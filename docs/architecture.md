@@ -149,6 +149,9 @@ part of this slice; the blockers are authored data and minimap-independent.
 The server binary accepts a TOML deployment file (`--config`); CLI flags override file
 values, and secrets can reference paths or 64-hex strings.
 
+`NetServer::run_until` accepts a shutdown flag; the server binary sets it from
+Ctrl-C/SIGINT, then flushes the recording before exiting.
+
 `NetServer` can watch a content file (`watch_content`/`--reload-content`) and swap it only
 when the phase is Lobby and no clients are connected; the simulation is recreated with the
 new catalogue for the next match.

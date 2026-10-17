@@ -19,5 +19,6 @@ moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true
 serde.workspace = true
+ctrlc.workspace = true
 toml.workspace = true
 moba-core.workspace = true

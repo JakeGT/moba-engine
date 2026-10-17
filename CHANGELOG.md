@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Graceful SIGINT/SIGTERM shutdown that flushes an in-progress replay.
 - Documented 50-match bot-balance confidence interval.
 - CI tools gate now runs a 30-second wire-decoder fuzz pass.
 - `--json` summaries for `replay` and `content-check` tools.

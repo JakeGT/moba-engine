@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 167 tests
+- `cargo test --workspace --locked` — 168 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -158,3 +158,5 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 
 - Bot balance: 50-match soak (509,820 ticks) blue 30 / red 20; 95% Wilson CI 46.2–72.4%
   includes even odds, so no side bias is established at this sample size.
+
+- Shutdown: SIGINT during a live custom match flushed a 119-tick replay before exit.

@@ -239,14 +239,22 @@ fn main() {
                 "plaintext LAN mode"
             }
         );
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal_flag = Arc::clone(&shutdown);
+        if let Err(error) = ctrlc::set_handler(move || {
+            signal_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }) {
+            eprintln!("signal handler: {error}");
+        }
         server
-            .run_for(Duration::from_secs(seconds))
+            .run_until(Duration::from_secs(seconds), &shutdown)
             .unwrap_or_else(|error| {
                 eprintln!("network server error: {error}");
                 std::process::exit(1);
             });
         server.finish_recording();
         let stats = server.stats();
+        eprintln!("network shutdown requested; replay flushed if one was in progress");
         eprintln!(
             "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} replayed_hellos={} avg_tick_us={} max_tick_us={}",
             stats.clients,

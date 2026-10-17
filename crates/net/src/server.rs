@@ -885,15 +885,19 @@ impl NetServer {
         self.recorded = true;
     }
 
-    /// Runs a real-time 30 Hz loop for `duration`.
+    /// Runs a real-time 30 Hz loop until `duration` elapses or `shutdown` is set.
     ///
     /// # Errors
     /// Returns socket I/O errors.
-    pub fn run_for(&mut self, duration: Duration) -> io::Result<()> {
+    pub fn run_until(
+        &mut self,
+        duration: Duration,
+        shutdown: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<()> {
         let tick_duration = Duration::from_secs_f64(1.0 / f64::from(SERVER_TICK_RATE));
         let start = Instant::now();
         let mut next_tick = Instant::now();
-        while start.elapsed() < duration {
+        while start.elapsed() < duration && !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             self.poll()?;
             let now = Instant::now();
             if now >= next_tick {
@@ -906,6 +910,15 @@ impl NetServer {
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(())
+    }
+
+    /// Runs a real-time 30 Hz loop for `duration`.
+    ///
+    /// # Errors
+    /// Returns socket I/O errors.
+    pub fn run_for(&mut self, duration: Duration) -> io::Result<()> {
+        let shutdown = std::sync::atomic::AtomicBool::new(false);
+        self.run_until(duration, &shutdown)
     }
 
     fn expire_clients(&mut self) {
@@ -1759,6 +1772,32 @@ cost = 1
         assert!(limiter.allow_at(other, start));
         assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
         assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn run_until_observes_shutdown_flag() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 4,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let shutdown = std::sync::atomic::AtomicBool::new(true);
+        server
+            .run_until(Duration::from_secs(10), &shutdown)
+            .expect("shutdown loop");
+        assert_eq!(server.stats().ticks, 0);
     }
 
     #[test]
