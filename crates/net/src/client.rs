@@ -79,6 +79,7 @@ pub struct NetClient {
     seed: u64,
     hero_pick: u8,
     nonce: u64,
+    reconnect_token: u32,
     sequence: u32,
     input_seq: u32,
     pending: Option<InputMessage>,
@@ -102,6 +103,14 @@ impl NetClient {
     /// # Errors
     /// Returns an OS error when the socket cannot be bound.
     pub fn start(server: SocketAddr) -> io::Result<Self> {
+        Self::start_with_session(server, 0)
+    }
+
+    /// Binds a new socket and starts the handshake, requesting resumption of `session`.
+    ///
+    /// # Errors
+    /// Returns an OS error when the socket cannot be bound.
+    pub fn start_with_session(server: SocketAddr, session: u32) -> io::Result<Self> {
         let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
         let now = Instant::now();
         let nonce = mint_nonce();
@@ -117,6 +126,7 @@ impl NetClient {
             seed: 0,
             hero_pick: 0,
             nonce,
+            reconnect_token: session,
             sequence: 0,
             input_seq: 0,
             pending: None,
@@ -142,7 +152,19 @@ impl NetClient {
     /// # Errors
     /// Returns `TimedOut` if no welcome arrives, or a socket error.
     pub fn connect(server: SocketAddr, timeout: Duration) -> io::Result<Self> {
-        let mut client = Self::start(server)?;
+        Self::connect_with_session(server, timeout, 0)
+    }
+
+    /// Connects or resumes a previous session token.
+    ///
+    /// # Errors
+    /// Returns `TimedOut` if no welcome arrives, or a socket error.
+    pub fn connect_with_session(
+        server: SocketAddr,
+        timeout: Duration,
+        session: u32,
+    ) -> io::Result<Self> {
+        let mut client = Self::start_with_session(server, session)?;
         let start = Instant::now();
         let mut next_hello = Instant::now();
         while start.elapsed() < timeout {
@@ -332,6 +354,12 @@ impl NetClient {
         self.slot
     }
 
+    /// Session token usable with [`Self::connect_with_session`] after a disconnect.
+    #[must_use]
+    pub const fn session(&self) -> u32 {
+        self.session
+    }
+
     /// Assigned team.
     #[must_use]
     pub const fn team(&self) -> Team {
@@ -471,6 +499,7 @@ impl NetClient {
         let hello = crate::protocol::Hello {
             protocol: u16::from(crate::protocol::PROTOCOL_VERSION),
             nonce: self.nonce,
+            reconnect: self.reconnect_token,
         };
         let payload = encode_hello(&hello);
         let header = Header {

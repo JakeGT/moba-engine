@@ -78,6 +78,8 @@ fn main() {
             max_clients: 10,
             countdown_ticks: u32::try_from(countdown_secs.saturating_mul(30)).unwrap_or(u32::MAX),
             results_ticks: u32::try_from(results_secs.saturating_mul(30)).unwrap_or(u32::MAX),
+            client_timeout: Duration::from_secs(5),
+            reconnect_grace: Duration::from_secs(60),
         })
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");

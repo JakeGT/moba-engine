@@ -51,6 +51,15 @@ levels/items, and a complete match flow.
 - Server match-flow test covers countdown, nexus end, results timer, rematch reset and the new
   seed; client capture verifies waiting/countdown/playing overlays and minimap.
 
+## Landed in round 9
+- **Reconnect**: disconnected slots are reserved for a configurable grace period (60 s
+  default) while bots cover; clients resume with their welcome session token, rebind the
+  address, keep the same slot/hero and receive a full snapshot. Input sequence and snapshot
+  baselines reset safely; net ids are retained. Covered by a real-UDP reconnect test.
+- **Handshake v5**: `Hello` carries an optional reconnect token; protocol version bumped.
+- **Server tuning**: `client_timeout`/`reconnect_grace` are configuration fields.
+- **Protocol v5**: `Hello` carries an optional reconnect token.
+
 ## Still open for M6
 - Hero levels/XP, gold, items and a shop.
 - Lobby/start flow, pause/reconnect, end-of-match summary and rematch.
@@ -63,8 +72,8 @@ levels/items, and a complete match flow.
 - [x] Fog circles align with server visibility; unseen units are absent and unseen terrain is dark.
 - [x] Tab scoreboard lists allied heroes and hides unseen enemies.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
-- [x] 119 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick and
-      progression; UDP test covers an actual shop purchase.
+- [x] 121 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
+      progression and reconnect handshake; UDP tests cover shop purchase and slot resumption.
 - [x] Levels/XP, gold/items/shop and the lobby-to-rematch flow (no ready-up/reconnect yet).
 
 ## Research notes

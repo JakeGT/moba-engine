@@ -61,6 +61,8 @@ fn main() {
         max_clients: options.clients.min(10),
         countdown_ticks: 0,
         results_ticks: 0,
+        client_timeout: Duration::from_secs(5),
+        reconnect_grace: Duration::from_secs(60),
     }) {
         Ok(server) => server,
         Err(error) => fail(&format!("cannot bind server: {error}")),

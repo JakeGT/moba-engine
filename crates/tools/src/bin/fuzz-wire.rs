@@ -82,6 +82,7 @@ fn fuzz_once(rng: &mut Rng) {
     let mut hello = encode_hello(&Hello {
         protocol: 1,
         nonce: rng.next_u64(),
+        reconnect: rng.next_u32(),
     });
     mutate(rng, &mut hello);
     let _ = decode_hello(&hello);

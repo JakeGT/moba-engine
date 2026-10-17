@@ -49,6 +49,13 @@ the simulation with a derived seed, resets per-client network-id/snapshot baseli
 a full snapshot to every connected client; connections and slots survive. Human inputs are
 accepted in `Playing`; shop purchases remain available at the nexus.
 
+On silence the server marks a client disconnected but reserves its slot and lets a bot cover
+for `reconnect_grace` (60 s default). The client can resume with the session token from the
+welcome; the server rebinds the address, restores the slot, resets the input sequence and
+sends a full snapshot. Resumption is explicit API today (no automatic client retry loop), and
+the token is a demultiplexing identifier, not a credential until M7 adds authenticated
+encryption.
+
 ## Server authority and netcode
 
 1. The client sends one-shot intents (`MoveTo`, `Attack`, `CastAbility`, `BuyItem`) over UDP.

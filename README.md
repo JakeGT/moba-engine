@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, screen-space bitmap HUD, Tab scoreboard, shop and mouse/keyboard controls |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 119 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 121 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -44,7 +44,9 @@ MOBA_SERVER=local cargo run -p moba-client
 B shop (1–8 buy), Tab scoreboard, Escape quit.
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
-The dedicated server exposes `--countdown S` and `--results S` to tune those phases.
+Disconnected players keep their slot for a 60-second grace period while a bot covers, and can
+resume with `NetClient::connect_with_session(server, timeout, session)` using
+`NetClient::session()`. The dedicated server exposes `--countdown S` and `--results S`.
 
 Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,

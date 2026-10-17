@@ -16,6 +16,8 @@ use crate::transport::{ReceivedMessage, UdpTransport};
 
 /// How long a silent client is kept before it is dropped and its slot reverts to a bot.
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Slots remain reserved for this long after a disconnect so players can reconnect.
+pub const RECONNECT_GRACE: Duration = Duration::from_secs(60);
 /// Snapshot history per client, used as delta baselines.
 const SNAPSHOT_HISTORY: usize = 64;
 /// Server tick rate (must match the simulation).
@@ -36,6 +38,10 @@ pub struct ServerConfig {
     pub countdown_ticks: u32,
     /// Ticks the results screen stays up before a rematch.
     pub results_ticks: u32,
+    /// Silence before a client is treated as disconnected.
+    pub client_timeout: Duration,
+    /// How long a disconnected player's slot is reserved for reconnection.
+    pub reconnect_grace: Duration,
 }
 
 impl Default for ServerConfig {
@@ -47,6 +53,8 @@ impl Default for ServerConfig {
             max_clients: 10,
             countdown_ticks: 90,
             results_ticks: 450,
+            client_timeout: CLIENT_TIMEOUT,
+            reconnect_grace: RECONNECT_GRACE,
         }
     }
 }
@@ -77,7 +85,9 @@ struct ClientConn {
     addr: SocketAddr,
     session: u32,
     team: moba_game::Team,
+    connected: bool,
     last_seen: Instant,
+    disconnected_at: Option<Instant>,
     last_input_seq: u32,
     command: Option<WireCommand>,
     net_ids: Vec<(moba_ecs::Entity, NetId)>,
@@ -213,7 +223,12 @@ impl NetServer {
     #[must_use]
     pub fn stats(&self) -> ServerStats {
         let mut stats = self.stats;
-        stats.clients = self.clients.iter().flatten().count();
+        stats.clients = self
+            .clients
+            .iter()
+            .flatten()
+            .filter(|client| client.connected)
+            .count();
         stats.bytes_sent = self.transport.bytes_sent;
         stats.bytes_received = self.transport.bytes_received;
         stats
@@ -352,11 +367,16 @@ impl NetServer {
     fn expire_clients(&mut self) {
         let now = Instant::now();
         for slot in 0..self.clients.len() {
-            let expired = self.clients[slot]
-                .as_ref()
-                .is_some_and(|client| now.duration_since(client.last_seen) > CLIENT_TIMEOUT);
-            if expired {
-                if let Some(client) = self.clients[slot].take() {
+            let timeout = self.config.client_timeout;
+            let grace = self.config.reconnect_grace;
+            let Some(client) = self.clients[slot].as_mut() else {
+                continue;
+            };
+            if client.connected {
+                if now.duration_since(client.last_seen) > timeout {
+                    client.connected = false;
+                    client.disconnected_at = Some(now);
+                    client.command = None;
                     let header = Header {
                         kind: PacketKind::Disconnect,
                         flags: 0,
@@ -367,6 +387,11 @@ impl NetServer {
                     };
                     let _ = self.transport.send(client.addr, &header, &[1]);
                 }
+            } else if client
+                .disconnected_at
+                .is_some_and(|at| now.duration_since(at) > grace)
+            {
+                self.clients[slot] = None;
             }
         }
         self.refresh_bot_mask();
@@ -375,7 +400,7 @@ impl NetServer {
     fn refresh_bot_mask(&mut self) {
         let mut mask = 0x03FFu16;
         for (slot, client) in self.clients.iter().enumerate() {
-            if client.is_some() {
+            if client.as_ref().is_some_and(|client| client.connected) {
                 mask &= !(1 << slot);
             }
         }
@@ -394,22 +419,45 @@ impl NetServer {
                     return Ok(());
                 }
                 if let Some(slot) = self.client_index_by_addr(message.addr) {
-                    let client = self.clients[slot].as_mut().expect("index is live");
-                    client.last_seen = Instant::now();
-                    let session = client.session;
-                    self.send_welcome(message.addr, slot, hello.nonce, session)?;
+                    let (connected, session) = {
+                        let client = self.clients[slot].as_mut().expect("index is live");
+                        if client.connected {
+                            client.last_seen = Instant::now();
+                        }
+                        (client.connected, client.session)
+                    };
+                    if connected {
+                        self.send_welcome(message.addr, slot, hello.nonce, session)?;
+                        return Ok(());
+                    }
+                    if hello.reconnect != session {
+                        self.reject_client(message.addr, session, 3)?;
+                        return Ok(());
+                    }
+                    self.reconnect_client(slot, message.addr, hello.nonce)?;
+                    return Ok(());
+                }
+                if hello.reconnect != 0 {
+                    let Some(slot) = self.clients.iter().position(|client| {
+                        client
+                            .as_ref()
+                            .is_some_and(|client| client.session == hello.reconnect)
+                    }) else {
+                        self.reject_client(message.addr, 0, 3)?;
+                        return Ok(());
+                    };
+                    if self.clients[slot]
+                        .as_ref()
+                        .is_some_and(|client| client.connected)
+                    {
+                        self.reject_client(message.addr, 0, 3)?;
+                        return Ok(());
+                    }
+                    self.reconnect_client(slot, message.addr, hello.nonce)?;
                     return Ok(());
                 }
                 let Some(slot) = self.free_slot() else {
-                    let header = Header {
-                        kind: PacketKind::Disconnect,
-                        flags: 0,
-                        session: 0,
-                        seq: 0,
-                        ack: 0,
-                        ack_bits: 0,
-                    };
-                    let _ = self.transport.send(message.addr, &header, &[2]);
+                    self.reject_client(message.addr, 0, 2)?;
                     return Ok(());
                 };
                 let session = 0xA5A5_0000 | (self.session_counter & 0xFFFF);
@@ -423,7 +471,9 @@ impl NetServer {
                     addr: message.addr,
                     session,
                     team,
+                    connected: true,
                     last_seen: Instant::now(),
+                    disconnected_at: None,
                     last_input_seq: 0,
                     command: None,
                     net_ids: Vec::new(),
@@ -445,7 +495,7 @@ impl NetServer {
                     return Ok(());
                 };
                 let client = self.clients[index].as_mut().expect("index is live");
-                if message.header.session != client.session {
+                if message.header.session != client.session || !client.connected {
                     return Ok(());
                 }
                 let Ok(input) = decode_input(&message.payload) else {
@@ -469,7 +519,7 @@ impl NetServer {
                     return Ok(());
                 };
                 let client = self.clients[index].as_mut().expect("index is live");
-                if message.header.session != client.session {
+                if message.header.session != client.session || !client.connected {
                     return Ok(());
                 }
                 client.last_seen = Instant::now();
@@ -483,7 +533,7 @@ impl NetServer {
             PacketKind::Ping => {
                 if let Some(index) = self.client_index_by_addr(message.addr) {
                     let client = self.clients[index].as_mut().expect("index is live");
-                    if message.header.session == client.session {
+                    if message.header.session == client.session && client.connected {
                         client.last_seen = Instant::now();
                         let header = Header {
                             kind: PacketKind::Pong,
@@ -499,13 +549,47 @@ impl NetServer {
             }
             PacketKind::Disconnect => {
                 if let Some(index) = self.client_index_by_addr(message.addr) {
-                    self.clients[index] = None;
+                    if let Some(client) = self.clients[index].as_mut() {
+                        client.connected = false;
+                        client.disconnected_at = Some(Instant::now());
+                        client.command = None;
+                    }
                     self.refresh_bot_mask();
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn reconnect_client(&mut self, slot: usize, addr: SocketAddr, nonce: u64) -> io::Result<()> {
+        let Some(client) = self.clients[slot].as_mut() else {
+            return Ok(());
+        };
+        let session = client.session;
+        client.addr = addr;
+        client.connected = true;
+        client.disconnected_at = None;
+        client.last_seen = Instant::now();
+        client.last_input_seq = 0;
+        client.command = None;
+        client.acked_snapshot = 0;
+        client.need_full = true;
+        client.history.clear();
+        self.refresh_bot_mask();
+        self.send_welcome(addr, slot, nonce, session)
+    }
+
+    fn reject_client(&mut self, addr: SocketAddr, session: u32, reason: u8) -> io::Result<()> {
+        let header = Header {
+            kind: PacketKind::Disconnect,
+            flags: 0,
+            session,
+            seq: 0,
+            ack: 0,
+            ack_bits: 0,
+        };
+        self.transport.send(addr, &header, &[reason])
     }
 
     fn send_welcome(
@@ -562,6 +646,9 @@ impl NetServer {
             let Some(client) = self.clients[index].as_mut() else {
                 continue;
             };
+            if !client.connected {
+                continue;
+            }
             current.clear();
             let viewer_slot = u8::try_from(index).unwrap_or(0xFF);
             for unit in &observed[client.team.index()] {
@@ -666,6 +753,8 @@ mod tests {
             max_clients: 10,
             countdown_ticks: 2,
             results_ticks: 3,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
         };
         let mut server = NetServer::bind(config).expect("bind");
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));

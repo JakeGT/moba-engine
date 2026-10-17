@@ -32,8 +32,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
-- Version 3: snapshots carry team scores, outcome, hero pick and per-hero progression; shop
-  intents are one-shot commands applied immediately by the server.
+- Version 5: optional reconnect token in the handshake; snapshots carry phase/countdown,
+  team scores, outcome, hero pick and per-hero progression; shop intents are one-shot
+  commands applied immediately by the server.
 
 ### Known limitations
 - No encryption/authentication yet; trusted networks only.

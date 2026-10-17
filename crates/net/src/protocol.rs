@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 4;
+pub const PROTOCOL_VERSION: u8 = 5;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -207,6 +207,8 @@ pub struct Hello {
     pub protocol: u16,
     /// Random nonce echoed by the welcome for RTT/identification.
     pub nonce: u64,
+    /// Session token to resume after a disconnect (`0` for a new connection).
+    pub reconnect: u32,
 }
 
 /// Handshake response payload.
@@ -234,6 +236,7 @@ pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     let mut out = Vec::with_capacity(10);
     put_u16(&mut out, hello.protocol);
     out.extend_from_slice(&hello.nonce.to_le_bytes());
+    put_u32(&mut out, hello.reconnect);
     out
 }
 
@@ -248,6 +251,7 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
                 .try_into()
                 .map_err(|_| WireError::Truncated)?,
         ),
+        reconnect: reader.u32()?,
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -1137,6 +1141,16 @@ mod tests {
             encode_packet(&header(PacketKind::Snapshot, 1), &long, &mut buffer),
             Err(WireError::TooLarge)
         );
+    }
+
+    #[test]
+    fn handshake_round_trip() {
+        let hello = Hello {
+            protocol: 1,
+            nonce: 0xDEAD_BEEF_1234,
+            reconnect: 0xABCD_1234,
+        };
+        assert_eq!(decode_hello(&encode_hello(&hello)), Ok(hello));
     }
 
     #[test]
