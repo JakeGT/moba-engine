@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: 2026-10-17 (round 5 of the build).
+Last updated: 2026-10-17 (round 7 of the build).
 
 ## Milestones
 
@@ -50,8 +50,10 @@ Last updated: 2026-10-17 (round 5 of the build).
   input, NetId mapping, visibility-filtered delta snapshots, local-hero prediction,
   remote-entity interpolation, client snapshot history and RTT/bandwidth counters.
 - **`moba-netsim`** — per-client UDP link conditioner (latency, jitter, seeded loss).
-- **`moba-tools`** — `soak` binary for the five-minute ten-client network gate and
-  `fuzz-wire` for deterministic decoder fuzzing.
+- **`moba-tools`** — `soak` binary for the five-minute ten-client network gate,
+  `fuzz-wire` for deterministic decoder fuzzing, and embedding examples.
+- **`moba-engine`** — umbrella crate with `sim`, `net` and optional `render` features; the
+  intended entry point for embedding the engine.
 - **`moba-client`** — renders either a local bot preview or a live server match
   (`MOBA_SERVER`); predicted local hero, interpolated remote units, fog-of-war terrain,
   health/mana/cooldown/timer/score HUD, Tab scoreboard, mouse move/attack/cast controls,
@@ -60,8 +62,10 @@ Last updated: 2026-10-17 (round 5 of the build).
 ## Verification actually run
 
 - `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked` — 114 tests
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
+- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
+- `cargo check -p moba-engine --no-default-features` and `--all-features`
+- `cargo test --workspace --locked` — 116 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -98,6 +102,14 @@ Last updated: 2026-10-17 (round 5 of the build).
 `just`, `cargo-nextest` and `cargo-deny` are not installed in this environment; their
 commands were reproduced manually. Miri is green on core/ecs/jobs; the loom model is still
 pending.
+
+## Open-source surface
+
+Dual MIT/Apache-2.0; README, architecture/content/API guides, contributing, security, code of
+conduct, changelog, release checklist and GitHub templates. The umbrella crate keeps the
+default embedding headless (`sim`+`net`) and puts Vulkan behind `render`. Runnable examples are
+in `crates/tools/examples`. Publishing remains opt-in until crate names/ownership and the
+repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 
 ## Known gaps / next round
 

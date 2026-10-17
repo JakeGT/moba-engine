@@ -16,40 +16,75 @@ use winit::keyboard::KeyCode;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Key {
+    /// Move up / W key.
     W,
+    /// Move left / A key.
     A,
+    /// Move down / S key.
     S,
+    /// Move right / D key.
     D,
+    /// Ability Q.
     Q,
+    /// Ability E.
     E,
+    /// Reserved ability R.
     R,
+    /// Reserved key F.
     F,
+    /// Open shop.
     B,
+    /// Reserved map key.
     M,
+    /// Digit 1 (shop slot 1).
     Digit1,
+    /// Digit 2 (shop slot 2).
     Digit2,
+    /// Digit 3 (shop slot 3).
     Digit3,
+    /// Digit 4 (shop slot 4).
     Digit4,
+    /// Digit 5 (shop slot 5).
     Digit5,
+    /// Digit 6 (shop slot 6).
     Digit6,
+    /// Digit 7 (shop slot 7).
     Digit7,
+    /// Digit 8 (shop slot 8).
     Digit8,
+    /// Stop orders.
     Space,
+    /// Shift modifier.
     Shift,
+    /// Control modifier.
     Ctrl,
+    /// Alt modifier.
     Alt,
+    /// Toggle scoreboard.
     Tab,
+    /// Quit / close overlay.
     Escape,
+    /// Confirm.
     Enter,
+    /// Backspace.
     Backspace,
+    /// UI navigation up.
     ArrowUp,
+    /// UI navigation down.
     ArrowDown,
+    /// UI navigation left.
     ArrowLeft,
+    /// UI navigation right.
     ArrowRight,
+    /// Function key F1.
     F1,
+    /// Function key F2.
     F2,
+    /// Function key F3.
     F3,
+    /// Function key F4.
     F4,
+    /// Function key F5.
     F5,
 }
 
@@ -69,10 +104,15 @@ impl Key {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MouseButton {
+    /// Primary mouse button (attack/select).
     Left,
+    /// Secondary mouse button (move).
     Right,
+    /// Middle mouse button.
     Middle,
+    /// Back mouse button.
     Back,
+    /// Forward mouse button.
     Forward,
 }
 

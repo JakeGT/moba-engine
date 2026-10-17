@@ -1,9 +1,12 @@
 [package]
 name = "moba-nav"
-description = "Navmesh pathfinding, minion flow fields and spatial hashing."
+description = "Deterministic spatial grid for radius queries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

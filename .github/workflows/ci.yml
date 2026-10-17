@@ -26,7 +26,18 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-nextest
-      # M3 adds: Mesa lavapipe + Vulkan validation layers on Linux for headless render tests.
+      - name: Install shader compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools libxkbcommon-dev libwayland-dev
+      - name: Install shader compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install glslang
+      - name: Install shader compiler (Windows)
+        if: runner.os == 'Windows'
+        run: choco install vulkan-sdk -y --no-progress
+      # Server/sim tests need no GPU; renderer tests use lavapipe in a later stage.
       - run: just ci-core
 
   deny:

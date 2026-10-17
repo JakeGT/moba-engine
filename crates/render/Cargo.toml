@@ -1,9 +1,12 @@
 [package]
 name = "moba-render"
-description = "Vulkan renderer (ash): device, swapchain, render graph, bindless resources."
+description = "Vulkan 1.2 renderer: swapchain, instanced scene, terrain, bitmap HUD and capture."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

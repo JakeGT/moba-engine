@@ -1,9 +1,12 @@
 [package]
 name = "moba-ecs"
-description = "SoA archetype ECS with change tracking, built for snapshot diffing."
+description = "Generational SoA archetype ECS with change tracking and zero-allocation queries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

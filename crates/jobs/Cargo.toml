@@ -1,9 +1,12 @@
 [package]
 name = "moba-jobs"
-description = "Work-stealing task scheduler for the per-frame job graph."
+description = "Scoped work-stealing job pool for per-frame parallelism."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

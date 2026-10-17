@@ -327,6 +327,15 @@ impl Simulation {
         &self.world
     }
 
+    /// Mutable ECS access for embedding tools, custom modes and debug inspectors.
+    ///
+    /// Mutating simulation-owned components bypasses gameplay invariants and state hashing;
+    /// prefer adding custom components that your own systems read. Change tracking still
+    /// works, and the next tick will iterate whatever archetypes exist.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
     /// Simulation configuration.
     #[inline]
     #[must_use]

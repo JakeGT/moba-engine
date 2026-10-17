@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! ECS iteration throughput versus a naive array-of-structs baseline.
 //!
 //! The M1 exit criterion is that the archetype iteration beats `AoS` for the common

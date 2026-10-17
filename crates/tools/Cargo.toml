@@ -1,9 +1,12 @@
 [package]
 name = "moba-tools"
-description = "Replay viewer, bot clients and load tester."
+description = "Soak tester and deterministic wire fuzzer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

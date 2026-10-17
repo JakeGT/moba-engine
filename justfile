@@ -5,7 +5,7 @@ default:
     @just --list
 
 # Everything CI runs on all three OSes.
-ci-core: fmt-check clippy test layering
+ci-core: fmt-check clippy test layering doc features
 
 # Full local gate (adds supply-chain checks).
 ci: ci-core deny
@@ -17,7 +17,22 @@ clippy:
     cargo clippy --workspace --all-targets --locked -- -D warnings
 
 test:
-    cargo nextest run --workspace --locked --no-tests=pass
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v cargo-nextest >/dev/null 2>&1; then
+      cargo nextest run --workspace --locked --no-tests=pass
+    else
+      cargo test --workspace --locked
+    fi
+
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+
+# Prove the umbrella crate works headless and with the optional renderer layer.
+features:
+    cargo check -p moba-engine --no-default-features --locked
+    cargo check -p moba-engine --no-default-features --features render --locked
+    cargo check -p moba-engine --all-features --locked
 
 deny:
     cargo deny check

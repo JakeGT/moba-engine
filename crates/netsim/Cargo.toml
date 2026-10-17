@@ -1,9 +1,12 @@
 [package]
 name = "moba-netsim"
-description = "Link conditioner (latency, jitter, loss, reordering) for netcode tests."
+description = "UDP link conditioner (latency, jitter, loss) for netcode tests."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

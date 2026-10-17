@@ -1,9 +1,12 @@
 [package]
 name = "moba-platform"
-description = "Windowing, input, filesystem and clocks."
+description = "winit window, input and fixed-step frame loop (the only winit crate)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

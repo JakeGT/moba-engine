@@ -844,6 +844,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moba-engine"
+version = "0.1.0"
+dependencies = [
+ "moba-core",
+ "moba-ecs",
+ "moba-game",
+ "moba-nav",
+ "moba-net",
+ "moba-platform",
+ "moba-render",
+ "moba-sim",
+]
+
+[[package]]
 name = "moba-game"
 version = "0.1.0"
 dependencies = [

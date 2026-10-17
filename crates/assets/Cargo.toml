@@ -1,9 +1,12 @@
 [package]
 name = "moba-assets"
-description = "Asset baking (glTF to engine formats) and dev-build hot reload."
+description = "Asset baking scaffolding; the content pipeline lands in M8."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

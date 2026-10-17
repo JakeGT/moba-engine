@@ -6,6 +6,12 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+authors = ["MOBA Engine contributors"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["game", "gamedev", "engine", "moba", "vulkan"]
+categories = ["game-engines", "game-development"]
+# Publishing stays opt-in until crate names/ownership and the release policy are settled.
 publish = false
 
 [workspace.dependencies]
@@ -41,6 +47,7 @@ unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(miri)'] }
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

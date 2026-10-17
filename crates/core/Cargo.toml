@@ -1,9 +1,12 @@
 [package]
 name = "moba-core"
-description = "Foundation types: math, arenas, handles, time, logging and profiling hooks."
+description = "Foundation types: fixed-point math, arenas, bitsets, time and hashing."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

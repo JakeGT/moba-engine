@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Tick-cost benchmarks for a full 5v5 match with minion waves and bots.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};

@@ -2,6 +2,7 @@
 //!
 //! Glyph bytes are columns, least-significant bit at the top. Sourced from the
 //! Adafruit-GFX 5x7 font (BSD licence), as distributed with SSD1306 drivers.
+//! See `THIRD_PARTY.md` at the repository root for the full notice.
 
 /// Five column bytes for each printable ASCII glyph starting at `0x20`.
 pub(crate) const FONT_5X7: [u8; 480] = [

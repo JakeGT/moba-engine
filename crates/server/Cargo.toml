@@ -1,9 +1,12 @@
 [package]
 name = "moba-server"
-description = "Headless authoritative dedicated server."
+description = "Headless authoritative dedicated server and match runner."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 publish.workspace = true
 
 [lints]

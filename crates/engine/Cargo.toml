@@ -1,0 +1,32 @@
+[package]
+name = "moba-engine"
+description = "Umbrella crate for the MOBA engine: simulation, networking and optional Vulkan client layer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[features]
+default = ["sim", "net"]
+# Headless deterministic simulation and content tables.
+sim = ["dep:moba-sim", "dep:moba-core", "dep:moba-ecs", "dep:moba-game", "dep:moba-nav"]
+# UDP transport, protocol, prediction and snapshots.
+net = ["dep:moba-net", "sim"]
+# Vulkan renderer and winit platform. Pulls GPU/windowing dependencies.
+render = ["dep:moba-render", "dep:moba-platform"]
+
+[dependencies]
+moba-core = { workspace = true, optional = true }
+moba-ecs = { workspace = true, optional = true }
+moba-game = { workspace = true, optional = true }
+moba-sim = { workspace = true, optional = true }
+moba-nav = { workspace = true, optional = true }
+moba-net = { workspace = true, optional = true }
+moba-render = { workspace = true, optional = true }
+moba-platform = { workspace = true, optional = true }
+
+[lints]
+workspace = true
