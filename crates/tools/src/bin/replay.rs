@@ -69,6 +69,7 @@ fn main() {
             );
             println!("seed       {}", replay.config.seed);
             println!("frames     {}", replay.frames.len());
+            println!("checkpoints {}", replay.checkpoints.len());
             println!("ticks      {}", result.ticks);
             println!("outcome    {:?}", result.outcome);
             println!("state hash {:#018x}", result.state_hash);

@@ -66,9 +66,9 @@ Replays store resolved per-slot inputs, not snapshots: a live 194-tick match pro
 milliseconds.
 
 
-Custom-content replay: 555 ticks with Example Pack 1.0.0 (8 items + Vanguard) produced a
-`.mbr`; offline verification with `--items` matched the pack manifest, content hash
-`0xbb6dc5bd0e5ab91a` and state hash `0xfa2f7aae760d000f`.
+Custom-content replay: 554 ticks with Example Pack 1.0.0 (8 items + Vanguard) produced a
+`.mbr`; offline verification with `--items` matched the pack manifest, 3 checkpoints, content
+hash `0xbb6dc5bd0e5ab91a` and state hash `0x64844168ba624c84`.
 
 
 ## Tick telemetry

@@ -340,6 +340,7 @@ pub struct NetServer {
     frame: u64,
     match_number: u32,
     record_frames: Vec<TickInputs>,
+    record_checkpoints: Vec<(u32, u64)>,
     record_config: SimConfig,
     recorded: bool,
     surrender_votes: [u16; 2],
@@ -389,6 +390,7 @@ impl NetServer {
             frame: 0,
             match_number: 0,
             record_frames: Vec::new(),
+            record_checkpoints: Vec::new(),
             record_config: config_sim,
             recorded: false,
             surrender_votes: [0; 2],
@@ -608,6 +610,15 @@ impl NetServer {
         let started = Instant::now();
         self.simulation.tick(&inputs);
         self.simulation.clear_events();
+        if self.config.record.is_some()
+            && self.record_frames.len() % 150 == 0
+            && !self.record_frames.is_empty()
+        {
+            self.record_checkpoints.push((
+                u32::try_from(self.record_frames.len()).unwrap_or(u32::MAX),
+                self.simulation.state_hash(),
+            ));
+        }
         let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         self.stats.tick_nanos = self.stats.tick_nanos.saturating_add(elapsed);
         self.stats.tick_max_nanos = self.stats.tick_max_nanos.max(elapsed);
@@ -690,6 +701,7 @@ impl NetServer {
     fn reset_match(&mut self) {
         self.match_number = self.match_number.wrapping_add(1);
         self.record_frames.clear();
+        self.record_checkpoints.clear();
         self.recorded = false;
         let mut config = self.config.sim;
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -748,6 +760,7 @@ impl NetServer {
             content_hash: self.content.hash(),
             content_name: self.content.manifest.name.clone(),
             content_version: self.content.manifest.version.clone(),
+            checkpoints: std::mem::take(&mut self.record_checkpoints),
         };
         let target = replay_path(&path, self.match_number);
         match std::fs::write(&target, replay.encode()) {

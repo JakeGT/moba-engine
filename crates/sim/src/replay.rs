@@ -41,6 +41,15 @@ pub enum ReplayError {
         /// Hash of the supplied content pack.
         actual: u64,
     },
+    /// A checkpoint state hash does not match.
+    CheckpointMismatch {
+        /// Completed tick count of the checkpoint.
+        tick: u32,
+        /// Hash recorded in the replay.
+        expected: u64,
+        /// Hash produced during replay.
+        actual: u64,
+    },
     /// The replayed state hash does not match the recorded hash.
     HashMismatch {
         /// Hash recorded when the replay was written.
@@ -62,6 +71,14 @@ impl core::fmt::Display for ReplayError {
                     "replay content mismatch: expected {expected:#018x}, got {actual:#018x}"
                 )
             }
+            Self::CheckpointMismatch {
+                tick,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "replay diverged at tick {tick}: expected {expected:#018x}, got {actual:#018x}"
+            ),
             Self::HashMismatch { expected, actual } => {
                 write!(
                     f,
@@ -89,6 +106,8 @@ pub struct Replay {
     pub content_name: String,
     /// Content pack version.
     pub content_version: String,
+    /// Periodic `(completed_tick, state_hash)` checkpoints for first-divergence debugging.
+    pub checkpoints: Vec<(u32, u64)>,
 }
 
 /// Result of replaying a match.
@@ -113,6 +132,7 @@ impl Replay {
             content_hash: GameContent::default().hash(),
             content_name: GameContent::default().manifest.name,
             content_version: GameContent::default().manifest.version,
+            checkpoints: Vec::new(),
         }
     }
 
@@ -142,9 +162,28 @@ impl Replay {
             });
         }
         let mut simulation = Simulation::new_with_content(self.config, Arc::new(content.clone()));
-        for frame in &self.frames {
+        let mut checkpoints = self.checkpoints.iter().peekable();
+        for (index, frame) in self.frames.iter().enumerate() {
             simulation.tick(frame);
             simulation.clear_events();
+            let completed = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            while let Some(&&(tick, expected)) = checkpoints.peek() {
+                if tick != completed {
+                    break;
+                }
+                let actual = simulation.state_hash();
+                if expected != actual {
+                    return Err(ReplayError::CheckpointMismatch {
+                        tick,
+                        expected,
+                        actual,
+                    });
+                }
+                checkpoints.next();
+            }
+        }
+        if checkpoints.next().is_some() {
+            return Err(ReplayError::BadData);
         }
         let state_hash = simulation.state_hash();
         if let Some(expected) = self.expected_hash {
@@ -196,6 +235,15 @@ impl Replay {
                 encode_command(command, &mut out);
             }
         }
+        out.extend_from_slice(
+            &u32::try_from(self.checkpoints.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for (tick, hash) in &self.checkpoints {
+            out.extend_from_slice(&tick.to_le_bytes());
+            out.extend_from_slice(&hash.to_le_bytes());
+        }
         out
     }
 
@@ -240,6 +288,14 @@ impl Replay {
             }
             frames.push(inputs);
         }
+        let checkpoint_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
+        let mut checkpoints = Vec::with_capacity(checkpoint_count);
+        for _ in 0..checkpoint_count {
+            checkpoints.push((reader.u32()?, reader.u64()?));
+        }
+        if checkpoints.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(ReplayError::BadData);
+        }
         if reader.remaining() != 0 {
             return Err(ReplayError::BadData);
         }
@@ -255,6 +311,7 @@ impl Replay {
             content_hash,
             content_name,
             content_version,
+            checkpoints,
         })
     }
 }
@@ -367,6 +424,31 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_mismatch_reports_first_divergence() {
+        let config = SimConfig::default();
+        let mut simulation = Simulation::new(config);
+        let mut replay = Replay::new(config);
+        for _ in 0..20 {
+            replay.push(TickInputs::default());
+            simulation.tick(&TickInputs::default());
+        }
+        let checkpoint = simulation.state_hash();
+        replay.checkpoints.push((20, checkpoint));
+        replay.expected_hash = Some(simulation.state_hash());
+        assert!(
+            Replay::decode(&replay.encode())
+                .expect("decode")
+                .play()
+                .is_ok()
+        );
+        replay.checkpoints[0].1 ^= 1;
+        assert!(matches!(
+            Replay::decode(&replay.encode()).expect("decode").play(),
+            Err(ReplayError::CheckpointMismatch { tick: 20, .. })
+        ));
+    }
 
     #[test]
     fn replay_enforces_content_hash() {
