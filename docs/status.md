@@ -7,10 +7,10 @@ Last updated: 2026-10-17 (round 1 of the build).
 | # | Milestone | State | Notes |
 |---|---|---|---|
 | M0 | Bootstrap | ✅ | Workspace, lints, CI, justfile, agent definitions. |
-| M1 | Core runtime | ✅ | 67 workspace tests green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
+| M1 | Core runtime | ✅ | 87 workspace tests green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
 | M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
-| M4 | Simulation | ⬜ | Heroes, minions, towers, abilities, nav, fog, determinism. |
+| M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Fog/levels/items await M5/M6. |
 | M5 | Networking | ⬜ | UDP transport, snapshots, prediction/reconciliation, lag comp. |
 | M6 | Vertical slice | ⬜ | Playable 5v5 on one map. |
 | M7 | Hardening | ⬜ | 50 matches/box, fuzz, profiling capture. |
@@ -39,12 +39,18 @@ Last updated: 2026-10-17 (round 1 of the build).
   Vulkan 1.2/1.3 feature negotiation, swapchain, sync2 barriers, dynamic rendering,
   instanced units via a storage buffer, procedural terrain, and CPU readback capture.
   `moba-client` renders a 500-unit demo scene.
+- **`moba-game`** — data tables and pure rules: 5 heroes, 15 abilities, minions, towers,
+  nexuses, the three-lane map and integer mitigation.
+- **`moba-nav`** — deterministic spatial grid with exact-radius queries.
+- **`moba-sim`** — fixed-tick authoritative match simulation: commands, combat, abilities,
+  waves, towers, respawns, bots, events and a stable state hash.
+- **`moba-server`** — headless 30 Hz match runner with tick statistics (`--ticks`, `--seed`).
 
 ## Verification actually run
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked` — 67 tests
+- `cargo test --workspace --locked` — 87 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -55,18 +61,23 @@ Last updated: 2026-10-17 (round 1 of the build).
 - Renderer: 500 units + terrain at 1920×1080 under lavapipe with
   `MOBA_VULKAN_VALIDATION=required` — zero validation messages; capture stored at
   `docs/images/m3-500-units.png` (see `docs/dev/software-vulkan.md`).
+- Simulation: `cargo bench -p moba-sim --bench tick` — 12.9 µs/tick steady state;
+  `cargo run --release -p moba-server -- --ticks 20000` — 0.25 s wall, 106 peak units,
+  stable hash. Ten-thousand-tick determinism tests pass.
 
 `just`, `cargo-nextest` and `cargo-deny` are not installed in this environment; their
-commands were reproduced manually. Miri and loom are still to run (needs a nightly
-toolchain).
+commands were reproduced manually. Miri is green on core/ecs/jobs; the loom model is still
+pending.
 
 ## Known gaps / next round
 
 1. Loom model of the scope counter protocol; add `World`-level parallel iteration over
    chunk queries and bench it.
-2. M3 remainder: skeletal skinning, frame-time measurement on min-spec hardware, and a
+2. M5 networking: UDP transport, intent messages, snapshot delta compression, client
+   prediction/reconciliation and lag-compensated skillshots.
+3. M6 vertical slice: connect the simulation to the renderer (positions/health/teams),
+   add UI, fog of war, levels/items and a playable 5v5 flow.
+4. M3 remainder: skeletal skinning, frame-time measurement on min-spec hardware, and a
    golden-image test under lavapipe in CI.
-3. M4 simulation: fixed-tick MOBA rules on the ECS — heroes, abilities, minions, towers,
-   navmesh flow fields, vision and a determinism hash over 10k ticks.
-4. The reference machine has no usable hardware Vulkan device; lavapipe is installed in
+5. The reference machine has no usable hardware Vulkan device; lavapipe is installed in
    `.tools/` for validation (see `docs/dev/software-vulkan.md`).
