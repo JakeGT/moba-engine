@@ -66,6 +66,17 @@ pub enum AbilityKind {
         /// Duration in simulation ticks.
         duration_ticks: u32,
     },
+    /// Burns enemies around the target point for damage over time.
+    Burn {
+        /// Effect radius.
+        radius: Fix,
+        /// Duration in simulation ticks.
+        duration_ticks: u32,
+        /// Damage applied each tick.
+        damage_per_tick: i32,
+        /// Mitigation type.
+        damage_type: DamageType,
+    },
     /// Instantly damages enemies around the caster.
     Burst {
         /// Effect radius.
@@ -302,6 +313,16 @@ mod tests {
                 } => {
                     assert!(radius > Fix::ZERO);
                     assert!(duration_ticks > 0);
+                }
+                AbilityKind::Burn {
+                    radius,
+                    duration_ticks,
+                    damage_per_tick,
+                    ..
+                } => {
+                    assert!(radius > Fix::ZERO);
+                    assert!(duration_ticks > 0);
+                    assert!(damage_per_tick > 0);
                 }
             }
         }

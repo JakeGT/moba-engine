@@ -1013,6 +1013,8 @@ pub const ENTITY_FLAG_SLOW: u8 = 1 << 2;
 pub const ENTITY_FLAG_ROOT: u8 = 1 << 3;
 /// The unit is silenced.
 pub const ENTITY_FLAG_SILENCE: u8 = 1 << 4;
+/// The unit is burning.
+pub const ENTITY_FLAG_BURN: u8 = 1 << 5;
 
 impl NetEntity {
     /// Quantises an observed unit.
@@ -2022,6 +2024,7 @@ mod tests {
             slowed: false,
             rooted: false,
             silenced: false,
+            burning: false,
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);

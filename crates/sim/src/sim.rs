@@ -13,9 +13,9 @@ use moba_game::{
 use moba_nav::SpatialGrid;
 
 use crate::components::{
-    AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
-    LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
-    Root, Shield, Silence, Slow, UnitKind, VisionRange,
+    AttackDamageType, AttackStats, AttackTarget, Burn, Cooldowns, Dead, Health, HeroIdentity,
+    HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen,
+    Resistances, Root, Shield, Silence, Slow, UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -240,6 +240,8 @@ pub struct ObservedUnit {
     pub rooted: bool,
     /// Whether the unit is silenced.
     pub silenced: bool,
+    /// Whether the unit is burning.
+    pub burning: bool,
 }
 
 /// The authoritative MOBA simulation.
@@ -529,6 +531,7 @@ impl Simulation {
                 slowed: self.world.get::<Slow>(entity).is_some(),
                 rooted: self.world.get::<Root>(entity).is_some(),
                 silenced: self.world.get::<Silence>(entity).is_some(),
+                burning: self.world.get::<Burn>(entity).is_some(),
             });
         }
     }
@@ -667,6 +670,11 @@ impl Simulation {
             if let Some(identity) = self.world.get::<HeroIdentity>(entity) {
                 hasher.write_u32(10);
                 hasher.write_u32(u32::from(identity.0.0));
+            }
+            if let Some(burn) = self.world.get::<Burn>(entity) {
+                hasher.write_u32(7);
+                hasher.write_u32(burn.damage as u32);
+                hasher.write_u32(burn.remaining);
             }
             if let Some(silence) = self.world.get::<Silence>(entity) {
                 hasher.write_u32(6);
@@ -939,6 +947,21 @@ impl Simulation {
             }
         }
 
+        let mut burns = Vec::new();
+        let mut expired_burns = Vec::new();
+        for (entity, burn) in self.world.query::<&mut Burn>() {
+            burn.remaining = burn.remaining.saturating_sub(1);
+            burns.push((entity, *burn));
+            if burn.remaining == 0 {
+                expired_burns.push(entity);
+            }
+        }
+        for (target, burn) in burns {
+            self.damage(target, burn.damage, burn.damage_type, burn.source);
+        }
+        for entity in expired_burns {
+            let _ = self.world.remove::<Burn>(entity);
+        }
         let mut expired_silences = Vec::new();
         for (entity, silence) in self.world.query::<&mut Silence>() {
             silence.remaining = silence.remaining.saturating_sub(1);
@@ -1017,6 +1040,7 @@ impl Simulation {
         let _ = self.world.remove::<Slow>(entity);
         let _ = self.world.remove::<Root>(entity);
         let _ = self.world.remove::<Silence>(entity);
+        let _ = self.world.remove::<Burn>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
             position.0 = self.content.map.hero_spawn(team, slot % 5);
         }
@@ -1220,6 +1244,40 @@ impl Simulation {
                         remaining: current.remaining.max(duration_ticks),
                     },
                 );
+            }
+            moba_game::AbilityKind::Burn {
+                radius,
+                duration_ticks,
+                damage_per_tick,
+                damage_type,
+            } => {
+                self.damage_hits.clear();
+                for (entity, (other_position, other_team)) in
+                    self.world.query::<(&Position, &Team)>()
+                {
+                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
+                    {
+                        continue;
+                    }
+                    self.damage_hits.push(entity);
+                }
+                let mut hits = core::mem::take(&mut self.damage_hits);
+                for target_entity in hits.drain(..) {
+                    let remaining = self
+                        .world
+                        .get::<Burn>(target_entity)
+                        .map_or(duration_ticks, |burn| burn.remaining.max(duration_ticks));
+                    let _ = self.world.insert(
+                        target_entity,
+                        Burn {
+                            source: caster,
+                            damage: damage_per_tick,
+                            damage_type,
+                            remaining,
+                        },
+                    );
+                }
+                self.damage_hits = hits;
             }
             moba_game::AbilityKind::Silence {
                 radius,
@@ -2383,6 +2441,46 @@ mod tests {
         sim.grant_xp(blue, 2_000);
         assert!(sim.world.get::<Progression>(blue).expect("progress").level > 1);
         assert_eq!(sim.world.get::<Health>(blue).expect("health").max, health);
+    }
+
+    #[test]
+    fn burn_ability_deals_damage_over_time_and_expires() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Burn"),
+            cooldown_ticks: 120,
+            mana_cost: 5,
+            cast_range: 0.into(),
+            kind: AbilityKind::Burn {
+                radius: 1_000.into(),
+                duration_ticks: 10,
+                damage_per_tick: 20,
+                damage_type: DamageType::Magic,
+            },
+        };
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let red = sim.hero_entities[5];
+        let before = sim.world.get::<Health>(red).expect("health").current;
+        let mut cast = TickInputs::new();
+        let target = sim.world.get::<Position>(red).expect("position").0;
+        cast.set(0, PlayerCommand::CastAbility { slot: 0, target });
+        sim.tick(&cast);
+        assert!(sim.world.get::<Burn>(red).is_some());
+        for _ in 0..10 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(sim.world.get::<Burn>(red).is_none());
+        assert!(
+            sim.world.get::<Health>(red).expect("health").current < before - 100,
+            "burn ticks damage over its duration"
+        );
     }
 
     #[test]

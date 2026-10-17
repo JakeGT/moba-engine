@@ -669,6 +669,9 @@ fn push_unit(
     if status & moba_net::protocol::ENTITY_FLAG_SILENCE != 0 {
         color = color * 0.7 + Vec4::new(0.55, 0.55, 0.6, 1.0) * 0.3;
     }
+    if status & moba_net::protocol::ENTITY_FLAG_BURN != 0 {
+        color = color * 0.7 + Vec4::new(1.0, 0.42, 0.1, 1.0) * 0.3;
+    }
     let world_position = Vec3::new(
         position.x.to_f32() - 128.0,
         0.0,

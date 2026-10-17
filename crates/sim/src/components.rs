@@ -94,6 +94,19 @@ pub struct Silence {
     pub remaining: u32,
 }
 
+/// Damage over time.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Burn {
+    /// Entity that applied the burn.
+    pub source: Entity,
+    /// Damage applied each tick.
+    pub damage: i32,
+    /// Mitigation type.
+    pub damage_type: moba_game::DamageType,
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+}
+
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {

@@ -524,6 +524,12 @@ impl GameContent {
                     radius,
                     duration_ticks,
                 } => radius > Fix::ZERO && duration_ticks > 0,
+                AbilityKind::Burn {
+                    radius,
+                    duration_ticks,
+                    damage_per_tick,
+                    ..
+                } => radius > Fix::ZERO && duration_ticks > 0 && damage_per_tick > 0,
                 AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
                 AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
             };
@@ -682,6 +688,18 @@ impl GameContent {
                     feed(&[2]);
                     feed(&(amount as u32).to_le_bytes());
                     feed(&radius.to_bits().to_le_bytes());
+                }
+                AbilityKind::Burn {
+                    radius,
+                    duration_ticks,
+                    damage_per_tick,
+                    damage_type,
+                } => {
+                    feed(&[8]);
+                    feed(&radius.to_bits().to_le_bytes());
+                    feed(&duration_ticks.to_le_bytes());
+                    feed(&(damage_per_tick as u32).to_le_bytes());
+                    feed(&[damage_type as u8]);
                 }
                 AbilityKind::Silence {
                     radius,
@@ -1009,6 +1027,16 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         "heal" => AbilityKind::Heal {
                             amount: ability.amount,
                             radius: Fix::from_f32(ability.radius),
+                        },
+                        "burn" => AbilityKind::Burn {
+                            radius: Fix::from_f32(ability.radius),
+                            duration_ticks: ability.duration_ticks,
+                            damage_per_tick: ability.damage,
+                            damage_type: if ability.damage_type == "magic" {
+                                DamageType::Magic
+                            } else {
+                                DamageType::Physical
+                            },
                         },
                         "silence" => AbilityKind::Silence {
                             radius: Fix::from_f32(ability.radius),
