@@ -15,15 +15,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use moba_core::math::{Vec3, Vec4};
+use moba_game::Team;
 use moba_platform::{App, Frame, FrameOutcome, Key, Window, WindowConfig, run};
 use moba_render::{
     Camera, CapturedFrame, RenderConfig, Renderer, Scene, UnitInstance, ValidationMode,
 };
-
-const DEMO_UNITS: usize = 500;
+use moba_sim::{SimConfig, Simulation, UnitKind};
 
 struct ClientApp {
     renderer: Option<Renderer>,
+    simulation: Simulation,
     units: Vec<UnitInstance>,
     frames: u64,
     quit_after_frames: u64,
@@ -39,9 +40,19 @@ impl ClientApp {
         capture_frame: u64,
         error: Arc<Mutex<Option<String>>>,
     ) -> Self {
+        let mut simulation = Simulation::new(SimConfig::default());
+        let warmup: u32 = std::env::var("MOBA_WARMUP_TICKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        for _ in 0..warmup {
+            simulation.tick_with_bots();
+        }
+        simulation.clear_events();
         Self {
             renderer: None,
-            units: demo_units(),
+            simulation,
+            units: Vec::with_capacity(moba_sim::MAX_UNITS),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -55,6 +66,71 @@ impl ClientApp {
             if slot.is_none() {
                 *slot = Some(message);
             }
+        }
+    }
+
+    fn rebuild_units(&mut self) {
+        self.units.clear();
+        let world = self.simulation.world();
+        for entity in world.entities() {
+            let (Some(position), Some(team), Some(kind), Some(health)) = (
+                world.get::<moba_sim::Position>(entity),
+                world.get::<Team>(entity),
+                world.get::<UnitKind>(entity),
+                world.get::<moba_sim::Health>(entity),
+            ) else {
+                continue;
+            };
+            if health.current <= 0 {
+                continue;
+            }
+            let team_color = match team {
+                Team::Blue => Vec4::new(0.20, 0.46, 1.0, 1.0),
+                Team::Red => Vec4::new(1.0, 0.24, 0.18, 1.0),
+            };
+            let (height, mut color) = match kind {
+                UnitKind::Hero => (4.6, team_color),
+                UnitKind::MeleeMinion => (
+                    2.2,
+                    Vec4::new(
+                        team_color.x * 0.72 + 0.03,
+                        team_color.y * 0.72 + 0.03,
+                        team_color.z * 0.72 + 0.03,
+                        1.0,
+                    ),
+                ),
+                UnitKind::RangedMinion => (
+                    1.8,
+                    Vec4::new(
+                        team_color.x * 0.62 + 0.05,
+                        team_color.y * 0.62 + 0.05,
+                        team_color.z * 0.62 + 0.05,
+                        1.0,
+                    ),
+                ),
+                UnitKind::Tower => (
+                    9.0,
+                    Vec4::new(
+                        team_color.x * 0.60 + 0.12,
+                        team_color.y * 0.60 + 0.12,
+                        team_color.z * 0.60 + 0.12,
+                        1.0,
+                    ),
+                ),
+                UnitKind::Nexus => (15.0, Vec4::new(1.0, 0.76, 0.22, 1.0)),
+            };
+            let health_fraction = health.current as f32 / health.max as f32;
+            let brightness = 0.55 + 0.45 * health_fraction;
+            color.x *= brightness;
+            color.y *= brightness;
+            color.z *= brightness;
+            let world_position = Vec3::new(
+                position.0.x.to_f32() - 128.0,
+                0.0,
+                position.0.y.to_f32() - 128.0,
+            );
+            self.units
+                .push(UnitInstance::at(world_position, height, color));
         }
     }
 }
@@ -85,29 +161,37 @@ impl App for ClientApp {
 
     fn on_frame(&mut self, frame: &mut Frame<'_>) -> FrameOutcome {
         self.frames += 1;
-        if let Some(renderer) = self.renderer.as_mut() {
+        if self.renderer.is_some() {
+            for _ in 0..frame.ticks() {
+                self.simulation.tick_with_bots();
+                self.simulation.clear_events();
+            }
+            self.rebuild_units();
+
             let [width, height] = frame.window().size();
             if width > 0 && height > 0 {
                 let aspect = width as f32 / height as f32;
-                let yaw = frame.elapsed_secs() as f32 * 0.12;
-                let camera = Camera::orbit(Vec3::ZERO, 70.0, yaw, 0.62, aspect);
+                let yaw = frame.elapsed_secs() as f32 * 0.035;
+                let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                 let scene = Scene::new(camera, &self.units);
-                if let Some(path) = &self.capture_path {
-                    if self.frames >= self.capture_frame {
-                        match renderer.capture_frame(&scene) {
-                            Ok(frame) => {
-                                if let Err(error) = write_ppm(path, &frame) {
-                                    self.fail(format!("capture write failed: {error}"));
+                if let Some(renderer) = self.renderer.as_mut() {
+                    if let Some(path) = &self.capture_path {
+                        if self.frames >= self.capture_frame {
+                            match renderer.capture_frame(&scene) {
+                                Ok(frame) => {
+                                    if let Err(error) = write_ppm(path, &frame) {
+                                        self.fail(format!("capture write failed: {error}"));
+                                    }
                                 }
+                                Err(error) => self.fail(format!("capture failed: {error}")),
                             }
-                            Err(error) => self.fail(format!("capture failed: {error}")),
+                            return FrameOutcome::Exit;
                         }
+                    }
+                    if let Err(error) = renderer.render(&scene) {
+                        self.fail(format!("render failed: {error}"));
                         return FrameOutcome::Exit;
                     }
-                }
-                if let Err(error) = renderer.render(&scene) {
-                    self.fail(format!("render failed: {error}"));
-                    return FrameOutcome::Exit;
                 }
             }
         } else if self.error.lock().is_ok_and(|slot| slot.is_some()) {
@@ -119,31 +203,6 @@ impl App for ClientApp {
         }
         FrameOutcome::Continue
     }
-}
-
-fn demo_units() -> Vec<UnitInstance> {
-    let mut units = Vec::with_capacity(DEMO_UNITS);
-    for index in 0..DEMO_UNITS {
-        let column = index % 25;
-        let row = index / 25;
-        let x = (column as f32 - 12.0) * 4.0;
-        let z = (row as f32 - 10.0) * 4.0;
-        let big = index % 50 == 0;
-        let height = if big {
-            4.0
-        } else {
-            1.6 + (index % 5) as f32 * 0.12
-        };
-        let color = if index % 3 == 0 {
-            Vec4::new(0.82, 0.24, 0.18, 1.0)
-        } else if index % 3 == 1 {
-            Vec4::new(0.18, 0.42, 0.92, 1.0)
-        } else {
-            Vec4::new(0.55, 0.52, 0.48, 1.0)
-        };
-        units.push(UnitInstance::at(Vec3::new(x, 0.0, z), height, color));
-    }
-    units
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

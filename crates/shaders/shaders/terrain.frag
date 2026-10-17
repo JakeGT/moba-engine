@@ -32,7 +32,7 @@ void main() {
 
     // Distance fog hides the plane edge and keeps focus on the units.
     float distance = length(camera.camera_pos.xyz - in_world_pos);
-    float fog = smoothstep(120.0, 260.0, distance);
+    float fog = smoothstep(240.0, 520.0, distance);
     lit = mix(lit, camera.ambient.rgb * 1.2, fog);
 
     out_color = vec4(lit, 1.0);

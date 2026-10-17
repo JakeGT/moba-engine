@@ -12,7 +12,7 @@ Last updated: 2026-10-17 (round 1 of the build).
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Fog/levels/items await M5/M6. |
 | M5 | Networking | ⬜ | UDP transport, snapshots, prediction/reconciliation, lag comp. |
-| M6 | Vertical slice | ⬜ | Playable 5v5 on one map. |
+| M6 | Vertical slice | 🟡 | The client renders a live simulated match; UI, fog, networking and a playable flow remain. |
 | M7 | Hardening | ⬜ | 50 matches/box, fuzz, profiling capture. |
 | M8 | Content pipeline | ⬜ | Data-driven abilities. |
 
@@ -45,6 +45,8 @@ Last updated: 2026-10-17 (round 1 of the build).
 - **`moba-sim`** — fixed-tick authoritative match simulation: commands, combat, abilities,
   waves, towers, respawns, bots, events and a stable state hash.
 - **`moba-server`** — headless 30 Hz match runner with tick statistics (`--ticks`, `--seed`).
+- **`moba-client`** — renders the live simulation (units, lanes, towers, nexuses, health-tinted
+  colours) over the Vulkan terrain, with warm-up/capture modes for deterministic images.
 
 ## Verification actually run
 
@@ -64,6 +66,8 @@ Last updated: 2026-10-17 (round 1 of the build).
 - Simulation: `cargo bench -p moba-sim --bench tick` — 12.9 µs/tick steady state;
   `cargo run --release -p moba-server -- --ticks 20000` — 0.25 s wall, 106 peak units,
   stable hash. Ten-thousand-tick determinism tests pass.
+- Live slice: `MOBA_WARMUP_TICKS=3200 MOBA_CAPTURE=frame.ppm` renders the simulated match
+  with zero validation messages; see `docs/images/m4-simulation-slice.png`.
 
 `just`, `cargo-nextest` and `cargo-deny` are not installed in this environment; their
 commands were reproduced manually. Miri is green on core/ecs/jobs; the loom model is still

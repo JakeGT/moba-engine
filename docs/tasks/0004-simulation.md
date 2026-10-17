@@ -40,6 +40,8 @@ running far inside the 2 ms/tick budget.
       `destroying_a_nexus_ends_the_match`.
 - [x] `bots_fight_and_produce_events`, `heroes_respawn_after_death`.
 - [x] Steady-state 5v5 + waves: **12.9 µs/tick** (see `docs/perf/0004-simulation.md`).
+- [x] Client renders the live match (heroes, minions, towers, nexuses) with zero
+      validation messages; see `docs/images/m4-simulation-slice.png`.
 
 ## Budgets touched
 Server tick target ≤ 2 ms. Measured: 12.9 µs/tick steady state, 209.6 µs worst observed
