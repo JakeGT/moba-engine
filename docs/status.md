@@ -7,7 +7,7 @@ Last updated: 2026-10-17 (round 1 of the build).
 | # | Milestone | State | Notes |
 |---|---|---|---|
 | M0 | Bootstrap | ✅ | Workspace, lints, CI, justfile, agent definitions. |
-| M1 | Core runtime | ✅ | 62 tests green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
+| M1 | Core runtime | ✅ | 67 workspace tests green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
 | M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ⬜ | Heroes, minions, towers, abilities, nav, fog, determinism. |
@@ -44,7 +44,7 @@ Last updated: 2026-10-17 (round 1 of the build).
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked` — 62 tests
+- `cargo test --workspace --locked` — 67 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
