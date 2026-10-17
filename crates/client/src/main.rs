@@ -27,8 +27,7 @@ use std::time::{Duration, Instant};
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
 use moba_game::{
-    EMPTY_ITEM, HEROES, LANES, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
-    xp_to_next,
+    EMPTY_ITEM, LANES, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team, xp_to_next,
 };
 use moba_net::protocol::{MatchPhase, WireCommand, dequantize_position, quantize_position};
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
@@ -109,8 +108,11 @@ impl ClientApp {
                 Ok(client) => {
                     let slot = client.player_slot();
                     let spectator = client.is_spectator();
-                    let hero = usize::from(client.hero_pick()) % HEROES.len();
-                    let prediction = PredictionState::new(HEROES[hero].move_speed_per_sec);
+                    let hero = usize::from(client.hero_pick()) % client.heroes().len().max(1);
+                    let speed = client.heroes().get(hero).map_or(Fix::from_i32(7), |hero| {
+                        Fix::from_bits(hero.move_speed_bits)
+                    });
+                    let prediction = PredictionState::new(speed);
                     let interpolator =
                         Interpolator::new(SNAPSHOT_DELAY_TICKS, f32::from(client.tick_rate()));
                     app.network = Some(NetworkView {
@@ -1012,7 +1014,16 @@ fn build_network_hud(
                 })
             })
         });
-    let hero = &HEROES[usize::from(network.client.hero_pick()) % HEROES.len()];
+    let hero = network
+        .client
+        .heroes()
+        .get(usize::from(network.client.hero_pick()))
+        .copied()
+        .unwrap_or_default();
+    let hero_name = {
+        let name = hero.name_str();
+        if name.is_empty() { "UNKNOWN" } else { name }
+    };
 
     // Match timer and team score.
     let tick = snapshot.map_or(0, |state| state.tick);
@@ -1122,9 +1133,9 @@ fn build_network_hud(
         } else {
             xp_to_next(level)
         };
-        ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero.name);
+        ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero_name);
         ui.text(
-            x + 14.0 + UiDrawList::text_width(hero.name, 3.0) + 14.0,
+            x + 14.0 + UiDrawList::text_width(hero_name, 3.0) + 14.0,
             y + 16.0,
             2.0,
             Vec4::new(0.95, 0.78, 0.3, 1.0),
@@ -1208,8 +1219,8 @@ fn build_network_hud(
             ui.outline(bx, by, box_size, box_size, 1.0, border);
             ui.text(bx + 8.0, by + 8.0, 2.5, text, key);
             let remaining = cooldowns[slot];
-            let max_cooldown = hero
-                .ability(slot)
+            let max_cooldown = moba_game::ABILITIES
+                .get(usize::from(hero.abilities[slot]))
                 .map_or(1, |ability| {
                     u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)
                 })
@@ -1296,9 +1307,14 @@ fn build_network_hud(
             } else {
                 Vec4::new(1.0, 0.5, 0.4, 1.0)
             };
-            let name = HEROES
+            let name = network
+                .client
+                .heroes()
                 .get(usize::from(*pick))
-                .map_or("UNKNOWN", |hero| hero.name);
+                .map_or("UNKNOWN", |hero| {
+                    let name = hero.name_str();
+                    if name.is_empty() { "UNKNOWN" } else { name }
+                });
             ui.text(
                 sx + 32.0,
                 y,
@@ -1547,7 +1563,7 @@ fn build_vision(network: &NetworkView) -> VisionCircles {
         if entity.team != own_team || entity.is_dead() {
             return;
         }
-        let radius = vision_radius(entity);
+        let radius = vision_radius(network, entity);
         let position = dequantize_position(entity.x, entity.y);
         vision.add(
             position.x.to_f32() - 128.0,
@@ -1571,11 +1587,13 @@ fn build_vision(network: &NetworkView) -> VisionCircles {
     vision
 }
 
-fn vision_radius(entity: &moba_net::NetEntity) -> f32 {
+fn vision_radius(network: &NetworkView, entity: &moba_net::NetEntity) -> f32 {
     match entity.kind {
-        0 => HEROES
+        0 => network
+            .client
+            .heroes()
             .get(usize::from(entity.hero_pick))
-            .map_or(35.0, |hero| hero.vision_range.to_f32()),
+            .map_or(35.0, |hero| Fix::from_bits(hero.vision_bits).to_f32()),
         1 => MELEE_MINION.vision_range.to_f32(),
         2 => RANGED_MINION.vision_range.to_f32(),
         3 => TOWER.vision_range.to_f32(),

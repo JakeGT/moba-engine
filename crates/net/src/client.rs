@@ -12,8 +12,8 @@ use crate::crypto::{
 };
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotDelta, SnapshotState,
-    WireCommand, decode_hello, decode_packet, decode_snapshot, decode_welcome, encode_hello,
-    encode_input, encode_packet, sequence_after,
+    WireCommand, catalog_hash, decode_hello, decode_packet, decode_snapshot, decode_welcome,
+    encode_hello, encode_input, encode_packet, sequence_after,
 };
 use crate::transport::UdpTransport;
 
@@ -81,6 +81,7 @@ pub struct NetClient {
     seed: u64,
     hero_pick: u8,
     items: Vec<crate::protocol::WireItem>,
+    heroes: Vec<crate::protocol::WireHero>,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     spectator: bool,
@@ -181,6 +182,7 @@ impl NetClient {
             seed: 0,
             hero_pick: 0,
             items: Vec::new(),
+            heroes: Vec::new(),
             nonce,
             pre_shared_key,
             spectator,
@@ -333,6 +335,7 @@ impl NetClient {
     ///
     /// # Errors
     /// Returns OS receive errors.
+    #[allow(clippy::too_many_lines)] // One flat packet dispatch is easier to audit.
     pub fn poll(&mut self) -> io::Result<()> {
         for _ in 0..256 {
             let Some(message) = self.transport.recv()? else {
@@ -352,6 +355,15 @@ impl NetClient {
                     if welcome.nonce != self.nonce {
                         continue;
                     }
+                    let item_count =
+                        usize::from(welcome.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
+                    let hero_count =
+                        usize::from(welcome.hero_count).min(crate::protocol::MAX_WIRE_HEROES);
+                    let content_hash =
+                        catalog_hash(&welcome.items[..item_count], &welcome.heroes[..hero_count]);
+                    if content_hash != welcome.content_hash {
+                        continue;
+                    }
                     if let Some(key) = self.pre_shared_key {
                         if !verify_welcome_tag(
                             &key,
@@ -359,6 +371,7 @@ impl NetClient {
                             welcome.server_nonce,
                             message.header.session,
                             welcome.slot,
+                            content_hash,
                             &welcome.auth,
                         ) {
                             self.state = ClientState::Disconnected;
@@ -384,10 +397,10 @@ impl NetClient {
                     self.snapshot_interval = welcome.snapshot_interval;
                     self.seed = welcome.seed;
                     self.hero_pick = welcome.hero_pick;
-                    let item_count =
-                        usize::from(welcome.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
                     self.items.clear();
                     self.items.extend_from_slice(&welcome.items[..item_count]);
+                    self.heroes.clear();
+                    self.heroes.extend_from_slice(&welcome.heroes[..hero_count]);
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -557,6 +570,12 @@ impl NetClient {
     #[must_use]
     pub fn items(&self) -> &[crate::protocol::WireItem] {
         &self.items
+    }
+
+    /// Runtime hero catalogue received in the handshake.
+    #[must_use]
+    pub fn heroes(&self) -> &[crate::protocol::WireHero] {
+        &self.heroes
     }
 
     /// Server tick rate.

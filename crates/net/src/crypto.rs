@@ -196,6 +196,7 @@ pub fn welcome_tag(
     server_nonce: u64,
     session: u32,
     slot: u8,
+    content_hash: u64,
 ) -> [u8; 32] {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
@@ -204,6 +205,7 @@ pub fn welcome_tag(
     mac.update(&server_nonce.to_le_bytes());
     mac.update(&session.to_le_bytes());
     mac.update(&[slot]);
+    mac.update(&content_hash.to_le_bytes());
     mac.finalize().into_bytes().into()
 }
 
@@ -215,6 +217,7 @@ pub fn verify_welcome_tag(
     server_nonce: u64,
     session: u32,
     slot: u8,
+    content_hash: u64,
     tag: &[u8; 32],
 ) -> bool {
     let mut mac =
@@ -224,6 +227,7 @@ pub fn verify_welcome_tag(
     mac.update(&server_nonce.to_le_bytes());
     mac.update(&session.to_le_bytes());
     mac.update(&[slot]);
+    mac.update(&content_hash.to_le_bytes());
     mac.verify_slice(tag).is_ok()
 }
 
@@ -290,9 +294,13 @@ mod tests {
         assert!(verify_hello_tag(&[1; 32], 7, 123, 0, false, &tag));
         assert!(!verify_hello_tag(&[2; 32], 7, 123, 0, false, &tag));
         assert!(!verify_hello_tag(&[1; 32], 7, 123, 0, true, &tag));
-        let welcome = welcome_tag(&[1; 32], 123, 456, 9, 3);
-        assert!(verify_welcome_tag(&[1; 32], 123, 456, 9, 3, &welcome));
-        assert!(!verify_welcome_tag(&[1; 32], 123, 457, 9, 3, &welcome));
+        let welcome = welcome_tag(&[1; 32], 123, 456, 9, 3, 0xCAFE);
+        assert!(verify_welcome_tag(
+            &[1; 32], 123, 456, 9, 3, 0xCAFE, &welcome
+        ));
+        assert!(!verify_welcome_tag(
+            &[1; 32], 123, 457, 9, 3, 0xBEEF, &welcome
+        ));
     }
 
     #[test]

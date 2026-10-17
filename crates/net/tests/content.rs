@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use moba_game::{GameContent, ItemSpec};
+use moba_game::{GameContent, HeroSpec, ItemSpec};
 use moba_net::protocol::WireCommand;
 use moba_net::{NetClient, NetServer, ServerConfig};
 use moba_sim::SimConfig;
@@ -25,6 +25,21 @@ fn custom_content() -> GameContent {
                 ..ItemSpec::from(moba_game::ITEMS.first().expect("default item"))
             },
         ],
+        heroes: vec![HeroSpec {
+            name: String::from("Test Hero"),
+            max_health: 700,
+            max_mana: 300,
+            health_regen_per_tick: 2,
+            mana_regen_per_tick: 4,
+            attack_damage: 60,
+            attack_range: moba_core::Fix::from_i32(2),
+            attack_interval_ticks: 30,
+            move_speed_per_sec: moba_core::Fix::from_i32(7),
+            armor: 20,
+            magic_resist: 20,
+            vision_range: moba_core::Fix::from_i32(14),
+            abilities: [0, 1, 2],
+        }],
     }
 }
 
@@ -59,6 +74,8 @@ fn custom_item_catalogue_reaches_client_and_shop() {
     let mut client = NetClient::connect(addr, Duration::from_secs(2)).expect("connect");
     assert_eq!(client.items().len(), 2);
     assert_eq!(client.items()[0].name_str(), "Test Blade");
+    assert_eq!(client.heroes().len(), 1);
+    assert_eq!(client.heroes()[0].name_str(), "Test Hero");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(1) && client.snapshot().is_none() {
         client.poll().expect("poll");

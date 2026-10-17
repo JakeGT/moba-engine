@@ -14,10 +14,11 @@ use crate::crypto::{
     SessionCrypto, derive_session_key, random_nonce, verify_hello_tag, welcome_tag,
 };
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ITEMS, MatchPhase, NetEntity,
-    NetId, PacketKind, SnapshotDelta, SnapshotState, WIRE_ITEM_NAME, Welcome, WireCommand,
-    WireItem, build_delta, decode_hello, decode_input, dequantize_position, encode_snapshot,
-    encode_welcome, sequence_after,
+    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_HEROES, MAX_WIRE_ITEMS,
+    MatchPhase, NetEntity, NetId, PacketKind, SnapshotDelta, SnapshotState, WIRE_HERO_NAME,
+    WIRE_ITEM_NAME, Welcome, WireCommand, WireHero, WireItem, build_delta, catalog_hash,
+    decode_hello, decode_input, dequantize_position, encode_snapshot, encode_welcome,
+    sequence_after,
 };
 use crate::transport::{ReceivedMessage, UdpTransport};
 
@@ -865,12 +866,44 @@ impl NetServer {
             .get(slot)
             .and_then(|client| client.as_ref())
             .map_or((0xFF, true), |client| (client.slot, client.spectator));
+        let item_count = u8::try_from(self.content.items.len().min(MAX_WIRE_ITEMS))
+            .unwrap_or(MAX_WIRE_ITEMS as u8);
+        let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
+        for (slot, source) in items.iter_mut().zip(self.content.items.iter()) {
+            let bytes = source.name.as_bytes();
+            let length = bytes.len().min(WIRE_ITEM_NAME);
+            slot.name[..length].copy_from_slice(&bytes[..length]);
+            slot.name_len = u8::try_from(length).unwrap_or(WIRE_ITEM_NAME as u8);
+            slot.cost = source.cost;
+            slot.health = source.health;
+            slot.mana = source.mana;
+            slot.attack_damage = source.attack_damage;
+            slot.armor = source.armor;
+            slot.magic_resist = source.magic_resist;
+            slot.move_speed_bits = source.move_speed_per_sec.to_bits();
+        }
+        let hero_count = u8::try_from(self.content.heroes.len().min(MAX_WIRE_HEROES))
+            .unwrap_or(MAX_WIRE_HEROES as u8);
+        let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
+        for (slot, source) in heroes.iter_mut().zip(self.content.heroes.iter()) {
+            let bytes = source.name.as_bytes();
+            let length = bytes.len().min(WIRE_HERO_NAME);
+            slot.name[..length].copy_from_slice(&bytes[..length]);
+            slot.name_len = u8::try_from(length).unwrap_or(WIRE_HERO_NAME as u8);
+            slot.move_speed_bits = source.move_speed_per_sec.to_bits();
+            slot.vision_bits = source.vision_range.to_bits();
+            slot.abilities = source.abilities;
+        }
+        let content_hash = catalog_hash(
+            &items[..usize::from(item_count)],
+            &heroes[..usize::from(hero_count)],
+        );
         let mut server_nonce = 0;
         let mut auth = [0u8; 32];
         let mut crypto = None;
         if let Some(key) = self.config.pre_shared_key {
             server_nonce = random_nonce()?;
-            auth = welcome_tag(&key, nonce, server_nonce, session, slot_u8);
+            auth = welcome_tag(&key, nonce, server_nonce, session, slot_u8, content_hash);
             let session_key = derive_session_key(&key, nonce, server_nonce);
             crypto = Some(SessionCrypto::new(session_key, session, 1));
         }
@@ -889,25 +922,11 @@ impl NetServer {
             server_nonce,
             auth,
             spectator,
-            item_count: u8::try_from(self.content.items.len().min(MAX_WIRE_ITEMS))
-                .unwrap_or(MAX_WIRE_ITEMS as u8),
-            items: {
-                let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
-                for (slot, source) in items.iter_mut().zip(self.content.items.iter()) {
-                    let bytes = source.name.as_bytes();
-                    let length = bytes.len().min(WIRE_ITEM_NAME);
-                    slot.name[..length].copy_from_slice(&bytes[..length]);
-                    slot.name_len = u8::try_from(length).unwrap_or(WIRE_ITEM_NAME as u8);
-                    slot.cost = source.cost;
-                    slot.health = source.health;
-                    slot.mana = source.mana;
-                    slot.attack_damage = source.attack_damage;
-                    slot.armor = source.armor;
-                    slot.magic_resist = source.magic_resist;
-                    slot.move_speed_bits = source.move_speed_per_sec.to_bits();
-                }
-                items
-            },
+            item_count,
+            items,
+            hero_count,
+            heroes,
+            content_hash,
         };
         let payload = encode_welcome(&welcome);
         if let Some(client) = self.clients[slot].as_mut() {

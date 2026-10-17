@@ -6,7 +6,7 @@
 Let creators add and tune game content without forking simulation code, while keeping
 deterministic playback and server authority.
 
-## Landed (round 14)
+## Landed (rounds 14–15)
 - `GameContent`/`ItemSpec` owned runtime catalogue with validation (1–16 items, unique 1–16
   byte ASCII names, positive costs).
 - `Simulation::new_with_content` reads purchase costs/bonuses from the catalogue; default
@@ -16,6 +16,11 @@ deterministic playback and server authority.
 - `moba-server --items FILE` TOML loader, example `content/items.toml`.
 - Integration test buys a custom item over UDP and catches progress-only delta omission;
   protocol regression test added.
+- Runtime hero catalogue: `HeroSpec` stats and ability bindings, TOML `[[heroes]]`, validation,
+  `WireHero` handshake entries for client HUD/vision; simulation spawns/casts from content.
+- Example `content/example-pack.toml` (8 items + Vanguard hero); custom hero UDP test and
+  client capture (`../images/m8-hero-content.png`).
+- Catalogue integrity: FNV hash in `Welcome`, bound into the PSK HMAC and rechecked by clients.
 
 ## Next
 - Move hero stats, ability tables and map/lane/structure definitions into validated content.

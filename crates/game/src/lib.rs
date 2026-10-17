@@ -20,7 +20,10 @@ pub mod units;
 
 pub use ability::{ABILITIES, AbilityDef, AbilityKind};
 pub use combat::{DamageType, mitigate, mitigate_typed};
-pub use content::{ContentError, GameContent, ItemSpec, MAX_CONTENT_ITEMS, MAX_ITEM_NAME};
+pub use content::{
+    ContentError, GameContent, HeroSpec, ItemSpec, MAX_CONTENT_HEROES, MAX_CONTENT_ITEMS,
+    MAX_HERO_NAME, MAX_ITEM_NAME,
+};
 pub use hero::{HEROES, HeroDef, HeroId};
 pub use item::{
     EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, ITEM_SLOTS, ITEMS, ItemDef, LEVEL_CAP,

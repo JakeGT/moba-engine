@@ -13,6 +13,10 @@ use crate::{ITEMS, ItemDef};
 pub const MAX_CONTENT_ITEMS: usize = 16;
 /// Maximum item display-name length in bytes.
 pub const MAX_ITEM_NAME: usize = 16;
+/// Maximum heroes in a content pack.
+pub const MAX_CONTENT_HEROES: usize = 8;
+/// Maximum hero display-name length in bytes.
+pub const MAX_HERO_NAME: usize = 16;
 
 /// An owned, runtime item definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +39,70 @@ pub struct ItemSpec {
     pub move_speed_per_sec: Fix,
 }
 
+/// An owned, runtime hero stat definition.
+///
+/// Ability behaviour still comes from the engine ability library; `abilities` are stable
+/// ability ids in Q/W/E order so packs can recombine/tune existing kits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeroSpec {
+    /// Display name.
+    pub name: String,
+    /// Maximum health.
+    pub max_health: i32,
+    /// Maximum mana.
+    pub max_mana: i32,
+    /// Health regenerated per tick.
+    pub health_regen_per_tick: i32,
+    /// Mana regenerated per tick.
+    pub mana_regen_per_tick: i32,
+    /// Basic attack damage.
+    pub attack_damage: i32,
+    /// Basic attack range.
+    pub attack_range: Fix,
+    /// Basic attack interval in ticks.
+    pub attack_interval_ticks: u32,
+    /// Movement speed in world units per second.
+    pub move_speed_per_sec: Fix,
+    /// Armour.
+    pub armor: i32,
+    /// Magic resistance.
+    pub magic_resist: i32,
+    /// Vision radius.
+    pub vision_range: Fix,
+    /// Ability ids for Q/W/E.
+    pub abilities: [u8; 3],
+}
+
+impl From<&crate::HeroDef> for HeroSpec {
+    fn from(hero: &crate::HeroDef) -> Self {
+        Self {
+            name: hero.name.to_owned(),
+            max_health: hero.max_health,
+            max_mana: hero.max_mana,
+            health_regen_per_tick: hero.health_regen_per_tick,
+            mana_regen_per_tick: hero.mana_regen_per_tick,
+            attack_damage: hero.attack_damage,
+            attack_range: hero.attack_range,
+            attack_interval_ticks: hero.attack_interval_ticks,
+            move_speed_per_sec: hero.move_speed_per_sec,
+            armor: hero.armor,
+            magic_resist: hero.magic_resist,
+            vision_range: hero.vision_range,
+            abilities: hero.abilities,
+        }
+    }
+}
+
+impl HeroSpec {
+    /// Returns one static ability definition for a slot, if the id is valid.
+    #[must_use]
+    pub fn ability(&self, slot: usize) -> Option<&'static crate::AbilityDef> {
+        self.abilities
+            .get(slot)
+            .and_then(|&id| crate::ABILITIES.get(usize::from(id)))
+    }
+}
+
 impl From<&ItemDef> for ItemSpec {
     fn from(item: &ItemDef) -> Self {
         Self {
@@ -55,12 +123,15 @@ impl From<&ItemDef> for ItemSpec {
 pub struct GameContent {
     /// Item catalogue in stable id order.
     pub items: Vec<ItemSpec>,
+    /// Hero catalogue in stable id order.
+    pub heroes: Vec<HeroSpec>,
 }
 
 impl Default for GameContent {
     fn default() -> Self {
         Self {
             items: ITEMS.iter().map(ItemSpec::from).collect(),
+            heroes: crate::HEROES.iter().map(HeroSpec::from).collect(),
         }
     }
 }
@@ -78,6 +149,18 @@ pub enum ContentError {
     DuplicateName,
     /// An item costs zero gold.
     FreeItem,
+    /// No heroes were supplied.
+    NoHeroes,
+    /// Too many heroes for the wire catalogue.
+    TooManyHeroes,
+    /// A hero name is empty, too long or non-ASCII.
+    BadHeroName,
+    /// Two heroes share a name.
+    DuplicateHeroName,
+    /// A hero ability id is outside the ability library.
+    BadAbility,
+    /// A hero has non-positive health or an invalid attack interval.
+    BadHeroStats,
 }
 
 impl core::fmt::Display for ContentError {
@@ -88,6 +171,12 @@ impl core::fmt::Display for ContentError {
             Self::BadName => f.write_str("item names must be 1..=16 ASCII bytes"),
             Self::DuplicateName => f.write_str("item names must be unique"),
             Self::FreeItem => f.write_str("item costs must be greater than zero"),
+            Self::NoHeroes => f.write_str("content must define at least one hero"),
+            Self::TooManyHeroes => write!(f, "content has more than {MAX_CONTENT_HEROES} heroes"),
+            Self::BadHeroName => f.write_str("hero names must be 1..=16 ASCII bytes"),
+            Self::DuplicateHeroName => f.write_str("hero names must be unique"),
+            Self::BadAbility => f.write_str("hero ability ids must exist"),
+            Self::BadHeroStats => f.write_str("hero stats must be positive"),
         }
     }
 }
@@ -120,6 +209,39 @@ impl GameContent {
                 return Err(ContentError::DuplicateName);
             }
         }
+        if self.heroes.is_empty() {
+            return Err(ContentError::NoHeroes);
+        }
+        if self.heroes.len() > MAX_CONTENT_HEROES {
+            return Err(ContentError::TooManyHeroes);
+        }
+        for (index, hero) in self.heroes.iter().enumerate() {
+            if hero.name.is_empty() || hero.name.len() > MAX_HERO_NAME || !hero.name.is_ascii() {
+                return Err(ContentError::BadHeroName);
+            }
+            if self.heroes[..index]
+                .iter()
+                .any(|other| other.name == hero.name)
+            {
+                return Err(ContentError::DuplicateHeroName);
+            }
+            if hero
+                .abilities
+                .iter()
+                .any(|&id| usize::from(id) >= crate::ABILITIES.len())
+            {
+                return Err(ContentError::BadAbility);
+            }
+            if hero.max_health <= 0
+                || hero.max_mana < 0
+                || hero.attack_interval_ticks == 0
+                || hero.attack_range < Fix::ZERO
+                || hero.move_speed_per_sec <= Fix::ZERO
+                || hero.vision_range <= Fix::ZERO
+            {
+                return Err(ContentError::BadHeroStats);
+            }
+        }
         Ok(())
     }
 
@@ -148,6 +270,30 @@ impl GameContent {
             }
             feed(&item.move_speed_per_sec.to_bits().to_le_bytes());
         }
+        for hero in &self.heroes {
+            feed(hero.name.as_bytes());
+            feed(&[0]);
+            for value in [
+                hero.max_health as u32,
+                hero.max_mana as u32,
+                hero.health_regen_per_tick as u32,
+                hero.mana_regen_per_tick as u32,
+                hero.attack_damage as u32,
+                hero.attack_interval_ticks,
+                hero.armor as u32,
+                hero.magic_resist as u32,
+            ] {
+                feed(&value.to_le_bytes());
+            }
+            for value in [
+                hero.attack_range,
+                hero.move_speed_per_sec,
+                hero.vision_range,
+            ] {
+                feed(&value.to_bits().to_le_bytes());
+            }
+            feed(&hero.abilities);
+        }
         hash
     }
 }
@@ -162,6 +308,16 @@ mod tests {
         assert_eq!(content.items.len(), ITEMS.len());
         assert_eq!(content.validate(), Ok(()));
         assert_eq!(content.hash(), GameContent::default().hash());
+    }
+
+    #[test]
+    fn hero_validation_rejects_bad_ability_ids() {
+        let mut content = GameContent::default();
+        content.heroes[0].abilities = [255, 0, 0];
+        assert_eq!(content.validate(), Err(ContentError::BadAbility));
+        let mut content = GameContent::default();
+        content.heroes[0].max_health = 0;
+        assert_eq!(content.validate(), Err(ContentError::BadHeroStats));
     }
 
     #[test]

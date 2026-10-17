@@ -140,12 +140,11 @@ simulation loop.
 
 ## Runtime content
 
-`GameContent` owns the runtime item catalogue; the simulation holds an `Arc<GameContent>` and
-reads purchase costs/bonuses from it. `NetServer::bind_with_content` accepts a validated pack;
+`GameContent` owns the runtime item and hero catalogues; the simulation holds an
+`Arc<GameContent>` and reads purchase costs/bonuses and hero stats/ability bindings from it. `NetServer::bind_with_content` accepts a validated pack;
 the server publishes it in `Welcome`, and clients use the received `WireItem` list for shop and
-inventory labels. The default pack is derived from the compile-time table, so existing tests,
-replays and tools are unchanged. Hero, ability and map content remain compile-time; the
-content crate is designed to grow into those tables.
+inventory labels plus `WireHero` for names/vision/ability bindings. Ability behaviour and
+map/lane definitions remain compile-time; the content crate is designed to grow into them.
 
 ## Spectators
 

@@ -7,8 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
-- Runtime item content packs (`--items FILE`), validated and published to clients in the
-  handshake; fixed progress-only delta encoding bug found by the content integration test.
+- Runtime item and hero content packs (`--items FILE`), validated and published to clients in
+  the handshake; fixed progress-only delta encoding bug found by the content integration test.
 - Deterministic replay recording (`moba-server --record`) and verification
   (`moba-tools replay`), including a server recording test and decoder fuzz coverage.
 - Optional pre-shared-key authenticated encryption: HMAC handshake proofs, HKDF session keys,
@@ -38,6 +38,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
+- Version 10: handshake carries a validated runtime hero catalogue; runtime hero stat and
+  ability-binding packs.
 - Version 9: handshake carries a validated runtime item catalogue.
 - Version 8: ready-up and surrender vote commands, lobby ready/player masks.
 - Version 7: read-only spectator handshake/slots and full-map observation; spectator welcome

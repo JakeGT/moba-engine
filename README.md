@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 138 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 140 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -49,18 +49,20 @@ Disconnected players keep their slot for a 60-second grace period while a bot co
 resume with `NetClient::connect_with_session(server, timeout, session)` using
 `NetClient::session()`. The dedicated server exposes `--countdown S` and `--results S`.
 
-### Runtime item content
+### Runtime content packs
 
-Servers can load a validated TOML item catalogue and publish it to clients in the handshake:
+Servers can load a validated TOML item + hero catalogue and publish it to clients in the handshake:
 
 ```bash
 cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 --items content/items.toml
 MOBA_SERVER=127.0.0.1:7777 cargo run -p moba-client
 ```
 
-The client shop/HUD use the received catalogue; simulation purchases use the same definitions.
-Names are 1–16 ASCII bytes, costs must be positive and at most 16 items are supported per pack.
-See [content/items.toml](content/items.toml) and [content authoring](docs/content-authoring.md).
+The client shop/HUD and vision use the received catalogs; simulation purchases/hero stats use the same definitions.
+Names are 1–16 ASCII bytes, costs must be positive, packs hold at most 16 items and 8
+heroes, and hero abilities reference the engine ability library. See
+[content/example-pack.toml](content/example-pack.toml) and
+[content authoring](docs/content-authoring.md).
 
 ### Encrypted private servers
 

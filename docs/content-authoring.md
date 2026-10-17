@@ -58,7 +58,7 @@ replays will record the content hash. Until then, the static tables are the sing
 truth and are deliberately small and readable.
 
 
-## Runtime item packs
+## Runtime packs
 
 `moba-server --items FILE` loads a TOML catalogue. The pack is validated (1–16 items,
 unique 1–16 byte ASCII names, positive costs) and published in the `Welcome` handshake, so
@@ -75,6 +75,27 @@ move_speed = 1.2  # optional, world units/second
 
 Fields: `name`, `cost`, `health`, `mana`, `attack_damage`, `armor`, `magic_resist`,
 `move_speed` (all bonuses optional except name/cost). The catalogue is fixed-capacity on the
-wire; a pack cannot exceed 16 items. Replays record inputs but not the content file, so keep
-the pack alongside a replay when sharing it. Hero/ability/map definitions remain compile-time
-until the rest of M8 lands.
+wire; a pack cannot exceed 16 items. Packs may also define up to 8 heroes:
+
+```toml
+[[heroes]]
+name = "Vanguard"
+max_health = 800
+max_mana = 280
+health_regen_per_tick = 2
+mana_regen_per_tick = 3
+attack_damage = 50
+attack_range = 2.0
+attack_interval_ticks = 34
+move_speed = 6.5
+armor = 34
+magic_resist = 28
+vision_range = 13.0
+abilities = [0, 1, 2]  # ids into the engine ability library
+```
+
+Hero names must be 1–16 ASCII bytes and unique; ability ids must exist. Clients receive the
+hero names/vision/ability bindings for HUD/vision, while simulation stats come from the same
+pack. Replays record inputs but not the content file, so keep the pack alongside a replay
+when sharing it. Ability behaviour and map/lane definitions remain compile-time until the
+rest of M8 lands.

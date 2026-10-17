@@ -6,9 +6,9 @@ use std::sync::Arc;
 use moba_core::{Fix, FixVec2, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
-    DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HEROES, HeroDef,
-    HeroId, LEVEL_CAP, LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS,
-    STARTING_GOLD, TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
+    ABILITIES, AbilityDef, DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL,
+    GameContent, HeroId, LEVEL_CAP, LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION,
+    SHOP_RADIUS, STARTING_GOLD, TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
 
@@ -182,7 +182,16 @@ struct HeroView {
     mana: i32,
     cooldowns: Cooldowns,
     attack_range_sq: Fix,
-    def: &'static HeroDef,
+    max_health: i32,
+    abilities: [u8; 3],
+}
+
+impl HeroView {
+    fn ability(&self, slot: usize) -> Option<&'static AbilityDef> {
+        self.abilities
+            .get(slot)
+            .and_then(|&id| ABILITIES.get(usize::from(id)))
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -700,9 +709,9 @@ impl Simulation {
 
     fn spawn_hero(&mut self, slot: usize) -> Entity {
         let team = if slot < 5 { Team::Blue } else { Team::Red };
-        let pick = usize::from(self.config.hero_picks[slot]) % HEROES.len();
+        let pick = usize::from(self.config.hero_picks[slot]) % self.content.heroes.len();
         let hero_id = HeroId(u8::try_from(pick).expect("hero index fits u8"));
-        let def = hero_id.def();
+        let def = &self.content.heroes[pick];
         let entity = self.world.spawn();
         let _ = self.world.insert(
             entity,
@@ -987,7 +996,9 @@ impl Simulation {
         let Some(identity) = self.world.get::<HeroIdentity>(caster).copied() else {
             return;
         };
-        let def = identity.0.def();
+        let Some(def) = self.content.heroes.get(usize::from(identity.0.0)) else {
+            return;
+        };
         let ability_index = usize::from(slot);
         let Some(ability) = def.ability(ability_index) else {
             return;
@@ -1623,7 +1634,8 @@ impl Simulation {
                 mana: mana.current,
                 cooldowns: *cooldowns,
                 attack_range_sq: stats.range_sq,
-                def: identity.0.def(),
+                max_health: self.content.heroes[usize::from(identity.0.0)].max_health,
+                abilities: self.content.heroes[usize::from(identity.0.0)].abilities,
             });
         }
 
@@ -1677,9 +1689,9 @@ impl Simulation {
 
             let command = if let Some(target) = target {
                 let distance_sq = view.position.distance_sq(target.position);
-                let defensive = view.health * 100 <= view.def.max_health * 45;
+                let defensive = view.health * 100 <= view.max_health * 45;
                 if defensive && view.cooldowns.0[1] == 0 {
-                    if let Some(ability) = view.def.ability(1) {
+                    if let Some(ability) = view.ability(1) {
                         if view.mana >= ability.mana_cost {
                             Some(PlayerCommand::CastAbility {
                                 slot: 1,
@@ -1692,7 +1704,7 @@ impl Simulation {
                         None
                     }
                 } else if view.cooldowns.0[0] == 0
-                    && view.def.ability(0).is_some_and(|ability| {
+                    && view.ability(0).is_some_and(|ability| {
                         view.mana >= ability.mana_cost
                             && distance_sq <= ability.cast_range * ability.cast_range
                     })
@@ -1704,7 +1716,7 @@ impl Simulation {
                 } else if distance_sq > view.attack_range_sq
                     && distance_sq <= Fix::from_i32(12) * Fix::from_i32(12)
                     && view.cooldowns.0[2] == 0
-                    && view.def.ability(2).is_some_and(|ability| {
+                    && view.ability(2).is_some_and(|ability| {
                         view.mana >= ability.mana_cost
                             && distance_sq <= ability.cast_range * ability.cast_range
                     })
@@ -2002,6 +2014,7 @@ mod tests {
                 attack_damage: 5,
                 ..moba_game::ItemSpec::from(&moba_game::ITEMS[0])
             }],
+            heroes: GameContent::default().heroes,
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));

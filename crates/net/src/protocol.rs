@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 9;
+pub const PROTOCOL_VERSION: u8 = 10;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -221,6 +221,10 @@ pub struct Hello {
 pub const MAX_WIRE_ITEMS: usize = 16;
 /// Fixed item-name bytes on the wire.
 pub const WIRE_ITEM_NAME: usize = 16;
+/// Maximum heroes in a handshake catalogue.
+pub const MAX_WIRE_HEROES: usize = 8;
+/// Fixed hero-name bytes on the wire.
+pub const WIRE_HERO_NAME: usize = 16;
 
 /// One runtime item definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -270,6 +274,42 @@ impl WireItem {
     }
 }
 
+/// One runtime hero definition carried in the handshake.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WireHero {
+    /// Name bytes, padded with zeroes.
+    pub name: [u8; WIRE_HERO_NAME],
+    /// Used bytes in `name`.
+    pub name_len: u8,
+    /// Movement speed in raw fixed-point bits.
+    pub move_speed_bits: i64,
+    /// Vision radius in raw fixed-point bits.
+    pub vision_bits: i64,
+    /// Ability ids for Q/W/E.
+    pub abilities: [u8; 3],
+}
+
+impl Default for WireHero {
+    fn default() -> Self {
+        Self {
+            name: [0; WIRE_HERO_NAME],
+            name_len: 0,
+            move_speed_bits: 0,
+            vision_bits: 0,
+            abilities: [0; 3],
+        }
+    }
+}
+
+impl WireHero {
+    /// Decodes the name as UTF-8, falling back to an empty string.
+    #[must_use]
+    pub fn name_str(&self) -> &str {
+        let end = usize::from(self.name_len).min(WIRE_HERO_NAME);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
+
 /// Handshake response payload.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Welcome {
@@ -297,6 +337,12 @@ pub struct Welcome {
     pub item_count: u8,
     /// Runtime item catalogue for shop/HUD rendering.
     pub items: [WireItem; MAX_WIRE_ITEMS],
+    /// Number of valid entries in `heroes`.
+    pub hero_count: u8,
+    /// Runtime hero catalogue for HUD/vision rendering.
+    pub heroes: [WireHero; MAX_WIRE_HEROES],
+    /// Hash of the wire item/hero catalogue (also authenticated by the Welcome HMAC).
+    pub content_hash: u64,
 }
 
 /// Encodes a handshake request.
@@ -335,6 +381,41 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
     Ok(hello)
 }
 
+/// Hashes the catalogue bytes exactly as sent in the handshake.
+#[must_use]
+pub fn catalog_hash(items: &[WireItem], heroes: &[WireHero]) -> u64 {
+    let mut hash = 0xCBF2_9CE4_8422_2325u64;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+    };
+    for item in items {
+        feed(&item.name);
+        feed(&[item.name_len]);
+        for value in [
+            item.cost,
+            item.health as u32,
+            item.mana as u32,
+            item.attack_damage as u32,
+            item.armor as u32,
+            item.magic_resist as u32,
+        ] {
+            feed(&value.to_le_bytes());
+        }
+        feed(&item.move_speed_bits.to_le_bytes());
+    }
+    for hero in heroes {
+        feed(&hero.name);
+        feed(&[hero.name_len]);
+        feed(&hero.move_speed_bits.to_le_bytes());
+        feed(&hero.vision_bits.to_le_bytes());
+        feed(&hero.abilities);
+    }
+    hash
+}
+
 /// Encodes a handshake response.
 #[must_use]
 pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
@@ -361,10 +442,20 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
         put_u32(&mut out, item.magic_resist as u32);
         out.extend_from_slice(&item.move_speed_bits.to_le_bytes());
     }
+    out.push(welcome.hero_count);
+    for hero in welcome.heroes.iter().take(MAX_WIRE_HEROES) {
+        out.extend_from_slice(&hero.name);
+        out.push(hero.name_len);
+        out.extend_from_slice(&hero.move_speed_bits.to_le_bytes());
+        out.extend_from_slice(&hero.vision_bits.to_le_bytes());
+        out.extend_from_slice(&hero.abilities);
+    }
+    out.extend_from_slice(&welcome.content_hash.to_le_bytes());
     out
 }
 
 /// Decodes a handshake response.
+#[allow(clippy::too_many_lines)] // Wire field order mirrors the encoder.
 pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
     let mut reader = Reader::new(data);
     let welcome = Welcome {
@@ -444,6 +535,36 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
             }
             items
         },
+        hero_count: reader.u8()?,
+        heroes: {
+            let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
+            for hero in &mut heroes {
+                let mut name = [0; WIRE_HERO_NAME];
+                name.copy_from_slice(reader.bytes(WIRE_HERO_NAME)?);
+                hero.name = name;
+                hero.name_len = reader.u8()?;
+                hero.move_speed_bits = i64::from_le_bytes(
+                    reader
+                        .bytes(8)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                hero.vision_bits = i64::from_le_bytes(
+                    reader
+                        .bytes(8)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                hero.abilities.copy_from_slice(reader.bytes(3)?);
+            }
+            heroes
+        },
+        content_hash: u64::from_le_bytes(
+            reader
+                .bytes(8)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        ),
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -1309,6 +1430,22 @@ mod tests {
             ack: 7,
             ack_bits: 0b1010,
         }
+    }
+
+    #[test]
+    fn catalog_hash_covers_item_and_hero_catalogue() {
+        let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
+        items[0].name[..5].copy_from_slice(b"Blade");
+        items[0].name_len = 5;
+        let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
+        heroes[0].name[..4].copy_from_slice(b"Hero");
+        heroes[0].name_len = 4;
+        let baseline = catalog_hash(&items[..1], &heroes[..1]);
+        items[0].cost = 1;
+        assert_ne!(catalog_hash(&items[..1], &heroes[..1]), baseline);
+        items[0].cost = 0;
+        heroes[0].abilities[0] = 1;
+        assert_ne!(catalog_hash(&items[..1], &heroes[..1]), baseline);
     }
 
     #[test]
