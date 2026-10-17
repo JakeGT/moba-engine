@@ -1,0 +1,256 @@
+//! Procedural meshes and one-time GPU upload.
+
+use ash::vk;
+use bytemuck::{Pod, Zeroable};
+use gpu_allocator::MemoryLocation;
+
+use crate::device::DeviceContext;
+use crate::error::RenderResult;
+use crate::resources::{CommandPool, GpuBuffer};
+
+/// Vertex layout shared by every scene pipeline.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct Vertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
+}
+
+/// CPU-side mesh data.
+pub(crate) struct MeshData {
+    pub(crate) vertices: Vec<Vertex>,
+    pub(crate) indices: Vec<u32>,
+}
+
+/// Device-local vertex/index buffers.
+pub(crate) struct GpuMesh {
+    pub(crate) vertices: GpuBuffer,
+    pub(crate) indices: GpuBuffer,
+    pub(crate) index_count: u32,
+}
+
+impl MeshData {
+    /// Unit cube centred at the origin, one metre tall before scaling.
+    pub(crate) fn cube() -> Self {
+        let mut vertices = Vec::with_capacity(24);
+        let mut indices = Vec::with_capacity(36);
+        let faces = [
+            (
+                [1.0, 0.0, 0.0],
+                [
+                    [0.5, -0.5, -0.5],
+                    [0.5, -0.5, 0.5],
+                    [0.5, 0.5, 0.5],
+                    [0.5, 0.5, -0.5],
+                ],
+            ),
+            (
+                [-1.0, 0.0, 0.0],
+                [
+                    [-0.5, -0.5, 0.5],
+                    [-0.5, -0.5, -0.5],
+                    [-0.5, 0.5, -0.5],
+                    [-0.5, 0.5, 0.5],
+                ],
+            ),
+            (
+                [0.0, 1.0, 0.0],
+                [
+                    [-0.5, 0.5, -0.5],
+                    [0.5, 0.5, -0.5],
+                    [0.5, 0.5, 0.5],
+                    [-0.5, 0.5, 0.5],
+                ],
+            ),
+            (
+                [0.0, -1.0, 0.0],
+                [
+                    [-0.5, -0.5, 0.5],
+                    [0.5, -0.5, 0.5],
+                    [0.5, -0.5, -0.5],
+                    [-0.5, -0.5, -0.5],
+                ],
+            ),
+            (
+                [0.0, 0.0, 1.0],
+                [
+                    [-0.5, -0.5, 0.5],
+                    [-0.5, 0.5, 0.5],
+                    [0.5, 0.5, 0.5],
+                    [0.5, -0.5, 0.5],
+                ],
+            ),
+            (
+                [0.0, 0.0, -1.0],
+                [
+                    [0.5, -0.5, -0.5],
+                    [0.5, 0.5, -0.5],
+                    [-0.5, 0.5, -0.5],
+                    [-0.5, -0.5, -0.5],
+                ],
+            ),
+        ];
+        for (normal, corners) in faces {
+            let base = u32::try_from(vertices.len()).expect("vertex count fits u32");
+            for corner in corners {
+                vertices.push(Vertex {
+                    position: corner,
+                    normal,
+                });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        Self { vertices, indices }
+    }
+
+    /// Ground plane of the given size, centred at the origin.
+    pub(crate) fn plane(size: f32) -> Self {
+        let half = size * 0.5;
+        let vertices = vec![
+            Vertex {
+                position: [-half, 0.0, -half],
+                normal: [0.0, 1.0, 0.0],
+            },
+            Vertex {
+                position: [half, 0.0, -half],
+                normal: [0.0, 1.0, 0.0],
+            },
+            Vertex {
+                position: [half, 0.0, half],
+                normal: [0.0, 1.0, 0.0],
+            },
+            Vertex {
+                position: [-half, 0.0, half],
+                normal: [0.0, 1.0, 0.0],
+            },
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        Self { vertices, indices }
+    }
+}
+
+/// Uploads a mesh to device-local memory through staging buffers.
+#[allow(clippy::too_many_lines)] // One-time upload sequence; splitting hides the barriers.
+pub(crate) fn upload(device: &DeviceContext, data: &MeshData) -> RenderResult<GpuMesh> {
+    let allocator = device.allocator();
+    let vertex_bytes: &[u8] = bytemuck::cast_slice(&data.vertices);
+    let index_bytes: &[u8] = bytemuck::cast_slice(&data.indices);
+
+    let mut vertex_staging = GpuBuffer::new(
+        device.device.clone(),
+        allocator.clone(),
+        "mesh-vertices-staging",
+        vertex_bytes.len() as u64,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        MemoryLocation::CpuToGpu,
+    )?;
+    vertex_staging.write_bytes(0, vertex_bytes);
+    let mut index_staging = GpuBuffer::new(
+        device.device.clone(),
+        allocator.clone(),
+        "mesh-indices-staging",
+        index_bytes.len() as u64,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        MemoryLocation::CpuToGpu,
+    )?;
+    index_staging.write_bytes(0, index_bytes);
+
+    let vertices = GpuBuffer::new(
+        device.device.clone(),
+        allocator.clone(),
+        "mesh-vertices",
+        vertex_bytes.len() as u64,
+        vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        MemoryLocation::GpuOnly,
+    )?;
+    let indices = GpuBuffer::new(
+        device.device.clone(),
+        allocator,
+        "mesh-indices",
+        index_bytes.len() as u64,
+        vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        MemoryLocation::GpuOnly,
+    )?;
+
+    let pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
+    let command = pool.allocate_one()?;
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    // SAFETY: the command buffer is allocated and not recording.
+    unsafe { device.device.begin_command_buffer(command, &begin) }?;
+
+    let vertex_copy = vk::BufferCopy::default()
+        .src_offset(0)
+        .dst_offset(0)
+        .size(vertex_bytes.len() as u64);
+    // SAFETY: both buffers are valid, large enough, and created for transfer use.
+    unsafe {
+        device.device.cmd_copy_buffer(
+            command,
+            vertex_staging.handle(),
+            vertices.handle(),
+            core::slice::from_ref(&vertex_copy),
+        );
+    }
+    let index_copy = vk::BufferCopy::default()
+        .src_offset(0)
+        .dst_offset(0)
+        .size(index_bytes.len() as u64);
+    // SAFETY: same argument as the vertex copy.
+    unsafe {
+        device.device.cmd_copy_buffer(
+            command,
+            index_staging.handle(),
+            indices.handle(),
+            core::slice::from_ref(&index_copy),
+        );
+    }
+
+    let barriers = [
+        vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT)
+            .dst_access_mask(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(vertices.handle())
+            .offset(0)
+            .size(vk::WHOLE_SIZE),
+        vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::INDEX_INPUT)
+            .dst_access_mask(vk::AccessFlags2::INDEX_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(indices.handle())
+            .offset(0)
+            .size(vk::WHOLE_SIZE),
+    ];
+    let dependency = vk::DependencyInfo::default().buffer_memory_barriers(&barriers);
+    device.cmd_pipeline_barrier2(command, &dependency);
+
+    // SAFETY: the command buffer is recording and can be ended once.
+    unsafe { device.device.end_command_buffer(command) }?;
+    let commands = [command];
+    let submit = vk::SubmitInfo::default().command_buffers(&commands);
+    // SAFETY: the command buffer is executable and the graphics queue belongs to the device.
+    unsafe {
+        device
+            .device
+            .queue_submit(device.graphics_queue, &[submit], vk::Fence::null())
+    }?;
+    // SAFETY: waiting for our own submission to finish is valid at init time.
+    unsafe { device.device.queue_wait_idle(device.graphics_queue) }?;
+
+    drop(vertex_staging);
+    drop(index_staging);
+
+    let index_count = u32::try_from(data.indices.len()).expect("index count fits u32");
+    Ok(GpuMesh {
+        vertices,
+        indices,
+        index_count,
+    })
+}

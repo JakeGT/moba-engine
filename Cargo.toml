@@ -24,8 +24,12 @@ moba-net = { path = "crates/net" }
 moba-netsim = { path = "crates/netsim" }
 
 # Third-party. Versions are resolved once here so every crate agrees.
+ash = "0.38"
+ash-window = "0.13"
+bytemuck = { version = "1", features = ["derive"] }
 crossbeam-deque = "0.8"
 glam = "0.30"
+gpu-allocator = "0.27"
 raw-window-handle = "0.6"
 winit = "0.30"
 
