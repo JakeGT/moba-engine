@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 164 tests
+- `cargo test --workspace --locked` — 165 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.

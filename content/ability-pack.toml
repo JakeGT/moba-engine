@@ -38,6 +38,15 @@ radius = 180.0
 factor = 0.55
 duration_ticks = 90
 
+[[abilities]]
+name = "Binding Field"
+cooldown_ticks = 210
+mana_cost = 28
+cast_range = 0.0
+kind = "root"
+radius = 160.0
+duration_ticks = 75
+
 [[heroes]]
 name = "Nova Mage"
 max_health = 520
@@ -51,4 +60,4 @@ move_speed = 6.0
 armor = 14
 magic_resist = 24
 vision_range = 14.0
-abilities = [0, 2, 1]
+abilities = [3, 2, 1]

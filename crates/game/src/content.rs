@@ -516,6 +516,10 @@ impl GameContent {
                         && factor < Fix::ONE
                         && duration_ticks > 0
                 }
+                AbilityKind::Root {
+                    radius,
+                    duration_ticks,
+                } => radius > Fix::ZERO && duration_ticks > 0,
                 AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
                 AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
             };
@@ -674,6 +678,14 @@ impl GameContent {
                     feed(&[2]);
                     feed(&(amount as u32).to_le_bytes());
                     feed(&radius.to_bits().to_le_bytes());
+                }
+                AbilityKind::Root {
+                    radius,
+                    duration_ticks,
+                } => {
+                    feed(&[6]);
+                    feed(&radius.to_bits().to_le_bytes());
+                    feed(&duration_ticks.to_le_bytes());
                 }
                 AbilityKind::Slow {
                     radius,
@@ -985,6 +997,10 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         "heal" => AbilityKind::Heal {
                             amount: ability.amount,
                             radius: Fix::from_f32(ability.radius),
+                        },
+                        "root" => AbilityKind::Root {
+                            radius: Fix::from_f32(ability.radius),
+                            duration_ticks: ability.duration_ticks,
                         },
                         "slow" => AbilityKind::Slow {
                             radius: Fix::from_f32(ability.radius),

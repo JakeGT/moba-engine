@@ -396,7 +396,9 @@ impl App for ClientApp {
                         continue;
                     }
                     let fraction = health.current as f32 / health.max as f32;
-                    push_unit(units, position.0, *kind, *team, fraction, false, false);
+                    push_unit(
+                        units, position.0, *kind, *team, fraction, false, false, false,
+                    );
                 }
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
@@ -614,6 +616,7 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
             fraction,
             entity.flags & moba_net::protocol::ENTITY_FLAG_SHIELD != 0,
             entity.flags & moba_net::protocol::ENTITY_FLAG_SLOW != 0,
+            entity.flags & moba_net::protocol::ENTITY_FLAG_ROOT != 0,
         );
     }
 }
@@ -626,6 +629,7 @@ fn push_unit(
     health_fraction: f32,
     shielded: bool,
     slowed: bool,
+    rooted: bool,
 ) {
     let team_color = match team {
         Team::Blue => Vec4::new(0.20, 0.46, 1.0, 1.0),
@@ -671,6 +675,9 @@ fn push_unit(
     }
     if slowed {
         color = color * 0.75 + Vec4::new(0.35, 0.2, 0.75, 1.0) * 0.25;
+    }
+    if rooted {
+        color = color * 0.7 + Vec4::new(0.9, 0.75, 0.18, 1.0) * 0.3;
     }
     let world_position = Vec3::new(
         position.x.to_f32() - 128.0,

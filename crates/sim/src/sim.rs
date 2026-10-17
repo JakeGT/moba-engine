@@ -15,7 +15,7 @@ use moba_nav::SpatialGrid;
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
     LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
-    Shield, Slow, UnitKind, VisionRange,
+    Root, Shield, Slow, UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -198,6 +198,7 @@ struct AttackerSnapshot {
 
 /// A unit as seen by one team's fog-of-war snapshot.
 #[derive(Copy, Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent per-entity status flags.
 pub struct ObservedUnit {
     /// Stable entity handle.
     pub entity: Entity,
@@ -235,6 +236,8 @@ pub struct ObservedUnit {
     pub shielded: bool,
     /// Whether a movement slow is active.
     pub slowed: bool,
+    /// Whether the unit is rooted.
+    pub rooted: bool,
 }
 
 /// The authoritative MOBA simulation.
@@ -421,6 +424,7 @@ impl Simulation {
         self.observe(None, out);
     }
 
+    #[allow(clippy::too_many_lines)] // One fog pass keeps the visibility rules together.
     fn observe(&self, viewer: Option<Team>, out: &mut Vec<ObservedUnit>) {
         out.clear();
         let mut sources = [(FixVec2::ZERO, Fix::ZERO); MAX_UNITS];
@@ -521,6 +525,7 @@ impl Simulation {
                     .get::<Shield>(entity)
                     .is_some_and(|shield| shield.amount > 0),
                 slowed: self.world.get::<Slow>(entity).is_some(),
+                rooted: self.world.get::<Root>(entity).is_some(),
             });
         }
     }
@@ -580,6 +585,7 @@ impl Simulation {
     /// Used by replay/reconciliation tests. Iteration follows ECS archetype order, which is
     /// deterministic for the same command sequence.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Deterministic field coverage is intentionally flat.
     pub fn state_hash(&self) -> u64 {
         let mut hasher = StableHasher::new();
         hasher.write_u64(self.config.seed);
@@ -658,6 +664,10 @@ impl Simulation {
             if let Some(identity) = self.world.get::<HeroIdentity>(entity) {
                 hasher.write_u32(10);
                 hasher.write_u32(u32::from(identity.0.0));
+            }
+            if let Some(root) = self.world.get::<Root>(entity) {
+                hasher.write_u32(5);
+                hasher.write_u32(root.remaining);
             }
             if let Some(slow) = self.world.get::<Slow>(entity) {
                 hasher.write_u32(4);
@@ -922,6 +932,16 @@ impl Simulation {
             }
         }
 
+        let mut expired_roots = Vec::new();
+        for (entity, root) in self.world.query::<&mut Root>() {
+            root.remaining = root.remaining.saturating_sub(1);
+            if root.remaining == 0 {
+                expired_roots.push(entity);
+            }
+        }
+        for entity in expired_roots {
+            let _ = self.world.remove::<Root>(entity);
+        }
         let mut expired_slows = Vec::new();
         for (entity, slow) in self.world.query::<&mut Slow>() {
             slow.remaining = slow.remaining.saturating_sub(1);
@@ -978,6 +998,7 @@ impl Simulation {
             }
         }
         let _ = self.world.remove::<Slow>(entity);
+        let _ = self.world.remove::<Root>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
             position.0 = self.content.map.hero_spawn(team, slot % 5);
         }
@@ -1028,12 +1049,14 @@ impl Simulation {
                     }
                 }
                 PlayerCommand::MoveTo(position) => {
-                    let destination = clamp_position(position);
-                    if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
-                        target.0 = Some(destination);
-                    }
-                    if let Some(target) = self.world.get_mut::<AttackTarget>(entity) {
-                        target.0 = None;
+                    if self.world.get::<Root>(entity).is_none() {
+                        let destination = clamp_position(position);
+                        if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
+                            target.0 = Some(destination);
+                        }
+                        if let Some(target) = self.world.get_mut::<AttackTarget>(entity) {
+                            target.0 = None;
+                        }
                     }
                 }
                 PlayerCommand::Attack(target) => {
@@ -1176,6 +1199,33 @@ impl Simulation {
                         remaining: current.remaining.max(duration_ticks),
                     },
                 );
+            }
+            moba_game::AbilityKind::Root {
+                radius,
+                duration_ticks,
+            } => {
+                self.damage_hits.clear();
+                for (entity, (other_position, other_team)) in
+                    self.world.query::<(&Position, &Team)>()
+                {
+                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
+                    {
+                        continue;
+                    }
+                    self.damage_hits.push(entity);
+                }
+                let mut hits = core::mem::take(&mut self.damage_hits);
+                for target_entity in hits.drain(..) {
+                    let remaining = self
+                        .world
+                        .get::<Root>(target_entity)
+                        .map_or(duration_ticks, |root| root.remaining.max(duration_ticks));
+                    let _ = self.world.insert(target_entity, Root { remaining });
+                    if let Some(move_target) = self.world.get_mut::<MoveTarget>(target_entity) {
+                        move_target.0 = None;
+                    }
+                }
+                self.damage_hits = hits;
             }
             moba_game::AbilityKind::Slow {
                 radius,
@@ -2286,6 +2336,65 @@ mod tests {
         sim.grant_xp(blue, 2_000);
         assert!(sim.world.get::<Progression>(blue).expect("progress").level > 1);
         assert_eq!(sim.world.get::<Health>(blue).expect("health").max, health);
+    }
+
+    #[test]
+    fn root_ability_blocks_movement_and_expires() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Root"),
+            cooldown_ticks: 120,
+            mana_cost: 5,
+            cast_range: 0.into(),
+            kind: AbilityKind::Root {
+                radius: 1_000.into(),
+                duration_ticks: 60,
+            },
+        };
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let red = sim.hero_entities[5];
+        let red_position = sim.world.get::<Position>(red).expect("position").0;
+        let mut cast = TickInputs::new();
+        cast.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: red_position,
+            },
+        );
+        sim.tick(&cast);
+        assert!(sim.world.get::<Root>(red).is_some());
+        assert!(
+            sim.world
+                .get::<MoveTarget>(red)
+                .expect("target")
+                .0
+                .is_none()
+        );
+        let mut move_red = TickInputs::new();
+        move_red.set(5, PlayerCommand::MoveTo(FixVec2::from_ints(20, 20)));
+        sim.tick(&move_red);
+        assert!(
+            sim.world
+                .get::<MoveTarget>(red)
+                .expect("target")
+                .0
+                .is_none()
+        );
+        for _ in 0..61 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(sim.world.get::<Root>(red).is_none());
+        sim.tick(&move_red);
+        assert!(
+            sim.world
+                .get::<MoveTarget>(red)
+                .expect("target")
+                .0
+                .is_some()
+        );
     }
 
     #[test]

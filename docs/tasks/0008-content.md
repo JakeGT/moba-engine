@@ -35,6 +35,7 @@ deterministic playback and server authority.
   with 3 checkpoints over 555 ticks.
 
 - Shield kind: temporary absorption with duration, snapshot flag and cyan client tint.
+- Root kind: radius/duration with move-command blocking, expiry/respawn removal and a flag.
 - Slow kind: radius/factor/duration, movement multiplier with expiry/respawn restore and a
   snapshot flag.
 - Per-hero level-growth stats in content (health/mana/damage/armour/MR), with defaults.

@@ -52,6 +52,13 @@ pub enum AbilityKind {
         /// Duration in simulation ticks.
         duration_ticks: u32,
     },
+    /// Roots enemies around the target point, preventing movement.
+    Root {
+        /// Effect radius.
+        radius: Fix,
+        /// Duration in simulation ticks.
+        duration_ticks: u32,
+    },
     /// Instantly damages enemies around the caster.
     Burst {
         /// Effect radius.
@@ -276,6 +283,13 @@ mod tests {
                 } => {
                     assert!(radius > Fix::ZERO);
                     assert!(factor > Fix::ZERO && factor < Fix::ONE);
+                    assert!(duration_ticks > 0);
+                }
+                AbilityKind::Root {
+                    radius,
+                    duration_ticks,
+                } => {
+                    assert!(radius > Fix::ZERO);
                     assert!(duration_ticks > 0);
                 }
             }

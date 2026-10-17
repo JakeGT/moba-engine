@@ -80,6 +80,13 @@ pub struct Slow {
     pub remaining: u32,
 }
 
+/// Temporary movement root.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Root {
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+}
+
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {
