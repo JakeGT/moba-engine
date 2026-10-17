@@ -4,17 +4,20 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use moba_game::GameContent;
 use moba_sim::{ObservedUnit, PlayerCommand, Replay, SimConfig, Simulation, TickInputs};
 
 use crate::crypto::{
     SessionCrypto, derive_session_key, random_nonce, verify_hello_tag, welcome_tag,
 };
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MatchPhase, NetEntity, NetId, PacketKind,
-    SnapshotDelta, SnapshotState, Welcome, WireCommand, build_delta, decode_hello, decode_input,
-    dequantize_position, encode_snapshot, encode_welcome, sequence_after,
+    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ITEMS, MatchPhase, NetEntity,
+    NetId, PacketKind, SnapshotDelta, SnapshotState, WIRE_ITEM_NAME, Welcome, WireCommand,
+    WireItem, build_delta, decode_hello, decode_input, dequantize_position, encode_snapshot,
+    encode_welcome, sequence_after,
 };
 use crate::transport::{ReceivedMessage, UdpTransport};
 
@@ -187,6 +190,7 @@ enum Phase {
 pub struct NetServer {
     transport: UdpTransport,
     simulation: Simulation,
+    content: Arc<GameContent>,
     config: ServerConfig,
     clients: Vec<Option<ClientConn>>,
     observed: [Vec<ObservedUnit>; 2],
@@ -211,13 +215,22 @@ impl NetServer {
     /// # Errors
     /// Returns an OS error when the socket cannot be bound.
     pub fn bind(config: ServerConfig) -> io::Result<Self> {
+        Self::bind_with_content(config, Arc::new(GameContent::default()))
+    }
+
+    /// Binds with a validated runtime content pack.
+    ///
+    /// # Errors
+    /// Returns an OS error when the socket cannot be bound.
+    pub fn bind_with_content(config: ServerConfig, content: Arc<GameContent>) -> io::Result<Self> {
         let transport = UdpTransport::bind(config.bind)?;
         let total_slots = config.max_clients + config.max_spectators;
         let config_sim = config.sim;
-        let simulation = Simulation::new(config_sim);
+        let simulation = Simulation::new_with_content(config_sim, Arc::clone(&content));
         Ok(Self {
             transport,
             simulation,
+            content,
             config,
             clients: (0..total_slots).map(|_| None).collect(),
             observed: std::array::from_fn(|_| Vec::with_capacity(moba_sim::MAX_UNITS)),
@@ -456,7 +469,7 @@ impl NetServer {
         let mut config = self.config.sim;
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
-        self.simulation = Simulation::new(config);
+        self.simulation = Simulation::new_with_content(config, Arc::clone(&self.content));
         self.record_config = config;
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
@@ -876,6 +889,25 @@ impl NetServer {
             server_nonce,
             auth,
             spectator,
+            item_count: u8::try_from(self.content.items.len().min(MAX_WIRE_ITEMS))
+                .unwrap_or(MAX_WIRE_ITEMS as u8),
+            items: {
+                let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
+                for (slot, source) in items.iter_mut().zip(self.content.items.iter()) {
+                    let bytes = source.name.as_bytes();
+                    let length = bytes.len().min(WIRE_ITEM_NAME);
+                    slot.name[..length].copy_from_slice(&bytes[..length]);
+                    slot.name_len = u8::try_from(length).unwrap_or(WIRE_ITEM_NAME as u8);
+                    slot.cost = source.cost;
+                    slot.health = source.health;
+                    slot.mana = source.mana;
+                    slot.attack_damage = source.attack_damage;
+                    slot.armor = source.armor;
+                    slot.magic_resist = source.magic_resist;
+                    slot.move_speed_bits = source.move_speed_per_sec.to_bits();
+                }
+                items
+            },
         };
         let payload = encode_welcome(&welcome);
         if let Some(client) = self.clients[slot].as_mut() {

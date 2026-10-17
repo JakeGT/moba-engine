@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 8;
+pub const PROTOCOL_VERSION: u8 = 9;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -217,6 +217,59 @@ pub struct Hello {
     pub spectate: bool,
 }
 
+/// Maximum items in a handshake catalogue.
+pub const MAX_WIRE_ITEMS: usize = 16;
+/// Fixed item-name bytes on the wire.
+pub const WIRE_ITEM_NAME: usize = 16;
+
+/// One runtime item definition carried in the handshake.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WireItem {
+    /// Name bytes, padded with zeroes.
+    pub name: [u8; WIRE_ITEM_NAME],
+    /// Used bytes in `name`.
+    pub name_len: u8,
+    /// Gold cost.
+    pub cost: u32,
+    /// Health bonus.
+    pub health: i32,
+    /// Mana bonus.
+    pub mana: i32,
+    /// Attack damage bonus.
+    pub attack_damage: i32,
+    /// Armour bonus.
+    pub armor: i32,
+    /// Magic resistance bonus.
+    pub magic_resist: i32,
+    /// Movement speed bonus in raw fixed-point bits.
+    pub move_speed_bits: i64,
+}
+
+impl Default for WireItem {
+    fn default() -> Self {
+        Self {
+            name: [0; WIRE_ITEM_NAME],
+            name_len: 0,
+            cost: 0,
+            health: 0,
+            mana: 0,
+            attack_damage: 0,
+            armor: 0,
+            magic_resist: 0,
+            move_speed_bits: 0,
+        }
+    }
+}
+
+impl WireItem {
+    /// Decodes the name as UTF-8, falling back to an empty string.
+    #[must_use]
+    pub fn name_str(&self) -> &str {
+        let end = usize::from(self.name_len).min(WIRE_ITEM_NAME);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
+
 /// Handshake response payload.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Welcome {
@@ -240,6 +293,10 @@ pub struct Welcome {
     pub auth: [u8; 32],
     /// This connection is a read-only spectator.
     pub spectator: bool,
+    /// Number of valid entries in `items`.
+    pub item_count: u8,
+    /// Runtime item catalogue for shop/HUD rendering.
+    pub items: [WireItem; MAX_WIRE_ITEMS],
 }
 
 /// Encodes a handshake request.
@@ -292,6 +349,18 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
     out.extend_from_slice(&welcome.server_nonce.to_le_bytes());
     out.extend_from_slice(&welcome.auth);
     out.push(u8::from(welcome.spectator));
+    out.push(welcome.item_count);
+    for item in welcome.items.iter().take(MAX_WIRE_ITEMS) {
+        out.extend_from_slice(&item.name);
+        out.push(item.name_len);
+        put_u32(&mut out, item.cost);
+        put_u32(&mut out, item.health as u32);
+        put_u32(&mut out, item.mana as u32);
+        put_u32(&mut out, item.attack_damage as u32);
+        put_u32(&mut out, item.armor as u32);
+        put_u32(&mut out, item.magic_resist as u32);
+        out.extend_from_slice(&item.move_speed_bits.to_le_bytes());
+    }
     out
 }
 
@@ -327,6 +396,54 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
             .try_into()
             .map_err(|_| WireError::Truncated)?,
         spectator: reader.u8()? != 0,
+        item_count: reader.u8()?,
+        items: {
+            let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
+            for item in &mut items {
+                let mut name = [0; WIRE_ITEM_NAME];
+                name.copy_from_slice(reader.bytes(WIRE_ITEM_NAME)?);
+                item.name = name;
+                item.name_len = reader.u8()?;
+                item.cost = reader.u32()?;
+                item.health = i32::from_le_bytes(
+                    reader
+                        .bytes(4)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                item.mana = i32::from_le_bytes(
+                    reader
+                        .bytes(4)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                item.attack_damage = i32::from_le_bytes(
+                    reader
+                        .bytes(4)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                item.armor = i32::from_le_bytes(
+                    reader
+                        .bytes(4)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                item.magic_resist = i32::from_le_bytes(
+                    reader
+                        .bytes(4)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+                item.move_speed_bits = i64::from_le_bytes(
+                    reader
+                        .bytes(8)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                );
+            }
+            items
+        },
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -763,6 +880,7 @@ pub fn build_delta(
                     || update.mana.is_some()
                     || update.flags.is_some()
                     || update.cooldowns.is_some()
+                    || update.progress.is_some()
                 {
                     delta.updates.push(update);
                 }
@@ -1191,6 +1309,19 @@ mod tests {
             ack: 7,
             ack_bits: 0b1010,
         }
+    }
+
+    #[test]
+    fn progress_only_changes_are_delta_encoded() {
+        let baseline = vec![entity(1, 10, 20, 600)];
+        let mut current = baseline.clone();
+        current[0].progress.gold = 350;
+        current[0].progress.items[0] = 2;
+        let delta = build_delta(&current, Some(&baseline), 2, 0, 1);
+        assert_eq!(delta.updates.len(), 1);
+        let progress = delta.updates[0].progress.expect("progress update");
+        assert_eq!(progress.gold, 350);
+        assert_eq!(progress.items[0], 2);
     }
 
     #[test]

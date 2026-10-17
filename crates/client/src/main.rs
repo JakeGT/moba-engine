@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
 use moba_game::{
-    EMPTY_ITEM, HEROES, ITEMS, LANES, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
+    EMPTY_ITEM, HEROES, LANES, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
     xp_to_next,
 };
 use moba_net::protocol::{MatchPhase, WireCommand, dequantize_position, quantize_position};
@@ -1236,8 +1236,9 @@ fn build_network_hud(
             ui.outline(bx, by, 34.0, 26.0, 1.0, border);
             let item = progress.items[slot];
             if item != EMPTY_ITEM {
-                if let Some(definition) = ITEMS.get(usize::from(item)) {
-                    let short = definition.name.get(..5).unwrap_or(definition.name);
+                if let Some(definition) = network.client.items().get(usize::from(item)) {
+                    let name = definition.name_str();
+                    let short = name.get(..5).unwrap_or(name);
                     ui.text(bx + 2.0, by + 8.0, 1.4, text, short);
                 }
             }
@@ -1336,7 +1337,7 @@ fn build_network_hud(
             Vec4::new(0.95, 0.78, 0.3, 1.0),
             &format!("{} GOLD", progress.gold),
         );
-        for (index, item) in ITEMS.iter().enumerate() {
+        for (index, item) in network.client.items().iter().take(8).enumerate() {
             let row_y = sy + 62.0 + index as f32 * 36.0;
             let affordable = u32::from(progress.gold) >= item.cost;
             let name_color = if affordable {
@@ -1345,7 +1346,7 @@ fn build_network_hud(
                 Vec4::new(0.45, 0.5, 0.58, 1.0)
             };
             ui.text(sx + 24.0, row_y, 2.0, muted, &format!("[{}]", index + 1));
-            ui.text(sx + 70.0, row_y, 2.0, name_color, item.name);
+            ui.text(sx + 70.0, row_y, 2.0, name_color, item.name_str());
             ui.text(
                 sx + 300.0,
                 row_y,
@@ -1476,7 +1477,7 @@ fn build_network_hud(
     }
 }
 
-fn item_summary(item: &moba_game::ItemDef) -> String {
+fn item_summary(item: &moba_net::protocol::WireItem) -> String {
     let mut parts = Vec::new();
     if item.health != 0 {
         parts.push(format!("+{} HP", item.health));
@@ -1493,8 +1494,9 @@ fn item_summary(item: &moba_game::ItemDef) -> String {
     if item.magic_resist != 0 {
         parts.push(format!("+{} MR", item.magic_resist));
     }
-    if item.move_speed_per_sec != Fix::ZERO {
-        parts.push(format!("+{} MS", item.move_speed_per_sec.to_f32()));
+    let move_speed = Fix::from_bits(item.move_speed_bits);
+    if move_speed != Fix::ZERO {
+        parts.push(format!("+{} MS", move_speed.to_f32()));
     }
     parts.join("  ")
 }

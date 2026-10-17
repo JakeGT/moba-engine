@@ -1,13 +1,14 @@
 //! Headless fixed-tick MOBA simulation.
 
 use core::fmt;
+use std::sync::Arc;
 
 use moba_core::{Fix, FixVec2, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
-    DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, HEROES, HeroDef, HeroId, ITEMS,
-    LEVEL_CAP, LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD,
-    TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
+    DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HEROES, HeroDef,
+    HeroId, LEVEL_CAP, LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS,
+    STARTING_GOLD, TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
 
@@ -235,6 +236,7 @@ pub struct Simulation {
     world: World,
     tick: Tick,
     config: SimConfig,
+    content: Arc<GameContent>,
     hero_entities: [Entity; MAX_PLAYERS],
     wave: u32,
     next_wave_tick: u32,
@@ -255,10 +257,20 @@ impl Simulation {
     /// Creates a fresh match.
     #[must_use]
     pub fn new(config: SimConfig) -> Self {
+        Self::new_with_content(config, Arc::new(GameContent::default()))
+    }
+
+    /// Creates a fresh match with a validated runtime content pack.
+    ///
+    /// The caller is responsible for [`GameContent::validate`]; the server loads/validates
+    /// content before creating the match.
+    #[must_use]
+    pub fn new_with_content(config: SimConfig, content: Arc<GameContent>) -> Self {
         let mut simulation = Self {
             world: World::with_capacity(MAX_UNITS),
             tick: Tick::ZERO,
             config,
+            content,
             hero_entities: [Entity::PLACEHOLDER; MAX_PLAYERS],
             wave: 0,
             next_wave_tick: WAVE_DELAY_TICKS,
@@ -285,6 +297,13 @@ impl Simulation {
         }
         simulation.refresh_spatial();
         simulation
+    }
+
+    /// Content pack used by this match.
+    #[inline]
+    #[must_use]
+    pub fn content(&self) -> &GameContent {
+        &self.content
     }
 
     /// Current tick (the next tick to be simulated).
@@ -1504,7 +1523,7 @@ impl Simulation {
 
     #[allow(clippy::too_many_lines)] // Flat stat application is clearer than a trait tower.
     fn buy_item(&mut self, hero: Entity, item_id: u8) -> bool {
-        let Some(item) = ITEMS.get(usize::from(item_id)).copied() else {
+        let Some(item) = self.content.items.get(usize::from(item_id)).cloned() else {
             return false;
         };
         let Some(team) = self.world.get::<Team>(hero).copied() else {
@@ -1624,7 +1643,9 @@ impl Simulation {
                 if near_shop {
                     if let Some(progress) = self.world.get::<Progression>(hero) {
                         if usize::from(progress.item_count) < moba_game::ITEM_SLOTS {
-                            if let Some(item) = ITEMS
+                            if let Some(item) = self
+                                .content
+                                .items
                                 .iter()
                                 .enumerate()
                                 .find(|(_, item)| item.cost <= progress.gold)
@@ -1969,6 +1990,30 @@ mod tests {
             sim.world.get::<AttackStats>(blue).expect("stats").damage,
             damage_before + 12
         );
+    }
+
+    #[test]
+    fn custom_content_purchase_updates_observation() {
+        use moba_game::GameContent;
+        let content = GameContent {
+            items: vec![moba_game::ItemSpec {
+                name: String::from("Test Blade"),
+                cost: 10,
+                attack_damage: 5,
+                ..moba_game::ItemSpec::from(&moba_game::ITEMS[0])
+            }],
+        };
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        assert!(sim.purchase(0, 0));
+        let mut units = Vec::new();
+        sim.observed_units(Team::Blue, &mut units);
+        let own = units
+            .iter()
+            .find(|unit| unit.hero_slot == Some(0))
+            .expect("own hero");
+        assert_eq!(own.items[0], 0);
+        assert!(own.gold < 500);
     }
 
     #[test]

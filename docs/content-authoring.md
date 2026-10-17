@@ -56,3 +56,25 @@ loaded before match creation, with compile-time tables as the default pack and h
 development. The simulation will accept a content snapshot rather than reading global statics;
 replays will record the content hash. Until then, the static tables are the single source of
 truth and are deliberately small and readable.
+
+
+## Runtime item packs
+
+`moba-server --items FILE` loads a TOML catalogue. The pack is validated (1–16 items,
+unique 1–16 byte ASCII names, positive costs) and published in the `Welcome` handshake, so
+clients render the same names and costs without recompiling. The simulation reads purchase
+costs/bonuses from the same catalogue.
+
+```toml
+[[items]]
+name = "Test Blade"
+cost = 10
+attack_damage = 5
+move_speed = 1.2  # optional, world units/second
+```
+
+Fields: `name`, `cost`, `health`, `mana`, `attack_damage`, `armor`, `magic_resist`,
+`move_speed` (all bonuses optional except name/cost). The catalogue is fixed-capacity on the
+wire; a pack cannot exceed 16 items. Replays record inputs but not the content file, so keep
+the pack alongside a replay when sharing it. Hero/ability/map definitions remain compile-time
+until the rest of M8 lands.

@@ -78,6 +78,8 @@ fn fuzz_once(rng: &mut Rng) {
         server_nonce: rng.next_u64(),
         auth: [0; 32],
         spectator: rng.next_bool(),
+        item_count: 0,
+        items: [moba_net::protocol::WireItem::default(); moba_net::protocol::MAX_WIRE_ITEMS],
     });
     mutate(rng, &mut welcome);
     let _ = decode_welcome(&welcome);

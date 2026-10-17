@@ -5,8 +5,11 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use moba_core::Fix;
+use moba_game::{GameContent, ItemSpec};
 use moba_net::{NetServer, ServerConfig};
 use moba_sim::{SimConfig, Simulation, UnitKind};
 
@@ -22,6 +25,7 @@ fn main() {
         .ok()
         .map(|value| parse_secret(&value));
     let mut record: Option<std::path::PathBuf> = None;
+    let mut items_path: Option<std::path::PathBuf> = None;
     let mut require_ready = false;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -65,10 +69,11 @@ fn main() {
                 record = args.next().map(std::path::PathBuf::from);
             }
             "--ready" => require_ready = true,
+            "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE]"
                 );
                 return;
             }
@@ -87,7 +92,8 @@ fn main() {
             eprintln!("invalid --listen address {listen}: {error}");
             std::process::exit(2);
         });
-        let mut server = NetServer::bind(ServerConfig {
+        let content = items_path.as_ref().map(|path| load_content(path));
+        let server_config = ServerConfig {
             bind,
             sim: config,
             snapshot_interval: 1,
@@ -100,7 +106,17 @@ fn main() {
             record,
             max_spectators: 8,
             require_ready,
-        })
+        };
+        let mut server = if let Some(content) = content {
+            eprintln!(
+                "content: {} items, hash {:#018x}",
+                content.items.len(),
+                content.hash()
+            );
+            NetServer::bind_with_content(server_config, Arc::new(content))
+        } else {
+            NetServer::bind(server_config)
+        }
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");
             std::process::exit(2);
@@ -217,4 +233,59 @@ fn parse_secret(value: &str) -> [u8; 32] {
         });
     }
     key
+}
+
+#[derive(serde::Deserialize)]
+struct ContentFile {
+    items: Vec<ItemEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct ItemEntry {
+    name: String,
+    cost: u32,
+    #[serde(default)]
+    health: i32,
+    #[serde(default)]
+    mana: i32,
+    #[serde(default)]
+    attack_damage: i32,
+    #[serde(default)]
+    armor: i32,
+    #[serde(default)]
+    magic_resist: i32,
+    #[serde(default)]
+    move_speed: f32,
+}
+
+fn load_content(path: &std::path::Path) -> GameContent {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        eprintln!("cannot read content {}: {error}", path.display());
+        std::process::exit(2);
+    });
+    let file: ContentFile = toml::from_str(&text).unwrap_or_else(|error| {
+        eprintln!("invalid content {}: {error}", path.display());
+        std::process::exit(2);
+    });
+    let content = GameContent {
+        items: file
+            .items
+            .into_iter()
+            .map(|item| ItemSpec {
+                name: item.name,
+                cost: item.cost,
+                health: item.health,
+                mana: item.mana,
+                attack_damage: item.attack_damage,
+                armor: item.armor,
+                magic_resist: item.magic_resist,
+                move_speed_per_sec: Fix::from_f32(item.move_speed),
+            })
+            .collect(),
+    };
+    if let Err(error) = content.validate() {
+        eprintln!("invalid content {}: {error}", path.display());
+        std::process::exit(2);
+    }
+    content
 }

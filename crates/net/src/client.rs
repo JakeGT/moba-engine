@@ -80,6 +80,7 @@ pub struct NetClient {
     snapshot_interval: u8,
     seed: u64,
     hero_pick: u8,
+    items: Vec<crate::protocol::WireItem>,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     spectator: bool,
@@ -179,6 +180,7 @@ impl NetClient {
             snapshot_interval: 1,
             seed: 0,
             hero_pick: 0,
+            items: Vec::new(),
             nonce,
             pre_shared_key,
             spectator,
@@ -382,6 +384,10 @@ impl NetClient {
                     self.snapshot_interval = welcome.snapshot_interval;
                     self.seed = welcome.seed;
                     self.hero_pick = welcome.hero_pick;
+                    let item_count =
+                        usize::from(welcome.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
+                    self.items.clear();
+                    self.items.extend_from_slice(&welcome.items[..item_count]);
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -545,6 +551,12 @@ impl NetClient {
     #[must_use]
     pub const fn hero_pick(&self) -> u8 {
         self.hero_pick
+    }
+
+    /// Runtime item catalogue received in the handshake.
+    #[must_use]
+    pub fn items(&self) -> &[crate::protocol::WireItem] {
+        &self.items
     }
 
     /// Server tick rate.

@@ -138,6 +138,15 @@ simulation loop.
 - Tests: real UDP loopback, optional `moba-netsim` proxies, and deterministic single-process
   simulations.
 
+## Runtime content
+
+`GameContent` owns the runtime item catalogue; the simulation holds an `Arc<GameContent>` and
+reads purchase costs/bonuses from it. `NetServer::bind_with_content` accepts a validated pack;
+the server publishes it in `Welcome`, and clients use the received `WireItem` list for shop and
+inventory labels. The default pack is derived from the compile-time table, so existing tests,
+replays and tools are unchanged. Hero, ability and map content remain compile-time; the
+content crate is designed to grow into those tables.
+
 ## Spectators
 
 The server starts a match immediately by default. With `--ready` (or

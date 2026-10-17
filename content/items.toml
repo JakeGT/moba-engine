@@ -1,0 +1,47 @@
+# Example runtime item catalogue. Load with:
+#   moba-server --listen 127.0.0.1:7777 --items content/items.toml
+# Names are 1..=16 ASCII bytes, costs are > 0, and at most 16 items are allowed.
+[[items]]
+name = "Ironblade"
+cost = 350
+attack_damage = 12
+
+[[items]]
+name = "Chain Vest"
+cost = 400
+health = 150
+armor = 8
+
+[[items]]
+name = "Mana Crystal"
+cost = 350
+mana = 120
+magic_resist = 6
+
+[[items]]
+name = "Swift Boots"
+cost = 500
+move_speed = 1.2
+
+[[items]]
+name = "Ogre Heart"
+cost = 900
+health = 350
+
+[[items]]
+name = "Warhammer"
+cost = 1100
+attack_damage = 35
+armor = 10
+
+[[items]]
+name = "Spellguard"
+cost = 950
+mana = 250
+magic_resist = 25
+
+[[items]]
+name = "Bastion Plate"
+cost = 1400
+health = 500
+armor = 30

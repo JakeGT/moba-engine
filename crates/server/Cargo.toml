@@ -13,9 +13,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-moba-core.workspace = true
 moba-ecs.workspace = true
 moba-jobs.workspace = true
 moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true
+moba-core.workspace = true
+serde.workspace = true
+toml.workspace = true
