@@ -78,6 +78,9 @@ struct ClientApp {
     capture_frame: u64,
     startup_error: Option<String>,
     error: Arc<Mutex<Option<String>>>,
+    last_frame: Instant,
+    frame_ms: f32,
+    fps: f32,
 }
 
 impl ClientApp {
@@ -101,6 +104,9 @@ impl ClientApp {
             capture_frame,
             startup_error: None,
             error,
+            last_frame: Instant::now(),
+            frame_ms: 0.0,
+            fps: 0.0,
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -201,6 +207,19 @@ impl App for ClientApp {
     #[allow(clippy::too_many_lines)] // The frame is one explicit presentation sequence.
     fn on_frame(&mut self, frame: &mut Frame<'_>) -> FrameOutcome {
         self.frames += 1;
+        let now = Instant::now();
+        let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
+        self.last_frame = now;
+        self.frame_ms = if self.frame_ms == 0.0 {
+            raw_ms
+        } else {
+            self.frame_ms * 0.9 + raw_ms * 0.1
+        };
+        self.fps = if self.frame_ms > 0.0 {
+            1_000.0 / self.frame_ms
+        } else {
+            0.0
+        };
         if let Some(message) = self.startup_error.take() {
             self.fail(message);
             return FrameOutcome::Exit;
@@ -215,6 +234,7 @@ impl App for ClientApp {
         let mut failure: Option<String> = None;
         let mut exit_after_capture = false;
         let [width, height] = frame.window().size();
+        let (frame_ms, fps) = (self.frame_ms, self.fps);
         {
             let ClientApp {
                 network,
@@ -335,6 +355,8 @@ impl App for ClientApp {
                             &camera,
                             width,
                             height,
+                            frame_ms,
+                            fps,
                         );
                         let vision = build_vision(network);
                         let scene = Scene::with_vision(camera, units, vision);
@@ -379,7 +401,7 @@ impl App for ClientApp {
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
                     let yaw = frame.elapsed_secs() as f32 * 0.035;
-                    build_local_hud(ui, simulation, width, height);
+                    build_local_hud(ui, simulation, width, height, frame_ms, fps);
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                     let scene = Scene::new(camera, units);
                     if let Some(renderer) = renderer.as_mut() {
@@ -1006,6 +1028,18 @@ fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u32, height: 
             ui.line(a.x, a.y, b.x, b.y, 1.5, lane_color);
         }
     }
+    let wall_color = Vec4::new(0.55, 0.42, 0.28, 1.0);
+    for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
+        let a = map(FixVec2::from_ints(
+            i32::from(wall.a[0]),
+            i32::from(wall.a[1]),
+        ));
+        let b = map(FixVec2::from_ints(
+            i32::from(wall.b[0]),
+            i32::from(wall.b[1]),
+        ));
+        ui.line(a.x, a.y, b.x, b.y, 2.0, wall_color);
+    }
     for entity in &snapshot.entities {
         if entity.is_dead() {
             continue;
@@ -1050,6 +1084,18 @@ fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u32, height: 
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn draw_perf(ui: &mut UiDrawList, width: f32, frame_ms: f32, fps: f32) {
+    let label = format!("{fps:.0} FPS   {frame_ms:.1} MS");
+    ui.text(
+        width - 24.0 - UiDrawList::text_width(&label, 1.8),
+        54.0,
+        1.8,
+        Vec4::new(0.55, 0.62, 0.72, 1.0),
+        &label,
+    );
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // HUD composition is one pass.
 fn build_network_hud(
     ui: &mut UiDrawList,
     network: &NetworkView,
@@ -1058,6 +1104,8 @@ fn build_network_hud(
     camera: &Camera,
     width: u32,
     height: u32,
+    frame_ms: f32,
+    fps: f32,
 ) {
     ui.clear();
     if width == 0 || height == 0 {
@@ -1072,6 +1120,7 @@ fn build_network_hud(
     let track = Vec4::new(0.055, 0.075, 0.095, 1.0);
     let width_f = width as f32;
     let height_f = height as f32;
+    draw_perf(ui, width_f, frame_ms, fps);
 
     draw_health_bars(ui, network, camera, width, height);
     let snapshot = network.client.snapshot();
@@ -1591,8 +1640,16 @@ fn item_summary(item: &moba_net::protocol::WireItem) -> String {
     parts.join("  ")
 }
 
-fn build_local_hud(ui: &mut UiDrawList, simulation: &Simulation, width: u32, height: u32) {
+fn build_local_hud(
+    ui: &mut UiDrawList,
+    simulation: &Simulation,
+    width: u32,
+    height: u32,
+    frame_ms: f32,
+    fps: f32,
+) {
     ui.clear();
+    draw_perf(ui, width as f32, frame_ms, fps);
     if width == 0 || height == 0 {
         return;
     }

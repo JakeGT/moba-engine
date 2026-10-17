@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Client FPS/frame-time HUD and wall segments on the minimap.
 - Per-hero level-growth fields in content packs.
 - Bounded handshake nonce replay window (same-address retransmits allowed).
 - Replay format v4 periodic state checkpoints and first-divergence tick reporting.
