@@ -101,6 +101,7 @@ fn valid_snapshot(rng: &mut Rng) -> Vec<u8> {
             kind: rng.gen_range_u32(5) as u8,
             team: rng.gen_range_u32(2) as u8,
             hero_slot: rng.gen_range_u32(11) as u8,
+            hero_pick: rng.gen_range_u32(6) as u8,
             flags: rng.next_u32() as u8,
             max_health: rng.next_u32() as u16,
             max_mana: rng.next_u32() as u16,

@@ -14,6 +14,10 @@ pub const UNIT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unit.frag
 pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
 /// Procedural terrain fragment shader.
 pub const TERRAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.frag.spv"));
+/// Screen-space UI vertex shader.
+pub const UI_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.vert.spv"));
+/// Screen-space UI fragment shader.
+pub const UI_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.frag.spv"));
 
 /// A named SPIR-V module, for tooling and validation.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +45,14 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "terrain.frag",
         spirv: TERRAIN_FRAG,
+    },
+    ShaderModule {
+        name: "ui.vert",
+        spirv: UI_VERT,
+    },
+    ShaderModule {
+        name: "ui.frag",
+        spirv: UI_FRAG,
     },
 ];
 

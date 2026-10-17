@@ -16,7 +16,8 @@ mod sim;
 
 pub use components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
-    LaneWalker, Mana, MoveSpeed, MoveTarget, Position, Regen, Resistances, UnitKind, VisionRange,
+    LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Regen, Resistances, UnitKind,
+    VisionRange,
 };
 pub use sim::{
     HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, ObservedUnit,

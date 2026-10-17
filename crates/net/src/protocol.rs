@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -350,6 +350,8 @@ pub struct NetEntity {
     pub team: u8,
     /// Hero slot or `0xFF`.
     pub hero_slot: u8,
+    /// Hero definition index or `0xFF`.
+    pub hero_pick: u8,
     /// Flag bit 0: dead hero.
     pub flags: u8,
     /// Maximum health.
@@ -381,6 +383,7 @@ impl NetEntity {
             kind: unit.kind as u8,
             team: unit.team.index() as u8,
             hero_slot: unit.hero_slot.unwrap_or(0xFF),
+            hero_pick: unit.hero_pick,
             flags: if unit.dead { ENTITY_FLAG_DEAD } else { 0 },
             max_health: clamp_u16(unit.max_health),
             max_mana: clamp_u16(unit.max_mana),
@@ -474,6 +477,12 @@ pub struct SnapshotDelta {
     pub acked_input: u32,
     /// Snapshot sequence this delta is based on (0 = full).
     pub baseline_seq: u32,
+    /// Blue team hero kills.
+    pub blue_score: u32,
+    /// Red team hero kills.
+    pub red_score: u32,
+    /// Match outcome: 0 none, 1 blue, 2 red.
+    pub outcome: u8,
     /// Newly visible entities (always full state).
     pub spawns: Vec<NetEntity>,
     /// Changed entities.
@@ -497,6 +506,12 @@ pub struct SnapshotState {
     pub seq: u32,
     /// Server tick.
     pub tick: u32,
+    /// Blue team hero kills.
+    pub blue_score: u32,
+    /// Red team hero kills.
+    pub red_score: u32,
+    /// Match outcome: 0 none, 1 blue, 2 red.
+    pub outcome: u8,
     /// Entities sorted by network id.
     pub entities: Vec<NetEntity>,
 }
@@ -510,6 +525,9 @@ impl SnapshotState {
         Self {
             seq,
             tick: delta.tick,
+            blue_score: delta.blue_score,
+            red_score: delta.red_score,
+            outcome: delta.outcome,
             entities,
         }
     }
@@ -548,6 +566,9 @@ impl SnapshotState {
         Ok(Self {
             seq,
             tick: delta.tick,
+            blue_score: delta.blue_score,
+            red_score: delta.red_score,
+            outcome: delta.outcome,
             entities,
         })
     }
@@ -576,6 +597,9 @@ pub fn build_delta(
             tick,
             acked_input,
             baseline_seq: 0,
+            blue_score: 0,
+            red_score: 0,
+            outcome: 0,
             spawns: current.to_vec(),
             updates: Vec::new(),
             despawns: Vec::new(),
@@ -585,6 +609,9 @@ pub fn build_delta(
         tick,
         acked_input,
         baseline_seq,
+        blue_score: 0,
+        red_score: 0,
+        outcome: 0,
         spawns: Vec::new(),
         updates: Vec::new(),
         despawns: Vec::new(),
@@ -695,10 +722,13 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<WireCommand, WireError> {
 /// Returns [`WireError::TooMany`] when a count exceeds `u16::MAX`.
 pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), WireError> {
     out.clear();
-    out.reserve(16 + delta.spawns.len() * 24 + delta.updates.len() * 12 + delta.despawns.len() * 2);
+    out.reserve(32 + delta.spawns.len() * 25 + delta.updates.len() * 12 + delta.despawns.len() * 2);
     put_u32(out, delta.tick);
     put_u32(out, delta.acked_input);
     put_u32(out, delta.baseline_seq);
+    put_u32(out, delta.blue_score);
+    put_u32(out, delta.red_score);
+    out.push(delta.outcome);
     put_u16(out, count_u16(delta.spawns.len())?);
     put_u16(out, count_u16(delta.updates.len())?);
     put_u16(out, count_u16(delta.despawns.len())?);
@@ -707,6 +737,7 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         out.push(spawn.kind);
         out.push(spawn.team);
         out.push(spawn.hero_slot);
+        out.push(spawn.hero_pick);
         out.push(spawn.flags);
         put_u16(out, spawn.max_health);
         put_u16(out, spawn.max_mana);
@@ -768,6 +799,9 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     let tick = reader.u32()?;
     let acked_input = reader.u32()?;
     let baseline_seq = reader.u32()?;
+    let blue_score = reader.u32()?;
+    let red_score = reader.u32()?;
+    let outcome = reader.u8()?;
     let spawn_count = usize::from(reader.u16()?);
     let update_count = usize::from(reader.u16()?);
     let despawn_count = usize::from(reader.u16()?);
@@ -778,6 +812,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             kind: reader.u8()?,
             team: reader.u8()?,
             hero_slot: reader.u8()?,
+            hero_pick: reader.u8()?,
             flags: reader.u8()?,
             max_health: reader.u16()?,
             max_mana: reader.u16()?,
@@ -833,6 +868,9 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
         tick,
         acked_input,
         baseline_seq,
+        blue_score,
+        red_score,
+        outcome,
         spawns,
         updates,
         despawns,
@@ -1000,6 +1038,7 @@ mod tests {
             kind: UnitKind::Hero as u8,
             team: Team::Blue.index() as u8,
             hero_slot: 0,
+            hero_pick: 0,
             flags: 0,
             max_health: 600,
             max_mana: 300,
@@ -1020,14 +1059,22 @@ mod tests {
         current[1].mana = 50;
         current.push(entity(3, 50, 60, 600));
 
-        let full = build_delta(&baseline, None, 3, 42, 0);
+        let mut full = build_delta(&baseline, None, 3, 42, 0);
+        full.blue_score = 3;
+        full.red_score = 2;
+        full.outcome = 1;
         let mut payload = Vec::new();
         encode_snapshot(&full, &mut payload).unwrap();
         let decoded = decode_snapshot(&payload).unwrap();
         let state = SnapshotState::from_full(3, &decoded);
         assert_eq!(state.entities.len(), 2);
+        assert_eq!((state.blue_score, state.red_score), (3, 2));
+        assert_eq!(state.outcome, 1);
 
-        let delta = build_delta(&current, Some(&baseline), 4, 43, 3);
+        let mut delta = build_delta(&current, Some(&baseline), 4, 43, 3);
+        delta.blue_score = 4;
+        delta.red_score = 2;
+        delta.outcome = 2;
         assert_eq!(delta.spawns.len(), 1);
         assert_eq!(delta.updates.len(), 2);
         encode_snapshot(&delta, &mut payload).unwrap();
@@ -1038,6 +1085,8 @@ mod tests {
         assert_eq!(next.get(1).unwrap().x, 11);
         assert_eq!(next.get(2).unwrap().mana, 50);
         assert_eq!(next.get(3).unwrap().x, 50);
+        assert_eq!((next.blue_score, next.red_score), (4, 2));
+        assert_eq!(next.outcome, 2);
     }
 
     #[test]
@@ -1049,6 +1098,9 @@ mod tests {
         let state = SnapshotState {
             seq: 1,
             tick: 1,
+            blue_score: 0,
+            red_score: 0,
+            outcome: 0,
             entities: baseline,
         };
         let applied = state.apply(&delta, 2).unwrap();
@@ -1057,6 +1109,9 @@ mod tests {
         let wrong = SnapshotState {
             seq: 9,
             tick: 9,
+            blue_score: 0,
+            red_score: 0,
+            outcome: 0,
             entities: applied.entities.clone(),
         };
         assert_eq!(wrong.apply(&delta, 3), Err(WireError::MissingBaseline));
@@ -1122,11 +1177,13 @@ mod tests {
             max_mana: 300,
             dead: false,
             hero_slot: Some(7),
+            hero_pick: 2,
             cooldowns: [10, 20, 30],
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);
         assert_eq!(entity.position(), unit.position);
+        assert_eq!(entity.hero_pick, 2);
         assert!(!entity.is_dead());
     }
 }

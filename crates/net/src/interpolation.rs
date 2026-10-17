@@ -121,6 +121,7 @@ mod tests {
             kind: 0,
             team: 0,
             hero_slot: 0,
+            hero_pick: 0,
             flags: 0,
             max_health: 600,
             max_mana: 300,
@@ -136,6 +137,9 @@ mod tests {
         SnapshotState {
             seq,
             tick,
+            blue_score: 0,
+            red_score: 0,
+            outcome: 0,
             entities,
         }
     }

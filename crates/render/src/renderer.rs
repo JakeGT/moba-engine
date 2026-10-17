@@ -18,10 +18,11 @@ use crate::resources::{
 };
 use crate::scene::{CameraUniform, GpuInstance, Scene};
 use crate::swapchain::Swapchain;
+use crate::ui::{UiDrawList, UiVertex};
 use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
-const CAMERA_UNIFORM_SIZE: u64 = 128;
+const CAMERA_UNIFORM_SIZE: u64 = 384;
 
 /// Renderer configuration.
 #[derive(Clone, Debug)]
@@ -34,6 +35,8 @@ pub struct RenderConfig {
     pub vsync: bool,
     /// Linear RGBA clear colour.
     pub clear_color: [f32; 4],
+    /// Maximum number of UI vertices per frame.
+    pub max_ui_vertices: usize,
 }
 
 impl Default for RenderConfig {
@@ -43,6 +46,7 @@ impl Default for RenderConfig {
             max_instances: 4096,
             vsync: true,
             clear_color: [0.028, 0.035, 0.055, 1.0],
+            max_ui_vertices: 65_536,
         }
     }
 }
@@ -56,6 +60,7 @@ struct FrameData {
     instance_buffer: GpuBuffer,
     camera_set: vk::DescriptorSet,
     instance_set: vk::DescriptorSet,
+    ui_buffer: GpuBuffer,
 }
 
 struct Surface {
@@ -87,6 +92,8 @@ pub struct Renderer {
     pipeline_layout: PipelineLayout,
     unit_pipeline: GraphicsPipeline,
     terrain_pipeline: GraphicsPipeline,
+    ui_pipeline_layout: PipelineLayout,
+    ui_pipeline: GraphicsPipeline,
     frames: Vec<FrameData>,
     capture_buffer: Option<GpuBuffer>,
     capture_pending: bool,
@@ -162,6 +169,8 @@ impl Renderer {
         let terrain_vertex = ShaderModule::new(device.device.clone(), moba_shaders::TERRAIN_VERT)?;
         let terrain_fragment =
             ShaderModule::new(device.device.clone(), moba_shaders::TERRAIN_FRAG)?;
+        let ui_vertex = ShaderModule::new(device.device.clone(), moba_shaders::UI_VERT)?;
+        let ui_fragment = ShaderModule::new(device.device.clone(), moba_shaders::UI_FRAG)?;
 
         let camera_binding = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -222,6 +231,24 @@ impl Renderer {
             )?,
         );
 
+        let ui_push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .offset(0)
+            .size(8)];
+        let ui_pipeline_layout =
+            PipelineLayout::with_push_constants(device.device.clone(), &[], &ui_push)?;
+        let ui_pipeline = GraphicsPipeline::from_raw(
+            device.device.clone(),
+            pipeline::create_ui(
+                &device.device,
+                ui_pipeline_layout.handle(),
+                ui_vertex.handle(),
+                ui_fragment.handle(),
+                swapchain.format,
+                swapchain.depth_format,
+            )?,
+        );
+
         let terrain_mesh = mesh::upload(&device, &mesh::MeshData::plane(300.0))?;
         let unit_mesh = mesh::upload(&device, &mesh::MeshData::cube())?;
 
@@ -252,6 +279,17 @@ impl Renderer {
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 MemoryLocation::CpuToGpu,
             )?;
+            let ui_buffer_size = u64::try_from(core::mem::size_of::<UiVertex>())
+                .expect("UI vertex size fits u64")
+                * u64::try_from(config.max_ui_vertices).expect("UI vertex count fits u64");
+            let ui_buffer = GpuBuffer::new(
+                device.device.clone(),
+                device.allocator(),
+                "ui-vertices",
+                ui_buffer_size,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                MemoryLocation::CpuToGpu,
+            )?;
             let camera_set = sets[frame_index * 2];
             let instance_set = sets[frame_index * 2 + 1];
             write_descriptors(
@@ -270,6 +308,7 @@ impl Renderer {
                 instance_buffer,
                 camera_set,
                 instance_set,
+                ui_buffer,
             });
         }
 
@@ -286,6 +325,8 @@ impl Renderer {
             pipeline_layout,
             unit_pipeline,
             terrain_pipeline,
+            ui_pipeline_layout,
+            ui_pipeline,
             frames,
             capture_buffer: None,
             capture_pending: false,
@@ -321,8 +362,20 @@ impl Renderer {
     ///
     /// Returns `Ok(())` when the frame was presented or when the window is minimised. A
     /// stale swapchain is recreated internally and the frame is skipped.
-    #[allow(clippy::too_many_lines)] // The frame is one explicit, ordered command stream.
     pub fn render(&mut self, scene: &Scene<'_>) -> RenderResult<()> {
+        self.render_internal(scene, None)
+    }
+
+    /// Draws a frame with a screen-space UI overlay.
+    ///
+    /// # Errors
+    /// Returns Vulkan errors from resource creation, presentation or the frame submission.
+    pub fn render_with_ui(&mut self, scene: &Scene<'_>, ui: &UiDrawList) -> RenderResult<()> {
+        self.render_internal(scene, Some(ui))
+    }
+
+    #[allow(clippy::too_many_lines)] // The frame is one explicit, ordered command stream.
+    fn render_internal(&mut self, scene: &Scene<'_>, ui: Option<&UiDrawList>) -> RenderResult<()> {
         let [width, height] = self.window.size();
         if width == 0 || height == 0 {
             return Ok(());
@@ -366,7 +419,7 @@ impl Renderer {
         let unit_count = scene.units.len().min(self.config.max_instances);
         {
             let frame = &mut self.frames[frame_index];
-            let uniform = CameraUniform::from(scene.camera);
+            let uniform = CameraUniform::new(scene.camera, &scene.vision);
             frame.camera_buffer.write_bytes(0, bytes_of(&uniform));
             if unit_count > 0 {
                 let mapped = frame
@@ -380,6 +433,21 @@ impl Renderer {
                 for (destination, source) in mapped.iter_mut().zip(&scene.units[..unit_count]) {
                     *destination = GpuInstance::from(*source);
                 }
+            }
+            let ui_count = ui.map_or(0, |list| {
+                list.vertices().len().min(self.config.max_ui_vertices)
+            });
+            if ui_count > 0 {
+                let source = ui.expect("UI list exists when UI count is non-zero");
+                let mapped = frame
+                    .ui_buffer
+                    .mapped_slice_mut::<UiVertex>(ui_count)
+                    .ok_or_else(|| {
+                        RenderError::NoSuitableDevice(String::from(
+                            "UI vertex buffer is not host visible",
+                        ))
+                    })?;
+                mapped.copy_from_slice(&source.vertices()[..ui_count]);
             }
         }
 
@@ -580,6 +648,51 @@ impl Renderer {
             }
         }
 
+        let ui_count = ui.map_or(0, |list| {
+            list.vertices().len().min(self.config.max_ui_vertices)
+        });
+        if ui_count > 0 {
+            // SAFETY: pipeline, buffer and push constant range are live and compatible.
+            unsafe {
+                self.device.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.ui_pipeline.handle(),
+                );
+            }
+            // SAFETY: the UI buffer was written for this frame and is large enough.
+            unsafe {
+                self.device.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &[self.frames[frame_index].ui_buffer.handle()],
+                    &[0],
+                );
+            }
+            let viewport_size = [extent.width as f32, extent.height as f32];
+            // SAFETY: the UI pipeline layout declares exactly this 8-byte vertex-stage push
+            // constant range.
+            unsafe {
+                self.device.device.cmd_push_constants(
+                    command_buffer,
+                    self.ui_pipeline_layout.handle(),
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    bytes_of(&viewport_size),
+                );
+            }
+            // SAFETY: `ui_count` was bounded by the vertex buffer capacity.
+            unsafe {
+                self.device.device.cmd_draw(
+                    command_buffer,
+                    u32::try_from(ui_count).expect("UI vertex count fits u32"),
+                    1,
+                    0,
+                    0,
+                );
+            }
+        }
+
         self.device.cmd_end_rendering(command_buffer);
 
         let capturing = self.capture_pending;
@@ -749,10 +862,30 @@ impl Renderer {
     /// Debug/test path: it waits for the device to go idle. Used for golden images and by
     /// the `MOBA_CAPTURE` client mode.
     pub fn capture_frame(&mut self, scene: &Scene<'_>) -> RenderResult<CapturedFrame> {
+        self.capture_frame_internal(scene, None)
+    }
+
+    /// Renders with a UI overlay and reads the frame back.
+    ///
+    /// # Errors
+    /// Returns Vulkan errors from rendering or the readback.
+    pub fn capture_frame_with_ui(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: &UiDrawList,
+    ) -> RenderResult<CapturedFrame> {
+        self.capture_frame_internal(scene, Some(ui))
+    }
+
+    fn capture_frame_internal(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: Option<&UiDrawList>,
+    ) -> RenderResult<CapturedFrame> {
         self.ensure_capture_buffer()?;
         self.capture_ready = false;
         self.capture_pending = true;
-        self.render(scene)?;
+        self.render_internal(scene, ui)?;
         if !self.capture_ready {
             self.capture_pending = false;
             return Err(RenderError::NoSuitableDevice(String::from(

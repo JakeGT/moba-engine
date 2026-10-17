@@ -1,0 +1,192 @@
+//! Immediate-mode screen-space UI: solid quads and a built-in 5x7 bitmap font.
+
+use bytemuck::{Pod, Zeroable};
+use moba_core::math::Vec4;
+
+use crate::font_data::FONT_5X7;
+
+/// One UI vertex in physical pixels (top-left origin).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
+pub struct UiVertex {
+    /// `[x, y]` in pixels.
+    pub position: [f32; 2],
+    /// Linear RGBA colour.
+    pub color: [f32; 4],
+}
+
+/// CPU-built list of UI triangles for one frame.
+#[derive(Clone, Debug, Default)]
+pub struct UiDrawList {
+    vertices: Vec<UiVertex>,
+}
+
+impl UiDrawList {
+    /// Creates an empty list.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Removes all geometry.
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+    }
+
+    /// Number of vertices.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Whether the list is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vertices.is_empty()
+    }
+
+    /// Raw vertices for the renderer.
+    #[must_use]
+    pub fn vertices(&self) -> &[UiVertex] {
+        &self.vertices
+    }
+
+    /// Adds an axis-aligned rectangle.
+    pub fn rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Vec4) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let color = color.to_array();
+        let vertices = [
+            UiVertex {
+                position: [x, y],
+                color,
+            },
+            UiVertex {
+                position: [x + width, y],
+                color,
+            },
+            UiVertex {
+                position: [x + width, y + height],
+                color,
+            },
+            UiVertex {
+                position: [x, y],
+                color,
+            },
+            UiVertex {
+                position: [x + width, y + height],
+                color,
+            },
+            UiVertex {
+                position: [x, y + height],
+                color,
+            },
+        ];
+        self.vertices.extend_from_slice(&vertices);
+    }
+
+    /// Adds a rectangular outline.
+    pub fn outline(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        thickness: f32,
+        color: Vec4,
+    ) {
+        self.rect(x, y, width, thickness, color);
+        self.rect(x, y + height - thickness, width, thickness, color);
+        self.rect(x, y, thickness, height, color);
+        self.rect(x + width - thickness, y, thickness, height, color);
+    }
+
+    /// Adds a horizontal bar with background, fill and border.
+    #[allow(clippy::too_many_arguments)] // Geometry plus three explicit colours.
+    pub fn bar(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        fraction: f32,
+        fill: Vec4,
+        background: Vec4,
+        border: Vec4,
+    ) {
+        self.rect(x, y, width, height, background);
+        self.rect(x, y, width * fraction.clamp(0.0, 1.0), height, fill);
+        self.outline(x, y, width, height, 1.0, border);
+    }
+
+    /// Width in pixels of `text` at `scale`.
+    #[must_use]
+    pub fn text_width(text: &str, scale: f32) -> f32 {
+        let count = text.chars().count();
+        if count == 0 {
+            0.0
+        } else {
+            count as f32 * 6.0 * scale - scale
+        }
+    }
+
+    /// Adds one line of text with its top-left at `(x, y)`.
+    pub fn text(&mut self, x: f32, y: f32, scale: f32, color: Vec4, text: &str) {
+        let mut cursor = x;
+        for character in text.chars() {
+            let index = (character as u32).wrapping_sub(0x20) as usize;
+            let glyph = FONT_5X7.get(index * 5..index * 5 + 5).unwrap_or(&[0; 5]);
+            for (column, bits) in glyph.iter().enumerate() {
+                for row in 0..7 {
+                    if bits & (1 << row) != 0 {
+                        self.rect(
+                            cursor + column as f32 * scale,
+                            y + row as f32 * scale,
+                            scale,
+                            scale,
+                            color,
+                        );
+                    }
+                }
+            }
+            cursor += 6.0 * scale;
+        }
+    }
+
+    /// Adds text with a one-pixel-scale drop shadow.
+    pub fn text_shadowed(&mut self, x: f32, y: f32, scale: f32, color: Vec4, text: &str) {
+        let shadow = Vec4::new(0.0, 0.0, 0.0, 0.8);
+        self.text(x + scale, y + scale, scale, shadow, text);
+        self.text(x, y, scale, color, text);
+    }
+
+    /// Adds a filled panel with a border.
+    pub fn panel(&mut self, x: f32, y: f32, width: f32, height: f32, fill: Vec4, border: Vec4) {
+        self.rect(x, y, width, height, fill);
+        self.outline(x, y, width, height, 1.0, border);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_emits_one_quad_per_lit_pixel() {
+        let mut ui = UiDrawList::new();
+        ui.text(0.0, 0.0, 2.0, Vec4::ONE, "A");
+        assert!(!ui.is_empty());
+        assert_eq!(ui.len() % 6, 0);
+        assert!(UiDrawList::text_width("ABC", 2.0) > 30.0);
+    }
+
+    #[test]
+    fn empty_rect_is_ignored() {
+        let mut ui = UiDrawList::new();
+        ui.rect(0.0, 0.0, 0.0, 10.0, Vec4::ONE);
+        assert!(ui.is_empty());
+        ui.rect(0.0, 0.0, 10.0, 10.0, Vec4::ONE);
+        assert_eq!(ui.len(), 6);
+    }
+}

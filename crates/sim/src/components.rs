@@ -6,7 +6,7 @@
 
 use moba_core::{Fix, FixVec2};
 use moba_ecs::Entity;
-use moba_game::{DamageType, HeroId};
+use moba_game::{DamageType, HeroId, Team};
 
 /// What kind of unit an entity is.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -146,6 +146,10 @@ pub struct Dead {
     /// Ticks until respawn.
     pub respawn_in: u32,
 }
+
+/// The team that landed the most recent damage on a unit (kill credit).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LastHitBy(pub Team);
 
 /// Vision radius. Used by interaction range checks now and fog of war in M5.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

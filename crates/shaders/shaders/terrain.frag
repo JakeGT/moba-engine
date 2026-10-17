@@ -5,6 +5,8 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 camera_pos;
     vec4 light_direction;
     vec4 ambient;
+    vec4 vision_circles[16];
+    uvec4 vision_count;
 } camera;
 
 layout(location = 0) in vec3 in_normal;
@@ -29,6 +31,22 @@ void main() {
     float diffuse = max(dot(normalize(in_normal), normalize(camera.light_direction.xyz)), 0.0)
         * camera.light_direction.w;
     vec3 lit = base * (camera.ambient.rgb + diffuse);
+
+    // Fog of war: darken terrain outside the allied vision circles. Server snapshots
+    // already withhold unseen units; this makes the visibility boundary legible.
+    float visibility = 0.0;
+    for (int i = 0; i < 16; i++) {
+        if (i >= int(camera.vision_count.x)) {
+            break;
+        }
+        vec4 circle = camera.vision_circles[i];
+        float distance_to_vision = length(in_world_pos.xz - circle.xy);
+        visibility = max(visibility, 1.0 - smoothstep(circle.z - 2.0, circle.z + 2.0, distance_to_vision));
+    }
+    if (camera.vision_count.x > 0u) {
+        vec3 fog_color = vec3(0.012, 0.020, 0.035);
+        lit = mix(lit, fog_color, (1.0 - visibility) * 0.72);
+    }
 
     // Distance fog hides the plane edge and keeps focus on the units.
     float distance = length(camera.camera_pos.xyz - in_world_pos);

@@ -9,6 +9,7 @@
 
 mod device;
 mod error;
+mod font_data;
 mod instance;
 mod mesh;
 mod pipeline;
@@ -16,8 +17,10 @@ mod renderer;
 mod resources;
 mod scene;
 mod swapchain;
+mod ui;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::ValidationMode;
 pub use renderer::{CapturedFrame, RenderConfig, Renderer};
-pub use scene::{Camera, Scene, UnitInstance};
+pub use scene::{Camera, Scene, UnitInstance, VISION_CIRCLES, VisionCircles};
+pub use ui::{UiDrawList, UiVertex};

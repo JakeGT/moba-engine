@@ -456,13 +456,21 @@ impl NetServer {
                 client.baseline(client.acked_snapshot)
             };
             let baseline_seq = baseline.as_ref().map_or(0, |_| client.acked_snapshot);
-            let delta: SnapshotDelta = build_delta(
+            let mut delta: SnapshotDelta = build_delta(
                 &current,
                 baseline,
                 tick,
                 client.last_input_seq,
                 baseline_seq,
             );
+            let (blue_score, red_score) = self.simulation.score();
+            delta.blue_score = blue_score;
+            delta.red_score = red_score;
+            delta.outcome = match self.simulation.outcome() {
+                None => 0,
+                Some(moba_game::Team::Blue) => 1,
+                Some(moba_game::Team::Red) => 2,
+            };
             encode_snapshot(&delta, &mut payload)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             client.snapshot_seq = client.snapshot_seq.wrapping_add(1);

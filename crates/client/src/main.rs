@@ -24,14 +24,15 @@ use std::time::{Duration, Instant};
 
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
-use moba_game::{HEROES, Team};
+use moba_game::{HEROES, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team};
 use moba_net::protocol::{WireCommand, dequantize_position, quantize_position};
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
 use moba_platform::{
     App, Frame, FrameOutcome, InputState, Key, MouseButton, Window, WindowConfig, run,
 };
 use moba_render::{
-    Camera, CapturedFrame, RenderConfig, Renderer, Scene, UnitInstance, ValidationMode,
+    Camera, CapturedFrame, RenderConfig, Renderer, Scene, UiDrawList, UnitInstance, ValidationMode,
+    VisionCircles,
 };
 use moba_sim::{SimConfig, Simulation, UnitKind};
 
@@ -54,6 +55,8 @@ struct ClientApp {
     simulation: Option<Simulation>,
     network: Option<NetworkView>,
     units: Vec<UnitInstance>,
+    ui: UiDrawList,
+    scoreboard_visible: bool,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -74,6 +77,8 @@ impl ClientApp {
             simulation: None,
             network: None,
             units: Vec::with_capacity(moba_sim::MAX_UNITS),
+            ui: UiDrawList::new(),
+            scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -180,6 +185,8 @@ impl App for ClientApp {
                 network,
                 simulation,
                 units,
+                ui,
+                scoreboard_visible,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -244,17 +251,23 @@ impl App for ClientApp {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect);
                         handle_network_input(network, frame.input(), &camera, width, height);
-                        let scene = Scene::new(camera, units);
+                        if frame.input().was_key_pressed(Key::Tab) {
+                            *scoreboard_visible = !*scoreboard_visible;
+                        }
+                        build_network_hud(ui, network, *scoreboard_visible, width, height);
+                        let vision = build_vision(network);
+                        let scene = Scene::with_vision(camera, units, vision);
                         if let Some(renderer) = renderer.as_mut() {
                             if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                                 capture_and_exit(
                                     renderer,
                                     &scene,
+                                    ui,
                                     capture_path.as_deref(),
                                     &mut failure,
                                 );
                                 exit_after_capture = true;
-                            } else if let Err(error) = renderer.render(&scene) {
+                            } else if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }
                         }
@@ -285,6 +298,7 @@ impl App for ClientApp {
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
                     let yaw = frame.elapsed_secs() as f32 * 0.035;
+                    build_local_hud(ui, simulation, width, height);
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                     let scene = Scene::new(camera, units);
                     if let Some(renderer) = renderer.as_mut() {
@@ -292,11 +306,12 @@ impl App for ClientApp {
                             capture_and_exit(
                                 renderer,
                                 &scene,
+                                ui,
                                 capture_path.as_deref(),
                                 &mut failure,
                             );
                             exit_after_capture = true;
-                        } else if let Err(error) = renderer.render(&scene) {
+                        } else if let Err(error) = renderer.render_with_ui(&scene, ui) {
                             failure = Some(format!("render failed: {error}"));
                         }
                     }
@@ -325,13 +340,14 @@ fn frames_is_capture(frames: u64, capture_frame: u64, capture_path: Option<&Path
 fn capture_and_exit(
     renderer: &mut Renderer,
     scene: &Scene<'_>,
+    ui: &UiDrawList,
     capture_path: Option<&Path>,
     failure: &mut Option<String>,
 ) {
     let Some(path) = capture_path else {
         return;
     };
-    match renderer.capture_frame(scene) {
+    match renderer.capture_frame_with_ui(scene, ui) {
         Ok(frame) => {
             if let Err(error) = write_ppm(path, &frame) {
                 *failure = Some(format!("capture write failed: {error}"));
@@ -619,6 +635,381 @@ fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<()> {
     }
     file.write_all(&rgb)?;
     file.flush()
+}
+
+#[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
+fn build_network_hud(
+    ui: &mut UiDrawList,
+    network: &NetworkView,
+    scoreboard: bool,
+    width: u32,
+    height: u32,
+) {
+    ui.clear();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let bg = Vec4::new(0.015, 0.025, 0.045, 0.82);
+    let border = Vec4::new(0.22, 0.42, 0.58, 0.9);
+    let text = Vec4::new(0.88, 0.94, 1.0, 1.0);
+    let muted = Vec4::new(0.55, 0.68, 0.78, 1.0);
+    let health = Vec4::new(0.18, 0.82, 0.36, 1.0);
+    let mana = Vec4::new(0.22, 0.50, 1.0, 1.0);
+    let track = Vec4::new(0.055, 0.075, 0.095, 1.0);
+    let width_f = width as f32;
+    let height_f = height as f32;
+
+    let snapshot = network.client.snapshot();
+    let own = network
+        .own_net_id
+        .and_then(|id| snapshot.and_then(|state| state.get(id)))
+        .or_else(|| {
+            snapshot.and_then(|state| {
+                state.entities.iter().find(|entity| {
+                    entity.hero_slot == network.own_slot
+                        && entity.team == network.client.team().index() as u8
+                })
+            })
+        });
+    let hero = &HEROES[usize::from(network.client.hero_pick()) % HEROES.len()];
+
+    // Match timer and team score.
+    let tick = snapshot.map_or(0, |state| state.tick);
+    let seconds = tick / 30;
+    let timer = format!("{:02}:{:02}", seconds / 60, seconds % 60);
+    let blue = snapshot.map_or(0, |state| state.blue_score);
+    let red = snapshot.map_or(0, |state| state.red_score);
+    let timer_width = 360.0;
+    ui.panel(
+        (width_f - timer_width) * 0.5,
+        14.0,
+        timer_width,
+        72.0,
+        bg,
+        border,
+    );
+    ui.text_shadowed(
+        (width_f - UiDrawList::text_width(&timer, 3.5)) * 0.5,
+        20.0,
+        3.5,
+        text,
+        &timer,
+    );
+    ui.text(
+        (width_f - timer_width) * 0.5 + 18.0,
+        52.0,
+        2.0,
+        Vec4::new(0.4, 0.65, 1.0, 1.0),
+        &format!("BLUE {blue}"),
+    );
+    ui.text(
+        width_f.midpoint(timer_width) - 18.0 - UiDrawList::text_width(&format!("RED {red}"), 2.0),
+        52.0,
+        2.0,
+        Vec4::new(1.0, 0.42, 0.32, 1.0),
+        &format!("RED {red}"),
+    );
+
+    // Connection/status block.
+    ui.panel(18.0, 18.0, 250.0, 82.0, bg, border);
+    ui.text(30.0, 28.0, 2.5, text, "MOBA ONLINE");
+    let stats = network.client.stats();
+    let ping = stats.rtt_ms.unwrap_or(0);
+    ui.text(
+        30.0,
+        54.0,
+        2.0,
+        muted,
+        &format!("SLOT {}   PING {} MS", network.own_slot, ping),
+    );
+    ui.text(
+        30.0,
+        74.0,
+        2.0,
+        muted,
+        &format!("TICK {}   {} SNAPSHOTS", tick, stats.snapshots),
+    );
+
+    // Controls.
+    ui.text(
+        width_f - 24.0 - UiDrawList::text_width("RMB MOVE   LMB ATTACK   Q/W/E CAST", 2.0),
+        24.0,
+        2.0,
+        muted,
+        "RMB MOVE   LMB ATTACK   Q/W/E CAST",
+    );
+
+    // Hero panel.
+    let panel_w = 452.0;
+    let panel_h = 154.0;
+    let x = 24.0;
+    let y = height_f - panel_h - 24.0;
+    ui.panel(x, y, panel_w, panel_h, bg, border);
+    ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero.name);
+    ui.text(
+        x + 250.0,
+        y + 16.0,
+        2.0,
+        muted,
+        &format!(
+            "TEAM {}",
+            if network.client.team() == Team::Blue {
+                "BLUE"
+            } else {
+                "RED"
+            }
+        ),
+    );
+
+    let (hp, max_hp, mp, max_mp) = own.map_or((0, 1, 0, 1), |entity| {
+        (
+            i32::from(entity.health),
+            i32::from(entity.max_health).max(1),
+            i32::from(entity.mana),
+            i32::from(entity.max_mana).max(1),
+        )
+    });
+    ui.text(x + 14.0, y + 46.0, 2.0, muted, &format!("HP {hp}/{max_hp}"));
+    ui.bar(
+        x + 14.0,
+        y + 64.0,
+        panel_w - 28.0,
+        14.0,
+        hp as f32 / max_hp as f32,
+        health,
+        track,
+        border,
+    );
+    ui.text(x + 14.0, y + 84.0, 2.0, muted, &format!("MP {mp}/{max_mp}"));
+    ui.bar(
+        x + 14.0,
+        y + 102.0,
+        panel_w - 28.0,
+        10.0,
+        mp as f32 / max_mp as f32,
+        mana,
+        track,
+        border,
+    );
+
+    let cooldowns = own.map_or([0; 3], |entity| entity.cooldowns);
+    for slot in 0..3 {
+        let box_size = 38.0;
+        let bx = x + 14.0 + slot as f32 * 48.0;
+        let by = y + 118.0;
+        let key = ["Q", "W", "E"][slot];
+        ui.rect(bx, by, box_size, box_size, track);
+        ui.outline(bx, by, box_size, box_size, 1.0, border);
+        ui.text(bx + 8.0, by + 8.0, 2.5, text, key);
+        let remaining = cooldowns[slot];
+        let max_cooldown = hero
+            .ability(slot)
+            .map_or(1, |ability| {
+                u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)
+            })
+            .max(1);
+        if remaining > 0 {
+            let fraction = f32::from(remaining) / f32::from(max_cooldown);
+            ui.rect(
+                bx,
+                by,
+                box_size,
+                box_size * fraction.clamp(0.0, 1.0),
+                Vec4::new(0.0, 0.0, 0.0, 0.62),
+            );
+            let seconds = f32::from(remaining) / 30.0;
+            ui.text(bx + 4.0, by + 24.0, 1.8, text, &format!("{seconds:.1}"));
+        }
+    }
+    if scoreboard {
+        let panel_width = 620.0;
+        let panel_height = 330.0;
+        let sx = (width_f - panel_width) * 0.5;
+        let sy = (height_f - panel_height) * 0.5;
+        ui.panel(
+            sx,
+            sy,
+            panel_width,
+            panel_height,
+            Vec4::new(0.01, 0.02, 0.035, 0.9),
+            border,
+        );
+        ui.text_shadowed(sx + 24.0, sy + 18.0, 3.5, text, "SCOREBOARD");
+        ui.text(
+            sx + panel_width - 200.0,
+            sy + 26.0,
+            2.0,
+            muted,
+            "TAB TO CLOSE",
+        );
+        let mut rows = [(None, 0u8, 0u8, 0u16, 0u16); 10];
+        let mut count = 0usize;
+        if let Some(state) = snapshot {
+            for entity in state
+                .entities
+                .iter()
+                .filter(|entity| entity.hero_slot != 0xFF)
+            {
+                if count >= rows.len() {
+                    break;
+                }
+                rows[count] = (
+                    Some(entity.team),
+                    entity.hero_slot,
+                    entity.hero_pick,
+                    entity.health,
+                    entity.max_health,
+                );
+                count += 1;
+            }
+        }
+        rows[..count].sort_unstable_by_key(|(team, slot, _, _, _)| (*team, *slot));
+        for (index, (team, slot, pick, hp, max_hp)) in rows[..count].iter().enumerate() {
+            let y = sy + 64.0 + index as f32 * 24.0;
+            let color = if *team == Some(0) {
+                Vec4::new(0.45, 0.7, 1.0, 1.0)
+            } else {
+                Vec4::new(1.0, 0.5, 0.4, 1.0)
+            };
+            let name = HEROES
+                .get(usize::from(*pick))
+                .map_or("UNKNOWN", |hero| hero.name);
+            ui.text(sx + 32.0, y, 2.0, color, &format!("SLOT {slot}  {name}"));
+            ui.text(sx + 400.0, y, 2.0, muted, &format!("{hp}/{max_hp} HP"));
+        }
+        ui.text(
+            sx + 32.0,
+            sy + panel_height - 34.0,
+            2.0,
+            muted,
+            "ENEMY ROWS APPEAR ONLY WHILE VISIBLE",
+        );
+    }
+    if let Some(outcome) = snapshot
+        .map(|state| state.outcome)
+        .filter(|outcome| *outcome != 0)
+    {
+        let winner = if outcome == 1 { Team::Blue } else { Team::Red };
+        let victory = winner == network.client.team();
+        let label = if victory { "VICTORY" } else { "DEFEAT" };
+        let color = if victory {
+            Vec4::new(0.35, 1.0, 0.5, 1.0)
+        } else {
+            Vec4::new(1.0, 0.35, 0.28, 1.0)
+        };
+        ui.rect(0.0, 0.0, width_f, height_f, Vec4::new(0.0, 0.0, 0.0, 0.35));
+        ui.panel(
+            (width_f - 460.0) * 0.5,
+            height_f * 0.36,
+            460.0,
+            130.0,
+            bg,
+            border,
+        );
+        ui.text_shadowed(
+            (width_f - UiDrawList::text_width(label, 7.0)) * 0.5,
+            height_f * 0.36 + 24.0,
+            7.0,
+            color,
+            label,
+        );
+        ui.text(
+            (width_f - UiDrawList::text_width("PRESS ESC TO EXIT", 2.0)) * 0.5,
+            height_f * 0.36 + 92.0,
+            2.0,
+            muted,
+            "PRESS ESC TO EXIT",
+        );
+    }
+    if own.is_some_and(|entity| entity.is_dead()) {
+        ui.text_shadowed(
+            (width_f - UiDrawList::text_width("RESPAWNING", 5.0)) * 0.5,
+            height_f * 0.42,
+            5.0,
+            Vec4::new(1.0, 0.35, 0.25, 1.0),
+            "RESPAWNING",
+        );
+    }
+}
+
+fn build_local_hud(ui: &mut UiDrawList, simulation: &Simulation, width: u32, height: u32) {
+    ui.clear();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let bg = Vec4::new(0.015, 0.025, 0.045, 0.82);
+    let border = Vec4::new(0.22, 0.42, 0.58, 0.9);
+    let text = Vec4::new(0.88, 0.94, 1.0, 1.0);
+    let muted = Vec4::new(0.55, 0.68, 0.78, 1.0);
+    ui.panel(18.0, 18.0, 330.0, 112.0, bg, border);
+    ui.text_shadowed(32.0, 30.0, 3.0, text, "LOCAL BOT PREVIEW");
+    ui.text(
+        32.0,
+        64.0,
+        2.0,
+        muted,
+        &format!(
+            "TICK {}   WAVE {}   UNITS {}",
+            simulation.current_tick().get(),
+            simulation.wave(),
+            simulation.unit_count()
+        ),
+    );
+    ui.text(32.0, 88.0, 2.0, muted, "SET MOBA_SERVER TO PLAY ONLINE");
+    ui.text(
+        width as f32 - 24.0 - UiDrawList::text_width("OFFLINE", 2.0),
+        height as f32 - 36.0,
+        2.0,
+        muted,
+        "OFFLINE",
+    );
+}
+
+fn build_vision(network: &NetworkView) -> VisionCircles {
+    let mut vision = VisionCircles::default();
+    let Some(snapshot) = network.client.snapshot() else {
+        return vision;
+    };
+    let own_team = network.client.team().index() as u8;
+    let add = |entity: &moba_net::NetEntity, vision: &mut VisionCircles| {
+        if entity.team != own_team || entity.is_dead() {
+            return;
+        }
+        let radius = vision_radius(entity);
+        let position = dequantize_position(entity.x, entity.y);
+        vision.add(
+            position.x.to_f32() - 128.0,
+            position.y.to_f32() - 128.0,
+            radius,
+        );
+    };
+    // Heroes and structures are the most useful fog anchors; minions fill the rest.
+    for priority in [0u8, 1, 2] {
+        for entity in &snapshot.entities {
+            let kind_priority = match entity.kind {
+                0 => 0,
+                3 | 4 => 1,
+                _ => 2,
+            };
+            if kind_priority == priority {
+                add(entity, &mut vision);
+            }
+        }
+    }
+    vision
+}
+
+fn vision_radius(entity: &moba_net::NetEntity) -> f32 {
+    match entity.kind {
+        0 => HEROES
+            .get(usize::from(entity.hero_pick))
+            .map_or(35.0, |hero| hero.vision_range.to_f32()),
+        1 => MELEE_MINION.vision_range.to_f32(),
+        2 => RANGED_MINION.vision_range.to_f32(),
+        3 => TOWER.vision_range.to_f32(),
+        4 => NEXUS.vision_range.to_f32(),
+        _ => 0.0,
+    }
 }
 
 #[cfg(test)]

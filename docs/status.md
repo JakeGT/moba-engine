@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: 2026-10-17 (round 4 of the build).
+Last updated: 2026-10-17 (round 5 of the build).
 
 ## Milestones
 
@@ -10,9 +10,9 @@ Last updated: 2026-10-17 (round 4 of the build).
 | M1 | Core runtime | ✅ | Workspace test suite green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
 | M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
-| M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering landed in M5; fog rendering, levels and items await M6. |
-| M5 | Networking | 🟡 | UDP transport, handshake, visibility/delta snapshots, prediction/reconciliation, interpolation and a playable network client; five-minute 10-client soak at 150 ms/5%/30 ms passes at 4.1–4.5 KB/s down; encryption and long fuzzers pending. |
-| M6 | Vertical slice | 🟡 | Local preview and networked play render; HUD, fog rendering, levels/items, scoreboard and a complete match flow remain. |
+| M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5) and fog rendering (M6) landed; levels and items remain. |
+| M5 | Networking | 🟡 | UDP transport, handshake, visibility/delta snapshots, prediction/reconciliation, interpolation and playable network client (protocol v2 with scores/outcome); five-minute 10-client soak passes at 4.1–4.5 KB/s down; encryption and long fuzzers pending. |
+| M6 | Vertical slice | 🟡 | Playable networked/local match with batched bitmap HUD, health/mana/cooldowns, team scores, Tab scoreboard, fog-of-war terrain and VICTORY/DEFEAT; levels, items, lobby/rematch remain. |
 | M7 | Hardening | ⬜ | 50 matches/box, fuzz, profiling capture. |
 | M8 | Content pipeline | ⬜ | Data-driven abilities. |
 
@@ -37,13 +37,13 @@ Last updated: 2026-10-17 (round 4 of the build).
   `spirv-val`.
 - **`moba-render`** — ash-based Vulkan renderer: validation layers, device scoring,
   Vulkan 1.2/1.3 feature negotiation, swapchain, sync2 barriers, dynamic rendering,
-  instanced units via a storage buffer, procedural terrain, and CPU readback capture.
-  `moba-client` renders a 500-unit demo scene.
+  instanced units via a storage buffer, procedural terrain with vision-circle fog, a
+  screen-space bitmap-font UI batch (no texture/descriptor/pass), and CPU readback capture.
 - **`moba-game`** — data tables and pure rules: 5 heroes, 15 abilities, minions, towers,
   nexuses, the three-lane map and integer mitigation.
 - **`moba-nav`** — deterministic spatial grid with exact-radius queries.
 - **`moba-sim`** — fixed-tick authoritative match simulation: commands, combat, abilities,
-  waves, towers, respawns, bots, events and a stable state hash.
+  waves, towers, respawns, bots, kill credit/team scores, events and a stable state hash.
 - **`moba-server`** — headless 30 Hz match runner with tick statistics (`--ticks`, `--seed`);
   `--listen ADDR --seconds N` hosts a network match.
 - **`moba-net`** — UDP wire protocol, fragmentation, handshake, session slots, intent
@@ -53,14 +53,15 @@ Last updated: 2026-10-17 (round 4 of the build).
 - **`moba-tools`** — `soak` binary for the five-minute ten-client network gate and
   `fuzz-wire` for deterministic decoder fuzzing.
 - **`moba-client`** — renders either a local bot preview or a live server match
-  (`MOBA_SERVER`); predicted local hero, interpolated remote units, mouse move/attack/cast
-  controls, camera follow and headless capture modes.
+  (`MOBA_SERVER`); predicted local hero, interpolated remote units, fog-of-war terrain,
+  health/mana/cooldown/timer/score HUD, Tab scoreboard, mouse move/attack/cast controls,
+  camera follow and headless capture modes.
 
 ## Verification actually run
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked` — 110 tests
+- `cargo test --workspace --locked` — 113 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -79,12 +80,15 @@ Last updated: 2026-10-17 (round 4 of the build).
   stable hash. Ten-thousand-tick determinism tests pass.
 - Live slice: `MOBA_WARMUP_TICKS=3200 MOBA_CAPTURE=frame.ppm` renders the simulated match
   with zero validation messages; see `docs/images/m4-simulation-slice.png`.
-- Network soak: five minutes with ten clients through independent 150 ms/5%/30 ms links —
-  all stayed connected, ~8,500 snapshots each, 4.1–4.5 KiB/s downstream and ~1.17 KiB/s
-  upstream; server sent 13.4 MiB over 9,120 ticks. Protocol/delta/snapshot tests pass.
+- Network soak: five minutes (protocol v1) with ten clients through independent
+  150 ms/5%/30 ms links — all connected, ~8,500 snapshots each, 4.1–4.5 KiB/s down and
+  ~1.17 KiB/s up; server sent 13.4 MiB over 9,120 ticks. A 30 s protocol-v2 rerun measured
+  4.0–5.2 KiB/s down and ~1.2 KiB/s up. Protocol/delta/snapshot tests pass.
 - Online client: `MOBA_SERVER=local MOBA_DEMO_MOVE=110,128` connected, rendered
   interpolated snapshots with the local hero predicted, and captured a validation-clean
   frame; see `docs/images/m5-network-client.png`.
+- HUD/fog/scoreboard: captured under lavapipe with validation enabled — see
+  `docs/images/m6-hud-fog.png` and `docs/images/m6-scoreboard.png`.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
 
@@ -96,8 +100,9 @@ pending.
 
 1. Loom model of the scope counter protocol; add `World`-level parallel iteration over
    chunk queries and bench it.
-2. M6 vertical slice: HUD, fog of war, levels/items, scoreboard and a full playable 5v5 flow.
-3. M5 hardening: authenticated/encrypted packets and long-running fuzzers (M7 security).
+2. M6 remainder: hero levels/XP, gold/items/shop, lobby/rematch flow, minimap and floating
+   health bars, and terrain line-of-sight fog.
+3. M5 hardening: authenticated/encrypted packets and long-running sanitizer fuzzers (M7).
 4. M3 remainder: skeletal skinning, frame-time measurement on min-spec hardware, and a
    golden-image test under lavapipe in CI.
 5. The reference machine has no usable hardware Vulkan device; lavapipe is installed in

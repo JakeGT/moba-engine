@@ -361,7 +361,17 @@ impl PipelineLayout {
         device: ash::Device,
         set_layouts: &[vk::DescriptorSetLayout],
     ) -> RenderResult<Self> {
-        let create_info = vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts);
+        Self::with_push_constants(device, set_layouts, &[])
+    }
+
+    pub(crate) fn with_push_constants(
+        device: ash::Device,
+        set_layouts: &[vk::DescriptorSetLayout],
+        push_constants: &[vk::PushConstantRange],
+    ) -> RenderResult<Self> {
+        let create_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(set_layouts)
+            .push_constant_ranges(push_constants);
         // SAFETY: the device is live and the layout array is valid for the call.
         let handle = unsafe { device.create_pipeline_layout(&create_info, None) }?;
         Ok(Self { device, handle })

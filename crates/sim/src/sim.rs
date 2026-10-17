@@ -12,7 +12,8 @@ use moba_nav::SpatialGrid;
 
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
-    LaneWalker, Mana, MoveSpeed, MoveTarget, Position, Regen, Resistances, UnitKind, VisionRange,
+    LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Regen, Resistances, UnitKind,
+    VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -210,6 +211,8 @@ pub struct ObservedUnit {
     pub dead: bool,
     /// Player slot for heroes, `None` otherwise.
     pub hero_slot: Option<u8>,
+    /// Hero definition index for heroes (`0xFF` otherwise).
+    pub hero_pick: u8,
     /// Remaining Q/W/E cooldowns for heroes.
     pub cooldowns: [u32; 3],
 }
@@ -223,6 +226,8 @@ pub struct Simulation {
     wave: u32,
     next_wave_tick: u32,
     outcome: Option<Team>,
+    blue_score: u32,
+    red_score: u32,
     projectiles: Vec<Projectile>,
     events: Vec<SimEvent>,
     grid: SpatialGrid<TargetRef>,
@@ -245,6 +250,8 @@ impl Simulation {
             wave: 0,
             next_wave_tick: WAVE_DELAY_TICKS,
             outcome: None,
+            blue_score: 0,
+            red_score: 0,
             projectiles: Vec::with_capacity(MAX_PROJECTILES),
             events: Vec::with_capacity(MAX_EVENTS),
             grid: SpatialGrid::new(
@@ -279,6 +286,13 @@ impl Simulation {
     #[must_use]
     pub const fn outcome(&self) -> Option<Team> {
         self.outcome
+    }
+
+    /// Team hero-kill score as `(blue, red)`.
+    #[inline]
+    #[must_use]
+    pub const fn score(&self) -> (u32, u32) {
+        (self.blue_score, self.red_score)
     }
 
     /// Number of waves spawned so far.
@@ -406,6 +420,10 @@ impl Simulation {
                 .get::<Mana>(entity)
                 .map_or((0, 0), |mana| (mana.current, mana.max));
             let hero_slot = self.world.get::<HeroSlot>(entity).map(|slot| slot.0);
+            let hero_pick = self
+                .world
+                .get::<HeroIdentity>(entity)
+                .map_or(0xFF, |identity| identity.0.0);
             let cooldowns = self
                 .world
                 .get::<Cooldowns>(entity)
@@ -427,6 +445,7 @@ impl Simulation {
                 max_mana: mana.1,
                 dead: dead && hero_slot.is_some(),
                 hero_slot,
+                hero_pick,
                 cooldowns,
             });
         }
@@ -791,6 +810,7 @@ impl Simulation {
             return;
         };
         let _ = self.world.remove::<Dead>(entity);
+        let _ = self.world.remove::<LastHitBy>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
             position.0 = MAP.hero_spawn(team, slot % 5);
         }
@@ -965,7 +985,7 @@ impl Simulation {
                 }
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target in hits.drain(..) {
-                    self.damage(target, damage, damage_type);
+                    self.damage(target, damage, damage_type, team);
                 }
                 self.damage_hits = hits;
             }
@@ -1134,15 +1154,22 @@ impl Simulation {
             if target_health.current <= 0 {
                 continue;
             }
-            let attacker_team = self.world.get::<Team>(snapshot.attacker).copied();
+            let Some(attacker_team) = self.world.get::<Team>(snapshot.attacker).copied() else {
+                continue;
+            };
             let target_team = self.world.get::<Team>(snapshot.target).copied();
-            if attacker_team == target_team {
+            if Some(attacker_team) == target_team {
                 continue;
             }
             if attacker_position.distance_sq(target_position) > snapshot.range_sq {
                 continue;
             }
-            self.damage(snapshot.target, snapshot.damage, DamageType::Physical);
+            self.damage(
+                snapshot.target,
+                snapshot.damage,
+                DamageType::Physical,
+                attacker_team,
+            );
             if let Some(stats) = self.world.get_mut::<AttackStats>(snapshot.attacker) {
                 stats.cooldown = snapshot.interval;
             }
@@ -1174,7 +1201,12 @@ impl Simulation {
                     }
                 });
             if let Some((_, target)) = hit {
-                self.damage(target, projectile.damage, projectile.damage_type);
+                self.damage(
+                    target,
+                    projectile.damage,
+                    projectile.damage_type,
+                    projectile.team,
+                );
                 self.projectiles.swap_remove(index);
             } else {
                 self.projectiles[index] = projectile;
@@ -1209,6 +1241,12 @@ impl Simulation {
                 if let Some(target) = self.world.get_mut::<AttackTarget>(entity) {
                     target.0 = None;
                 }
+                if let Some(credit) = self.world.get::<LastHitBy>(entity).map(|credit| credit.0) {
+                    match credit {
+                        Team::Blue => self.blue_score = self.blue_score.saturating_add(1),
+                        Team::Red => self.red_score = self.red_score.saturating_add(1),
+                    }
+                }
                 self.push_event(SimEvent::UnitDied { entity, kind, team });
                 continue;
             }
@@ -1228,7 +1266,7 @@ impl Simulation {
         self.deaths = deaths;
     }
 
-    fn damage(&mut self, target: Entity, amount: i32, damage_type: DamageType) {
+    fn damage(&mut self, target: Entity, amount: i32, damage_type: DamageType, source: Team) {
         let Some(health) = self.world.get::<Health>(target).copied() else {
             return;
         };
@@ -1249,8 +1287,17 @@ impl Simulation {
             resistances.armor,
             resistances.magic_resist,
         );
-        if let Some(health) = self.world.get_mut::<Health>(target) {
+        let remaining = if let Some(health) = self.world.get_mut::<Health>(target) {
             health.current = (health.current - dealt).max(0);
+            health.current
+        } else {
+            return;
+        };
+        if remaining <= 0 {
+            let target_team = self.world.get::<Team>(target).copied();
+            if target_team.is_some_and(|team| team != source) {
+                let _ = self.world.insert(target, LastHitBy(source));
+            }
         }
     }
 
@@ -1572,6 +1619,21 @@ mod tests {
             observed
                 .iter()
                 .any(|unit| unit.team == Team::Red && unit.kind.is_hero())
+        );
+    }
+
+    #[test]
+    fn hero_kills_credit_the_attacking_team() {
+        let mut sim = idle(SimConfig::default().hero_picks);
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        sim.damage(red, 10_000, DamageType::Physical, Team::Blue);
+        sim.damage(blue, 10_000, DamageType::Physical, Team::Red);
+        sim.tick(&TickInputs::default());
+        assert_eq!(sim.score(), (1, 1));
+        assert_eq!(
+            sim.world.get::<Dead>(red).map(|dead| dead.respawn_in),
+            Some(HERO_RESPAWN_TICKS)
         );
     }
 

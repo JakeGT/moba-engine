@@ -99,19 +99,74 @@ pub struct Scene<'a> {
     pub camera: Camera,
     /// Units to draw, in any order.
     pub units: &'a [UnitInstance],
+    /// Allied vision circles; an empty set disables fog darkening.
+    pub vision: VisionCircles,
+}
+
+/// Up to 16 allied vision circles used to darken unseen terrain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisionCircles {
+    /// World-space circles: `(x, z, radius, unused)`.
+    pub circles: [Vec4; VISION_CIRCLES],
+    /// Number of active circles.
+    pub count: u32,
+}
+
+/// Maximum vision circles uploaded per frame.
+pub const VISION_CIRCLES: usize = 16;
+
+impl Default for VisionCircles {
+    fn default() -> Self {
+        Self {
+            circles: [Vec4::ZERO; VISION_CIRCLES],
+            count: 0,
+        }
+    }
+}
+
+impl VisionCircles {
+    /// Adds a world-space circle, saturating at [`VISION_CIRCLES`].
+    pub fn add(&mut self, x: f32, z: f32, radius: f32) {
+        if self.count as usize >= VISION_CIRCLES {
+            return;
+        }
+        self.circles[self.count as usize] = Vec4::new(x, z, radius.max(0.0), 0.0);
+        self.count += 1;
+    }
 }
 
 impl<'a> Scene<'a> {
-    /// Creates a scene.
+    /// Creates a scene without fog-of-war darkening.
     #[must_use]
     pub const fn new(camera: Camera, units: &'a [UnitInstance]) -> Self {
-        Self { camera, units }
+        Self {
+            camera,
+            units,
+            vision: VisionCircles {
+                circles: [Vec4::ZERO; VISION_CIRCLES],
+                count: 0,
+            },
+        }
+    }
+
+    /// Creates a scene with allied vision circles for terrain fog.
+    #[must_use]
+    pub const fn with_vision(
+        camera: Camera,
+        units: &'a [UnitInstance],
+        vision: VisionCircles,
+    ) -> Self {
+        Self {
+            camera,
+            units,
+            vision,
+        }
     }
 
     /// Creates an empty scene with a camera (used for clear-only frames and tests).
     #[must_use]
     pub const fn empty(camera: Camera) -> Self {
-        Self { camera, units: &[] }
+        Self::new(camera, &[])
     }
 }
 
@@ -123,10 +178,16 @@ pub(crate) struct CameraUniform {
     camera_pos: [f32; 4],
     light_direction: [f32; 4],
     ambient: [f32; 4],
+    vision_circles: [[f32; 4]; VISION_CIRCLES],
+    vision_count: [u32; 4],
 }
 
-impl From<Camera> for CameraUniform {
-    fn from(camera: Camera) -> Self {
+impl CameraUniform {
+    pub(crate) fn new(camera: Camera, vision: &VisionCircles) -> Self {
+        let mut circles = [[0.0; 4]; VISION_CIRCLES];
+        for (destination, source) in circles.iter_mut().zip(vision.circles) {
+            *destination = source.to_array();
+        }
         Self {
             view_proj: camera.view_proj.to_cols_array_2d(),
             camera_pos: [camera.position.x, camera.position.y, camera.position.z, 1.0],
@@ -137,6 +198,8 @@ impl From<Camera> for CameraUniform {
                 camera.light_intensity,
             ],
             ambient: [camera.ambient.x, camera.ambient.y, camera.ambient.z, 0.0],
+            vision_circles: circles,
+            vision_count: [vision.count, 0, 0, 0],
         }
     }
 }
