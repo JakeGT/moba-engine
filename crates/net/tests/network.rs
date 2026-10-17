@@ -25,6 +25,7 @@ fn spawn_server(
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: None,
         record: None,
+        max_spectators: 8,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("local addr");

@@ -50,6 +50,8 @@ pub struct ServerConfig {
     pub pre_shared_key: Option<[u8; 32]>,
     /// Optional path for deterministic replay files (one per match).
     pub record: Option<PathBuf>,
+    /// Additional read-only spectator connections beyond the ten player slots.
+    pub max_spectators: usize,
 }
 
 impl core::fmt::Debug for ServerConfig {
@@ -65,6 +67,7 @@ impl core::fmt::Debug for ServerConfig {
             .field("reconnect_grace", &self.reconnect_grace)
             .field("pre_shared_key", &self.pre_shared_key.is_some())
             .field("record", &self.record)
+            .field("max_spectators", &self.max_spectators)
             .finish()
     }
 }
@@ -82,6 +85,7 @@ impl Default for ServerConfig {
             reconnect_grace: RECONNECT_GRACE,
             pre_shared_key: None,
             record: None,
+            max_spectators: 8,
         }
     }
 }
@@ -111,6 +115,8 @@ struct SnapshotRecord {
 struct ClientConn {
     addr: SocketAddr,
     session: u32,
+    slot: u8,
+    spectator: bool,
     team: moba_game::Team,
     connected: bool,
     last_seen: Instant,
@@ -176,8 +182,9 @@ pub struct NetServer {
     transport: UdpTransport,
     simulation: Simulation,
     config: ServerConfig,
-    clients: [Option<ClientConn>; 10],
+    clients: Vec<Option<ClientConn>>,
     observed: [Vec<ObservedUnit>; 2],
+    observed_spectator: Vec<ObservedUnit>,
     current: Vec<NetEntity>,
     payload: Vec<u8>,
     session_counter: u32,
@@ -197,14 +204,16 @@ impl NetServer {
     /// Returns an OS error when the socket cannot be bound.
     pub fn bind(config: ServerConfig) -> io::Result<Self> {
         let transport = UdpTransport::bind(config.bind)?;
+        let total_slots = config.max_clients + config.max_spectators;
         let config_sim = config.sim;
         let simulation = Simulation::new(config_sim);
         Ok(Self {
             transport,
             simulation,
             config,
-            clients: std::array::from_fn(|_| None),
+            clients: (0..total_slots).map(|_| None).collect(),
             observed: std::array::from_fn(|_| Vec::with_capacity(moba_sim::MAX_UNITS)),
+            observed_spectator: Vec::with_capacity(moba_sim::MAX_UNITS),
             current: Vec::with_capacity(moba_sim::MAX_UNITS),
             payload: Vec::with_capacity(MAX_DATAGRAM),
             session_counter: 1,
@@ -328,7 +337,7 @@ impl NetServer {
 
     fn tick_simulation(&mut self) {
         let mut inputs: TickInputs = self.simulation.bot_inputs();
-        for slot in 0..self.clients.len() {
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
             };
@@ -364,7 +373,7 @@ impl NetServer {
         self.config.sim = config;
         self.simulation = Simulation::new(config);
         self.record_config = config;
-        for slot in 0..self.clients.len() {
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
             };
@@ -477,8 +486,11 @@ impl NetServer {
 
     fn refresh_bot_mask(&mut self) {
         let mut mask = 0x03FFu16;
-        for (slot, client) in self.clients.iter().enumerate() {
-            if client.as_ref().is_some_and(|client| client.connected) {
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
+            if self.clients[slot]
+                .as_ref()
+                .is_some_and(|client| client.connected)
+            {
                 mask &= !(1 << slot);
             }
         }
@@ -502,6 +514,7 @@ impl NetServer {
                         hello.protocol,
                         hello.nonce,
                         hello.reconnect,
+                        hello.spectate,
                         &hello.auth,
                     ) {
                         self.reject_client(message.addr, 0, 4)?;
@@ -565,13 +578,18 @@ impl NetServer {
                     self.reconnect_client(slot, message.addr, hello.nonce)?;
                     return Ok(());
                 }
-                let Some(slot) = self.free_slot() else {
+                let slot = if hello.spectate {
+                    self.free_spectator_slot()
+                } else {
+                    self.free_slot()
+                };
+                let Some(slot) = slot else {
                     self.reject_client(message.addr, 0, 2)?;
                     return Ok(());
                 };
                 let session = 0xA5A5_0000 | (self.session_counter & 0xFFFF);
                 self.session_counter = self.session_counter.wrapping_add(1);
-                let team = if slot < 5 {
+                let team = if hello.spectate || slot < 5 {
                     moba_game::Team::Blue
                 } else {
                     moba_game::Team::Red
@@ -579,6 +597,12 @@ impl NetServer {
                 self.clients[slot] = Some(ClientConn {
                     addr: message.addr,
                     session,
+                    slot: if hello.spectate {
+                        0xFF
+                    } else {
+                        u8::try_from(slot).expect("player slot fits u8")
+                    },
+                    spectator: hello.spectate,
                     team,
                     connected: true,
                     last_seen: Instant::now(),
@@ -606,7 +630,8 @@ impl NetServer {
                     return Ok(());
                 };
                 let client = self.clients[index].as_mut().expect("index is live");
-                if message.header.session != client.session || !client.connected {
+                if message.header.session != client.session || !client.connected || client.spectator
+                {
                     return Ok(());
                 }
                 let Ok(input) = decode_input(&message.payload) else {
@@ -714,7 +739,11 @@ impl NetServer {
         session: u32,
     ) -> io::Result<()> {
         let config = self.config.sim;
-        let slot_u8 = u8::try_from(slot).expect("slot fits u8");
+        let (slot_u8, spectator) = self
+            .clients
+            .get(slot)
+            .and_then(|client| client.as_ref())
+            .map_or((0xFF, true), |client| (client.slot, client.spectator));
         let mut server_nonce = 0;
         let mut auth = [0u8; 32];
         let mut crypto = None;
@@ -730,10 +759,15 @@ impl NetServer {
             snapshot_interval: self.config.snapshot_interval,
             tick: self.simulation.current_tick().get(),
             seed: config.seed,
-            hero_pick: config.hero_picks[slot],
+            hero_pick: if spectator {
+                0
+            } else {
+                config.hero_picks[slot]
+            },
             nonce,
             server_nonce,
             auth,
+            spectator,
         };
         let payload = encode_welcome(&welcome);
         if let Some(client) = self.clients[slot].as_mut() {
@@ -760,6 +794,11 @@ impl NetServer {
             .find(|slot| self.clients[*slot].is_none())
     }
 
+    fn free_spectator_slot(&self) -> Option<usize> {
+        (self.config.max_clients.min(self.clients.len())..self.clients.len())
+            .find(|slot| self.clients[*slot].is_none())
+    }
+
     fn client_index_by_addr(&self, addr: SocketAddr) -> Option<usize> {
         self.clients
             .iter()
@@ -772,6 +811,8 @@ impl NetServer {
             self.simulation
                 .observed_units(team, &mut observed[team.index()]);
         }
+        let mut observed_spectator = core::mem::take(&mut self.observed_spectator);
+        self.simulation.observed_all(&mut observed_spectator);
         let tick = self.simulation.current_tick().get();
         let (phase_code, countdown) = self.phase();
         let mut current = core::mem::take(&mut self.current);
@@ -784,8 +825,17 @@ impl NetServer {
                 continue;
             }
             current.clear();
-            let viewer_slot = u8::try_from(index).unwrap_or(0xFF);
-            for unit in &observed[client.team.index()] {
+            let viewer_slot = if client.spectator {
+                0xFF
+            } else {
+                u8::try_from(index).unwrap_or(0xFF)
+            };
+            let units = if client.spectator {
+                &observed_spectator
+            } else {
+                &observed[client.team.index()]
+            };
+            for unit in units {
                 let mut entity = NetEntity::from_observed(client.net_id_for(unit.entity), unit);
                 if unit.hero_slot != Some(viewer_slot) {
                     // Gold and inventory are private to the owning player.
@@ -837,6 +887,7 @@ impl NetServer {
             self.stats.snapshots_sent += 1;
         }
         self.observed = observed;
+        self.observed_spectator = observed_spectator;
         self.current = current;
         self.payload = payload;
         Ok(())
@@ -902,6 +953,7 @@ mod tests {
             reconnect_grace: Duration::from_secs(2),
             pre_shared_key: None,
             record: None,
+            max_spectators: 8,
         };
         let mut server = NetServer::bind(config).expect("bind");
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
@@ -961,6 +1013,7 @@ mod tests {
             reconnect_grace: Duration::from_secs(2),
             pre_shared_key: None,
             record: Some(replay_path.clone()),
+            max_spectators: 8,
         };
         let mut server = NetServer::bind(config).expect("bind");
         server.phase = Phase::Playing;

@@ -96,6 +96,7 @@ fn main() {
             reconnect_grace: Duration::from_secs(60),
             pre_shared_key: secret,
             record,
+            max_spectators: 8,
         })
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");

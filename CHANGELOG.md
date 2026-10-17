@@ -36,6 +36,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
+- Version 7: read-only spectator handshake/slots and full-map observation; spectator welcome
+  flag.
 - Version 6: optional authenticated, encrypted transport (PSK handshake + ChaCha20-Poly1305
   payloads); handshake auth fields; reconnect token; snapshots carry phase/countdown,
   team scores, outcome, hero pick and per-hero progression; shop intents are one-shot

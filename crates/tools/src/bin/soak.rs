@@ -73,6 +73,7 @@ fn main() {
         reconnect_grace: Duration::from_secs(60),
         pre_shared_key: options.secret,
         record: None,
+        max_spectators: 8,
     }) {
         Ok(server) => server,
         Err(error) => fail(&format!("cannot bind server: {error}")),

@@ -386,31 +386,42 @@ impl Simulation {
     /// teammate. The output vector is cleared first and must be owned by the caller so the
     /// hot path allocates nothing after warm-up.
     pub fn observed_units(&self, viewer: Team, out: &mut Vec<ObservedUnit>) {
+        self.observe(Some(viewer), out);
+    }
+
+    /// Builds the complete unit list for a spectator (no fog filtering).
+    pub fn observed_all(&self, out: &mut Vec<ObservedUnit>) {
+        self.observe(None, out);
+    }
+
+    fn observe(&self, viewer: Option<Team>, out: &mut Vec<ObservedUnit>) {
         out.clear();
         let mut sources = [(FixVec2::ZERO, Fix::ZERO); MAX_UNITS];
         let mut source_count = 0usize;
-        for entity in self.world.entities() {
-            let Some(team) = self.world.get::<Team>(entity) else {
-                continue;
-            };
-            if *team != viewer {
-                continue;
-            }
-            let Some(health) = self.world.get::<Health>(entity) else {
-                continue;
-            };
-            if health.current <= 0 {
-                continue;
-            }
-            let Some(position) = self.world.get::<Position>(entity) else {
-                continue;
-            };
-            let Some(vision) = self.world.get::<VisionRange>(entity) else {
-                continue;
-            };
-            if source_count < MAX_UNITS {
-                sources[source_count] = (position.0, vision.0);
-                source_count += 1;
+        if let Some(viewer) = viewer {
+            for entity in self.world.entities() {
+                let Some(team) = self.world.get::<Team>(entity) else {
+                    continue;
+                };
+                if *team != viewer {
+                    continue;
+                }
+                let Some(health) = self.world.get::<Health>(entity) else {
+                    continue;
+                };
+                if health.current <= 0 {
+                    continue;
+                }
+                let Some(position) = self.world.get::<Position>(entity) else {
+                    continue;
+                };
+                let Some(vision) = self.world.get::<VisionRange>(entity) else {
+                    continue;
+                };
+                if source_count < MAX_UNITS {
+                    sources[source_count] = (position.0, vision.0);
+                    source_count += 1;
+                }
             }
         }
 
@@ -428,8 +439,9 @@ impl Simulation {
                 continue;
             };
             let dead = health.current <= 0;
-            let allied = *team == viewer;
-            let visible = allied
+            let allied = viewer.is_some_and(|viewer| *team == viewer);
+            let visible = viewer.is_none()
+                || allied
                 || kind.is_structure()
                 || (!dead && unit_in_vision(position.0, &sources[..source_count]));
             if !visible {

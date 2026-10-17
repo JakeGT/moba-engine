@@ -7,7 +7,7 @@ Make the engine safe and operable outside a trusted LAN, and make failures repro
 authenticated transport, reconnect, deterministic replays, load/soak gates and profiling.
 
 ## Landed so far
-- **Optional PSK AEAD** (protocol v6): HMAC-SHA256 handshake proofs, server nonce, HKDF-
+- **Optional PSK AEAD** (protocol v7): HMAC-SHA256 handshake proofs, server nonce, HKDF-
   SHA256 session keys, ChaCha20-Poly1305 payloads authenticated with header AAD, per-peer
   transport keys, encrypted fragments/reconnect, redacted key debug output.
 - **Reconnect** with a configurable grace period and slot/hero/network-id resumption.

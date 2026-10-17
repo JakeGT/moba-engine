@@ -156,6 +156,7 @@ pub fn hello_tag(
     protocol: u16,
     nonce: u64,
     reconnect: u32,
+    spectate: bool,
 ) -> [u8; 32] {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
@@ -163,6 +164,7 @@ pub fn hello_tag(
     mac.update(&protocol.to_le_bytes());
     mac.update(&nonce.to_le_bytes());
     mac.update(&reconnect.to_le_bytes());
+    mac.update(&[u8::from(spectate)]);
     mac.finalize().into_bytes().into()
 }
 
@@ -173,6 +175,7 @@ pub fn verify_hello_tag(
     protocol: u16,
     nonce: u64,
     reconnect: u32,
+    spectate: bool,
     tag: &[u8; 32],
 ) -> bool {
     let mut mac =
@@ -181,6 +184,7 @@ pub fn verify_hello_tag(
     mac.update(&protocol.to_le_bytes());
     mac.update(&nonce.to_le_bytes());
     mac.update(&reconnect.to_le_bytes());
+    mac.update(&[u8::from(spectate)]);
     mac.verify_slice(tag).is_ok()
 }
 
@@ -282,9 +286,10 @@ mod tests {
 
     #[test]
     fn handshake_tags_are_keyed() {
-        let tag = hello_tag(&[1; 32], 6, 123, 0);
-        assert!(verify_hello_tag(&[1; 32], 6, 123, 0, &tag));
-        assert!(!verify_hello_tag(&[2; 32], 6, 123, 0, &tag));
+        let tag = hello_tag(&[1; 32], 7, 123, 0, false);
+        assert!(verify_hello_tag(&[1; 32], 7, 123, 0, false, &tag));
+        assert!(!verify_hello_tag(&[2; 32], 7, 123, 0, false, &tag));
+        assert!(!verify_hello_tag(&[1; 32], 7, 123, 0, true, &tag));
         let welcome = welcome_tag(&[1; 32], 123, 456, 9, 3);
         assert!(verify_welcome_tag(&[1; 32], 123, 456, 9, 3, &welcome));
         assert!(!verify_welcome_tag(&[1; 32], 123, 457, 9, 3, &welcome));

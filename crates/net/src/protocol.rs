@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 6;
+pub const PROTOCOL_VERSION: u8 = 7;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -213,6 +213,8 @@ pub struct Hello {
     pub reconnect: u32,
     /// HMAC-SHA256 proof of the pre-shared key (all zero in plaintext mode).
     pub auth: [u8; 32],
+    /// Request a read-only spectator connection.
+    pub spectate: bool,
 }
 
 /// Handshake response payload.
@@ -236,6 +238,8 @@ pub struct Welcome {
     pub server_nonce: u64,
     /// HMAC-SHA256 proof of the pre-shared key (all zero in plaintext mode).
     pub auth: [u8; 32],
+    /// This connection is a read-only spectator.
+    pub spectator: bool,
 }
 
 /// Encodes a handshake request.
@@ -246,6 +250,7 @@ pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     out.extend_from_slice(&hello.nonce.to_le_bytes());
     put_u32(&mut out, hello.reconnect);
     out.extend_from_slice(&hello.auth);
+    out.push(u8::from(hello.spectate));
     out
 }
 
@@ -265,6 +270,7 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
             .bytes(32)?
             .try_into()
             .map_err(|_| WireError::Truncated)?,
+        spectate: reader.u8()? != 0,
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -285,6 +291,7 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
     out.extend_from_slice(&welcome.nonce.to_le_bytes());
     out.extend_from_slice(&welcome.server_nonce.to_le_bytes());
     out.extend_from_slice(&welcome.auth);
+    out.push(u8::from(welcome.spectator));
     out
 }
 
@@ -319,6 +326,7 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
             .bytes(32)?
             .try_into()
             .map_err(|_| WireError::Truncated)?,
+        spectator: reader.u8()? != 0,
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -1175,6 +1183,7 @@ mod tests {
             nonce: 0xDEAD_BEEF_1234,
             reconnect: 0xABCD_1234,
             auth: [3; 32],
+            spectate: true,
         };
         assert_eq!(decode_hello(&encode_hello(&hello)), Ok(hello));
     }

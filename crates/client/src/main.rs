@@ -53,6 +53,7 @@ struct NetworkView {
     last_snapshot_seq: u32,
     phase: MatchPhase,
     countdown: u16,
+    spectator: bool,
     last_tick: u32,
     demo_move: Option<FixVec2>,
     demo_sent: bool,
@@ -103,6 +104,7 @@ impl ClientApp {
             Ok(spec) if !spec.is_empty() => match connect_network(&spec) {
                 Ok(client) => {
                     let slot = client.player_slot();
+                    let spectator = client.is_spectator();
                     let hero = usize::from(client.hero_pick()) % HEROES.len();
                     let prediction = PredictionState::new(HEROES[hero].move_speed_per_sec);
                     let interpolator =
@@ -116,6 +118,7 @@ impl ClientApp {
                         last_snapshot_seq: 0,
                         phase: MatchPhase::Lobby,
                         countdown: 0,
+                        spectator,
                         last_tick: 0,
                         demo_move: parse_demo_move(),
                         demo_sent: false,
@@ -168,10 +171,14 @@ impl App for ClientApp {
         match Renderer::new(window, config) {
             Ok(renderer) => {
                 let title = if let Some(network) = &self.network {
-                    format!(
-                        "MOBA — online slot {} (right-click move, Q/W/E cast)",
-                        network.own_slot
-                    )
+                    if network.spectator {
+                        String::from("MOBA — spectator")
+                    } else {
+                        format!(
+                            "MOBA — online slot {} (right-click move, Q/W/E cast)",
+                            network.own_slot
+                        )
+                    }
                 } else {
                     String::from("MOBA — local preview")
                 };
@@ -293,7 +300,7 @@ impl App for ClientApp {
                     rebuild_network_units(network, units);
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
-                        let camera = network_camera(network, aspect);
+                        let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
                         handle_network_input(
                             network,
                             frame.input(),
@@ -442,6 +449,7 @@ fn parse_secret() -> Option<[u8; 32]> {
 
 fn connect_network(spec: &str) -> Result<NetClient, String> {
     let secret = parse_secret();
+    let spectator = std::env::var("MOBA_SPECTATE").is_ok_and(|value| value == "1");
     if spec == "local" {
         let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
             bind: "127.0.0.1:0".parse().expect("loopback address"),
@@ -454,6 +462,7 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
             reconnect_grace: Duration::from_secs(60),
             pre_shared_key: secret,
             record: None,
+            max_spectators: 8,
         })
         .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
@@ -462,18 +471,26 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
         std::thread::spawn(move || {
             let _ = server.run_for(Duration::from_secs(3_600));
         });
-        match secret {
-            Some(key) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
-            None => NetClient::connect(addr, Duration::from_secs(5)),
+        match (secret, spectator) {
+            (Some(key), true) => {
+                NetClient::connect_spectator_with_key(addr, Duration::from_secs(5), key)
+            }
+            (Some(key), false) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
+            (None, true) => NetClient::connect_spectator(addr, Duration::from_secs(5)),
+            (None, false) => NetClient::connect(addr, Duration::from_secs(5)),
         }
         .map_err(|error| format!("local connection failed: {error}"))
     } else {
         let addr = spec
             .parse()
             .map_err(|error| format!("invalid MOBA_SERVER {spec}: {error}"))?;
-        match secret {
-            Some(key) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
-            None => NetClient::connect(addr, Duration::from_secs(5)),
+        match (secret, spectator) {
+            (Some(key), true) => {
+                NetClient::connect_spectator_with_key(addr, Duration::from_secs(5), key)
+            }
+            (Some(key), false) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
+            (None, true) => NetClient::connect_spectator(addr, Duration::from_secs(5)),
+            (None, false) => NetClient::connect(addr, Duration::from_secs(5)),
         }
         .map_err(|error| format!("connection to {spec} failed: {error}"))
     }
@@ -578,7 +595,10 @@ fn team_from_u8(value: u8) -> Option<Team> {
     })
 }
 
-fn network_camera(network: &NetworkView, aspect: f32) -> Camera {
+fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
+    if network.spectator {
+        return Camera::orbit(Vec3::ZERO, 240.0, -0.7 + elapsed * 0.015, 0.92, aspect);
+    }
     let predicted = network.prediction.position();
     let center = Vec3::new(
         predicted.x.to_f32() - 128.0,
@@ -596,6 +616,9 @@ fn handle_network_input(
     height: u32,
     shop: &mut bool,
 ) {
+    if network.spectator {
+        return;
+    }
     if input.was_key_pressed(Key::B) {
         *shop = !*shop;
     }
@@ -1003,7 +1026,17 @@ fn build_network_hud(
 
     // Connection/status block.
     ui.panel(18.0, 18.0, 250.0, 82.0, bg, border);
-    ui.text(30.0, 28.0, 2.5, text, "MOBA ONLINE");
+    ui.text(
+        30.0,
+        28.0,
+        2.5,
+        text,
+        if network.spectator {
+            "MOBA SPECTATOR"
+        } else {
+            "MOBA ONLINE"
+        },
+    );
     let stats = network.client.stats();
     let ping = stats.rtt_ms.unwrap_or(0);
     ui.text(
@@ -1011,7 +1044,15 @@ fn build_network_hud(
         54.0,
         2.0,
         muted,
-        &format!("SLOT {}   PING {} MS", network.own_slot, ping),
+        &format!(
+            "SLOT {}   PING {} MS",
+            if network.spectator {
+                String::from("--")
+            } else {
+                network.own_slot.to_string()
+            },
+            ping
+        ),
     );
     ui.text(
         30.0,
@@ -1022,146 +1063,153 @@ fn build_network_hud(
     );
 
     // Controls.
+    let controls = if network.spectator {
+        "SPECTATOR VIEW   TAB SCOREBOARD"
+    } else {
+        "RMB MOVE   LMB ATTACK   Q/W/E CAST"
+    };
     ui.text(
-        width_f - 24.0 - UiDrawList::text_width("RMB MOVE   LMB ATTACK   Q/W/E CAST", 2.0),
+        width_f - 24.0 - UiDrawList::text_width(controls, 2.0),
         24.0,
         2.0,
         muted,
-        "RMB MOVE   LMB ATTACK   Q/W/E CAST",
+        controls,
     );
 
-    // Hero panel.
-    let panel_w = 452.0;
-    let panel_h = 196.0;
-    let x = 24.0;
-    let y = height_f - panel_h - 24.0;
-    ui.panel(x, y, panel_w, panel_h, bg, border);
     let progress = own.map_or(moba_net::protocol::NetProgress::default(), |entity| {
         entity.progress
     });
-    let level = progress.level.max(1);
-    let xp_needed = if level >= LEVEL_CAP {
-        0
-    } else {
-        xp_to_next(level)
-    };
-    ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero.name);
-    ui.text(
-        x + 14.0 + UiDrawList::text_width(hero.name, 3.0) + 14.0,
-        y + 16.0,
-        2.0,
-        Vec4::new(0.95, 0.78, 0.3, 1.0),
-        &format!("LV {level}"),
-    );
-    ui.text(
-        x + 250.0,
-        y + 16.0,
-        2.0,
-        muted,
-        &format!(
-            "TEAM {}   {}G",
-            if network.client.team() == Team::Blue {
-                "BLUE"
-            } else {
-                "RED"
-            },
-            progress.gold
-        ),
-    );
+    if !network.spectator {
+        // Hero panel.
+        let panel_w = 452.0;
+        let panel_h = 196.0;
+        let x = 24.0;
+        let y = height_f - panel_h - 24.0;
+        ui.panel(x, y, panel_w, panel_h, bg, border);
+        let level = progress.level.max(1);
+        let xp_needed = if level >= LEVEL_CAP {
+            0
+        } else {
+            xp_to_next(level)
+        };
+        ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero.name);
+        ui.text(
+            x + 14.0 + UiDrawList::text_width(hero.name, 3.0) + 14.0,
+            y + 16.0,
+            2.0,
+            Vec4::new(0.95, 0.78, 0.3, 1.0),
+            &format!("LV {level}"),
+        );
+        ui.text(
+            x + 250.0,
+            y + 16.0,
+            2.0,
+            muted,
+            &format!(
+                "TEAM {}   {}G",
+                if network.client.team() == Team::Blue {
+                    "BLUE"
+                } else {
+                    "RED"
+                },
+                progress.gold
+            ),
+        );
 
-    let (hp, max_hp, mp, max_mp) = own.map_or((0, 1, 0, 1), |entity| {
-        (
-            i32::from(entity.health),
-            i32::from(entity.max_health).max(1),
-            i32::from(entity.mana),
-            i32::from(entity.max_mana).max(1),
-        )
-    });
-    ui.text(x + 14.0, y + 42.0, 2.0, muted, &format!("HP {hp}/{max_hp}"));
-    ui.bar(
-        x + 14.0,
-        y + 58.0,
-        panel_w - 28.0,
-        14.0,
-        hp as f32 / max_hp as f32,
-        health,
-        track,
-        border,
-    );
-    ui.text(x + 14.0, y + 78.0, 2.0, muted, &format!("MP {mp}/{max_mp}"));
-    ui.bar(
-        x + 14.0,
-        y + 94.0,
-        panel_w - 28.0,
-        10.0,
-        mp as f32 / max_mp as f32,
-        mana,
-        track,
-        border,
-    );
-    let xp_fraction = if xp_needed == 0 {
-        1.0
-    } else {
-        f32::from(progress.xp) / f32::from(u16::try_from(xp_needed).unwrap_or(u16::MAX))
-    };
-    let xp_label = if xp_needed == 0 {
-        String::from("XP MAX")
-    } else {
-        format!("XP {}/{}", progress.xp, xp_needed)
-    };
-    ui.text(x + 14.0, y + 112.0, 1.8, muted, &xp_label);
-    ui.bar(
-        x + 14.0,
-        y + 128.0,
-        panel_w - 28.0,
-        8.0,
-        xp_fraction,
-        Vec4::new(0.85, 0.68, 0.25, 1.0),
-        track,
-        border,
-    );
+        let (hp, max_hp, mp, max_mp) = own.map_or((0, 1, 0, 1), |entity| {
+            (
+                i32::from(entity.health),
+                i32::from(entity.max_health).max(1),
+                i32::from(entity.mana),
+                i32::from(entity.max_mana).max(1),
+            )
+        });
+        ui.text(x + 14.0, y + 42.0, 2.0, muted, &format!("HP {hp}/{max_hp}"));
+        ui.bar(
+            x + 14.0,
+            y + 58.0,
+            panel_w - 28.0,
+            14.0,
+            hp as f32 / max_hp as f32,
+            health,
+            track,
+            border,
+        );
+        ui.text(x + 14.0, y + 78.0, 2.0, muted, &format!("MP {mp}/{max_mp}"));
+        ui.bar(
+            x + 14.0,
+            y + 94.0,
+            panel_w - 28.0,
+            10.0,
+            mp as f32 / max_mp as f32,
+            mana,
+            track,
+            border,
+        );
+        let xp_fraction = if xp_needed == 0 {
+            1.0
+        } else {
+            f32::from(progress.xp) / f32::from(u16::try_from(xp_needed).unwrap_or(u16::MAX))
+        };
+        let xp_label = if xp_needed == 0 {
+            String::from("XP MAX")
+        } else {
+            format!("XP {}/{}", progress.xp, xp_needed)
+        };
+        ui.text(x + 14.0, y + 112.0, 1.8, muted, &xp_label);
+        ui.bar(
+            x + 14.0,
+            y + 128.0,
+            panel_w - 28.0,
+            8.0,
+            xp_fraction,
+            Vec4::new(0.85, 0.68, 0.25, 1.0),
+            track,
+            border,
+        );
 
-    let cooldowns = own.map_or([0; 3], |entity| entity.cooldowns);
-    for slot in 0..3 {
-        let box_size = 38.0;
-        let bx = x + 14.0 + slot as f32 * 48.0;
-        let by = y + 146.0;
-        let key = ["Q", "W", "E"][slot];
-        ui.rect(bx, by, box_size, box_size, track);
-        ui.outline(bx, by, box_size, box_size, 1.0, border);
-        ui.text(bx + 8.0, by + 8.0, 2.5, text, key);
-        let remaining = cooldowns[slot];
-        let max_cooldown = hero
-            .ability(slot)
-            .map_or(1, |ability| {
-                u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)
-            })
-            .max(1);
-        if remaining > 0 {
-            let fraction = f32::from(remaining) / f32::from(max_cooldown);
-            ui.rect(
-                bx,
-                by,
-                box_size,
-                box_size * fraction.clamp(0.0, 1.0),
-                Vec4::new(0.0, 0.0, 0.0, 0.62),
-            );
-            let seconds = f32::from(remaining) / 30.0;
-            ui.text(bx + 4.0, by + 24.0, 1.8, text, &format!("{seconds:.1}"));
+        let cooldowns = own.map_or([0; 3], |entity| entity.cooldowns);
+        for slot in 0..3 {
+            let box_size = 38.0;
+            let bx = x + 14.0 + slot as f32 * 48.0;
+            let by = y + 146.0;
+            let key = ["Q", "W", "E"][slot];
+            ui.rect(bx, by, box_size, box_size, track);
+            ui.outline(bx, by, box_size, box_size, 1.0, border);
+            ui.text(bx + 8.0, by + 8.0, 2.5, text, key);
+            let remaining = cooldowns[slot];
+            let max_cooldown = hero
+                .ability(slot)
+                .map_or(1, |ability| {
+                    u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)
+                })
+                .max(1);
+            if remaining > 0 {
+                let fraction = f32::from(remaining) / f32::from(max_cooldown);
+                ui.rect(
+                    bx,
+                    by,
+                    box_size,
+                    box_size * fraction.clamp(0.0, 1.0),
+                    Vec4::new(0.0, 0.0, 0.0, 0.62),
+                );
+                let seconds = f32::from(remaining) / 30.0;
+                ui.text(bx + 4.0, by + 24.0, 1.8, text, &format!("{seconds:.1}"));
+            }
         }
-    }
-    // Inventory.
-    ui.text(x + 172.0, y + 148.0, 1.8, muted, "ITEMS");
-    for slot in 0..6 {
-        let bx = x + 172.0 + slot as f32 * 43.0;
-        let by = y + 164.0;
-        ui.rect(bx, by, 34.0, 26.0, track);
-        ui.outline(bx, by, 34.0, 26.0, 1.0, border);
-        let item = progress.items[slot];
-        if item != EMPTY_ITEM {
-            if let Some(definition) = ITEMS.get(usize::from(item)) {
-                let short = definition.name.get(..5).unwrap_or(definition.name);
-                ui.text(bx + 2.0, by + 8.0, 1.4, text, short);
+        // Inventory.
+        ui.text(x + 172.0, y + 148.0, 1.8, muted, "ITEMS");
+        for slot in 0..6 {
+            let bx = x + 172.0 + slot as f32 * 43.0;
+            let by = y + 164.0;
+            ui.rect(bx, by, 34.0, 26.0, track);
+            ui.outline(bx, by, 34.0, 26.0, 1.0, border);
+            let item = progress.items[slot];
+            if item != EMPTY_ITEM {
+                if let Some(definition) = ITEMS.get(usize::from(item)) {
+                    let short = definition.name.get(..5).unwrap_or(definition.name);
+                    ui.text(bx + 2.0, by + 8.0, 1.4, text, short);
+                }
             }
         }
     }
@@ -1237,7 +1285,7 @@ fn build_network_hud(
             "ENEMY ROWS APPEAR ONLY WHILE VISIBLE",
         );
     }
-    if shop {
+    if shop && !network.spectator {
         let shop_w = 700.0;
         let shop_h = 390.0;
         let sx = (width_f - shop_w) * 0.5;
@@ -1432,6 +1480,9 @@ fn build_local_hud(ui: &mut UiDrawList, simulation: &Simulation, width: u32, hei
 
 fn build_vision(network: &NetworkView) -> VisionCircles {
     let mut vision = VisionCircles::default();
+    if network.spectator {
+        return vision;
+    }
     let Some(snapshot) = network.client.snapshot() else {
         return vision;
     };

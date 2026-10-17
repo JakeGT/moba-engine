@@ -20,6 +20,7 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: Some(KEY),
         record: None,
+        max_spectators: 8,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("local addr");

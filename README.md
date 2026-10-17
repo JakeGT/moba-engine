@@ -16,9 +16,9 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 |---|---|
 | Simulation | Deterministic 30 Hz 5v5 MOBA, three lanes, towers/nexus, 5 heroes × 3 abilities, minions, bots, respawns, levels/XP, gold, items and a shop |
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
-| Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, screen-space bitmap HUD, Tab scoreboard, shop and mouse/keyboard controls |
+| Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 130 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 131 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -41,7 +41,8 @@ MOBA_SERVER=local cargo run -p moba-client
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
-B shop (1–8 buy), Tab scoreboard, Escape quit.
+B shop (1–8 buy), Tab scoreboard, Escape quit. Set `MOBA_SPECTATE=1` to join as a read-only
+spectator with full-map visibility and a free overview camera.
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can

@@ -138,6 +138,14 @@ simulation loop.
 - Tests: real UDP loopback, optional `moba-netsim` proxies, and deterministic single-process
   simulations.
 
+## Spectators
+
+A connection can request `spectate` in the handshake. Spectators occupy extra slots beyond the
+ten players, receive the union of all units (no fog filtering), have gold/inventory fields
+zeroed, cannot submit inputs, and render with a free overview camera. They use the same
+snapshot/ack/reconnect machinery as players; no gameplay state is duplicated. Spectators are
+capped by `ServerConfig::max_spectators`.
+
 ## Replays and debugging
 
 The server can write deterministic `.mbr` replays (`--record FILE`). A replay stores the

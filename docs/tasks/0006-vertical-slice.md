@@ -51,6 +51,15 @@ levels/items, and a complete match flow.
 - Server match-flow test covers countdown, nexus end, results timer, rematch reset and the new
   seed; client capture verifies waiting/countdown/playing overlays and minimap.
 
+## Landed in round 12
+- **Protocol v7**: spectator handshake flag/slot and welcome flag; peek into a spectator-selected
+  all-map observation path.
+- **Spectator mode**: read-only connections in extra server slots receive all-team snapshots
+  (no fog), zeroed private gold/inventory, cannot send inputs, and render with a free overview
+  camera, minimap and scoreboard. `MOBA_SPECTATE=1` client mode; handshake/protocol v7.
+- Spectator integration test verifies both teams and more than the 26 base entities are
+  visible without a player slot.
+
 ## Landed in round 9
 - **Reconnect**: disconnected slots are reserved for a configurable grace period (60 s
   default) while bots cover; clients resume with their welcome session token, rebind the

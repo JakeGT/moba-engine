@@ -20,6 +20,7 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: Some(KEY),
         record: None,
+        max_spectators: 8,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("addr");
@@ -48,8 +49,30 @@ fn encrypted_handshake_and_snapshots() {
     let snapshot = client.snapshot().expect("encrypted snapshot");
     assert_ne!(snapshot.entities.len(), 0);
 
+    let mut spectator = NetClient::connect_spectator_with_key(addr, Duration::from_secs(2), KEY)
+        .expect("encrypted spectator");
+    assert!(spectator.is_spectator());
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) && spectator.snapshot().is_none() {
+        spectator.poll().expect("spectator poll");
+        spectator.update().expect("spectator update");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let full = spectator.snapshot().expect("spectator snapshot");
+    assert!(
+        full.entities
+            .iter()
+            .any(|entity| entity.kind == 0 && entity.team == 0)
+    );
+    assert!(
+        full.entities
+            .iter()
+            .any(|entity| entity.kind == 0 && entity.team == 1)
+    );
+
     let wrong = NetClient::connect_with_key(addr, Duration::from_millis(500), [0x24; 32]);
     assert!(wrong.is_err(), "wrong key must not connect");
+    let _ = spectator.disconnect();
     let _ = client.disconnect();
     server.join().expect("server thread");
 }
