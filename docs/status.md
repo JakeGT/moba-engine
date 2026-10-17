@@ -155,3 +155,6 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
    golden-image test under lavapipe in CI.
 5. The reference machine has no usable hardware Vulkan device; lavapipe is installed in
    `.tools/` for validation (see `docs/dev/software-vulkan.md`).
+
+- Bot balance: 50-match soak (509,820 ticks) blue 30 / red 20; 95% Wilson CI 46.2–72.4%
+  includes even odds, so no side bias is established at this sample size.

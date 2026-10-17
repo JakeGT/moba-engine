@@ -82,3 +82,10 @@ Release 10-client soak (12 s, 150 ms RTT, 5% loss, 30 ms jitter): average simula
 Release `match-soak --matches 50` with rotated team compositions and two verification passes
 per seed: 509,820 ticks, unique state hash per seed, determinism ok, average tick 6 µs,
 max 3,021 µs, outcomes blue 30 / red 20.
+
+## Bot balance check (round 44)
+
+50 deterministic matches (509,820 ticks, rotated hero compositions) finished blue 30 / red 20
+with worst tick 289 us and determinism ok. The 95% Wilson interval for blue's win rate is
+46.2%–72.4%, which includes 50%; this sample does not establish a side bias. Larger samples
+and fixed-composition sweeps should be used before changing balance.
