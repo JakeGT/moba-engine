@@ -180,7 +180,9 @@ fn main() {
         };
         let mut server = if let Some(content) = content {
             eprintln!(
-                "content: {} items, hash {:#018x}",
+                "content: {} {} ({} items, hash {:#018x})",
+                content.manifest.name,
+                content.manifest.version,
                 content.items.len(),
                 content.hash()
             );

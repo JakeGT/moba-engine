@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Content pack manifests (name/version/author) and replay format v3 carrying them.
 - Allocation-regression test and hot-path fix: command ordering no longer allocates a `Vec`
   per tick (312→12 allocations per 300 ticks).
 - Global UDP packet budget (`--max-total-pps`) complementing per-address limits.

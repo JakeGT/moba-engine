@@ -1,3 +1,7 @@
+name = "One Lane"
+version = "1.0.0"
+author = "MOBA Engine"
+
 # Example map-only pack: items/heroes/abilities omitted, so engine defaults apply.
 [map]
 blue_spawn = [32, 128]

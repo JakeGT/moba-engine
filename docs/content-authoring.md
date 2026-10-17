@@ -60,6 +60,15 @@ truth and are deliberately small and readable.
 
 ## Runtime packs
 
+Packs carry identity metadata (all 1–32 ASCII bytes):
+
+```toml
+name = "Example Pack"
+version = "1.0.0"
+author = "MOBA Engine"
+```
+
+
 `moba-server --items FILE` loads a TOML catalogue. The pack is validated (1–16 items,
 unique 1–16 byte ASCII names, positive costs) and published in the `Welcome` handshake, so
 clients render the same names and costs without recompiling. The simulation reads purchase

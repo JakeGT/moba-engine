@@ -1,3 +1,7 @@
+name = "Nova Pack"
+version = "1.0.0"
+author = "MOBA Engine"
+
 # Example pack with a custom ability. Verify with:
 #   moba-server --items content/ability-pack.toml --record match.mbr ...
 [[items]]

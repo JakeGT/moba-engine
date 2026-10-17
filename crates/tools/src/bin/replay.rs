@@ -63,6 +63,10 @@ fn main() {
         Ok(result) => {
             println!("file       {}", path.display());
             println!("content    {:#018x}", replay.content_hash);
+            println!(
+                "pack       {} {}",
+                replay.content_name, replay.content_version
+            );
             println!("seed       {}", replay.config.seed);
             println!("frames     {}", replay.frames.len());
             println!("ticks      {}", result.ticks);

@@ -1,3 +1,7 @@
+name = "Example Pack"
+version = "1.0.0"
+author = "MOBA Engine"
+
 # Example runtime item catalogue. Load with:
 #   moba-server --listen 127.0.0.1:7777 --items content/items.toml
 # Names are 1..=16 ASCII bytes, costs are > 0, and at most 16 items are allowed.

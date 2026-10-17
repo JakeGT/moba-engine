@@ -2132,6 +2132,7 @@ mod tests {
     fn custom_content_purchase_updates_observation() {
         use moba_game::GameContent;
         let content = GameContent {
+            manifest: GameContent::default().manifest,
             items: vec![moba_game::ItemSpec {
                 name: String::from("Test Blade"),
                 cost: 10,

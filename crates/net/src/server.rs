@@ -736,6 +736,8 @@ impl NetServer {
             frames: std::mem::take(&mut self.record_frames),
             expected_hash: Some(state_hash),
             content_hash: self.content.hash(),
+            content_name: self.content.manifest.name.clone(),
+            content_version: self.content.manifest.version.clone(),
         };
         let target = replay_path(&path, self.match_number);
         match std::fs::write(&target, replay.encode()) {

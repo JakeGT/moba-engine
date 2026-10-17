@@ -15,6 +15,30 @@ use crate::{
     Team,
 };
 
+/// Maximum length of a manifest field.
+pub const MAX_MANIFEST_FIELD: usize = 32;
+
+/// Human-readable identity of a content pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContentManifest {
+    /// Pack name.
+    pub name: String,
+    /// Pack version string.
+    pub version: String,
+    /// Author/maintainer.
+    pub author: String,
+}
+
+impl Default for ContentManifest {
+    fn default() -> Self {
+        Self {
+            name: String::from("Core"),
+            version: String::from(env!("CARGO_PKG_VERSION")),
+            author: String::from("MOBA Engine"),
+        }
+    }
+}
+
 /// Maximum number of items in a content pack (matches the wire catalogue).
 pub const MAX_CONTENT_ITEMS: usize = 16;
 /// Maximum item display-name length in bytes.
@@ -283,6 +307,8 @@ impl From<&ItemDef> for ItemSpec {
 /// A validated content pack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GameContent {
+    /// Pack identity/version metadata.
+    pub manifest: ContentManifest,
     /// Item catalogue in stable id order.
     pub items: Vec<ItemSpec>,
     /// Hero catalogue in stable id order.
@@ -296,6 +322,7 @@ pub struct GameContent {
 impl Default for GameContent {
     fn default() -> Self {
         Self {
+            manifest: ContentManifest::default(),
             items: ITEMS.iter().map(ItemSpec::from).collect(),
             heroes: crate::HEROES.iter().map(HeroSpec::from).collect(),
             abilities: ABILITIES.iter().map(AbilitySpec::from).collect(),
@@ -347,6 +374,8 @@ pub enum ContentError {
     BadMapData,
     /// Wall count/endpoints are invalid.
     BadWalls,
+    /// Manifest fields are empty, too long or non-ASCII.
+    BadManifest,
 }
 
 impl core::fmt::Display for ContentError {
@@ -376,6 +405,7 @@ impl core::fmt::Display for ContentError {
             Self::BadMap => f.write_str("map limits are invalid"),
             Self::BadMapData => f.write_str("map lanes/structures are invalid"),
             Self::BadWalls => f.write_str("map walls are invalid"),
+            Self::BadManifest => f.write_str("manifest fields must be 1..=32 ASCII bytes"),
         }
     }
 }
@@ -389,6 +419,15 @@ impl GameContent {
     /// Returns the first [`ContentError`] found.
     #[allow(clippy::too_many_lines)] // Flat validation table is intentionally exhaustive.
     pub fn validate(&self) -> Result<(), ContentError> {
+        for field in [
+            &self.manifest.name,
+            &self.manifest.version,
+            &self.manifest.author,
+        ] {
+            if field.is_empty() || field.len() > MAX_MANIFEST_FIELD || !field.is_ascii() {
+                return Err(ContentError::BadManifest);
+            }
+        }
         if self.items.is_empty() {
             return Err(ContentError::NoItems);
         }
@@ -550,6 +589,14 @@ impl GameContent {
                 hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
             }
         };
+        for field in [
+            &self.manifest.name,
+            &self.manifest.version,
+            &self.manifest.author,
+        ] {
+            feed(field.as_bytes());
+            feed(&[0]);
+        }
         for item in &self.items {
             feed(item.name.as_bytes());
             feed(&[0]);
@@ -692,6 +739,9 @@ impl std::error::Error for ContentLoadError {}
 
 #[derive(Deserialize)]
 struct ContentFile {
+    name: Option<String>,
+    version: Option<String>,
+    author: Option<String>,
     #[serde(default)]
     items: Vec<ItemEntry>,
     heroes: Option<Vec<HeroEntry>>,
@@ -941,7 +991,14 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 .collect(),
         },
     );
+    let defaults = GameContent::default();
+    let manifest = ContentManifest {
+        name: file.name.unwrap_or(defaults.manifest.name),
+        version: file.version.unwrap_or(defaults.manifest.version),
+        author: file.author.unwrap_or(defaults.manifest.author),
+    };
     let content = GameContent {
+        manifest,
         items,
         heroes,
         abilities,
@@ -1011,6 +1068,8 @@ b = [80, 160]
         assert_eq!(content.items.len(), 8);
         assert_eq!(content.heroes.len(), 1);
         assert_eq!(content.heroes[0].name, "Vanguard");
+        assert_eq!(content.manifest.name, "Example Pack");
+        assert_eq!(content.manifest.version, "1.0.0");
     }
 
     #[test]
@@ -1048,6 +1107,13 @@ abilities = [0, 0, 0]
             content.abilities[0].kind,
             AbilityKind::Burst { damage: 50, .. }
         ));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_empty_fields() {
+        let mut content = GameContent::default();
+        content.manifest.author.clear();
+        assert_eq!(content.validate(), Err(ContentError::BadManifest));
     }
 
     #[test]

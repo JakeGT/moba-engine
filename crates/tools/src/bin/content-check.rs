@@ -12,6 +12,11 @@ fn main() {
             std::process::exit(1);
         });
     println!("file       {path}");
+    println!(
+        "pack       {} {}",
+        content.manifest.name, content.manifest.version
+    );
+    println!("author     {}", content.manifest.author);
     println!("items      {}", content.items.len());
     println!("heroes     {}", content.heroes.len());
     println!("abilities  {}", content.abilities.len());

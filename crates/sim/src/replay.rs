@@ -7,7 +7,8 @@
 //!
 //! Format (little-endian, version 1):
 //! `"MOBARPL1" | version u8 | seed u64 | hero_picks[10] | bot_mask u16 | spawn_waves u8 |
-//!  content_hash u64 | has_hash u8 | expected_hash u64 | frame_count u32 | frames...`
+//!  content_hash u64 | name_len u8+name | version_len u8+version | has_hash u8 |
+//!  expected_hash u64 | frame_count u32 | frames...`
 //!
 //! Each frame is a `present u16` bitmask followed by one command per present slot.
 
@@ -84,6 +85,10 @@ pub struct Replay {
     pub expected_hash: Option<u64>,
     /// Content pack hash used by the match.
     pub content_hash: u64,
+    /// Content pack display name.
+    pub content_name: String,
+    /// Content pack version.
+    pub content_version: String,
 }
 
 /// Result of replaying a match.
@@ -106,6 +111,8 @@ impl Replay {
             frames: Vec::new(),
             expected_hash: None,
             content_hash: GameContent::default().hash(),
+            content_name: GameContent::default().manifest.name,
+            content_version: GameContent::default().manifest.version,
         }
     }
 
@@ -166,6 +173,12 @@ impl Replay {
         out.extend_from_slice(&self.config.bot_mask.to_le_bytes());
         out.push(u8::from(self.config.spawn_waves));
         out.extend_from_slice(&self.content_hash.to_le_bytes());
+        for field in [&self.content_name, &self.content_version] {
+            let bytes = field.as_bytes();
+            let length = bytes.len().min(255);
+            out.push(u8::try_from(length).unwrap_or(u8::MAX));
+            out.extend_from_slice(&bytes[..length]);
+        }
         out.push(u8::from(self.expected_hash.is_some()));
         out.extend_from_slice(&self.expected_hash.unwrap_or(0).to_le_bytes());
         out.extend_from_slice(
@@ -204,6 +217,12 @@ impl Replay {
         let bot_mask = reader.u16()?;
         let spawn_waves = reader.u8()? != 0;
         let content_hash = reader.u64()?;
+        let read_field = |reader: &mut Reader<'_>| -> Result<String, ReplayError> {
+            let length = usize::from(reader.u8()?);
+            Ok(String::from_utf8_lossy(reader.bytes(length)?).into_owned())
+        };
+        let content_name = read_field(&mut reader)?;
+        let content_version = read_field(&mut reader)?;
         let has_hash = reader.u8()? != 0;
         let expected = reader.u64()?;
         let frame_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
@@ -234,6 +253,8 @@ impl Replay {
             frames,
             expected_hash: has_hash.then_some(expected),
             content_hash,
+            content_name,
+            content_version,
         })
     }
 }
@@ -410,12 +431,11 @@ mod tests {
         assert_eq!(result.state_hash, simulation.state_hash());
         assert_eq!(result.outcome, Some(moba_game::Team::Red));
 
-        let mut corrupt = encoded.clone();
-        // Expected hash lives at byte 31; changing it must make verification fail.
-        corrupt[39] ^= 0x40;
-        let decoded = Replay::decode(&corrupt).expect("header still valid");
+        let mut corrupt = decoded.clone();
+        corrupt.expected_hash = Some(corrupt.expected_hash.unwrap_or(0) ^ 0x40);
+        let corrupt = Replay::decode(&corrupt.encode()).expect("round trip");
         assert!(matches!(
-            decoded.play(),
+            corrupt.play(),
             Err(ReplayError::HashMismatch { .. })
         ));
     }
