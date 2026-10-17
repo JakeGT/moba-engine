@@ -41,6 +41,7 @@ fn custom_content() -> GameContent {
             abilities: [0, 1, 2],
         }],
         abilities: GameContent::default().abilities,
+        map: GameContent::default().map,
     }
 }
 

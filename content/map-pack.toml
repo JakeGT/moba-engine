@@ -1,0 +1,18 @@
+# Example map-only pack: items/heroes/abilities omitted, so engine defaults apply.
+[map]
+blue_spawn = [32, 128]
+red_spawn = [224, 128]
+
+[[map.lanes]]
+name = "Mid"
+path = [[32, 128], [128, 112], [224, 128]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [20, 128]
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [236, 128]

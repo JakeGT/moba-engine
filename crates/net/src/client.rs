@@ -83,6 +83,7 @@ pub struct NetClient {
     items: Vec<crate::protocol::WireItem>,
     heroes: Vec<crate::protocol::WireHero>,
     abilities: Vec<crate::protocol::WireAbility>,
+    map: crate::protocol::WireMap,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     spectator: bool,
@@ -185,6 +186,7 @@ impl NetClient {
             items: Vec::new(),
             heroes: Vec::new(),
             abilities: Vec::new(),
+            map: crate::protocol::WireMap::default(),
             nonce,
             pre_shared_key,
             spectator,
@@ -374,6 +376,7 @@ impl NetClient {
                         &welcome.items[..item_count],
                         &welcome.heroes[..hero_count],
                         &welcome.abilities[..ability_count],
+                        &welcome.map,
                     );
                     if content_hash != welcome.content_hash {
                         eprintln!(
@@ -422,6 +425,7 @@ impl NetClient {
                     self.abilities.clear();
                     self.abilities
                         .extend_from_slice(&welcome.abilities[..ability_count]);
+                    self.map = welcome.map;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -603,6 +607,12 @@ impl NetClient {
     #[must_use]
     pub fn abilities(&self) -> &[crate::protocol::WireAbility] {
         &self.abilities
+    }
+
+    /// Minimap geometry received in the handshake.
+    #[must_use]
+    pub const fn map(&self) -> &crate::protocol::WireMap {
+        &self.map
     }
 
     /// Server tick rate.

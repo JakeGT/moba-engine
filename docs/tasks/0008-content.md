@@ -21,6 +21,9 @@ deterministic playback and server authority.
 - Runtime ability catalogue: `AbilitySpec` over the engine's skillshot/dash/heal/burst kinds,
   TOML `[[abilities]]`, validation, `WireAbility` handshake entries for HUD cooldowns; a
   custom burst ability is exercised by a simulation test (content/ability-pack.toml).
+- Runtime maps: `MapSpec` lanes/spawns/structures, partial TOML `[map]` overlay, validation,
+  simulation placement, and `WireMap` lane geometry for the client minimap; map-only pack
+  capture (`../images/m8-map-content.png`).
 - Example `content/example-pack.toml` (8 items + Vanguard hero); custom hero UDP test and
   client capture (`../images/m8-hero-content.png`).
 - Catalogue integrity: FNV hash in `Welcome`, bound into the PSK HMAC and rechecked by clients.

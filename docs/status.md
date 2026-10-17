@@ -14,7 +14,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 | M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and spectator mode (protocol v7); 5-minute plaintext soak, 20 s encrypted and 15 s v7 soaks pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
 | M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up gating and surrender votes, HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; line-of-sight fog and map selection remain. |
 | M7 | Hardening | 🟡 | PSK AEAD transport, reconnect, replay manifests and per-address UDP rate limiting/tick telemetry landed; public identity/edge anti-DoS, 50 matches/box, one-hour sanitizer fuzz and profiling captures remain. |
-| M8 | Content pipeline | 🟡 | Runtime item/hero/ability packs load from TOML, validate, drive simulation and reach clients in the handshake; new ability kinds and map/lane data remain compile-time. |
+| M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation and reach clients in the handshake; new ability behaviour kinds, hot reload and richer manifests remain. |
 
 ## What exists now
 
@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 146 tests
+- `cargo test --workspace --locked` — 148 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -91,7 +91,7 @@ Last updated: 2026-10-17 (round 17 of the build).
   ~1.17 KiB/s up; server sent 13.4 MiB over 9,120 ticks. 30 s reruns measured 4.0–5.2 KiB/s
   (v2), 4.2–5.7 KiB/s (v3), 4.2–5.7 KiB/s (v4) and 4.2–5.8 KiB/s (v5); protocol-v6
   plaintext measured 4.6–6.8 KiB/s down (v6), 4.7–7.6 KiB/s (v7), 4.8–7.7 KiB/s (v8)
-  5.2–8.8 KiB/s (v9) and 5.2–9.1 KiB/s (v10);
+  5.2–8.8 KiB/s (v9) and 5.2–9.2 KiB/s (v10);
   encrypted v6 measured 5.0–7.3 KiB/s down / 1.8–1.9 KiB/s up.
   Protocol/delta/snapshot tests pass.
 - Online client: `MOBA_SERVER=local MOBA_DEMO_MOVE=110,128` connected, rendered
@@ -116,10 +116,12 @@ Last updated: 2026-10-17 (round 17 of the build).
   and a deterministic surrender replay test pass.
 - Content: `--items content/example-pack.toml` client capture shows the custom Vanguard
   hero/name (`m8-hero-content.png`); UDP test verifies custom items, heroes and purchases.
+- Map content: map-only pack capture (`m8-map-content.png`) shows the custom one-lane minimap;
+  simulation tests verify custom spawns/nexuses and the wire map catalogue.
 - Replay manifest: custom-content 134-tick replay verified with `--items` at content hash
   `0x5f2fd8408d51955a`; replaying without the pack is rejected.
 - Rate limiting: valid-packet flood test drops excess at a 10 pps budget; release 10-client
-  soak reports rate_limited=0, avg tick 9 µs / max 55 µs.
+  soak reports rate_limited=0, avg tick 10 µs / max 65 µs.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
 - Replay: live server recording (`--record`) and `moba-tools replay` reproduce

@@ -85,6 +85,7 @@ fn fuzz_once(rng: &mut Rng) {
         ability_count: 0,
         abilities: [moba_net::protocol::WireAbility::default();
             moba_net::protocol::MAX_WIRE_ABILITIES],
+        map: moba_net::protocol::WireMap::default(),
         content_hash: 0,
     });
     mutate(rng, &mut welcome);

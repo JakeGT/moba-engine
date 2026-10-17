@@ -74,4 +74,4 @@ Custom-content replay: 134 ticks with the example pack (8 items + Vanguard) prod
 ## Tick telemetry
 
 Release 10-client soak (12 s, 150 ms RTT, 5% loss, 30 ms jitter): average simulation tick
-9 µs, max 55 µs (budget 33,333 µs at 30 Hz), zero rate-limited datagrams.
+10 µs, max 65 µs (budget 33,333 µs at 30 Hz), zero rate-limited datagrams.

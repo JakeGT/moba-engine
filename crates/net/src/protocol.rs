@@ -229,6 +229,12 @@ pub const WIRE_HERO_NAME: usize = 16;
 pub const MAX_WIRE_ABILITIES: usize = 24;
 /// Fixed ability-name bytes on the wire.
 pub const WIRE_ABILITY_NAME: usize = 16;
+/// Maximum lanes in a handshake map.
+pub const MAX_WIRE_LANES: usize = 4;
+/// Maximum points per lane on the wire.
+pub const MAX_WIRE_LANE_POINTS: usize = 16;
+/// Fixed lane-name bytes on the wire.
+pub const WIRE_LANE_NAME: usize = 16;
 
 /// One runtime item definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -347,6 +353,63 @@ impl WireAbility {
     }
 }
 
+/// One lane path carried in the handshake map.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WireLane {
+    /// Name bytes, padded with zeroes.
+    pub name: [u8; WIRE_LANE_NAME],
+    /// Used bytes in `name`.
+    pub name_len: u8,
+    /// Number of valid points.
+    pub point_count: u8,
+    /// World-space points.
+    pub points: [[i16; 2]; MAX_WIRE_LANE_POINTS],
+}
+
+impl Default for WireLane {
+    fn default() -> Self {
+        Self {
+            name: [0; WIRE_LANE_NAME],
+            name_len: 0,
+            point_count: 0,
+            points: [[0; 2]; MAX_WIRE_LANE_POINTS],
+        }
+    }
+}
+
+impl WireLane {
+    /// Decodes the name as UTF-8, falling back to an empty string.
+    #[must_use]
+    pub fn name_str(&self) -> &str {
+        let end = usize::from(self.name_len).min(WIRE_LANE_NAME);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
+
+/// Minimap geometry carried in the handshake.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WireMap {
+    /// Number of valid lanes.
+    pub lane_count: u8,
+    /// Lane paths.
+    pub lanes: [WireLane; MAX_WIRE_LANES],
+    /// Blue spawn.
+    pub blue_spawn: [i16; 2],
+    /// Red spawn.
+    pub red_spawn: [i16; 2],
+}
+
+impl Default for WireMap {
+    fn default() -> Self {
+        Self {
+            lane_count: 0,
+            lanes: [WireLane::default(); MAX_WIRE_LANES],
+            blue_spawn: [0; 2],
+            red_spawn: [0; 2],
+        }
+    }
+}
+
 /// Handshake response payload.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Welcome {
@@ -382,7 +445,9 @@ pub struct Welcome {
     pub ability_count: u8,
     /// Runtime ability catalogue for HUD rendering.
     pub abilities: [WireAbility; MAX_WIRE_ABILITIES],
-    /// Hash of the wire item/hero/ability catalogue (also authenticated by the Welcome HMAC).
+    /// Minimap lane geometry.
+    pub map: WireMap,
+    /// Hash of the wire item/hero/ability/map catalogue (also authenticated by the Welcome HMAC).
     pub content_hash: u64,
 }
 
@@ -424,7 +489,12 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
 
 /// Hashes the catalogue bytes exactly as sent in the handshake.
 #[must_use]
-pub fn catalog_hash(items: &[WireItem], heroes: &[WireHero], abilities: &[WireAbility]) -> u64 {
+pub fn catalog_hash(
+    items: &[WireItem],
+    heroes: &[WireHero],
+    abilities: &[WireAbility],
+    map: &WireMap,
+) -> u64 {
     let mut hash = 0xCBF2_9CE4_8422_2325u64;
     let mut feed = |bytes: &[u8]| {
         for byte in bytes {
@@ -459,6 +529,18 @@ pub fn catalog_hash(items: &[WireItem], heroes: &[WireHero], abilities: &[WireAb
         feed(&[ability.name_len]);
         feed(&ability.cooldown_ticks.to_le_bytes());
         feed(&ability.mana_cost.to_le_bytes());
+    }
+    for lane in map.lanes.iter().take(usize::from(map.lane_count)) {
+        feed(&lane.name);
+        feed(&[lane.name_len, lane.point_count]);
+        for point in lane.points {
+            feed(&point[0].to_le_bytes());
+            feed(&point[1].to_le_bytes());
+        }
+    }
+    for point in [map.blue_spawn, map.red_spawn] {
+        feed(&point[0].to_le_bytes());
+        feed(&point[1].to_le_bytes());
     }
     hash
 }
@@ -504,6 +586,20 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
         put_u32(&mut out, ability.cooldown_ticks);
         put_u16(&mut out, ability.mana_cost);
     }
+    out.push(welcome.map.lane_count);
+    for lane in welcome.map.lanes.iter().take(MAX_WIRE_LANES) {
+        out.extend_from_slice(&lane.name);
+        out.push(lane.name_len);
+        out.push(lane.point_count);
+        for point in lane.points {
+            out.extend_from_slice(&point[0].to_le_bytes());
+            out.extend_from_slice(&point[1].to_le_bytes());
+        }
+    }
+    out.extend_from_slice(&welcome.map.blue_spawn[0].to_le_bytes());
+    out.extend_from_slice(&welcome.map.blue_spawn[1].to_le_bytes());
+    out.extend_from_slice(&welcome.map.red_spawn[0].to_le_bytes());
+    out.extend_from_slice(&welcome.map.red_spawn[1].to_le_bytes());
     out.extend_from_slice(&welcome.content_hash.to_le_bytes());
     out
 }
@@ -625,6 +721,63 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
                 ability.mana_cost = reader.u16()?;
             }
             abilities
+        },
+        map: {
+            let lane_count = reader.u8()?;
+            let mut lanes = [WireLane::default(); MAX_WIRE_LANES];
+            for lane in &mut lanes {
+                let mut name = [0; WIRE_LANE_NAME];
+                name.copy_from_slice(reader.bytes(WIRE_LANE_NAME)?);
+                lane.name = name;
+                lane.name_len = reader.u8()?;
+                lane.point_count = reader.u8()?;
+                for point in &mut lane.points {
+                    point[0] = i16::from_le_bytes(
+                        reader
+                            .bytes(2)?
+                            .try_into()
+                            .map_err(|_| WireError::Truncated)?,
+                    );
+                    point[1] = i16::from_le_bytes(
+                        reader
+                            .bytes(2)?
+                            .try_into()
+                            .map_err(|_| WireError::Truncated)?,
+                    );
+                }
+            }
+            WireMap {
+                lane_count,
+                lanes,
+                blue_spawn: [
+                    i16::from_le_bytes(
+                        reader
+                            .bytes(2)?
+                            .try_into()
+                            .map_err(|_| WireError::Truncated)?,
+                    ),
+                    i16::from_le_bytes(
+                        reader
+                            .bytes(2)?
+                            .try_into()
+                            .map_err(|_| WireError::Truncated)?,
+                    ),
+                ],
+                red_spawn: [
+                    i16::from_le_bytes(
+                        reader
+                            .bytes(2)?
+                            .try_into()
+                            .map_err(|_| WireError::Truncated)?,
+                    ),
+                    i16::from_le_bytes(
+                        reader
+                            .bytes(2)?
+                            .try_into()
+                            .map_err(|_| WireError::Truncated)?,
+                    ),
+                ],
+            }
         },
         content_hash: u64::from_le_bytes(
             reader
@@ -1507,12 +1660,18 @@ mod tests {
         let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
         heroes[0].name[..4].copy_from_slice(b"Hero");
         heroes[0].name_len = 4;
-        let baseline = catalog_hash(&items[..1], &heroes[..1], &[]);
+        let baseline = catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default());
         items[0].cost = 1;
-        assert_ne!(catalog_hash(&items[..1], &heroes[..1], &[]), baseline);
+        assert_ne!(
+            catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default()),
+            baseline
+        );
         items[0].cost = 0;
         heroes[0].abilities[0] = 1;
-        assert_ne!(catalog_hash(&items[..1], &heroes[..1], &[]), baseline);
+        assert_ne!(
+            catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default()),
+            baseline
+        );
     }
 
     #[test]

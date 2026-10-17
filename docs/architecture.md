@@ -147,10 +147,10 @@ datagrams and average/max simulation tick nanoseconds for operators and the soak
 
 ## Runtime content
 
-`GameContent` owns the runtime item and hero catalogues; the simulation holds an
-`Arc<GameContent>` and reads purchase costs/bonuses and hero stats/ability bindings from it. `NetServer::bind_with_content` accepts a validated pack;
-the server publishes it in `Welcome`, and clients use the received `WireItem` list for shop and
-inventory labels plus `WireHero` for names/vision/ability bindings. Ability behaviour and
+`GameContent` owns the runtime item, hero, ability and map catalogues; the simulation holds
+an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` accepts a validated pack;
+the server publishes it in `Welcome`, and clients use the received `WireItem`, `WireHero`,
+`WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability behaviour and
 map/lane definitions remain compile-time; the content crate is designed to grow into them.
 
 ## Spectators

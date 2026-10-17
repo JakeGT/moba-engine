@@ -15,10 +15,11 @@ use crate::crypto::{
 };
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ABILITIES, MAX_WIRE_HEROES,
-    MAX_WIRE_ITEMS, MatchPhase, NetEntity, NetId, PacketKind, SnapshotDelta, SnapshotState,
-    WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME, Welcome, WireAbility, WireCommand, WireHero,
-    WireItem, build_delta, catalog_hash, decode_hello, decode_input, dequantize_position,
-    encode_snapshot, encode_welcome, sequence_after,
+    MAX_WIRE_ITEMS, MAX_WIRE_LANE_POINTS, MAX_WIRE_LANES, MatchPhase, NetEntity, NetId, PacketKind,
+    SnapshotDelta, SnapshotState, WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME,
+    WIRE_LANE_NAME, Welcome, WireAbility, WireCommand, WireHero, WireItem, WireLane, WireMap,
+    build_delta, catalog_hash, decode_hello, decode_input, dequantize_position, encode_snapshot,
+    encode_welcome, sequence_after,
 };
 use crate::transport::{ReceivedMessage, UdpTransport};
 
@@ -950,6 +951,7 @@ impl NetServer {
         self.transport.send(addr, &header, &[reason])
     }
 
+    #[allow(clippy::too_many_lines)] // Handshake catalogue assembly is one linear frame.
     fn send_welcome(
         &mut self,
         addr: SocketAddr,
@@ -1002,10 +1004,39 @@ impl NetServer {
             slot.cooldown_ticks = source.cooldown_ticks;
             slot.mana_cost = u16::try_from(source.mana_cost.max(0)).unwrap_or(u16::MAX);
         }
+        let wire_map = {
+            let mut lanes = [WireLane::default(); MAX_WIRE_LANES];
+            for (slot, source) in lanes.iter_mut().zip(self.content.map.lanes.iter()) {
+                let bytes = source.name.as_bytes();
+                let length = bytes.len().min(WIRE_LANE_NAME);
+                slot.name[..length].copy_from_slice(&bytes[..length]);
+                slot.name_len = u8::try_from(length).unwrap_or(WIRE_LANE_NAME as u8);
+                slot.point_count = u8::try_from(source.path.len().min(MAX_WIRE_LANE_POINTS))
+                    .unwrap_or(MAX_WIRE_LANE_POINTS as u8);
+                for (target, point) in slot.points.iter_mut().zip(source.path.iter()) {
+                    target[0] = i16::try_from(point.x.to_i64()).unwrap_or(0);
+                    target[1] = i16::try_from(point.y.to_i64()).unwrap_or(0);
+                }
+            }
+            WireMap {
+                lane_count: u8::try_from(self.content.map.lanes.len().min(MAX_WIRE_LANES))
+                    .unwrap_or(MAX_WIRE_LANES as u8),
+                lanes,
+                blue_spawn: [
+                    i16::try_from(self.content.map.blue_spawn.x.to_i64()).unwrap_or(0),
+                    i16::try_from(self.content.map.blue_spawn.y.to_i64()).unwrap_or(0),
+                ],
+                red_spawn: [
+                    i16::try_from(self.content.map.red_spawn.x.to_i64()).unwrap_or(0),
+                    i16::try_from(self.content.map.red_spawn.y.to_i64()).unwrap_or(0),
+                ],
+            }
+        };
         let content_hash = catalog_hash(
             &items[..usize::from(item_count)],
             &heroes[..usize::from(hero_count)],
             &abilities[..usize::from(ability_count)],
+            &wire_map,
         );
         let mut server_nonce = 0;
         let mut auth = [0u8; 32];
@@ -1037,6 +1068,7 @@ impl NetServer {
             heroes,
             ability_count,
             abilities,
+            map: wire_map,
             content_hash,
         };
         let payload = encode_welcome(&welcome);

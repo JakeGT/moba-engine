@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
 use moba_game::{
-    EMPTY_ITEM, LANES, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team, xp_to_next,
+    EMPTY_ITEM, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team, xp_to_next,
 };
 use moba_net::protocol::{MatchPhase, WireCommand, dequantize_position, quantize_position};
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
@@ -928,10 +928,18 @@ fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u32, height: 
         )
     };
     let lane_color = Vec4::new(0.22, 0.38, 0.28, 0.85);
-    for lane in &LANES {
-        for pair in lane.path.windows(2) {
-            let a = map(pair[0]);
-            let b = map(pair[1]);
+    let wire_map = network.client.map();
+    for lane in wire_map.lanes.iter().take(usize::from(wire_map.lane_count)) {
+        let count = usize::from(lane.point_count).min(lane.points.len());
+        for pair in lane.points[..count].windows(2) {
+            let a = map(FixVec2::from_ints(
+                i32::from(pair[0][0]),
+                i32::from(pair[0][1]),
+            ));
+            let b = map(FixVec2::from_ints(
+                i32::from(pair[1][0]),
+                i32::from(pair[1][1]),
+            ));
             ui.line(a.x, a.y, b.x, b.y, 1.5, lane_color);
         }
     }

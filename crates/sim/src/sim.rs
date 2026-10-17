@@ -7,7 +7,7 @@ use moba_core::{Fix, FixVec2, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
     DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP,
-    LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Team,
+    LEVEL_GROWTH, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Team,
     XP_RADIUS, mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
@@ -660,7 +660,7 @@ impl Simulation {
     }
 
     fn spawn_structures(&mut self) {
-        for structure in MAP.structures {
+        for structure in self.content.map.structures.clone() {
             let entity = self.world.spawn();
             let (stats, kind) = match structure.kind {
                 moba_game::StructureKind::Tower => (&TOWER, UnitKind::Tower),
@@ -708,7 +708,11 @@ impl Simulation {
         let entity = self.world.spawn();
         let _ = self.world.insert(
             entity,
-            Position(MAP.hero_spawn(team, u8::try_from(slot % 5).expect("slot fits u8"))),
+            Position(
+                self.content
+                    .map
+                    .hero_spawn(team, u8::try_from(slot % 5).expect("slot fits u8")),
+            ),
         );
         let _ = self.world.insert(entity, team);
         let _ = self.world.insert(entity, UnitKind::Hero);
@@ -839,9 +843,15 @@ impl Simulation {
     fn spawn_wave(&mut self) {
         self.wave = self.wave.saturating_add(1);
         for team in Team::ALL {
-            for (lane_index, lane) in MAP.lanes.iter().enumerate() {
-                let start = lane.point(team, 0);
-                let direction = (lane.point(team, 1) - start).normalize_or_zero();
+            let lanes: Vec<(FixVec2, FixVec2)> = self
+                .content
+                .map
+                .lanes
+                .iter()
+                .map(|lane| (lane.point(team, 0), lane.point(team, 1)))
+                .collect();
+            for (lane_index, (start, next)) in lanes.into_iter().enumerate() {
+                let direction = (next - start).normalize_or_zero();
                 let perpendicular = direction.perpendicular();
                 for index in 0..3i32 {
                     let offset = Fix::from_i32(index - 1);
@@ -904,7 +914,7 @@ impl Simulation {
         let _ = self.world.remove::<Dead>(entity);
         let _ = self.world.remove::<LastHitBy>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
-            position.0 = MAP.hero_spawn(team, slot % 5);
+            position.0 = self.content.map.hero_spawn(team, slot % 5);
         }
         if let Some(health) = self.world.get_mut::<Health>(entity) {
             health.current = health.max;
@@ -1112,7 +1122,7 @@ impl Simulation {
 
     fn update_minion_targets(&mut self) {
         let grid = &self.grid;
-        let map = MAP;
+        let map = &self.content.map;
         for (_, (position, team, stats, attack_target, move_target, walker)) in
             self.world.query_filtered::<(
                 &Position,
@@ -1158,7 +1168,7 @@ impl Simulation {
             }
 
             attack_target.0 = None;
-            let lane = map.lanes[usize::from(walker.lane).min(map.lanes.len() - 1)];
+            let lane = &map.lanes[usize::from(walker.lane).min(map.lanes.len() - 1)];
             let mut waypoint = usize::from(walker.waypoint).min(lane.len() - 1);
             while waypoint < lane.len() - 1
                 && position.distance(lane.point(team, waypoint)) <= WAYPOINT_REACH
@@ -1541,7 +1551,7 @@ impl Simulation {
         let Some(position) = self.world.get::<Position>(hero).map(|p| p.0) else {
             return false;
         };
-        if position.distance_sq(MAP.nexus_position(team)) > SHOP_RADIUS * SHOP_RADIUS {
+        if position.distance_sq(self.content.map.nexus_position(team)) > SHOP_RADIUS * SHOP_RADIUS {
             return false;
         }
         let Some(mut progress) = self.world.get::<Progression>(hero).copied() else {
@@ -1676,7 +1686,9 @@ impl Simulation {
             }
             if let Some(hero) = self.hero_entities.get(slot).copied() {
                 let near_shop = self.world.get::<Position>(hero).is_some_and(|position| {
-                    position.0.distance_sq(MAP.nexus_position(view.team))
+                    position
+                        .0
+                        .distance_sq(self.content.map.nexus_position(view.team))
                         <= SHOP_RADIUS * SHOP_RADIUS
                 });
                 if near_shop {
@@ -1699,7 +1711,7 @@ impl Simulation {
                     }
                 }
             }
-            let enemy_nexus = MAP.nexus_position(view.team.enemy());
+            let enemy_nexus = self.content.map.nexus_position(view.team.enemy());
             let hero_target =
                 self.nearest_enemy(view.position, view.team, Fix::from_i32(13), |kind| {
                     kind.is_hero()
@@ -2011,7 +2023,8 @@ mod tests {
         );
 
         let damage_before = sim.world.get::<AttackStats>(blue).expect("stats").damage;
-        sim.world.get_mut::<Position>(blue).expect("position").0 = MAP.nexus_position(Team::Blue);
+        sim.world.get_mut::<Position>(blue).expect("position").0 =
+            sim.content.map.nexus_position(Team::Blue);
         let gold_before = sim.world.get::<Progression>(blue).expect("progress").gold;
         sim.buy_item(blue, 0);
         let progress = *sim.world.get::<Progression>(blue).expect("progress");
@@ -2035,6 +2048,7 @@ mod tests {
             }],
             heroes: GameContent::default().heroes,
             abilities: GameContent::default().abilities,
+            map: GameContent::default().map,
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
@@ -2047,6 +2061,23 @@ mod tests {
             .expect("own hero");
         assert_eq!(own.items[0], 0);
         assert!(own.gold < 500);
+    }
+
+    #[test]
+    fn custom_map_content_places_spawns_and_structures() {
+        let content = moba_game::load_content_toml(include_str!("../../../content/map-pack.toml"))
+            .expect("map pack");
+        let sim = Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        assert_eq!(sim.unit_count(), 12, "10 heroes + two nexuses");
+        let blue = sim
+            .world
+            .get::<Position>(sim.hero_entities[0])
+            .expect("position");
+        assert!(blue.0.x < Fix::from_i32(40));
+        assert_eq!(
+            sim.content.map.nexus_position(Team::Blue),
+            FixVec2::from_ints(20, 128)
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
   counters and average/max simulation tick telemetry.
 - Replay format v2 with content-hash manifests; `moba-tools replay --items`; shared
   `moba-game` TOML loader used by server and tools.
-- Runtime item, hero and ability content packs (`--items FILE`), validated and published to clients in
+- Runtime item, hero, ability and map content packs (`--items FILE`), validated and published to clients in
   the handshake; fixed progress-only delta encoding bug found by the content integration test.
 - Deterministic replay recording (`moba-server --record`) and verification
   (`moba-tools replay`), including a server recording test and decoder fuzz coverage.
@@ -42,8 +42,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
-- Version 10: handshake carries validated runtime item, hero and ability catalogues, with a
-  catalogue hash bound into the Welcome HMAC.
+- Version 10: handshake carries validated runtime item, hero, ability and map catalogues,
+  with a catalogue hash bound into the Welcome HMAC.
 - Version 9: handshake carries a validated runtime item catalogue.
 - Version 8: ready-up and surrender vote commands, lobby ready/player masks.
 - Version 7: read-only spectator handshake/slots and full-map observation; spectator welcome

@@ -7,10 +7,13 @@
 
 use std::path::Path;
 
-use moba_core::Fix;
+use moba_core::{Fix, FixVec2};
 use serde::Deserialize;
 
-use crate::{ABILITIES, AbilityDef, AbilityKind, DamageType, ITEMS, ItemDef};
+use crate::{
+    ABILITIES, AbilityDef, AbilityKind, DamageType, ITEMS, ItemDef, MAP, MapDef, StructureKind,
+    Team,
+};
 
 /// Maximum number of items in a content pack (matches the wire catalogue).
 pub const MAX_CONTENT_ITEMS: usize = 16;
@@ -24,6 +27,12 @@ pub const MAX_HERO_NAME: usize = 16;
 pub const MAX_CONTENT_ABILITIES: usize = 24;
 /// Maximum ability display-name length in bytes.
 pub const MAX_ABILITY_NAME: usize = 16;
+/// Maximum lanes in a content pack.
+pub const MAX_CONTENT_LANES: usize = 4;
+/// Maximum waypoints per lane.
+pub const MAX_LANE_POINTS: usize = 16;
+/// Maximum structures in a content pack.
+pub const MAX_CONTENT_STRUCTURES: usize = 32;
 
 /// An owned, runtime item definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +53,120 @@ pub struct ItemSpec {
     pub magic_resist: i32,
     /// Bonus movement speed in world units per second.
     pub move_speed_per_sec: Fix,
+}
+
+/// An owned lane path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneSpec {
+    /// Display name (1..=16 ASCII bytes).
+    pub name: String,
+    /// Waypoints from blue base to red base.
+    pub path: Vec<FixVec2>,
+}
+
+impl LaneSpec {
+    /// Number of waypoints.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.path.len()
+    }
+
+    /// Returns `true` when the lane has no waypoints.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+
+    /// Waypoint at `index` measured from `team`'s own base.
+    #[must_use]
+    pub fn point(&self, team: Team, index: usize) -> FixVec2 {
+        match team {
+            Team::Blue => self.path[index.min(self.path.len() - 1)],
+            Team::Red => self.path[self.path.len() - 1 - index.min(self.path.len() - 1)],
+        }
+    }
+}
+
+/// An owned placed structure.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct StructureSpec {
+    /// Owning team.
+    pub team: Team,
+    /// World position.
+    pub position: FixVec2,
+    /// Structure type.
+    pub kind: StructureKind,
+    /// Optional lane index.
+    pub lane: Option<u8>,
+}
+
+/// An owned runtime map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapSpec {
+    /// Lanes in stable order.
+    pub lanes: Vec<LaneSpec>,
+    /// Structures in stable order.
+    pub structures: Vec<StructureSpec>,
+    /// Blue spawn.
+    pub blue_spawn: FixVec2,
+    /// Red spawn.
+    pub red_spawn: FixVec2,
+}
+
+impl From<&MapDef> for MapSpec {
+    fn from(map: &MapDef) -> Self {
+        Self {
+            lanes: map
+                .lanes
+                .iter()
+                .map(|lane| LaneSpec {
+                    name: lane.name.to_owned(),
+                    path: lane.path.to_vec(),
+                })
+                .collect(),
+            structures: map
+                .structures
+                .iter()
+                .map(|structure| StructureSpec {
+                    team: structure.team,
+                    position: structure.position,
+                    kind: structure.kind,
+                    lane: structure.lane,
+                })
+                .collect(),
+            blue_spawn: map.blue_spawn,
+            red_spawn: map.red_spawn,
+        }
+    }
+}
+
+impl MapSpec {
+    /// Team spawn point.
+    #[must_use]
+    pub const fn spawn(&self, team: Team) -> FixVec2 {
+        match team {
+            Team::Blue => self.blue_spawn,
+            Team::Red => self.red_spawn,
+        }
+    }
+
+    /// A hero's spawn position for a slot in `0..5`.
+    #[must_use]
+    pub fn hero_spawn(&self, team: Team, slot: u8) -> FixVec2 {
+        let base = self.spawn(team);
+        let offsets = [(0, 0), (4, -7), (4, 7), (-4, -12), (-4, 12)];
+        let (dx, dy) = offsets[slot as usize % offsets.len()];
+        FixVec2::new(base.x + Fix::from_i32(dx), base.y + Fix::from_i32(dy))
+    }
+
+    /// Nexus position for a team.
+    #[must_use]
+    pub fn nexus_position(&self, team: Team) -> FixVec2 {
+        self.structures
+            .iter()
+            .find(|structure| structure.team == team && structure.kind == StructureKind::Nexus)
+            .map_or(self.spawn(team), |structure| structure.position)
+    }
 }
 
 /// An owned, runtime ability definition.
@@ -151,6 +274,8 @@ pub struct GameContent {
     pub heroes: Vec<HeroSpec>,
     /// Ability catalogue in stable id order.
     pub abilities: Vec<AbilitySpec>,
+    /// Map geometry.
+    pub map: MapSpec,
 }
 
 impl Default for GameContent {
@@ -159,6 +284,7 @@ impl Default for GameContent {
             items: ITEMS.iter().map(ItemSpec::from).collect(),
             heroes: crate::HEROES.iter().map(HeroSpec::from).collect(),
             abilities: ABILITIES.iter().map(AbilitySpec::from).collect(),
+            map: MapSpec::from(&MAP),
         }
     }
 }
@@ -200,6 +326,10 @@ pub enum ContentError {
     BadAbilityStats,
     /// Ability kind parameters are invalid.
     BadAbilityKind,
+    /// Map has no lanes or too many lanes/points/structures.
+    BadMap,
+    /// Map lane names or structure layout are invalid.
+    BadMapData,
 }
 
 impl core::fmt::Display for ContentError {
@@ -226,6 +356,8 @@ impl core::fmt::Display for ContentError {
                 f.write_str("ability cooldown must be positive and mana/cast range non-negative")
             }
             Self::BadAbilityKind => f.write_str("ability kind parameters must be positive"),
+            Self::BadMap => f.write_str("map limits are invalid"),
+            Self::BadMapData => f.write_str("map lanes/structures are invalid"),
         }
     }
 }
@@ -237,6 +369,7 @@ impl GameContent {
     ///
     /// # Errors
     /// Returns the first [`ContentError`] found.
+    #[allow(clippy::too_many_lines)] // Flat validation table is intentionally exhaustive.
     pub fn validate(&self) -> Result<(), ContentError> {
         if self.items.is_empty() {
             return Err(ContentError::NoItems);
@@ -304,6 +437,45 @@ impl GameContent {
                 return Err(ContentError::BadAbilityKind);
             }
         }
+        if self.map.lanes.is_empty()
+            || self.map.lanes.len() > MAX_CONTENT_LANES
+            || self.map.structures.len() > MAX_CONTENT_STRUCTURES
+        {
+            return Err(ContentError::BadMap);
+        }
+        for (index, lane) in self.map.lanes.iter().enumerate() {
+            if lane.name.is_empty()
+                || lane.name.len() > MAX_HERO_NAME
+                || !lane.name.is_ascii()
+                || lane.path.len() < 2
+                || lane.path.len() > MAX_LANE_POINTS
+            {
+                return Err(ContentError::BadMapData);
+            }
+            if self.map.lanes[..index]
+                .iter()
+                .any(|other| other.name == lane.name)
+            {
+                return Err(ContentError::BadMapData);
+            }
+        }
+        for team in Team::ALL {
+            if !self
+                .map
+                .structures
+                .iter()
+                .any(|structure| structure.team == team && structure.kind == StructureKind::Nexus)
+            {
+                return Err(ContentError::BadMapData);
+            }
+        }
+        if self.map.structures.iter().any(|structure| {
+            structure
+                .lane
+                .is_some_and(|lane| usize::from(lane) >= self.map.lanes.len())
+        }) {
+            return Err(ContentError::BadMapData);
+        }
         if self.heroes.is_empty() {
             return Err(ContentError::NoHeroes);
         }
@@ -342,6 +514,7 @@ impl GameContent {
 
     /// Stable FNV-1a hash of the catalogue, used for diagnostics and mismatch checks.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Canonical field feed mirrors the content schema.
     pub fn hash(&self) -> u64 {
         let mut hash = 0xCBF2_9CE4_8422_2325u64;
         let mut feed = |bytes: &[u8]| {
@@ -431,6 +604,24 @@ impl GameContent {
             }
             feed(&hero.abilities);
         }
+        feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
+        feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
+        feed(&self.map.red_spawn.x.to_bits().to_le_bytes());
+        feed(&self.map.red_spawn.y.to_bits().to_le_bytes());
+        for lane in &self.map.lanes {
+            feed(lane.name.as_bytes());
+            feed(&[0]);
+            for point in &lane.path {
+                feed(&point.x.to_bits().to_le_bytes());
+                feed(&point.y.to_bits().to_le_bytes());
+            }
+        }
+        for structure in &self.map.structures {
+            feed(&[structure.team.index() as u8, structure.kind as u8]);
+            feed(&structure.position.x.to_bits().to_le_bytes());
+            feed(&structure.position.y.to_bits().to_le_bytes());
+            feed(&[structure.lane.unwrap_or(0xFF)]);
+        }
         hash
     }
 }
@@ -464,6 +655,31 @@ struct ContentFile {
     items: Vec<ItemEntry>,
     heroes: Option<Vec<HeroEntry>>,
     abilities: Option<Vec<AbilityEntry>>,
+    map: Option<MapEntry>,
+}
+
+#[derive(Deserialize)]
+struct MapEntry {
+    blue_spawn: [i32; 2],
+    red_spawn: [i32; 2],
+    lanes: Vec<LaneEntry>,
+    #[serde(default)]
+    structures: Vec<StructureEntry>,
+}
+
+#[derive(Deserialize)]
+struct LaneEntry {
+    name: String,
+    path: Vec<[i32; 2]>,
+}
+
+#[derive(Deserialize)]
+struct StructureEntry {
+    team: String,
+    kind: String,
+    position: [i32; 2],
+    #[serde(default)]
+    lane: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -536,8 +752,10 @@ struct HeroEntry {
 ///
 /// # Errors
 /// Returns [`ContentLoadError`] for syntax or validation failures.
+#[allow(clippy::too_many_lines)] // One declarative conversion for every content table.
 pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
     let file: ContentFile = toml::from_str(text).map_err(ContentLoadError::Toml)?;
+    let defaults = GameContent::default();
     let items = file
         .items
         .into_iter()
@@ -551,7 +769,12 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             magic_resist: item.magic_resist,
             move_speed_per_sec: Fix::from_f32(item.move_speed),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let items = if items.is_empty() {
+        defaults.items
+    } else {
+        items
+    };
     let heroes = file.heroes.map_or_else(
         || GameContent::default().heroes,
         |heroes| {
@@ -618,10 +841,48 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 .collect()
         },
     );
+    let map = file.map.map_or_else(
+        || GameContent::default().map,
+        |map| MapSpec {
+            blue_spawn: FixVec2::from_ints(map.blue_spawn[0], map.blue_spawn[1]),
+            red_spawn: FixVec2::from_ints(map.red_spawn[0], map.red_spawn[1]),
+            lanes: map
+                .lanes
+                .into_iter()
+                .map(|lane| LaneSpec {
+                    name: lane.name,
+                    path: lane
+                        .path
+                        .into_iter()
+                        .map(|point| FixVec2::from_ints(point[0], point[1]))
+                        .collect(),
+                })
+                .collect(),
+            structures: map
+                .structures
+                .into_iter()
+                .map(|structure| StructureSpec {
+                    team: if structure.team == "red" {
+                        Team::Red
+                    } else {
+                        Team::Blue
+                    },
+                    position: FixVec2::from_ints(structure.position[0], structure.position[1]),
+                    kind: if structure.kind == "nexus" {
+                        StructureKind::Nexus
+                    } else {
+                        StructureKind::Tower
+                    },
+                    lane: structure.lane,
+                })
+                .collect(),
+        },
+    );
     let content = GameContent {
         items,
         heroes,
         abilities,
+        map,
     };
     content.validate().map_err(ContentLoadError::Invalid)?;
     Ok(content)
@@ -646,6 +907,33 @@ mod tests {
         assert_eq!(content.items.len(), ITEMS.len());
         assert_eq!(content.validate(), Ok(()));
         assert_eq!(content.hash(), GameContent::default().hash());
+    }
+
+    #[test]
+    fn map_only_pack_overlays_defaults() {
+        let text = r#"
+[map]
+blue_spawn = [32, 128]
+red_spawn = [224, 128]
+
+[[map.lanes]]
+name = "Mid"
+path = [[32, 128], [128, 128], [224, 128]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [20, 128]
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [236, 128]
+"#;
+        let content = load_toml(text).expect("map pack");
+        assert_eq!(content.items.len(), ITEMS.len());
+        assert_eq!(content.map.lanes.len(), 1);
+        assert_eq!(content.map.nexus_position(Team::Blue).x.to_i64(), 20);
     }
 
     #[test]

@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 146 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 148 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -51,17 +51,17 @@ resume with `NetClient::connect_with_session(server, timeout, session)` using
 
 ### Runtime content packs
 
-Servers can load validated TOML item, hero and ability catalogues and publish them to clients in the handshake:
+Servers can load validated TOML item, hero, ability and map definitions and publish them to clients in the handshake:
 
 ```bash
 cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 --items content/items.toml
 MOBA_SERVER=127.0.0.1:7777 cargo run -p moba-client
 ```
 
-The client shop/HUD, cooldowns and vision use the received catalogs; simulation purchases, hero stats and ability effects use the same definitions.
-Names are 1–16 ASCII bytes, costs must be positive, packs hold at most 16 items, 8 heroes and 24 abilities, and hero ability slots reference
+The client shop/HUD, cooldowns, vision and minimap use the received catalogs; simulation purchases, hero stats, ability effects and map geometry use the same definitions.
+Names are 1–16 ASCII bytes, costs must be positive, packs hold at most 16 items, 8 heroes, 24 abilities, 4 lanes and 32 structures, and hero ability slots reference
 catalogue ids. See
-[content/example-pack.toml](content/example-pack.toml) and [content/ability-pack.toml](content/ability-pack.toml) and
+[content/example-pack.toml](content/example-pack.toml) and [content/ability-pack.toml](content/ability-pack.toml) and [content/map-pack.toml](content/map-pack.toml) and
 [content authoring](docs/content-authoring.md).
 
 ### Server hardening
