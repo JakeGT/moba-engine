@@ -17,7 +17,9 @@ is **not** a complete public-internet security model:
 
 - it is a shared key, not per-player identity, and has no forward secrecy;
 - packet metadata (addresses, sizes, timing, session ids) is visible;
-- there is no anti-DoS/rate-limit layer, matchmaking identity or revocation;
+- per-address UDP budgets reject floods of valid packets, but malformed-packet bandwidth and
+  spoofed-source floods still need a network/edge gateway;
+- there is no matchmaking identity or revocation;
 - replay is limited by sequence/ack semantics, not a formal anti-replay window;
 - a compromised client or key compromises that match.
 

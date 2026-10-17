@@ -87,7 +87,7 @@ levels/items, and a complete match flow.
 - [x] Fog circles align with server visibility; unseen units are absent and unseen terrain is dark.
 - [x] Tab scoreboard lists allied heroes and hides unseen enemies.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
-- [x] 144 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
+- [x] 146 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
       progression and reconnect handshake; UDP tests cover shop purchase and slot resumption.
 - [x] Levels/XP, gold/items/shop and the lobby-to-rematch flow (no ready-up/reconnect yet).
 

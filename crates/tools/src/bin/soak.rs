@@ -74,6 +74,7 @@ fn main() {
         pre_shared_key: options.secret,
         record: None,
         max_spectators: 8,
+        max_packets_per_second: 120,
         require_ready: false,
     }) {
         Ok(server) => server,
@@ -195,11 +196,14 @@ fn main() {
     }
     let (server_stats, hash) = server_thread.join().expect("server thread");
     eprintln!(
-        "server: ticks={} snapshots={} sent={} KiB recv={} KiB hash={:#x}",
+        "server: ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} avg_tick_us={} max_tick_us={} hash={:#x}",
         server_stats.ticks,
         server_stats.snapshots_sent,
         server_stats.bytes_sent / 1024,
         server_stats.bytes_received / 1024,
+        server_stats.rate_limited,
+        server_stats.tick_avg_nanos / 1_000,
+        server_stats.tick_max_nanos / 1_000,
         hash
     );
     if failed {

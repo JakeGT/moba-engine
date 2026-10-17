@@ -138,6 +138,13 @@ simulation loop.
 - Tests: real UDP loopback, optional `moba-netsim` proxies, and deterministic single-process
   simulations.
 
+## Server operations
+
+`NetServer` applies a token-bucket rate limit per source address before message decoding
+(default 120 pps, burst one second; `0` disables). Buckets are bounded and evicted LRU to cap
+memory under spoofed-source floods. `ServerStats` exposes bytes, snapshots, rate-limited
+datagrams and average/max simulation tick nanoseconds for operators and the soak harness.
+
 ## Runtime content
 
 `GameContent` owns the runtime item and hero catalogues; the simulation holds an

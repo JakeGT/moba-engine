@@ -15,6 +15,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   hash, `moba-tools replay FILE` verification, recording test and decoder noise test.
 - **Operational tools**: 5-minute plaintext soak, encrypted 10-client soak, deterministic
   wire fuzzer, replay verifier.
+- **Application-layer DoS controls**: bounded per-address token buckets (configurable
+  `--max-pps`, 0 disables), drop counters and avg/max tick telemetry. Release soak measures
+  avg 9 µs / max 55 µs per simulation tick with 10 clients.
 
 ## Still open
 - Public identity/key exchange, revocation, anti-DoS/rate limiting and a formal replay window.

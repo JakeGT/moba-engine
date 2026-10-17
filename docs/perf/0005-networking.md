@@ -69,3 +69,9 @@ milliseconds.
 Custom-content replay: 134 ticks with the example pack (8 items + Vanguard) produced a
 20 KB `.mbr`; offline verification with `--items` matched content hash
 `0x5f2fd8408d51955a` and state hash `0x2e3dc732ced63886`.
+
+
+## Tick telemetry
+
+Release 10-client soak (12 s, 150 ms RTT, 5% loss, 30 ms jitter): average simulation tick
+9 µs, max 55 µs (budget 33,333 µs at 30 Hz), zero rate-limited datagrams.

@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 144 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 146 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -63,6 +63,13 @@ Names are 1–16 ASCII bytes, costs must be positive, packs hold at most 16 item
 catalogue ids. See
 [content/example-pack.toml](content/example-pack.toml) and [content/ability-pack.toml](content/ability-pack.toml) and
 [content authoring](docs/content-authoring.md).
+
+### Server hardening
+
+The dedicated server enforces a per-address UDP budget (default 120 packets/s, burst 120)
+before decoding; raise/lower with `--max-pps N` or disable with `0`. It reports drop counts
+plus average/max simulation tick time in its final stats. Rate limiting is application-layer
+defence; put public servers behind a DDoS/connection gateway as well.
 
 ### Encrypted private servers
 

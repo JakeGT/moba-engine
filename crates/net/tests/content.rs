@@ -57,6 +57,7 @@ fn spawn_server(content: GameContent) -> (SocketAddr, std::thread::JoinHandle<()
         pre_shared_key: None,
         record: None,
         max_spectators: 4,
+        max_packets_per_second: 120,
         require_ready: false,
     };
     let mut server = NetServer::bind_with_content(config, Arc::new(content)).expect("bind");

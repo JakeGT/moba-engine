@@ -26,6 +26,7 @@ fn main() {
     let mut record: Option<std::path::PathBuf> = None;
     let mut items_path: Option<std::path::PathBuf> = None;
     let mut require_ready = false;
+    let mut max_packets_per_second = 120u32;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -68,11 +69,16 @@ fn main() {
                 record = args.next().map(std::path::PathBuf::from);
             }
             "--ready" => require_ready = true,
+            "--max-pps" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    max_packets_per_second = value;
+                }
+            }
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N]"
                 );
                 return;
             }
@@ -104,6 +110,7 @@ fn main() {
             pre_shared_key: secret,
             record,
             max_spectators: 8,
+            max_packets_per_second,
             require_ready,
         };
         let mut server = if let Some(content) = content {
@@ -138,12 +145,15 @@ fn main() {
         server.finish_recording();
         let stats = server.stats();
         eprintln!(
-            "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB",
+            "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} avg_tick_us={} max_tick_us={}",
             stats.clients,
             stats.ticks,
             stats.snapshots_sent,
             stats.bytes_sent / 1024,
-            stats.bytes_received / 1024
+            stats.bytes_received / 1024,
+            stats.rate_limited,
+            stats.tick_avg_nanos / 1_000,
+            stats.tick_max_nanos / 1_000
         );
         return;
     }

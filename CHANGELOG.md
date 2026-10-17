@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Per-address UDP token-bucket rate limiting (`--max-pps`) with bounded/LRU buckets, drop
+  counters and average/max simulation tick telemetry.
 - Replay format v2 with content-hash manifests; `moba-tools replay --items`; shared
   `moba-game` TOML loader used by server and tools.
 - Runtime item, hero and ability content packs (`--items FILE`), validated and published to clients in

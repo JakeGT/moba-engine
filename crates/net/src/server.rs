@@ -56,6 +56,8 @@ pub struct ServerConfig {
     pub record: Option<PathBuf>,
     /// Additional read-only spectator connections beyond the ten player slots.
     pub max_spectators: usize,
+    /// Per-address UDP packet budget per second (0 disables rate limiting).
+    pub max_packets_per_second: u32,
     /// Require every connected player to ready up before starting the countdown.
     pub require_ready: bool,
 }
@@ -74,6 +76,7 @@ impl core::fmt::Debug for ServerConfig {
             .field("pre_shared_key", &self.pre_shared_key.is_some())
             .field("record", &self.record)
             .field("max_spectators", &self.max_spectators)
+            .field("max_packets_per_second", &self.max_packets_per_second)
             .field("require_ready", &self.require_ready)
             .finish()
     }
@@ -93,6 +96,7 @@ impl Default for ServerConfig {
             pre_shared_key: None,
             record: None,
             max_spectators: 8,
+            max_packets_per_second: 120,
             require_ready: false,
         }
     }
@@ -111,6 +115,86 @@ pub struct ServerStats {
     pub bytes_sent: u64,
     /// UDP bytes received.
     pub bytes_received: u64,
+    /// Datagrams dropped by the per-address rate limiter.
+    pub rate_limited: u64,
+    /// Total nanoseconds spent inside simulation ticks.
+    pub tick_nanos: u64,
+    /// Longest simulation tick.
+    pub tick_max_nanos: u64,
+    /// Mean simulation tick, filled by [`NetServer::stats`].
+    pub tick_avg_nanos: u64,
+}
+
+#[derive(Debug)]
+struct RateBucket {
+    addr: SocketAddr,
+    tokens: f32,
+    last_refill: Instant,
+    last_seen: Instant,
+}
+
+#[derive(Debug)]
+struct RateLimiter {
+    rate: f32,
+    burst: f32,
+    max_buckets: usize,
+    buckets: Vec<RateBucket>,
+}
+
+impl RateLimiter {
+    fn new(packets_per_second: u32, max_buckets: usize) -> Self {
+        let rate = packets_per_second as f32;
+        Self {
+            rate,
+            burst: rate.max(1.0),
+            max_buckets,
+            buckets: Vec::new(),
+        }
+    }
+
+    fn allow_at(&mut self, addr: SocketAddr, now: Instant) -> bool {
+        if self.rate <= 0.0 {
+            return true;
+        }
+        let position = self.buckets.iter().position(|bucket| bucket.addr == addr);
+        let index = if let Some(index) = position {
+            index
+        } else if self.buckets.len() >= self.max_buckets {
+            let oldest = self
+                .buckets
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, bucket)| bucket.last_seen)
+                .map_or(0, |(index, _)| index);
+            self.buckets[oldest] = RateBucket {
+                addr,
+                tokens: self.burst,
+                last_refill: now,
+                last_seen: now,
+            };
+            oldest
+        } else {
+            self.buckets.push(RateBucket {
+                addr,
+                tokens: self.burst,
+                last_refill: now,
+                last_seen: now,
+            });
+            self.buckets.len() - 1
+        };
+        let bucket = &mut self.buckets[index];
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f32();
+        bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
+        bucket.last_refill = now;
+        bucket.last_seen = now;
+        if bucket.tokens < 1.0 {
+            return false;
+        }
+        bucket.tokens -= 1.0;
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -192,6 +276,7 @@ pub struct NetServer {
     transport: UdpTransport,
     simulation: Simulation,
     content: Arc<GameContent>,
+    limiter: RateLimiter,
     config: ServerConfig,
     clients: Vec<Option<ClientConn>>,
     observed: [Vec<ObservedUnit>; 2],
@@ -228,10 +313,12 @@ impl NetServer {
         let total_slots = config.max_clients + config.max_spectators;
         let config_sim = config.sim;
         let simulation = Simulation::new_with_content(config_sim, Arc::clone(&content));
+        let limiter = RateLimiter::new(config.max_packets_per_second, 256);
         Ok(Self {
             transport,
             simulation,
             content,
+            limiter,
             config,
             clients: (0..total_slots).map(|_| None).collect(),
             observed: std::array::from_fn(|_| Vec::with_capacity(moba_sim::MAX_UNITS)),
@@ -300,6 +387,7 @@ impl NetServer {
             .count();
         stats.bytes_sent = self.transport.bytes_sent;
         stats.bytes_received = self.transport.bytes_received;
+        stats.tick_avg_nanos = stats.tick_nanos.checked_div(stats.ticks).unwrap_or(0);
         stats
     }
 
@@ -312,6 +400,10 @@ impl NetServer {
             let Some(message) = self.transport.recv()? else {
                 break;
             };
+            if !self.limiter.allow_at(message.addr, Instant::now()) {
+                self.stats.rate_limited += 1;
+                continue;
+            }
             if let Err(error) = self.handle_message(message) {
                 eprintln!("net: dropped message: {error}");
             }
@@ -385,8 +477,12 @@ impl NetServer {
         if self.config.record.is_some() {
             self.record_frames.push(inputs);
         }
+        let started = Instant::now();
         self.simulation.tick(&inputs);
         self.simulation.clear_events();
+        let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.stats.tick_nanos = self.stats.tick_nanos.saturating_add(elapsed);
+        self.stats.tick_max_nanos = self.stats.tick_max_nanos.max(elapsed);
         self.stats.ticks += 1;
     }
 
@@ -1144,6 +1240,7 @@ mod tests {
             pre_shared_key: None,
             record: None,
             max_spectators: 8,
+            max_packets_per_second: 120,
             require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");
@@ -1185,6 +1282,21 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_enforces_burst_and_refill() {
+        let addr: SocketAddr = "127.0.0.1:4000".parse().expect("addr");
+        let other: SocketAddr = "127.0.0.1:4001".parse().expect("addr");
+        let start = Instant::now();
+        let mut limiter = RateLimiter::new(10, 8);
+        for _ in 0..10 {
+            assert!(limiter.allow_at(addr, start));
+        }
+        assert!(!limiter.allow_at(addr, start));
+        assert!(limiter.allow_at(other, start));
+        assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
+        assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
     fn recorded_bot_ticks_replay_deterministically() {
         let replay_path = std::env::temp_dir().join(format!(
             "moba-replay-test-{}-{}.mbr",
@@ -1205,6 +1317,7 @@ mod tests {
             pre_shared_key: None,
             record: Some(replay_path.clone()),
             max_spectators: 8,
+            max_packets_per_second: 120,
             require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");
