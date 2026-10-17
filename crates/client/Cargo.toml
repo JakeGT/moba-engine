@@ -1,0 +1,21 @@
+[package]
+name = "moba-client"
+description = "Game client: rendering, prediction, interpolation and UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moba-core.workspace = true
+moba-ecs.workspace = true
+moba-jobs.workspace = true
+moba-platform.workspace = true
+moba-render.workspace = true
+moba-assets.workspace = true
+moba-sim.workspace = true
+moba-game.workspace = true
+moba-net.workspace = true

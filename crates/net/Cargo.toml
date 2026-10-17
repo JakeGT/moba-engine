@@ -1,0 +1,13 @@
+[package]
+name = "moba-net"
+description = "UDP transport, reliability channels, encryption and snapshot delta compression."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moba-core.workspace = true

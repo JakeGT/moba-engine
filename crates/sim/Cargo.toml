@@ -1,0 +1,16 @@
+[package]
+name = "moba-sim"
+description = "Headless fixed-tick (30 Hz) authoritative gameplay simulation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moba-core.workspace = true
+moba-ecs.workspace = true
+moba-jobs.workspace = true
+moba-nav.workspace = true

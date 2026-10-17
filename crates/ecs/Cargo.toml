@@ -1,0 +1,20 @@
+[package]
+name = "moba-ecs"
+description = "SoA archetype ECS with change tracking, built for snapshot diffing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moba-core.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "ecs_iter"
+harness = false

@@ -1,0 +1,13 @@
+[package]
+name = "moba-netsim"
+description = "Link conditioner (latency, jitter, loss, reordering) for netcode tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moba-core.workspace = true

@@ -1,0 +1,11 @@
+too-many-arguments-threshold = 8
+# The sim must be reproducible from (seed, inputs): no wall clocks, no randomly-seeded hashing.
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "sim time comes from the tick counter" },
+  { path = "std::time::SystemTime::now", reason = "sim time comes from the tick counter" },
+  { path = "std::thread::sleep", reason = "the sim never blocks" },
+]
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "random iteration order breaks determinism; use a fixed-hasher or ordered map" },
+  { path = "std::collections::HashSet", reason = "random iteration order breaks determinism; use a fixed-hasher or ordered set" },
+]

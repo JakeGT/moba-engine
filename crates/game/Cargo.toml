@@ -1,0 +1,16 @@
+[package]
+name = "moba-game"
+description = "Data-driven MOBA rules: heroes, abilities, buffs, minions, towers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moba-core.workspace = true
+moba-ecs.workspace = true
+moba-sim.workspace = true
+moba-nav.workspace = true

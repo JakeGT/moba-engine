@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+# Internal crates. Layering is enforced by `just layering`.
+moba-core = { path = "crates/core" }
+moba-ecs = { path = "crates/ecs" }
+moba-jobs = { path = "crates/jobs" }
+moba-platform = { path = "crates/platform" }
+moba-shaders = { path = "crates/shaders" }
+moba-render = { path = "crates/render" }
+moba-assets = { path = "crates/assets" }
+moba-nav = { path = "crates/nav" }
+moba-sim = { path = "crates/sim" }
+moba-game = { path = "crates/game" }
+moba-net = { path = "crates/net" }
+moba-netsim = { path = "crates/netsim" }
+
+# Third-party. Versions are resolved once here so every crate agrees.
+crossbeam-deque = "0.8"
+glam = "0.30"
+
+# Dev-only.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+# Pedantic lints that are noise for engine code.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+similar_names = "allow"
+
+[profile.dev]
+# Keep debug builds playable: optimise dependencies, not our code.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Release + symbols for Tracy / perf / RenderDoc captures.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
