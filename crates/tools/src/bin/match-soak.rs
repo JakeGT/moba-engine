@@ -20,16 +20,13 @@ fn run_match(
     max_ticks: u32,
     bot_mask: u16,
     spawn_waves: bool,
-    pick: Option<u8>,
+    hero_picks: [u8; moba_sim::MAX_PLAYERS],
 ) -> MatchResult {
     let config = SimConfig {
         seed,
         bot_mask,
         spawn_waves,
-        hero_picks: pick.map_or_else(
-            || SimConfig::default().hero_picks,
-            |pick| [pick; moba_sim::MAX_PLAYERS],
-        ),
+        hero_picks,
     };
     let mut simulation = Simulation::new(config);
     let mut tick_nanos = 0u64;
@@ -66,6 +63,7 @@ fn main() {
     let mut bot_mask = 0x03FFu16;
     let mut spawn_waves = true;
     let mut pick: Option<u8> = None;
+    let mut vary_picks = true;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -97,9 +95,10 @@ fn main() {
                     pick = Some(value);
                 }
             }
+            "--fixed-picks" => vary_picks = false,
             "--help" => {
                 eprintln!(
-                    "usage: match-soak [--matches N] [--ticks N] [--seed N] [--bot-mask HEX] [--pick N] [--no-waves] [--no-verify]"
+                    "usage: match-soak [--matches N] [--ticks N] [--seed N] [--bot-mask HEX] [--pick N] [--fixed-picks] [--no-waves] [--no-verify]"
                 );
                 return;
             }
@@ -118,9 +117,25 @@ fn main() {
     let mut mismatches = 0u32;
     for index in 0..matches {
         let match_seed = seed.wrapping_add(u64::from(index));
-        let first = run_match(match_seed, max_ticks, bot_mask, spawn_waves, pick);
+        let picks = pick.map_or_else(
+            || {
+                if vary_picks {
+                    let mut team = [0u8, 1, 2, 3, 4];
+                    let rotation = (index as usize) % team.len().max(1);
+                    team.rotate_left(rotation);
+                    [
+                        team[0], team[1], team[2], team[3], team[4], team[0], team[1], team[2],
+                        team[3], team[4],
+                    ]
+                } else {
+                    SimConfig::default().hero_picks
+                }
+            },
+            |pick| [pick; moba_sim::MAX_PLAYERS],
+        );
+        let first = run_match(match_seed, max_ticks, bot_mask, spawn_waves, picks);
         if verify {
-            let second = run_match(match_seed, max_ticks, bot_mask, spawn_waves, pick);
+            let second = run_match(match_seed, max_ticks, bot_mask, spawn_waves, picks);
             if first.hash != second.hash
                 || first.outcome != second.outcome
                 || first.ticks != second.ticks

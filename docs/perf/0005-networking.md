@@ -79,6 +79,6 @@ Release 10-client soak (12 s, 150 ms RTT, 5% loss, 30 ms jitter): average simula
 
 ## Batch match harness
 
-Release `match-soak --matches 50` with two verification passes per seed: 612,000 ticks,
-unique state hash per seed, determinism ok, average tick 6 µs, max 709 µs. Outcome
-distribution is currently blue=50/red=0, exposing demo-bot balance bias (not determinism).
+Release `match-soak --matches 50` with rotated team compositions and two verification passes
+per seed: 509,820 ticks, unique state hash per seed, determinism ok, average tick 6 µs,
+max 3,021 µs, outcomes blue 30 / red 20.

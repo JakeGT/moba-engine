@@ -7,8 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
-- `match-soak` 50-match deterministic harness and `content-check` validator; mirrored hero
-  spawn/pick fairness fixes and alternating wave/command order.
+- `match-soak` 50-match deterministic harness with composition rotation and `content-check`
+  validator; mirrored hero spawn/pick fairness fixes and alternating wave/command order.
 - Per-address UDP token-bucket rate limiting (`--max-pps`) with bounded/LRU buckets, drop
   counters and average/max simulation tick telemetry.
 - Replay format v2 with content-hash manifests; `moba-tools replay --items`; shared

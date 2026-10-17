@@ -22,10 +22,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 ## Still open
 - Public identity/key exchange/revocation and a formal replay window.
 - One-hour sanitizer-backed fuzzing run (the deterministic fuzzer is available).
-- 50 consecutive matches per box under the soak harness is implemented (`match-soak`):
-  612,000 ticks, deterministic, unique hashes per seed, avg 6 µs / max 709 µs. The demo bots
-  still show a side/composition bias (all-blue with mirrored picks), tracked as balance work.
-  Profiling capture review remains.
+- 50 consecutive matches per box under the soak harness is implemented (`match-soak`) with
+  per-match composition rotation: 509,820 ticks, deterministic, unique hashes per seed,
+  avg 6 µs / max 3,021 µs, outcomes blue 30 / red 20. Profiling capture review remains.
 - Allocation-counting hot-path tests; loom model of the job-scope counter.
 - Windows/macOS renderer validation and min-spec frame timings.
 

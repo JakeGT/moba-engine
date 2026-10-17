@@ -91,8 +91,8 @@ cargo run -p moba-tools --bin content-check -- content/example-pack.toml
 cargo run --release -p moba-tools --bin match-soak -- --matches 50
 ```
 
-`match-soak` replays each seeded bot match twice, checks determinism and reports tick timing
-and outcome distribution.
+`match-soak` rotates team compositions, replays each seeded bot match twice, checks
+determinism and reports tick timing and outcome distribution (`--fixed-picks` for one comp).
 
 Deterministic replays can be recorded by the server and verified offline:
 
