@@ -126,6 +126,8 @@ pub struct ServerStats {
     pub bytes_received: u64,
     /// Datagrams dropped by the per-address rate limiter.
     pub rate_limited: u64,
+    /// Hello packets rejected as cross-address replays.
+    pub replayed_hellos: u64,
     /// Total nanoseconds spent inside simulation ticks.
     pub tick_nanos: u64,
     /// Longest simulation tick.
@@ -221,6 +223,57 @@ impl RateLimiter {
             return false;
         }
         bucket.tokens -= 1.0;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct HandshakeNonce {
+    key: [u8; 32],
+    nonce: u64,
+    addr: SocketAddr,
+    seen: Instant,
+}
+
+#[derive(Debug)]
+struct NonceTracker {
+    entries: Vec<HandshakeNonce>,
+    window: Duration,
+    max_entries: usize,
+}
+
+impl NonceTracker {
+    fn new(window: Duration, max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            window,
+            max_entries,
+        }
+    }
+
+    fn allow(&mut self, key: [u8; 32], nonce: u64, addr: SocketAddr, now: Instant) -> bool {
+        self.entries
+            .retain(|entry| now.saturating_duration_since(entry.seen) <= self.window);
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == key && entry.nonce == nonce)
+        {
+            if entry.addr != addr {
+                return false;
+            }
+            entry.seen = now;
+            return true;
+        }
+        if self.entries.len() >= self.max_entries {
+            self.entries.remove(0);
+        }
+        self.entries.push(HandshakeNonce {
+            key,
+            nonce,
+            addr,
+            seen: now,
+        });
         true
     }
 }
@@ -326,6 +379,7 @@ pub struct NetServer {
     content: Arc<GameContent>,
     identity: Option<ServerIdentity>,
     client_keys: Vec<[u8; 32]>,
+    nonces: NonceTracker,
     reload: Option<ContentReload>,
     limiter: RateLimiter,
     config: ServerConfig,
@@ -376,6 +430,7 @@ impl NetServer {
             content,
             identity: None,
             client_keys: Vec::new(),
+            nonces: NonceTracker::new(Duration::from_secs(60), 2_048),
             reload: None,
             limiter,
             config,
@@ -889,6 +944,16 @@ impl NetServer {
                         .copied()
                 });
                 if keys_configured && matched_key.is_none() {
+                    self.reject_client(message.addr, 0, 4)?;
+                    return Ok(());
+                }
+                if !self.nonces.allow(
+                    matched_key.unwrap_or([0; 32]),
+                    hello.nonce,
+                    message.addr,
+                    Instant::now(),
+                ) {
+                    self.stats.replayed_hellos += 1;
                     self.reject_client(message.addr, 0, 4)?;
                     return Ok(());
                 }
@@ -1591,6 +1656,20 @@ cost = 1
         assert!(limiter.allow_at(other, start));
         assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
         assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn handshake_nonce_replay_is_address_bound() {
+        let key = [9u8; 32];
+        let first: SocketAddr = "127.0.0.1:5000".parse().expect("addr");
+        let second: SocketAddr = "127.0.0.1:5001".parse().expect("addr");
+        let start = Instant::now();
+        let mut tracker = NonceTracker::new(Duration::from_secs(10), 8);
+        assert!(tracker.allow(key, 7, first, start));
+        assert!(tracker.allow(key, 7, first, start));
+        assert!(!tracker.allow(key, 7, second, start));
+        assert!(tracker.allow(key, 8, second, start));
+        assert!(tracker.allow(key, 7, second, start + Duration::from_secs(11)));
     }
 
     #[test]

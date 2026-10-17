@@ -166,6 +166,12 @@ the server publishes it in `Welcome`, and clients use the received `WireItem`, `
 `WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability behaviour and
 map/lane definitions remain compile-time; the content crate is designed to grow into them.
 
+## Handshake replay window
+
+Authenticated Hello nonces are tracked for 60 s (bounded to 2,048 entries). A repeated
+key/nonce from the same source is treated as a retransmit; the same key/nonce from a different
+source is rejected and counted as `replayed_hellos`.
+
 ## Client tokens
 
 `NetServer::add_client_key` keeps a bounded key ring. A Hello HMAC is tried against the global

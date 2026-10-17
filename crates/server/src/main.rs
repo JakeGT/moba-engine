@@ -240,13 +240,14 @@ fn main() {
         server.finish_recording();
         let stats = server.stats();
         eprintln!(
-            "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} avg_tick_us={} max_tick_us={}",
+            "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} replayed_hellos={} avg_tick_us={} max_tick_us={}",
             stats.clients,
             stats.ticks,
             stats.snapshots_sent,
             stats.bytes_sent / 1024,
             stats.bytes_received / 1024,
             stats.rate_limited,
+            stats.replayed_hellos,
             stats.tick_avg_nanos / 1_000,
             stats.tick_max_nanos / 1_000
         );

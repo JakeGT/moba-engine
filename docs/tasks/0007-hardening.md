@@ -9,6 +9,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 ## Landed so far
 - **Per-client token ring**: multiple Hello HMAC keys, per-player session encryption and
   allowlist/rotation (`--allow-token`); wrong/unlisted tokens rejected.
+- **Handshake replay window**: authenticated key/nonce pairs are address-bound for 60 s;
+  cross-address replays are counted/rejected while retransmits still work.
 - **Pinned server identity**: Ed25519-signed Welcome over nonces/session/catalogue; clients
   pin the public key via `MOBA_SERVER_PUBKEY`; server loads `--server-key FILE`.
 - **Optional PSK AEAD** (protocol v7): HMAC-SHA256 handshake proofs, server nonce, HKDF-

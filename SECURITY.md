@@ -17,7 +17,10 @@ is **not** a complete public-internet security model:
 
 - optional pinned Ed25519 server identity authenticates the dedicated server;
 - per-client bearer tokens provide allowlisting/rotation/revocation, but are shared secrets,
-  not public-key player identity; there is no server challenge/replay window yet;
+  not public-key player identity;
+- Hello nonces are replay-bound to the first source address for 60 s; retransmits from that
+  address are allowed, cross-address replays are dropped. Spoofed-source denial is still an
+  edge-network concern;
 - PSK/token mode has no forward secrecy;
 - packet metadata (addresses, sizes, timing, session ids) is visible;
 - per-address and global UDP budgets reject valid-packet floods, but malformed-packet
