@@ -121,7 +121,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 - Replay manifest: custom-content 134-tick replay verified with `--items` at content hash
   `0x5f2fd8408d51955a`; replaying without the pack is rejected.
 - Rate limiting: valid-packet flood test drops excess at a 10 pps budget; release 10-client
-  soak reports rate_limited=0, avg tick 10 µs / max 65 µs.
+  soak reports rate_limited=0, avg tick 11 µs / max 54 µs.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
 - Replay: live server recording (`--record`) and `moba-tools replay` reproduce

@@ -20,9 +20,12 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   avg 9 µs / max 55 µs per simulation tick with 10 clients.
 
 ## Still open
-- Public identity/key exchange, revocation, anti-DoS/rate limiting and a formal replay window.
+- Public identity/key exchange/revocation and a formal replay window.
 - One-hour sanitizer-backed fuzzing run (the deterministic fuzzer is available).
-- 50 consecutive matches per box under the soak harness; profiling capture review.
+- 50 consecutive matches per box under the soak harness is implemented (`match-soak`):
+  612,000 ticks, deterministic, unique hashes per seed, avg 6 µs / max 709 µs. The demo bots
+  still show a side/composition bias (all-blue with mirrored picks), tracked as balance work.
+  Profiling capture review remains.
 - Allocation-counting hot-path tests; loom model of the job-scope counter.
 - Windows/macOS renderer validation and min-spec frame timings.
 
@@ -30,7 +33,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - [x] Wrong-key encrypted handshake is rejected; encrypted reconnect works.
 - [x] Encrypted 10-client soak at 150 ms/5%/30 ms stays inside budgets.
 - [x] Replay file reproduces the final state hash; malformed input never panics.
-- [ ] One-hour fuzz, 50-match soak and profiling captures.
+- [x] 50-match deterministic harness, content-check tool, per-address rate limiting and tick
+  telemetry.
+- [ ] One-hour fuzz, balanced demo bots and profiling captures.
 
 ## Security references
 - RustCrypto [ChaCha20-Poly1305](https://docs.rs/chacha20poly1305) and

@@ -100,6 +100,7 @@ impl MapDef {
         let base = self.spawn(team);
         let offsets = [(0, 0), (4, -7), (4, 7), (-4, -12), (-4, 12)];
         let (dx, dy) = offsets[slot as usize % offsets.len()];
+        let dx = if team == Team::Blue { dx } else { -dx };
         FixVec2::new(base.x + Fix::from_i32(dx), base.y + Fix::from_i32(dy))
     }
 

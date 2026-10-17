@@ -84,6 +84,16 @@ MOBA_SECRET="$SECRET" cargo run -p moba-client
 This enables the authenticated ChaCha20-Poly1305 session mode; see [SECURITY.md](SECURITY.md)
 for its scope and limitations.
 
+Validate content and run the deterministic match harness:
+
+```bash
+cargo run -p moba-tools --bin content-check -- content/example-pack.toml
+cargo run --release -p moba-tools --bin match-soak -- --matches 50
+```
+
+`match-soak` replays each seeded bot match twice, checks determinism and reports tick timing
+and outcome distribution.
+
 Deterministic replays can be recorded by the server and verified offline:
 
 ```bash

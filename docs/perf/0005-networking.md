@@ -74,4 +74,11 @@ Custom-content replay: 134 ticks with the example pack (8 items + Vanguard) prod
 ## Tick telemetry
 
 Release 10-client soak (12 s, 150 ms RTT, 5% loss, 30 ms jitter): average simulation tick
-10 µs, max 65 µs (budget 33,333 µs at 30 Hz), zero rate-limited datagrams.
+11 µs, max 54 µs (budget 33,333 µs at 30 Hz), zero rate-limited datagrams.
+
+
+## Batch match harness
+
+Release `match-soak --matches 50` with two verification passes per seed: 612,000 ticks,
+unique state hash per seed, determinism ok, average tick 6 µs, max 709 µs. Outcome
+distribution is currently blue=50/red=0, exposing demo-bot balance bias (not determinism).

@@ -77,3 +77,11 @@ fuzz-wire:
 # Verify a deterministic replay file.
 replay FILE:
     cargo run -p moba-tools --bin replay -- {{FILE}}
+
+# Run the 50-match deterministic soak.
+match-soak:
+    cargo run --release -p moba-tools --bin match-soak
+
+# Validate a content pack.
+content-check FILE:
+    cargo run -p moba-tools --bin content-check -- {{FILE}}

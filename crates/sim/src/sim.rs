@@ -64,7 +64,7 @@ impl Default for SimConfig {
         Self {
             seed: 0x5EED_1234,
             bot_mask: 0x03FF,
-            hero_picks: [0, 1, 2, 3, 4, 4, 3, 2, 1, 0],
+            hero_picks: [0, 1, 2, 3, 4, 0, 1, 2, 3, 4],
             spawn_waves: true,
         }
     }
@@ -842,7 +842,14 @@ impl Simulation {
 
     fn spawn_wave(&mut self) {
         self.wave = self.wave.saturating_add(1);
-        for team in Team::ALL {
+        // Alternate spawn order so neither team systematically receives the first tick of
+        // wave movement/entity ordering.
+        let order = if self.wave % 2 == 0 {
+            [Team::Red, Team::Blue]
+        } else {
+            [Team::Blue, Team::Red]
+        };
+        for team in order {
             let lanes: Vec<(FixVec2, FixVec2)> = self
                 .content
                 .map
@@ -938,15 +945,22 @@ impl Simulation {
     }
 
     fn apply_inputs(&mut self, inputs: &TickInputs) {
-        for (slot, command) in inputs.players.iter().enumerate() {
-            let Some(command) = command else {
+        // Alternate command resolution order so neither team systematically resolves casts,
+        // purchases or attack orders first.
+        let order: Vec<usize> = if self.tick.get() % 2 == 0 {
+            (0..MAX_PLAYERS).collect()
+        } else {
+            (0..MAX_PLAYERS).rev().collect()
+        };
+        for slot in order {
+            let Some(command) = inputs.players[slot] else {
                 continue;
             };
             let entity = self.hero_entities[slot];
             if self.world.has::<Dead>(entity) {
                 continue;
             }
-            match *command {
+            match command {
                 PlayerCommand::Stop => {
                     if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
                         target.0 = None;
