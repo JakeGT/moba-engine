@@ -506,6 +506,16 @@ impl GameContent {
                     amount,
                     duration_ticks,
                 } => amount > 0 && duration_ticks > 0,
+                AbilityKind::Slow {
+                    radius,
+                    factor,
+                    duration_ticks,
+                } => {
+                    radius > Fix::ZERO
+                        && factor > Fix::ZERO
+                        && factor < Fix::ONE
+                        && duration_ticks > 0
+                }
                 AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
                 AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
             };
@@ -664,6 +674,16 @@ impl GameContent {
                     feed(&[2]);
                     feed(&(amount as u32).to_le_bytes());
                     feed(&radius.to_bits().to_le_bytes());
+                }
+                AbilityKind::Slow {
+                    radius,
+                    factor,
+                    duration_ticks,
+                } => {
+                    feed(&[5]);
+                    feed(&radius.to_bits().to_le_bytes());
+                    feed(&factor.to_bits().to_le_bytes());
+                    feed(&duration_ticks.to_le_bytes());
                 }
                 AbilityKind::Shield {
                     amount,
@@ -852,6 +872,8 @@ struct AbilityEntry {
     amount: i32,
     #[serde(default)]
     duration_ticks: u32,
+    #[serde(default)]
+    factor: f32,
     #[serde(default = "default_damage_type")]
     damage_type: String,
 }
@@ -963,6 +985,11 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         "heal" => AbilityKind::Heal {
                             amount: ability.amount,
                             radius: Fix::from_f32(ability.radius),
+                        },
+                        "slow" => AbilityKind::Slow {
+                            radius: Fix::from_f32(ability.radius),
+                            factor: Fix::from_f32(ability.factor),
+                            duration_ticks: ability.duration_ticks,
                         },
                         "shield" => AbilityKind::Shield {
                             amount: ability.amount,

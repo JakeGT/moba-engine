@@ -124,8 +124,9 @@ damage_type = "magic"   # physical | magic
 ```
 
 Kinds take: `skillshot` (`speed`, `range`, `radius`, `damage`, `damage_type`), `dash`
-(`range`), `heal` (`amount`, `radius`), `shield` (`amount`, `duration_ticks`) or `burst`
-(`radius`, `damage`, `damage_type`). Shields absorb damage before health and show as a cyan
+(`range`), `heal` (`amount`, `radius`), `shield` (`amount`, `duration_ticks`), `slow` (`radius`,
+`factor`, `duration_ticks`) or `burst` (`radius`, `damage`, `damage_type`). Slow multiplies
+movement speed (0<factor<1) and restores it on expiry/respawn; slowed units get a purple tint. Shields absorb damage before health and show as a cyan
 tint on the unit.
 Hero names must be 1–16 ASCII bytes and unique; ability ids must exist.
 

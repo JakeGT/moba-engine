@@ -1007,6 +1007,8 @@ pub struct NetEntity {
 pub const ENTITY_FLAG_DEAD: u8 = 1;
 /// A temporary shield is active.
 pub const ENTITY_FLAG_SHIELD: u8 = 1 << 1;
+/// A movement slow is active.
+pub const ENTITY_FLAG_SLOW: u8 = 1 << 2;
 
 impl NetEntity {
     /// Quantises an observed unit.
@@ -1020,7 +1022,8 @@ impl NetEntity {
             hero_slot: unit.hero_slot.unwrap_or(0xFF),
             hero_pick: unit.hero_pick,
             flags: (if unit.dead { ENTITY_FLAG_DEAD } else { 0 })
-                | (if unit.shielded { ENTITY_FLAG_SHIELD } else { 0 }),
+                | (if unit.shielded { ENTITY_FLAG_SHIELD } else { 0 })
+                | (if unit.slowed { ENTITY_FLAG_SLOW } else { 0 }),
             max_health: clamp_u16(unit.max_health),
             max_mana: clamp_u16(unit.max_mana),
             x,
@@ -2006,6 +2009,7 @@ mod tests {
             gold: 950,
             items: [0, 1, 2, 0xFF, 0xFF, 0xFF],
             shielded: true,
+            slowed: false,
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);

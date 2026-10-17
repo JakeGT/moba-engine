@@ -69,6 +69,17 @@ pub struct Shield {
     pub remaining: u32,
 }
 
+/// Temporary movement slow.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Slow {
+    /// Unslowed movement speed per tick.
+    pub base: Fix,
+    /// Movement multiplier (0..1).
+    pub factor: Fix,
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+}
+
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {

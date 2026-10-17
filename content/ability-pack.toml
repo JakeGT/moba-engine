@@ -28,6 +28,16 @@ kind = "shield"
 amount = 120
 duration_ticks = 180
 
+[[abilities]]
+name = "Frost Field"
+cooldown_ticks = 180
+mana_cost = 25
+cast_range = 0.0
+kind = "slow"
+radius = 180.0
+factor = 0.55
+duration_ticks = 90
+
 [[heroes]]
 name = "Nova Mage"
 max_health = 520
@@ -41,4 +51,4 @@ move_speed = 6.0
 armor = 14
 magic_resist = 24
 vision_range = 14.0
-abilities = [0, 0, 1]
+abilities = [0, 2, 1]

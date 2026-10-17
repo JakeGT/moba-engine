@@ -43,6 +43,15 @@ pub enum AbilityKind {
         /// Duration in simulation ticks.
         duration_ticks: u32,
     },
+    /// Slows enemies around the target point for a duration.
+    Slow {
+        /// Effect radius.
+        radius: Fix,
+        /// Movement multiplier (0..1).
+        factor: Fix,
+        /// Duration in simulation ticks.
+        duration_ticks: u32,
+    },
     /// Instantly damages enemies around the caster.
     Burst {
         /// Effect radius.
@@ -258,6 +267,15 @@ mod tests {
                     duration_ticks,
                 } => {
                     assert!(amount > 0);
+                    assert!(duration_ticks > 0);
+                }
+                AbilityKind::Slow {
+                    radius,
+                    factor,
+                    duration_ticks,
+                } => {
+                    assert!(radius > Fix::ZERO);
+                    assert!(factor > Fix::ZERO && factor < Fix::ONE);
                     assert!(duration_ticks > 0);
                 }
             }
