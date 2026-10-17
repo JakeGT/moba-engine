@@ -13,7 +13,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
 | M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and spectator mode (protocol v7); 5-minute plaintext soak, 20 s encrypted and 15 s v7 soaks pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
 | M6 | Vertical slice | ✅ | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up/surrender, HUD, levels/XP, gold/items/shop, minimap, health bars, scoreboard, fog-of-war and wall line-of-sight. Linux-verified; audio/settings deferred. |
-| M7 | Hardening | 🟡 | PSK AEAD transport, reconnect, replay manifests and per-address UDP rate limiting/tick telemetry landed; public identity/edge anti-DoS, 50 matches/box, one-hour sanitizer fuzz and profiling captures remain. |
+| M7 | Hardening | 🟡 | PSK AEAD transport, reconnect, replay manifests, rate limiting/tick telemetry, 50-match harness and Criterion profiling captures landed; public identity/edge anti-DoS, one-hour fuzz and balanced demo bots remain. |
 | M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation and reach clients in the handshake; new ability behaviour kinds, hot reload and richer manifests remain. |
 
 ## What exists now

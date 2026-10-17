@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Criterion snapshot-codec benchmarks and a profiling capture log
+  (`docs/perf/0007-profiling.md`).
 - Runtime map vision blockers: TOML `[[map.walls]]`, server LOS filtering, shader
   per-pixel wall shadows, aligned wall geometry and wall data in the handshake map.
 - `match-soak` 50-match deterministic harness with composition rotation and `content-check`

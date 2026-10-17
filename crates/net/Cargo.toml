@@ -24,6 +24,11 @@ sha2.workspace = true
 moba-sim.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 moba-ecs.workspace = true
 
 moba-netsim.workspace = true
+
+[[bench]]
+name = "snapshot"
+harness = false

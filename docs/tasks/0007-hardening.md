@@ -24,7 +24,10 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - One-hour sanitizer-backed fuzzing run (the deterministic fuzzer is available).
 - 50 consecutive matches per box under the soak harness is implemented (`match-soak`) with
   per-match composition rotation: 509,820 ticks, deterministic, unique hashes per seed,
-  avg 6 µs / max 3,021 µs, outcomes blue 30 / red 20. Profiling capture review remains.
+  avg 6 µs / max 3,021 µs, outcomes blue 30 / red 20.
+- Criterion captures: snapshot codec (full encode 206 ns / decode 264 ns, steady delta
+  encode 35 ns / decode 92 ns) and simulation ticks (10.7–12.9 µs steady). Profiling log:
+  `docs/perf/0007-profiling.md`.
 - Allocation-counting hot-path tests; loom model of the job-scope counter.
 - Windows/macOS renderer validation and min-spec frame timings.
 
@@ -34,7 +37,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - [x] Replay file reproduces the final state hash; malformed input never panics.
 - [x] 50-match deterministic harness, content-check tool, per-address rate limiting and tick
   telemetry.
-- [ ] One-hour fuzz, balanced demo bots and profiling captures.
+- [x] Profiling captures: Criterion snapshot codec + simulation benches recorded in
+  `docs/perf/0007-profiling.md`.
+- [ ] One-hour fuzz and balanced demo bots.
 
 ## Security references
 - RustCrypto [ChaCha20-Poly1305](https://docs.rs/chacha20poly1305) and
