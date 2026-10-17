@@ -34,3 +34,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   [HKDF](https://docs.rs/hkdf).
 - [hexgate](https://github.com/alexdesander/hexgate) for UDP encryption/auth structure.
 - [SECURITY.md](../../SECURITY.md) for the documented threat model and limitations.
+- [lockstep-tactics](https://github.com/RizgarOzan/lockstep-tactics) for bit-identical
+  lockstep/replay verification across platforms.
+- [AstraWeave deterministic architecture](https://github.com/lazyxeon/AstraWeave/blob/main/docs/src/architecture/deterministic.md)
+  for deterministic simulation/testing practices.
