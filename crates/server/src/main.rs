@@ -8,8 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use moba_core::Fix;
-use moba_game::{GameContent, HeroSpec, ItemSpec};
+use moba_game::GameContent;
 use moba_net::{NetServer, ServerConfig};
 use moba_sim::{SimConfig, Simulation, UnitKind};
 
@@ -235,103 +234,9 @@ fn parse_secret(value: &str) -> [u8; 32] {
     key
 }
 
-#[derive(serde::Deserialize)]
-struct ContentFile {
-    #[serde(default)]
-    items: Vec<ItemEntry>,
-    heroes: Option<Vec<HeroEntry>>,
-}
-
-#[derive(serde::Deserialize)]
-struct ItemEntry {
-    name: String,
-    cost: u32,
-    #[serde(default)]
-    health: i32,
-    #[serde(default)]
-    mana: i32,
-    #[serde(default)]
-    attack_damage: i32,
-    #[serde(default)]
-    armor: i32,
-    #[serde(default)]
-    magic_resist: i32,
-    #[serde(default)]
-    move_speed: f32,
-}
-
-#[derive(serde::Deserialize)]
-struct HeroEntry {
-    name: String,
-    max_health: i32,
-    max_mana: i32,
-    #[serde(default)]
-    health_regen_per_tick: i32,
-    #[serde(default)]
-    mana_regen_per_tick: i32,
-    attack_damage: i32,
-    attack_range: f32,
-    attack_interval_ticks: u32,
-    move_speed: f32,
-    #[serde(default)]
-    armor: i32,
-    #[serde(default)]
-    magic_resist: i32,
-    vision_range: f32,
-    abilities: [u8; 3],
-}
-
 fn load_content(path: &std::path::Path) -> GameContent {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
-        eprintln!("cannot read content {}: {error}", path.display());
-        std::process::exit(2);
-    });
-    let file: ContentFile = toml::from_str(&text).unwrap_or_else(|error| {
+    moba_game::load_content_file(path).unwrap_or_else(|error| {
         eprintln!("invalid content {}: {error}", path.display());
         std::process::exit(2);
-    });
-    let content = GameContent {
-        items: file
-            .items
-            .into_iter()
-            .map(|item| ItemSpec {
-                name: item.name,
-                cost: item.cost,
-                health: item.health,
-                mana: item.mana,
-                attack_damage: item.attack_damage,
-                armor: item.armor,
-                magic_resist: item.magic_resist,
-                move_speed_per_sec: Fix::from_f32(item.move_speed),
-            })
-            .collect(),
-        heroes: file.heroes.map_or_else(
-            || GameContent::default().heroes,
-            |heroes| {
-                heroes
-                    .into_iter()
-                    .map(|hero| HeroSpec {
-                        name: hero.name,
-                        max_health: hero.max_health,
-                        max_mana: hero.max_mana,
-                        health_regen_per_tick: hero.health_regen_per_tick,
-                        mana_regen_per_tick: hero.mana_regen_per_tick,
-                        attack_damage: hero.attack_damage,
-                        attack_range: Fix::from_f32(hero.attack_range),
-                        attack_interval_ticks: hero.attack_interval_ticks,
-                        move_speed_per_sec: Fix::from_f32(hero.move_speed),
-                        armor: hero.armor,
-                        magic_resist: hero.magic_resist,
-                        vision_range: Fix::from_f32(hero.vision_range),
-                        abilities: hero.abilities,
-                    })
-                    .collect()
-            },
-        ),
-    };
-    if let Err(error) = content.validate() {
-        eprintln!("invalid content {}: {error}", path.display());
-        std::process::exit(2);
-    }
-    content
+    })
 }

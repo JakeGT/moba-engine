@@ -7,14 +7,17 @@
 //!
 //! Format (little-endian, version 1):
 //! `"MOBARPL1" | version u8 | seed u64 | hero_picks[10] | bot_mask u16 | spawn_waves u8 |
-//!  has_hash u8 | expected_hash u64 | frame_count u32 | frames...`
+//!  content_hash u64 | has_hash u8 | expected_hash u64 | frame_count u32 | frames...`
 //!
 //! Each frame is a `present u16` bitmask followed by one command per present slot.
+
+use std::sync::Arc;
 
 use moba_core::FixVec2;
 use moba_ecs::Entity;
 
 use crate::{MAX_PLAYERS, PlayerCommand, SimConfig, Simulation, TickInputs};
+use moba_game::GameContent;
 
 /// Replay magic/version tag.
 const MAGIC: &[u8; 8] = b"MOBARPL1";
@@ -30,6 +33,13 @@ pub enum ReplayError {
     BadHeader,
     /// Frame or command data is invalid.
     BadData,
+    /// The content pack hash does not match the recording.
+    ContentMismatch {
+        /// Hash recorded when the replay was written.
+        expected: u64,
+        /// Hash of the supplied content pack.
+        actual: u64,
+    },
     /// The replayed state hash does not match the recorded hash.
     HashMismatch {
         /// Hash recorded when the replay was written.
@@ -45,6 +55,12 @@ impl core::fmt::Display for ReplayError {
             Self::Truncated => f.write_str("truncated replay"),
             Self::BadHeader => f.write_str("bad replay header/version"),
             Self::BadData => f.write_str("invalid replay data"),
+            Self::ContentMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "replay content mismatch: expected {expected:#018x}, got {actual:#018x}"
+                )
+            }
             Self::HashMismatch { expected, actual } => {
                 write!(
                     f,
@@ -66,6 +82,8 @@ pub struct Replay {
     pub frames: Vec<TickInputs>,
     /// State hash recorded at the end of the match, when known.
     pub expected_hash: Option<u64>,
+    /// Content pack hash used by the match.
+    pub content_hash: u64,
 }
 
 /// Result of replaying a match.
@@ -87,6 +105,7 @@ impl Replay {
             config,
             frames: Vec::new(),
             expected_hash: None,
+            content_hash: GameContent::default().hash(),
         }
     }
 
@@ -100,7 +119,22 @@ impl Replay {
     /// # Errors
     /// Returns [`ReplayError::HashMismatch`] when the result differs from the recording.
     pub fn play(&self) -> Result<ReplayResult, ReplayError> {
-        let mut simulation = Simulation::new(self.config);
+        self.play_with_content(&GameContent::default())
+    }
+
+    /// Replays with a specific content pack, checking the recorded content hash first.
+    ///
+    /// # Errors
+    /// Returns [`ReplayError::ContentMismatch`] or [`ReplayError::HashMismatch`].
+    pub fn play_with_content(&self, content: &GameContent) -> Result<ReplayResult, ReplayError> {
+        let actual_content = content.hash();
+        if actual_content != self.content_hash {
+            return Err(ReplayError::ContentMismatch {
+                expected: self.content_hash,
+                actual: actual_content,
+            });
+        }
+        let mut simulation = Simulation::new_with_content(self.config, Arc::new(content.clone()));
         for frame in &self.frames {
             simulation.tick(frame);
             simulation.clear_events();
@@ -131,6 +165,7 @@ impl Replay {
         out.extend_from_slice(&self.config.hero_picks);
         out.extend_from_slice(&self.config.bot_mask.to_le_bytes());
         out.push(u8::from(self.config.spawn_waves));
+        out.extend_from_slice(&self.content_hash.to_le_bytes());
         out.push(u8::from(self.expected_hash.is_some()));
         out.extend_from_slice(&self.expected_hash.unwrap_or(0).to_le_bytes());
         out.extend_from_slice(
@@ -168,6 +203,7 @@ impl Replay {
         hero_picks.copy_from_slice(reader.bytes(MAX_PLAYERS)?);
         let bot_mask = reader.u16()?;
         let spawn_waves = reader.u8()? != 0;
+        let content_hash = reader.u64()?;
         let has_hash = reader.u8()? != 0;
         let expected = reader.u64()?;
         let frame_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
@@ -197,6 +233,7 @@ impl Replay {
             },
             frames,
             expected_hash: has_hash.then_some(expected),
+            content_hash,
         })
     }
 }
@@ -311,6 +348,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replay_enforces_content_hash() {
+        let mut content = GameContent::default();
+        content.items[0].cost += 1;
+        content.validate().expect("custom content");
+        let config = SimConfig::default();
+        let mut sim = Simulation::new_with_content(config, Arc::new(content.clone()));
+        let mut replay = Replay::new(config);
+        replay.content_hash = content.hash();
+        replay.push(TickInputs::default());
+        sim.tick(&TickInputs::default());
+        replay.expected_hash = Some(sim.state_hash());
+        let encoded = replay.encode();
+        let decoded = Replay::decode(&encoded).expect("decode");
+        assert!(decoded.play_with_content(&content).is_ok());
+        assert!(matches!(
+            decoded.play(),
+            Err(ReplayError::ContentMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn decoder_rejects_noise_without_panicking() {
         let mut rng = moba_core::Rng::from_seed(0x5EED_BEEF);
         for length in 0..512usize {
@@ -354,7 +412,7 @@ mod tests {
 
         let mut corrupt = encoded.clone();
         // Expected hash lives at byte 31; changing it must make verification fail.
-        corrupt[31] ^= 0x40;
+        corrupt[39] ^= 0x40;
         let decoded = Replay::decode(&corrupt).expect("header still valid");
         assert!(matches!(
             decoded.play(),

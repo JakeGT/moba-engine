@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 11 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 140 tests
+- `cargo test --workspace --locked` — 142 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -116,6 +116,8 @@ Last updated: 2026-10-17 (round 11 of the build).
   and a deterministic surrender replay test pass.
 - Content: `--items content/example-pack.toml` client capture shows the custom Vanguard
   hero/name (`m8-hero-content.png`); UDP test verifies custom items, heroes and purchases.
+- Replay manifest: custom-content 134-tick replay verified with `--items` at content hash
+  `0x5f2fd8408d51955a`; replaying without the pack is rejected.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
 - Replay: live server recording (`--record`) and `moba-tools replay` reproduce

@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 140 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 142 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -82,10 +82,12 @@ Deterministic replays can be recorded by the server and verified offline:
 ```bash
 cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 --ready --record match.mbr
 cargo run -p moba-tools --bin replay -- match.mbr
+# custom content pack used by the match:
+cargo run -p moba-tools --bin replay -- --items content/example-pack.toml match.mbr
 ```
 
-Replays store the seed/config and exact per-tick inputs; the verifier reproduces the final
-state hash. Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
+Replays store the seed/config, content hash and exact per-tick inputs; the verifier checks
+the content manifest and reproduces the final state hash. Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,
 `MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`.
 

@@ -996,6 +996,8 @@ version = "0.1.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -1069,8 +1071,6 @@ dependencies = [
  "moba-jobs",
  "moba-net",
  "moba-sim",
- "serde",
- "toml",
 ]
 
 [[package]]

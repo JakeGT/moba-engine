@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Replay format v2 with content-hash manifests; `moba-tools replay --items`; shared
+  `moba-game` TOML loader used by server and tools.
 - Runtime item and hero content packs (`--items FILE`), validated and published to clients in
   the handshake; fixed progress-only delta encoding bug found by the content integration test.
 - Deterministic replay recording (`moba-server --record`) and verification

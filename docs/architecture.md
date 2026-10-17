@@ -163,8 +163,8 @@ capped by `ServerConfig::max_spectators`.
 ## Replays and debugging
 
 The server can write deterministic `.mbr` replays (`--record FILE`). A replay stores the
-simulation configuration plus every resolved per-tick input frame (post-bot resolution) and
-the final state hash. `moba-tools replay` re-simulates the frames and verifies the hash, which
+simulation configuration, content hash, every resolved per-tick input frame (post-bot
+resolution) and the final state hash. Verification rejects a mismatched content pack first. `moba-tools replay` re-simulates the frames and verifies the hash, which
 makes bug reports, balance regressions and CI fixtures shareable without video. Replays are
 match-scoped; a rematch writes a `.matchN.mbr` file.
 

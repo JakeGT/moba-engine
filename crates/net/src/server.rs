@@ -521,6 +521,7 @@ impl NetServer {
             config: self.record_config,
             frames: std::mem::take(&mut self.record_frames),
             expected_hash: Some(state_hash),
+            content_hash: self.content.hash(),
         };
         let target = replay_path(&path, self.match_number);
         match std::fs::write(&target, replay.encode()) {

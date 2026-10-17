@@ -5,7 +5,10 @@
 //! publish it to clients in the handshake; clients render and shop against the received
 //! catalogue. The catalogue is deliberately small and fixed-capacity on the wire.
 
+use std::path::Path;
+
 use moba_core::Fix;
+use serde::Deserialize;
 
 use crate::{ITEMS, ItemDef};
 
@@ -298,6 +301,132 @@ impl GameContent {
     }
 }
 
+/// Errors loading a content pack from TOML.
+#[derive(Debug)]
+pub enum ContentLoadError {
+    /// File could not be read.
+    Io(std::io::Error),
+    /// TOML could not be parsed.
+    Toml(toml::de::Error),
+    /// Content failed semantic validation.
+    Invalid(ContentError),
+}
+
+impl core::fmt::Display for ContentLoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "cannot read content: {error}"),
+            Self::Toml(error) => write!(f, "invalid TOML: {error}"),
+            Self::Invalid(error) => write!(f, "invalid content: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ContentLoadError {}
+
+#[derive(Deserialize)]
+struct ContentFile {
+    #[serde(default)]
+    items: Vec<ItemEntry>,
+    heroes: Option<Vec<HeroEntry>>,
+}
+
+#[derive(Deserialize)]
+struct ItemEntry {
+    name: String,
+    cost: u32,
+    #[serde(default)]
+    health: i32,
+    #[serde(default)]
+    mana: i32,
+    #[serde(default)]
+    attack_damage: i32,
+    #[serde(default)]
+    armor: i32,
+    #[serde(default)]
+    magic_resist: i32,
+    #[serde(default)]
+    move_speed: f32,
+}
+
+#[derive(Deserialize)]
+struct HeroEntry {
+    name: String,
+    max_health: i32,
+    max_mana: i32,
+    #[serde(default)]
+    health_regen_per_tick: i32,
+    #[serde(default)]
+    mana_regen_per_tick: i32,
+    attack_damage: i32,
+    attack_range: f32,
+    attack_interval_ticks: u32,
+    move_speed: f32,
+    #[serde(default)]
+    armor: i32,
+    #[serde(default)]
+    magic_resist: i32,
+    vision_range: f32,
+    abilities: [u8; 3],
+}
+
+/// Parses and validates a content pack from TOML.
+///
+/// # Errors
+/// Returns [`ContentLoadError`] for syntax or validation failures.
+pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
+    let file: ContentFile = toml::from_str(text).map_err(ContentLoadError::Toml)?;
+    let items = file
+        .items
+        .into_iter()
+        .map(|item| ItemSpec {
+            name: item.name,
+            cost: item.cost,
+            health: item.health,
+            mana: item.mana,
+            attack_damage: item.attack_damage,
+            armor: item.armor,
+            magic_resist: item.magic_resist,
+            move_speed_per_sec: Fix::from_f32(item.move_speed),
+        })
+        .collect();
+    let heroes = file.heroes.map_or_else(
+        || GameContent::default().heroes,
+        |heroes| {
+            heroes
+                .into_iter()
+                .map(|hero| HeroSpec {
+                    name: hero.name,
+                    max_health: hero.max_health,
+                    max_mana: hero.max_mana,
+                    health_regen_per_tick: hero.health_regen_per_tick,
+                    mana_regen_per_tick: hero.mana_regen_per_tick,
+                    attack_damage: hero.attack_damage,
+                    attack_range: Fix::from_f32(hero.attack_range),
+                    attack_interval_ticks: hero.attack_interval_ticks,
+                    move_speed_per_sec: Fix::from_f32(hero.move_speed),
+                    armor: hero.armor,
+                    magic_resist: hero.magic_resist,
+                    vision_range: Fix::from_f32(hero.vision_range),
+                    abilities: hero.abilities,
+                })
+                .collect()
+        },
+    );
+    let content = GameContent { items, heroes };
+    content.validate().map_err(ContentLoadError::Invalid)?;
+    Ok(content)
+}
+
+/// Reads, parses and validates a content pack.
+///
+/// # Errors
+/// Returns [`ContentLoadError`] for I/O, syntax or validation failures.
+pub fn load_file(path: &Path) -> Result<GameContent, ContentLoadError> {
+    let text = std::fs::read_to_string(path).map_err(ContentLoadError::Io)?;
+    load_toml(&text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +437,15 @@ mod tests {
         assert_eq!(content.items.len(), ITEMS.len());
         assert_eq!(content.validate(), Ok(()));
         assert_eq!(content.hash(), GameContent::default().hash());
+    }
+
+    #[test]
+    fn example_pack_parses() {
+        let content = load_toml(include_str!("../../../content/example-pack.toml"))
+            .expect("example pack is valid");
+        assert_eq!(content.items.len(), 8);
+        assert_eq!(content.heroes.len(), 1);
+        assert_eq!(content.heroes[0].name, "Vanguard");
     }
 
     #[test]

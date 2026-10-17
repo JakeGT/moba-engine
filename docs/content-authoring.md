@@ -96,6 +96,6 @@ abilities = [0, 1, 2]  # ids into the engine ability library
 
 Hero names must be 1–16 ASCII bytes and unique; ability ids must exist. Clients receive the
 hero names/vision/ability bindings for HUD/vision, while simulation stats come from the same
-pack. Replays record inputs but not the content file, so keep the pack alongside a replay
-when sharing it. Ability behaviour and map/lane definitions remain compile-time until the
+pack. Replays record a content hash and inputs; keep the pack alongside a replay and verify with
+`moba-tools replay --items pack.toml match.mbr`. A mismatched/missing pack is rejected. Ability behaviour and map/lane definitions remain compile-time until the
 rest of M8 lands.

@@ -21,10 +21,13 @@ deterministic playback and server authority.
 - Example `content/example-pack.toml` (8 items + Vanguard hero); custom hero UDP test and
   client capture (`../images/m8-hero-content.png`).
 - Catalogue integrity: FNV hash in `Welcome`, bound into the PSK HMAC and rechecked by clients.
+- Shared TOML loader in `moba-game`; replay format v2 carries the content hash, and
+  `moba-tools replay --items pack.toml` verifies custom matches. Live custom replay verified
+  at hash `0x5f2fd8408d51955a` / state `0x2e3dc732ced63886`.
 
 ## Next
 - Move hero stats, ability tables and map/lane/structure definitions into validated content.
-- Content hash in handshake/replay manifests; reject mismatched packs.
+- Content hash in replay manifests is done; extend it to full manifest/version metadata.
 - Hot-reload for development and a `moba-tools content check` command.
 - Asset/model mappings and per-map rendering.
 

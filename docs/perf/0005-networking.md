@@ -64,3 +64,8 @@ cargo run --release -p moba-tools --bin soak -- --seconds 300
 Replays store resolved per-slot inputs, not snapshots: a live 194-tick match produced a
 30 KB `.mbr` file (≈4.6 KB/s while playing). Offline verification re-simulates the match in
 milliseconds.
+
+
+Custom-content replay: 134 ticks with the example pack (8 items + Vanguard) produced a
+20 KB `.mbr`; offline verification with `--items` matched content hash
+`0x5f2fd8408d51955a` and state hash `0x2e3dc732ced63886`.
