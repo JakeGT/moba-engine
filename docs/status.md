@@ -12,7 +12,7 @@ Last updated: 2026-10-17 (round 11 of the build).
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
 | M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and spectator mode (protocol v7); 5-minute plaintext soak, 20 s encrypted and 15 s v7 soaks pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
-| M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; ready-up/surrender and line-of-sight fog remain. |
+| M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up gating and surrender votes, HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; line-of-sight fog and map selection remain. |
 | M7 | Hardening | 🟡 | Optional PSK AEAD transport, reconnect and deterministic replay tooling landed; public identity/anti-DoS, 50 matches/box, one-hour sanitizer fuzz and profiling captures remain. |
 | M8 | Content pipeline | ⬜ | Data-driven abilities. |
 
@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 11 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 129 tests
+- `cargo test --workspace --locked` — 133 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -90,8 +90,8 @@ Last updated: 2026-10-17 (round 11 of the build).
   150 ms/5%/30 ms links — all connected, ~8,500 snapshots each, 4.1–4.5 KiB/s down and
   ~1.17 KiB/s up; server sent 13.4 MiB over 9,120 ticks. 30 s reruns measured 4.0–5.2 KiB/s
   (v2), 4.2–5.7 KiB/s (v3), 4.2–5.7 KiB/s (v4) and 4.2–5.8 KiB/s (v5); protocol-v6
-  plaintext measured 4.6–6.8 KiB/s down (v6) and 4.7–7.6 KiB/s (v7); encrypted v6
-  measured 5.0–7.3 KiB/s down / 1.8–1.9 KiB/s up.
+  plaintext measured 4.6–6.8 KiB/s down (v6), 4.7–7.6 KiB/s (v7) and 4.8–7.7 KiB/s (v8);
+  encrypted v6 measured 5.0–7.3 KiB/s down / 1.8–1.9 KiB/s up.
   Protocol/delta/snapshot tests pass.
 - Online client: `MOBA_SERVER=local MOBA_DEMO_MOVE=110,128` connected, rendered
   interpolated snapshots with the local hero predicted, and captured a validation-clean
@@ -111,6 +111,8 @@ Last updated: 2026-10-17 (round 11 of the build).
   key is rejected. 10-client encrypted soak stays at 5.0–7.3 KiB/s down / 1.8–1.9 KiB/s up.
 - Spectator: `MOBA_SPECTATE=1` capture shows full-map visibility, both teams, minimap and free
   camera; a real-UDP test verifies 5 blue + 5 red heroes with no player slot.
+- Ready/surrender: `--ready` lobby capture (`m6-ready-lobby.png`), real-UDP ready-gate test
+  and a deterministic surrender replay test pass.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
 - Replay: live server recording (`--record`) and `moba-tools replay` reproduce

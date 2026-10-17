@@ -223,6 +223,7 @@ fn encode_command(command: &PlayerCommand, out: &mut Vec<u8>) {
             out.push(4);
             out.push(*item);
         }
+        PlayerCommand::Surrender => out.push(5),
     }
 }
 
@@ -236,6 +237,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<PlayerCommand, ReplayError>
             target: fixed_vec(reader)?,
         },
         4 => PlayerCommand::BuyItem(reader.u8()?),
+        5 => PlayerCommand::Surrender,
         _ => return Err(ReplayError::BadData),
     })
 }
@@ -333,7 +335,11 @@ mod tests {
             if tick < 200 {
                 inputs.set(0, PlayerCommand::MoveTo(FixVec2::from_ints(100, 128)));
             }
-            inputs.set(1, PlayerCommand::Stop);
+            if tick == 299 {
+                inputs.set(1, PlayerCommand::Surrender);
+            } else {
+                inputs.set(1, PlayerCommand::Stop);
+            }
             replay.push(inputs);
             simulation.tick(&inputs);
         }
@@ -344,6 +350,7 @@ mod tests {
         let result = decoded.play().expect("replay verifies");
         assert_eq!(result.ticks, 300);
         assert_eq!(result.state_hash, simulation.state_hash());
+        assert_eq!(result.outcome, Some(moba_game::Team::Red));
 
         let mut corrupt = encoded.clone();
         // Expected hash lives at byte 31; changing it must make verification fail.

@@ -74,6 +74,7 @@ fn main() {
         pre_shared_key: options.secret,
         record: None,
         max_spectators: 8,
+        require_ready: false,
     }) {
         Ok(server) => server,
         Err(error) => fail(&format!("cannot bind server: {error}")),

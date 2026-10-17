@@ -44,6 +44,7 @@ use moba_sim::{SimConfig, Simulation, UnitKind};
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
 const SNAPSHOT_DELAY_TICKS: f32 = 4.0;
 
+#[allow(clippy::struct_excessive_bools)] // Mode flags are independent UI/network state.
 struct NetworkView {
     client: NetClient,
     prediction: PredictionState,
@@ -54,6 +55,9 @@ struct NetworkView {
     phase: MatchPhase,
     countdown: u16,
     spectator: bool,
+    ready: bool,
+    ready_count: u8,
+    player_count: u8,
     last_tick: u32,
     demo_move: Option<FixVec2>,
     demo_sent: bool,
@@ -119,6 +123,9 @@ impl ClientApp {
                         phase: MatchPhase::Lobby,
                         countdown: 0,
                         spectator,
+                        ready: false,
+                        ready_count: 0,
+                        player_count: 0,
                         last_tick: 0,
                         demo_move: parse_demo_move(),
                         demo_sent: false,
@@ -249,6 +256,12 @@ impl App for ClientApp {
                             network.phase =
                                 MatchPhase::from_u8(snapshot.phase).unwrap_or(MatchPhase::Lobby);
                             network.countdown = snapshot.countdown;
+                            network.ready_count =
+                                u8::try_from(snapshot.ready_mask.count_ones()).unwrap_or(u8::MAX);
+                            network.player_count =
+                                u8::try_from(snapshot.player_mask.count_ones()).unwrap_or(u8::MAX);
+                            network.ready = network.own_slot < 10
+                                && snapshot.ready_mask & (1 << network.own_slot) != 0;
                             if snapshot.tick < network.last_tick {
                                 // Rematch: server restarted at tick zero with fresh net ids.
                                 network.interpolator.clear();
@@ -463,6 +476,7 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
             pre_shared_key: secret,
             record: None,
             max_spectators: 8,
+            require_ready: false,
         })
         .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
@@ -618,6 +632,19 @@ fn handle_network_input(
 ) {
     if network.spectator {
         return;
+    }
+    if input.was_key_pressed(Key::R) && network.phase == MatchPhase::Lobby {
+        let ready = !network.ready;
+        if network
+            .client
+            .send_command(WireCommand::Ready { ready })
+            .is_ok()
+        {
+            network.ready = ready;
+        }
+    }
+    if input.was_key_pressed(Key::F5) && network.phase == MatchPhase::Playing {
+        let _ = network.client.send_command(WireCommand::Surrender);
     }
     if input.was_key_pressed(Key::B) {
         *shop = !*shop;
@@ -1062,6 +1089,9 @@ fn build_network_hud(
         &format!("TICK {}   {} SNAPSHOTS", tick, stats.snapshots),
     );
 
+    if !network.spectator {
+        ui.text(30.0, 108.0, 1.8, muted, "R READY   F5 SURRENDER");
+    }
     // Controls.
     let controls = if network.spectator {
         "SPECTATOR VIEW   TAB SCOREBOARD"
@@ -1339,10 +1369,34 @@ fn build_network_hud(
     }
     if matches!(network.phase, MatchPhase::Lobby | MatchPhase::Countdown) {
         let seconds = u32::from(network.countdown).div_ceil(30);
-        let label = if network.phase == MatchPhase::Lobby {
-            String::from("WAITING FOR PLAYERS")
+        let (label, footer) = if network.spectator {
+            (
+                format!("SPECTATOR — MATCH STARTS IN {seconds}"),
+                String::from("ALL UNITS VISIBLE"),
+            )
+        } else if network.phase == MatchPhase::Lobby {
+            if network.ready {
+                (
+                    String::from("READY — WAITING FOR PLAYERS"),
+                    format!(
+                        "{}/{} PLAYERS READY",
+                        network.ready_count, network.player_count
+                    ),
+                )
+            } else {
+                (
+                    String::from("PRESS R TO READY"),
+                    format!(
+                        "{}/{} PLAYERS READY",
+                        network.ready_count, network.player_count
+                    ),
+                )
+            }
         } else {
-            format!("MATCH STARTS IN {seconds}")
+            (
+                format!("MATCH STARTS IN {seconds}"),
+                String::from("BOTS FILL EMPTY SLOTS"),
+            )
         };
         let panel_w = 560.0;
         let panel_h = 110.0;
@@ -1362,11 +1416,11 @@ fn build_network_hud(
             &label,
         );
         ui.text(
-            (width_f - UiDrawList::text_width("BOTS FILL EMPTY SLOTS", 2.0)) * 0.5,
+            (width_f - UiDrawList::text_width(&footer, 2.0)) * 0.5,
             height_f * 0.35 + 72.0,
             2.0,
             muted,
-            "BOTS FILL EMPTY SLOTS",
+            &footer,
         );
     }
     if let Some(outcome) = snapshot

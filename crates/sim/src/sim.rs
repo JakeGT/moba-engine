@@ -87,6 +87,8 @@ pub enum PlayerCommand {
     },
     /// Purchases an item from the catalogue (must be near the team nexus).
     BuyItem(u8),
+    /// Concedes the match for the sender's team.
+    Surrender,
 }
 
 /// One tick of input for every player.
@@ -947,6 +949,15 @@ impl Simulation {
                 }
                 PlayerCommand::BuyItem(item) => {
                     self.buy_item(entity, item);
+                }
+                PlayerCommand::Surrender => {
+                    if self.outcome.is_none() {
+                        if let Some(team) = self.world.get::<Team>(entity).copied() {
+                            let winner = team.enemy();
+                            self.outcome = Some(winner);
+                            self.push_event(SimEvent::MatchEnded { winner });
+                        }
+                    }
                 }
             }
         }
@@ -1958,6 +1969,16 @@ mod tests {
             sim.world.get::<AttackStats>(blue).expect("stats").damage,
             damage_before + 12
         );
+    }
+
+    #[test]
+    fn surrender_ends_the_match_for_the_enemy_team() {
+        use moba_game::Team;
+        let mut sim = idle(SimConfig::default().hero_picks);
+        let mut inputs = TickInputs::new();
+        inputs.set(0, PlayerCommand::Surrender);
+        sim.tick(&inputs);
+        assert_eq!(sim.outcome(), Some(Team::Red));
     }
 
     #[test]

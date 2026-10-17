@@ -54,11 +54,17 @@ levels/items, and a complete match flow.
 ## Landed in round 12
 - **Protocol v7**: spectator handshake flag/slot and welcome flag; peek into a spectator-selected
   all-map observation path.
+- **Protocol v8 ready/surrender**: `Ready { ready }` gates the countdown when
+  `ServerConfig::require_ready` is set; snapshot ready/player masks drive the lobby HUD.
+  `Surrender` is a deterministic simulation command and is recorded in replays; the server
+  requires every connected human on a team to vote before it takes effect.
 - **Spectator mode**: read-only connections in extra server slots receive all-team snapshots
   (no fog), zeroed private gold/inventory, cannot send inputs, and render with a free overview
   camera, minimap and scoreboard. `MOBA_SPECTATE=1` client mode; handshake/protocol v7.
 - Spectator integration test verifies both teams and more than the 26 base entities are
   visible without a player slot.
+- Ready/surrender integration test starts in Lobby, sends `Ready`, reaches Playing and gets a
+  red win after a blue surrender. Capture: `../images/m6-ready-lobby.png`.
 
 ## Landed in round 9
 - **Reconnect**: disconnected slots are reserved for a configurable grace period (60 s
@@ -81,7 +87,7 @@ levels/items, and a complete match flow.
 - [x] Fog circles align with server visibility; unseen units are absent and unseen terrain is dark.
 - [x] Tab scoreboard lists allied heroes and hides unseen enemies.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
-- [x] 130 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
+- [x] 133 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
       progression and reconnect handshake; UDP tests cover shop purchase and slot resumption.
 - [x] Levels/XP, gold/items/shop and the lobby-to-rematch flow (no ready-up/reconnect yet).
 

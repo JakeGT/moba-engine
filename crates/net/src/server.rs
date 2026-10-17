@@ -52,6 +52,8 @@ pub struct ServerConfig {
     pub record: Option<PathBuf>,
     /// Additional read-only spectator connections beyond the ten player slots.
     pub max_spectators: usize,
+    /// Require every connected player to ready up before starting the countdown.
+    pub require_ready: bool,
 }
 
 impl core::fmt::Debug for ServerConfig {
@@ -68,6 +70,7 @@ impl core::fmt::Debug for ServerConfig {
             .field("pre_shared_key", &self.pre_shared_key.is_some())
             .field("record", &self.record)
             .field("max_spectators", &self.max_spectators)
+            .field("require_ready", &self.require_ready)
             .finish()
     }
 }
@@ -86,6 +89,7 @@ impl Default for ServerConfig {
             pre_shared_key: None,
             record: None,
             max_spectators: 8,
+            require_ready: false,
         }
     }
 }
@@ -112,6 +116,7 @@ struct SnapshotRecord {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // Connection flags are independent state.
 struct ClientConn {
     addr: SocketAddr,
     session: u32,
@@ -119,6 +124,7 @@ struct ClientConn {
     spectator: bool,
     team: moba_game::Team,
     connected: bool,
+    ready: bool,
     last_seen: Instant,
     disconnected_at: Option<Instant>,
     last_input_seq: u32,
@@ -195,6 +201,8 @@ pub struct NetServer {
     record_frames: Vec<TickInputs>,
     record_config: SimConfig,
     recorded: bool,
+    surrender_votes: [u16; 2],
+    pending_surrender: Option<moba_game::Team>,
 }
 
 impl NetServer {
@@ -224,6 +232,8 @@ impl NetServer {
             record_frames: Vec::new(),
             record_config: config_sim,
             recorded: false,
+            surrender_votes: [0; 2],
+            pending_surrender: None,
         })
     }
 
@@ -348,6 +358,16 @@ impl NetServer {
                 inputs.set(slot, command);
             }
         }
+        if let Some(team) = self.pending_surrender.take() {
+            for slot in 0..self.config.max_clients.min(self.clients.len()) {
+                if let Some(client) = self.clients[slot].as_ref() {
+                    if client.connected && !client.spectator && client.team == team {
+                        inputs.set(slot, PlayerCommand::Surrender);
+                        break;
+                    }
+                }
+            }
+        }
         if self.config.record.is_some() {
             self.record_frames.push(inputs);
         }
@@ -362,6 +382,71 @@ impl NetServer {
         } else {
             Phase::Countdown(self.config.countdown_ticks)
         };
+        self.surrender_votes = [0; 2];
+        self.pending_surrender = None;
+    }
+
+    fn maybe_start_countdown(&mut self) {
+        if self.phase != Phase::Lobby {
+            return;
+        }
+        if self.config.require_ready && !self.all_players_ready() {
+            return;
+        }
+        self.start_countdown();
+    }
+
+    fn all_players_ready(&self) -> bool {
+        let mut players = 0;
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
+            let Some(client) = self.clients[slot].as_ref() else {
+                continue;
+            };
+            if !client.connected {
+                continue;
+            }
+            players += 1;
+            if !client.ready {
+                return false;
+            }
+        }
+        players > 0
+    }
+
+    fn set_ready(&mut self, slot: usize, ready: bool) {
+        let Some(client) = self.clients[slot].as_mut() else {
+            return;
+        };
+        if client.spectator {
+            return;
+        }
+        client.ready = ready;
+        if !ready && matches!(self.phase, Phase::Countdown(_)) {
+            self.phase = Phase::Lobby;
+        }
+        self.maybe_start_countdown();
+    }
+
+    fn cast_surrender_vote(&mut self, slot: usize) {
+        if !matches!(self.phase, Phase::Playing) {
+            return;
+        }
+        let Some(client) = self.clients[slot].as_ref() else {
+            return;
+        };
+        let team = client.team;
+        self.surrender_votes[team.index()] |= 1 << slot;
+        let mut connected = 0u16;
+        for index in 0..self.config.max_clients.min(self.clients.len()) {
+            if let Some(player) = self.clients[index].as_ref() {
+                if player.connected && !player.spectator && player.team == team {
+                    connected |= 1 << index;
+                }
+            }
+        }
+        if connected != 0 && self.surrender_votes[team.index()] & connected == connected {
+            self.pending_surrender = Some(team);
+        }
     }
 
     fn reset_match(&mut self) {
@@ -386,7 +471,16 @@ impl NetServer {
             client.last_input_seq = 0;
         }
         self.refresh_bot_mask();
-        if self.clients.iter().any(Option::is_some) {
+        self.surrender_votes = [0; 2];
+        self.pending_surrender = None;
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
+            if let Some(client) = self.clients[slot].as_mut() {
+                client.ready = false;
+            }
+        }
+        if self.config.require_ready {
+            self.phase = Phase::Lobby;
+        } else if self.clients.iter().any(Option::is_some) {
             self.start_countdown();
         } else {
             self.phase = Phase::Lobby;
@@ -460,8 +554,13 @@ impl NetServer {
             if client.connected {
                 if now.duration_since(client.last_seen) > timeout {
                     client.connected = false;
+                    client.ready = false;
                     client.disconnected_at = Some(now);
                     client.command = None;
+                    self.surrender_votes[client.team.index()] &= !(1 << slot);
+                    if self.config.require_ready && matches!(self.phase, Phase::Countdown(_)) {
+                        self.phase = Phase::Lobby;
+                    }
                     self.transport.remove_peer_key(client.addr);
                     let header = Header {
                         kind: PacketKind::Disconnect,
@@ -605,6 +704,7 @@ impl NetServer {
                     spectator: hello.spectate,
                     team,
                     connected: true,
+                    ready: false,
                     last_seen: Instant::now(),
                     disconnected_at: None,
                     last_input_seq: 0,
@@ -620,9 +720,7 @@ impl NetServer {
                     bytes_sent: 0,
                 });
                 self.refresh_bot_mask();
-                if self.phase == Phase::Lobby {
-                    self.start_countdown();
-                }
+                self.maybe_start_countdown();
                 self.send_welcome(message.addr, slot, hello.nonce, session)?;
             }
             PacketKind::Input => {
@@ -639,15 +737,25 @@ impl NetServer {
                 };
                 client.last_seen = Instant::now();
                 let mut purchase = None;
+                let mut ready_change = None;
+                let mut surrender = false;
                 if sequence_after(input.input_seq, client.last_input_seq) {
                     client.last_input_seq = input.input_seq;
                     match input.command {
                         WireCommand::BuyItem { item } => purchase = Some(item),
+                        WireCommand::Ready { ready } => ready_change = Some(ready),
+                        WireCommand::Surrender => surrender = true,
                         command => client.command = Some(command),
                     }
                 }
                 if let Some(item) = purchase {
                     self.simulation.purchase(index, item);
+                }
+                if let Some(ready) = ready_change {
+                    self.set_ready(index, ready);
+                }
+                if surrender {
+                    self.cast_surrender_vote(index);
                 }
             }
             PacketKind::SnapshotAck => {
@@ -817,6 +925,18 @@ impl NetServer {
         let (phase_code, countdown) = self.phase();
         let mut current = core::mem::take(&mut self.current);
         let mut payload = core::mem::take(&mut self.payload);
+        let mut ready_mask = 0u16;
+        let mut player_mask = 0u16;
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
+            if let Some(player) = self.clients[slot].as_ref() {
+                if player.connected && !player.spectator {
+                    player_mask |= 1 << slot;
+                    if player.ready {
+                        ready_mask |= 1 << slot;
+                    }
+                }
+            }
+        }
         for index in 0..self.clients.len() {
             let Some(client) = self.clients[index].as_mut() else {
                 continue;
@@ -868,6 +988,8 @@ impl NetServer {
             };
             delta.phase = phase_code as u8;
             delta.countdown = countdown;
+            delta.ready_mask = ready_mask;
+            delta.player_mask = player_mask;
             encode_snapshot(&delta, &mut payload)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             client.snapshot_seq = client.snapshot_seq.wrapping_add(1);
@@ -904,6 +1026,8 @@ fn wire_to_command(client: &ClientConn, command: WireCommand) -> Option<PlayerCo
             target: dequantize_position(x, y),
         },
         WireCommand::BuyItem { item } => PlayerCommand::BuyItem(item),
+        WireCommand::Ready { .. } => return None,
+        WireCommand::Surrender => PlayerCommand::Surrender,
     })
 }
 
@@ -954,6 +1078,7 @@ mod tests {
             pre_shared_key: None,
             record: None,
             max_spectators: 8,
+            require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
@@ -1014,6 +1139,7 @@ mod tests {
             pre_shared_key: None,
             record: Some(replay_path.clone()),
             max_spectators: 8,
+            require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");
         server.phase = Phase::Playing;

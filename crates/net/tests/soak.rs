@@ -23,6 +23,7 @@ fn ten_clients_over_a_lossy_150ms_link() {
         pre_shared_key: None,
         record: None,
         max_spectators: 8,
+        require_ready: false,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let server_addr = server.local_addr().expect("addr");

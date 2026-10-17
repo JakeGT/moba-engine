@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 131 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 133 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -41,7 +41,7 @@ MOBA_SERVER=local cargo run -p moba-client
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
-B shop (1–8 buy), Tab scoreboard, Escape quit. Set `MOBA_SPECTATE=1` to join as a read-only
+R ready up in the lobby, F5 surrender vote, B shop (1–8 buy), Tab scoreboard, Escape quit. Set `MOBA_SPECTATE=1` to join as a read-only
 spectator with full-map visibility and a free overview camera.
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
@@ -65,7 +65,7 @@ for its scope and limitations.
 Deterministic replays can be recorded by the server and verified offline:
 
 ```bash
-cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 --record match.mbr
+cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 --ready --record match.mbr
 cargo run -p moba-tools --bin replay -- match.mbr
 ```
 

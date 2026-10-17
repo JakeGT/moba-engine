@@ -22,6 +22,7 @@ fn main() {
         .ok()
         .map(|value| parse_secret(&value));
     let mut record: Option<std::path::PathBuf> = None;
+    let mut require_ready = false;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -63,10 +64,11 @@ fn main() {
             "--record" => {
                 record = args.next().map(std::path::PathBuf::from);
             }
+            "--ready" => require_ready = true,
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready]"
                 );
                 return;
             }
@@ -97,6 +99,7 @@ fn main() {
             pre_shared_key: secret,
             record,
             max_spectators: 8,
+            require_ready,
         })
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");

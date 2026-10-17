@@ -149,6 +149,8 @@ mod tests {
             outcome: 0,
             phase: 0,
             countdown: 0,
+            ready_mask: 0,
+            player_mask: 0,
             entities,
         }
     }

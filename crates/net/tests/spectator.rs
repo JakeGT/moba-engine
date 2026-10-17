@@ -19,6 +19,7 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
         pre_shared_key: None,
         record: None,
         max_spectators: 4,
+        require_ready: false,
     })
     .expect("server binds");
     let addr = server.local_addr().expect("addr");

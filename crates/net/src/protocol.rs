@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 7;
+pub const PROTOCOL_VERSION: u8 = 8;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -393,6 +393,13 @@ pub enum WireCommand {
         /// Catalogue index.
         item: u8,
     },
+    /// Toggle lobby readiness.
+    Ready {
+        /// Requested ready state.
+        ready: bool,
+    },
+    /// Vote to end the match for the sender's team.
+    Surrender,
 }
 
 /// Client intent payload.
@@ -585,6 +592,10 @@ pub struct SnapshotDelta {
     pub phase: u8,
     /// Ticks remaining in countdown/results.
     pub countdown: u16,
+    /// Bitmask of player slots that are ready.
+    pub ready_mask: u16,
+    /// Bitmask of connected player slots.
+    pub player_mask: u16,
     /// Newly visible entities (always full state).
     pub spawns: Vec<NetEntity>,
     /// Changed entities.
@@ -618,6 +629,10 @@ pub struct SnapshotState {
     pub phase: u8,
     /// Ticks remaining in countdown/results.
     pub countdown: u16,
+    /// Bitmask of player slots that are ready.
+    pub ready_mask: u16,
+    /// Bitmask of connected player slots.
+    pub player_mask: u16,
     /// Entities sorted by network id.
     pub entities: Vec<NetEntity>,
 }
@@ -636,6 +651,8 @@ impl SnapshotState {
             outcome: delta.outcome,
             phase: delta.phase,
             countdown: delta.countdown,
+            ready_mask: delta.ready_mask,
+            player_mask: delta.player_mask,
             entities,
         }
     }
@@ -679,6 +696,8 @@ impl SnapshotState {
             outcome: delta.outcome,
             phase: delta.phase,
             countdown: delta.countdown,
+            ready_mask: delta.ready_mask,
+            player_mask: delta.player_mask,
             entities,
         })
     }
@@ -712,6 +731,8 @@ pub fn build_delta(
             outcome: 0,
             phase: 0,
             countdown: 0,
+            ready_mask: 0,
+            player_mask: 0,
             spawns: current.to_vec(),
             updates: Vec::new(),
             despawns: Vec::new(),
@@ -726,6 +747,8 @@ pub fn build_delta(
         outcome: 0,
         phase: 0,
         countdown: 0,
+        ready_mask: 0,
+        player_mask: 0,
         spawns: Vec::new(),
         updates: Vec::new(),
         despawns: Vec::new(),
@@ -812,6 +835,11 @@ fn encode_command(out: &mut Vec<u8>, command: WireCommand) {
             out.push(4);
             out.push(item);
         }
+        WireCommand::Ready { ready } => {
+            out.push(5);
+            out.push(u8::from(ready));
+        }
+        WireCommand::Surrender => out.push(6),
     }
 }
 
@@ -831,6 +859,10 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<WireCommand, WireError> {
             y: reader.u16()?,
         },
         4 => WireCommand::BuyItem { item: reader.u8()? },
+        5 => WireCommand::Ready {
+            ready: reader.u8()? != 0,
+        },
+        6 => WireCommand::Surrender,
         _ => return Err(WireError::BadValue),
     })
 }
@@ -850,6 +882,8 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
     out.push(delta.outcome);
     out.push(delta.phase);
     put_u16(out, delta.countdown);
+    put_u16(out, delta.ready_mask);
+    put_u16(out, delta.player_mask);
     put_u16(out, count_u16(delta.spawns.len())?);
     put_u16(out, count_u16(delta.updates.len())?);
     put_u16(out, count_u16(delta.despawns.len())?);
@@ -939,6 +973,8 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     let outcome = reader.u8()?;
     let phase = reader.u8()?;
     let countdown = reader.u16()?;
+    let ready_mask = reader.u16()?;
+    let player_mask = reader.u16()?;
     let spawn_count = usize::from(reader.u16()?);
     let update_count = usize::from(reader.u16()?);
     let despawn_count = usize::from(reader.u16()?);
@@ -1038,6 +1074,8 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
         outcome,
         phase,
         countdown,
+        ready_mask,
+        player_mask,
         spawns,
         updates,
         despawns,
@@ -1299,6 +1337,8 @@ mod tests {
             outcome: 0,
             phase: 0,
             countdown: 0,
+            ready_mask: 0,
+            player_mask: 0,
             entities: baseline,
         };
         let applied = state.apply(&delta, 2).unwrap();
@@ -1312,6 +1352,8 @@ mod tests {
             outcome: 0,
             phase: 0,
             countdown: 0,
+            ready_mask: 0,
+            player_mask: 0,
             entities: applied.entities.clone(),
         };
         assert_eq!(wrong.apply(&delta, 3), Err(WireError::MissingBaseline));

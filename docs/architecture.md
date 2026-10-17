@@ -140,6 +140,12 @@ simulation loop.
 
 ## Spectators
 
+The server starts a match immediately by default. With `--ready` (or
+`ServerConfig::require_ready`), every connected player must send `Ready { ready }`; snapshots
+carry ready/player masks. Disconnecting or unreadying a player during the countdown returns
+the lobby to `Lobby`. `F5` sends `Surrender`; each connected human on a team must vote, then a
+recorded `PlayerCommand::Surrender` ends the match deterministically for replay.
+
 A connection can request `spectate` in the handshake. Spectators occupy extra slots beyond the
 ten players, receive the union of all units (no fog filtering), have gold/inventory fields
 zeroed, cannot submit inputs, and render with a free overview camera. They use the same

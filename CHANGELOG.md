@@ -36,6 +36,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
+- Version 8: ready-up and surrender vote commands, lobby ready/player masks.
 - Version 7: read-only spectator handshake/slots and full-map observation; spectator welcome
   flag.
 - Version 6: optional authenticated, encrypted transport (PSK handshake + ChaCha20-Poly1305
