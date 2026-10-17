@@ -19,16 +19,24 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   timeouts, bandwidth counters.
 - **Client**: handshake with retries, command retransmission until acked, snapshot history,
   delta application, full-resync request, keepalive/RTT, event queue.
+- **prediction/reconciliation** (`moba-net::prediction`): the local hero responds to a
+  click immediately; large errors snap (dash/respawn), lag-sized offsets are tolerated
+  while moving, and idle positions converge smoothly to the authoritative one.
+- **interpolation** (`moba-net::interpolation`): a 4-tick (133 ms) snapshot buffer lerps
+  remote entity positions and deduplicates retransmitted/out-of-order snapshots.
+- **playable network client**: `MOBA_SERVER=<addr|local>` renders snapshots with the local
+  hero predicted; right-click move, left-click attack, Q/W/E cast, Space stop.
 - **netsim**: per-client UDP link conditioner with base latency, jitter, seeded loss and
   reordering; optional one-way/round-trip shaping.
 - **tools**: `soak` binary (10 clients, 150 ms RTT, 5% loss, 30 ms jitter, default 5 min).
 
 ## Non-goals / still open
-- Client-side prediction/reconciliation of the local hero and interpolation of remote
-  entities (next round; the snapshot/ack/NetId foundation is ready).
-- Server lag compensation for skillshots.
+- Server rewind compensation is not needed for the current kit: every aimed ability is a
+  traveling projectile and basic attacks are server-targeted, so aim is not resolved
+  against a stale snapshot. Revisit if hitscan abilities are added.
+- HUD (health/mana/cooldowns), fog of war, scoreboard and the wider match flow belong to M6.
 - Encryption/authentication: sessions are 32-bit tokens, not cryptographic; M7 hardening.
-- Fuzzing harness runtime (short decoder fuzz lives in unit tests).
+- Sanitizer-backed fuzzing runtime (M7); the deterministic wire fuzzer is available now.
 
 ## Acceptance tests
 - [x] Protocol round-trips, bounds checks and 5k-byte fragmented datagrams.
@@ -40,7 +48,36 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
       ~1.1 KB/s (budget 4).
 - [x] Five-minute soak (`moba-tools soak --seconds 300`): all 10 clients stay connected,
       ~8,500 snapshots each, 4.1–4.5 KB/s down, ~1.17 KB/s up, 177–209 ms RTT.
-- [ ] Prediction/reconciliation and lag compensation.
+- [x] Prediction/reconciliation tests and interpolation tests.
+- [x] Networked client renders server snapshots and predicts the local hero; readback
+      capture with validation enabled.
+- [x] Wire fuzzer: 73M decoder iterations in 60 s clean (one-hour gate available).
+- [~] Lag compensation: N/A for traveling projectiles/server-targeted attacks; documented.
+
+## Netcode decisions (checked against prior art)
+- **Interpolation delay**: the client buffers 4 ticks (133 ms) at 30 Hz. Glenn Fiedler's
+  rule of thumb is ~3x the snapshot interval plus jitter to survive two consecutive lost
+  packets; 4 ticks covers 2 x 33 ms loss + 30 ms jitter with margin. Linear interpolation is
+  sufficient for ground-plane MOBA movement; Hermite splines are unnecessary until units
+  have significant non-linear vertical motion.
+- **Prediction**: movement is order-based, not physics replay. The client moves immediately,
+  snaps on >8-unit errors (dash/respawn/clamp) and converges while idle; lag-sized errors
+  are tolerated while moving instead of rubber-banding. Replaying unacknowledged inputs
+  would require the server to timestamp orders by client tick; the current input model does
+  not, so conservative dead-reckoning is the honest trade-off.
+- **Lag compensation**: Source-style rewind compensates hitscan aim against stale targets.
+  This kit has no hitscan player aim: every aimed ability is a travelling projectile and
+  basic attacks are server-targeted, so the server resolves them against current state.
+  Rewind becomes necessary if hitscan abilities are added.
+- **Sequence wrap**: packet/input ordering uses RFC 1982 serial arithmetic, with a
+  wrap-around test, so a long-lived session cannot misorder packets after 2^32 sends.
+- **Fuzzing**: `just fuzz-wire` runs deterministic structured mutations through every
+  decoder for one hour by default. This is a fast gate, not a replacement for sanitizer
+  fuzzing, which joins M7.
+
+References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot_interpolation/),
+[Valve lag compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation),
+[RFC 1982 serial arithmetic](https://www.rfc-editor.org/rfc/rfc1982).
 
 ## Budgets touched
 Downstream ≤ 20 KB/s typical / 40 KB/s teamfight; upstream ≤ 4 KB/s. Measured far inside

@@ -20,6 +20,6 @@ pub use components::{
 };
 pub use sim::{
     HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, ObservedUnit,
-    PlayerCommand, SimConfig, SimEvent, Simulation, TickInputs, WAVE_DELAY_TICKS,
+    PlayerCommand, SimConfig, SimEvent, Simulation, TICK_DURATION, TickInputs, WAVE_DELAY_TICKS,
     WAVE_INTERVAL_TICKS, WORLD_EXTENT,
 };

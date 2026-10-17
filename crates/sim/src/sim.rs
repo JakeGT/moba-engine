@@ -33,7 +33,8 @@ pub const HERO_RESPAWN_TICKS: u32 = 300;
 pub const WORLD_EXTENT: i32 = 256;
 
 /// Fixed-point duration of one tick (`1/30` second).
-const ONE_TICK: Fix = Fix::from_bits(143_165_576);
+pub const TICK_DURATION: Fix = Fix::from_bits(143_165_576);
+const ONE_TICK: Fix = TICK_DURATION;
 const MINION_AGGRO: Fix = Fix::from_i32(6);
 const MINION_AGGRO_SQ: Fix = Fix::from_bits(
     MINION_AGGRO

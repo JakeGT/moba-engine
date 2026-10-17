@@ -6,11 +6,15 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod interpolation;
+pub mod prediction;
 pub mod protocol;
 pub mod server;
 pub mod transport;
 
 pub use client::{ClientEvent, ClientStats, NetClient};
+pub use interpolation::Interpolator;
+pub use prediction::PredictionState;
 pub use protocol::{
     HEADER_LEN, Header, MAX_DATAGRAM, NetEntity, NetId, NetUpdate, PacketKind, SnapshotDelta,
     SnapshotState, Welcome, WireCommand, WireError, decode_hello, decode_packet, decode_welcome,

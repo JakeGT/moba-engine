@@ -10,7 +10,7 @@ use moba_game::Team;
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotDelta, SnapshotState,
     WireCommand, decode_hello, decode_packet, decode_snapshot, decode_welcome, encode_hello,
-    encode_input, encode_packet,
+    encode_input, encode_packet, sequence_after,
 };
 use crate::transport::UdpTransport;
 
@@ -253,7 +253,7 @@ impl NetClient {
             return Ok(());
         }
         if let Some(pending) = &self.pending {
-            if pending.input_seq <= self.last_acked_input {
+            if !sequence_after(pending.input_seq, self.last_acked_input) {
                 self.pending = None;
             } else if self.last_input_sent.elapsed() >= INPUT_RESEND {
                 self.send_input()?;
@@ -397,13 +397,19 @@ impl NetClient {
             self.request_full();
             return;
         };
-        self.last_acked_input = self.last_acked_input.max(delta.acked_input);
+        if sequence_after(delta.acked_input, self.last_acked_input) {
+            self.last_acked_input = delta.acked_input;
+        }
         if let Some(pending) = &self.pending {
-            if pending.input_seq <= self.last_acked_input {
+            if !sequence_after(pending.input_seq, self.last_acked_input) {
                 self.pending = None;
             }
         }
-        if self.latest.as_ref().is_none_or(|latest| seq > latest.seq) {
+        if self
+            .latest
+            .as_ref()
+            .is_none_or(|latest| sequence_after(seq, latest.seq))
+        {
             self.latest = Some(state.clone());
         }
         self.history.push_back(state);
@@ -411,7 +417,7 @@ impl NetClient {
             self.history.pop_front();
         }
         self.snapshots_received += 1;
-        if seq > self.last_acked_snapshot {
+        if sequence_after(seq, self.last_acked_snapshot) {
             self.last_acked_snapshot = seq;
             self.send_ack(seq, false);
         }

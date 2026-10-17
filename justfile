@@ -54,3 +54,7 @@ bench-compare:
 # Five-minute ten-client network soak (150 ms RTT, 5% loss, 30 ms jitter).
 soak:
     cargo run --release -p moba-tools --bin soak -- --seconds 300
+
+# Deterministic wire-decoder fuzzing (default one hour; pass seconds for CI).
+fuzz-wire:
+    cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 3600

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::{
     HEADER_LEN, Header, MAX_DATAGRAM, MAX_PAYLOAD, PacketKind, decode_packet, encode_packet,
+    sequence_after,
 };
 
 /// Fragment payload overhead: message id, index, count, inner kind, inner seq.
@@ -261,19 +262,22 @@ impl AckTracker {
     pub fn record(&mut self, sequence: u32) {
         match self.latest {
             None => self.latest = Some(sequence),
-            Some(latest) if sequence > latest && sequence - latest < 32 => {
-                let shift = sequence - latest;
-                self.bits = (self.bits << shift) | (1 << (shift - 1));
+            Some(latest) if sequence == latest => {}
+            Some(latest) if sequence_after(sequence, latest) => {
+                let shift = sequence.wrapping_sub(latest);
+                if shift < 32 {
+                    self.bits = (self.bits << shift) | (1 << (shift - 1));
+                } else {
+                    self.bits = 0;
+                }
                 self.latest = Some(sequence);
             }
-            Some(latest) if sequence > latest => {
-                self.bits = 0;
-                self.latest = Some(sequence);
+            Some(latest) => {
+                let back = latest.wrapping_sub(sequence);
+                if back > 0 && back <= 32 {
+                    self.bits |= 1 << (back - 1);
+                }
             }
-            Some(latest) if latest - sequence > 0 && latest - sequence <= 32 => {
-                self.bits |= 1 << (latest - sequence - 1);
-            }
-            _ => {}
         }
     }
 
@@ -282,8 +286,9 @@ impl AckTracker {
     pub fn contains(&self, sequence: u32) -> bool {
         match self.latest {
             Some(latest) if sequence == latest => true,
-            Some(latest) if latest > sequence && latest - sequence <= 32 => {
-                self.bits & (1 << (latest - sequence - 1)) != 0
+            Some(latest) if !sequence_after(sequence, latest) => {
+                let back = latest.wrapping_sub(sequence);
+                back <= 32 && (self.bits & (1 << (back - 1))) != 0
             }
             _ => false,
         }
@@ -310,6 +315,16 @@ mod tests {
         tracker.record(100);
         assert!(tracker.contains(100));
         assert!(!tracker.contains(12), "far jump clears the window");
+        // Wrap-around: latest is near u32::MAX and a small sequence follows it.
+        let mut wrap = AckTracker::default();
+        wrap.record(u32::MAX - 1);
+        wrap.record(u32::MAX);
+        wrap.record(0);
+        wrap.record(1);
+        assert!(wrap.contains(0));
+        assert!(wrap.contains(1));
+        assert!(wrap.contains(u32::MAX));
+        assert!(!wrap.contains(5));
     }
 
     #[test]

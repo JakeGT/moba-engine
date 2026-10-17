@@ -923,6 +923,15 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Serial-number comparison (RFC 1982 style) for 32-bit packet sequences.
+///
+/// Returns `true` when `candidate` is newer than `reference`, tolerating wraparound.
+#[must_use]
+pub const fn sequence_after(candidate: u32, reference: u32) -> bool {
+    let difference = candidate.wrapping_sub(reference);
+    difference != 0 && difference < 0x8000_0000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,6 +1098,15 @@ mod tests {
             let _ = decode_snapshot(body);
             let _ = decode_input(body);
         }
+    }
+
+    #[test]
+    fn serial_sequence_tolerates_wrap() {
+        assert!(sequence_after(1, 0));
+        assert!(!sequence_after(0, 1));
+        assert!(!sequence_after(5, 5));
+        assert!(sequence_after(2, u32::MAX));
+        assert!(!sequence_after(u32::MAX, 2));
     }
 
     #[test]

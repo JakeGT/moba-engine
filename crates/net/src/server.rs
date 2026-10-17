@@ -10,7 +10,7 @@ use moba_sim::{ObservedUnit, PlayerCommand, SimConfig, Simulation, TickInputs};
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, NetEntity, NetId, PacketKind,
     SnapshotDelta, SnapshotState, Welcome, WireCommand, build_delta, decode_hello, decode_input,
-    dequantize_position, encode_snapshot, encode_welcome,
+    dequantize_position, encode_snapshot, encode_welcome, sequence_after,
 };
 use crate::transport::{ReceivedMessage, UdpTransport};
 
@@ -341,7 +341,7 @@ impl NetServer {
                     return Ok(());
                 };
                 client.last_seen = Instant::now();
-                if input.input_seq > client.last_input_seq {
+                if sequence_after(input.input_seq, client.last_input_seq) {
                     client.last_input_seq = input.input_seq;
                     client.command = Some(input.command);
                 }
@@ -358,7 +358,7 @@ impl NetServer {
                 if message.header.flags & FLAG_NEED_FULL != 0 {
                     client.need_full = true;
                     client.acked_snapshot = 0;
-                } else if message.header.ack > client.acked_snapshot {
+                } else if sequence_after(message.header.ack, client.acked_snapshot) {
                     client.acked_snapshot = message.header.ack;
                 }
             }
