@@ -17,8 +17,9 @@ server: ticks=240 snapshots=1693 sent=437 KiB recv=47 KiB
 - Snapshot rate: every server tick (30 Hz), each client received ~25–39 snapshots/s
   depending on loss; the client requests a full resync if a delta baseline is missing.
   Protocol v2 adds scores/outcome/hero-pick, v3 progression, v4 match phase/countdown. 30 s
-  reruns measured 4.0–5.2 KiB/s (v2), 4.2–5.7 KiB/s (v3), 4.2–5.7 KiB/s (v4) and
-  4.2–5.8 KiB/s (v5).
+  reruns measured 4.0–5.2 KiB/s (v2), 4.2–5.7 KiB/s (v3), 4.2–5.7 KiB/s (v4), 4.2–5.8 KiB/s (v5)
+  and 4.6–6.8 KiB/s (v6 plaintext, 20 s). Encrypted v6 measured 5.0–7.3 KiB/s down /
+  1.8–1.9 KiB/s up.
 - Downstream: **4.4–4.7 KB/s per client** (21% of the 20 KB/s typical budget).
 - Upstream: **~1.1 KB/s per client** (28% of the 4 KB/s budget).
 - RTT: 160–210 ms under 75+30 ms one-way shaping.

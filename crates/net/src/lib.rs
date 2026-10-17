@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod crypto;
 pub mod interpolation;
 pub mod prediction;
 pub mod protocol;
@@ -13,6 +14,7 @@ pub mod server;
 pub mod transport;
 
 pub use client::{ClientEvent, ClientStats, NetClient};
+pub use crypto::{CryptoError, SessionCrypto};
 pub use interpolation::Interpolator;
 pub use prediction::PredictionState;
 pub use protocol::{

@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Optional pre-shared-key authenticated encryption: HMAC handshake proofs, HKDF session keys,
+  ChaCha20-Poly1305 payloads, encrypted reconnect and privacy-preserving debug output.
 - Open-source project surface: dual MIT/Apache-2.0 license, README, architecture,
   content-authoring, API-stability and security docs, contributions guide and templates.
 - `cargo doc` quality gate and CI documentation job.
@@ -32,7 +34,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
-- Version 5: optional reconnect token in the handshake; snapshots carry phase/countdown,
+- Version 6: optional authenticated, encrypted transport (PSK handshake + ChaCha20-Poly1305
+  payloads); handshake auth fields; reconnect token; snapshots carry phase/countdown,
   team scores, outcome, hero pick and per-hero progression; shop intents are one-shot
   commands applied immediately by the server.
 

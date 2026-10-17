@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 5;
+pub const PROTOCOL_VERSION: u8 = 6;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -68,6 +68,8 @@ impl PacketKind {
 
 /// Set when a client cannot apply a delta and needs a full snapshot.
 pub const FLAG_NEED_FULL: u16 = 1;
+/// Payload is AEAD-sealed (optional PSK mode).
+pub const FLAG_ENCRYPTED: u16 = 1 << 1;
 
 /// Fixed packet header.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -209,6 +211,8 @@ pub struct Hello {
     pub nonce: u64,
     /// Session token to resume after a disconnect (`0` for a new connection).
     pub reconnect: u32,
+    /// HMAC-SHA256 proof of the pre-shared key (all zero in plaintext mode).
+    pub auth: [u8; 32],
 }
 
 /// Handshake response payload.
@@ -228,6 +232,10 @@ pub struct Welcome {
     pub hero_pick: u8,
     /// Client nonce echoed back.
     pub nonce: u64,
+    /// Server handshake nonce (zero in plaintext mode).
+    pub server_nonce: u64,
+    /// HMAC-SHA256 proof of the pre-shared key (all zero in plaintext mode).
+    pub auth: [u8; 32],
 }
 
 /// Encodes a handshake request.
@@ -237,6 +245,7 @@ pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     put_u16(&mut out, hello.protocol);
     out.extend_from_slice(&hello.nonce.to_le_bytes());
     put_u32(&mut out, hello.reconnect);
+    out.extend_from_slice(&hello.auth);
     out
 }
 
@@ -252,6 +261,10 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
                 .map_err(|_| WireError::Truncated)?,
         ),
         reconnect: reader.u32()?,
+        auth: reader
+            .bytes(32)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -270,6 +283,8 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
     out.extend_from_slice(&welcome.seed.to_le_bytes());
     out.push(welcome.hero_pick);
     out.extend_from_slice(&welcome.nonce.to_le_bytes());
+    out.extend_from_slice(&welcome.server_nonce.to_le_bytes());
+    out.extend_from_slice(&welcome.auth);
     out
 }
 
@@ -294,6 +309,16 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
                 .try_into()
                 .map_err(|_| WireError::Truncated)?,
         ),
+        server_nonce: u64::from_le_bytes(
+            reader
+                .bytes(8)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        ),
+        auth: reader
+            .bytes(32)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -1149,6 +1174,7 @@ mod tests {
             protocol: 1,
             nonce: 0xDEAD_BEEF_1234,
             reconnect: 0xABCD_1234,
+            auth: [3; 32],
         };
         assert_eq!(decode_hello(&encode_hello(&hello)), Ok(hello));
     }

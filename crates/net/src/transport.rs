@@ -5,9 +5,10 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
+use crate::crypto::SessionCrypto;
 use crate::protocol::{
-    HEADER_LEN, Header, MAX_DATAGRAM, MAX_PAYLOAD, PacketKind, decode_packet, encode_packet,
-    sequence_after,
+    FLAG_ENCRYPTED, HEADER_LEN, Header, MAX_DATAGRAM, MAX_PAYLOAD, PacketKind, decode_packet,
+    encode_packet, sequence_after,
 };
 
 /// Fragment payload overhead: message id, index, count, inner kind, inner seq.
@@ -51,6 +52,7 @@ pub struct UdpTransport {
     buffer: Vec<u8>,
     fragment_id: u16,
     assemblies: Vec<Assembly>,
+    peers: Vec<(SocketAddr, SessionCrypto)>,
     pub(crate) bytes_sent: u64,
     pub(crate) bytes_received: u64,
 }
@@ -68,6 +70,7 @@ impl UdpTransport {
             buffer: vec![0; MAX_DATAGRAM],
             fragment_id: 0,
             assemblies: Vec::new(),
+            peers: Vec::new(),
             bytes_sent: 0,
             bytes_received: 0,
         })
@@ -81,12 +84,71 @@ impl UdpTransport {
         self.socket.local_addr()
     }
 
+    /// Installs the AEAD state for a peer. Subsequent non-handshake messages are sealed.
+    pub fn set_peer_key(&mut self, addr: SocketAddr, crypto: SessionCrypto) {
+        if let Some(existing) = self
+            .peers
+            .iter_mut()
+            .find(|(peer, _)| *peer == addr)
+            .map(|(_, crypto)| crypto)
+        {
+            *existing = crypto;
+        } else {
+            self.peers.push((addr, crypto));
+        }
+    }
+
+    /// Removes the AEAD state for a peer.
+    pub fn remove_peer_key(&mut self, addr: SocketAddr) {
+        self.peers.retain(|(peer, _)| *peer != addr);
+    }
+
     /// Sends one logical message, fragmenting it when necessary.
+    ///
+    /// When a peer key is installed the payload is AEAD-sealed and the encrypted flag is set.
     ///
     /// # Errors
     /// Returns the first OS send error; a partially sent fragmented message is dropped by
     /// the receiver when it times out, and the next snapshot supersedes it.
     pub fn send(&mut self, addr: SocketAddr, header: &Header, payload: &[u8]) -> io::Result<()> {
+        if let Some(crypto) = self
+            .peers
+            .iter()
+            .find(|(peer, _)| *peer == addr)
+            .map(|(_, crypto)| crypto.clone())
+        {
+            let sealed_header = Header {
+                flags: header.flags | FLAG_ENCRYPTED,
+                ..*header
+            };
+            let sealed = crypto
+                .seal(&sealed_header, payload)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            self.send_payload(addr, &sealed_header, &sealed)
+        } else {
+            self.send_payload(addr, header, payload)
+        }
+    }
+
+    /// Sends a handshake message without encryption.
+    ///
+    /// # Errors
+    /// Returns the first OS send error.
+    pub fn send_plaintext(
+        &mut self,
+        addr: SocketAddr,
+        header: &Header,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        self.send_payload(addr, header, payload)
+    }
+
+    fn send_payload(
+        &mut self,
+        addr: SocketAddr,
+        header: &Header,
+        payload: &[u8],
+    ) -> io::Result<()> {
         if payload.len() > MAX_MESSAGE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -168,10 +230,15 @@ impl UdpTransport {
     fn handle_datagram(&mut self, addr: SocketAddr, length: usize) -> Option<ReceivedMessage> {
         let (header, payload) = decode_packet(&self.buffer[..length]).ok()?;
         if header.kind != PacketKind::Fragment {
+            let payload = if header.flags & FLAG_ENCRYPTED != 0 {
+                self.decrypt(addr, &header, payload)?
+            } else {
+                payload.to_vec()
+            };
             return Some(ReceivedMessage {
                 addr,
                 header,
-                payload: payload.to_vec(),
+                payload,
             });
         }
         if payload.len() < FRAGMENT_HEADER_LEN {
@@ -227,18 +294,29 @@ impl UdpTransport {
         for part in completed.parts {
             payload.extend_from_slice(part.as_ref()?);
         }
+        let reassembled = Header {
+            kind: completed.kind,
+            flags: completed.flags,
+            session: completed.session,
+            seq: completed.seq,
+            ack: header.ack,
+            ack_bits: header.ack_bits,
+        };
+        let payload = if reassembled.flags & FLAG_ENCRYPTED != 0 {
+            self.decrypt(addr, &reassembled, &payload)?
+        } else {
+            payload
+        };
         Some(ReceivedMessage {
             addr,
-            header: Header {
-                kind: completed.kind,
-                flags: completed.flags,
-                session: completed.session,
-                seq: completed.seq,
-                ack: header.ack,
-                ack_bits: header.ack_bits,
-            },
+            header: reassembled,
             payload,
         })
+    }
+
+    fn decrypt(&self, addr: SocketAddr, header: &Header, payload: &[u8]) -> Option<Vec<u8>> {
+        let (_, crypto) = self.peers.iter().find(|(peer, _)| *peer == addr)?;
+        crypto.open(header, payload).ok()
     }
 
     fn expire_assemblies(&mut self) {
@@ -325,6 +403,42 @@ mod tests {
         assert!(wrap.contains(1));
         assert!(wrap.contains(u32::MAX));
         assert!(!wrap.contains(5));
+    }
+
+    #[test]
+    fn encrypted_messages_round_trip_and_wrong_key_is_dropped() {
+        let key = [5u8; 32];
+        let mut sender = UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut receiver = UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        let receiver_addr = receiver.local_addr().unwrap();
+        sender.set_peer_key(receiver_addr, SessionCrypto::new(key, 9, 0));
+        receiver.set_peer_key(sender_addr, SessionCrypto::new(key, 9, 1));
+        let header = Header {
+            kind: PacketKind::Input,
+            flags: 0,
+            session: 9,
+            seq: 1,
+            ack: 0,
+            ack_bits: 0,
+        };
+        let payload: Vec<u8> = (0..3_000u32).map(|value| (value % 251) as u8).collect();
+        sender.send(receiver_addr, &header, &payload).unwrap();
+        let mut received = None;
+        for _ in 0..100 {
+            if let Some(message) = receiver.recv().unwrap() {
+                received = Some(message);
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let message = received.expect("encrypted message arrives");
+        assert_eq!(message.payload, payload);
+        assert!(message.header.flags & FLAG_ENCRYPTED != 0);
+
+        let mut wrong = UdpTransport::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        wrong.set_peer_key(sender_addr, SessionCrypto::new([6u8; 32], 9, 1));
+        assert!(wrong.recv().unwrap().is_none());
     }
 
     #[test]

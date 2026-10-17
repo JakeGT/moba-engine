@@ -18,6 +18,9 @@ fn main() {
     let mut seconds = 60u64;
     let mut countdown_secs = 3u64;
     let mut results_secs = 15u64;
+    let mut secret: Option<[u8; 32]> = std::env::var("MOBA_SECRET")
+        .ok()
+        .map(|value| parse_secret(&value));
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -49,10 +52,17 @@ fn main() {
                     results_secs = value;
                 }
             }
+            "--secret" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--secret needs 64 hex characters");
+                    std::process::exit(2);
+                };
+                secret = Some(parse_secret(&value));
+            }
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX]"
                 );
                 return;
             }
@@ -80,14 +90,20 @@ fn main() {
             results_ticks: u32::try_from(results_secs.saturating_mul(30)).unwrap_or(u32::MAX),
             client_timeout: Duration::from_secs(5),
             reconnect_grace: Duration::from_secs(60),
+            pre_shared_key: secret,
         })
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");
             std::process::exit(2);
         });
         eprintln!(
-            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results)",
-            server.local_addr().expect("bound address")
+            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results, {})",
+            server.local_addr().expect("bound address"),
+            if secret.is_some() {
+                "encrypted"
+            } else {
+                "plaintext LAN mode"
+            }
         );
         server
             .run_for(Duration::from_secs(seconds))
@@ -174,4 +190,21 @@ fn main() {
     if simulation.outcome().is_none() {
         eprintln!("note: match did not finish within the tick limit");
     }
+}
+
+fn parse_secret(value: &str) -> [u8; 32] {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        eprintln!("secret must be 64 hex characters");
+        std::process::exit(2);
+    }
+    let mut key = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).unwrap_or_default();
+        key[index] = u8::from_str_radix(text, 16).unwrap_or_else(|_| {
+            eprintln!("secret contains non-hex characters");
+            std::process::exit(2);
+        });
+    }
+    key
 }

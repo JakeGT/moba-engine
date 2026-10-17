@@ -425,7 +425,23 @@ fn parse_demo_move() -> Option<FixVec2> {
     ))
 }
 
+fn parse_secret() -> Option<[u8; 32]> {
+    let value = std::env::var("MOBA_SECRET").ok()?;
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        eprintln!("MOBA_SECRET must be 64 hex characters; ignoring");
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).ok()?;
+        key[index] = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(key)
+}
+
 fn connect_network(spec: &str) -> Result<NetClient, String> {
+    let secret = parse_secret();
     if spec == "local" {
         let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
             bind: "127.0.0.1:0".parse().expect("loopback address"),
@@ -436,6 +452,7 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
             results_ticks: 450,
             client_timeout: Duration::from_secs(5),
             reconnect_grace: Duration::from_secs(60),
+            pre_shared_key: secret,
         })
         .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
@@ -444,14 +461,20 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
         std::thread::spawn(move || {
             let _ = server.run_for(Duration::from_secs(3_600));
         });
-        NetClient::connect(addr, Duration::from_secs(5))
-            .map_err(|error| format!("local connection failed: {error}"))
+        match secret {
+            Some(key) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
+            None => NetClient::connect(addr, Duration::from_secs(5)),
+        }
+        .map_err(|error| format!("local connection failed: {error}"))
     } else {
         let addr = spec
             .parse()
             .map_err(|error| format!("invalid MOBA_SERVER {spec}: {error}"))?;
-        NetClient::connect(addr, Duration::from_secs(5))
-            .map_err(|error| format!("connection to {spec} failed: {error}"))
+        match secret {
+            Some(key) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
+            None => NetClient::connect(addr, Duration::from_secs(5)),
+        }
+        .map_err(|error| format!("connection to {spec} failed: {error}"))
     }
 }
 

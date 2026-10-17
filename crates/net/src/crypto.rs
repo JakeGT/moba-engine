@@ -1,0 +1,300 @@
+//! Optional pre-shared-key authenticated encryption for UDP payloads.
+//!
+//! Handshake: the client proves knowledge of a 32-byte pre-shared key with an HMAC over a
+//! random nonce; the server replies with its own nonce plus an HMAC. Both sides derive a
+//! per-session ChaCha20-Poly1305 key with HKDF-SHA256. Application packets are AEAD-sealed
+//! with a nonce made from session id, direction and packet sequence, and the packet header
+//! fields are authenticated as associated data.
+//!
+//! This is an explicit pre-shared-key mode for private/dedicated servers, not a public
+//! matchmaking identity system. It protects confidentiality and integrity from passive and
+//! off-path attackers that do not know the key; it does not hide packet metadata.
+
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+use crate::protocol::Header;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// AEAD tag size appended to encrypted payloads.
+pub const TAG_LEN: usize = 16;
+/// Session key length.
+pub const KEY_LEN: usize = 32;
+
+/// Encryption/decryption failure. Callers drop malformed or unauthenticated datagrams.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CryptoError {
+    /// The payload could not be authenticated or decrypted.
+    Decrypt,
+    /// Encrypting failed (length/allocation).
+    Encrypt,
+    /// Randomness or key derivation failed.
+    KeyDerivation,
+}
+
+impl core::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Decrypt => f.write_str("authentication/decryption failed"),
+            Self::Encrypt => f.write_str("encryption failed"),
+            Self::KeyDerivation => f.write_str("key derivation failed"),
+        }
+    }
+}
+
+impl std::error::Error for CryptoError {}
+
+/// Per-session AEAD state.
+#[derive(Clone)]
+pub struct SessionCrypto {
+    key: [u8; KEY_LEN],
+    session: u32,
+    send_direction: u8,
+}
+
+impl core::fmt::Debug for SessionCrypto {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SessionCrypto")
+            .field("session", &self.session)
+            .field("direction", &self.send_direction)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionCrypto {
+    /// Creates a session cipher. `direction` is 0 for client→server and 1 for server→client.
+    #[must_use]
+    pub const fn new(key: [u8; KEY_LEN], session: u32, send_direction: u8) -> Self {
+        Self {
+            key,
+            session,
+            send_direction,
+        }
+    }
+
+    fn nonce(&self, direction: u8, sequence: u32) -> [u8; 12] {
+        let mut nonce = [0u8; 12];
+        nonce[..4].copy_from_slice(&self.session.to_le_bytes());
+        nonce[4..8].copy_from_slice(&sequence.to_le_bytes());
+        nonce[8] = direction;
+        nonce
+    }
+
+    /// Encrypts and authenticates one application message.
+    ///
+    /// # Errors
+    /// Returns [`CryptoError::Encrypt`] if the cipher rejects the input.
+    pub fn seal(&self, header: &Header, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let cipher = ChaCha20Poly1305::new((&self.key).into());
+        let aad = associated_data(header);
+        cipher
+            .encrypt(
+                (&self.nonce(self.send_direction, header.seq)).into(),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CryptoError::Encrypt)
+    }
+
+    /// Verifies and decrypts one application message.
+    ///
+    /// # Errors
+    /// Returns [`CryptoError::Decrypt`] for a bad tag, wrong key or tampered header.
+    pub fn open(&self, header: &Header, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let cipher = ChaCha20Poly1305::new((&self.key).into());
+        let aad = associated_data(header);
+        cipher
+            .decrypt(
+                (&self.nonce(self.send_direction ^ 1, header.seq)).into(),
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CryptoError::Decrypt)
+    }
+}
+
+fn associated_data(header: &Header) -> [u8; 19] {
+    let mut aad = [0u8; 19];
+    aad[0] = header.kind as u8;
+    aad[1..3].copy_from_slice(&header.flags.to_le_bytes());
+    aad[3..7].copy_from_slice(&header.session.to_le_bytes());
+    aad[7..11].copy_from_slice(&header.seq.to_le_bytes());
+    aad[11..15].copy_from_slice(&header.ack.to_le_bytes());
+    aad[15..19].copy_from_slice(&header.ack_bits.to_le_bytes());
+    aad
+}
+
+/// Derives a per-session key from the pre-shared key and both handshake nonces.
+#[must_use]
+pub fn derive_session_key(
+    pre_shared_key: &[u8; KEY_LEN],
+    client_nonce: u64,
+    server_nonce: u64,
+) -> [u8; KEY_LEN] {
+    let mut salt = [0u8; 16];
+    salt[..8].copy_from_slice(&client_nonce.to_le_bytes());
+    salt[8..].copy_from_slice(&server_nonce.to_le_bytes());
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt), pre_shared_key);
+    let mut key = [0u8; KEY_LEN];
+    hkdf.expand(b"moba-session-v1", &mut key)
+        .expect("32-byte HKDF output is valid");
+    key
+}
+
+/// Computes the client hello authenticator.
+#[must_use]
+pub fn hello_tag(
+    pre_shared_key: &[u8; KEY_LEN],
+    protocol: u16,
+    nonce: u64,
+    reconnect: u32,
+) -> [u8; 32] {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+    mac.update(b"moba-hello-v1");
+    mac.update(&protocol.to_le_bytes());
+    mac.update(&nonce.to_le_bytes());
+    mac.update(&reconnect.to_le_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+/// Verifies the client hello authenticator.
+#[must_use]
+pub fn verify_hello_tag(
+    pre_shared_key: &[u8; KEY_LEN],
+    protocol: u16,
+    nonce: u64,
+    reconnect: u32,
+    tag: &[u8; 32],
+) -> bool {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+    mac.update(b"moba-hello-v1");
+    mac.update(&protocol.to_le_bytes());
+    mac.update(&nonce.to_le_bytes());
+    mac.update(&reconnect.to_le_bytes());
+    mac.verify_slice(tag).is_ok()
+}
+
+/// Computes the server welcome authenticator.
+#[must_use]
+pub fn welcome_tag(
+    pre_shared_key: &[u8; KEY_LEN],
+    client_nonce: u64,
+    server_nonce: u64,
+    session: u32,
+    slot: u8,
+) -> [u8; 32] {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+    mac.update(b"moba-welcome-v1");
+    mac.update(&client_nonce.to_le_bytes());
+    mac.update(&server_nonce.to_le_bytes());
+    mac.update(&session.to_le_bytes());
+    mac.update(&[slot]);
+    mac.finalize().into_bytes().into()
+}
+
+/// Verifies the server welcome authenticator.
+#[must_use]
+pub fn verify_welcome_tag(
+    pre_shared_key: &[u8; KEY_LEN],
+    client_nonce: u64,
+    server_nonce: u64,
+    session: u32,
+    slot: u8,
+    tag: &[u8; 32],
+) -> bool {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+    mac.update(b"moba-welcome-v1");
+    mac.update(&client_nonce.to_le_bytes());
+    mac.update(&server_nonce.to_le_bytes());
+    mac.update(&session.to_le_bytes());
+    mac.update(&[slot]);
+    mac.verify_slice(tag).is_ok()
+}
+
+/// Generates a cryptographically random handshake nonce.
+///
+/// # Errors
+/// Returns an I/O error when the OS randomness source is unavailable.
+pub fn random_nonce() -> std::io::Result<u64> {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| std::io::Error::other(format!("randomness: {error}")))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::PacketKind;
+
+    fn header(seq: u32) -> Header {
+        Header {
+            kind: PacketKind::Input,
+            flags: 0,
+            session: 7,
+            seq,
+            ack: 1,
+            ack_bits: 0,
+        }
+    }
+
+    #[test]
+    fn seal_open_round_trip_and_tamper_rejection() {
+        let key = derive_session_key(&[9; 32], 11, 22);
+        let sender = SessionCrypto::new(key, 42, 0);
+        let receiver = SessionCrypto::new(key, 42, 1);
+        let header = header(3);
+        let sealed = sender.seal(&header, b"hello").unwrap();
+        assert_ne!(sealed, b"hello");
+        assert_eq!(receiver.open(&header, &sealed).unwrap(), b"hello");
+        let mut tampered = sealed.clone();
+        tampered[0] ^= 1;
+        assert_eq!(receiver.open(&header, &tampered), Err(CryptoError::Decrypt));
+        let mut wrong_header = header;
+        wrong_header.ack ^= 1;
+        assert_eq!(
+            receiver.open(&wrong_header, &sealed),
+            Err(CryptoError::Decrypt)
+        );
+    }
+
+    #[test]
+    fn server_direction_round_trip() {
+        let key = derive_session_key(&[4; 32], 7, 8);
+        let server = SessionCrypto::new(key, 99, 1);
+        let client = SessionCrypto::new(key, 99, 0);
+        let header = header(1);
+        let sealed = server.seal(&header, b"snapshot").unwrap();
+        assert_eq!(client.open(&header, &sealed).unwrap(), b"snapshot");
+    }
+
+    #[test]
+    fn handshake_tags_are_keyed() {
+        let tag = hello_tag(&[1; 32], 6, 123, 0);
+        assert!(verify_hello_tag(&[1; 32], 6, 123, 0, &tag));
+        assert!(!verify_hello_tag(&[2; 32], 6, 123, 0, &tag));
+        let welcome = welcome_tag(&[1; 32], 123, 456, 9, 3);
+        assert!(verify_welcome_tag(&[1; 32], 123, 456, 9, 3, &welcome));
+        assert!(!verify_welcome_tag(&[1; 32], 123, 457, 9, 3, &welcome));
+    }
+
+    #[test]
+    fn derived_keys_are_directional_and_salted() {
+        let a = derive_session_key(&[3; 32], 1, 2);
+        let b = derive_session_key(&[3; 32], 1, 2);
+        assert_eq!(a, b);
+        assert_ne!(a, derive_session_key(&[3; 32], 2, 1));
+    }
+}

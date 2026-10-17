@@ -3,10 +3,13 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use moba_game::Team;
 
+use crate::crypto::{
+    SessionCrypto, derive_session_key, hello_tag, random_nonce, verify_welcome_tag,
+};
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotDelta, SnapshotState,
     WireCommand, decode_hello, decode_packet, decode_snapshot, decode_welcome, encode_hello,
@@ -66,7 +69,6 @@ pub struct ClientStats {
 }
 
 /// A connected game client.
-#[derive(Debug)]
 pub struct NetClient {
     transport: UdpTransport,
     server: SocketAddr,
@@ -79,6 +81,7 @@ pub struct NetClient {
     seed: u64,
     hero_pick: u8,
     nonce: u64,
+    pre_shared_key: Option<[u8; 32]>,
     reconnect_token: u32,
     sequence: u32,
     input_seq: u32,
@@ -97,6 +100,18 @@ pub struct NetClient {
     snapshots_received: u64,
 }
 
+impl core::fmt::Debug for NetClient {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NetClient")
+            .field("server", &self.server)
+            .field("state", &self.state)
+            .field("slot", &self.slot)
+            .field("session", &self.session)
+            .field("encrypted", &self.pre_shared_key.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl NetClient {
     /// Binds a local socket and starts the handshake without blocking.
     ///
@@ -111,9 +126,37 @@ impl NetClient {
     /// # Errors
     /// Returns an OS error when the socket cannot be bound.
     pub fn start_with_session(server: SocketAddr, session: u32) -> io::Result<Self> {
+        Self::start_with_options(server, session, None)
+    }
+
+    /// Binds a new socket and starts an authenticated handshake with a pre-shared key.
+    ///
+    /// # Errors
+    /// Returns an OS error when the socket cannot be bound or randomness fails.
+    pub fn start_with_key(server: SocketAddr, key: [u8; 32]) -> io::Result<Self> {
+        Self::start_with_options(server, 0, Some(key))
+    }
+
+    /// Starts an authenticated reconnect handshake.
+    ///
+    /// # Errors
+    /// Returns an OS error when the socket cannot be bound or randomness fails.
+    pub fn start_with_session_key(
+        server: SocketAddr,
+        session: u32,
+        key: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::start_with_options(server, session, Some(key))
+    }
+
+    fn start_with_options(
+        server: SocketAddr,
+        session: u32,
+        pre_shared_key: Option<[u8; 32]>,
+    ) -> io::Result<Self> {
         let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
         let now = Instant::now();
-        let nonce = mint_nonce();
+        let nonce = random_nonce()?;
         let mut client = Self {
             transport,
             server,
@@ -126,6 +169,7 @@ impl NetClient {
             seed: 0,
             hero_pick: 0,
             nonce,
+            pre_shared_key,
             reconnect_token: session,
             sequence: 0,
             input_seq: 0,
@@ -164,13 +208,44 @@ impl NetClient {
         timeout: Duration,
         session: u32,
     ) -> io::Result<Self> {
-        let mut client = Self::start_with_session(server, session)?;
+        Self::connect_with_session_key(server, timeout, session, None)
+    }
+
+    /// Connects with an authenticated, encrypted pre-shared-key handshake.
+    ///
+    /// # Errors
+    /// Returns `TimedOut` or `ConnectionAborted` when the server rejects the handshake.
+    pub fn connect_with_key(
+        server: SocketAddr,
+        timeout: Duration,
+        key: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::connect_with_session_key(server, timeout, 0, Some(key))
+    }
+
+    /// Resumes a session with an authenticated, encrypted handshake.
+    ///
+    /// # Errors
+    /// Returns `TimedOut` or `ConnectionAborted` when the server rejects the handshake.
+    pub fn connect_with_session_key(
+        server: SocketAddr,
+        timeout: Duration,
+        session: u32,
+        key: Option<[u8; 32]>,
+    ) -> io::Result<Self> {
+        let mut client = Self::start_with_options(server, session, key)?;
         let start = Instant::now();
         let mut next_hello = Instant::now();
         while start.elapsed() < timeout {
             client.poll()?;
             if client.state == ClientState::Connected {
                 return Ok(client);
+            }
+            if client.state == ClientState::Disconnected {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "server rejected the handshake",
+                ));
             }
             let now = Instant::now();
             if now >= next_hello {
@@ -208,6 +283,26 @@ impl NetClient {
                     if welcome.nonce != self.nonce {
                         continue;
                     }
+                    if let Some(key) = self.pre_shared_key {
+                        if !verify_welcome_tag(
+                            &key,
+                            self.nonce,
+                            welcome.server_nonce,
+                            message.header.session,
+                            welcome.slot,
+                            &welcome.auth,
+                        ) {
+                            self.state = ClientState::Disconnected;
+                            self.push_event(ClientEvent::Disconnected);
+                            continue;
+                        }
+                        let session_key =
+                            derive_session_key(&key, self.nonce, welcome.server_nonce);
+                        self.transport.set_peer_key(
+                            self.server,
+                            SessionCrypto::new(session_key, message.header.session, 0),
+                        );
+                    }
                     self.session = message.header.session;
                     self.slot = welcome.slot;
                     self.team = if welcome.slot < 5 {
@@ -233,7 +328,7 @@ impl NetClient {
                     self.handle_snapshot(message.header, &message.payload);
                 }
                 PacketKind::Disconnect => {
-                    if self.state == ClientState::Connected {
+                    if self.state != ClientState::Disconnected {
                         self.state = ClientState::Disconnected;
                         self.push_event(ClientEvent::Disconnected);
                     }
@@ -496,10 +591,15 @@ impl NetClient {
     }
 
     fn send_hello(&mut self) -> io::Result<()> {
+        let protocol = u16::from(crate::protocol::PROTOCOL_VERSION);
+        let auth = self.pre_shared_key.map_or([0; 32], |key| {
+            hello_tag(&key, protocol, self.nonce, self.reconnect_token)
+        });
         let hello = crate::protocol::Hello {
-            protocol: u16::from(crate::protocol::PROTOCOL_VERSION),
+            protocol,
             nonce: self.nonce,
             reconnect: self.reconnect_token,
+            auth,
         };
         let payload = encode_hello(&hello);
         let header = Header {
@@ -540,14 +640,6 @@ impl NetClient {
             self.events.push_back(event);
         }
     }
-}
-
-fn mint_nonce() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    nanos ^ 0x9E37_79B9_7F4A_7C15
 }
 
 /// Helper for tools/tests: encode a packet with an arbitrary payload.

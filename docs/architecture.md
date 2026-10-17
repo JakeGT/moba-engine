@@ -73,6 +73,22 @@ encryption.
 The protocol version is part of every packet. Field-masked updates are additive; a new
 version must bump `PROTOCOL_VERSION` and the client/server together.
 
+### Optional encrypted transport
+
+When a server is configured with a 32-byte pre-shared key:
+
+1. `Hello` carries an HMAC-SHA256 proof; the server rejects a bad proof.
+2. `Welcome` carries a server nonce and an HMAC over both nonces/session/slot.
+3. Both sides derive a per-session key with HKDF-SHA256 and enable ChaCha20-Poly1305 for
+   application payloads. The packet header fields are AEAD associated data; the nonce is
+   session id + direction + packet sequence.
+4. Handshake/Welcome packets stay unencrypted (the Welcome proof is authenticated); all
+   gameplay payloads after the handshake are sealed. Fragmented messages are encrypted as a
+   whole and reassembled before decryption.
+
+No key material is logged. This is a private-server mode, not public identity; see
+[SECURITY.md](../SECURITY.md).
+
 ## Rendering
 
 `moba-render` owns a Vulkan 1.2 device with dynamic rendering and synchronization2. One

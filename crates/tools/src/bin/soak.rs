@@ -20,6 +20,7 @@ struct Options {
     rtt_ms: u64,
     jitter_ms: u64,
     loss_percent: u8,
+    secret: Option<[u8; 32]>,
 }
 
 #[allow(clippy::too_many_lines)] // CLI orchestration is linear and auditable.
@@ -30,6 +31,7 @@ fn main() {
         rtt_ms: 150,
         jitter_ms: 30,
         loss_percent: 5,
+        secret: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -39,9 +41,15 @@ fn main() {
             "--rtt" => options.rtt_ms = parse(&mut args, options.rtt_ms),
             "--jitter" => options.jitter_ms = parse(&mut args, options.jitter_ms),
             "--loss" => options.loss_percent = parse(&mut args, options.loss_percent),
+            "--secret" => {
+                let Some(value) = args.next() else {
+                    fail("--secret needs 64 hex characters");
+                };
+                options.secret = Some(parse_secret(&value));
+            }
             "--help" => {
                 eprintln!(
-                    "usage: soak [--seconds N] [--clients N] [--rtt MS] [--jitter MS] [--loss PCT]"
+                    "usage: soak [--seconds N] [--clients N] [--rtt MS] [--jitter MS] [--loss PCT] [--secret HEX]"
                 );
                 return;
             }
@@ -63,6 +71,7 @@ fn main() {
         results_ticks: 0,
         client_timeout: Duration::from_secs(5),
         reconnect_grace: Duration::from_secs(60),
+        pre_shared_key: options.secret,
     }) {
         Ok(server) => server,
         Err(error) => fail(&format!("cannot bind server: {error}")),
@@ -94,12 +103,18 @@ fn main() {
 
     let mut clients: Vec<NetClient> = proxies
         .iter()
-        .map(
-            |proxy| match NetClient::connect(proxy.local_addr(), Duration::from_secs(5)) {
+        .map(|proxy| {
+            let result = match options.secret {
+                Some(key) => {
+                    NetClient::connect_with_key(proxy.local_addr(), Duration::from_secs(5), key)
+                }
+                None => NetClient::connect(proxy.local_addr(), Duration::from_secs(5)),
+            };
+            match result {
                 Ok(client) => client,
                 Err(error) => fail(&format!("connect failed: {error}")),
-            },
-        )
+            }
+        })
         .collect();
     eprintln!(
         "connected {} clients (slots {:?})",
@@ -198,4 +213,17 @@ fn parse<T: std::str::FromStr>(args: &mut impl Iterator<Item = String>, default:
 fn fail(message: &str) -> ! {
     eprintln!("soak failed: {message}");
     std::process::exit(1);
+}
+
+fn parse_secret(value: &str) -> [u8; 32] {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        fail("secret must be 64 hex characters");
+    }
+    let mut key = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).unwrap_or_default();
+        key[index] = u8::from_str_radix(text, 16).unwrap_or_else(|_| fail("secret must be hex"));
+    }
+    key
 }

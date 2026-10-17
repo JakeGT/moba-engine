@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, screen-space bitmap HUD, Tab scoreboard, shop and mouse/keyboard controls |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 121 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 127 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -47,6 +47,19 @@ Matches run a lobby → 3-second countdown → gameplay → results → automati
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can
 resume with `NetClient::connect_with_session(server, timeout, session)` using
 `NetClient::session()`. The dedicated server exposes `--countdown S` and `--results S`.
+
+### Encrypted private servers
+
+Generate a 32-byte key and pass the same 64-hex secret to both sides:
+
+```bash
+SECRET=$(openssl rand -hex 32)
+cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 --secret "$SECRET"
+MOBA_SECRET="$SECRET" cargo run -p moba-client
+```
+
+This enables the authenticated ChaCha20-Poly1305 session mode; see [SECURITY.md](SECURITY.md)
+for its scope and limitations.
 
 Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,
@@ -92,7 +105,7 @@ the extension points.
 | `moba-game` | Data tables and pure rules: heroes, abilities, units, map, items, progression |
 | `moba-sim` | Deterministic authoritative simulation |
 | `moba-nav` | Spatial grid |
-| `moba-net` | UDP transport, protocol, prediction, snapshots |
+| `moba-net` | UDP transport (optional PSK AEAD), protocol, reconnect, prediction, snapshots |
 | `moba-netsim` | Link conditioner for tests |
 | `moba-platform` | winit window/input/fixed step |
 | `moba-render` | Vulkan renderer, terrain, fog, HUD batch |
@@ -147,8 +160,9 @@ expectations.
 
 ## Security
 
-The preview protocol is **not encrypted or authenticated**; run it on a trusted LAN only.
-See [SECURITY.md](SECURITY.md).
+Plaintext is the default for LAN development. Optional pre-shared-key mode authenticates the
+handshake and encrypts packet payloads (ChaCha20-Poly1305 + HKDF + HMAC). It is not a full
+public-internet identity/anti-DoS solution; read [SECURITY.md](SECURITY.md).
 
 ## License
 

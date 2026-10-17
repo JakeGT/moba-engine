@@ -2,10 +2,27 @@
 
 ## Preview warning
 
-The current protocol (0.1, protocol version 3) is **not encrypted or authenticated**. The
-session token is a 32-bit demultiplexing value, not a credential. Do not expose the server to
-the public internet or use it for competitive play. The planned M7 hardening adds an
-authenticated key exchange, AEAD-protected packets and replay protection.
+The default protocol is **plaintext** for LAN development. An optional pre-shared-key mode
+authenticates the handshake and encrypts every application packet with ChaCha20-Poly1305:
+
+```bash
+# 32-byte key as 64 hex characters
+SECRET=$(openssl rand -hex 32)
+cargo run -p moba-server -- --listen 0.0.0.0:7777 --seconds 600 --secret "$SECRET"
+MOBA_SECRET="$SECRET" cargo run -p moba-client
+```
+
+This protects payload confidentiality/integrity and proves key possession to the server. It
+is **not** a complete public-internet security model:
+
+- it is a shared key, not per-player identity, and has no forward secrecy;
+- packet metadata (addresses, sizes, timing, session ids) is visible;
+- there is no anti-DoS/rate-limit layer, matchmaking identity or revocation;
+- replay is limited by sequence/ack semantics, not a formal anti-replay window;
+- a compromised client or key compromises that match.
+
+Do not expose a plaintext server to the public internet. For public deployments, terminate
+transport security in a trusted gateway or wait for the M7 authenticated key-exchange work.
 
 ## Reporting a vulnerability
 
@@ -22,8 +39,8 @@ publish details before a fix is available.
 
 ## Scope
 
-In scope: parser panics/overflows, spoofed-input state corruption, denial-of-service via
-packets, asset/shader tooling issues, unsafe-code soundness.
+In scope: parser/AEAD panics or overflows, key/nonce misuse, spoofed-input state corruption,
+denial of service via packets, asset/shader tooling issues, unsafe-code soundness.
 
-Out of scope: cheating in unranked/preview matches, missing encryption (documented above),
-issues in third-party drivers or the Vulkan validation layers.
+Out of scope: cheating in unranked/preview matches, missing public identity/anti-DoS features
+(documented above), issues in third-party drivers or Vulkan validation layers.

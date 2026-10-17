@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use moba_net::{NetClient, NetServer, ServerConfig};
 use moba_sim::SimConfig;
 
+const KEY: [u8; 32] = [0x33; 32];
+
 fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
     let config = ServerConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -16,6 +18,7 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
         results_ticks: 0,
         client_timeout: Duration::from_millis(100),
         reconnect_grace: Duration::from_secs(2),
+        pre_shared_key: Some(KEY),
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("local addr");
@@ -30,7 +33,8 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
 #[test]
 fn reconnect_resumes_the_same_slot() {
     let (addr, server) = spawn_server(3);
-    let mut first = NetClient::connect(addr, Duration::from_secs(2)).expect("first connect");
+    let mut first =
+        NetClient::connect_with_key(addr, Duration::from_secs(2), KEY).expect("first connect");
     let slot = first.player_slot();
     let session = first.session();
     for _ in 0..50 {
@@ -45,9 +49,10 @@ fn reconnect_resumes_the_same_slot() {
     drop(first);
 
     // Wait past the short client timeout so the server reserves the slot for a reconnect.
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(600));
     let mut second =
-        NetClient::connect_with_session(addr, Duration::from_secs(2), session).expect("resume");
+        NetClient::connect_with_session_key(addr, Duration::from_secs(2), session, Some(KEY))
+            .expect("resume");
     assert_eq!(second.player_slot(), slot);
     assert_eq!(second.session(), session);
     let start = Instant::now();

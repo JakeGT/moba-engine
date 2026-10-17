@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 
 use moba_sim::{ObservedUnit, PlayerCommand, SimConfig, Simulation, TickInputs};
 
+use crate::crypto::{
+    SessionCrypto, derive_session_key, random_nonce, verify_hello_tag, welcome_tag,
+};
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MatchPhase, NetEntity, NetId, PacketKind,
     SnapshotDelta, SnapshotState, Welcome, WireCommand, build_delta, decode_hello, decode_input,
@@ -24,7 +27,7 @@ const SNAPSHOT_HISTORY: usize = 64;
 pub const SERVER_TICK_RATE: u16 = 30;
 
 /// Server configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// UDP bind address.
     pub bind: SocketAddr,
@@ -42,6 +45,24 @@ pub struct ServerConfig {
     pub client_timeout: Duration,
     /// How long a disconnected player's slot is reserved for reconnection.
     pub reconnect_grace: Duration,
+    /// Optional pre-shared key; when set, handshakes are authenticated and payloads encrypted.
+    pub pre_shared_key: Option<[u8; 32]>,
+}
+
+impl core::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind", &self.bind)
+            .field("sim", &self.sim)
+            .field("snapshot_interval", &self.snapshot_interval)
+            .field("max_clients", &self.max_clients)
+            .field("countdown_ticks", &self.countdown_ticks)
+            .field("results_ticks", &self.results_ticks)
+            .field("client_timeout", &self.client_timeout)
+            .field("reconnect_grace", &self.reconnect_grace)
+            .field("pre_shared_key", &self.pre_shared_key.is_some())
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -55,6 +76,7 @@ impl Default for ServerConfig {
             results_ticks: 450,
             client_timeout: CLIENT_TIMEOUT,
             reconnect_grace: RECONNECT_GRACE,
+            pre_shared_key: None,
         }
     }
 }
@@ -96,6 +118,8 @@ struct ClientConn {
     acked_snapshot: u32,
     need_full: bool,
     history: VecDeque<SnapshotRecord>,
+    welcome_nonce: u64,
+    welcome_payload: Vec<u8>,
     bytes_sent: u64,
 }
 
@@ -377,6 +401,7 @@ impl NetServer {
                     client.connected = false;
                     client.disconnected_at = Some(now);
                     client.command = None;
+                    self.transport.remove_peer_key(client.addr);
                     let header = Header {
                         kind: PacketKind::Disconnect,
                         flags: 0,
@@ -391,6 +416,7 @@ impl NetServer {
                 .disconnected_at
                 .is_some_and(|at| now.duration_since(at) > grace)
             {
+                self.transport.remove_peer_key(client.addr);
                 self.clients[slot] = None;
             }
         }
@@ -418,6 +444,18 @@ impl NetServer {
                 if hello.protocol != u16::from(crate::protocol::PROTOCOL_VERSION) {
                     return Ok(());
                 }
+                if let Some(key) = self.config.pre_shared_key {
+                    if !verify_hello_tag(
+                        &key,
+                        hello.protocol,
+                        hello.nonce,
+                        hello.reconnect,
+                        &hello.auth,
+                    ) {
+                        self.reject_client(message.addr, 0, 4)?;
+                        return Ok(());
+                    }
+                }
                 if let Some(slot) = self.client_index_by_addr(message.addr) {
                     let (connected, session) = {
                         let client = self.clients[slot].as_mut().expect("index is live");
@@ -427,7 +465,26 @@ impl NetServer {
                         (client.connected, client.session)
                     };
                     if connected {
-                        self.send_welcome(message.addr, slot, hello.nonce, session)?;
+                        let cached = {
+                            let client = self.clients[slot].as_ref().expect("index is live");
+                            (client.welcome_nonce == hello.nonce
+                                && !client.welcome_payload.is_empty())
+                            .then(|| client.welcome_payload.clone())
+                        };
+                        if let Some(payload) = cached {
+                            let header = Header {
+                                kind: PacketKind::Welcome,
+                                flags: 0,
+                                session,
+                                seq: 0,
+                                ack: 0,
+                                ack_bits: 0,
+                            };
+                            self.transport
+                                .send_plaintext(message.addr, &header, &payload)?;
+                        } else {
+                            self.send_welcome(message.addr, slot, hello.nonce, session)?;
+                        }
                         return Ok(());
                     }
                     if hello.reconnect != session {
@@ -482,6 +539,8 @@ impl NetServer {
                     acked_snapshot: 0,
                     need_full: true,
                     history: VecDeque::new(),
+                    welcome_nonce: 0,
+                    welcome_payload: Vec::new(),
                     bytes_sent: 0,
                 });
                 self.refresh_bot_mask();
@@ -553,6 +612,7 @@ impl NetServer {
                         client.connected = false;
                         client.disconnected_at = Some(Instant::now());
                         client.command = None;
+                        self.transport.remove_peer_key(client.addr);
                     }
                     self.refresh_bot_mask();
                 }
@@ -567,6 +627,8 @@ impl NetServer {
             return Ok(());
         };
         let session = client.session;
+        let old_addr = client.addr;
+        self.transport.remove_peer_key(old_addr);
         client.addr = addr;
         client.connected = true;
         client.disconnected_at = None;
@@ -600,16 +662,32 @@ impl NetServer {
         session: u32,
     ) -> io::Result<()> {
         let config = self.config.sim;
+        let slot_u8 = u8::try_from(slot).expect("slot fits u8");
+        let mut server_nonce = 0;
+        let mut auth = [0u8; 32];
+        let mut crypto = None;
+        if let Some(key) = self.config.pre_shared_key {
+            server_nonce = random_nonce()?;
+            auth = welcome_tag(&key, nonce, server_nonce, session, slot_u8);
+            let session_key = derive_session_key(&key, nonce, server_nonce);
+            crypto = Some(SessionCrypto::new(session_key, session, 1));
+        }
         let welcome = Welcome {
-            slot: u8::try_from(slot).expect("slot fits u8"),
+            slot: slot_u8,
             tick_rate: SERVER_TICK_RATE,
             snapshot_interval: self.config.snapshot_interval,
             tick: self.simulation.current_tick().get(),
             seed: config.seed,
             hero_pick: config.hero_picks[slot],
             nonce,
+            server_nonce,
+            auth,
         };
         let payload = encode_welcome(&welcome);
+        if let Some(client) = self.clients[slot].as_mut() {
+            client.welcome_nonce = nonce;
+            client.welcome_payload.clone_from(&payload);
+        }
         let header = Header {
             kind: PacketKind::Welcome,
             flags: 0,
@@ -618,7 +696,11 @@ impl NetServer {
             ack: 0,
             ack_bits: 0,
         };
-        self.transport.send(addr, &header, &payload)
+        self.transport.send_plaintext(addr, &header, &payload)?;
+        if let Some(crypto) = crypto {
+            self.transport.set_peer_key(addr, crypto);
+        }
+        Ok(())
     }
 
     fn free_slot(&self) -> Option<usize> {
@@ -755,6 +837,7 @@ mod tests {
             results_ticks: 3,
             client_timeout: Duration::from_millis(100),
             reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
         };
         let mut server = NetServer::bind(config).expect("bind");
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));

@@ -75,6 +75,8 @@ fn fuzz_once(rng: &mut Rng) {
         seed: rng.next_u64(),
         hero_pick: rng.gen_range_u32(5) as u8,
         nonce: rng.next_u64(),
+        server_nonce: rng.next_u64(),
+        auth: [0; 32],
     });
     mutate(rng, &mut welcome);
     let _ = decode_welcome(&welcome);
@@ -83,6 +85,7 @@ fn fuzz_once(rng: &mut Rng) {
         protocol: 1,
         nonce: rng.next_u64(),
         reconnect: rng.next_u32(),
+        auth: [0; 32],
     });
     mutate(rng, &mut hello);
     let _ = decode_hello(&hello);
