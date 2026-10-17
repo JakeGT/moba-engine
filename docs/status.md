@@ -12,7 +12,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
 | M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and spectator mode (protocol v7); 5-minute plaintext soak, 20 s encrypted and 15 s v7 soaks pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
-| M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up gating and surrender votes, HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; line-of-sight wall visuals/verification remain. |
+| M6 | Vertical slice | ✅ | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up/surrender, HUD, levels/XP, gold/items/shop, minimap, health bars, scoreboard, fog-of-war and wall line-of-sight. Linux-verified; audio/settings deferred. |
 | M7 | Hardening | 🟡 | PSK AEAD transport, reconnect, replay manifests and per-address UDP rate limiting/tick telemetry landed; public identity/edge anti-DoS, 50 matches/box, one-hour sanitizer fuzz and profiling captures remain. |
 | M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation and reach clients in the handshake; new ability behaviour kinds, hot reload and richer manifests remain. |
 
@@ -118,6 +118,8 @@ Last updated: 2026-10-17 (round 17 of the build).
   hero/name (`m8-hero-content.png`); UDP test verifies custom items, heroes and purchases.
 - Map content: map-only pack capture (`m8-map-content.png`) shows the custom one-lane minimap;
   simulation tests verify custom spawns/nexuses and the wire map catalogue.
+- Line-of-sight: wall geometry and shader fog capture (`m6-los-fog.png`); server test proves a
+  wall hides an enemy hero, and walls align with centered world/vision coordinates.
 - Replay manifest: custom-content 134-tick replay verified with `--items` at content hash
   `0x5f2fd8408d51955a`; replaying without the pack is rejected.
 - Rate limiting: valid-packet flood test drops excess at a 10 pps budget; release 10-client

@@ -19,5 +19,5 @@ position = [236, 128]
 
 # Vision-blocking wall (movement passes through; line-of-sight does not).
 [[map.walls]]
-a = [48, 100]
-b = [48, 156]
+a = [110, 100]
+b = [110, 156]

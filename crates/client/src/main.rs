@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use moba_core::math::{Vec2, Vec3, Vec4};
+use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
 use moba_game::{
     EMPTY_ITEM, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team, xp_to_next,
@@ -518,6 +518,24 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
     let Some(latest) = network.interpolator.latest() else {
         return;
     };
+    let wire_map = network.client.map();
+    for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
+        let a = Vec2::new(f32::from(wall.a[0]), f32::from(wall.a[1]));
+        let b = Vec2::new(f32::from(wall.b[0]), f32::from(wall.b[1]));
+        let direction = b - a;
+        let length = direction.length().max(0.5);
+        let angle = direction.y.atan2(direction.x);
+        let center = (a + b) * 0.5;
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::new(length, 4.0, 2.5),
+            Quat::from_rotation_y(-angle),
+            Vec3::new(center.x - 128.0, 2.0, center.y - 128.0),
+        );
+        units.push(UnitInstance::new(
+            transform,
+            Vec4::new(0.24, 0.21, 0.16, 1.0),
+        ));
+    }
     let render_tick = network.interpolator.render_tick(Instant::now());
     for entity in &latest.entities {
         if entity.is_dead() {
@@ -615,6 +633,9 @@ fn team_from_u8(value: u8) -> Option<Team> {
 fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
     if network.spectator {
         return Camera::orbit(Vec3::ZERO, 240.0, -0.7 + elapsed * 0.015, 0.92, aspect);
+    }
+    if std::env::var("MOBA_CAMERA").is_ok_and(|value| value == "overview") {
+        return Camera::orbit(Vec3::ZERO, 240.0, -0.7, 0.92, aspect);
     }
     let predicted = network.prediction.position();
     let center = Vec3::new(
@@ -1569,10 +1590,10 @@ fn build_vision(network: &NetworkView) -> VisionCircles {
     let wire_map = network.client.map();
     for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
         vision.add_wall(
-            f32::from(wall.a[0]),
-            f32::from(wall.a[1]),
-            f32::from(wall.b[0]),
-            f32::from(wall.b[1]),
+            f32::from(wall.a[0]) - 128.0,
+            f32::from(wall.a[1]) - 128.0,
+            f32::from(wall.b[0]) - 128.0,
+            f32::from(wall.b[1]) - 128.0,
         );
     }
     let Some(snapshot) = network.client.snapshot() else {

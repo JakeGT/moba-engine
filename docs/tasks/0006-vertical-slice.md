@@ -75,12 +75,10 @@ levels/items, and a complete match flow.
 - **Server tuning**: `client_timeout`/`reconnect_grace` are configuration fields.
 - **Protocol v5**: `Hello` carries an optional reconnect token.
 
-## Still open for M6
-- Hero levels/XP, gold, items and a shop.
-- Lobby/start flow, pause/reconnect, end-of-match summary and rematch.
-- Terrain line-of-sight blockers in fog (current vision is radius-only, same as the server).
-- Minimap, floating health bars, targeting/selection affordances.
-- Audio and settings.
+## Closeout
+- Hero levels/XP, gold/items/shop, lobby/rematch, reconnect, spectator, ready/surrender,
+  minimap, health bars and line-of-sight walls all landed.
+- Deferred beyond M6: audio, settings, richer targeting affordances.
 
 ## Acceptance
 - [x] HUD renders under lavapipe with validation enabled.
@@ -89,7 +87,10 @@ levels/items, and a complete match flow.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
 - [x] 149 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
       progression and reconnect handshake; UDP tests cover shop purchase and slot resumption.
-- [x] Levels/XP, gold/items/shop and the lobby-to-rematch flow (no ready-up/reconnect yet).
+- [x] Levels/XP, gold/items/shop and lobby-to-rematch flow.
+- [x] Ready-up/surrender, spectator mode and reconnect grace.
+- [x] Wall line-of-sight filtering on the server and per-pixel wall shadows in the terrain
+      shader, with geometry rendered in the same centered world space.
 
 ## Research notes
 - Small pixel text: a bitmap font is cheaper and crisper than SDF at fixed HUD scales
