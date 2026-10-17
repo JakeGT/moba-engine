@@ -42,14 +42,16 @@ impl BitSet64 {
         true
     }
 
-    /// Clears a bit. Returns `false` if `index >= 64`.
+    /// Clears a bit and returns whether it was set. Returns `false` if `index >= 64`.
     #[inline]
     pub fn remove(&mut self, index: u32) -> bool {
         if index >= 64 {
             return false;
         }
-        self.0 &= !(1u64 << index);
-        true
+        let mask = 1u64 << index;
+        let was_set = self.0 & mask != 0;
+        self.0 &= !mask;
+        was_set
     }
 
     /// Returns whether a bit is set.
