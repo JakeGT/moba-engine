@@ -101,7 +101,8 @@ deployments should use [server.example.toml](../server.example.toml).
 
 `Replay` stores content hash/manifest, resolved inputs, periodic state checkpoints (v4) and the
 final hash. `moba-tools replay --items pack.toml match.mbr` reports the first divergent
-checkpoint if a replay breaks.
+checkpoint if a replay breaks. Add `--json` to `replay` or `content-check` for machine-readable
+summaries.
 
 ## Quality gates
 

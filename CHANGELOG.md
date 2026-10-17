@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- `--json` summaries for `replay` and `content-check` tools.
 - `burn` damage-over-time ability kind.
 - `silence` ability kind blocking casts until expiry.
 - `root` ability kind blocking movement until expiry.
