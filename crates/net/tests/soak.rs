@@ -16,6 +16,8 @@ fn ten_clients_over_a_lossy_150ms_link() {
         sim: SimConfig::default(),
         snapshot_interval: 1,
         max_clients: 10,
+        countdown_ticks: 0,
+        results_ticks: 0,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let server_addr = server.local_addr().expect("addr");

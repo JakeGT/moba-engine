@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -297,6 +297,34 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
     Ok(welcome)
 }
 
+/// High-level match phase carried in snapshots.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MatchPhase {
+    /// Waiting for players; the simulation is paused.
+    Lobby = 0,
+    /// Pre-match countdown; the simulation is paused.
+    Countdown = 1,
+    /// The simulation is running.
+    Playing = 2,
+    /// Nexus destroyed; showing results before a rematch.
+    Results = 3,
+}
+
+impl MatchPhase {
+    /// Decodes a phase byte.
+    #[must_use]
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::Lobby,
+            1 => Self::Countdown,
+            2 => Self::Playing,
+            3 => Self::Results,
+            _ => return None,
+        })
+    }
+}
+
 /// A player command as it travels on the wire.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WireCommand {
@@ -516,6 +544,10 @@ pub struct SnapshotDelta {
     pub red_score: u32,
     /// Match outcome: 0 none, 1 blue, 2 red.
     pub outcome: u8,
+    /// Current match phase.
+    pub phase: u8,
+    /// Ticks remaining in countdown/results.
+    pub countdown: u16,
     /// Newly visible entities (always full state).
     pub spawns: Vec<NetEntity>,
     /// Changed entities.
@@ -545,6 +577,10 @@ pub struct SnapshotState {
     pub red_score: u32,
     /// Match outcome: 0 none, 1 blue, 2 red.
     pub outcome: u8,
+    /// Current match phase.
+    pub phase: u8,
+    /// Ticks remaining in countdown/results.
+    pub countdown: u16,
     /// Entities sorted by network id.
     pub entities: Vec<NetEntity>,
 }
@@ -561,6 +597,8 @@ impl SnapshotState {
             blue_score: delta.blue_score,
             red_score: delta.red_score,
             outcome: delta.outcome,
+            phase: delta.phase,
+            countdown: delta.countdown,
             entities,
         }
     }
@@ -602,6 +640,8 @@ impl SnapshotState {
             blue_score: delta.blue_score,
             red_score: delta.red_score,
             outcome: delta.outcome,
+            phase: delta.phase,
+            countdown: delta.countdown,
             entities,
         })
     }
@@ -633,6 +673,8 @@ pub fn build_delta(
             blue_score: 0,
             red_score: 0,
             outcome: 0,
+            phase: 0,
+            countdown: 0,
             spawns: current.to_vec(),
             updates: Vec::new(),
             despawns: Vec::new(),
@@ -645,6 +687,8 @@ pub fn build_delta(
         blue_score: 0,
         red_score: 0,
         outcome: 0,
+        phase: 0,
+        countdown: 0,
         spawns: Vec::new(),
         updates: Vec::new(),
         despawns: Vec::new(),
@@ -767,6 +811,8 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
     put_u32(out, delta.blue_score);
     put_u32(out, delta.red_score);
     out.push(delta.outcome);
+    out.push(delta.phase);
+    put_u16(out, delta.countdown);
     put_u16(out, count_u16(delta.spawns.len())?);
     put_u16(out, count_u16(delta.updates.len())?);
     put_u16(out, count_u16(delta.despawns.len())?);
@@ -854,6 +900,8 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     let blue_score = reader.u32()?;
     let red_score = reader.u32()?;
     let outcome = reader.u8()?;
+    let phase = reader.u8()?;
+    let countdown = reader.u16()?;
     let spawn_count = usize::from(reader.u16()?);
     let update_count = usize::from(reader.u16()?);
     let despawn_count = usize::from(reader.u16()?);
@@ -951,6 +999,8 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
         blue_score,
         red_score,
         outcome,
+        phase,
+        countdown,
         spawns,
         updates,
         despawns,
@@ -1150,6 +1200,8 @@ mod tests {
         full.blue_score = 3;
         full.red_score = 2;
         full.outcome = 1;
+        full.phase = 2;
+        full.countdown = 0;
         let mut payload = Vec::new();
         encode_snapshot(&full, &mut payload).unwrap();
         let decoded = decode_snapshot(&payload).unwrap();
@@ -1157,11 +1209,14 @@ mod tests {
         assert_eq!(state.entities.len(), 2);
         assert_eq!((state.blue_score, state.red_score), (3, 2));
         assert_eq!(state.outcome, 1);
+        assert_eq!(state.phase, 2);
 
         let mut delta = build_delta(&current, Some(&baseline), 4, 43, 3);
         delta.blue_score = 4;
         delta.red_score = 2;
         delta.outcome = 2;
+        delta.phase = 3;
+        delta.countdown = 450;
         assert_eq!(delta.spawns.len(), 1);
         assert_eq!(delta.updates.len(), 2);
         encode_snapshot(&delta, &mut payload).unwrap();
@@ -1177,6 +1232,8 @@ mod tests {
         assert_eq!(next.get(3).unwrap().x, 50);
         assert_eq!((next.blue_score, next.red_score), (4, 2));
         assert_eq!(next.outcome, 2);
+        assert_eq!(next.phase, 3);
+        assert_eq!(next.countdown, 450);
     }
 
     #[test]
@@ -1191,6 +1248,8 @@ mod tests {
             blue_score: 0,
             red_score: 0,
             outcome: 0,
+            phase: 0,
+            countdown: 0,
             entities: baseline,
         };
         let applied = state.apply(&delta, 2).unwrap();
@@ -1202,6 +1261,8 @@ mod tests {
             blue_score: 0,
             red_score: 0,
             outcome: 0,
+            phase: 0,
+            countdown: 0,
             entities: applied.entities.clone(),
         };
         assert_eq!(wrong.apply(&delta, 3), Err(WireError::MissingBaseline));

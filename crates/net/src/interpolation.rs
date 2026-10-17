@@ -51,6 +51,12 @@ impl Interpolator {
         }
     }
 
+    /// Drops all buffered snapshots (used when a rematch restarts the tick).
+    pub fn clear(&mut self) {
+        self.states.clear();
+        self.last_arrival = Instant::now();
+    }
+
     /// Latest received snapshot.
     #[must_use]
     pub fn latest(&self) -> Option<&SnapshotState> {
@@ -141,6 +147,8 @@ mod tests {
             blue_score: 0,
             red_score: 0,
             outcome: 0,
+            phase: 0,
+            countdown: 0,
             entities,
         }
     }
@@ -157,6 +165,19 @@ mod tests {
             FixVec2::from_ints(0, 0)
         );
         assert!(interpolator.position(2, 11.0).is_none());
+    }
+
+    #[test]
+    fn clear_discards_rematch_history() {
+        let mut interpolator = Interpolator::new(0.0, 30.0);
+        interpolator.push(state(10, 500, vec![entity(1, 160, 160)]));
+        interpolator.clear();
+        interpolator.push(state(11, 1, vec![entity(1, 160, 160)]));
+        assert_eq!(interpolator.latest().unwrap().tick, 1);
+        assert_eq!(
+            interpolator.position(1, 1.0).unwrap(),
+            FixVec2::from_ints(10, 10)
+        );
     }
 
     #[test]

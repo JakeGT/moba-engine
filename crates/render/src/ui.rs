@@ -86,6 +86,46 @@ impl UiDrawList {
         self.vertices.extend_from_slice(&vertices);
     }
 
+    /// Adds a line segment as a rotated quad.
+    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Vec4) {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let length = (dx * dx + dy * dy).sqrt();
+        if length <= f32::EPSILON || thickness <= 0.0 {
+            return;
+        }
+        let nx = -dy / length * thickness * 0.5;
+        let ny = dx / length * thickness * 0.5;
+        let color = color.to_array();
+        let vertices = [
+            UiVertex {
+                position: [x1 + nx, y1 + ny],
+                color,
+            },
+            UiVertex {
+                position: [x2 + nx, y2 + ny],
+                color,
+            },
+            UiVertex {
+                position: [x2 - nx, y2 - ny],
+                color,
+            },
+            UiVertex {
+                position: [x1 + nx, y1 + ny],
+                color,
+            },
+            UiVertex {
+                position: [x2 - nx, y2 - ny],
+                color,
+            },
+            UiVertex {
+                position: [x1 - nx, y1 - ny],
+                color,
+            },
+        ];
+        self.vertices.extend_from_slice(&vertices);
+    }
+
     /// Adds a rectangular outline.
     pub fn outline(
         &mut self,
@@ -187,6 +227,20 @@ mod tests {
         ui.rect(0.0, 0.0, 0.0, 10.0, Vec4::ONE);
         assert!(ui.is_empty());
         ui.rect(0.0, 0.0, 10.0, 10.0, Vec4::ONE);
+        assert_eq!(ui.len(), 6);
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+
+    #[test]
+    fn lines_emit_quads_and_ignore_degenerate_input() {
+        let mut ui = UiDrawList::new();
+        ui.line(0.0, 0.0, 10.0, 0.0, 2.0, Vec4::ONE);
+        assert_eq!(ui.len(), 6);
+        ui.line(1.0, 1.0, 1.0, 1.0, 2.0, Vec4::ONE);
         assert_eq!(ui.len(), 6);
     }
 }

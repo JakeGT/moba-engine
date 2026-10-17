@@ -40,6 +40,15 @@ be built on a machine with no Vulkan SDK.
 - Content changes affect the hash and therefore replays. Publish content versions alongside
   replays.
 
+## Match flow
+
+`moba-net` runs an authoritative state machine: `Lobby → Countdown → Playing → Results →
+rematch`. The simulation is paused outside `Playing`; snapshots carry the phase and remaining
+countdown ticks so the client renders waiting/countdown/results overlays. A rematch rebuilds
+the simulation with a derived seed, resets per-client network-id/snapshot baselines and sends
+a full snapshot to every connected client; connections and slots survive. Human inputs are
+accepted in `Playing`; shop purchases remain available at the nexus.
+
 ## Server authority and netcode
 
 1. The client sends one-shot intents (`MoveTo`, `Attack`, `CastAbility`, `BuyItem`) over UDP.

@@ -27,10 +27,10 @@ use std::time::{Duration, Instant};
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
 use moba_game::{
-    EMPTY_ITEM, HEROES, ITEMS, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
+    EMPTY_ITEM, HEROES, ITEMS, LANES, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
     xp_to_next,
 };
-use moba_net::protocol::{WireCommand, dequantize_position, quantize_position};
+use moba_net::protocol::{MatchPhase, WireCommand, dequantize_position, quantize_position};
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
 use moba_platform::{
     App, Frame, FrameOutcome, InputState, Key, MouseButton, Window, WindowConfig, run,
@@ -51,6 +51,9 @@ struct NetworkView {
     own_slot: u8,
     own_net_id: Option<u16>,
     last_snapshot_seq: u32,
+    phase: MatchPhase,
+    countdown: u16,
+    last_tick: u32,
     demo_move: Option<FixVec2>,
     demo_sent: bool,
     demo_buy: Option<u8>,
@@ -111,6 +114,9 @@ impl ClientApp {
                         own_slot: slot,
                         own_net_id: None,
                         last_snapshot_seq: 0,
+                        phase: MatchPhase::Lobby,
+                        countdown: 0,
+                        last_tick: 0,
                         demo_move: parse_demo_move(),
                         demo_sent: false,
                         demo_buy: std::env::var("MOBA_DEMO_BUY")
@@ -233,6 +239,17 @@ impl App for ClientApp {
                     if let Some(snapshot) = snapshot {
                         if snapshot.seq != network.last_snapshot_seq {
                             network.last_snapshot_seq = snapshot.seq;
+                            network.phase =
+                                MatchPhase::from_u8(snapshot.phase).unwrap_or(MatchPhase::Lobby);
+                            network.countdown = snapshot.countdown;
+                            if snapshot.tick < network.last_tick {
+                                // Rematch: server restarted at tick zero with fresh net ids.
+                                network.interpolator.clear();
+                                network.own_net_id = None;
+                                network.prediction.set_target(None);
+                                network.client.clear_pending_input();
+                            }
+                            network.last_tick = snapshot.tick;
                             network.interpolator.push(snapshot.clone());
                             if let Some(own) = snapshot.entities.iter().find(|entity| {
                                 entity.hero_slot == network.own_slot
@@ -241,9 +258,9 @@ impl App for ClientApp {
                                 network.own_net_id = Some(own.net_id);
                                 network.prediction.set_dead(own.is_dead());
                                 network.prediction.reconcile(own.position());
-                                if let Some(item) =
-                                    network.demo_buy.filter(|_| !network.demo_bought)
-                                {
+                                if let Some(item) = network.demo_buy.filter(|_| {
+                                    !network.demo_bought && network.phase == MatchPhase::Playing
+                                }) {
                                     if network
                                         .client
                                         .send_command(WireCommand::BuyItem { item })
@@ -252,9 +269,9 @@ impl App for ClientApp {
                                         network.demo_bought = true;
                                     }
                                 }
-                                if let Some(target) =
-                                    network.demo_move.filter(|_| !network.demo_sent)
-                                {
+                                if let Some(target) = network.demo_move.filter(|_| {
+                                    !network.demo_sent && network.phase == MatchPhase::Playing
+                                }) {
                                     let (x, y) = quantize_position(target);
                                     if network
                                         .client
@@ -268,8 +285,10 @@ impl App for ClientApp {
                             }
                         }
                     }
-                    for _ in 0..frame.ticks() {
-                        network.prediction.step();
+                    if network.phase == MatchPhase::Playing {
+                        for _ in 0..frame.ticks() {
+                            network.prediction.step();
+                        }
                     }
                     rebuild_network_units(network, units);
                     if width > 0 && height > 0 {
@@ -291,6 +310,7 @@ impl App for ClientApp {
                             network,
                             *scoreboard_visible,
                             *shop_visible,
+                            &camera,
                             width,
                             height,
                         );
@@ -412,6 +432,8 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
             sim: SimConfig::default(),
             snapshot_interval: 1,
             max_clients: 10,
+            countdown_ticks: 90,
+            results_ticks: 450,
         })
         .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
@@ -447,14 +469,7 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
         let Some(team) = team_from_u8(entity.team) else {
             continue;
         };
-        let position = if Some(entity.net_id) == network.own_net_id {
-            network.prediction.position()
-        } else {
-            network
-                .interpolator
-                .position(entity.net_id, render_tick)
-                .unwrap_or_else(|| dequantize_position(entity.x, entity.y))
-        };
+        let position = rendered_entity_position(network, entity, render_tick);
         let fraction = if entity.max_health == 0 {
             1.0
         } else {
@@ -573,6 +588,9 @@ fn handle_network_input(
                 let _ = network.client.send_command(WireCommand::BuyItem { item });
             }
         }
+        return;
+    }
+    if network.phase != MatchPhase::Playing {
         return;
     }
     let Some(cursor) = input.cursor() else {
@@ -698,11 +716,196 @@ fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<()> {
 }
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
+fn rendered_entity_position(
+    network: &NetworkView,
+    entity: &moba_net::NetEntity,
+    render_tick: f32,
+) -> FixVec2 {
+    if Some(entity.net_id) == network.own_net_id {
+        network.prediction.position()
+    } else {
+        network
+            .interpolator
+            .position(entity.net_id, render_tick)
+            .unwrap_or_else(|| dequantize_position(entity.x, entity.y))
+    }
+}
+
+fn project_to_screen(camera: &Camera, world: Vec3, width: u32, height: u32) -> Option<Vec2> {
+    let clip = camera.view_proj * Vec4::new(world.x, world.y, world.z, 1.0);
+    if clip.w <= 0.0001 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !(0.0..=1.0).contains(&ndc.z) {
+        return None;
+    }
+    let x = (ndc.x * 0.5 + 0.5) * width as f32;
+    let y = (1.0 - ndc.y) * 0.5 * height as f32;
+    Some(Vec2::new(x, y))
+}
+
+fn unit_hud_height(kind: u8) -> f32 {
+    match kind {
+        0 => 6.2,
+        1 => 3.2,
+        2 => 2.8,
+        3 => 10.5,
+        4 => 17.0,
+        _ => 3.0,
+    }
+}
+
+fn draw_health_bars(
+    ui: &mut UiDrawList,
+    network: &NetworkView,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+) {
+    let Some(snapshot) = network.client.snapshot() else {
+        return;
+    };
+    let render_tick = network.interpolator.render_tick(Instant::now());
+    let width_f = width as f32;
+    for entity in &snapshot.entities {
+        if entity.is_dead() || (entity.kind != 0 && entity.kind < 3) {
+            continue;
+        }
+        let position = rendered_entity_position(network, entity, render_tick);
+        let world = Vec3::new(
+            position.x.to_f32() - 128.0,
+            unit_hud_height(entity.kind),
+            position.y.to_f32() - 128.0,
+        );
+        let Some(screen) = project_to_screen(camera, world, width, height) else {
+            continue;
+        };
+        let bar_width = if entity.kind == 0 { 46.0 } else { 64.0 };
+        let bar_height = if entity.kind == 0 { 5.0 } else { 7.0 };
+        let x = (screen.x - bar_width * 0.5).clamp(4.0, (width_f - bar_width - 4.0).max(4.0));
+        let y = (screen.y - 8.0).clamp(4.0, height as f32 - 4.0);
+        let fraction = if entity.max_health == 0 {
+            0.0
+        } else {
+            f32::from(entity.health) / f32::from(entity.max_health)
+        };
+        let team_color = if entity.team == 0 {
+            Vec4::new(0.35, 0.62, 1.0, 1.0)
+        } else {
+            Vec4::new(1.0, 0.42, 0.32, 1.0)
+        };
+        ui.rect(
+            x,
+            y,
+            bar_width,
+            bar_height,
+            Vec4::new(0.02, 0.03, 0.04, 0.85),
+        );
+        ui.rect(
+            x,
+            y,
+            bar_width * fraction.clamp(0.0, 1.0),
+            bar_height,
+            Vec4::new(0.2, 0.85, 0.38, 1.0),
+        );
+        ui.outline(x, y, bar_width, bar_height, 1.0, team_color);
+        if Some(entity.net_id) == network.own_net_id {
+            ui.rect(
+                x + bar_width * 0.5 - 5.0,
+                y - 5.0,
+                10.0,
+                2.0,
+                Vec4::new(0.95, 0.78, 0.3, 1.0),
+            );
+        }
+    }
+}
+
+fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u32, height: u32) {
+    let Some(snapshot) = network.client.snapshot() else {
+        return;
+    };
+    let size = 188.0;
+    let margin = 24.0;
+    let x = width as f32 - size - margin;
+    let y = height as f32 - size - margin;
+    ui.panel(
+        x,
+        y,
+        size,
+        size,
+        Vec4::new(0.01, 0.02, 0.035, 0.82),
+        Vec4::new(0.22, 0.42, 0.58, 0.9),
+    );
+    let inner = size - 20.0;
+    let left = x + 10.0;
+    let top = y + 10.0;
+    ui.rect(left, top, inner, inner, Vec4::new(0.04, 0.08, 0.06, 0.9));
+    let map = |position: FixVec2| {
+        Vec2::new(
+            left + position.x.to_f32() / 256.0 * inner,
+            top + position.y.to_f32() / 256.0 * inner,
+        )
+    };
+    let lane_color = Vec4::new(0.22, 0.38, 0.28, 0.85);
+    for lane in &LANES {
+        for pair in lane.path.windows(2) {
+            let a = map(pair[0]);
+            let b = map(pair[1]);
+            ui.line(a.x, a.y, b.x, b.y, 1.5, lane_color);
+        }
+    }
+    for entity in &snapshot.entities {
+        if entity.is_dead() {
+            continue;
+        }
+        let position = dequantize_position(entity.x, entity.y);
+        let point = map(position);
+        let team_color = if entity.team == 0 {
+            Vec4::new(0.35, 0.62, 1.0, 1.0)
+        } else {
+            Vec4::new(1.0, 0.42, 0.32, 1.0)
+        };
+        let dot = if entity.kind == 0 || entity.kind >= 3 {
+            5.0
+        } else {
+            3.0
+        };
+        ui.rect(
+            point.x - dot * 0.5,
+            point.y - dot * 0.5,
+            dot,
+            dot,
+            team_color,
+        );
+        if Some(entity.net_id) == network.own_net_id {
+            ui.outline(
+                point.x - 4.5,
+                point.y - 4.5,
+                9.0,
+                9.0,
+                1.5,
+                Vec4::new(0.95, 0.78, 0.3, 1.0),
+            );
+        }
+    }
+    ui.text(
+        x + 10.0,
+        y + size - 14.0,
+        1.5,
+        Vec4::new(0.55, 0.68, 0.78, 1.0),
+        "MAP",
+    );
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_network_hud(
     ui: &mut UiDrawList,
     network: &NetworkView,
     scoreboard: bool,
     shop: bool,
+    camera: &Camera,
     width: u32,
     height: u32,
 ) {
@@ -720,6 +923,7 @@ fn build_network_hud(
     let width_f = width as f32;
     let height_f = height as f32;
 
+    draw_health_bars(ui, network, camera, width, height);
     let snapshot = network.client.snapshot();
     let own = network
         .own_net_id
@@ -935,6 +1139,7 @@ fn build_network_hud(
             }
         }
     }
+    draw_minimap(ui, network, width, height);
     if scoreboard {
         let panel_width = 620.0;
         let panel_height = 330.0;
@@ -1058,6 +1263,38 @@ fn build_network_hud(
             "B CLOSE   NUMBER BUY   PURCHASES REQUIRE OWN NEXUS",
         );
     }
+    if matches!(network.phase, MatchPhase::Lobby | MatchPhase::Countdown) {
+        let seconds = u32::from(network.countdown).div_ceil(30);
+        let label = if network.phase == MatchPhase::Lobby {
+            String::from("WAITING FOR PLAYERS")
+        } else {
+            format!("MATCH STARTS IN {seconds}")
+        };
+        let panel_w = 560.0;
+        let panel_h = 110.0;
+        ui.panel(
+            (width_f - panel_w) * 0.5,
+            height_f * 0.35,
+            panel_w,
+            panel_h,
+            bg,
+            border,
+        );
+        ui.text_shadowed(
+            (width_f - UiDrawList::text_width(&label, 4.0)) * 0.5,
+            height_f * 0.35 + 26.0,
+            4.0,
+            text,
+            &label,
+        );
+        ui.text(
+            (width_f - UiDrawList::text_width("BOTS FILL EMPTY SLOTS", 2.0)) * 0.5,
+            height_f * 0.35 + 72.0,
+            2.0,
+            muted,
+            "BOTS FILL EMPTY SLOTS",
+        );
+    }
     if let Some(outcome) = snapshot
         .map(|state| state.outcome)
         .filter(|outcome| *outcome != 0)
@@ -1086,12 +1323,18 @@ fn build_network_hud(
             color,
             label,
         );
+        let seconds = u32::from(network.countdown).div_ceil(30);
+        let footer = if network.phase == MatchPhase::Results {
+            format!("NEXT MATCH IN {seconds}   /   ESC TO EXIT")
+        } else {
+            String::from("PRESS ESC TO EXIT")
+        };
         ui.text(
-            (width_f - UiDrawList::text_width("PRESS ESC TO EXIT", 2.0)) * 0.5,
+            (width_f - UiDrawList::text_width(&footer, 2.0)) * 0.5,
             height_f * 0.36 + 92.0,
             2.0,
             muted,
-            "PRESS ESC TO EXIT",
+            &footer,
         );
     }
     if own.is_some_and(|entity| entity.is_dead()) {

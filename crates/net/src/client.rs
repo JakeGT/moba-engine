@@ -309,6 +309,11 @@ impl NetClient {
         Ok(())
     }
 
+    /// Drops any pending input (for example after a rematch reset).
+    pub fn clear_pending_input(&mut self) {
+        self.pending = None;
+    }
+
     /// Latest applied snapshot.
     #[must_use]
     pub const fn snapshot(&self) -> Option<&SnapshotState> {

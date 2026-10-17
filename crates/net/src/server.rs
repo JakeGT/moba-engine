@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use moba_sim::{ObservedUnit, PlayerCommand, SimConfig, Simulation, TickInputs};
 
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, NetEntity, NetId, PacketKind,
+    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MatchPhase, NetEntity, NetId, PacketKind,
     SnapshotDelta, SnapshotState, Welcome, WireCommand, build_delta, decode_hello, decode_input,
     dequantize_position, encode_snapshot, encode_welcome, sequence_after,
 };
@@ -32,6 +32,10 @@ pub struct ServerConfig {
     pub snapshot_interval: u8,
     /// Maximum connected clients.
     pub max_clients: usize,
+    /// Ticks between first client connect and gameplay (0 starts immediately).
+    pub countdown_ticks: u32,
+    /// Ticks the results screen stays up before a rematch.
+    pub results_ticks: u32,
 }
 
 impl Default for ServerConfig {
@@ -41,6 +45,8 @@ impl Default for ServerConfig {
             sim: SimConfig::default(),
             snapshot_interval: 1,
             max_clients: 10,
+            countdown_ticks: 90,
+            results_ticks: 450,
         }
     }
 }
@@ -117,6 +123,15 @@ impl ClientConn {
 }
 
 /// A running authoritative network server.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Phase {
+    Lobby,
+    Countdown(u32),
+    Playing,
+    Results(u32),
+}
+
+/// A running authoritative network server.
 #[derive(Debug)]
 pub struct NetServer {
     transport: UdpTransport,
@@ -128,6 +143,9 @@ pub struct NetServer {
     payload: Vec<u8>,
     session_counter: u32,
     stats: ServerStats,
+    phase: Phase,
+    frame: u64,
+    match_number: u32,
 }
 
 impl NetServer {
@@ -148,6 +166,9 @@ impl NetServer {
             payload: Vec::with_capacity(MAX_DATAGRAM),
             session_counter: 1,
             stats: ServerStats::default(),
+            phase: Phase::Lobby,
+            frame: 0,
+            match_number: 0,
         })
     }
 
@@ -163,6 +184,29 @@ impl NetServer {
     #[must_use]
     pub const fn simulation(&self) -> &Simulation {
         &self.simulation
+    }
+
+    /// Current phase and remaining countdown/results ticks.
+    #[must_use]
+    pub fn phase(&self) -> (MatchPhase, u16) {
+        match self.phase {
+            Phase::Lobby => (MatchPhase::Lobby, 0),
+            Phase::Countdown(remaining) => (
+                MatchPhase::Countdown,
+                u16::try_from(remaining).unwrap_or(u16::MAX),
+            ),
+            Phase::Playing => (MatchPhase::Playing, 0),
+            Phase::Results(remaining) => (
+                MatchPhase::Results,
+                u16::try_from(remaining).unwrap_or(u16::MAX),
+            ),
+        }
+    }
+
+    /// Zero-based match number served by this process.
+    #[must_use]
+    pub const fn match_number(&self) -> u32 {
+        self.match_number
     }
 
     /// Current counters.
@@ -192,11 +236,45 @@ impl NetServer {
         Ok(())
     }
 
-    /// Advances the simulation and broadcasts snapshots.
+    /// Advances the match state machine and broadcasts snapshots.
+    ///
+    /// Phases: lobby (paused) → countdown (paused) → playing → results (paused) → rematch.
     ///
     /// # Errors
     /// Returns OS send errors from snapshot transmission.
     pub fn tick(&mut self) -> io::Result<()> {
+        self.frame = self.frame.wrapping_add(1);
+        match self.phase {
+            Phase::Lobby => {}
+            Phase::Countdown(remaining) => {
+                self.phase = if remaining <= 1 {
+                    Phase::Playing
+                } else {
+                    Phase::Countdown(remaining - 1)
+                };
+            }
+            Phase::Playing => {
+                self.tick_simulation();
+                if self.simulation.outcome().is_some() {
+                    self.phase = Phase::Results(self.config.results_ticks.max(1));
+                }
+            }
+            Phase::Results(remaining) => {
+                if remaining <= 1 {
+                    self.reset_match();
+                } else {
+                    self.phase = Phase::Results(remaining - 1);
+                }
+            }
+        }
+        let interval = u64::from(self.config.snapshot_interval.max(1));
+        if self.frame % interval == 0 {
+            self.send_snapshots()?;
+        }
+        Ok(())
+    }
+
+    fn tick_simulation(&mut self) {
         let mut inputs: TickInputs = self.simulation.bot_inputs();
         for slot in 0..self.clients.len() {
             let Some(client) = self.clients[slot].as_mut() else {
@@ -210,12 +288,42 @@ impl NetServer {
             }
         }
         self.simulation.tick(&inputs);
+        self.simulation.clear_events();
         self.stats.ticks += 1;
-        let interval = u32::from(self.config.snapshot_interval.max(1));
-        if self.simulation.current_tick().get() % interval == 0 {
-            self.send_snapshots()?;
+    }
+
+    fn start_countdown(&mut self) {
+        self.phase = if self.config.countdown_ticks == 0 {
+            Phase::Playing
+        } else {
+            Phase::Countdown(self.config.countdown_ticks)
+        };
+    }
+
+    fn reset_match(&mut self) {
+        self.match_number = self.match_number.wrapping_add(1);
+        let mut config = self.config.sim;
+        config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.config.sim = config;
+        self.simulation = Simulation::new(config);
+        for slot in 0..self.clients.len() {
+            let Some(client) = self.clients[slot].as_mut() else {
+                continue;
+            };
+            client.history.clear();
+            client.net_ids.clear();
+            client.next_net_id = 1;
+            client.acked_snapshot = 0;
+            client.need_full = true;
+            client.command = None;
+            client.last_input_seq = 0;
         }
-        Ok(())
+        self.refresh_bot_mask();
+        if self.clients.iter().any(Option::is_some) {
+            self.start_countdown();
+        } else {
+            self.phase = Phase::Lobby;
+        }
     }
 
     /// Runs a real-time 30 Hz loop for `duration`.
@@ -327,6 +435,9 @@ impl NetServer {
                     bytes_sent: 0,
                 });
                 self.refresh_bot_mask();
+                if self.phase == Phase::Lobby {
+                    self.start_countdown();
+                }
                 self.send_welcome(message.addr, slot, hello.nonce, session)?;
             }
             PacketKind::Input => {
@@ -444,6 +555,7 @@ impl NetServer {
                 .observed_units(team, &mut observed[team.index()]);
         }
         let tick = self.simulation.current_tick().get();
+        let (phase_code, countdown) = self.phase();
         let mut current = core::mem::take(&mut self.current);
         let mut payload = core::mem::take(&mut self.payload);
         for index in 0..self.clients.len() {
@@ -483,6 +595,8 @@ impl NetServer {
                 Some(moba_game::Team::Blue) => 1,
                 Some(moba_game::Team::Red) => 2,
             };
+            delta.phase = phase_code as u8;
+            delta.countdown = countdown;
             encode_snapshot(&delta, &mut payload)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             client.snapshot_seq = client.snapshot_seq.wrapping_add(1);
@@ -536,4 +650,58 @@ pub fn apply_delta(
     seq: u32,
 ) -> Result<SnapshotState, crate::protocol::WireError> {
     baseline.apply(delta, seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moba_sim::{Health, UnitKind};
+
+    #[test]
+    fn match_flow_transitions_and_resets() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 2,
+            results_ticks: 3,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
+
+        // A connecting client would start the countdown; drive the same transition directly.
+        server.phase = Phase::Countdown(2);
+        server.tick().expect("countdown");
+        assert_eq!(server.phase(), (MatchPhase::Countdown, 1));
+        server.tick().expect("playing");
+        assert_eq!(server.phase(), (MatchPhase::Playing, 0));
+
+        let nexus = server
+            .simulation
+            .world()
+            .entities()
+            .find(|entity| {
+                server.simulation.world().get::<UnitKind>(*entity) == Some(&UnitKind::Nexus)
+                    && server.simulation.world().get::<moba_game::Team>(*entity)
+                        == Some(&moba_game::Team::Red)
+            })
+            .expect("red nexus");
+        server
+            .simulation
+            .world_mut()
+            .get_mut::<Health>(nexus)
+            .expect("nexus health")
+            .current = 0;
+        server.tick().expect("result");
+        assert_eq!(server.phase(), (MatchPhase::Results, 3));
+        assert_eq!(server.simulation().outcome(), Some(moba_game::Team::Blue));
+
+        for _ in 0..3 {
+            server.tick().expect("results timer");
+        }
+        assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
+        assert_eq!(server.match_number(), 1);
+        assert_eq!(server.simulation().outcome(), None);
+    }
 }

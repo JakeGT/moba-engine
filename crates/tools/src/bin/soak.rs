@@ -59,6 +59,8 @@ fn main() {
         sim: SimConfig::default(),
         snapshot_interval: 1,
         max_clients: options.clients.min(10),
+        countdown_ticks: 0,
+        results_ticks: 0,
     }) {
         Ok(server) => server,
         Err(error) => fail(&format!("cannot bind server: {error}")),

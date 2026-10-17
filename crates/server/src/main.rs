@@ -16,6 +16,8 @@ fn main() {
     let mut seed = SimConfig::default().seed;
     let mut listen: Option<String> = None;
     let mut seconds = 60u64;
+    let mut countdown_secs = 3u64;
+    let mut results_secs = 15u64;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -37,8 +39,21 @@ fn main() {
                     seconds = value;
                 }
             }
+            "--countdown" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    countdown_secs = value;
+                }
+            }
+            "--results" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    results_secs = value;
+                }
+            }
             "--help" => {
-                eprintln!("usage: moba-server [--ticks N] [--seed N] [--listen ADDR --seconds N]");
+                eprintln!(
+                    "usage: moba-server [--ticks N] [--seed N] \
+                     [--listen ADDR --seconds N --countdown S --results S]"
+                );
                 return;
             }
             other => eprintln!("unknown argument: {other}"),
@@ -61,13 +76,15 @@ fn main() {
             sim: config,
             snapshot_interval: 1,
             max_clients: 10,
+            countdown_ticks: u32::try_from(countdown_secs.saturating_mul(30)).unwrap_or(u32::MAX),
+            results_ticks: u32::try_from(results_secs.saturating_mul(30)).unwrap_or(u32::MAX),
         })
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");
             std::process::exit(2);
         });
         eprintln!(
-            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots)",
+            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results)",
             server.local_addr().expect("bound address")
         );
         server

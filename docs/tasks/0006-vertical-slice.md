@@ -38,6 +38,19 @@ levels/items, and a complete match flow.
   `moba-game`; the simulation only applies them through small helpers, so new items or
   balance changes do not alter the core tick loop.
 
+## Landed in round 8
+- **Match flow**: authoritative `Lobby → Countdown → Playing → Results → rematch` state
+  machine in `moba-net`; snapshots carry phase/countdown; a rematch derives a new seed,
+  resets client snapshot baselines/net ids and sends a full snapshot while connections stay up.
+- **Match overlays**: waiting, countdown, victory/defeat and next-match countdown HUD.
+- **Minimap**: lane paths plus visible unit dots, own hero highlighted, derived from the same
+  visibility-filtered snapshots.
+- **Floating health bars**: world→screen projected bars above visible heroes and structures,
+  with team-coloured borders and an own-hero marker.
+- **Protocol v4** for phase/countdown; server `--countdown/--results` tuning flags.
+- Server match-flow test covers countdown, nexus end, results timer, rematch reset and the new
+  seed; client capture verifies waiting/countdown/playing overlays and minimap.
+
 ## Still open for M6
 - Hero levels/XP, gold, items and a shop.
 - Lobby/start flow, pause/reconnect, end-of-match summary and rematch.
@@ -50,9 +63,9 @@ levels/items, and a complete match flow.
 - [x] Fog circles align with server visibility; unseen units are absent and unseen terrain is dark.
 - [x] Tab scoreboard lists allied heroes and hides unseen enemies.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
-- [x] 114 workspace tests; protocol/delta tests cover scores, outcome, hero pick and
+- [x] 119 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick and
       progression; UDP test covers an actual shop purchase.
-- [~] Levels/XP, gold/items/shop landed; lobby-to-rematch flow remains.
+- [x] Levels/XP, gold/items/shop and the lobby-to-rematch flow (no ready-up/reconnect yet).
 
 ## Research notes
 - Small pixel text: a bitmap font is cheaper and crisper than SDF at fixed HUD scales

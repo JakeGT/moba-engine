@@ -8,6 +8,8 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 
 ![MOBA engine HUD and fog of war](docs/images/m6-hud-fog.png)
 
+![Minimap and floating health bars](docs/images/m6-minimap-healthbars.png)
+
 ## What is in the box
 
 | Area | Capability |
@@ -16,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, screen-space bitmap HUD, Tab scoreboard, shop and mouse/keyboard controls |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 116 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 119 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -40,6 +42,9 @@ MOBA_SERVER=local cargo run -p moba-client
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
 B shop (1–8 buy), Tab scoreboard, Escape quit.
+
+Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
+The dedicated server exposes `--countdown S` and `--results S` to tune those phases.
 
 Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,

@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: 2026-10-17 (round 7 of the build).
+Last updated: 2026-10-17 (round 8 of the build).
 
 ## Milestones
 
@@ -11,8 +11,8 @@ Last updated: 2026-10-17 (round 7 of the build).
 | M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
-| M5 | Networking | 🟡 | UDP transport, handshake, visibility/delta snapshots, prediction/reconciliation, interpolation and playable network client (protocol v3 with scores/outcome/progression); five-minute 10-client soak passes at 4.1–4.5 KB/s down; encryption and long fuzzers pending. |
-| M6 | Vertical slice | 🟡 | Playable networked/local match with batched HUD, levels/XP, gold/items/shop, team scores, Tab scoreboard, fog-of-war terrain and VICTORY/DEFEAT; lobby/rematch, minimap and line-of-sight fog remain. |
+| M5 | Networking | 🟡 | UDP transport, handshake, visibility/delta snapshots, prediction/reconciliation, interpolation and playable network client (protocol v4 with phase/countdown, scores/outcome/progression); five-minute 10-client soak passes at 4.1–4.5 KB/s down; encryption and long fuzzers pending. |
+| M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, batched HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; reconnect/surrender and line-of-sight fog remain. |
 | M7 | Hardening | ⬜ | 50 matches/box, fuzz, profiling capture. |
 | M8 | Content pipeline | ⬜ | Data-driven abilities. |
 
@@ -65,7 +65,7 @@ Last updated: 2026-10-17 (round 7 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 116 tests
+- `cargo test --workspace --locked` — 119 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -87,7 +87,8 @@ Last updated: 2026-10-17 (round 7 of the build).
 - Network soak: five minutes (protocol v1) with ten clients through independent
   150 ms/5%/30 ms links — all connected, ~8,500 snapshots each, 4.1–4.5 KiB/s down and
   ~1.17 KiB/s up; server sent 13.4 MiB over 9,120 ticks. 30 s reruns measured 4.0–5.2 KiB/s
-  (v2) and 4.2–5.7 KiB/s (v3) down at ~1.2 KiB/s up. Protocol/delta/snapshot tests pass.
+  (v2), 4.2–5.7 KiB/s (v3) and 4.2–5.7 KiB/s (v4) down at ~1.2 KiB/s up. Protocol/delta/
+  snapshot tests pass.
 - Online client: `MOBA_SERVER=local MOBA_DEMO_MOVE=110,128` connected, rendered
   interpolated snapshots with the local hero predicted, and captured a validation-clean
   frame; see `docs/images/m5-network-client.png`.
@@ -96,6 +97,10 @@ Last updated: 2026-10-17 (round 7 of the build).
 - Progression/shop: `MOBA_DEMO_BUY=0` and `MOBA_SHOP=1` captures show XP/gold/items and the
   catalogue; an over-UDP test buys an item and observes the spent gold — see
   `docs/images/m6-progression.png` and `docs/images/m6-shop.png`.
+- Match flow/minimap: countdown and in-game captures with minimap and floating health bars —
+  see `docs/images/m6-countdown.png` and `docs/images/m6-minimap-healthbars.png`.
+- Match-flow test: countdown → nexus end → results → rematch with a derived seed and client
+  baseline reset.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
 
@@ -115,8 +120,8 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 
 1. Loom model of the scope counter protocol; add `World`-level parallel iteration over
    chunk queries and bench it.
-2. M6 remainder: lobby/rematch flow, minimap and floating health bars, terrain line-of-sight
-   fog, and reconnect/surrender.
+2. M6 remainder: ready-up lobby, reconnect/surrender, terrain line-of-sight fog and map
+   selection.
 3. M5 hardening: authenticated/encrypted packets and long-running sanitizer fuzzers (M7).
 4. M3 remainder: skeletal skinning, frame-time measurement on min-spec hardware, and a
    golden-image test under lavapipe in CI.

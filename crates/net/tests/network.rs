@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use moba_core::FixVec2;
-use moba_net::protocol::{WireCommand, quantize_position};
+use moba_net::protocol::{MatchPhase, WireCommand, quantize_position};
 use moba_net::{ClientEvent, NetClient, NetServer, ServerConfig};
 use moba_sim::SimConfig;
 
@@ -19,6 +19,8 @@ fn spawn_server(
         sim: SimConfig::default(),
         snapshot_interval: 1,
         max_clients: 10,
+        countdown_ticks: 0,
+        results_ticks: 0,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("local addr");
@@ -89,6 +91,7 @@ fn client_connects_receives_snapshots_and_moves() {
     assert!(saw_connected, "connected event missing");
     assert!(saw_snapshot, "snapshot missing");
     let snapshot = client.snapshot().expect("snapshot state");
+    assert_eq!(snapshot.phase, MatchPhase::Playing as u8);
     assert!(
         snapshot.entities.len() >= 16,
         "structures should be visible"

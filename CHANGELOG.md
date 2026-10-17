@@ -11,6 +11,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
   content-authoring, API-stability and security docs, contributions guide and templates.
 - `cargo doc` quality gate and CI documentation job.
 - `moba-engine` umbrella crate with `sim`, `net` and optional `render` features.
+- Match flow: lobby/countdown/playing/results/rematch state machine, match overlays, minimap,
+  floating health bars and protocol v4 (phase/countdown).
 - Runnable embedding examples (`headless_match`, `scripted_orders`), release/security/contributing
   guidance, third-party notices and issue/PR templates.
 - `missing_docs` lint for the public API.
