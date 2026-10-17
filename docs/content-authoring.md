@@ -101,6 +101,12 @@ armor = 34
 magic_resist = 28
 vision_range = 13.0
 abilities = [0, 1, 2]  # ids into the engine ability library
+# Optional per-level growth (defaults: 70 HP, 30 MP, 4 AD, 1 armour, 1 MR):
+# health_per_level = 70
+# mana_per_level = 30
+# attack_damage_per_level = 4
+# armor_per_level = 1
+# magic_resist_per_level = 1
 ```
 
 Packs can define abilities instead of using the engine's default library:

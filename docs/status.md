@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 160 tests
+- `cargo test --workspace --locked` — 161 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -120,8 +120,8 @@ Last updated: 2026-10-17 (round 17 of the build).
   simulation tests verify custom spawns/nexuses and the wire map catalogue.
 - Line-of-sight: wall geometry and shader fog capture (`m6-los-fog.png`); server test proves a
   wall hides an enemy hero, and walls align with centered world/vision coordinates.
-- Replay manifest: custom-content 554-tick replay verified with `--items` at content
-  `0xbb6dc5bd0e5ab91a` / state `0x64844168ba624c84`, pack `Example Pack 1.0.0`, 3 state
+- Replay manifest: custom-content 555-tick replay verified with `--items` at content
+  `0x717e1ddd76abfabe` / state `0xd101300c1c113b98`, pack `Example Pack 1.0.0`, 3 state
   checkpoints; replaying without the pack is rejected.
 - Rate limiting: valid-packet flood test drops excess at a 10 pps budget; release 10-client
   soak reports rate_limited=0, avg tick 11 µs / max 54 µs.

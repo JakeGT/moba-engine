@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Per-hero level-growth fields in content packs.
 - Bounded handshake nonce replay window (same-address retransmits allowed).
 - Replay format v4 periodic state checkpoints and first-divergence tick reporting.
 - Per-client token key ring for authenticated/encrypted per-player sessions and rotation.

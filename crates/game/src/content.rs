@@ -267,6 +267,16 @@ pub struct HeroSpec {
     pub vision_range: Fix,
     /// Ability ids for Q/W/E.
     pub abilities: [u8; 3],
+    /// Health gained per level.
+    pub health_per_level: i32,
+    /// Mana gained per level.
+    pub mana_per_level: i32,
+    /// Attack damage gained per level.
+    pub attack_damage_per_level: i32,
+    /// Armour gained per level.
+    pub armor_per_level: i32,
+    /// Magic resistance gained per level.
+    pub magic_resist_per_level: i32,
 }
 
 impl From<&crate::HeroDef> for HeroSpec {
@@ -285,6 +295,11 @@ impl From<&crate::HeroDef> for HeroSpec {
             magic_resist: hero.magic_resist,
             vision_range: hero.vision_range,
             abilities: hero.abilities,
+            health_per_level: crate::LEVEL_GROWTH.health,
+            mana_per_level: crate::LEVEL_GROWTH.mana,
+            attack_damage_per_level: crate::LEVEL_GROWTH.attack_damage,
+            armor_per_level: crate::LEVEL_GROWTH.armor,
+            magic_resist_per_level: crate::LEVEL_GROWTH.magic_resist,
         }
     }
 }
@@ -565,6 +580,14 @@ impl GameContent {
             {
                 return Err(ContentError::BadAbility);
             }
+            if hero.health_per_level < 0
+                || hero.mana_per_level < 0
+                || hero.attack_damage_per_level < 0
+                || hero.armor_per_level < 0
+                || hero.magic_resist_per_level < 0
+            {
+                return Err(ContentError::BadHeroStats);
+            }
             if hero.max_health <= 0
                 || hero.max_mana < 0
                 || hero.attack_interval_ticks == 0
@@ -685,6 +708,15 @@ impl GameContent {
                 feed(&value.to_bits().to_le_bytes());
             }
             feed(&hero.abilities);
+            for value in [
+                hero.health_per_level as u32,
+                hero.mana_per_level as u32,
+                hero.attack_damage_per_level as u32,
+                hero.armor_per_level as u32,
+                hero.magic_resist_per_level as u32,
+            ] {
+                feed(&value.to_le_bytes());
+            }
         }
         feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
@@ -847,6 +879,11 @@ struct HeroEntry {
     magic_resist: i32,
     vision_range: f32,
     abilities: [u8; 3],
+    health_per_level: Option<i32>,
+    mana_per_level: Option<i32>,
+    attack_damage_per_level: Option<i32>,
+    armor_per_level: Option<i32>,
+    magic_resist_per_level: Option<i32>,
 }
 
 /// Parses and validates a content pack from TOML.
@@ -895,6 +932,15 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                     magic_resist: hero.magic_resist,
                     vision_range: Fix::from_f32(hero.vision_range),
                     abilities: hero.abilities,
+                    health_per_level: hero.health_per_level.unwrap_or(crate::LEVEL_GROWTH.health),
+                    mana_per_level: hero.mana_per_level.unwrap_or(crate::LEVEL_GROWTH.mana),
+                    attack_damage_per_level: hero
+                        .attack_damage_per_level
+                        .unwrap_or(crate::LEVEL_GROWTH.attack_damage),
+                    armor_per_level: hero.armor_per_level.unwrap_or(crate::LEVEL_GROWTH.armor),
+                    magic_resist_per_level: hero
+                        .magic_resist_per_level
+                        .unwrap_or(crate::LEVEL_GROWTH.magic_resist),
                 })
                 .collect()
         },

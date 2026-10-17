@@ -31,10 +31,11 @@ deterministic playback and server authority.
 - Shared TOML loader in `moba-game`; packs carry name/version/author manifests. Replay
   format v3 carries the content hash plus pack name/version, and
   `moba-tools replay --items pack.toml` verifies custom matches. Live 555-tick replay with
-  Example Pack 1.0.0 verified at content `0xbb6dc5bd0e5ab91a` / state `0x64844168ba624c84`
-  with 3 checkpoints over 554 ticks.
+  Example Pack 1.0.0 verified at content `0x717e1ddd76abfabe` / state `0xd101300c1c113b98`
+  with 3 checkpoints over 555 ticks.
 
 - Shield kind: temporary absorption with duration, snapshot flag and cyan client tint.
+- Per-hero level-growth stats in content (health/mana/damage/armour/MR), with defaults.
 - Hot reload: `--reload-content` swaps packs only in an empty lobby; connected clients keep
   their handshake catalogue. Test covers reload with zero clients.
 

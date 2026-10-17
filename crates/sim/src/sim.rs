@@ -1574,22 +1574,31 @@ impl Simulation {
     }
 
     fn level_up(&mut self, hero: Entity) {
+        let growth = self
+            .world
+            .get::<HeroIdentity>(hero)
+            .and_then(|identity| self.content.heroes.get(usize::from(identity.0.0)))
+            .map_or(LEVEL_GROWTH, |hero| moba_game::LevelGrowth {
+                health: hero.health_per_level,
+                mana: hero.mana_per_level,
+                attack_damage: hero.attack_damage_per_level,
+                armor: hero.armor_per_level,
+                magic_resist: hero.magic_resist_per_level,
+            });
         if let Some(health) = self.world.get_mut::<Health>(hero) {
-            health.max = health.max.saturating_add(LEVEL_GROWTH.health);
-            health.current = (health.current + LEVEL_GROWTH.health).min(health.max);
+            health.max = health.max.saturating_add(growth.health);
+            health.current = (health.current + growth.health).min(health.max);
         }
         if let Some(mana) = self.world.get_mut::<Mana>(hero) {
-            mana.max = mana.max.saturating_add(LEVEL_GROWTH.mana);
-            mana.current = (mana.current + LEVEL_GROWTH.mana).min(mana.max);
+            mana.max = mana.max.saturating_add(growth.mana);
+            mana.current = (mana.current + growth.mana).min(mana.max);
         }
         if let Some(stats) = self.world.get_mut::<AttackStats>(hero) {
-            stats.damage = stats.damage.saturating_add(LEVEL_GROWTH.attack_damage);
+            stats.damage = stats.damage.saturating_add(growth.attack_damage);
         }
         if let Some(resistances) = self.world.get_mut::<Resistances>(hero) {
-            resistances.armor = resistances.armor.saturating_add(LEVEL_GROWTH.armor);
-            resistances.magic_resist = resistances
-                .magic_resist
-                .saturating_add(LEVEL_GROWTH.magic_resist);
+            resistances.armor = resistances.armor.saturating_add(growth.armor);
+            resistances.magic_resist = resistances.magic_resist.saturating_add(growth.magic_resist);
         }
     }
 
@@ -2176,6 +2185,24 @@ mod tests {
             observed.iter().all(|unit| unit.hero_slot != Some(5)),
             "wall blocks the enemy hero"
         );
+    }
+
+    #[test]
+    fn hero_growth_comes_from_content() {
+        use moba_game::GameContent;
+        let mut content = GameContent::default();
+        content.heroes[0].health_per_level = 0;
+        content.heroes[0].mana_per_level = 0;
+        content.heroes[0].attack_damage_per_level = 0;
+        content.heroes[0].armor_per_level = 0;
+        content.heroes[0].magic_resist_per_level = 0;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let blue = sim.hero_entities[0];
+        let health = sim.world.get::<Health>(blue).expect("health").max;
+        sim.grant_xp(blue, 2_000);
+        assert!(sim.world.get::<Progression>(blue).expect("progress").level > 1);
+        assert_eq!(sim.world.get::<Health>(blue).expect("health").max, health);
     }
 
     #[test]
