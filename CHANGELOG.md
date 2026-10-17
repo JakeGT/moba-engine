@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- CI tools gate now runs a 30-second wire-decoder fuzz pass.
 - `--json` summaries for `replay` and `content-check` tools.
 - `burn` damage-over-time ability kind.
 - `silence` ability kind blocking casts until expiry.

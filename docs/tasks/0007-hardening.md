@@ -31,7 +31,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 
 ## CI gates
 - Cross-platform fmt/clippy/tests/docs/features/layering.
-- `ci-tools`: content-check fixtures, 10-match deterministic soak and bench compilation.
+- `ci-tools`: content-check fixtures, 10-match deterministic soak, 30-second wire fuzz and
+  bench compilation.
 - cargo-deny and Miri jobs.
 
 ## Still open
