@@ -19,7 +19,7 @@ pub use components::{
     LaneWalker, Mana, MoveSpeed, MoveTarget, Position, Regen, Resistances, UnitKind, VisionRange,
 };
 pub use sim::{
-    HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, PlayerCommand,
-    SimConfig, SimEvent, Simulation, TickInputs, WAVE_DELAY_TICKS, WAVE_INTERVAL_TICKS,
-    WORLD_EXTENT,
+    HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, ObservedUnit,
+    PlayerCommand, SimConfig, SimEvent, Simulation, TickInputs, WAVE_DELAY_TICKS,
+    WAVE_INTERVAL_TICKS, WORLD_EXTENT,
 };

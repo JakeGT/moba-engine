@@ -871,6 +871,10 @@ name = "moba-net"
 version = "0.1.0"
 dependencies = [
  "moba-core",
+ "moba-ecs",
+ "moba-game",
+ "moba-netsim",
+ "moba-sim",
 ]
 
 [[package]]

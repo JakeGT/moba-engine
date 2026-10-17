@@ -11,3 +11,11 @@ workspace = true
 
 [dependencies]
 moba-core.workspace = true
+moba-ecs.workspace = true
+moba-game.workspace = true
+moba-sim.workspace = true
+
+[dev-dependencies]
+moba-ecs.workspace = true
+
+moba-netsim.workspace = true

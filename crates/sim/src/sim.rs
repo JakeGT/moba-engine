@@ -186,6 +186,33 @@ struct AttackerSnapshot {
     interval: u32,
 }
 
+/// A unit as seen by one team's fog-of-war snapshot.
+#[derive(Copy, Clone, Debug)]
+pub struct ObservedUnit {
+    /// Stable entity handle.
+    pub entity: Entity,
+    /// Unit type.
+    pub kind: UnitKind,
+    /// Owning team.
+    pub team: Team,
+    /// Ground position.
+    pub position: FixVec2,
+    /// Current health (`0` while dead).
+    pub health: i32,
+    /// Maximum health.
+    pub max_health: i32,
+    /// Current mana (zero for non-heroes).
+    pub mana: i32,
+    /// Maximum mana (zero for non-heroes).
+    pub max_mana: i32,
+    /// Whether the unit is a dead hero waiting to respawn.
+    pub dead: bool,
+    /// Player slot for heroes, `None` otherwise.
+    pub hero_slot: Option<u8>,
+    /// Remaining Q/W/E cooldowns for heroes.
+    pub cooldowns: [u32; 3],
+}
+
 /// The authoritative MOBA simulation.
 pub struct Simulation {
     world: World,
@@ -306,6 +333,102 @@ impl Simulation {
         self.hero_entity(slot)
             .and_then(|entity| self.world.get::<Health>(entity))
             .copied()
+    }
+
+    /// Sets which player slots are driven by the server bot AI.
+    ///
+    /// The network server clears the bit for connected humans and leaves bot bits set for
+    /// empty slots. The match seed and picks do not change.
+    pub fn set_bot_mask(&mut self, bot_mask: u16) {
+        self.config.bot_mask = bot_mask;
+    }
+
+    /// Builds the list of units visible to `viewer` for a snapshot.
+    ///
+    /// Teammates are always visible (including dead heroes so the HUD can show respawn
+    /// timers). Enemy structures are treated as permanently known map features; enemy
+    /// heroes and minions are visible only while inside the vision radius of a living
+    /// teammate. The output vector is cleared first and must be owned by the caller so the
+    /// hot path allocates nothing after warm-up.
+    pub fn observed_units(&self, viewer: Team, out: &mut Vec<ObservedUnit>) {
+        out.clear();
+        let mut sources = [(FixVec2::ZERO, Fix::ZERO); MAX_UNITS];
+        let mut source_count = 0usize;
+        for entity in self.world.entities() {
+            let Some(team) = self.world.get::<Team>(entity) else {
+                continue;
+            };
+            if *team != viewer {
+                continue;
+            }
+            let Some(health) = self.world.get::<Health>(entity) else {
+                continue;
+            };
+            if health.current <= 0 {
+                continue;
+            }
+            let Some(position) = self.world.get::<Position>(entity) else {
+                continue;
+            };
+            let Some(vision) = self.world.get::<VisionRange>(entity) else {
+                continue;
+            };
+            if source_count < MAX_UNITS {
+                sources[source_count] = (position.0, vision.0);
+                source_count += 1;
+            }
+        }
+
+        for entity in self.world.entities() {
+            let Some(team) = self.world.get::<Team>(entity) else {
+                continue;
+            };
+            let Some(kind) = self.world.get::<UnitKind>(entity) else {
+                continue;
+            };
+            let Some(position) = self.world.get::<Position>(entity) else {
+                continue;
+            };
+            let Some(health) = self.world.get::<Health>(entity) else {
+                continue;
+            };
+            let dead = health.current <= 0;
+            let allied = *team == viewer;
+            let visible = allied
+                || kind.is_structure()
+                || (!dead && unit_in_vision(position.0, &sources[..source_count]));
+            if !visible {
+                continue;
+            }
+            let mana = self
+                .world
+                .get::<Mana>(entity)
+                .map_or((0, 0), |mana| (mana.current, mana.max));
+            let hero_slot = self.world.get::<HeroSlot>(entity).map(|slot| slot.0);
+            let cooldowns = self
+                .world
+                .get::<Cooldowns>(entity)
+                .map_or([0; 3], |cooldowns| {
+                    [
+                        u32::from(u16::try_from(cooldowns.0[0]).unwrap_or(u16::MAX)),
+                        u32::from(u16::try_from(cooldowns.0[1]).unwrap_or(u16::MAX)),
+                        u32::from(u16::try_from(cooldowns.0[2]).unwrap_or(u16::MAX)),
+                    ]
+                });
+            out.push(ObservedUnit {
+                entity,
+                kind: *kind,
+                team: *team,
+                position: position.0,
+                health: health.current,
+                max_health: health.max,
+                mana: mana.0,
+                max_mana: mana.1,
+                dead: dead && hero_slot.is_some(),
+                hero_slot,
+                cooldowns,
+            });
+        }
     }
 
     /// Events produced since the queue was last cleared.
@@ -1284,6 +1407,12 @@ impl Simulation {
     }
 }
 
+fn unit_in_vision(position: FixVec2, sources: &[(FixVec2, Fix)]) -> bool {
+    sources
+        .iter()
+        .any(|&(source, range)| position.distance_sq(source) <= range * range)
+}
+
 fn clamp_position(position: FixVec2) -> FixVec2 {
     let min = Fix::from_i32(2);
     let max = Fix::from_i32(WORLD_EXTENT - 2);
@@ -1412,6 +1541,37 @@ mod tests {
         }
         let after = sim.world.get::<Health>(red).unwrap().current;
         assert!(after < start, "skillshot should hit ({start} -> {after})");
+    }
+
+    #[test]
+    fn enemy_units_are_only_visible_inside_team_vision() {
+        let mut sim = idle(SimConfig::default().hero_picks);
+        let mut observed = Vec::new();
+        sim.observed_units(Team::Blue, &mut observed);
+        assert!(
+            !observed
+                .iter()
+                .any(|unit| unit.team == Team::Red && unit.kind.is_hero())
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|unit| unit.kind.is_structure())
+                .count(),
+            16,
+            "structures are permanently known"
+        );
+
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        sim.world.get_mut::<Position>(blue).unwrap().0 = FixVec2::from_ints(200, 128);
+        sim.world.get_mut::<Position>(red).unwrap().0 = FixVec2::from_ints(204, 128);
+        sim.observed_units(Team::Blue, &mut observed);
+        assert!(
+            observed
+                .iter()
+                .any(|unit| unit.team == Team::Red && unit.kind.is_hero())
+        );
     }
 
     #[test]

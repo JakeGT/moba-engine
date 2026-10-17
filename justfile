@@ -50,3 +50,7 @@ bench-baseline:
 
 bench-compare:
     cargo bench --workspace -- --baseline main
+
+# Five-minute ten-client network soak (150 ms RTT, 5% loss, 30 ms jitter).
+soak:
+    cargo run --release -p moba-tools --bin soak -- --seconds 300

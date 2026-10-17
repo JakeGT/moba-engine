@@ -7,11 +7,15 @@
 
 use std::time::{Duration, Instant};
 
+use moba_net::{NetServer, ServerConfig};
 use moba_sim::{SimConfig, Simulation, UnitKind};
 
+#[allow(clippy::too_many_lines)] // CLI orchestration is linear and auditable.
 fn main() {
     let mut ticks = 18_000u32;
     let mut seed = SimConfig::default().seed;
+    let mut listen: Option<String> = None;
+    let mut seconds = 60u64;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -25,8 +29,16 @@ fn main() {
                     seed = value;
                 }
             }
+            "--listen" => {
+                listen = args.next();
+            }
+            "--seconds" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    seconds = value;
+                }
+            }
             "--help" => {
-                eprintln!("usage: moba-server [--ticks N] [--seed N]");
+                eprintln!("usage: moba-server [--ticks N] [--seed N] [--listen ADDR --seconds N]");
                 return;
             }
             other => eprintln!("unknown argument: {other}"),
@@ -38,6 +50,44 @@ fn main() {
         bot_mask: 0x03FF,
         ..SimConfig::default()
     };
+
+    if let Some(listen) = listen {
+        let bind = listen.parse().unwrap_or_else(|error| {
+            eprintln!("invalid --listen address {listen}: {error}");
+            std::process::exit(2);
+        });
+        let mut server = NetServer::bind(ServerConfig {
+            bind,
+            sim: config,
+            snapshot_interval: 1,
+            max_clients: 10,
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("cannot bind {bind}: {error}");
+            std::process::exit(2);
+        });
+        eprintln!(
+            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots)",
+            server.local_addr().expect("bound address")
+        );
+        server
+            .run_for(Duration::from_secs(seconds))
+            .unwrap_or_else(|error| {
+                eprintln!("network server error: {error}");
+                std::process::exit(1);
+            });
+        let stats = server.stats();
+        eprintln!(
+            "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB",
+            stats.clients,
+            stats.ticks,
+            stats.snapshots_sent,
+            stats.bytes_sent / 1024,
+            stats.bytes_received / 1024
+        );
+        return;
+    }
+
     let mut simulation = Simulation::new(config);
     let target = Duration::from_secs_f64(1.0 / 30.0);
     let mut peak_units = simulation.unit_count();
