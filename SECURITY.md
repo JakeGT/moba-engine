@@ -15,9 +15,10 @@ MOBA_SECRET="$SECRET" cargo run -p moba-client
 This protects payload confidentiality/integrity and proves key possession to the server. It
 is **not** a complete public-internet security model:
 
-- optional pinned Ed25519 server identity authenticates the dedicated server, but there is no
-  per-player identity or revocation;
-- PSK mode is a shared key with no forward secrecy;
+- optional pinned Ed25519 server identity authenticates the dedicated server;
+- per-client bearer tokens provide allowlisting/rotation/revocation, but are shared secrets,
+  not public-key player identity; there is no server challenge/replay window yet;
+- PSK/token mode has no forward secrecy;
 - packet metadata (addresses, sizes, timing, session ids) is visible;
 - per-address and global UDP budgets reject valid-packet floods, but malformed-packet
   bandwidth and high-volume spoofed-source floods still need a network/edge gateway;

@@ -27,6 +27,7 @@ fn main() {
     let mut items_path: Option<std::path::PathBuf> = None;
     let mut server_key: Option<std::path::PathBuf> = None;
     let mut reload_content = false;
+    let mut client_tokens: Vec<[u8; 32]> = Vec::new();
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
     let mut max_total_packets_per_second = 2_000u32;
@@ -76,6 +77,9 @@ fn main() {
         }
         if let Some(value) = file.max_pps {
             max_packets_per_second = value;
+        }
+        if let Some(tokens) = file.client_tokens {
+            client_tokens = tokens.iter().map(|token| parse_secret(token)).collect();
         }
         if let Some(value) = file.max_total_pps {
             max_total_packets_per_second = value;
@@ -135,6 +139,13 @@ fn main() {
             }
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
+            "--allow-token" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--allow-token needs 64 hex characters");
+                    std::process::exit(2);
+                };
+                client_tokens.push(parse_secret(&value));
+            }
             "--reload-content" => reload_content = true,
             "--config" => {
                 let _ = args.next();
@@ -142,7 +153,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--allow-token HEX] [--config FILE]"
                 );
                 return;
             }
@@ -202,6 +213,9 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        for token in &client_tokens {
+            server.add_client_key(*token);
+        }
         let mut identity_note = String::new();
         if let Some(path) = server_key.as_ref() {
             let seed = load_identity_seed(path);
@@ -211,7 +225,7 @@ fn main() {
         eprintln!(
             "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results, {}){identity_note}",
             server.local_addr().expect("bound address"),
-            if secret.is_some() {
+            if secret.is_some() || !client_tokens.is_empty() {
                 "encrypted"
             } else {
                 "plaintext LAN mode"
@@ -378,6 +392,7 @@ struct FileServerConfig {
     ready: Option<bool>,
     max_pps: Option<u32>,
     max_total_pps: Option<u32>,
+    client_tokens: Option<Vec<String>>,
 }
 
 fn load_server_config(path: &std::path::Path) -> FileServerConfig {

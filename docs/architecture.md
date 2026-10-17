@@ -166,6 +166,13 @@ the server publishes it in `Welcome`, and clients use the received `WireItem`, `
 `WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability behaviour and
 map/lane definitions remain compile-time; the content crate is designed to grow into them.
 
+## Client tokens
+
+`NetServer::add_client_key` keeps a bounded key ring. A Hello HMAC is tried against the global
+PSK and every client key; the matching key is stored on the connection and used for that
+player's Welcome HMAC and ChaCha20-Poly1305 session. `--allow-token` / `client_tokens` expose
+this for per-player access and key rotation without wire changes.
+
 ## Server identity
 
 An operator can install a 32-byte Ed25519 seed (`--server-key FILE`). `Welcome` then carries

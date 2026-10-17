@@ -7,6 +7,8 @@ Make the engine safe and operable outside a trusted LAN, and make failures repro
 authenticated transport, reconnect, deterministic replays, load/soak gates and profiling.
 
 ## Landed so far
+- **Per-client token ring**: multiple Hello HMAC keys, per-player session encryption and
+  allowlist/rotation (`--allow-token`); wrong/unlisted tokens rejected.
 - **Pinned server identity**: Ed25519-signed Welcome over nonces/session/catalogue; clients
   pin the public key via `MOBA_SERVER_PUBKEY`; server loads `--server-key FILE`.
 - **Optional PSK AEAD** (protocol v7): HMAC-SHA256 handshake proofs, server nonce, HKDF-
@@ -28,7 +30,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - cargo-deny and Miri jobs.
 
 ## Still open
-- Client identity/revocation, playercount attestation and a formal replay window.
+- Public-key client identity/challenge replay window and player-count attestation.
 - One-hour sanitizer-backed fuzzing run (the deterministic fuzzer is available).
 - 50 consecutive matches per box under the soak harness is implemented (`match-soak`) with
   per-match composition rotation: 509,820 ticks, deterministic, unique hashes per seed,

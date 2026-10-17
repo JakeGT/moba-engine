@@ -17,3 +17,5 @@ max_total_pps = 2000
 # Optional secrets: 64 hex characters. Prefer a secret manager/environment in production.
 # secret = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 # server_key = "server.seed"
+# Per-client keys: clients use MOBA_SECRET / --secret with their own token.
+# client_tokens = ["0001...64 hex...", "0002...64 hex..."]

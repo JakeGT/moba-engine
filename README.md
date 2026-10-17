@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 157 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 158 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -98,6 +98,11 @@ MOBA_SECRET="$SECRET" cargo run -p moba-client
 
 This enables the authenticated ChaCha20-Poly1305 session mode; see [SECURITY.md](SECURITY.md)
 for its scope and limitations.
+
+For per-player access, the server accepts a key ring (`--allow-token HEX`, repeatable; or
+`client_tokens` in the TOML config). Each client uses its own token via `MOBA_SECRET`; tokens
+authenticate the Hello, derive that player's encryption key, and can be revoked by removing
+them from the ring and restarting.
 
 Servers can also present a pinned Ed25519 identity. Generate a seed, start the server, and pin
 the printed public key:

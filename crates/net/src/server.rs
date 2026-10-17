@@ -256,6 +256,7 @@ struct ClientConn {
     addr: SocketAddr,
     session: u32,
     slot: u8,
+    key: Option<[u8; 32]>,
     spectator: bool,
     team: moba_game::Team,
     connected: bool,
@@ -324,6 +325,7 @@ pub struct NetServer {
     simulation: Simulation,
     content: Arc<GameContent>,
     identity: Option<ServerIdentity>,
+    client_keys: Vec<[u8; 32]>,
     reload: Option<ContentReload>,
     limiter: RateLimiter,
     config: ServerConfig,
@@ -372,6 +374,7 @@ impl NetServer {
             simulation,
             content,
             identity: None,
+            client_keys: Vec::new(),
             reload: None,
             limiter,
             config,
@@ -441,6 +444,13 @@ impl NetServer {
     #[must_use]
     pub fn server_public_key(&self) -> Option<[u8; 32]> {
         self.identity.as_ref().map(|identity| identity.public)
+    }
+
+    /// Adds a per-client key to the accepted key ring (Hello HMAC + session encryption).
+    pub fn add_client_key(&mut self, key: [u8; 32]) {
+        if !self.client_keys.contains(&key) {
+            self.client_keys.push(key);
+        }
     }
 
     /// Watches a content pack file and reloads it while the lobby is empty.
@@ -838,18 +848,36 @@ impl NetServer {
                 if hello.protocol != u16::from(crate::protocol::PROTOCOL_VERSION) {
                     return Ok(());
                 }
-                if let Some(key) = self.config.pre_shared_key {
-                    if !verify_hello_tag(
-                        &key,
+                let keys_configured =
+                    self.config.pre_shared_key.is_some() || !self.client_keys.is_empty();
+                let matched_key = self.config.pre_shared_key.filter(|key| {
+                    verify_hello_tag(
+                        key,
                         hello.protocol,
                         hello.nonce,
                         hello.reconnect,
                         hello.spectate,
                         &hello.auth,
-                    ) {
-                        self.reject_client(message.addr, 0, 4)?;
-                        return Ok(());
-                    }
+                    )
+                });
+                let matched_key = matched_key.or_else(|| {
+                    self.client_keys
+                        .iter()
+                        .find(|key| {
+                            verify_hello_tag(
+                                key,
+                                hello.protocol,
+                                hello.nonce,
+                                hello.reconnect,
+                                hello.spectate,
+                                &hello.auth,
+                            )
+                        })
+                        .copied()
+                });
+                if keys_configured && matched_key.is_none() {
+                    self.reject_client(message.addr, 0, 4)?;
+                    return Ok(());
                 }
                 if let Some(slot) = self.client_index_by_addr(message.addr) {
                     let (connected, session) = {
@@ -886,6 +914,9 @@ impl NetServer {
                         self.reject_client(message.addr, session, 3)?;
                         return Ok(());
                     }
+                    if let Some(client) = self.clients[slot].as_mut() {
+                        client.key = matched_key;
+                    }
                     self.reconnect_client(slot, message.addr, hello.nonce)?;
                     return Ok(());
                 }
@@ -904,6 +935,9 @@ impl NetServer {
                     {
                         self.reject_client(message.addr, 0, 3)?;
                         return Ok(());
+                    }
+                    if let Some(client) = self.clients[slot].as_mut() {
+                        client.key = matched_key;
                     }
                     self.reconnect_client(slot, message.addr, hello.nonce)?;
                     return Ok(());
@@ -927,6 +961,7 @@ impl NetServer {
                 self.clients[slot] = Some(ClientConn {
                     addr: message.addr,
                     session,
+                    key: matched_key,
                     slot: if hello.spectate {
                         0xFF
                     } else {
@@ -1176,7 +1211,12 @@ impl NetServer {
         let mut server_nonce = 0;
         let mut auth = [0u8; 32];
         let mut crypto = None;
-        if let Some(key) = self.config.pre_shared_key {
+        let client_key = self
+            .clients
+            .get(slot)
+            .and_then(|client| client.as_ref())
+            .and_then(|client| client.key);
+        if let Some(key) = client_key {
             server_nonce = random_nonce()?;
             auth = welcome_tag(&key, nonce, server_nonce, session, slot_u8, content_hash);
             let session_key = derive_session_key(&key, nonce, server_nonce);
