@@ -975,10 +975,10 @@ impl Simulation {
     fn apply_inputs(&mut self, inputs: &TickInputs) {
         // Alternate command resolution order so neither team systematically resolves casts,
         // purchases or attack orders first.
-        let order: Vec<usize> = if self.tick.get() % 2 == 0 {
-            (0..MAX_PLAYERS).collect()
+        let order: [usize; MAX_PLAYERS] = if self.tick.get() % 2 == 0 {
+            core::array::from_fn(|index| index)
         } else {
-            (0..MAX_PLAYERS).rev().collect()
+            core::array::from_fn(|index| MAX_PLAYERS - 1 - index)
         };
         for slot in order {
             let Some(command) = inputs.players[slot] else {

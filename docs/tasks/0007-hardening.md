@@ -33,6 +33,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - 50 consecutive matches per box under the soak harness is implemented (`match-soak`) with
   per-match composition rotation: 509,820 ticks, deterministic, unique hashes per seed,
   avg 6 µs / max 3,021 µs, outcomes blue 30 / red 20.
+- Allocation regression guard: 300 steady ticks at 12 allocations / 490 bytes after removing
+  a per-tick command-order `Vec` (previously 312 / 24,490).
 - Criterion captures: snapshot codec (full encode 206 ns / decode 264 ns, steady delta
   encode 35 ns / decode 92 ns) and simulation ticks (10.7–12.9 µs steady). Profiling log:
   `docs/perf/0007-profiling.md`.

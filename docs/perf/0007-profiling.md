@@ -31,6 +31,14 @@ soak telemetry measured 11 µs average / 54 µs max with 10 clients.
 
 Reproduce: `cargo bench -p moba-sim --bench tick`
 
+## Allocation hot-path guard
+
+`cargo test -p moba-sim --test allocations` counts global allocator calls across 300 warm
+steady-state ticks. It exposed a per-tick heap `Vec` used only to alternate command order;
+replacing it with a fixed stack array reduced the measured window from **312 allocations /
+24,490 bytes** to **12 allocations / 490 bytes**. The test now enforces <=30 allocations and
+<=4 KiB.
+
 ## Interpretation
 
 - Snapshot encoding/decoding is sub-microsecond at 40 visible entities; per-client cost is

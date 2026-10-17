@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Allocation-regression test and hot-path fix: command ordering no longer allocates a `Vec`
+  per tick (312→12 allocations per 300 ticks).
 - Global UDP packet budget (`--max-total-pps`) complementing per-address limits.
 - TOML dedicated-server configuration (`--config server.example.toml`) with CLI override.
 - `shield` ability kind with timed damage absorption, snapshot flag and client tint.
