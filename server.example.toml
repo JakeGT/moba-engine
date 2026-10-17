@@ -1,0 +1,18 @@
+# Dedicated server configuration. CLI flags override these values.
+listen = "0.0.0.0:7777"
+seconds = 600
+ticks = 18000
+seed = 12345
+countdown = 3
+results = 15
+ready = true
+max_pps = 120
+
+# Optional content and replay paths (relative to the server's working directory).
+# items = "content/example-pack.toml"
+# reload_content = true
+# record = "match.mbr"
+
+# Optional secrets: 64 hex characters. Prefer a secret manager/environment in production.
+# secret = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+# server_key = "server.seed"

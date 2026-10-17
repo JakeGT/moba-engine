@@ -146,6 +146,9 @@ The terrain shader receives the same segments and rejects a vision-circle contri
 a wall crosses the circle-center→fragment ray. Wall geometry rendering is intentionally not
 part of this slice; the blockers are authored data and minimap-independent.
 
+The server binary accepts a TOML deployment file (`--config`); CLI flags override file
+values, and secrets can reference paths or 64-hex strings.
+
 `NetServer` can watch a content file (`watch_content`/`--reload-content`) and swap it only
 when the phase is Lobby and no clients are connected; the simulation is recreated with the
 new catalogue for the next match.

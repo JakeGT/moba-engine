@@ -29,7 +29,55 @@ fn main() {
     let mut reload_content = false;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
-    let mut args = std::env::args().skip(1);
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let config_path = raw_args
+        .iter()
+        .position(|argument| argument == "--config")
+        .and_then(|index| raw_args.get(index + 1))
+        .map(std::path::PathBuf::from);
+    if let Some(path) = config_path.as_ref() {
+        let file = load_server_config(path);
+        if let Some(value) = file.listen {
+            listen = Some(value);
+        }
+        if let Some(value) = file.seconds {
+            seconds = value;
+        }
+        if let Some(value) = file.countdown {
+            countdown_secs = value;
+        }
+        if let Some(value) = file.results {
+            results_secs = value;
+        }
+        if let Some(value) = file.seed {
+            seed = value;
+        }
+        if let Some(value) = file.ticks {
+            ticks = value;
+        }
+        if let Some(value) = file.secret {
+            secret = Some(parse_secret(&value));
+        }
+        if let Some(value) = file.record {
+            record = Some(value);
+        }
+        if let Some(value) = file.items {
+            items_path = Some(value);
+        }
+        if let Some(value) = file.server_key {
+            server_key = Some(value);
+        }
+        if let Some(value) = file.reload_content {
+            reload_content = value;
+        }
+        if let Some(value) = file.ready {
+            require_ready = value;
+        }
+        if let Some(value) = file.max_pps {
+            max_packets_per_second = value;
+        }
+    }
+    let mut args = raw_args.into_iter();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--ticks" => {
@@ -79,10 +127,13 @@ fn main() {
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
             "--reload-content" => reload_content = true,
+            "--config" => {
+                let _ = args.next();
+            }
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--server-key FILE] [--reload-content]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--server-key FILE] [--reload-content] [--config FILE]"
                 );
                 return;
             }
@@ -297,4 +348,60 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+#[derive(serde::Deserialize, Default)]
+struct FileServerConfig {
+    listen: Option<String>,
+    seconds: Option<u64>,
+    countdown: Option<u64>,
+    results: Option<u64>,
+    seed: Option<u64>,
+    ticks: Option<u32>,
+    secret: Option<String>,
+    record: Option<std::path::PathBuf>,
+    items: Option<std::path::PathBuf>,
+    server_key: Option<std::path::PathBuf>,
+    reload_content: Option<bool>,
+    ready: Option<bool>,
+    max_pps: Option<u32>,
+}
+
+fn load_server_config(path: &std::path::Path) -> FileServerConfig {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        eprintln!("cannot read config {}: {error}", path.display());
+        std::process::exit(2);
+    });
+    toml::from_str(&text).unwrap_or_else(|error| {
+        eprintln!("invalid config {}: {error}", path.display());
+        std::process::exit(2);
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_file_parses_deployment_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "moba-server-config-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        std::fs::write(
+            &path,
+            "listen = \"127.0.0.1:7777\"\nseconds = 120\ncountdown = 2\nready = true\nmax_pps = 60\n",
+        )
+        .expect("write config");
+        let file = load_server_config(&path);
+        assert_eq!(file.listen.as_deref(), Some("127.0.0.1:7777"));
+        assert_eq!(file.seconds, Some(120));
+        assert_eq!(file.countdown, Some(2));
+        assert_eq!(file.ready, Some(true));
+        assert_eq!(file.max_pps, Some(60));
+        let _ = std::fs::remove_file(&path);
+    }
 }

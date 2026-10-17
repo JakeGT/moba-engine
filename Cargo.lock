@@ -1152,6 +1152,8 @@ dependencies = [
  "moba-jobs",
  "moba-net",
  "moba-sim",
+ "serde",
+ "toml",
 ]
 
 [[package]]
