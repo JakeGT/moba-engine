@@ -87,6 +87,9 @@ fn fuzz_once(rng: &mut Rng) {
             moba_net::protocol::MAX_WIRE_ABILITIES],
         map: moba_net::protocol::WireMap::default(),
         content_hash: 0,
+        identity: false,
+        server_public_key: [0; 32],
+        server_signature: [0; 64],
     });
     mutate(rng, &mut welcome);
     let _ = decode_welcome(&welcome);

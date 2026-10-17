@@ -11,7 +11,8 @@ use moba_game::GameContent;
 use moba_sim::{ObservedUnit, PlayerCommand, Replay, SimConfig, Simulation, TickInputs};
 
 use crate::crypto::{
-    SessionCrypto, derive_session_key, random_nonce, verify_hello_tag, welcome_tag,
+    SessionCrypto, derive_session_key, identity_public_key, random_nonce, sign_server_welcome,
+    verify_hello_tag, welcome_tag,
 };
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ABILITIES, MAX_WIRE_HEROES,
@@ -198,6 +199,19 @@ impl RateLimiter {
     }
 }
 
+struct ServerIdentity {
+    seed: [u8; 32],
+    public: [u8; 32],
+}
+
+impl core::fmt::Debug for ServerIdentity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ServerIdentity")
+            .field("public", &self.public)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 struct SnapshotRecord {
     seq: u32,
@@ -277,6 +291,7 @@ pub struct NetServer {
     transport: UdpTransport,
     simulation: Simulation,
     content: Arc<GameContent>,
+    identity: Option<ServerIdentity>,
     limiter: RateLimiter,
     config: ServerConfig,
     clients: Vec<Option<ClientConn>>,
@@ -319,6 +334,7 @@ impl NetServer {
             transport,
             simulation,
             content,
+            identity: None,
             limiter,
             config,
             clients: (0..total_slots).map(|_| None).collect(),
@@ -374,6 +390,19 @@ impl NetServer {
     #[must_use]
     pub const fn match_number(&self) -> u32 {
         self.match_number
+    }
+
+    /// Enables pinned server identity signing and returns the public key.
+    pub fn set_server_identity(&mut self, seed: [u8; 32]) -> [u8; 32] {
+        let public = identity_public_key(&seed);
+        self.identity = Some(ServerIdentity { seed, public });
+        public
+    }
+
+    /// Current server public key, when identity signing is enabled.
+    #[must_use]
+    pub fn server_public_key(&self) -> Option<[u8; 32]> {
+        self.identity.as_ref().map(|identity| identity.public)
     }
 
     /// Current counters.
@@ -1063,6 +1092,24 @@ impl NetServer {
             let session_key = derive_session_key(&key, nonce, server_nonce);
             crypto = Some(SessionCrypto::new(session_key, session, 1));
         }
+        let (identity, server_public_key, server_signature) =
+            self.identity
+                .as_ref()
+                .map_or((false, [0; 32], [0; 64]), |identity| {
+                    (
+                        true,
+                        identity.public,
+                        sign_server_welcome(
+                            &identity.seed,
+                            u16::from(crate::protocol::PROTOCOL_VERSION),
+                            nonce,
+                            server_nonce,
+                            session,
+                            slot_u8,
+                            content_hash,
+                        ),
+                    )
+                });
         let welcome = Welcome {
             slot: slot_u8,
             tick_rate: SERVER_TICK_RATE,
@@ -1086,6 +1133,9 @@ impl NetServer {
             abilities,
             map: wire_map,
             content_hash,
+            identity,
+            server_public_key,
+            server_signature,
         };
         let payload = encode_welcome(&welcome);
         if let Some(client) = self.clients[slot].as_mut() {

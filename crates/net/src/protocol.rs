@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 10;
+pub const PROTOCOL_VERSION: u8 = 11;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -466,6 +466,12 @@ pub struct Welcome {
     pub map: WireMap,
     /// Hash of the wire item/hero/ability/map catalogue (also authenticated by the Welcome HMAC).
     pub content_hash: u64,
+    /// Whether a pinned server identity signature is present.
+    pub identity: bool,
+    /// Ed25519 server public key (zero when unsigned).
+    pub server_public_key: [u8; 32],
+    /// Ed25519 signature over the Welcome challenge.
+    pub server_signature: [u8; 64],
 }
 
 /// Encodes a handshake request.
@@ -631,6 +637,9 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
         out.extend_from_slice(&wall.b[1].to_le_bytes());
     }
     out.extend_from_slice(&welcome.content_hash.to_le_bytes());
+    out.push(u8::from(welcome.identity));
+    out.extend_from_slice(&welcome.server_public_key);
+    out.extend_from_slice(&welcome.server_signature);
     out
 }
 
@@ -850,6 +859,15 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
                 .try_into()
                 .map_err(|_| WireError::Truncated)?,
         ),
+        identity: reader.u8()? != 0,
+        server_public_key: reader
+            .bytes(32)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
+        server_signature: reader
+            .bytes(64)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);

@@ -12,6 +12,7 @@
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -242,6 +243,81 @@ pub fn random_nonce() -> std::io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+/// Derives the Ed25519 public key for a 32-byte identity seed.
+#[must_use]
+pub fn identity_public_key(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
+}
+
+fn identity_message(
+    protocol: u16,
+    client_nonce: u64,
+    server_nonce: u64,
+    session: u32,
+    slot: u8,
+    content_hash: u64,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(39);
+    message.extend_from_slice(b"moba-server-id-v1");
+    message.extend_from_slice(&protocol.to_le_bytes());
+    message.extend_from_slice(&client_nonce.to_le_bytes());
+    message.extend_from_slice(&server_nonce.to_le_bytes());
+    message.extend_from_slice(&session.to_le_bytes());
+    message.push(slot);
+    message.extend_from_slice(&content_hash.to_le_bytes());
+    message
+}
+
+/// Signs the server identity challenge embedded in `Welcome`.
+#[must_use]
+pub fn sign_server_welcome(
+    seed: &[u8; 32],
+    protocol: u16,
+    client_nonce: u64,
+    server_nonce: u64,
+    session: u32,
+    slot: u8,
+    content_hash: u64,
+) -> [u8; 64] {
+    let key = SigningKey::from_bytes(seed);
+    let message = identity_message(
+        protocol,
+        client_nonce,
+        server_nonce,
+        session,
+        slot,
+        content_hash,
+    );
+    key.sign(&message).to_bytes()
+}
+
+/// Verifies a pinned server identity signature.
+#[must_use]
+pub fn verify_server_welcome(
+    public_key: &[u8; 32],
+    protocol: u16,
+    client_nonce: u64,
+    server_nonce: u64,
+    session: u32,
+    slot: u8,
+    content_hash: u64,
+    signature: &[u8; 64],
+) -> bool {
+    let Ok(key) = VerifyingKey::from_bytes(public_key) else {
+        return false;
+    };
+    let message = identity_message(
+        protocol,
+        client_nonce,
+        server_nonce,
+        session,
+        slot,
+        content_hash,
+    );
+    key.verify(&message, &Signature::from_bytes(signature))
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +376,22 @@ mod tests {
         ));
         assert!(!verify_welcome_tag(
             &[1; 32], 123, 457, 9, 3, 0xBEEF, &welcome
+        ));
+    }
+
+    #[test]
+    fn server_identity_signature_round_trip_and_tamper_rejection() {
+        let seed = [7u8; 32];
+        let public = identity_public_key(&seed);
+        let signature = sign_server_welcome(&seed, 11, 1, 2, 3, 0, 0xCAFE);
+        assert!(verify_server_welcome(
+            &public, 11, 1, 2, 3, 0, 0xCAFE, &signature
+        ));
+        assert!(!verify_server_welcome(
+            &public, 11, 1, 2, 3, 0, 0xBEEF, &signature
+        ));
+        assert!(!verify_server_welcome(
+            &[8u8; 32], 11, 1, 2, 3, 0, 0xCAFE, &signature
         ));
     }
 

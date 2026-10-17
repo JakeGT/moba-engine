@@ -39,6 +39,7 @@ getrandom = "0.2"
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
+ed25519-dalek = "2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 glam = "0.30"

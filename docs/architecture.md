@@ -159,6 +159,13 @@ the server publishes it in `Welcome`, and clients use the received `WireItem`, `
 `WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability behaviour and
 map/lane definitions remain compile-time; the content crate is designed to grow into them.
 
+## Server identity
+
+An operator can install a 32-byte Ed25519 seed (`--server-key FILE`). `Welcome` then carries
+the public key and a signature over protocol, nonces, session, slot and catalogue hash.
+Clients that pin `MOBA_SERVER_PUBKEY` require a matching signature; unpinned clients continue
+to work. Identity is independent of the optional PSK encryption mode.
+
 ## Spectators
 
 The server starts a match immediately by default. With `--ready` (or

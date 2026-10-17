@@ -462,8 +462,24 @@ fn parse_secret() -> Option<[u8; 32]> {
     Some(key)
 }
 
+fn parse_server_public() -> Option<[u8; 32]> {
+    let value = std::env::var("MOBA_SERVER_PUBKEY").ok()?;
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        eprintln!("MOBA_SERVER_PUBKEY must be 64 hex characters; ignoring");
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(chunk).ok()?;
+        key[index] = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(key)
+}
+
 fn connect_network(spec: &str) -> Result<NetClient, String> {
     let secret = parse_secret();
+    let server_public = parse_server_public();
     let spectator = std::env::var("MOBA_SPECTATE").is_ok_and(|value| value == "1");
     if spec == "local" {
         let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
@@ -501,13 +517,27 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
         let addr = spec
             .parse()
             .map_err(|error| format!("invalid MOBA_SERVER {spec}: {error}"))?;
-        match (secret, spectator) {
-            (Some(key), true) => {
+        match (secret, spectator, server_public) {
+            (Some(key), true, Some(pin)) => {
+                NetClient::connect_spectator_with_key_pinned(addr, Duration::from_secs(5), key, pin)
+            }
+            (Some(key), false, Some(pin)) => {
+                NetClient::connect_with_key_pinned(addr, Duration::from_secs(5), key, pin)
+            }
+            (None, true, Some(pin)) => {
+                NetClient::connect_spectator_pinned(addr, Duration::from_secs(5), pin)
+            }
+            (None, false, Some(pin)) => {
+                NetClient::connect_pinned(addr, Duration::from_secs(5), pin)
+            }
+            (Some(key), true, None) => {
                 NetClient::connect_spectator_with_key(addr, Duration::from_secs(5), key)
             }
-            (Some(key), false) => NetClient::connect_with_key(addr, Duration::from_secs(5), key),
-            (None, true) => NetClient::connect_spectator(addr, Duration::from_secs(5)),
-            (None, false) => NetClient::connect(addr, Duration::from_secs(5)),
+            (Some(key), false, None) => {
+                NetClient::connect_with_key(addr, Duration::from_secs(5), key)
+            }
+            (None, true, None) => NetClient::connect_spectator(addr, Duration::from_secs(5)),
+            (None, false, None) => NetClient::connect(addr, Duration::from_secs(5)),
         }
         .map_err(|error| format!("connection to {spec} failed: {error}"))
     }

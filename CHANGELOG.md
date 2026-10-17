@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Optional pinned Ed25519 server identity (`--server-key`, `MOBA_SERVER_PUBKEY`) with a
+  signed Welcome challenge.
 - Criterion snapshot-codec benchmarks and a profiling capture log
   (`docs/perf/0007-profiling.md`).
 - Runtime map vision blockers: TOML `[[map.walls]]`, server LOS filtering, shader
@@ -48,6 +50,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
+- Version 11: Ed25519 server identity public key/signature in `Welcome`; pinned clients.
 - Version 10: handshake carries validated runtime item, hero, ability and map catalogues,
   with a catalogue hash bound into the Welcome HMAC.
 - Version 9: handshake carries a validated runtime item catalogue.

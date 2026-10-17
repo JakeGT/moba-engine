@@ -21,6 +21,7 @@ getrandom.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
 moba-sim.workspace = true
 
 [dev-dependencies]

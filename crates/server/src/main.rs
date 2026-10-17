@@ -25,6 +25,7 @@ fn main() {
         .map(|value| parse_secret(&value));
     let mut record: Option<std::path::PathBuf> = None;
     let mut items_path: Option<std::path::PathBuf> = None;
+    let mut server_key: Option<std::path::PathBuf> = None;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
     let mut args = std::env::args().skip(1);
@@ -75,10 +76,11 @@ fn main() {
                 }
             }
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
+            "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--server-key FILE]"
                 );
                 return;
             }
@@ -127,8 +129,14 @@ fn main() {
             eprintln!("cannot bind {bind}: {error}");
             std::process::exit(2);
         });
+        let mut identity_note = String::new();
+        if let Some(path) = server_key.as_ref() {
+            let seed = load_identity_seed(path);
+            let public = server.set_server_identity(seed);
+            identity_note = format!(" identity={}", hex(&public));
+        }
         eprintln!(
-            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results, {})",
+            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results, {}){identity_note}",
             server.local_addr().expect("bound address"),
             if secret.is_some() {
                 "encrypted"
@@ -249,4 +257,34 @@ fn load_content(path: &std::path::Path) -> GameContent {
         eprintln!("invalid content {}: {error}", path.display());
         std::process::exit(2);
     })
+}
+
+fn load_identity_seed(path: &std::path::Path) -> [u8; 32] {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        eprintln!("cannot read server key {}: {error}", path.display());
+        std::process::exit(2);
+    });
+    let text = text.trim();
+    let mut seed = [0u8; 32];
+    if text.len() != 64 {
+        eprintln!("server key must be 64 hex characters");
+        std::process::exit(2);
+    }
+    for (index, chunk) in text.as_bytes().chunks_exact(2).enumerate() {
+        let value = std::str::from_utf8(chunk).unwrap_or_default();
+        seed[index] = u8::from_str_radix(value, 16).unwrap_or_else(|_| {
+            eprintln!("server key contains non-hex characters");
+            std::process::exit(2);
+        });
+    }
+    seed
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }

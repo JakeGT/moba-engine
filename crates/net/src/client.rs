@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use moba_game::Team;
 
 use crate::crypto::{
-    SessionCrypto, derive_session_key, hello_tag, random_nonce, verify_welcome_tag,
+    SessionCrypto, derive_session_key, hello_tag, random_nonce, verify_server_welcome,
+    verify_welcome_tag,
 };
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotDelta, SnapshotState,
@@ -86,6 +87,8 @@ pub struct NetClient {
     map: crate::protocol::WireMap,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
+    expected_server: Option<[u8; 32]>,
+    server_public_key: Option<[u8; 32]>,
     spectator: bool,
     reconnect_token: u32,
     sequence: u32,
@@ -132,7 +135,7 @@ impl NetClient {
     /// # Errors
     /// Returns an OS error when the socket cannot be bound.
     pub fn start_with_session(server: SocketAddr, session: u32) -> io::Result<Self> {
-        Self::start_with_options(server, session, None, false)
+        Self::start_with_options(server, session, None, None, false)
     }
 
     /// Starts a read-only spectator handshake.
@@ -140,7 +143,7 @@ impl NetClient {
     /// # Errors
     /// Returns an OS error when the socket cannot be bound or randomness fails.
     pub fn start_spectator(server: SocketAddr) -> io::Result<Self> {
-        Self::start_with_options(server, 0, None, true)
+        Self::start_with_options(server, 0, None, None, true)
     }
 
     /// Binds a new socket and starts an authenticated handshake with a pre-shared key.
@@ -148,7 +151,7 @@ impl NetClient {
     /// # Errors
     /// Returns an OS error when the socket cannot be bound or randomness fails.
     pub fn start_with_key(server: SocketAddr, key: [u8; 32]) -> io::Result<Self> {
-        Self::start_with_options(server, 0, Some(key), false)
+        Self::start_with_options(server, 0, Some(key), None, false)
     }
 
     /// Starts an authenticated reconnect handshake.
@@ -160,13 +163,14 @@ impl NetClient {
         session: u32,
         key: [u8; 32],
     ) -> io::Result<Self> {
-        Self::start_with_options(server, session, Some(key), false)
+        Self::start_with_options(server, session, Some(key), None, false)
     }
 
     fn start_with_options(
         server: SocketAddr,
         session: u32,
         pre_shared_key: Option<[u8; 32]>,
+        expected_server: Option<[u8; 32]>,
         spectator: bool,
     ) -> io::Result<Self> {
         let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
@@ -189,6 +193,8 @@ impl NetClient {
             map: crate::protocol::WireMap::default(),
             nonce,
             pre_shared_key,
+            expected_server,
+            server_public_key: None,
             spectator,
             reconnect_token: session,
             sequence: 0,
@@ -243,12 +249,62 @@ impl NetClient {
         Self::connect_with_session_key(server, timeout, 0, Some(key))
     }
 
+    /// Connects with a pinned Ed25519 server public key.
+    ///
+    /// # Errors
+    /// Returns `TimedOut`/`ConnectionAborted` when the server cannot be authenticated.
+    pub fn connect_pinned(
+        server: SocketAddr,
+        timeout: Duration,
+        public_key: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::connect_with_options(server, timeout, 0, None, Some(public_key), false)
+    }
+
+    /// Connects with a pre-shared key and a pinned server public key.
+    ///
+    /// # Errors
+    /// Returns `TimedOut`/`ConnectionAborted` when authentication fails.
+    pub fn connect_with_key_pinned(
+        server: SocketAddr,
+        timeout: Duration,
+        key: [u8; 32],
+        public_key: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::connect_with_options(server, timeout, 0, Some(key), Some(public_key), false)
+    }
+
+    /// Connects as a pinned spectator with a pre-shared key.
+    ///
+    /// # Errors
+    /// Returns `TimedOut`/`ConnectionAborted` when authentication fails.
+    pub fn connect_spectator_with_key_pinned(
+        server: SocketAddr,
+        timeout: Duration,
+        key: [u8; 32],
+        public_key: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::connect_with_options(server, timeout, 0, Some(key), Some(public_key), true)
+    }
+
+    /// Connects as a pinned spectator.
+    ///
+    /// # Errors
+    /// Returns `TimedOut`/`ConnectionAborted` when authentication fails.
+    pub fn connect_spectator_pinned(
+        server: SocketAddr,
+        timeout: Duration,
+        public_key: [u8; 32],
+    ) -> io::Result<Self> {
+        Self::connect_with_options(server, timeout, 0, None, Some(public_key), true)
+    }
+
     /// Connects as a read-only spectator (no slot or input).
     ///
     /// # Errors
     /// Returns `TimedOut` or `ConnectionAborted` when the server rejects the handshake.
     pub fn connect_spectator(server: SocketAddr, timeout: Duration) -> io::Result<Self> {
-        Self::connect_with_options(server, timeout, 0, None, true)
+        Self::connect_with_options(server, timeout, 0, None, None, true)
     }
 
     /// Resumes a spectator session token.
@@ -260,7 +316,7 @@ impl NetClient {
         timeout: Duration,
         session: u32,
     ) -> io::Result<Self> {
-        Self::connect_with_options(server, timeout, session, None, true)
+        Self::connect_with_options(server, timeout, session, None, None, true)
     }
 
     /// Resumes a spectator session token with an authenticated handshake.
@@ -273,7 +329,7 @@ impl NetClient {
         session: u32,
         key: [u8; 32],
     ) -> io::Result<Self> {
-        Self::connect_with_options(server, timeout, session, Some(key), true)
+        Self::connect_with_options(server, timeout, session, Some(key), None, true)
     }
 
     /// Connects as a read-only spectator with an encrypted handshake.
@@ -285,7 +341,7 @@ impl NetClient {
         timeout: Duration,
         key: [u8; 32],
     ) -> io::Result<Self> {
-        Self::connect_with_options(server, timeout, 0, Some(key), true)
+        Self::connect_with_options(server, timeout, 0, Some(key), None, true)
     }
 
     /// Resumes a session with an authenticated, encrypted handshake.
@@ -298,7 +354,7 @@ impl NetClient {
         session: u32,
         key: Option<[u8; 32]>,
     ) -> io::Result<Self> {
-        Self::connect_with_options(server, timeout, session, key, false)
+        Self::connect_with_options(server, timeout, session, key, None, false)
     }
 
     fn connect_with_options(
@@ -306,9 +362,11 @@ impl NetClient {
         timeout: Duration,
         session: u32,
         key: Option<[u8; 32]>,
+        expected_server: Option<[u8; 32]>,
         spectator: bool,
     ) -> io::Result<Self> {
-        let mut client = Self::start_with_options(server, session, key, spectator)?;
+        let mut client =
+            Self::start_with_options(server, session, key, expected_server, spectator)?;
         let start = Instant::now();
         let mut next_hello = Instant::now();
         while start.elapsed() < timeout {
@@ -353,15 +411,8 @@ impl NetClient {
                     if self.state != ClientState::Connecting {
                         continue;
                     }
-                    let welcome = match decode_welcome(&message.payload) {
-                        Ok(welcome) => welcome,
-                        Err(error) => {
-                            eprintln!(
-                                "welcome decode failed: {error:?} len={}",
-                                message.payload.len()
-                            );
-                            continue;
-                        }
+                    let Ok(welcome) = decode_welcome(&message.payload) else {
+                        continue;
                     };
                     if welcome.nonce != self.nonce {
                         continue;
@@ -379,12 +430,28 @@ impl NetClient {
                         &welcome.map,
                     );
                     if content_hash != welcome.content_hash {
-                        eprintln!(
-                            "content hash mismatch client={content_hash:#x} welcome={:#x}",
-                            welcome.content_hash
-                        );
                         continue;
                     }
+                    if let Some(pinned) = self.expected_server {
+                        if !welcome.identity
+                            || welcome.server_public_key != pinned
+                            || !verify_server_welcome(
+                                &pinned,
+                                u16::from(crate::protocol::PROTOCOL_VERSION),
+                                self.nonce,
+                                welcome.server_nonce,
+                                message.header.session,
+                                welcome.slot,
+                                content_hash,
+                                &welcome.server_signature,
+                            )
+                        {
+                            self.state = ClientState::Disconnected;
+                            self.push_event(ClientEvent::Disconnected);
+                            continue;
+                        }
+                    }
+                    self.server_public_key = welcome.identity.then_some(welcome.server_public_key);
                     if let Some(key) = self.pre_shared_key {
                         if !verify_welcome_tag(
                             &key,
@@ -571,6 +638,12 @@ impl NetClient {
     #[must_use]
     pub const fn is_spectator(&self) -> bool {
         self.spectator
+    }
+
+    /// Authenticated server public key, when the server presented one.
+    #[must_use]
+    pub const fn server_public_key(&self) -> Option<[u8; 32]> {
+        self.server_public_key
     }
 
     /// Assigned team.
