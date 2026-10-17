@@ -153,8 +153,8 @@ values, and secrets can reference paths or 64-hex strings.
 when the phase is Lobby and no clients are connected; the simulation is recreated with the
 new catalogue for the next match.
 
-`NetServer` applies a token-bucket rate limit per source address before message decoding
-(default 120 pps, burst one second; `0` disables). Buckets are bounded and evicted LRU to cap
+`NetServer` applies a token-bucket rate limit per source address (default 120 pps) and a
+global packet budget (default 2000 pps) before message decoding; `0` disables either. Buckets are bounded and evicted LRU to cap
 memory under spoofed-source floods. `ServerStats` exposes bytes, snapshots, rate-limited
 datagrams and average/max simulation tick nanoseconds for operators and the soak harness.
 

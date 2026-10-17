@@ -60,6 +60,8 @@ pub struct ServerConfig {
     pub max_spectators: usize,
     /// Per-address UDP packet budget per second (0 disables rate limiting).
     pub max_packets_per_second: u32,
+    /// Global UDP packet budget per second across all addresses (0 disables).
+    pub max_total_packets_per_second: u32,
     /// Require every connected player to ready up before starting the countdown.
     pub require_ready: bool,
 }
@@ -79,6 +81,10 @@ impl core::fmt::Debug for ServerConfig {
             .field("record", &self.record)
             .field("max_spectators", &self.max_spectators)
             .field("max_packets_per_second", &self.max_packets_per_second)
+            .field(
+                "max_total_packets_per_second",
+                &self.max_total_packets_per_second,
+            )
             .field("require_ready", &self.require_ready)
             .finish()
     }
@@ -99,6 +105,7 @@ impl Default for ServerConfig {
             record: None,
             max_spectators: 8,
             max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
             require_ready: false,
         }
     }
@@ -139,16 +146,25 @@ struct RateBucket {
 struct RateLimiter {
     rate: f32,
     burst: f32,
+    total_rate: f32,
+    total_burst: f32,
+    total_tokens: f32,
+    total_last: Instant,
     max_buckets: usize,
     buckets: Vec<RateBucket>,
 }
 
 impl RateLimiter {
-    fn new(packets_per_second: u32, max_buckets: usize) -> Self {
+    fn new(packets_per_second: u32, total_packets_per_second: u32, max_buckets: usize) -> Self {
         let rate = packets_per_second as f32;
+        let total_rate = total_packets_per_second as f32;
         Self {
             rate,
             burst: rate.max(1.0),
+            total_rate,
+            total_burst: total_rate.max(1.0),
+            total_tokens: total_rate.max(1.0),
+            total_last: Instant::now(),
             max_buckets,
             buckets: Vec::new(),
         }
@@ -157,6 +173,16 @@ impl RateLimiter {
     fn allow_at(&mut self, addr: SocketAddr, now: Instant) -> bool {
         if self.rate <= 0.0 {
             return true;
+        }
+        if self.total_rate > 0.0 {
+            let elapsed = now.saturating_duration_since(self.total_last).as_secs_f32();
+            self.total_tokens =
+                (self.total_tokens + elapsed * self.total_rate).min(self.total_burst);
+            self.total_last = now;
+            if self.total_tokens < 1.0 {
+                return false;
+            }
+            self.total_tokens -= 1.0;
         }
         let position = self.buckets.iter().position(|bucket| bucket.addr == addr);
         let index = if let Some(index) = position {
@@ -336,7 +362,11 @@ impl NetServer {
         let total_slots = config.max_clients + config.max_spectators;
         let config_sim = config.sim;
         let simulation = Simulation::new_with_content(config_sim, Arc::clone(&content));
-        let limiter = RateLimiter::new(config.max_packets_per_second, 256);
+        let limiter = RateLimiter::new(
+            config.max_packets_per_second,
+            config.max_total_packets_per_second,
+            256,
+        );
         Ok(Self {
             transport,
             simulation,
@@ -1397,6 +1427,7 @@ mod tests {
             record: None,
             max_spectators: 8,
             max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
             require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");
@@ -1467,6 +1498,7 @@ cost = 1
             record: None,
             max_spectators: 4,
             max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
             require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");
@@ -1496,7 +1528,7 @@ cost = 1
         let addr: SocketAddr = "127.0.0.1:4000".parse().expect("addr");
         let other: SocketAddr = "127.0.0.1:4001".parse().expect("addr");
         let start = Instant::now();
-        let mut limiter = RateLimiter::new(10, 8);
+        let mut limiter = RateLimiter::new(10, 0, 8);
         for _ in 0..10 {
             assert!(limiter.allow_at(addr, start));
         }
@@ -1504,6 +1536,20 @@ cost = 1
         assert!(limiter.allow_at(other, start));
         assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
         assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn global_budget_caps_distributed_floods() {
+        let start = Instant::now();
+        let mut limiter = RateLimiter::new(100, 5, 64);
+        let mut allowed = 0;
+        for index in 0..20u16 {
+            let addr: SocketAddr = format!("127.0.0.1:{}", 5000 + index).parse().expect("addr");
+            if limiter.allow_at(addr, start) {
+                allowed += 1;
+            }
+        }
+        assert!(allowed <= 5, "global burst caps distinct sources");
     }
 
     #[test]
@@ -1528,6 +1574,7 @@ cost = 1
             record: Some(replay_path.clone()),
             max_spectators: 8,
             max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
             require_ready: false,
         };
         let mut server = NetServer::bind(config).expect("bind");

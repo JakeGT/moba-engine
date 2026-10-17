@@ -7,6 +7,7 @@ countdown = 3
 results = 15
 ready = true
 max_pps = 120
+max_total_pps = 2000
 
 # Optional content and replay paths (relative to the server's working directory).
 # items = "content/example-pack.toml"

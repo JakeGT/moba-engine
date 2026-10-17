@@ -19,8 +19,8 @@ is **not** a complete public-internet security model:
   per-player identity or revocation;
 - PSK mode is a shared key with no forward secrecy;
 - packet metadata (addresses, sizes, timing, session ids) is visible;
-- per-address UDP budgets reject floods of valid packets, but malformed-packet bandwidth and
-  spoofed-source floods still need a network/edge gateway;
+- per-address and global UDP budgets reject valid-packet floods, but malformed-packet
+  bandwidth and high-volume spoofed-source floods still need a network/edge gateway;
 - there is no matchmaking identity or revocation;
 - replay is limited by sequence/ack semantics, not a formal anti-replay window;
 - a compromised client or key compromises that match.

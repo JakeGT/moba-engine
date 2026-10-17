@@ -23,6 +23,7 @@ fn spawn_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
         record: None,
         max_spectators: 4,
         max_packets_per_second: 120,
+        max_total_packets_per_second: 2_000,
         require_ready: false,
     })
     .expect("bind");

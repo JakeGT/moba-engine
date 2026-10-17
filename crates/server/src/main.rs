@@ -29,6 +29,7 @@ fn main() {
     let mut reload_content = false;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
+    let mut max_total_packets_per_second = 2_000u32;
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let config_path = raw_args
         .iter()
@@ -75,6 +76,9 @@ fn main() {
         }
         if let Some(value) = file.max_pps {
             max_packets_per_second = value;
+        }
+        if let Some(value) = file.max_total_pps {
+            max_total_packets_per_second = value;
         }
     }
     let mut args = raw_args.into_iter();
@@ -124,6 +128,11 @@ fn main() {
                     max_packets_per_second = value;
                 }
             }
+            "--max-total-pps" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    max_total_packets_per_second = value;
+                }
+            }
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
             "--reload-content" => reload_content = true,
@@ -133,7 +142,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--server-key FILE] [--reload-content] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--config FILE]"
                 );
                 return;
             }
@@ -166,6 +175,7 @@ fn main() {
             record,
             max_spectators: 8,
             max_packets_per_second,
+            max_total_packets_per_second,
             require_ready,
         };
         let mut server = if let Some(content) = content {
@@ -365,6 +375,7 @@ struct FileServerConfig {
     reload_content: Option<bool>,
     ready: Option<bool>,
     max_pps: Option<u32>,
+    max_total_pps: Option<u32>,
 }
 
 fn load_server_config(path: &std::path::Path) -> FileServerConfig {

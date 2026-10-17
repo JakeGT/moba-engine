@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Global UDP packet budget (`--max-total-pps`) complementing per-address limits.
 - TOML dedicated-server configuration (`--config server.example.toml`) with CLI override.
 - `shield` ability kind with timed damage absorption, snapshot flag and client tint.
 - Content hot reload (`--reload-content`) applied only in an empty lobby, with a server test.

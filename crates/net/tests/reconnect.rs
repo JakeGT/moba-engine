@@ -22,6 +22,7 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
         record: None,
         max_spectators: 8,
         max_packets_per_second: 120,
+        max_total_packets_per_second: 2_000,
         require_ready: false,
     };
     let mut server = NetServer::bind(config).expect("server binds");

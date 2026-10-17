@@ -18,7 +18,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - **Operational tools**: 5-minute plaintext soak, encrypted 10-client soak, deterministic
   wire fuzzer, replay verifier.
 - **Application-layer DoS controls**: bounded per-address token buckets (configurable
-  `--max-pps`, 0 disables), drop counters and avg/max tick telemetry. Release soak measures
+  `--max-pps`), a global packet budget (`--max-total-pps`), drop counters and avg/max tick
+  telemetry; both limits can be disabled with 0. Release soak measures
   avg 9 µs / max 55 µs per simulation tick with 10 clients.
 
 ## CI gates

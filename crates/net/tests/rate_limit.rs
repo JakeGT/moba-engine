@@ -22,6 +22,7 @@ fn flood_is_rate_limited() {
         record: None,
         max_spectators: 4,
         max_packets_per_second: 10,
+        max_total_packets_per_second: 0,
         require_ready: false,
     })
     .expect("bind");

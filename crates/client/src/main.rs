@@ -495,6 +495,7 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
             record: None,
             max_spectators: 8,
             max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
             require_ready: false,
         })
         .map_err(|error| format!("local server failed: {error}"))?;
