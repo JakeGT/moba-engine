@@ -138,6 +138,14 @@ simulation loop.
 - Tests: real UDP loopback, optional `moba-netsim` proxies, and deterministic single-process
   simulations.
 
+## Replays and debugging
+
+The server can write deterministic `.mbr` replays (`--record FILE`). A replay stores the
+simulation configuration plus every resolved per-tick input frame (post-bot resolution) and
+the final state hash. `moba-tools replay` re-simulates the frames and verifies the hash, which
+makes bug reports, balance regressions and CI fixtures shareable without video. Replays are
+match-scoped; a rematch writes a `.matchN.mbr` file.
+
 ## Error and panic policy
 
 Library code returns `Result` for I/O, Vulkan, protocol and validation errors; malformed UDP

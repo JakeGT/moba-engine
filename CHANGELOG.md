@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Deterministic replay recording (`moba-server --record`) and verification
+  (`moba-tools replay`), including a server recording test and decoder fuzz coverage.
 - Optional pre-shared-key authenticated encryption: HMAC handshake proofs, HKDF session keys,
   ChaCha20-Poly1305 payloads, encrypted reconnect and privacy-preserving debug output.
 - Open-source project surface: dual MIT/Apache-2.0 license, README, architecture,

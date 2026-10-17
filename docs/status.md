@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: 2026-10-17 (round 9 of the build).
+Last updated: 2026-10-17 (round 11 of the build).
 
 ## Milestones
 
@@ -13,7 +13,7 @@ Last updated: 2026-10-17 (round 9 of the build).
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
 | M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation and playable client (protocol v6); 5-minute plaintext soak and 20 s encrypted 10-client soak pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
 | M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, batched HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; ready-up/surrender and line-of-sight fog remain. |
-| M7 | Hardening | ⬜ | 50 matches/box, fuzz, profiling capture. |
+| M7 | Hardening | 🟡 | Optional PSK AEAD transport, reconnect and deterministic replay tooling landed; public identity/anti-DoS, 50 matches/box, one-hour sanitizer fuzz and profiling captures remain. |
 | M8 | Content pipeline | ⬜ | Data-driven abilities. |
 
 ## What exists now
@@ -50,8 +50,10 @@ Last updated: 2026-10-17 (round 9 of the build).
   input, NetId mapping, visibility-filtered delta snapshots, local-hero prediction,
   remote-entity interpolation, client snapshot history and RTT/bandwidth counters.
 - **`moba-netsim`** — per-client UDP link conditioner (latency, jitter, seeded loss).
-- **`moba-tools`** — `soak` binary for the five-minute ten-client network gate,
-  `fuzz-wire` for deterministic decoder fuzzing, and embedding examples.
+- **`moba-tools`** — `soak` for the five-minute network gate, `fuzz-wire` for decoder fuzzing,
+  `replay` for deterministic replay verification, and embedding examples.
+- **Replays** — `.mbr` files store config + resolved inputs + expected hash; server `--record`
+  and `moba-tools replay` verify them.
 - **`moba-engine`** — umbrella crate with `sim`, `net` and optional `render` features; the
   intended entry point for embedding the engine.
 - **`moba-client`** — renders either a local bot preview or a live server match
@@ -65,7 +67,7 @@ Last updated: 2026-10-17 (round 9 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 127 tests
+- `cargo test --workspace --locked` — 129 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
@@ -108,6 +110,9 @@ Last updated: 2026-10-17 (round 9 of the build).
   key is rejected. 10-client encrypted soak stays at 5.0–7.3 KiB/s down / 1.8–1.9 KiB/s up.
 - Wire fuzzer: 73,072,000 structured/random decoder iterations in 60 s clean; one-hour gate
   via `just fuzz-wire`.
+- Replay: live server recording (`--record`) and `moba-tools replay` reproduce
+  `0x8fc6baefe95c96d6` for a 194-tick match; the server recording test and decoder noise test
+  cover replay determinism and malformed input.
 
 `just`, `cargo-nextest` and `cargo-deny` are not installed in this environment; their
 commands were reproduced manually. Miri is green on core/ecs/jobs; the loom model is still
@@ -126,7 +131,8 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 1. Loom model of the scope counter protocol; add `World`-level parallel iteration over
    chunk queries and bench it.
 2. M6 remainder: ready-up lobby, surrender/vote, terrain line-of-sight fog and map selection.
-3. M5 hardening: authenticated/encrypted packets and long-running sanitizer fuzzers (M7).
+3. M7 hardening: public identity/anti-DoS, one-hour sanitizer fuzzing, 50-match soak and
+   profiling captures.
 4. M3 remainder: skeletal skinning, frame-time measurement on min-spec hardware, and a
    golden-image test under lavapipe in CI.
 5. The reference machine has no usable hardware Vulkan device; lavapipe is installed in

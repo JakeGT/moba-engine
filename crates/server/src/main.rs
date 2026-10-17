@@ -21,6 +21,7 @@ fn main() {
     let mut secret: Option<[u8; 32]> = std::env::var("MOBA_SECRET")
         .ok()
         .map(|value| parse_secret(&value));
+    let mut record: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -59,10 +60,13 @@ fn main() {
                 };
                 secret = Some(parse_secret(&value));
             }
+            "--record" => {
+                record = args.next().map(std::path::PathBuf::from);
+            }
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE]"
                 );
                 return;
             }
@@ -91,6 +95,7 @@ fn main() {
             client_timeout: Duration::from_secs(5),
             reconnect_grace: Duration::from_secs(60),
             pre_shared_key: secret,
+            record,
         })
         .unwrap_or_else(|error| {
             eprintln!("cannot bind {bind}: {error}");
@@ -111,6 +116,7 @@ fn main() {
                 eprintln!("network server error: {error}");
                 std::process::exit(1);
             });
+        server.finish_recording();
         let stats = server.stats();
         eprintln!(
             "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB",

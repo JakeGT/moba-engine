@@ -73,3 +73,7 @@ soak:
 # Deterministic wire-decoder fuzzing (default one hour; pass seconds for CI).
 fuzz-wire:
     cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 3600
+
+# Verify a deterministic replay file.
+replay FILE:
+    cargo run -p moba-tools --bin replay -- {{FILE}}

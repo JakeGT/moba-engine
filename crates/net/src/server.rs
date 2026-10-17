@@ -3,9 +3,10 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use moba_sim::{ObservedUnit, PlayerCommand, SimConfig, Simulation, TickInputs};
+use moba_sim::{ObservedUnit, PlayerCommand, Replay, SimConfig, Simulation, TickInputs};
 
 use crate::crypto::{
     SessionCrypto, derive_session_key, random_nonce, verify_hello_tag, welcome_tag,
@@ -47,6 +48,8 @@ pub struct ServerConfig {
     pub reconnect_grace: Duration,
     /// Optional pre-shared key; when set, handshakes are authenticated and payloads encrypted.
     pub pre_shared_key: Option<[u8; 32]>,
+    /// Optional path for deterministic replay files (one per match).
+    pub record: Option<PathBuf>,
 }
 
 impl core::fmt::Debug for ServerConfig {
@@ -61,6 +64,7 @@ impl core::fmt::Debug for ServerConfig {
             .field("client_timeout", &self.client_timeout)
             .field("reconnect_grace", &self.reconnect_grace)
             .field("pre_shared_key", &self.pre_shared_key.is_some())
+            .field("record", &self.record)
             .finish()
     }
 }
@@ -77,6 +81,7 @@ impl Default for ServerConfig {
             client_timeout: CLIENT_TIMEOUT,
             reconnect_grace: RECONNECT_GRACE,
             pre_shared_key: None,
+            record: None,
         }
     }
 }
@@ -180,6 +185,9 @@ pub struct NetServer {
     phase: Phase,
     frame: u64,
     match_number: u32,
+    record_frames: Vec<TickInputs>,
+    record_config: SimConfig,
+    recorded: bool,
 }
 
 impl NetServer {
@@ -189,7 +197,8 @@ impl NetServer {
     /// Returns an OS error when the socket cannot be bound.
     pub fn bind(config: ServerConfig) -> io::Result<Self> {
         let transport = UdpTransport::bind(config.bind)?;
-        let simulation = Simulation::new(config.sim);
+        let config_sim = config.sim;
+        let simulation = Simulation::new(config_sim);
         Ok(Self {
             transport,
             simulation,
@@ -203,6 +212,9 @@ impl NetServer {
             phase: Phase::Lobby,
             frame: 0,
             match_number: 0,
+            record_frames: Vec::new(),
+            record_config: config_sim,
+            recorded: false,
         })
     }
 
@@ -296,6 +308,7 @@ impl NetServer {
                 self.tick_simulation();
                 if self.simulation.outcome().is_some() {
                     self.phase = Phase::Results(self.config.results_ticks.max(1));
+                    self.write_recording();
                 }
             }
             Phase::Results(remaining) => {
@@ -326,6 +339,9 @@ impl NetServer {
                 inputs.set(slot, command);
             }
         }
+        if self.config.record.is_some() {
+            self.record_frames.push(inputs);
+        }
         self.simulation.tick(&inputs);
         self.simulation.clear_events();
         self.stats.ticks += 1;
@@ -341,10 +357,13 @@ impl NetServer {
 
     fn reset_match(&mut self) {
         self.match_number = self.match_number.wrapping_add(1);
+        self.record_frames.clear();
+        self.recorded = false;
         let mut config = self.config.sim;
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
         self.simulation = Simulation::new(config);
+        self.record_config = config;
         for slot in 0..self.clients.len() {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
@@ -363,6 +382,39 @@ impl NetServer {
         } else {
             self.phase = Phase::Lobby;
         }
+    }
+
+    /// Writes any in-progress match replay. Safe to call multiple times.
+    ///
+    /// A completed match is written automatically when its nexus falls; this method is for
+    /// graceful server shutdown during a live match.
+    pub fn finish_recording(&mut self) {
+        self.write_recording();
+    }
+
+    fn write_recording(&mut self) {
+        if self.recorded || self.record_frames.is_empty() {
+            return;
+        }
+        let Some(path) = self.config.record.clone() else {
+            return;
+        };
+        let state_hash = self.simulation.state_hash();
+        let replay = Replay {
+            config: self.record_config,
+            frames: std::mem::take(&mut self.record_frames),
+            expected_hash: Some(state_hash),
+        };
+        let target = replay_path(&path, self.match_number);
+        match std::fs::write(&target, replay.encode()) {
+            Ok(()) => eprintln!(
+                "replay: wrote {} ticks to {} ({state_hash:#018x})",
+                replay.frames.len(),
+                target.display()
+            ),
+            Err(error) => eprintln!("replay: cannot write {}: {error}", target.display()),
+        }
+        self.recorded = true;
     }
 
     /// Runs a real-time 30 Hz loop for `duration`.
@@ -821,6 +873,17 @@ pub fn apply_delta(
     baseline.apply(delta, seq)
 }
 
+fn replay_path(base: &Path, match_number: u32) -> PathBuf {
+    if match_number == 0 {
+        return base.to_path_buf();
+    }
+    let stem = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("match");
+    base.with_file_name(format!("{stem}.match{match_number}.mbr"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,6 +901,7 @@ mod tests {
             client_timeout: Duration::from_millis(100),
             reconnect_grace: Duration::from_secs(2),
             pre_shared_key: None,
+            record: None,
         };
         let mut server = NetServer::bind(config).expect("bind");
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
@@ -875,5 +939,40 @@ mod tests {
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
         assert_eq!(server.match_number(), 1);
         assert_eq!(server.simulation().outcome(), None);
+    }
+
+    #[test]
+    fn recorded_bot_ticks_replay_deterministically() {
+        let replay_path = std::env::temp_dir().join(format!(
+            "moba-replay-test-{}-{}.mbr",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: Some(replay_path.clone()),
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        server.phase = Phase::Playing;
+        for _ in 0..60 {
+            server.tick().expect("tick");
+        }
+        server.finish_recording();
+        let bytes = std::fs::read(&replay_path).expect("replay written");
+        let replay = moba_sim::Replay::decode(&bytes).expect("replay decodes");
+        let result = replay.play().expect("replay verifies");
+        assert_eq!(result.ticks, 60);
+        assert_eq!(result.state_hash, server.simulation().state_hash());
+        let _ = std::fs::remove_file(&replay_path);
     }
 }

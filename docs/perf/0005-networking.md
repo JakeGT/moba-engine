@@ -57,3 +57,10 @@ cargo run --release -p moba-tools --bin soak -- --seconds 300
 
 - Prediction/reconciliation and interpolation add client CPU but no wire growth.
 - Lag compensation needs a short server history of hitboxes (or positions) for rewind.
+
+
+## Replay cost
+
+Replays store resolved per-slot inputs, not snapshots: a live 194-tick match produced a
+30 KB `.mbr` file (≈4.6 KB/s while playing). Offline verification re-simulates the match in
+milliseconds.

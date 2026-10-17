@@ -1,6 +1,6 @@
 [package]
 name = "moba-tools"
-description = "Soak tester and deterministic wire fuzzer."
+description = "Soak tester, deterministic wire fuzzer and replay verifier."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

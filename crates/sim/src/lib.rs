@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod components;
+mod replay;
 mod sim;
 
 pub use components::{
@@ -19,6 +20,7 @@ pub use components::{
     LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
     UnitKind, VisionRange,
 };
+pub use replay::{Replay, ReplayError, ReplayResult};
 pub use sim::{
     HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, ObservedUnit,
     PlayerCommand, SimConfig, SimEvent, Simulation, TICK_DURATION, TickInputs, WAVE_DELAY_TICKS,

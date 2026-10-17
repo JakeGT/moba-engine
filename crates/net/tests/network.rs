@@ -24,6 +24,7 @@ fn spawn_server(
         client_timeout: Duration::from_millis(100),
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: None,
+        record: None,
     };
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("local addr");

@@ -453,6 +453,7 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
             client_timeout: Duration::from_secs(5),
             reconnect_grace: Duration::from_secs(60),
             pre_shared_key: secret,
+            record: None,
         })
         .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
