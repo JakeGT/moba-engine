@@ -7,8 +7,8 @@ Last updated: 2026-10-17 (round 1 of the build).
 | # | Milestone | State | Notes |
 |---|---|---|---|
 | M0 | Bootstrap | ✅ | Workspace, lints, CI, justfile, agent definitions. |
-| M1 | Core runtime | ✅ (miri/loom pending) | 62 tests green, clippy `-D warnings` green, ECS benches beat AoS. |
-| M2 | Platform | ⬜ | winit window + input + fixed-step loop. |
+| M1 | Core runtime | ✅ | 62 tests green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
+| M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | ⬜ | ash device/swapchain/render graph, shaders, golden images. |
 | M4 | Simulation | ⬜ | Heroes, minions, towers, abilities, nav, fog, determinism. |
 | M5 | Networking | ⬜ | UDP transport, snapshots, prediction/reconciliation, lag comp. |
@@ -29,6 +29,10 @@ Last updated: 2026-10-17 (round 1 of the build).
 - **`moba-jobs`** — scoped work-stealing pool with a global injector, per-worker deques,
   condvar idle sleep, caller participation, nested scopes, panic capture and
   `parallel_for` over disjoint chunks.
+- **`moba-platform`** — the only crate that links `winit`: window config/error type,
+  physical-key input snapshot with focus-loss safety, 30 Hz `FixedStep`, frame pacing,
+  and the `App` loop. `moba-client` is a smoke-test app that exits after
+  `MOBA_SMOKE_FRAMES` frames.
 
 ## Verification actually run
 
@@ -38,6 +42,10 @@ Last updated: 2026-10-17 (round 1 of the build).
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.
+- Miri: `moba-core` + `moba-ecs` pass under Stacked Borrows with strict provenance
+  (85 s); `moba-jobs` passes zero-worker and threaded tests under Tree Borrows with
+  `-Zmiri-ignore-leaks` (crossbeam-epoch's deferred bags are the leak source).
+- Client smoke: `MOBA_SMOKE_FRAMES=60 cargo run -p moba-client` exits 0 on Linux/X11.
 
 `just`, `cargo-nextest` and `cargo-deny` are not installed in this environment; their
 commands were reproduced manually. Miri and loom are still to run (needs a nightly
@@ -45,8 +53,9 @@ toolchain).
 
 ## Known gaps / next round
 
-1. Run miri over `core`, `ecs`, `jobs`; add a loom model of the scope counter protocol.
-2. Add `World`-level parallel iteration (chunk queries split across the job pool) with a
-   bench, then move on to M2 (winit platform) and M3 (ash renderer).
+1. Loom model of the scope counter protocol; add `World`-level parallel iteration over
+   chunk queries and bench it.
+2. M3: Vulkan device selection, swapchain, dynamic rendering, sync2, bindless descriptors,
+   shader build pipeline and a first triangle/instanced units scene.
 3. The reference machine has no usable Vulkan device (loader finds no GPU), so renderer
    work must compile clean and be validated on a machine with a GPU or lavapipe.

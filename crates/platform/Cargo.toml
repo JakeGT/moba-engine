@@ -11,3 +11,5 @@ workspace = true
 
 [dependencies]
 moba-core.workspace = true
+raw-window-handle.workspace = true
+winit.workspace = true

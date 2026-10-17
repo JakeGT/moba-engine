@@ -26,12 +26,15 @@ moba-netsim = { path = "crates/netsim" }
 # Third-party. Versions are resolved once here so every crate agrees.
 crossbeam-deque = "0.8"
 glam = "0.30"
+raw-window-handle = "0.6"
+winit = "0.30"
 
 # Dev-only.
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(miri)'] }
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 

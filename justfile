@@ -23,8 +23,12 @@ deny:
     cargo deny check
 
 # UB check for the crates that own unsafe containers (needs nightly + miri).
+# core/ecs run under Stacked Borrows with strict provenance. crossbeam-deque (used by the
+# scheduler) casts integers to pointers internally and leaves deferred epoch bags behind,
+# so the jobs crate runs under Tree Borrows with the external leak check disabled.
 miri:
-    cargo +nightly miri test -p moba-core -p moba-ecs -p moba-jobs
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test -p moba-core -p moba-ecs
+    MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo +nightly miri test -p moba-jobs
 
 # The server and the simulation must never pull in rendering or windowing.
 layering:

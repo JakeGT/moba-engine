@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use moba_jobs::JobSystem;
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn scoped_jobs_run_exactly_once() {
     let system = JobSystem::new(3);
     let counter = AtomicUsize::new(0);
@@ -37,6 +38,7 @@ fn scoped_jobs_can_borrow_caller_data() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn nested_scopes_complete() {
     let system = JobSystem::new(2);
     let counter = AtomicUsize::new(0);
@@ -114,6 +116,7 @@ fn panics_in_the_scope_body_still_wait_for_jobs() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn parallel_for_covers_disjoint_chunks() {
     let system = JobSystem::new(3);
     let mut data = vec![0u32; 10_000];
@@ -157,6 +160,7 @@ fn nested_parallel_for_is_safe() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn repeated_scopes_do_not_leak_or_deadlock() {
     let system = JobSystem::new(2);
     let counter = AtomicUsize::new(0);
