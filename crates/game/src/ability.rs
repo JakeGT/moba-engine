@@ -36,6 +36,13 @@ pub enum AbilityKind {
         /// Visual/UI radius (unused by the simulation maths).
         radius: Fix,
     },
+    /// Grants the caster a temporary damage-absorbing shield.
+    Shield {
+        /// Damage absorbed before health.
+        amount: i32,
+        /// Duration in simulation ticks.
+        duration_ticks: u32,
+    },
     /// Instantly damages enemies around the caster.
     Burst {
         /// Effect radius.
@@ -246,6 +253,13 @@ mod tests {
                 }
                 AbilityKind::Heal { amount, .. } => assert!(amount > 0),
                 AbilityKind::Dash { range } => assert!(range > Fix::ZERO),
+                AbilityKind::Shield {
+                    amount,
+                    duration_ticks,
+                } => {
+                    assert!(amount > 0);
+                    assert!(duration_ticks > 0);
+                }
             }
         }
     }

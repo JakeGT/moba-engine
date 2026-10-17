@@ -15,7 +15,7 @@ use moba_nav::SpatialGrid;
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
     LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
-    UnitKind, VisionRange,
+    Shield, UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -231,6 +231,8 @@ pub struct ObservedUnit {
     pub gold: u32,
     /// Inventory item ids (`0xFF` empty).
     pub items: [u8; 6],
+    /// Whether a temporary shield is active.
+    pub shielded: bool,
 }
 
 /// The authoritative MOBA simulation.
@@ -512,6 +514,10 @@ impl Simulation {
                 xp: progression.map_or(0, |progress| progress.xp),
                 gold: progression.map_or(0, |progress| progress.gold),
                 items: progression.map_or([EMPTY_ITEM; 6], |progress| progress.items),
+                shielded: self
+                    .world
+                    .get::<Shield>(entity)
+                    .is_some_and(|shield| shield.amount > 0),
             });
         }
     }
@@ -649,6 +655,11 @@ impl Simulation {
             if let Some(identity) = self.world.get::<HeroIdentity>(entity) {
                 hasher.write_u32(10);
                 hasher.write_u32(u32::from(identity.0.0));
+            }
+            if let Some(shield) = self.world.get::<Shield>(entity) {
+                hasher.write_u32(3);
+                hasher.write_u32(shield.amount as u32);
+                hasher.write_u32(shield.remaining);
             }
             if let Some(progress) = self.world.get::<Progression>(entity) {
                 hasher.write_u32(11);
@@ -902,6 +913,17 @@ impl Simulation {
             }
         }
 
+        let mut expired_shields = Vec::new();
+        for (entity, shield) in self.world.query::<&mut Shield>() {
+            shield.remaining = shield.remaining.saturating_sub(1);
+            if shield.remaining == 0 || shield.amount <= 0 {
+                expired_shields.push(entity);
+            }
+        }
+        for entity in expired_shields {
+            let _ = self.world.remove::<Shield>(entity);
+        }
+
         self.respawns.clear();
         for (entity, dead) in self.world.query::<&mut Dead>() {
             dead.respawn_in = dead.respawn_in.saturating_sub(1);
@@ -925,6 +947,7 @@ impl Simulation {
         };
         let _ = self.world.remove::<Dead>(entity);
         let _ = self.world.remove::<LastHitBy>(entity);
+        let _ = self.world.remove::<Shield>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
             position.0 = self.content.map.hero_spawn(team, slot % 5);
         }
@@ -1106,6 +1129,23 @@ impl Simulation {
                 if let Some(health) = self.world.get_mut::<Health>(caster) {
                     health.current = (health.current + amount).min(health.max);
                 }
+            }
+            moba_game::AbilityKind::Shield {
+                amount,
+                duration_ticks,
+            } => {
+                let current = self
+                    .world
+                    .get::<Shield>(caster)
+                    .copied()
+                    .unwrap_or_default();
+                let _ = self.world.insert(
+                    caster,
+                    Shield {
+                        amount: current.amount.saturating_add(amount),
+                        remaining: current.remaining.max(duration_ticks),
+                    },
+                );
             }
             moba_game::AbilityKind::Burst {
                 radius,
@@ -1436,8 +1476,16 @@ impl Simulation {
             resistances.armor,
             resistances.magic_resist,
         );
+        let mut damage = dealt;
+        if let Some(shield) = self.world.get_mut::<Shield>(target) {
+            if shield.amount > 0 {
+                let absorbed = shield.amount.min(damage);
+                shield.amount -= absorbed;
+                damage -= absorbed;
+            }
+        }
         let remaining = if let Some(health) = self.world.get_mut::<Health>(target) {
-            health.current = (health.current - dealt).max(0);
+            health.current = (health.current - damage).max(0);
             health.current
         } else {
             return;
@@ -2127,6 +2175,48 @@ mod tests {
             observed.iter().all(|unit| unit.hero_slot != Some(5)),
             "wall blocks the enemy hero"
         );
+    }
+
+    #[test]
+    fn shield_ability_absorbs_damage_and_expires() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Shield"),
+            cooldown_ticks: 120,
+            mana_cost: 10,
+            cast_range: 0.into(),
+            kind: AbilityKind::Shield {
+                amount: 100,
+                duration_ticks: 60,
+            },
+        };
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let mut inputs = TickInputs::new();
+        inputs.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: FixVec2::ZERO,
+            },
+        );
+        sim.tick(&inputs);
+        assert_eq!(sim.world.get::<Shield>(blue).expect("shield").amount, 100);
+        let before = sim.world.get::<Health>(blue).expect("health").current;
+        sim.damage(blue, 10, DamageType::Physical, red);
+        assert_eq!(
+            sim.world.get::<Health>(blue).expect("health").current,
+            before,
+            "shield absorbs the hit"
+        );
+        assert!(sim.world.get::<Shield>(blue).expect("shield").amount < 100);
+        for _ in 0..62 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(sim.world.get::<Shield>(blue).is_none());
     }
 
     #[test]

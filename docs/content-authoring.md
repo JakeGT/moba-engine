@@ -109,7 +109,9 @@ damage_type = "magic"   # physical | magic
 ```
 
 Kinds take: `skillshot` (`speed`, `range`, `radius`, `damage`, `damage_type`), `dash`
-(`range`), `heal` (`amount`, `radius`) or `burst` (`radius`, `damage`, `damage_type`).
+(`range`), `heal` (`amount`, `radius`), `shield` (`amount`, `duration_ticks`) or `burst`
+(`radius`, `damage`, `damage_type`). Shields absorb damage before health and show as a cyan
+tint on the unit.
 Hero names must be 1–16 ASCII bytes and unique; ability ids must exist.
 
 A map can be supplied as a partial overlay; omitted item/hero/ability sections use engine

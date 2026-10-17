@@ -18,7 +18,8 @@ deterministic playback and server authority.
   protocol regression test added.
 - Runtime hero catalogue: `HeroSpec` stats and ability bindings, TOML `[[heroes]]`, validation,
   `WireHero` handshake entries for client HUD/vision; simulation spawns/casts from content.
-- Runtime ability catalogue: `AbilitySpec` over the engine's skillshot/dash/heal/burst kinds,
+- Runtime ability catalogue: `AbilitySpec` over the engine's skillshot/dash/heal/shield/burst
+  kinds,
   TOML `[[abilities]]`, validation, `WireAbility` handshake entries for HUD cooldowns; a
   custom burst ability is exercised by a simulation test (content/ability-pack.toml).
 - Runtime maps: `MapSpec` lanes/spawns/structures/walls, partial TOML `[map]` overlay,
@@ -31,6 +32,7 @@ deterministic playback and server authority.
   `moba-tools replay --items pack.toml` verifies custom matches. Live custom replay verified
   at hash `0x5f2fd8408d51955a` / state `0x2e3dc732ced63886`.
 
+- Shield kind: temporary absorption with duration, snapshot flag and cyan client tint.
 - Hot reload: `--reload-content` swaps packs only in an empty lobby; connected clients keep
   their handshake catalogue. Test covers reload with zero clients.
 

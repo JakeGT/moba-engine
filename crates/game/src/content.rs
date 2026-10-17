@@ -448,6 +448,10 @@ impl GameContent {
                         && damage >= 0
                 }
                 AbilityKind::Dash { range } => range > Fix::ZERO,
+                AbilityKind::Shield {
+                    amount,
+                    duration_ticks,
+                } => amount > 0 && duration_ticks > 0,
                 AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
                 AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
             };
@@ -590,6 +594,14 @@ impl GameContent {
                     feed(&[2]);
                     feed(&(amount as u32).to_le_bytes());
                     feed(&radius.to_bits().to_le_bytes());
+                }
+                AbilityKind::Shield {
+                    amount,
+                    duration_ticks,
+                } => {
+                    feed(&[4]);
+                    feed(&(amount as u32).to_le_bytes());
+                    feed(&duration_ticks.to_le_bytes());
                 }
                 AbilityKind::Burst {
                     radius,
@@ -756,6 +768,8 @@ struct AbilityEntry {
     damage: i32,
     #[serde(default)]
     amount: i32,
+    #[serde(default)]
+    duration_ticks: u32,
     #[serde(default = "default_damage_type")]
     damage_type: String,
 }
@@ -853,6 +867,10 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         "heal" => AbilityKind::Heal {
                             amount: ability.amount,
                             radius: Fix::from_f32(ability.radius),
+                        },
+                        "shield" => AbilityKind::Shield {
+                            amount: ability.amount,
+                            duration_ticks: ability.duration_ticks,
                         },
                         "burst" => AbilityKind::Burst {
                             radius: Fix::from_f32(ability.radius),

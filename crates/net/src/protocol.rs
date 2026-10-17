@@ -1005,6 +1005,8 @@ pub struct NetEntity {
 
 /// Flag bit for dead heroes.
 pub const ENTITY_FLAG_DEAD: u8 = 1;
+/// A temporary shield is active.
+pub const ENTITY_FLAG_SHIELD: u8 = 1 << 1;
 
 impl NetEntity {
     /// Quantises an observed unit.
@@ -1017,7 +1019,8 @@ impl NetEntity {
             team: unit.team.index() as u8,
             hero_slot: unit.hero_slot.unwrap_or(0xFF),
             hero_pick: unit.hero_pick,
-            flags: if unit.dead { ENTITY_FLAG_DEAD } else { 0 },
+            flags: (if unit.dead { ENTITY_FLAG_DEAD } else { 0 })
+                | (if unit.shielded { ENTITY_FLAG_SHIELD } else { 0 }),
             max_health: clamp_u16(unit.max_health),
             max_mana: clamp_u16(unit.max_mana),
             x,
@@ -2002,6 +2005,7 @@ mod tests {
             xp: 120,
             gold: 950,
             items: [0, 1, 2, 0xFF, 0xFF, 0xFF],
+            shielded: true,
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);
@@ -2010,5 +2014,6 @@ mod tests {
         assert_eq!(entity.progress.level, 4);
         assert_eq!(entity.progress.gold, 950);
         assert!(!entity.is_dead());
+        assert!(entity.flags & ENTITY_FLAG_SHIELD != 0);
     }
 }

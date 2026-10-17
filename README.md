@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, terrain fog of war, bitmap HUD, Tab scoreboard, shop, mouse/keyboard controls and a read-only spectator view |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 152 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 153 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 

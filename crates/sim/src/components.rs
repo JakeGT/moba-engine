@@ -60,6 +60,15 @@ pub struct Health {
     pub max: i32,
 }
 
+/// Temporary damage absorption.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Shield {
+    /// Remaining absorption.
+    pub amount: i32,
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+}
+
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {

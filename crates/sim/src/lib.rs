@@ -18,7 +18,7 @@ mod sim;
 pub use components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
     LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
-    UnitKind, VisionRange,
+    Shield, UnitKind, VisionRange,
 };
 pub use replay::{Replay, ReplayError, ReplayResult};
 pub use sim::{
