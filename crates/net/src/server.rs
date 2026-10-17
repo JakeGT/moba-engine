@@ -5,7 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use moba_game::GameContent;
 use moba_sim::{ObservedUnit, PlayerCommand, Replay, SimConfig, Simulation, TickInputs};
@@ -199,6 +199,12 @@ impl RateLimiter {
     }
 }
 
+#[derive(Debug)]
+struct ContentReload {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+}
+
 struct ServerIdentity {
     seed: [u8; 32],
     public: [u8; 32],
@@ -292,6 +298,7 @@ pub struct NetServer {
     simulation: Simulation,
     content: Arc<GameContent>,
     identity: Option<ServerIdentity>,
+    reload: Option<ContentReload>,
     limiter: RateLimiter,
     config: ServerConfig,
     clients: Vec<Option<ClientConn>>,
@@ -335,6 +342,7 @@ impl NetServer {
             simulation,
             content,
             identity: None,
+            reload: None,
             limiter,
             config,
             clients: (0..total_slots).map(|_| None).collect(),
@@ -405,6 +413,53 @@ impl NetServer {
         self.identity.as_ref().map(|identity| identity.public)
     }
 
+    /// Watches a content pack file and reloads it while the lobby is empty.
+    ///
+    /// Connected clients keep their handshake catalogue, so reloads are deferred until no
+    /// clients are connected and the server is back in the lobby.
+    pub fn watch_content(&mut self, path: PathBuf) {
+        let modified = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        self.reload = Some(ContentReload { path, modified });
+    }
+
+    fn poll_content_reload(&mut self) {
+        let Some(reload) = self.reload.as_mut() else {
+            return;
+        };
+        if self.phase != Phase::Lobby
+            || self.clients.iter().flatten().any(|client| client.connected)
+        {
+            return;
+        }
+        let Ok(modified) = std::fs::metadata(&reload.path).and_then(|metadata| metadata.modified())
+        else {
+            return;
+        };
+        if reload.modified == Some(modified) {
+            return;
+        }
+        reload.modified = Some(modified);
+        match moba_game::load_content_file(&reload.path) {
+            Ok(content) => {
+                let hash = content.hash();
+                let content = Arc::new(content);
+                self.simulation =
+                    Simulation::new_with_content(self.config.sim, Arc::clone(&content));
+                self.content = content;
+                self.record_config = self.config.sim;
+                self.record_frames.clear();
+                self.recorded = false;
+                eprintln!(
+                    "content reloaded {} items, hash {hash:#018x}",
+                    self.content.items.len()
+                );
+            }
+            Err(error) => eprintln!("content reload failed: {error}"),
+        }
+    }
+
     /// Current counters.
     #[must_use]
     pub fn stats(&self) -> ServerStats {
@@ -450,6 +505,9 @@ impl NetServer {
     /// Returns OS send errors from snapshot transmission.
     pub fn tick(&mut self) -> io::Result<()> {
         self.frame = self.frame.wrapping_add(1);
+        if self.frame % 30 == 0 {
+            self.poll_content_reload();
+        }
         match self.phase {
             Phase::Lobby => {}
             Phase::Countdown(remaining) => {
@@ -1377,6 +1435,60 @@ mod tests {
         assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
         assert_eq!(server.match_number(), 1);
         assert_eq!(server.simulation().outcome(), None);
+    }
+
+    #[test]
+    fn content_reloads_only_with_an_empty_lobby() {
+        let path = std::env::temp_dir().join(format!(
+            "moba-reload-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        std::fs::write(
+            &path,
+            r#"[[items]]
+name = "First"
+cost = 1
+"#,
+        )
+        .expect("seed content");
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 4,
+            max_packets_per_second: 120,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        server.watch_content(path.clone());
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(
+            &path,
+            r#"[[items]]
+name = "Reloaded"
+cost = 1
+"#,
+        )
+        .expect("rewrite content");
+        for _ in 0..30 {
+            server.tick().expect("tick");
+        }
+        assert_eq!(server.simulation().content().items[0].name, "Reloaded");
+        assert_eq!(
+            server.simulation().content().hash(),
+            moba_game::load_content_file(&path).expect("load").hash()
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

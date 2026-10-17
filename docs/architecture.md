@@ -146,6 +146,10 @@ The terrain shader receives the same segments and rejects a vision-circle contri
 a wall crosses the circle-center→fragment ray. Wall geometry rendering is intentionally not
 part of this slice; the blockers are authored data and minimap-independent.
 
+`NetServer` can watch a content file (`watch_content`/`--reload-content`) and swap it only
+when the phase is Lobby and no clients are connected; the simulation is recreated with the
+new catalogue for the next match.
+
 `NetServer` applies a token-bucket rate limit per source address before message decoding
 (default 120 pps, burst one second; `0` disables). Buckets are bounded and evicted LRU to cap
 memory under spoofed-source floods. `ServerStats` exposes bytes, snapshots, rate-limited

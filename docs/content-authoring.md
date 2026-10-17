@@ -143,6 +143,10 @@ Maps allow 1–4 lanes with 2–16 waypoints, up to 32 structures/walls, and mus
 nexus per team. Clients receive lane/wall geometry in the handshake; the server filters
 visible units and the terrain shader ray-tests each vision circle against the walls. Clients receive the
 hero names/vision/ability bindings for HUD/vision, while simulation stats come from the same
-pack. Replays record a content hash and inputs; keep the pack alongside a replay and verify with
+pack. Use `moba-server --items pack.toml --reload-content` while iterating: the pack is re-read at
+most once per second when the lobby is empty, and the new catalogue is used by the next
+handshake. Connected clients are never hot-swapped mid-match.
+
+Replays record a content hash and inputs; keep the pack alongside a replay and verify with
 `moba-tools replay --items pack.toml match.mbr`. A mismatched/missing pack is rejected. Ability behaviour effects are data-driven via these kinds; new behaviour kinds and map/lane
 definitions remain compile-time until the rest of M8 lands.

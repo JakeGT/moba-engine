@@ -40,6 +40,18 @@ jobs:
       # Server/sim tests need no GPU; renderer tests use lavapipe in a later stage.
       - run: just ci-core
 
+  tools:
+    name: tools + deterministic soak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just ci-tools
+
   deny:
     runs-on: ubuntu-latest
     steps:

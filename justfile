@@ -8,7 +8,7 @@ default:
 ci-core: fmt-check clippy test layering doc features
 
 # Full local gate (adds supply-chain checks).
-ci: ci-core deny
+ci: ci-core deny ci-tools
 
 fmt-check:
     cargo fmt --all --check
@@ -85,3 +85,10 @@ match-soak:
 # Validate a content pack.
 content-check FILE:
     cargo run -p moba-tools --bin content-check -- {{FILE}}
+
+# Release-gate tooling: content validation, deterministic match soak, bench compilation.
+ci-tools:
+    cargo run --release -p moba-tools --bin content-check -- content/example-pack.toml
+    cargo run --release -p moba-tools --bin content-check -- content/map-pack.toml
+    cargo run --release -p moba-tools --bin match-soak -- --matches 10 --ticks 12000
+    cargo bench --workspace --no-run

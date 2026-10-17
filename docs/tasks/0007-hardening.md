@@ -21,6 +21,11 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   `--max-pps`, 0 disables), drop counters and avg/max tick telemetry. Release soak measures
   avg 9 µs / max 55 µs per simulation tick with 10 clients.
 
+## CI gates
+- Cross-platform fmt/clippy/tests/docs/features/layering.
+- `ci-tools`: content-check fixtures, 10-match deterministic soak and bench compilation.
+- cargo-deny and Miri jobs.
+
 ## Still open
 - Client identity/revocation, playercount attestation and a formal replay window.
 - One-hour sanitizer-backed fuzzing run (the deterministic fuzzer is available).

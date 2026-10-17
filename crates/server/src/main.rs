@@ -26,6 +26,7 @@ fn main() {
     let mut record: Option<std::path::PathBuf> = None;
     let mut items_path: Option<std::path::PathBuf> = None;
     let mut server_key: Option<std::path::PathBuf> = None;
+    let mut reload_content = false;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
     let mut args = std::env::args().skip(1);
@@ -77,10 +78,11 @@ fn main() {
             }
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
+            "--reload-content" => reload_content = true,
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--server-key FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--server-key FILE] [--reload-content]"
                 );
                 return;
             }
@@ -129,6 +131,14 @@ fn main() {
             eprintln!("cannot bind {bind}: {error}");
             std::process::exit(2);
         });
+        if reload_content {
+            if let Some(path) = items_path.clone() {
+                server.watch_content(path);
+            } else {
+                eprintln!("--reload-content requires --items FILE");
+                std::process::exit(2);
+            }
+        }
         let mut identity_note = String::new();
         if let Some(path) = server_key.as_ref() {
             let seed = load_identity_seed(path);

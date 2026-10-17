@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Content hot reload (`--reload-content`) applied only in an empty lobby, with a server test.
+- CI release gate for content validation, deterministic 10-match soak and benchmark
+  compilation.
 - Optional pinned Ed25519 server identity (`--server-key`, `MOBA_SERVER_PUBKEY`) with a
   signed Welcome challenge.
 - Criterion snapshot-codec benchmarks and a profiling capture log

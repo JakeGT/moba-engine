@@ -31,10 +31,13 @@ deterministic playback and server authority.
   `moba-tools replay --items pack.toml` verifies custom matches. Live custom replay verified
   at hash `0x5f2fd8408d51955a` / state `0x2e3dc732ced63886`.
 
+- Hot reload: `--reload-content` swaps packs only in an empty lobby; connected clients keep
+  their handshake catalogue. Test covers reload with zero clients.
+
 ## Next
 - Move map/lane/structure definitions into validated content.
 - Add more ability behaviour kinds (projectile arcs, buffs, summons) and scripting hooks.
-- Rich manifest metadata (content version/author) and hot reload for development.
+- Rich manifest metadata (content version/author) and per-client content-update packets.
 - Hot-reload for development and a `moba-tools content check` command.
 - Asset/model mappings and per-map rendering.
 
