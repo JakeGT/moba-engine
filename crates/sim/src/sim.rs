@@ -15,7 +15,7 @@ use moba_nav::SpatialGrid;
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
     LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
-    Root, Shield, Slow, UnitKind, VisionRange,
+    Root, Shield, Silence, Slow, UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -238,6 +238,8 @@ pub struct ObservedUnit {
     pub slowed: bool,
     /// Whether the unit is rooted.
     pub rooted: bool,
+    /// Whether the unit is silenced.
+    pub silenced: bool,
 }
 
 /// The authoritative MOBA simulation.
@@ -526,6 +528,7 @@ impl Simulation {
                     .is_some_and(|shield| shield.amount > 0),
                 slowed: self.world.get::<Slow>(entity).is_some(),
                 rooted: self.world.get::<Root>(entity).is_some(),
+                silenced: self.world.get::<Silence>(entity).is_some(),
             });
         }
     }
@@ -664,6 +667,10 @@ impl Simulation {
             if let Some(identity) = self.world.get::<HeroIdentity>(entity) {
                 hasher.write_u32(10);
                 hasher.write_u32(u32::from(identity.0.0));
+            }
+            if let Some(silence) = self.world.get::<Silence>(entity) {
+                hasher.write_u32(6);
+                hasher.write_u32(silence.remaining);
             }
             if let Some(root) = self.world.get::<Root>(entity) {
                 hasher.write_u32(5);
@@ -932,6 +939,16 @@ impl Simulation {
             }
         }
 
+        let mut expired_silences = Vec::new();
+        for (entity, silence) in self.world.query::<&mut Silence>() {
+            silence.remaining = silence.remaining.saturating_sub(1);
+            if silence.remaining == 0 {
+                expired_silences.push(entity);
+            }
+        }
+        for entity in expired_silences {
+            let _ = self.world.remove::<Silence>(entity);
+        }
         let mut expired_roots = Vec::new();
         for (entity, root) in self.world.query::<&mut Root>() {
             root.remaining = root.remaining.saturating_sub(1);
@@ -999,6 +1016,7 @@ impl Simulation {
         }
         let _ = self.world.remove::<Slow>(entity);
         let _ = self.world.remove::<Root>(entity);
+        let _ = self.world.remove::<Silence>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
             position.0 = self.content.map.hero_spawn(team, slot % 5);
         }
@@ -1128,6 +1146,9 @@ impl Simulation {
         let Some(team) = self.world.get::<Team>(caster).copied() else {
             return;
         };
+        if self.world.get::<Silence>(caster).is_some() {
+            return;
+        }
 
         let is_directed = matches!(
             ability.kind,
@@ -1199,6 +1220,32 @@ impl Simulation {
                         remaining: current.remaining.max(duration_ticks),
                     },
                 );
+            }
+            moba_game::AbilityKind::Silence {
+                radius,
+                duration_ticks,
+            } => {
+                self.damage_hits.clear();
+                for (entity, (other_position, other_team)) in
+                    self.world.query::<(&Position, &Team)>()
+                {
+                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
+                    {
+                        continue;
+                    }
+                    self.damage_hits.push(entity);
+                }
+                let mut hits = core::mem::take(&mut self.damage_hits);
+                for target_entity in hits.drain(..) {
+                    let remaining = self
+                        .world
+                        .get::<Silence>(target_entity)
+                        .map_or(duration_ticks, |silence| {
+                            silence.remaining.max(duration_ticks)
+                        });
+                    let _ = self.world.insert(target_entity, Silence { remaining });
+                }
+                self.damage_hits = hits;
             }
             moba_game::AbilityKind::Root {
                 radius,
@@ -2336,6 +2383,67 @@ mod tests {
         sim.grant_xp(blue, 2_000);
         assert!(sim.world.get::<Progression>(blue).expect("progress").level > 1);
         assert_eq!(sim.world.get::<Health>(blue).expect("health").max, health);
+    }
+
+    #[test]
+    fn silence_ability_blocks_casting_and_expires() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Silence"),
+            cooldown_ticks: 120,
+            mana_cost: 5,
+            cast_range: 0.into(),
+            kind: AbilityKind::Silence {
+                radius: 1_000.into(),
+                duration_ticks: 60,
+            },
+        };
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let red_position = sim.world.get::<Position>(red).expect("position").0;
+        let mut cast = TickInputs::new();
+        cast.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: red_position,
+            },
+        );
+        sim.tick(&cast);
+        assert!(sim.world.get::<Silence>(red).is_some());
+        let mana_before = sim.world.get::<Mana>(red).expect("mana").current;
+        let blue_position = sim.world.get::<Position>(blue).expect("position").0;
+        let mut red_cast = TickInputs::new();
+        red_cast.set(
+            5,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: blue_position,
+            },
+        );
+        sim.tick(&red_cast);
+        assert_eq!(
+            sim.world.get::<Mana>(red).expect("mana").current,
+            mana_before,
+            "silenced cast spends no mana"
+        );
+        for _ in 0..61 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(sim.world.get::<Silence>(red).is_none());
+        sim.tick(&red_cast);
+        assert!(
+            sim.world.get::<Mana>(red).expect("mana").current < mana_before,
+            "cast works after silence expires"
+        );
     }
 
     #[test]

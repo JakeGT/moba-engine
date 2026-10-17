@@ -59,6 +59,13 @@ pub enum AbilityKind {
         /// Duration in simulation ticks.
         duration_ticks: u32,
     },
+    /// Silences enemies around the target point, preventing ability casts.
+    Silence {
+        /// Effect radius.
+        radius: Fix,
+        /// Duration in simulation ticks.
+        duration_ticks: u32,
+    },
     /// Instantly damages enemies around the caster.
     Burst {
         /// Effect radius.
@@ -286,6 +293,10 @@ mod tests {
                     assert!(duration_ticks > 0);
                 }
                 AbilityKind::Root {
+                    radius,
+                    duration_ticks,
+                }
+                | AbilityKind::Silence {
                     radius,
                     duration_ticks,
                 } => {

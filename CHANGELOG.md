@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- `silence` ability kind blocking casts until expiry.
 - `root` ability kind blocking movement until expiry.
 - Optional JSONL match-results log (`--results-log`).
 - `slow` ability kind with movement multiplier, expiry/respawn restore and client tint.

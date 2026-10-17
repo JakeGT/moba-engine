@@ -1011,6 +1011,8 @@ pub const ENTITY_FLAG_SHIELD: u8 = 1 << 1;
 pub const ENTITY_FLAG_SLOW: u8 = 1 << 2;
 /// The unit is rooted.
 pub const ENTITY_FLAG_ROOT: u8 = 1 << 3;
+/// The unit is silenced.
+pub const ENTITY_FLAG_SILENCE: u8 = 1 << 4;
 
 impl NetEntity {
     /// Quantises an observed unit.
@@ -1026,7 +1028,12 @@ impl NetEntity {
             flags: (if unit.dead { ENTITY_FLAG_DEAD } else { 0 })
                 | (if unit.shielded { ENTITY_FLAG_SHIELD } else { 0 })
                 | (if unit.slowed { ENTITY_FLAG_SLOW } else { 0 })
-                | (if unit.rooted { ENTITY_FLAG_ROOT } else { 0 }),
+                | (if unit.rooted { ENTITY_FLAG_ROOT } else { 0 })
+                | (if unit.silenced {
+                    ENTITY_FLAG_SILENCE
+                } else {
+                    0
+                }),
             max_health: clamp_u16(unit.max_health),
             max_mana: clamp_u16(unit.max_mana),
             x,
@@ -2014,6 +2021,7 @@ mod tests {
             shielded: true,
             slowed: false,
             rooted: false,
+            silenced: false,
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);

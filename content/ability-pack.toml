@@ -47,6 +47,15 @@ kind = "root"
 radius = 160.0
 duration_ticks = 75
 
+[[abilities]]
+name = "Hush"
+cooldown_ticks = 240
+mana_cost = 30
+cast_range = 0.0
+kind = "silence"
+radius = 170.0
+duration_ticks = 80
+
 [[heroes]]
 name = "Nova Mage"
 max_health = 520
@@ -60,4 +69,4 @@ move_speed = 6.0
 armor = 14
 magic_resist = 24
 vision_range = 14.0
-abilities = [3, 2, 1]
+abilities = [4, 2, 1]

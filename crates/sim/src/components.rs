@@ -87,6 +87,13 @@ pub struct Root {
     pub remaining: u32,
 }
 
+/// Temporary silence.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Silence {
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+}
+
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {
