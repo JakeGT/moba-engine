@@ -849,8 +849,6 @@ version = "0.1.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
- "moba-nav",
- "moba-sim",
 ]
 
 [[package]]
@@ -925,8 +923,10 @@ version = "0.1.0"
 name = "moba-sim"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "moba-core",
  "moba-ecs",
+ "moba-game",
  "moba-jobs",
  "moba-nav",
 ]

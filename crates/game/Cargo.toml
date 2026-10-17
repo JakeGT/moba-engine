@@ -12,5 +12,3 @@ workspace = true
 [dependencies]
 moba-core.workspace = true
 moba-ecs.workspace = true
-moba-sim.workspace = true
-moba-nav.workspace = true
