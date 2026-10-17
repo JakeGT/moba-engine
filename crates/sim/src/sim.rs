@@ -5,15 +5,16 @@ use core::fmt;
 use moba_core::{Fix, FixVec2, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
-    DamageType, HEROES, HeroDef, HeroId, MAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
-    mitigate_typed,
+    DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, HEROES, HeroDef, HeroId, ITEMS,
+    LEVEL_CAP, LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD,
+    TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
 
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, Cooldowns, Dead, Health, HeroIdentity, HeroSlot,
-    LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Regen, Resistances, UnitKind,
-    VisionRange,
+    LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances,
+    UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -84,6 +85,8 @@ pub enum PlayerCommand {
         /// Target point.
         target: FixVec2,
     },
+    /// Purchases an item from the catalogue (must be near the team nexus).
+    BuyItem(u8),
 }
 
 /// One tick of input for every player.
@@ -215,6 +218,14 @@ pub struct ObservedUnit {
     pub hero_pick: u8,
     /// Remaining Q/W/E cooldowns for heroes.
     pub cooldowns: [u32; 3],
+    /// Hero level (zero for non-heroes).
+    pub level: u8,
+    /// Experience towards the next level.
+    pub xp: u32,
+    /// Current gold (only meaningful for the viewing player's hero).
+    pub gold: u32,
+    /// Inventory item ids (`0xFF` empty).
+    pub items: [u8; 6],
 }
 
 /// The authoritative MOBA simulation.
@@ -233,7 +244,7 @@ pub struct Simulation {
     grid: SpatialGrid<TargetRef>,
     hero_views: Vec<HeroView>,
     attackers: Vec<AttackerSnapshot>,
-    deaths: Vec<(Entity, Team, UnitKind)>,
+    deaths: Vec<(Entity, Team, UnitKind, FixVec2)>,
     respawns: Vec<Entity>,
     damage_hits: Vec<Entity>,
 }
@@ -424,6 +435,7 @@ impl Simulation {
                 .world
                 .get::<HeroIdentity>(entity)
                 .map_or(0xFF, |identity| identity.0.0);
+            let progression = self.world.get::<Progression>(entity).copied();
             let cooldowns = self
                 .world
                 .get::<Cooldowns>(entity)
@@ -447,6 +459,10 @@ impl Simulation {
                 hero_slot,
                 hero_pick,
                 cooldowns,
+                level: progression.map_or(0, |progress| progress.level),
+                xp: progression.map_or(0, |progress| progress.xp),
+                gold: progression.map_or(0, |progress| progress.gold),
+                items: progression.map_or([EMPTY_ITEM; 6], |progress| progress.items),
             });
         }
     }
@@ -467,6 +483,16 @@ impl Simulation {
     pub fn tick(&mut self, inputs: &TickInputs) {
         if self.outcome.is_some() {
             return;
+        }
+        if self.tick.get() % GOLD_TICK_INTERVAL == 0 {
+            for hero in self.hero_entities {
+                if self.world.has::<Dead>(hero) {
+                    continue;
+                }
+                if let Some(progress) = self.world.get_mut::<Progression>(hero) {
+                    progress.gold = progress.gold.saturating_add(GOLD_PER_INTERVAL);
+                }
+            }
         }
         self.tick_timers();
         self.apply_inputs(inputs);
@@ -502,6 +528,8 @@ impl Simulation {
         hasher.write_u32(self.tick.get());
         hasher.write_u32(self.wave);
         hasher.write_u32(self.next_wave_tick);
+        hasher.write_u32(self.blue_score);
+        hasher.write_u32(self.red_score);
         match self.outcome {
             Some(team) => hasher.write_u32(1 + team.index() as u32),
             None => hasher.write_u32(0),
@@ -572,6 +600,16 @@ impl Simulation {
             if let Some(identity) = self.world.get::<HeroIdentity>(entity) {
                 hasher.write_u32(10);
                 hasher.write_u32(u32::from(identity.0.0));
+            }
+            if let Some(progress) = self.world.get::<Progression>(entity) {
+                hasher.write_u32(11);
+                hasher.write_u32(u32::from(progress.level));
+                hasher.write_u32(progress.xp);
+                hasher.write_u32(progress.gold);
+                hasher.write_u32(u32::from(progress.item_count));
+                for item in progress.items {
+                    hasher.write_u32(u32::from(item));
+                }
             }
         }
         hasher.finish64()
@@ -669,6 +707,16 @@ impl Simulation {
             .insert(entity, HeroSlot(u8::try_from(slot).expect("slot fits u8")));
         let _ = self.world.insert(entity, HeroIdentity(hero_id));
         let _ = self.world.insert(entity, Cooldowns::default());
+        let _ = self.world.insert(
+            entity,
+            Progression {
+                level: 1,
+                xp: 0,
+                gold: STARTING_GOLD,
+                items: [EMPTY_ITEM; 6],
+                item_count: 0,
+            },
+        );
         let _ = self.world.insert(
             entity,
             Regen {
@@ -876,6 +924,9 @@ impl Simulation {
                 } => {
                     self.cast_ability(entity, ability, target);
                 }
+                PlayerCommand::BuyItem(item) => {
+                    self.buy_item(entity, item);
+                }
             }
         }
     }
@@ -985,7 +1036,7 @@ impl Simulation {
                 }
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target in hits.drain(..) {
-                    self.damage(target, damage, damage_type, team);
+                    self.damage(target, damage, damage_type, caster);
                 }
                 self.damage_hits = hits;
             }
@@ -1168,7 +1219,7 @@ impl Simulation {
                 snapshot.target,
                 snapshot.damage,
                 DamageType::Physical,
-                attacker_team,
+                snapshot.attacker,
             );
             if let Some(stats) = self.world.get_mut::<AttackStats>(snapshot.attacker) {
                 stats.cooldown = snapshot.interval;
@@ -1205,7 +1256,7 @@ impl Simulation {
                     target,
                     projectile.damage,
                     projectile.damage_type,
-                    projectile.team,
+                    projectile.owner,
                 );
                 self.projectiles.swap_remove(index);
             } else {
@@ -1218,13 +1269,15 @@ impl Simulation {
     fn resolve_deaths(&mut self) {
         let mut deaths = core::mem::take(&mut self.deaths);
         deaths.clear();
-        for (entity, (health, team, kind)) in self.world.query::<(&Health, &Team, &UnitKind)>() {
+        for (entity, (health, team, kind, position)) in
+            self.world.query::<(&Health, &Team, &UnitKind, &Position)>()
+        {
             if health.current <= 0 {
-                deaths.push((entity, *team, *kind));
+                deaths.push((entity, *team, *kind, position.0));
             }
         }
 
-        for (entity, team, kind) in deaths.iter().copied() {
+        for (entity, team, kind, position) in deaths.iter().copied() {
             if kind.is_hero() {
                 if self.world.has::<Dead>(entity) {
                     continue;
@@ -1241,16 +1294,20 @@ impl Simulation {
                 if let Some(target) = self.world.get_mut::<AttackTarget>(entity) {
                     target.0 = None;
                 }
-                if let Some(credit) = self.world.get::<LastHitBy>(entity).map(|credit| credit.0) {
-                    match credit {
+                let credit = self.world.get::<LastHitBy>(entity).copied();
+                if let Some(credit) = credit {
+                    match credit.team {
                         Team::Blue => self.blue_score = self.blue_score.saturating_add(1),
                         Team::Red => self.red_score = self.red_score.saturating_add(1),
                     }
                 }
+                self.award_bounty(team, kind, position, credit.map(|credit| credit.entity));
                 self.push_event(SimEvent::UnitDied { entity, kind, team });
                 continue;
             }
 
+            let credit = self.world.get::<LastHitBy>(entity).copied();
+            self.award_bounty(team, kind, position, credit.map(|credit| credit.entity));
             self.world.despawn(entity);
             self.push_event(SimEvent::UnitDied { entity, kind, team });
             if kind.is_structure() {
@@ -1266,7 +1323,10 @@ impl Simulation {
         self.deaths = deaths;
     }
 
-    fn damage(&mut self, target: Entity, amount: i32, damage_type: DamageType, source: Team) {
+    fn damage(&mut self, target: Entity, amount: i32, damage_type: DamageType, source: Entity) {
+        let Some(source_team) = self.world.get::<Team>(source).copied() else {
+            return;
+        };
         let Some(health) = self.world.get::<Health>(target).copied() else {
             return;
         };
@@ -1295,10 +1355,164 @@ impl Simulation {
         };
         if remaining <= 0 {
             let target_team = self.world.get::<Team>(target).copied();
-            if target_team.is_some_and(|team| team != source) {
-                let _ = self.world.insert(target, LastHitBy(source));
+            if target_team.is_some_and(|team| team != source_team) {
+                let _ = self.world.insert(
+                    target,
+                    LastHitBy {
+                        team: source_team,
+                        entity: source,
+                    },
+                );
             }
         }
+    }
+
+    fn award_bounty(
+        &mut self,
+        dead_team: Team,
+        kind: UnitKind,
+        position: FixVec2,
+        last_hit: Option<Entity>,
+    ) {
+        let enemy = dead_team.enemy();
+        let mut beneficiaries = [Entity::PLACEHOLDER; MAX_PLAYERS];
+        let mut count = 0usize;
+        for hero in self.hero_entities {
+            if self.world.get::<Team>(hero).copied() != Some(enemy) || self.world.has::<Dead>(hero)
+            {
+                continue;
+            }
+            let Some(hero_position) = self.world.get::<Position>(hero).map(|p| p.0) else {
+                continue;
+            };
+            if hero_position.distance_sq(position) <= XP_RADIUS * XP_RADIUS {
+                beneficiaries[count] = hero;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            // League-style shared minion experience: 130% split among nearby allies.
+            let shared = (unit_xp(kind) * 13 / 10) / u32::try_from(count).unwrap_or(1);
+            let share = shared.max(1);
+            for hero in &beneficiaries[..count] {
+                self.grant_xp(*hero, share);
+            }
+        }
+        let Some(killer) = last_hit else {
+            return;
+        };
+        if self.world.get::<Team>(killer).copied() != Some(enemy)
+            || self.world.get::<HeroSlot>(killer).is_none()
+        {
+            return;
+        }
+        if let Some(progress) = self.world.get_mut::<Progression>(killer) {
+            progress.gold = progress.gold.saturating_add(unit_gold(kind));
+        }
+    }
+
+    fn grant_xp(&mut self, hero: Entity, amount: u32) {
+        let Some(mut progress) = self.world.get::<Progression>(hero).copied() else {
+            return;
+        };
+        if progress.level >= LEVEL_CAP {
+            progress.xp = 0;
+            let _ = self.world.insert(hero, progress);
+            return;
+        }
+        progress.xp = progress.xp.saturating_add(amount);
+        while progress.level < LEVEL_CAP {
+            let needed = xp_to_next(progress.level);
+            if progress.xp < needed {
+                break;
+            }
+            progress.xp -= needed;
+            progress.level += 1;
+            self.level_up(hero);
+        }
+        if progress.level >= LEVEL_CAP {
+            progress.xp = 0;
+        }
+        let _ = self.world.insert(hero, progress);
+    }
+
+    fn level_up(&mut self, hero: Entity) {
+        if let Some(health) = self.world.get_mut::<Health>(hero) {
+            health.max = health.max.saturating_add(LEVEL_GROWTH.health);
+            health.current = (health.current + LEVEL_GROWTH.health).min(health.max);
+        }
+        if let Some(mana) = self.world.get_mut::<Mana>(hero) {
+            mana.max = mana.max.saturating_add(LEVEL_GROWTH.mana);
+            mana.current = (mana.current + LEVEL_GROWTH.mana).min(mana.max);
+        }
+        if let Some(stats) = self.world.get_mut::<AttackStats>(hero) {
+            stats.damage = stats.damage.saturating_add(LEVEL_GROWTH.attack_damage);
+        }
+        if let Some(resistances) = self.world.get_mut::<Resistances>(hero) {
+            resistances.armor = resistances.armor.saturating_add(LEVEL_GROWTH.armor);
+            resistances.magic_resist = resistances
+                .magic_resist
+                .saturating_add(LEVEL_GROWTH.magic_resist);
+        }
+    }
+
+    /// Purchases an item for `slot`'s hero. Used by the network server for shop inputs,
+    /// which are applied immediately rather than queued as movement orders.
+    ///
+    /// Returns whether the purchase succeeded (near own nexus, enough gold, free slot).
+    pub fn purchase(&mut self, slot: usize, item_id: u8) -> bool {
+        let Some(&hero) = self.hero_entities.get(slot) else {
+            return false;
+        };
+        if self.world.has::<Dead>(hero) {
+            return false;
+        }
+        self.buy_item(hero, item_id)
+    }
+
+    #[allow(clippy::too_many_lines)] // Flat stat application is clearer than a trait tower.
+    fn buy_item(&mut self, hero: Entity, item_id: u8) -> bool {
+        let Some(item) = ITEMS.get(usize::from(item_id)).copied() else {
+            return false;
+        };
+        let Some(team) = self.world.get::<Team>(hero).copied() else {
+            return false;
+        };
+        let Some(position) = self.world.get::<Position>(hero).map(|p| p.0) else {
+            return false;
+        };
+        if position.distance_sq(MAP.nexus_position(team)) > SHOP_RADIUS * SHOP_RADIUS {
+            return false;
+        }
+        let Some(mut progress) = self.world.get::<Progression>(hero).copied() else {
+            return false;
+        };
+        if progress.gold < item.cost || usize::from(progress.item_count) >= moba_game::ITEM_SLOTS {
+            return false;
+        }
+        progress.gold -= item.cost;
+        progress.items[usize::from(progress.item_count)] = item_id;
+        progress.item_count += 1;
+        let _ = self.world.insert(hero, progress);
+        if let Some(health) = self.world.get_mut::<Health>(hero) {
+            health.max = health.max.saturating_add(item.health);
+            health.current = health.current.saturating_add(item.health);
+        }
+        if let Some(mana) = self.world.get_mut::<Mana>(hero) {
+            mana.max = mana.max.saturating_add(item.mana);
+            mana.current = mana.current.saturating_add(item.mana);
+        }
+        if let Some(stats) = self.world.get_mut::<AttackStats>(hero) {
+            stats.damage = stats.damage.saturating_add(item.attack_damage);
+        }
+        if let Some(resistances) = self.world.get_mut::<Resistances>(hero) {
+            resistances.armor = resistances.armor.saturating_add(item.armor);
+            resistances.magic_resist = resistances.magic_resist.saturating_add(item.magic_resist);
+        }
+        if let Some(speed) = self.world.get_mut::<MoveSpeed>(hero) {
+            speed.0 += item.move_speed_per_sec * ONE_TICK;
+        }
+        true
     }
 
     fn refresh_spatial(&mut self) {
@@ -1325,11 +1539,16 @@ impl Simulation {
     fn push_event(&mut self, event: SimEvent) {
         if self.events.len() < MAX_EVENTS {
             self.events.push(event);
+        } else if matches!(event, SimEvent::MatchEnded { .. }) {
+            // Match end is a terminal event; it must not be lost when the bounded queue is
+            // full of routine combat events.
+            self.events[MAX_EVENTS - 1] = event;
         }
     }
 
     /// Deterministic bot AI. Returns one command per bot-controlled slot.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Explicit priority ladder is easier to audit.
     pub fn bot_inputs(&mut self) -> TickInputs {
         self.refresh_spatial();
         self.hero_views.clear();
@@ -1364,6 +1583,29 @@ impl Simulation {
             let slot = usize::from(view.slot);
             if self.config.bot_mask & (1 << slot) == 0 {
                 continue;
+            }
+            if let Some(hero) = self.hero_entities.get(slot).copied() {
+                let near_shop = self.world.get::<Position>(hero).is_some_and(|position| {
+                    position.0.distance_sq(MAP.nexus_position(view.team))
+                        <= SHOP_RADIUS * SHOP_RADIUS
+                });
+                if near_shop {
+                    if let Some(progress) = self.world.get::<Progression>(hero) {
+                        if usize::from(progress.item_count) < moba_game::ITEM_SLOTS {
+                            if let Some(item) = ITEMS
+                                .iter()
+                                .enumerate()
+                                .find(|(_, item)| item.cost <= progress.gold)
+                            {
+                                inputs.set(
+                                    slot,
+                                    PlayerCommand::BuyItem(u8::try_from(item.0).unwrap_or(0)),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
             let enemy_nexus = MAP.nexus_position(view.team.enemy());
             let hero_target =
@@ -1452,6 +1694,26 @@ impl Simulation {
             }
         });
         best.map(|(_, target)| target)
+    }
+}
+
+const fn unit_xp(kind: UnitKind) -> u32 {
+    match kind {
+        UnitKind::MeleeMinion => 32,
+        UnitKind::RangedMinion => 45,
+        UnitKind::Tower => 220,
+        UnitKind::Nexus => 300,
+        UnitKind::Hero => 180,
+    }
+}
+
+const fn unit_gold(kind: UnitKind) -> u32 {
+    match kind {
+        UnitKind::MeleeMinion => 20,
+        UnitKind::RangedMinion => 25,
+        UnitKind::Tower => 250,
+        UnitKind::Nexus => 500,
+        UnitKind::Hero => 300,
     }
 }
 
@@ -1627,13 +1889,53 @@ mod tests {
         let mut sim = idle(SimConfig::default().hero_picks);
         let blue = sim.hero_entities[0];
         let red = sim.hero_entities[5];
-        sim.damage(red, 10_000, DamageType::Physical, Team::Blue);
-        sim.damage(blue, 10_000, DamageType::Physical, Team::Red);
+        sim.damage(red, 10_000, DamageType::Physical, blue);
+        sim.damage(blue, 10_000, DamageType::Physical, red);
         sim.tick(&TickInputs::default());
         assert_eq!(sim.score(), (1, 1));
         assert_eq!(
             sim.world.get::<Dead>(red).map(|dead| dead.respawn_in),
             Some(HERO_RESPAWN_TICKS)
+        );
+    }
+
+    #[test]
+    fn progression_awards_xp_gold_and_items() {
+        use moba_game::{STARTING_GOLD, Team};
+
+        let mut sim = idle(SimConfig::default().hero_picks);
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let red_position = sim.world.get::<Position>(red).expect("position").0;
+        sim.world.get_mut::<Position>(blue).expect("position").0 = red_position;
+        sim.damage(red, 10_000, DamageType::Physical, blue);
+        sim.tick(&TickInputs::default());
+
+        let progress = *sim.world.get::<Progression>(blue).expect("progression");
+        assert_eq!(progress.level, 1);
+        assert_eq!(progress.xp, 234, "solo hero kill shares 130% of 180 XP");
+        assert!(progress.gold >= STARTING_GOLD + 300);
+
+        let health_before = sim.world.get::<Health>(blue).expect("health").max;
+        sim.grant_xp(blue, 1_000);
+        let progress = *sim.world.get::<Progression>(blue).expect("progression");
+        assert_eq!(progress.level, 4);
+        assert_eq!(progress.xp, 94);
+        assert_eq!(
+            sim.world.get::<Health>(blue).expect("health").max,
+            health_before + 210
+        );
+
+        let damage_before = sim.world.get::<AttackStats>(blue).expect("stats").damage;
+        sim.world.get_mut::<Position>(blue).expect("position").0 = MAP.nexus_position(Team::Blue);
+        let gold_before = sim.world.get::<Progression>(blue).expect("progress").gold;
+        sim.buy_item(blue, 0);
+        let progress = *sim.world.get::<Progression>(blue).expect("progress");
+        assert_eq!(progress.item_count, 1);
+        assert_eq!(progress.gold, gold_before - 350);
+        assert_eq!(
+            sim.world.get::<AttackStats>(blue).expect("stats").damage,
+            damage_before + 12
         );
     }
 

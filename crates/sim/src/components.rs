@@ -147,9 +147,29 @@ pub struct Dead {
     pub respawn_in: u32,
 }
 
-/// The team that landed the most recent damage on a unit (kill credit).
+/// The unit and team that landed the most recent damage (kill credit).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct LastHitBy(pub Team);
+pub struct LastHitBy {
+    /// Team of the last attacker.
+    pub team: Team,
+    /// Last attacking entity.
+    pub entity: Entity,
+}
+
+/// Hero level, experience, gold and inventory.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Progression {
+    /// Current level (`1..=LEVEL_CAP`).
+    pub level: u8,
+    /// Experience towards the next level.
+    pub xp: u32,
+    /// Spendable gold.
+    pub gold: u32,
+    /// Purchased item ids, `moba_game::EMPTY_ITEM` for empty slots.
+    pub items: [u8; moba_game::ITEM_SLOTS],
+    /// Number of filled inventory slots.
+    pub item_count: u8,
+}
 
 /// Vision radius. Used by interaction range checks now and fog of war in M5.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

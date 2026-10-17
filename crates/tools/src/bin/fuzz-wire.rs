@@ -114,6 +114,12 @@ fn valid_snapshot(rng: &mut Rng) -> Vec<u8> {
                 rng.next_u32() as u16,
                 rng.next_u32() as u16,
             ],
+            progress: moba_net::protocol::NetProgress {
+                level: rng.gen_range_u32(16) as u8,
+                xp: rng.next_u32() as u16,
+                gold: rng.next_u32() as u16,
+                items: [0xFF; 6],
+            },
         });
     }
     if !delta.spawns.is_empty() && rng.next_bool() {

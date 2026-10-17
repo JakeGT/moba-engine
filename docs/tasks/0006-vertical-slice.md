@@ -23,6 +23,21 @@ levels/items, and a complete match flow.
   kills; snapshots carry scores and outcome; the HUD shows VICTORY/DEFEAT.
 - **Protocol v2**: snapshots add scores, outcome and hero pick on spawn (+9 bytes/snapshot).
 
+## Landed in round 6
+- **Hero levels/XP**: level 1–15 with the League-style rising threshold (280 XP to level 2,
+  +100 per level), shared minion/structure XP (130% split among nearby allies), and per-level
+  health/mana/damage/armour/magic-resistance growth from a data table (`LEVEL_GROWTH`).
+- **Gold and bounties**: last-hit gold for minions/heroes/towers/nexus, passive gold every
+  15 ticks, starting gold, and per-team kill credit retained.
+- **Items and shop**: eight data-driven items with flat stat bonuses, six inventory slots,
+  purchase validation (own nexus radius, gold, free slot), and deterministic bot purchases.
+- **Protocol v3 + HUD**: level/XP/gold/inventory travel in snapshots (gold/inventory are
+  private to the owning client), HUD shows level, XP bar, gold and item slots; B opens a
+  shop with number-key purchases.
+- **Extensibility**: item catalogue, level growth, XP curve and economy constants live in
+  `moba-game`; the simulation only applies them through small helpers, so new items or
+  balance changes do not alter the core tick loop.
+
 ## Still open for M6
 - Hero levels/XP, gold, items and a shop.
 - Lobby/start flow, pause/reconnect, end-of-match summary and rematch.
@@ -35,8 +50,9 @@ levels/items, and a complete match flow.
 - [x] Fog circles align with server visibility; unseen units are absent and unseen terrain is dark.
 - [x] Tab scoreboard lists allied heroes and hides unseen enemies.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
-- [x] 113 workspace tests; protocol/delta tests cover scores, outcome and hero pick.
-- [ ] Levels/items and the full lobby-to-rematch flow.
+- [x] 114 workspace tests; protocol/delta tests cover scores, outcome, hero pick and
+      progression; UDP test covers an actual shop purchase.
+- [~] Levels/XP, gold/items/shop landed; lobby-to-rematch flow remains.
 
 ## Research notes
 - Small pixel text: a bitmap font is cheaper and crisper than SDF at fixed HUD scales

@@ -12,6 +12,7 @@
 pub mod ability;
 pub mod combat;
 pub mod hero;
+pub mod item;
 pub mod map;
 pub mod team;
 pub mod units;
@@ -19,6 +20,10 @@ pub mod units;
 pub use ability::{ABILITIES, AbilityDef, AbilityKind};
 pub use combat::{DamageType, mitigate, mitigate_typed};
 pub use hero::{HEROES, HeroDef, HeroId};
+pub use item::{
+    EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, ITEM_SLOTS, ITEMS, ItemDef, LEVEL_CAP,
+    LEVEL_GROWTH, LevelGrowth, SHOP_RADIUS, STARTING_GOLD, XP_RADIUS, xp_to_next,
+};
 pub use map::{LANES, LaneDef, MAP, MapDef, STRUCTURES, StructureDef, StructureKind};
 pub use team::Team;
 pub use units::{MELEE_MINION, MinionDef, NEXUS, RANGED_MINION, StructureStats, TOWER};

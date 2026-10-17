@@ -32,6 +32,8 @@ pub enum Key {
     Digit4,
     Digit5,
     Digit6,
+    Digit7,
+    Digit8,
     Space,
     Shift,
     Ctrl,
@@ -53,7 +55,7 @@ pub enum Key {
 
 impl Key {
     /// Number of variants; used to size bit sets.
-    pub const COUNT: usize = 33;
+    pub const COUNT: usize = 35;
 
     /// Dense index of this key.
     #[inline]
@@ -106,6 +108,8 @@ pub(crate) fn map_key(code: KeyCode) -> Option<Key> {
         KeyCode::Digit4 => Key::Digit4,
         KeyCode::Digit5 => Key::Digit5,
         KeyCode::Digit6 => Key::Digit6,
+        KeyCode::Digit7 => Key::Digit7,
+        KeyCode::Digit8 => Key::Digit8,
         KeyCode::Space => Key::Space,
         KeyCode::ShiftLeft | KeyCode::ShiftRight => Key::Shift,
         KeyCode::ControlLeft | KeyCode::ControlRight => Key::Ctrl,

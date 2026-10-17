@@ -42,6 +42,7 @@ fn client_connects_receives_snapshots_and_moves() {
     let mut saw_snapshot = false;
     let start = Instant::now();
     let mut sent_move = false;
+    let mut sent_buy = false;
     let mut start_position = None;
     while start.elapsed() < Duration::from_millis(1_500) {
         client.poll().expect("poll");
@@ -62,6 +63,12 @@ fn client_connects_receives_snapshots_and_moves() {
                 let position = hero.position();
                 if start_position.is_none() {
                     start_position = Some(position);
+                }
+                if !sent_buy {
+                    client
+                        .send_command(WireCommand::BuyItem { item: 0 })
+                        .expect("shop input");
+                    sent_buy = true;
                 }
                 if !sent_move {
                     let target = FixVec2::from_ints(120, 128);
@@ -86,6 +93,15 @@ fn client_connects_receives_snapshots_and_moves() {
         snapshot.entities.len() >= 16,
         "structures should be visible"
     );
+    let own = snapshot
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.hero_slot == client.player_slot() && entity.team == client.team().index() as u8
+        })
+        .expect("own hero");
+    assert_eq!(own.progress.items[0], 0, "Ironblade should be in slot 0");
+    assert!(own.progress.gold < 500, "purchase should spend gold");
     let stats = client.stats();
     assert!(stats.bytes_received > 0);
     assert_eq!(stats.state, Some(moba_net::client::ClientState::Connected));

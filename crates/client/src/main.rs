@@ -13,6 +13,8 @@
 //! - `MOBA_CAPTURE=<file.ppm>` plus `MOBA_CAPTURE_FRAME=<n>` writes a readback image.
 //! - `MOBA_VULKAN_VALIDATION=required|off`.
 //! - `MOBA_DEMO_MOVE=x,y` issues one move order after the first snapshot (capture demos).
+//! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
+//! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
 
 #![forbid(unsafe_code)]
 
@@ -24,7 +26,10 @@ use std::time::{Duration, Instant};
 
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
-use moba_game::{HEROES, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team};
+use moba_game::{
+    EMPTY_ITEM, HEROES, ITEMS, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team,
+    xp_to_next,
+};
 use moba_net::protocol::{WireCommand, dequantize_position, quantize_position};
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
 use moba_platform::{
@@ -48,6 +53,8 @@ struct NetworkView {
     last_snapshot_seq: u32,
     demo_move: Option<FixVec2>,
     demo_sent: bool,
+    demo_buy: Option<u8>,
+    demo_bought: bool,
 }
 
 struct ClientApp {
@@ -57,6 +64,7 @@ struct ClientApp {
     units: Vec<UnitInstance>,
     ui: UiDrawList,
     scoreboard_visible: bool,
+    shop_visible: bool,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -79,6 +87,7 @@ impl ClientApp {
             units: Vec::with_capacity(moba_sim::MAX_UNITS),
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
+            shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -104,6 +113,10 @@ impl ClientApp {
                         last_snapshot_seq: 0,
                         demo_move: parse_demo_move(),
                         demo_sent: false,
+                        demo_buy: std::env::var("MOBA_DEMO_BUY")
+                            .ok()
+                            .and_then(|value| value.parse().ok()),
+                        demo_bought: false,
                     });
                 }
                 Err(error) => app.startup_error = Some(error),
@@ -187,6 +200,7 @@ impl App for ClientApp {
                 units,
                 ui,
                 scoreboard_visible,
+                shop_visible,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -227,6 +241,17 @@ impl App for ClientApp {
                                 network.own_net_id = Some(own.net_id);
                                 network.prediction.set_dead(own.is_dead());
                                 network.prediction.reconcile(own.position());
+                                if let Some(item) =
+                                    network.demo_buy.filter(|_| !network.demo_bought)
+                                {
+                                    if network
+                                        .client
+                                        .send_command(WireCommand::BuyItem { item })
+                                        .is_ok()
+                                    {
+                                        network.demo_bought = true;
+                                    }
+                                }
                                 if let Some(target) =
                                     network.demo_move.filter(|_| !network.demo_sent)
                                 {
@@ -250,11 +275,25 @@ impl App for ClientApp {
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect);
-                        handle_network_input(network, frame.input(), &camera, width, height);
+                        handle_network_input(
+                            network,
+                            frame.input(),
+                            &camera,
+                            width,
+                            height,
+                            shop_visible,
+                        );
                         if frame.input().was_key_pressed(Key::Tab) {
                             *scoreboard_visible = !*scoreboard_visible;
                         }
-                        build_network_hud(ui, network, *scoreboard_visible, width, height);
+                        build_network_hud(
+                            ui,
+                            network,
+                            *scoreboard_visible,
+                            *shop_visible,
+                            width,
+                            height,
+                        );
                         let vision = build_vision(network);
                         let scene = Scene::with_vision(camera, units, vision);
                         if let Some(renderer) = renderer.as_mut() {
@@ -514,7 +553,28 @@ fn handle_network_input(
     camera: &Camera,
     width: u32,
     height: u32,
+    shop: &mut bool,
 ) {
+    if input.was_key_pressed(Key::B) {
+        *shop = !*shop;
+    }
+    if *shop {
+        for (key, item) in [
+            (Key::Digit1, 0u8),
+            (Key::Digit2, 1),
+            (Key::Digit3, 2),
+            (Key::Digit4, 3),
+            (Key::Digit5, 4),
+            (Key::Digit6, 5),
+            (Key::Digit7, 6),
+            (Key::Digit8, 7),
+        ] {
+            if input.was_key_pressed(key) {
+                let _ = network.client.send_command(WireCommand::BuyItem { item });
+            }
+        }
+        return;
+    }
     let Some(cursor) = input.cursor() else {
         return;
     };
@@ -642,6 +702,7 @@ fn build_network_hud(
     ui: &mut UiDrawList,
     network: &NetworkView,
     scoreboard: bool,
+    shop: bool,
     width: u32,
     height: u32,
 ) {
@@ -741,23 +802,40 @@ fn build_network_hud(
 
     // Hero panel.
     let panel_w = 452.0;
-    let panel_h = 154.0;
+    let panel_h = 196.0;
     let x = 24.0;
     let y = height_f - panel_h - 24.0;
     ui.panel(x, y, panel_w, panel_h, bg, border);
+    let progress = own.map_or(moba_net::protocol::NetProgress::default(), |entity| {
+        entity.progress
+    });
+    let level = progress.level.max(1);
+    let xp_needed = if level >= LEVEL_CAP {
+        0
+    } else {
+        xp_to_next(level)
+    };
     ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero.name);
+    ui.text(
+        x + 14.0 + UiDrawList::text_width(hero.name, 3.0) + 14.0,
+        y + 16.0,
+        2.0,
+        Vec4::new(0.95, 0.78, 0.3, 1.0),
+        &format!("LV {level}"),
+    );
     ui.text(
         x + 250.0,
         y + 16.0,
         2.0,
         muted,
         &format!(
-            "TEAM {}",
+            "TEAM {}   {}G",
             if network.client.team() == Team::Blue {
                 "BLUE"
             } else {
                 "RED"
-            }
+            },
+            progress.gold
         ),
     );
 
@@ -769,10 +847,10 @@ fn build_network_hud(
             i32::from(entity.max_mana).max(1),
         )
     });
-    ui.text(x + 14.0, y + 46.0, 2.0, muted, &format!("HP {hp}/{max_hp}"));
+    ui.text(x + 14.0, y + 42.0, 2.0, muted, &format!("HP {hp}/{max_hp}"));
     ui.bar(
         x + 14.0,
-        y + 64.0,
+        y + 58.0,
         panel_w - 28.0,
         14.0,
         hp as f32 / max_hp as f32,
@@ -780,14 +858,35 @@ fn build_network_hud(
         track,
         border,
     );
-    ui.text(x + 14.0, y + 84.0, 2.0, muted, &format!("MP {mp}/{max_mp}"));
+    ui.text(x + 14.0, y + 78.0, 2.0, muted, &format!("MP {mp}/{max_mp}"));
     ui.bar(
         x + 14.0,
-        y + 102.0,
+        y + 94.0,
         panel_w - 28.0,
         10.0,
         mp as f32 / max_mp as f32,
         mana,
+        track,
+        border,
+    );
+    let xp_fraction = if xp_needed == 0 {
+        1.0
+    } else {
+        f32::from(progress.xp) / f32::from(u16::try_from(xp_needed).unwrap_or(u16::MAX))
+    };
+    let xp_label = if xp_needed == 0 {
+        String::from("XP MAX")
+    } else {
+        format!("XP {}/{}", progress.xp, xp_needed)
+    };
+    ui.text(x + 14.0, y + 112.0, 1.8, muted, &xp_label);
+    ui.bar(
+        x + 14.0,
+        y + 128.0,
+        panel_w - 28.0,
+        8.0,
+        xp_fraction,
+        Vec4::new(0.85, 0.68, 0.25, 1.0),
         track,
         border,
     );
@@ -796,7 +895,7 @@ fn build_network_hud(
     for slot in 0..3 {
         let box_size = 38.0;
         let bx = x + 14.0 + slot as f32 * 48.0;
-        let by = y + 118.0;
+        let by = y + 146.0;
         let key = ["Q", "W", "E"][slot];
         ui.rect(bx, by, box_size, box_size, track);
         ui.outline(bx, by, box_size, box_size, 1.0, border);
@@ -821,6 +920,21 @@ fn build_network_hud(
             ui.text(bx + 4.0, by + 24.0, 1.8, text, &format!("{seconds:.1}"));
         }
     }
+    // Inventory.
+    ui.text(x + 172.0, y + 148.0, 1.8, muted, "ITEMS");
+    for slot in 0..6 {
+        let bx = x + 172.0 + slot as f32 * 43.0;
+        let by = y + 164.0;
+        ui.rect(bx, by, 34.0, 26.0, track);
+        ui.outline(bx, by, 34.0, 26.0, 1.0, border);
+        let item = progress.items[slot];
+        if item != EMPTY_ITEM {
+            if let Some(definition) = ITEMS.get(usize::from(item)) {
+                let short = definition.name.get(..5).unwrap_or(definition.name);
+                ui.text(bx + 2.0, by + 8.0, 1.4, text, short);
+            }
+        }
+    }
     if scoreboard {
         let panel_width = 620.0;
         let panel_height = 330.0;
@@ -842,7 +956,7 @@ fn build_network_hud(
             muted,
             "TAB TO CLOSE",
         );
-        let mut rows = [(None, 0u8, 0u8, 0u16, 0u16); 10];
+        let mut rows = [(None, 0u8, 0u8, 0u16, 0u16, 0u8); 10];
         let mut count = 0usize;
         if let Some(state) = snapshot {
             for entity in state
@@ -859,12 +973,13 @@ fn build_network_hud(
                     entity.hero_pick,
                     entity.health,
                     entity.max_health,
+                    entity.progress.level,
                 );
                 count += 1;
             }
         }
-        rows[..count].sort_unstable_by_key(|(team, slot, _, _, _)| (*team, *slot));
-        for (index, (team, slot, pick, hp, max_hp)) in rows[..count].iter().enumerate() {
+        rows[..count].sort_unstable_by_key(|(team, slot, _, _, _, _)| (*team, *slot));
+        for (index, (team, slot, pick, hp, max_hp, level)) in rows[..count].iter().enumerate() {
             let y = sy + 64.0 + index as f32 * 24.0;
             let color = if *team == Some(0) {
                 Vec4::new(0.45, 0.7, 1.0, 1.0)
@@ -874,7 +989,13 @@ fn build_network_hud(
             let name = HEROES
                 .get(usize::from(*pick))
                 .map_or("UNKNOWN", |hero| hero.name);
-            ui.text(sx + 32.0, y, 2.0, color, &format!("SLOT {slot}  {name}"));
+            ui.text(
+                sx + 32.0,
+                y,
+                2.0,
+                color,
+                &format!("SLOT {slot}  {name}  LV {level}"),
+            );
             ui.text(sx + 400.0, y, 2.0, muted, &format!("{hp}/{max_hp} HP"));
         }
         ui.text(
@@ -883,6 +1004,58 @@ fn build_network_hud(
             2.0,
             muted,
             "ENEMY ROWS APPEAR ONLY WHILE VISIBLE",
+        );
+    }
+    if shop {
+        let shop_w = 700.0;
+        let shop_h = 390.0;
+        let sx = (width_f - shop_w) * 0.5;
+        let sy = ((height_f - shop_h) * 0.5 - 80.0).max(40.0);
+        ui.panel(
+            sx,
+            sy,
+            shop_w,
+            shop_h,
+            Vec4::new(0.01, 0.02, 0.035, 0.94),
+            border,
+        );
+        ui.text_shadowed(sx + 24.0, sy + 18.0, 3.5, text, "SHOP");
+        ui.text(
+            sx + shop_w - 180.0,
+            sy + 26.0,
+            2.0,
+            Vec4::new(0.95, 0.78, 0.3, 1.0),
+            &format!("{} GOLD", progress.gold),
+        );
+        for (index, item) in ITEMS.iter().enumerate() {
+            let row_y = sy + 62.0 + index as f32 * 36.0;
+            let affordable = u32::from(progress.gold) >= item.cost;
+            let name_color = if affordable {
+                text
+            } else {
+                Vec4::new(0.45, 0.5, 0.58, 1.0)
+            };
+            ui.text(sx + 24.0, row_y, 2.0, muted, &format!("[{}]", index + 1));
+            ui.text(sx + 70.0, row_y, 2.0, name_color, item.name);
+            ui.text(
+                sx + 300.0,
+                row_y,
+                2.0,
+                if affordable {
+                    Vec4::new(0.95, 0.78, 0.3, 1.0)
+                } else {
+                    Vec4::new(0.55, 0.4, 0.3, 1.0)
+                },
+                &format!("{}G", item.cost),
+            );
+            ui.text(sx + 390.0, row_y, 1.7, muted, &item_summary(item));
+        }
+        ui.text(
+            sx + 24.0,
+            sy + shop_h - 30.0,
+            1.8,
+            muted,
+            "B CLOSE   NUMBER BUY   PURCHASES REQUIRE OWN NEXUS",
         );
     }
     if let Some(outcome) = snapshot
@@ -930,6 +1103,29 @@ fn build_network_hud(
             "RESPAWNING",
         );
     }
+}
+
+fn item_summary(item: &moba_game::ItemDef) -> String {
+    let mut parts = Vec::new();
+    if item.health != 0 {
+        parts.push(format!("+{} HP", item.health));
+    }
+    if item.mana != 0 {
+        parts.push(format!("+{} MP", item.mana));
+    }
+    if item.attack_damage != 0 {
+        parts.push(format!("+{} DMG", item.attack_damage));
+    }
+    if item.armor != 0 {
+        parts.push(format!("+{} ARMOR", item.armor));
+    }
+    if item.magic_resist != 0 {
+        parts.push(format!("+{} MR", item.magic_resist));
+    }
+    if item.move_speed_per_sec != Fix::ZERO {
+        parts.push(format!("+{} MS", item.move_speed_per_sec.to_f32()));
+    }
+    parts.join("  ")
 }
 
 fn build_local_hud(ui: &mut UiDrawList, simulation: &Simulation, width: u32, height: u32) {

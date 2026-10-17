@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -323,6 +323,11 @@ pub enum WireCommand {
         /// Quantised Y.
         y: u16,
     },
+    /// Purchase an item from the shop.
+    BuyItem {
+        /// Catalogue index.
+        item: u8,
+    },
 }
 
 /// Client intent payload.
@@ -338,6 +343,19 @@ pub struct InputMessage {
 
 /// Network entity identifier assigned per connection.
 pub type NetId = u16;
+
+/// Hero progression carried in snapshots.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub struct NetProgress {
+    /// Current level.
+    pub level: u8,
+    /// Experience towards the next level.
+    pub xp: u16,
+    /// Gold (only filled for the receiving player's hero).
+    pub gold: u16,
+    /// Inventory item ids (`0xFF` empty).
+    pub items: [u8; 6],
+}
 
 /// Quantised entity state carried in snapshots.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -368,6 +386,8 @@ pub struct NetEntity {
     pub mana: u16,
     /// Remaining Q/W/E cooldowns in ticks.
     pub cooldowns: [u16; 3],
+    /// Level, XP, gold and inventory.
+    pub progress: NetProgress,
 }
 
 /// Flag bit for dead heroes.
@@ -396,6 +416,12 @@ impl NetEntity {
                 clamp_u16_u32(unit.cooldowns[1]),
                 clamp_u16_u32(unit.cooldowns[2]),
             ],
+            progress: NetProgress {
+                level: unit.level,
+                xp: clamp_u16_u32(unit.xp),
+                gold: clamp_u16_u32(unit.gold),
+                items: unit.items,
+            },
         }
     }
 
@@ -421,6 +447,7 @@ impl NetEntity {
             mana: (self.mana != previous.mana).then_some(self.mana),
             flags: (self.flags != previous.flags).then_some(self.flags),
             cooldowns: (self.cooldowns != previous.cooldowns).then_some(self.cooldowns),
+            progress: (self.progress != previous.progress).then_some(self.progress),
         }
     }
 
@@ -442,6 +469,9 @@ impl NetEntity {
         if let Some(cooldowns) = update.cooldowns {
             self.cooldowns = cooldowns;
         }
+        if let Some(progress) = update.progress {
+            self.progress = progress;
+        }
     }
 }
 
@@ -460,6 +490,8 @@ pub struct NetUpdate {
     pub flags: Option<u8>,
     /// Cooldowns when changed.
     pub cooldowns: Option<[u16; 3]>,
+    /// Progression/inventory when changed.
+    pub progress: Option<NetProgress>,
 }
 
 const UPDATE_POSITION: u8 = 1 << 0;
@@ -467,6 +499,7 @@ const UPDATE_HEALTH: u8 = 1 << 1;
 const UPDATE_MANA: u8 = 1 << 2;
 const UPDATE_FLAGS: u8 = 1 << 3;
 const UPDATE_COOLDOWNS: u8 = 1 << 4;
+const UPDATE_PROGRESS: u8 = 1 << 5;
 
 /// One snapshot, either a full state (`baseline_seq == 0`) or a delta.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -694,6 +727,10 @@ fn encode_command(out: &mut Vec<u8>, command: WireCommand) {
             put_u16(out, x);
             put_u16(out, y);
         }
+        WireCommand::BuyItem { item } => {
+            out.push(4);
+            out.push(item);
+        }
     }
 }
 
@@ -712,6 +749,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<WireCommand, WireError> {
             x: reader.u16()?,
             y: reader.u16()?,
         },
+        4 => WireCommand::BuyItem { item: reader.u8()? },
         _ => return Err(WireError::BadValue),
     })
 }
@@ -722,7 +760,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<WireCommand, WireError> {
 /// Returns [`WireError::TooMany`] when a count exceeds `u16::MAX`.
 pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), WireError> {
     out.clear();
-    out.reserve(32 + delta.spawns.len() * 25 + delta.updates.len() * 12 + delta.despawns.len() * 2);
+    out.reserve(40 + delta.spawns.len() * 36 + delta.updates.len() * 12 + delta.despawns.len() * 2);
     put_u32(out, delta.tick);
     put_u32(out, delta.acked_input);
     put_u32(out, delta.baseline_seq);
@@ -748,6 +786,10 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         for cooldown in spawn.cooldowns {
             put_u16(out, cooldown);
         }
+        out.push(spawn.progress.level);
+        put_u16(out, spawn.progress.xp);
+        put_u16(out, spawn.progress.gold);
+        out.extend_from_slice(&spawn.progress.items);
     }
     for update in &delta.updates {
         put_u16(out, update.net_id);
@@ -766,6 +808,9 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         }
         if update.cooldowns.is_some() {
             mask |= UPDATE_COOLDOWNS;
+        }
+        if update.progress.is_some() {
+            mask |= UPDATE_PROGRESS;
         }
         out.push(mask);
         if let Some((x, y)) = update.position {
@@ -786,6 +831,12 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
                 put_u16(out, cooldown);
             }
         }
+        if let Some(progress) = update.progress {
+            out.push(progress.level);
+            put_u16(out, progress.xp);
+            put_u16(out, progress.gold);
+            out.extend_from_slice(&progress.items);
+        }
     }
     for net_id in &delta.despawns {
         put_u16(out, *net_id);
@@ -794,6 +845,7 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
 }
 
 /// Decodes a snapshot payload.
+#[allow(clippy::too_many_lines)] // Field order mirrors the encoder one-for-one.
 pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     let mut reader = Reader::new(data);
     let tick = reader.u32()?;
@@ -821,13 +873,27 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             health: reader.u16()?,
             mana: reader.u16()?,
             cooldowns: [reader.u16()?, reader.u16()?, reader.u16()?],
+            progress: NetProgress {
+                level: reader.u8()?,
+                xp: reader.u16()?,
+                gold: reader.u16()?,
+                items: reader
+                    .bytes(6)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            },
         });
     }
     let mut updates = Vec::with_capacity(update_count);
     for _ in 0..update_count {
         let net_id = reader.u16()?;
         let mask = reader.u8()?;
-        let known = UPDATE_POSITION | UPDATE_HEALTH | UPDATE_MANA | UPDATE_FLAGS | UPDATE_COOLDOWNS;
+        let known = UPDATE_POSITION
+            | UPDATE_HEALTH
+            | UPDATE_MANA
+            | UPDATE_FLAGS
+            | UPDATE_COOLDOWNS
+            | UPDATE_PROGRESS;
         if mask & !known != 0 {
             return Err(WireError::BadValue);
         }
@@ -848,6 +914,19 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
         let cooldowns = (mask & UPDATE_COOLDOWNS != 0)
             .then(|| Ok::<[u16; 3], WireError>([reader.u16()?, reader.u16()?, reader.u16()?]))
             .transpose()?;
+        let progress = (mask & UPDATE_PROGRESS != 0)
+            .then(|| {
+                Ok::<NetProgress, WireError>(NetProgress {
+                    level: reader.u8()?,
+                    xp: reader.u16()?,
+                    gold: reader.u16()?,
+                    items: reader
+                        .bytes(6)?
+                        .try_into()
+                        .map_err(|_| WireError::Truncated)?,
+                })
+            })
+            .transpose()?;
         updates.push(NetUpdate {
             net_id,
             position,
@@ -855,6 +934,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             mana,
             flags,
             cooldowns,
+            progress,
         });
     }
     let mut despawns = Vec::with_capacity(despawn_count);
@@ -1047,6 +1127,7 @@ mod tests {
             health,
             mana: 100,
             cooldowns: [0, 0, 0],
+            progress: NetProgress::default(),
         }
     }
 
@@ -1056,6 +1137,12 @@ mod tests {
         let mut current = baseline.clone();
         current[0].x = 11;
         current[0].health = 500;
+        current[0].progress = NetProgress {
+            level: 5,
+            xp: 120,
+            gold: 750,
+            items: [0, 1, 0xFF, 0xFF, 0xFF, 0xFF],
+        };
         current[1].mana = 50;
         current.push(entity(3, 50, 60, 600));
 
@@ -1082,6 +1169,9 @@ mod tests {
         let next = state.apply(&decoded, 4).unwrap();
         assert_eq!(next.entities.len(), 3);
         assert_eq!(next.get(1).unwrap().health, 500);
+        assert_eq!(next.get(1).unwrap().progress.level, 5);
+        assert_eq!(next.get(1).unwrap().progress.gold, 750);
+        assert_eq!(next.get(1).unwrap().progress.items[1], 1);
         assert_eq!(next.get(1).unwrap().x, 11);
         assert_eq!(next.get(2).unwrap().mana, 50);
         assert_eq!(next.get(3).unwrap().x, 50);
@@ -1179,11 +1269,17 @@ mod tests {
             hero_slot: Some(7),
             hero_pick: 2,
             cooldowns: [10, 20, 30],
+            level: 4,
+            xp: 120,
+            gold: 950,
+            items: [0, 1, 2, 0xFF, 0xFF, 0xFF],
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);
         assert_eq!(entity.position(), unit.position);
         assert_eq!(entity.hero_pick, 2);
+        assert_eq!(entity.progress.level, 4);
+        assert_eq!(entity.progress.gold, 950);
         assert!(!entity.is_dead());
     }
 }

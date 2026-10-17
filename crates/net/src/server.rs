@@ -341,9 +341,16 @@ impl NetServer {
                     return Ok(());
                 };
                 client.last_seen = Instant::now();
+                let mut purchase = None;
                 if sequence_after(input.input_seq, client.last_input_seq) {
                     client.last_input_seq = input.input_seq;
-                    client.command = Some(input.command);
+                    match input.command {
+                        WireCommand::BuyItem { item } => purchase = Some(item),
+                        command => client.command = Some(command),
+                    }
+                }
+                if let Some(item) = purchase {
+                    self.simulation.purchase(index, item);
                 }
             }
             PacketKind::SnapshotAck => {
@@ -444,11 +451,16 @@ impl NetServer {
                 continue;
             };
             current.clear();
-            current.extend(
-                observed[client.team.index()]
-                    .iter()
-                    .map(|unit| NetEntity::from_observed(client.net_id_for(unit.entity), unit)),
-            );
+            let viewer_slot = u8::try_from(index).unwrap_or(0xFF);
+            for unit in &observed[client.team.index()] {
+                let mut entity = NetEntity::from_observed(client.net_id_for(unit.entity), unit);
+                if unit.hero_slot != Some(viewer_slot) {
+                    // Gold and inventory are private to the owning player.
+                    entity.progress.gold = 0;
+                    entity.progress.items = [moba_game::EMPTY_ITEM; 6];
+                }
+                current.push(entity);
+            }
             current.sort_unstable_by_key(|entity| entity.net_id);
             let baseline = if client.need_full {
                 None
@@ -505,6 +517,7 @@ fn wire_to_command(client: &ClientConn, command: WireCommand) -> Option<PlayerCo
             slot,
             target: dequantize_position(x, y),
         },
+        WireCommand::BuyItem { item } => PlayerCommand::BuyItem(item),
     })
 }
 

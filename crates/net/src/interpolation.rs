@@ -130,6 +130,7 @@ mod tests {
             health: 600,
             mana: 300,
             cooldowns: [0; 3],
+            progress: crate::protocol::NetProgress::default(),
         }
     }
 
