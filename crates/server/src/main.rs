@@ -28,6 +28,7 @@ fn main() {
     let mut server_key: Option<std::path::PathBuf> = None;
     let mut reload_content = false;
     let mut client_tokens: Vec<[u8; 32]> = Vec::new();
+    let mut results_log: Option<std::path::PathBuf> = None;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
     let mut max_total_packets_per_second = 2_000u32;
@@ -62,6 +63,9 @@ fn main() {
         }
         if let Some(value) = file.record {
             record = Some(value);
+        }
+        if let Some(value) = file.results_log {
+            results_log = Some(value);
         }
         if let Some(value) = file.items {
             items_path = Some(value);
@@ -126,6 +130,7 @@ fn main() {
             "--record" => {
                 record = args.next().map(std::path::PathBuf::from);
             }
+            "--results-log" => results_log = args.next().map(std::path::PathBuf::from),
             "--ready" => require_ready = true,
             "--max-pps" => {
                 if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
@@ -153,7 +158,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--allow-token HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--allow-token HEX] [--config FILE]"
                 );
                 return;
             }
@@ -212,6 +217,9 @@ fn main() {
                 eprintln!("--reload-content requires --items FILE");
                 std::process::exit(2);
             }
+        }
+        if let Some(path) = results_log.clone() {
+            server.set_results_log(path);
         }
         for token in &client_tokens {
             server.add_client_key(*token);
@@ -387,6 +395,7 @@ struct FileServerConfig {
     ticks: Option<u32>,
     secret: Option<String>,
     record: Option<std::path::PathBuf>,
+    results_log: Option<std::path::PathBuf>,
     items: Option<std::path::PathBuf>,
     server_key: Option<std::path::PathBuf>,
     reload_content: Option<bool>,

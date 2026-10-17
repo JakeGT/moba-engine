@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Optional JSONL match-results log (`--results-log`).
 - `slow` ability kind with movement multiplier, expiry/respawn restore and client tint.
 - Client FPS/frame-time HUD and wall segments on the minimap.
 - Per-hero level-growth fields in content packs.

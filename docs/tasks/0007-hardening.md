@@ -26,6 +26,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   telemetry; both limits can be disabled with 0. Release soak measures
   avg 9 µs / max 55 µs per simulation tick with 10 clients.
 
+- **Match results log**: optional JSONL append with seed/ticks/score/content/state/replay for
+  operators and analytics.
+
 ## CI gates
 - Cross-platform fmt/clippy/tests/docs/features/layering.
 - `ci-tools`: content-check fixtures, 10-match deterministic soak and bench compilation.

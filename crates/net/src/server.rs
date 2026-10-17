@@ -395,6 +395,8 @@ pub struct NetServer {
     match_number: u32,
     record_frames: Vec<TickInputs>,
     record_checkpoints: Vec<(u32, u64)>,
+    results_log: Option<PathBuf>,
+    results_logged: bool,
     record_config: SimConfig,
     recorded: bool,
     surrender_votes: [u16; 2],
@@ -446,6 +448,8 @@ impl NetServer {
             match_number: 0,
             record_frames: Vec::new(),
             record_checkpoints: Vec::new(),
+            results_log: None,
+            results_logged: false,
             record_config: config_sim,
             recorded: false,
             surrender_votes: [0; 2],
@@ -501,6 +505,11 @@ impl NetServer {
     #[must_use]
     pub fn server_public_key(&self) -> Option<[u8; 32]> {
         self.identity.as_ref().map(|identity| identity.public)
+    }
+
+    /// Appends one JSONL record per completed match to `path`.
+    pub fn set_results_log(&mut self, path: PathBuf) {
+        self.results_log = Some(path);
     }
 
     /// Adds a per-client key to the accepted key ring (Hello HMAC + session encryption).
@@ -619,6 +628,7 @@ impl NetServer {
                 if self.simulation.outcome().is_some() {
                     self.phase = Phase::Results(self.config.results_ticks.max(1));
                     self.write_recording();
+                    self.write_result_log();
                 }
             }
             Phase::Results(remaining) => {
@@ -758,6 +768,7 @@ impl NetServer {
         self.record_frames.clear();
         self.record_checkpoints.clear();
         self.recorded = false;
+        self.results_logged = false;
         let mut config = self.config.sim;
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
@@ -798,6 +809,51 @@ impl NetServer {
     /// graceful server shutdown during a live match.
     pub fn finish_recording(&mut self) {
         self.write_recording();
+    }
+
+    fn write_result_log(&mut self) {
+        if self.results_logged {
+            return;
+        }
+        let Some(path) = self.results_log.clone() else {
+            return;
+        };
+        self.results_logged = true;
+        let outcome = self.simulation.outcome().map_or("draw", |team| match team {
+            moba_game::Team::Blue => "blue",
+            moba_game::Team::Red => "red",
+        });
+        let (blue, red) = self.simulation.score();
+        let replay = self
+            .config
+            .record
+            .as_ref()
+            .map(|path| replay_path(path, self.match_number));
+        let line = result_json(
+            self.match_number.wrapping_add(1),
+            self.config.sim.seed,
+            self.simulation.current_tick().get(),
+            outcome,
+            blue,
+            red,
+            &self.content.manifest.name,
+            &self.content.manifest.version,
+            self.content.hash(),
+            self.simulation.state_hash(),
+            replay.as_deref(),
+        );
+        let write = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(line.as_bytes())
+                    .and_then(|()| file.write_all(b"\n"))
+            });
+        if let Err(error) = write {
+            eprintln!("results log {}: {error}", path.display());
+        }
     }
 
     fn write_recording(&mut self) {
@@ -1516,6 +1572,53 @@ pub fn apply_delta(
     baseline.apply(delta, seq)
 }
 
+fn json_string(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            character if character < ' ' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(character));
+            }
+            character => out.push(character),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[allow(clippy::too_many_arguments)] // One flat record keeps call sites explicit.
+fn result_json(
+    match_number: u32,
+    seed: u64,
+    ticks: u32,
+    outcome: &str,
+    blue_score: u32,
+    red_score: u32,
+    content_name: &str,
+    content_version: &str,
+    content_hash: u64,
+    state_hash: u64,
+    replay: Option<&Path>,
+) -> String {
+    let replay = replay.map_or_else(
+        || String::from("null"),
+        |path| json_string(&path.to_string_lossy()),
+    );
+    format!(
+        "{{\"match\":{match_number},\"seed\":{seed},\"ticks\":{ticks},\"outcome\":{},\"blue_score\":{blue_score},\"red_score\":{red_score},\"content\":{},\"content_version\":{},\"content_hash\":\"{content_hash:#018x}\",\"state_hash\":\"{state_hash:#018x}\",\"replay\":{replay}}}",
+        json_string(outcome),
+        json_string(content_name),
+        json_string(content_version)
+    )
+}
+
 fn replay_path(base: &Path, match_number: u32) -> PathBuf {
     if match_number == 0 {
         return base.to_path_buf();
@@ -1656,6 +1759,65 @@ cost = 1
         assert!(limiter.allow_at(other, start));
         assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
         assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn results_log_appends_once_per_match() {
+        let path = std::env::temp_dir().join(format!(
+            "moba-results-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 4,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        server.set_results_log(path.clone());
+        server.write_result_log();
+        server.write_result_log();
+        let text = std::fs::read_to_string(&path).expect("results posted");
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("\"match\":1"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn result_json_is_valid_and_escaped() {
+        let line = result_json(
+            2,
+            99,
+            4_500,
+            "blue",
+            7,
+            3,
+            "A\"B",
+            "1.0",
+            0x1234,
+            0x5678,
+            Some(Path::new("replay\\one.mbr")),
+        );
+        assert!(line.starts_with("{\"match\":2,\"seed\":99,\"ticks\":4500"));
+        assert!(line.contains("\"outcome\":\"blue\""));
+        assert!(line.contains("\"blue_score\":7,\"red_score\":3"));
+        assert!(line.contains("\"content\":\"A\\\"B\""));
+        assert!(line.contains("\"content_hash\":\"0x0000000000001234\""));
+        assert!(line.contains("\"state_hash\":\"0x0000000000005678\""));
+        assert!(line.contains("\"replay\":\"replay\\\\one.mbr\""));
     }
 
     #[test]
