@@ -1219,7 +1219,9 @@ fn build_network_hud(
             ui.outline(bx, by, box_size, box_size, 1.0, border);
             ui.text(bx + 8.0, by + 8.0, 2.5, text, key);
             let remaining = cooldowns[slot];
-            let max_cooldown = moba_game::ABILITIES
+            let max_cooldown = network
+                .client
+                .abilities()
                 .get(usize::from(hero.abilities[slot]))
                 .map_or(1, |ability| {
                     u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)

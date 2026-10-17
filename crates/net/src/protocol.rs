@@ -225,6 +225,10 @@ pub const WIRE_ITEM_NAME: usize = 16;
 pub const MAX_WIRE_HEROES: usize = 8;
 /// Fixed hero-name bytes on the wire.
 pub const WIRE_HERO_NAME: usize = 16;
+/// Maximum abilities in a handshake catalogue.
+pub const MAX_WIRE_ABILITIES: usize = 24;
+/// Fixed ability-name bytes on the wire.
+pub const WIRE_ABILITY_NAME: usize = 16;
 
 /// One runtime item definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -310,6 +314,39 @@ impl WireHero {
     }
 }
 
+/// One runtime ability definition carried in the handshake.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WireAbility {
+    /// Name bytes, padded with zeroes.
+    pub name: [u8; WIRE_ABILITY_NAME],
+    /// Used bytes in `name`.
+    pub name_len: u8,
+    /// Cooldown in ticks.
+    pub cooldown_ticks: u32,
+    /// Mana cost.
+    pub mana_cost: u16,
+}
+
+impl Default for WireAbility {
+    fn default() -> Self {
+        Self {
+            name: [0; WIRE_ABILITY_NAME],
+            name_len: 0,
+            cooldown_ticks: 0,
+            mana_cost: 0,
+        }
+    }
+}
+
+impl WireAbility {
+    /// Decodes the name as UTF-8, falling back to an empty string.
+    #[must_use]
+    pub fn name_str(&self) -> &str {
+        let end = usize::from(self.name_len).min(WIRE_ABILITY_NAME);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
+
 /// Handshake response payload.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Welcome {
@@ -341,7 +378,11 @@ pub struct Welcome {
     pub hero_count: u8,
     /// Runtime hero catalogue for HUD/vision rendering.
     pub heroes: [WireHero; MAX_WIRE_HEROES],
-    /// Hash of the wire item/hero catalogue (also authenticated by the Welcome HMAC).
+    /// Number of valid entries in `abilities`.
+    pub ability_count: u8,
+    /// Runtime ability catalogue for HUD rendering.
+    pub abilities: [WireAbility; MAX_WIRE_ABILITIES],
+    /// Hash of the wire item/hero/ability catalogue (also authenticated by the Welcome HMAC).
     pub content_hash: u64,
 }
 
@@ -383,7 +424,7 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
 
 /// Hashes the catalogue bytes exactly as sent in the handshake.
 #[must_use]
-pub fn catalog_hash(items: &[WireItem], heroes: &[WireHero]) -> u64 {
+pub fn catalog_hash(items: &[WireItem], heroes: &[WireHero], abilities: &[WireAbility]) -> u64 {
     let mut hash = 0xCBF2_9CE4_8422_2325u64;
     let mut feed = |bytes: &[u8]| {
         for byte in bytes {
@@ -412,6 +453,12 @@ pub fn catalog_hash(items: &[WireItem], heroes: &[WireHero]) -> u64 {
         feed(&hero.move_speed_bits.to_le_bytes());
         feed(&hero.vision_bits.to_le_bytes());
         feed(&hero.abilities);
+    }
+    for ability in abilities {
+        feed(&ability.name);
+        feed(&[ability.name_len]);
+        feed(&ability.cooldown_ticks.to_le_bytes());
+        feed(&ability.mana_cost.to_le_bytes());
     }
     hash
 }
@@ -449,6 +496,13 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
         out.extend_from_slice(&hero.move_speed_bits.to_le_bytes());
         out.extend_from_slice(&hero.vision_bits.to_le_bytes());
         out.extend_from_slice(&hero.abilities);
+    }
+    out.push(welcome.ability_count);
+    for ability in welcome.abilities.iter().take(MAX_WIRE_ABILITIES) {
+        out.extend_from_slice(&ability.name);
+        out.push(ability.name_len);
+        put_u32(&mut out, ability.cooldown_ticks);
+        put_u16(&mut out, ability.mana_cost);
     }
     out.extend_from_slice(&welcome.content_hash.to_le_bytes());
     out
@@ -558,6 +612,19 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
                 hero.abilities.copy_from_slice(reader.bytes(3)?);
             }
             heroes
+        },
+        ability_count: reader.u8()?,
+        abilities: {
+            let mut abilities = [WireAbility::default(); MAX_WIRE_ABILITIES];
+            for ability in &mut abilities {
+                let mut name = [0; WIRE_ABILITY_NAME];
+                name.copy_from_slice(reader.bytes(WIRE_ABILITY_NAME)?);
+                ability.name = name;
+                ability.name_len = reader.u8()?;
+                ability.cooldown_ticks = reader.u32()?;
+                ability.mana_cost = reader.u16()?;
+            }
+            abilities
         },
         content_hash: u64::from_le_bytes(
             reader
@@ -1440,12 +1507,12 @@ mod tests {
         let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
         heroes[0].name[..4].copy_from_slice(b"Hero");
         heroes[0].name_len = 4;
-        let baseline = catalog_hash(&items[..1], &heroes[..1]);
+        let baseline = catalog_hash(&items[..1], &heroes[..1], &[]);
         items[0].cost = 1;
-        assert_ne!(catalog_hash(&items[..1], &heroes[..1]), baseline);
+        assert_ne!(catalog_hash(&items[..1], &heroes[..1], &[]), baseline);
         items[0].cost = 0;
         heroes[0].abilities[0] = 1;
-        assert_ne!(catalog_hash(&items[..1], &heroes[..1]), baseline);
+        assert_ne!(catalog_hash(&items[..1], &heroes[..1], &[]), baseline);
     }
 
     #[test]

@@ -18,6 +18,9 @@ deterministic playback and server authority.
   protocol regression test added.
 - Runtime hero catalogue: `HeroSpec` stats and ability bindings, TOML `[[heroes]]`, validation,
   `WireHero` handshake entries for client HUD/vision; simulation spawns/casts from content.
+- Runtime ability catalogue: `AbilitySpec` over the engine's skillshot/dash/heal/burst kinds,
+  TOML `[[abilities]]`, validation, `WireAbility` handshake entries for HUD cooldowns; a
+  custom burst ability is exercised by a simulation test (content/ability-pack.toml).
 - Example `content/example-pack.toml` (8 items + Vanguard hero); custom hero UDP test and
   client capture (`../images/m8-hero-content.png`).
 - Catalogue integrity: FNV hash in `Welcome`, bound into the PSK HMAC and rechecked by clients.
@@ -26,8 +29,9 @@ deterministic playback and server authority.
   at hash `0x5f2fd8408d51955a` / state `0x2e3dc732ced63886`.
 
 ## Next
-- Move hero stats, ability tables and map/lane/structure definitions into validated content.
-- Content hash in replay manifests is done; extend it to full manifest/version metadata.
+- Move map/lane/structure definitions into validated content.
+- Add more ability behaviour kinds (projectile arcs, buffs, summons) and scripting hooks.
+- Rich manifest metadata (content version/author) and hot reload for development.
 - Hot-reload for development and a `moba-tools content check` command.
 - Asset/model mappings and per-map rendering.
 

@@ -10,7 +10,7 @@ use std::path::Path;
 use moba_core::Fix;
 use serde::Deserialize;
 
-use crate::{ITEMS, ItemDef};
+use crate::{ABILITIES, AbilityDef, AbilityKind, DamageType, ITEMS, ItemDef};
 
 /// Maximum number of items in a content pack (matches the wire catalogue).
 pub const MAX_CONTENT_ITEMS: usize = 16;
@@ -20,6 +20,10 @@ pub const MAX_ITEM_NAME: usize = 16;
 pub const MAX_CONTENT_HEROES: usize = 8;
 /// Maximum hero display-name length in bytes.
 pub const MAX_HERO_NAME: usize = 16;
+/// Maximum abilities in a content pack.
+pub const MAX_CONTENT_ABILITIES: usize = 24;
+/// Maximum ability display-name length in bytes.
+pub const MAX_ABILITY_NAME: usize = 16;
 
 /// An owned, runtime item definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +44,33 @@ pub struct ItemSpec {
     pub magic_resist: i32,
     /// Bonus movement speed in world units per second.
     pub move_speed_per_sec: Fix,
+}
+
+/// An owned, runtime ability definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbilitySpec {
+    /// Display name.
+    pub name: String,
+    /// Cooldown in simulation ticks.
+    pub cooldown_ticks: u32,
+    /// Mana cost.
+    pub mana_cost: i32,
+    /// Maximum cast distance.
+    pub cast_range: Fix,
+    /// Effect/behaviour.
+    pub kind: AbilityKind,
+}
+
+impl From<&AbilityDef> for AbilitySpec {
+    fn from(ability: &AbilityDef) -> Self {
+        Self {
+            name: ability.name.to_owned(),
+            cooldown_ticks: ability.cooldown_ticks,
+            mana_cost: ability.mana_cost,
+            cast_range: ability.cast_range,
+            kind: ability.kind,
+        }
+    }
 }
 
 /// An owned, runtime hero stat definition.
@@ -96,16 +127,6 @@ impl From<&crate::HeroDef> for HeroSpec {
     }
 }
 
-impl HeroSpec {
-    /// Returns one static ability definition for a slot, if the id is valid.
-    #[must_use]
-    pub fn ability(&self, slot: usize) -> Option<&'static crate::AbilityDef> {
-        self.abilities
-            .get(slot)
-            .and_then(|&id| crate::ABILITIES.get(usize::from(id)))
-    }
-}
-
 impl From<&ItemDef> for ItemSpec {
     fn from(item: &ItemDef) -> Self {
         Self {
@@ -128,6 +149,8 @@ pub struct GameContent {
     pub items: Vec<ItemSpec>,
     /// Hero catalogue in stable id order.
     pub heroes: Vec<HeroSpec>,
+    /// Ability catalogue in stable id order.
+    pub abilities: Vec<AbilitySpec>,
 }
 
 impl Default for GameContent {
@@ -135,6 +158,7 @@ impl Default for GameContent {
         Self {
             items: ITEMS.iter().map(ItemSpec::from).collect(),
             heroes: crate::HEROES.iter().map(HeroSpec::from).collect(),
+            abilities: ABILITIES.iter().map(AbilitySpec::from).collect(),
         }
     }
 }
@@ -164,6 +188,18 @@ pub enum ContentError {
     BadAbility,
     /// A hero has non-positive health or an invalid attack interval.
     BadHeroStats,
+    /// No abilities were supplied.
+    NoAbilities,
+    /// Too many abilities for the wire catalogue.
+    TooManyAbilities,
+    /// An ability name is empty, too long or non-ASCII.
+    BadAbilityName,
+    /// Two abilities share a name.
+    DuplicateAbilityName,
+    /// Ability cooldown mana or cast range is invalid.
+    BadAbilityStats,
+    /// Ability kind parameters are invalid.
+    BadAbilityKind,
 }
 
 impl core::fmt::Display for ContentError {
@@ -180,6 +216,16 @@ impl core::fmt::Display for ContentError {
             Self::DuplicateHeroName => f.write_str("hero names must be unique"),
             Self::BadAbility => f.write_str("hero ability ids must exist"),
             Self::BadHeroStats => f.write_str("hero stats must be positive"),
+            Self::NoAbilities => f.write_str("content must define at least one ability"),
+            Self::TooManyAbilities => {
+                write!(f, "content has more than {MAX_CONTENT_ABILITIES} abilities")
+            }
+            Self::BadAbilityName => f.write_str("ability names must be 1..=16 ASCII bytes"),
+            Self::DuplicateAbilityName => f.write_str("ability names must be unique"),
+            Self::BadAbilityStats => {
+                f.write_str("ability cooldown must be positive and mana/cast range non-negative")
+            }
+            Self::BadAbilityKind => f.write_str("ability kind parameters must be positive"),
         }
     }
 }
@@ -212,6 +258,52 @@ impl GameContent {
                 return Err(ContentError::DuplicateName);
             }
         }
+        if self.abilities.is_empty() {
+            return Err(ContentError::NoAbilities);
+        }
+        if self.abilities.len() > MAX_CONTENT_ABILITIES {
+            return Err(ContentError::TooManyAbilities);
+        }
+        for (index, ability) in self.abilities.iter().enumerate() {
+            if ability.name.is_empty()
+                || ability.name.len() > MAX_ABILITY_NAME
+                || !ability.name.is_ascii()
+            {
+                return Err(ContentError::BadAbilityName);
+            }
+            if self.abilities[..index]
+                .iter()
+                .any(|other| other.name == ability.name)
+            {
+                return Err(ContentError::DuplicateAbilityName);
+            }
+            if ability.cooldown_ticks == 0
+                || ability.mana_cost < 0
+                || ability.cast_range < Fix::ZERO
+            {
+                return Err(ContentError::BadAbilityStats);
+            }
+            let kind_ok = match ability.kind {
+                AbilityKind::Skillshot {
+                    speed_per_sec,
+                    range,
+                    radius,
+                    damage,
+                    ..
+                } => {
+                    speed_per_sec > Fix::ZERO
+                        && range > Fix::ZERO
+                        && radius > Fix::ZERO
+                        && damage >= 0
+                }
+                AbilityKind::Dash { range } => range > Fix::ZERO,
+                AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
+                AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
+            };
+            if !kind_ok {
+                return Err(ContentError::BadAbilityKind);
+            }
+        }
         if self.heroes.is_empty() {
             return Err(ContentError::NoHeroes);
         }
@@ -231,7 +323,7 @@ impl GameContent {
             if hero
                 .abilities
                 .iter()
-                .any(|&id| usize::from(id) >= crate::ABILITIES.len())
+                .any(|&id| usize::from(id) >= self.abilities.len())
             {
                 return Err(ContentError::BadAbility);
             }
@@ -272,6 +364,48 @@ impl GameContent {
                 feed(&value.to_le_bytes());
             }
             feed(&item.move_speed_per_sec.to_bits().to_le_bytes());
+        }
+        for ability in &self.abilities {
+            feed(ability.name.as_bytes());
+            feed(&[0]);
+            feed(&ability.cooldown_ticks.to_le_bytes());
+            feed(&(ability.mana_cost as u32).to_le_bytes());
+            feed(&ability.cast_range.to_bits().to_le_bytes());
+            match ability.kind {
+                AbilityKind::Skillshot {
+                    speed_per_sec,
+                    range,
+                    radius,
+                    damage,
+                    damage_type,
+                } => {
+                    feed(&[0]);
+                    feed(&speed_per_sec.to_bits().to_le_bytes());
+                    feed(&range.to_bits().to_le_bytes());
+                    feed(&radius.to_bits().to_le_bytes());
+                    feed(&(damage as u32).to_le_bytes());
+                    feed(&[damage_type as u8]);
+                }
+                AbilityKind::Dash { range } => {
+                    feed(&[1]);
+                    feed(&range.to_bits().to_le_bytes());
+                }
+                AbilityKind::Heal { amount, radius } => {
+                    feed(&[2]);
+                    feed(&(amount as u32).to_le_bytes());
+                    feed(&radius.to_bits().to_le_bytes());
+                }
+                AbilityKind::Burst {
+                    radius,
+                    damage,
+                    damage_type,
+                } => {
+                    feed(&[3]);
+                    feed(&radius.to_bits().to_le_bytes());
+                    feed(&(damage as u32).to_le_bytes());
+                    feed(&[damage_type as u8]);
+                }
+            }
         }
         for hero in &self.heroes {
             feed(hero.name.as_bytes());
@@ -329,6 +463,7 @@ struct ContentFile {
     #[serde(default)]
     items: Vec<ItemEntry>,
     heroes: Option<Vec<HeroEntry>>,
+    abilities: Option<Vec<AbilityEntry>>,
 }
 
 #[derive(Deserialize)]
@@ -347,6 +482,33 @@ struct ItemEntry {
     magic_resist: i32,
     #[serde(default)]
     move_speed: f32,
+}
+
+#[derive(Deserialize)]
+struct AbilityEntry {
+    name: String,
+    cooldown_ticks: u32,
+    #[serde(default)]
+    mana_cost: i32,
+    #[serde(default)]
+    cast_range: f32,
+    kind: String,
+    #[serde(default)]
+    speed: f32,
+    #[serde(default)]
+    range: f32,
+    #[serde(default)]
+    radius: f32,
+    #[serde(default)]
+    damage: i32,
+    #[serde(default)]
+    amount: i32,
+    #[serde(default = "default_damage_type")]
+    damage_type: String,
+}
+
+fn default_damage_type() -> String {
+    String::from("physical")
 }
 
 #[derive(Deserialize)]
@@ -413,7 +575,54 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 .collect()
         },
     );
-    let content = GameContent { items, heroes };
+    let abilities = file.abilities.map_or_else(
+        || GameContent::default().abilities,
+        |abilities| {
+            abilities
+                .into_iter()
+                .map(|ability| {
+                    let damage_type = match ability.damage_type.as_str() {
+                        "magic" => DamageType::Magic,
+
+                        _ => DamageType::Physical,
+                    };
+                    let kind = match ability.kind.as_str() {
+                        "dash" => AbilityKind::Dash {
+                            range: Fix::from_f32(ability.range),
+                        },
+                        "heal" => AbilityKind::Heal {
+                            amount: ability.amount,
+                            radius: Fix::from_f32(ability.radius),
+                        },
+                        "burst" => AbilityKind::Burst {
+                            radius: Fix::from_f32(ability.radius),
+                            damage: ability.damage,
+                            damage_type,
+                        },
+                        _ => AbilityKind::Skillshot {
+                            speed_per_sec: Fix::from_f32(ability.speed),
+                            range: Fix::from_f32(ability.range),
+                            radius: Fix::from_f32(ability.radius),
+                            damage: ability.damage,
+                            damage_type,
+                        },
+                    };
+                    AbilitySpec {
+                        name: ability.name,
+                        cooldown_ticks: ability.cooldown_ticks,
+                        mana_cost: ability.mana_cost,
+                        cast_range: Fix::from_f32(ability.cast_range),
+                        kind,
+                    }
+                })
+                .collect()
+        },
+    );
+    let content = GameContent {
+        items,
+        heroes,
+        abilities,
+    };
     content.validate().map_err(ContentLoadError::Invalid)?;
     Ok(content)
 }
@@ -446,6 +655,43 @@ mod tests {
         assert_eq!(content.items.len(), 8);
         assert_eq!(content.heroes.len(), 1);
         assert_eq!(content.heroes[0].name, "Vanguard");
+    }
+
+    #[test]
+    fn ability_pack_parses_and_heroes_reference_it() {
+        let text = r#"
+[[items]]
+name = "Stick"
+cost = 1
+
+[[abilities]]
+name = "Zap"
+cooldown_ticks = 60
+mana_cost = 10
+cast_range = 5.0
+kind = "burst"
+radius = 3.0
+damage = 50
+damage_type = "magic"
+
+[[heroes]]
+name = "Spark"
+max_health = 500
+max_mana = 300
+attack_damage = 40
+attack_range = 8.0
+attack_interval_ticks = 30
+move_speed = 6.0
+vision_range = 14.0
+abilities = [0, 0, 0]
+"#;
+        let content = load_toml(text).expect("ability pack");
+        assert_eq!(content.abilities.len(), 1);
+        assert_eq!(content.abilities[0].name, "Zap");
+        assert!(matches!(
+            content.abilities[0].kind,
+            AbilityKind::Burst { damage: 50, .. }
+        ));
     }
 
     #[test]

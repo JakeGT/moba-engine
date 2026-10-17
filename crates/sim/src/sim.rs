@@ -6,9 +6,9 @@ use std::sync::Arc;
 use moba_core::{Fix, FixVec2, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
-    ABILITIES, AbilityDef, DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL,
-    GameContent, HeroId, LEVEL_CAP, LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION,
-    SHOP_RADIUS, STARTING_GOLD, TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
+    DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP,
+    LEVEL_GROWTH, MAP, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Team,
+    XP_RADIUS, mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
 
@@ -183,15 +183,8 @@ struct HeroView {
     cooldowns: Cooldowns,
     attack_range_sq: Fix,
     max_health: i32,
-    abilities: [u8; 3],
-}
-
-impl HeroView {
-    fn ability(&self, slot: usize) -> Option<&'static AbilityDef> {
-        self.abilities
-            .get(slot)
-            .and_then(|&id| ABILITIES.get(usize::from(id)))
-    }
+    ability_mana: [i32; 3],
+    ability_range: [Fix; 3],
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1000,7 +993,12 @@ impl Simulation {
             return;
         };
         let ability_index = usize::from(slot);
-        let Some(ability) = def.ability(ability_index) else {
+        let Some(ability) = def
+            .abilities
+            .get(ability_index)
+            .and_then(|&id| self.content.abilities.get(usize::from(id)))
+            .cloned()
+        else {
             return;
         };
         let Some(cooldowns) = self.world.get::<Cooldowns>(caster).copied() else {
@@ -1635,7 +1633,36 @@ impl Simulation {
                 cooldowns: *cooldowns,
                 attack_range_sq: stats.range_sq,
                 max_health: self.content.heroes[usize::from(identity.0.0)].max_health,
-                abilities: self.content.heroes[usize::from(identity.0.0)].abilities,
+                ability_mana: {
+                    let mut mana = [0; 3];
+                    for (slot, id) in self.content.heroes[usize::from(identity.0.0)]
+                        .abilities
+                        .iter()
+                        .enumerate()
+                    {
+                        mana[slot] = self
+                            .content
+                            .abilities
+                            .get(usize::from(*id))
+                            .map_or(0, |ability| ability.mana_cost);
+                    }
+                    mana
+                },
+                ability_range: {
+                    let mut range = [Fix::ZERO; 3];
+                    for (slot, id) in self.content.heroes[usize::from(identity.0.0)]
+                        .abilities
+                        .iter()
+                        .enumerate()
+                    {
+                        range[slot] = self
+                            .content
+                            .abilities
+                            .get(usize::from(*id))
+                            .map_or(Fix::ZERO, |ability| ability.cast_range);
+                    }
+                    range
+                },
             });
         }
 
@@ -1691,23 +1718,17 @@ impl Simulation {
                 let distance_sq = view.position.distance_sq(target.position);
                 let defensive = view.health * 100 <= view.max_health * 45;
                 if defensive && view.cooldowns.0[1] == 0 {
-                    if let Some(ability) = view.ability(1) {
-                        if view.mana >= ability.mana_cost {
-                            Some(PlayerCommand::CastAbility {
-                                slot: 1,
-                                target: view.position,
-                            })
-                        } else {
-                            None
-                        }
+                    if view.mana >= view.ability_mana[1] {
+                        Some(PlayerCommand::CastAbility {
+                            slot: 1,
+                            target: view.position,
+                        })
                     } else {
                         None
                     }
                 } else if view.cooldowns.0[0] == 0
-                    && view.ability(0).is_some_and(|ability| {
-                        view.mana >= ability.mana_cost
-                            && distance_sq <= ability.cast_range * ability.cast_range
-                    })
+                    && view.mana >= view.ability_mana[0]
+                    && distance_sq <= view.ability_range[0] * view.ability_range[0]
                 {
                     Some(PlayerCommand::CastAbility {
                         slot: 0,
@@ -1716,10 +1737,8 @@ impl Simulation {
                 } else if distance_sq > view.attack_range_sq
                     && distance_sq <= Fix::from_i32(12) * Fix::from_i32(12)
                     && view.cooldowns.0[2] == 0
-                    && view.ability(2).is_some_and(|ability| {
-                        view.mana >= ability.mana_cost
-                            && distance_sq <= ability.cast_range * ability.cast_range
-                    })
+                    && view.mana >= view.ability_mana[2]
+                    && distance_sq <= view.ability_range[2] * view.ability_range[2]
                 {
                     Some(PlayerCommand::CastAbility {
                         slot: 2,
@@ -2015,6 +2034,7 @@ mod tests {
                 ..moba_game::ItemSpec::from(&moba_game::ITEMS[0])
             }],
             heroes: GameContent::default().heroes,
+            abilities: GameContent::default().abilities,
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
@@ -2027,6 +2047,43 @@ mod tests {
             .expect("own hero");
         assert_eq!(own.items[0], 0);
         assert!(own.gold < 500);
+    }
+
+    #[test]
+    fn custom_ability_content_drives_casting() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Zap"),
+            cooldown_ticks: 60,
+            mana_cost: 10,
+            cast_range: moba_core::Fix::from_i32(12),
+            kind: AbilityKind::Burst {
+                radius: moba_core::Fix::from_i32(6),
+                damage: 100,
+                damage_type: DamageType::Magic,
+            },
+        };
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let red_position = sim.world.get::<Position>(red).expect("position").0;
+        sim.world.get_mut::<Position>(blue).expect("position").0 = red_position;
+        let before = sim.world.get::<Health>(red).expect("health").current;
+        let mut inputs = TickInputs::new();
+        inputs.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: red_position,
+            },
+        );
+        sim.tick(&inputs);
+        assert!(
+            sim.world.get::<Health>(red).expect("health").current < before,
+            "custom burst ability damaged the target"
+        );
     }
 
     #[test]

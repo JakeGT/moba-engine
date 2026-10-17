@@ -1,0 +1,31 @@
+# Example pack with a custom ability. Verify with:
+#   moba-server --items content/ability-pack.toml --record match.mbr ...
+[[items]]
+name = "Spark Wand"
+cost = 250
+mana = 60
+
+[[abilities]]
+name = "Nova"
+cooldown_ticks = 90
+mana_cost = 20
+cast_range = 5.0
+kind = "burst"
+radius = 4.0
+damage = 90
+damage_type = "magic"
+
+[[heroes]]
+name = "Nova Mage"
+max_health = 520
+max_mana = 400
+health_regen_per_tick = 1
+mana_regen_per_tick = 5
+attack_damage = 42
+attack_range = 8.0
+attack_interval_ticks = 32
+move_speed = 6.0
+armor = 14
+magic_resist = 24
+vision_range = 14.0
+abilities = [0, 0, 0]

@@ -14,11 +14,11 @@ use crate::crypto::{
     SessionCrypto, derive_session_key, random_nonce, verify_hello_tag, welcome_tag,
 };
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_HEROES, MAX_WIRE_ITEMS,
-    MatchPhase, NetEntity, NetId, PacketKind, SnapshotDelta, SnapshotState, WIRE_HERO_NAME,
-    WIRE_ITEM_NAME, Welcome, WireCommand, WireHero, WireItem, build_delta, catalog_hash,
-    decode_hello, decode_input, dequantize_position, encode_snapshot, encode_welcome,
-    sequence_after,
+    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ABILITIES, MAX_WIRE_HEROES,
+    MAX_WIRE_ITEMS, MatchPhase, NetEntity, NetId, PacketKind, SnapshotDelta, SnapshotState,
+    WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME, Welcome, WireAbility, WireCommand, WireHero,
+    WireItem, build_delta, catalog_hash, decode_hello, decode_input, dequantize_position,
+    encode_snapshot, encode_welcome, sequence_after,
 };
 use crate::transport::{ReceivedMessage, UdpTransport};
 
@@ -895,9 +895,21 @@ impl NetServer {
             slot.vision_bits = source.vision_range.to_bits();
             slot.abilities = source.abilities;
         }
+        let ability_count = u8::try_from(self.content.abilities.len().min(MAX_WIRE_ABILITIES))
+            .unwrap_or(MAX_WIRE_ABILITIES as u8);
+        let mut abilities = [WireAbility::default(); MAX_WIRE_ABILITIES];
+        for (slot, source) in abilities.iter_mut().zip(self.content.abilities.iter()) {
+            let bytes = source.name.as_bytes();
+            let length = bytes.len().min(WIRE_ABILITY_NAME);
+            slot.name[..length].copy_from_slice(&bytes[..length]);
+            slot.name_len = u8::try_from(length).unwrap_or(WIRE_ABILITY_NAME as u8);
+            slot.cooldown_ticks = source.cooldown_ticks;
+            slot.mana_cost = u16::try_from(source.mana_cost.max(0)).unwrap_or(u16::MAX);
+        }
         let content_hash = catalog_hash(
             &items[..usize::from(item_count)],
             &heroes[..usize::from(hero_count)],
+            &abilities[..usize::from(ability_count)],
         );
         let mut server_nonce = 0;
         let mut auth = [0u8; 32];
@@ -927,6 +939,8 @@ impl NetServer {
             items,
             hero_count,
             heroes,
+            ability_count,
+            abilities,
             content_hash,
         };
         let payload = encode_welcome(&welcome);

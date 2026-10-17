@@ -40,6 +40,7 @@ fn custom_content() -> GameContent {
             vision_range: moba_core::Fix::from_i32(14),
             abilities: [0, 1, 2],
         }],
+        abilities: GameContent::default().abilities,
     }
 }
 
@@ -76,6 +77,7 @@ fn custom_item_catalogue_reaches_client_and_shop() {
     assert_eq!(client.items()[0].name_str(), "Test Blade");
     assert_eq!(client.heroes().len(), 1);
     assert_eq!(client.heroes()[0].name_str(), "Test Hero");
+    assert_ne!(client.abilities().len(), 0);
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(1) && client.snapshot().is_none() {
         client.poll().expect("poll");

@@ -82,6 +82,7 @@ pub struct NetClient {
     hero_pick: u8,
     items: Vec<crate::protocol::WireItem>,
     heroes: Vec<crate::protocol::WireHero>,
+    abilities: Vec<crate::protocol::WireAbility>,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     spectator: bool,
@@ -183,6 +184,7 @@ impl NetClient {
             hero_pick: 0,
             items: Vec::new(),
             heroes: Vec::new(),
+            abilities: Vec::new(),
             nonce,
             pre_shared_key,
             spectator,
@@ -349,8 +351,15 @@ impl NetClient {
                     if self.state != ClientState::Connecting {
                         continue;
                     }
-                    let Ok(welcome) = decode_welcome(&message.payload) else {
-                        continue;
+                    let welcome = match decode_welcome(&message.payload) {
+                        Ok(welcome) => welcome,
+                        Err(error) => {
+                            eprintln!(
+                                "welcome decode failed: {error:?} len={}",
+                                message.payload.len()
+                            );
+                            continue;
+                        }
                     };
                     if welcome.nonce != self.nonce {
                         continue;
@@ -359,9 +368,18 @@ impl NetClient {
                         usize::from(welcome.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
                     let hero_count =
                         usize::from(welcome.hero_count).min(crate::protocol::MAX_WIRE_HEROES);
-                    let content_hash =
-                        catalog_hash(&welcome.items[..item_count], &welcome.heroes[..hero_count]);
+                    let ability_count =
+                        usize::from(welcome.ability_count).min(crate::protocol::MAX_WIRE_ABILITIES);
+                    let content_hash = catalog_hash(
+                        &welcome.items[..item_count],
+                        &welcome.heroes[..hero_count],
+                        &welcome.abilities[..ability_count],
+                    );
                     if content_hash != welcome.content_hash {
+                        eprintln!(
+                            "content hash mismatch client={content_hash:#x} welcome={:#x}",
+                            welcome.content_hash
+                        );
                         continue;
                     }
                     if let Some(key) = self.pre_shared_key {
@@ -401,6 +419,9 @@ impl NetClient {
                     self.items.extend_from_slice(&welcome.items[..item_count]);
                     self.heroes.clear();
                     self.heroes.extend_from_slice(&welcome.heroes[..hero_count]);
+                    self.abilities.clear();
+                    self.abilities
+                        .extend_from_slice(&welcome.abilities[..ability_count]);
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -576,6 +597,12 @@ impl NetClient {
     #[must_use]
     pub fn heroes(&self) -> &[crate::protocol::WireHero] {
         &self.heroes
+    }
+
+    /// Runtime ability catalogue received in the handshake.
+    #[must_use]
+    pub fn abilities(&self) -> &[crate::protocol::WireAbility] {
+        &self.abilities
     }
 
     /// Server tick rate.
