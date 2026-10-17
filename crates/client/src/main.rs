@@ -1566,6 +1566,15 @@ fn build_vision(network: &NetworkView) -> VisionCircles {
     if network.spectator {
         return vision;
     }
+    let wire_map = network.client.map();
+    for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
+        vision.add_wall(
+            f32::from(wall.a[0]),
+            f32::from(wall.a[1]),
+            f32::from(wall.b[0]),
+            f32::from(wall.b[1]),
+        );
+    }
     let Some(snapshot) = network.client.snapshot() else {
         return vision;
     };

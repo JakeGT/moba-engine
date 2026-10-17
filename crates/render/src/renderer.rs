@@ -22,7 +22,7 @@ use crate::ui::{UiDrawList, UiVertex};
 use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
-const CAMERA_UNIFORM_SIZE: u64 = 384;
+const CAMERA_UNIFORM_SIZE: u64 = core::mem::size_of::<CameraUniform>() as u64;
 
 /// Renderer configuration.
 #[derive(Clone, Debug)]

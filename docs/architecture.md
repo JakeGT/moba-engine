@@ -138,7 +138,13 @@ simulation loop.
 - Tests: real UDP loopback, optional `moba-netsim` proxies, and deterministic single-process
   simulations.
 
-## Server operations
+## Visibility
+
+Each map can carry vision-blocking wall segments. The server intersects the source→unit
+segment against walls before revealing an enemy; allied units and structures stay visible.
+The terrain shader receives the same segments and rejects a vision-circle contribution when
+a wall crosses the circle-center→fragment ray. Wall geometry rendering is intentionally not
+part of this slice; the blockers are authored data and minimap-independent.
 
 `NetServer` applies a token-bucket rate limit per source address before message decoding
 (default 120 pps, burst one second; `0` disables). Buckets are bounded and evicted LRU to cap

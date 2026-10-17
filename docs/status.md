@@ -12,7 +12,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
 | M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and spectator mode (protocol v7); 5-minute plaintext soak, 20 s encrypted and 15 s v7 soaks pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
-| M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up gating and surrender votes, HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; line-of-sight fog and map selection remain. |
+| M6 | Vertical slice | 🟡 | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up gating and surrender votes, HUD, levels/XP, gold/items/shop, minimap, floating health bars, scoreboard, fog-of-war terrain and VICTORY/DEFEAT; line-of-sight wall visuals/verification remain. |
 | M7 | Hardening | 🟡 | PSK AEAD transport, reconnect, replay manifests and per-address UDP rate limiting/tick telemetry landed; public identity/edge anti-DoS, 50 matches/box, one-hour sanitizer fuzz and profiling captures remain. |
 | M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation and reach clients in the handshake; new ability behaviour kinds, hot reload and richer manifests remain. |
 
@@ -67,7 +67,7 @@ Last updated: 2026-10-17 (round 17 of the build).
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` (with `missing_docs`)
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
 - `cargo check -p moba-engine --no-default-features` and `--all-features`
-- `cargo test --workspace --locked` — 148 tests
+- `cargo test --workspace --locked` — 149 tests
 - `cargo bench -p moba-ecs --bench ecs_iter` — see `docs/perf/0001-core-runtime.md`
 - `just layering` equivalent via `cargo tree` — server/sim/game/nav/net are clean of
   render/platform/winit/ash.

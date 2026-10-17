@@ -16,3 +16,8 @@ position = [20, 128]
 team = "red"
 kind = "nexus"
 position = [236, 128]
+
+# Vision-blocking wall (movement passes through; line-of-sight does not).
+[[map.walls]]
+a = [48, 100]
+b = [48, 156]

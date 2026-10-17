@@ -33,6 +33,8 @@ pub const MAX_CONTENT_LANES: usize = 4;
 pub const MAX_LANE_POINTS: usize = 16;
 /// Maximum structures in a content pack.
 pub const MAX_CONTENT_STRUCTURES: usize = 32;
+/// Maximum vision-blocking wall segments.
+pub const MAX_CONTENT_WALLS: usize = 32;
 
 /// An owned, runtime item definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,6 +102,15 @@ pub struct StructureSpec {
     pub lane: Option<u8>,
 }
 
+/// A vision-blocking wall segment (does not block movement).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WallSpec {
+    /// First endpoint.
+    pub a: FixVec2,
+    /// Second endpoint.
+    pub b: FixVec2,
+}
+
 /// An owned runtime map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapSpec {
@@ -107,6 +118,8 @@ pub struct MapSpec {
     pub lanes: Vec<LaneSpec>,
     /// Structures in stable order.
     pub structures: Vec<StructureSpec>,
+    /// Vision-blocking wall segments.
+    pub walls: Vec<WallSpec>,
     /// Blue spawn.
     pub blue_spawn: FixVec2,
     /// Red spawn.
@@ -134,6 +147,7 @@ impl From<&MapDef> for MapSpec {
                     lane: structure.lane,
                 })
                 .collect(),
+            walls: Vec::new(),
             blue_spawn: map.blue_spawn,
             red_spawn: map.red_spawn,
         }
@@ -331,6 +345,8 @@ pub enum ContentError {
     BadMap,
     /// Map lane names or structure layout are invalid.
     BadMapData,
+    /// Wall count/endpoints are invalid.
+    BadWalls,
 }
 
 impl core::fmt::Display for ContentError {
@@ -359,6 +375,7 @@ impl core::fmt::Display for ContentError {
             Self::BadAbilityKind => f.write_str("ability kind parameters must be positive"),
             Self::BadMap => f.write_str("map limits are invalid"),
             Self::BadMapData => f.write_str("map lanes/structures are invalid"),
+            Self::BadWalls => f.write_str("map walls are invalid"),
         }
     }
 }
@@ -469,6 +486,11 @@ impl GameContent {
             {
                 return Err(ContentError::BadMapData);
             }
+        }
+        if self.map.walls.len() > MAX_CONTENT_WALLS
+            || self.map.walls.iter().any(|wall| wall.a == wall.b)
+        {
+            return Err(ContentError::BadWalls);
         }
         if self.map.structures.iter().any(|structure| {
             structure
@@ -623,6 +645,12 @@ impl GameContent {
             feed(&structure.position.y.to_bits().to_le_bytes());
             feed(&[structure.lane.unwrap_or(0xFF)]);
         }
+        for wall in &self.map.walls {
+            for point in [wall.a, wall.b] {
+                feed(&point.x.to_bits().to_le_bytes());
+                feed(&point.y.to_bits().to_le_bytes());
+            }
+        }
         hash
     }
 }
@@ -666,6 +694,14 @@ struct MapEntry {
     lanes: Vec<LaneEntry>,
     #[serde(default)]
     structures: Vec<StructureEntry>,
+    #[serde(default)]
+    walls: Vec<WallEntry>,
+}
+
+#[derive(Deserialize)]
+struct WallEntry {
+    a: [i32; 2],
+    b: [i32; 2],
 }
 
 #[derive(Deserialize)]
@@ -877,6 +913,14 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                     lane: structure.lane,
                 })
                 .collect(),
+            walls: map
+                .walls
+                .into_iter()
+                .map(|wall| WallSpec {
+                    a: FixVec2::from_ints(wall.a[0], wall.a[1]),
+                    b: FixVec2::from_ints(wall.b[0], wall.b[1]),
+                })
+                .collect(),
         },
     );
     let content = GameContent {
@@ -930,10 +974,15 @@ position = [20, 128]
 team = "red"
 kind = "nexus"
 position = [236, 128]
+
+[[map.walls]]
+a = [80, 96]
+b = [80, 160]
 "#;
         let content = load_toml(text).expect("map pack");
         assert_eq!(content.items.len(), ITEMS.len());
         assert_eq!(content.map.lanes.len(), 1);
+        assert_eq!(content.map.walls.len(), 1);
         assert_eq!(content.map.nexus_position(Team::Blue).x.to_i64(), 20);
     }
 

@@ -15,11 +15,11 @@ use crate::crypto::{
 };
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ABILITIES, MAX_WIRE_HEROES,
-    MAX_WIRE_ITEMS, MAX_WIRE_LANE_POINTS, MAX_WIRE_LANES, MatchPhase, NetEntity, NetId, PacketKind,
-    SnapshotDelta, SnapshotState, WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME,
-    WIRE_LANE_NAME, Welcome, WireAbility, WireCommand, WireHero, WireItem, WireLane, WireMap,
-    build_delta, catalog_hash, decode_hello, decode_input, dequantize_position, encode_snapshot,
-    encode_welcome, sequence_after,
+    MAX_WIRE_ITEMS, MAX_WIRE_LANE_POINTS, MAX_WIRE_LANES, MAX_WIRE_WALLS, MatchPhase, NetEntity,
+    NetId, PacketKind, SnapshotDelta, SnapshotState, WIRE_ABILITY_NAME, WIRE_HERO_NAME,
+    WIRE_ITEM_NAME, WIRE_LANE_NAME, Welcome, WireAbility, WireCommand, WireHero, WireItem,
+    WireLane, WireMap, WireWall, build_delta, catalog_hash, decode_hello, decode_input,
+    dequantize_position, encode_snapshot, encode_welcome, sequence_after,
 };
 use crate::transport::{ReceivedMessage, UdpTransport};
 
@@ -1030,6 +1030,22 @@ impl NetServer {
                     i16::try_from(self.content.map.red_spawn.x.to_i64()).unwrap_or(0),
                     i16::try_from(self.content.map.red_spawn.y.to_i64()).unwrap_or(0),
                 ],
+                wall_count: u8::try_from(self.content.map.walls.len().min(MAX_WIRE_WALLS))
+                    .unwrap_or(MAX_WIRE_WALLS as u8),
+                walls: {
+                    let mut walls = [WireWall::default(); MAX_WIRE_WALLS];
+                    for (target, source) in walls.iter_mut().zip(self.content.map.walls.iter()) {
+                        target.a = [
+                            i16::try_from(source.a.x.to_i64()).unwrap_or(0),
+                            i16::try_from(source.a.y.to_i64()).unwrap_or(0),
+                        ];
+                        target.b = [
+                            i16::try_from(source.b.x.to_i64()).unwrap_or(0),
+                            i16::try_from(source.b.y.to_i64()).unwrap_or(0),
+                        ];
+                    }
+                    walls
+                },
             }
         };
         let content_hash = catalog_hash(

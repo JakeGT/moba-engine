@@ -22,5 +22,5 @@ mod ui;
 pub use error::{RenderError, RenderResult};
 pub use instance::ValidationMode;
 pub use renderer::{CapturedFrame, RenderConfig, Renderer};
-pub use scene::{Camera, Scene, UnitInstance, VISION_CIRCLES, VisionCircles};
+pub use scene::{Camera, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles};
 pub use ui::{UiDrawList, UiVertex};

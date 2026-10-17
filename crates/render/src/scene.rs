@@ -110,16 +110,24 @@ pub struct VisionCircles {
     pub circles: [Vec4; VISION_CIRCLES],
     /// Number of active circles.
     pub count: u32,
+    /// Vision-blocking segments: `(x1, z1, x2, z2)`.
+    pub walls: [Vec4; VISION_WALLS],
+    /// Number of active walls.
+    pub wall_count: u32,
 }
 
 /// Maximum vision circles uploaded per frame.
 pub const VISION_CIRCLES: usize = 16;
+/// Maximum vision-blocking walls uploaded per frame.
+pub const VISION_WALLS: usize = 32;
 
 impl Default for VisionCircles {
     fn default() -> Self {
         Self {
             circles: [Vec4::ZERO; VISION_CIRCLES],
             count: 0,
+            walls: [Vec4::ZERO; VISION_WALLS],
+            wall_count: 0,
         }
     }
 }
@@ -133,6 +141,15 @@ impl VisionCircles {
         self.circles[self.count as usize] = Vec4::new(x, z, radius.max(0.0), 0.0);
         self.count += 1;
     }
+
+    /// Adds a vision-blocking wall segment, saturating at [`VISION_WALLS`].
+    pub fn add_wall(&mut self, x1: f32, z1: f32, x2: f32, z2: f32) {
+        if self.wall_count as usize >= VISION_WALLS {
+            return;
+        }
+        self.walls[self.wall_count as usize] = Vec4::new(x1, z1, x2, z2);
+        self.wall_count += 1;
+    }
 }
 
 impl<'a> Scene<'a> {
@@ -145,6 +162,8 @@ impl<'a> Scene<'a> {
             vision: VisionCircles {
                 circles: [Vec4::ZERO; VISION_CIRCLES],
                 count: 0,
+                walls: [Vec4::ZERO; VISION_WALLS],
+                wall_count: 0,
             },
         }
     }
@@ -180,6 +199,8 @@ pub(crate) struct CameraUniform {
     ambient: [f32; 4],
     vision_circles: [[f32; 4]; VISION_CIRCLES],
     vision_count: [u32; 4],
+    vision_walls: [[f32; 4]; VISION_WALLS],
+    wall_count: [u32; 4],
 }
 
 impl CameraUniform {
@@ -200,6 +221,8 @@ impl CameraUniform {
             ambient: [camera.ambient.x, camera.ambient.y, camera.ambient.z, 0.0],
             vision_circles: circles,
             vision_count: [vision.count, 0, 0, 0],
+            vision_walls: vision.walls.map(|wall| wall.to_array()),
+            wall_count: [vision.wall_count, 0, 0, 0],
         }
     }
 }

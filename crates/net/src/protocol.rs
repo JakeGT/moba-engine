@@ -235,6 +235,8 @@ pub const MAX_WIRE_LANES: usize = 4;
 pub const MAX_WIRE_LANE_POINTS: usize = 16;
 /// Fixed lane-name bytes on the wire.
 pub const WIRE_LANE_NAME: usize = 16;
+/// Maximum vision-wall segments in a handshake map.
+pub const MAX_WIRE_WALLS: usize = 32;
 
 /// One runtime item definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -386,6 +388,15 @@ impl WireLane {
     }
 }
 
+/// One vision-blocking wall segment.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireWall {
+    /// First endpoint.
+    pub a: [i16; 2],
+    /// Second endpoint.
+    pub b: [i16; 2],
+}
+
 /// Minimap geometry carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireMap {
@@ -397,6 +408,10 @@ pub struct WireMap {
     pub blue_spawn: [i16; 2],
     /// Red spawn.
     pub red_spawn: [i16; 2],
+    /// Number of valid walls.
+    pub wall_count: u8,
+    /// Vision-blocking walls.
+    pub walls: [WireWall; MAX_WIRE_WALLS],
 }
 
 impl Default for WireMap {
@@ -406,6 +421,8 @@ impl Default for WireMap {
             lanes: [WireLane::default(); MAX_WIRE_LANES],
             blue_spawn: [0; 2],
             red_spawn: [0; 2],
+            wall_count: 0,
+            walls: [WireWall::default(); MAX_WIRE_WALLS],
         }
     }
 }
@@ -542,6 +559,12 @@ pub fn catalog_hash(
         feed(&point[0].to_le_bytes());
         feed(&point[1].to_le_bytes());
     }
+    for wall in map.walls.iter().take(usize::from(map.wall_count)) {
+        for point in [wall.a, wall.b] {
+            feed(&point[0].to_le_bytes());
+            feed(&point[1].to_le_bytes());
+        }
+    }
     hash
 }
 
@@ -600,6 +623,13 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
     out.extend_from_slice(&welcome.map.blue_spawn[1].to_le_bytes());
     out.extend_from_slice(&welcome.map.red_spawn[0].to_le_bytes());
     out.extend_from_slice(&welcome.map.red_spawn[1].to_le_bytes());
+    out.push(welcome.map.wall_count);
+    for wall in welcome.map.walls.iter().take(MAX_WIRE_WALLS) {
+        out.extend_from_slice(&wall.a[0].to_le_bytes());
+        out.extend_from_slice(&wall.a[1].to_le_bytes());
+        out.extend_from_slice(&wall.b[0].to_le_bytes());
+        out.extend_from_slice(&wall.b[1].to_le_bytes());
+    }
     out.extend_from_slice(&welcome.content_hash.to_le_bytes());
     out
 }
@@ -777,6 +807,41 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
                             .map_err(|_| WireError::Truncated)?,
                     ),
                 ],
+                wall_count: reader.u8()?,
+                walls: {
+                    let mut walls = [WireWall::default(); MAX_WIRE_WALLS];
+                    for wall in &mut walls {
+                        wall.a = [
+                            i16::from_le_bytes(
+                                reader
+                                    .bytes(2)?
+                                    .try_into()
+                                    .map_err(|_| WireError::Truncated)?,
+                            ),
+                            i16::from_le_bytes(
+                                reader
+                                    .bytes(2)?
+                                    .try_into()
+                                    .map_err(|_| WireError::Truncated)?,
+                            ),
+                        ];
+                        wall.b = [
+                            i16::from_le_bytes(
+                                reader
+                                    .bytes(2)?
+                                    .try_into()
+                                    .map_err(|_| WireError::Truncated)?,
+                            ),
+                            i16::from_le_bytes(
+                                reader
+                                    .bytes(2)?
+                                    .try_into()
+                                    .map_err(|_| WireError::Truncated)?,
+                            ),
+                        ];
+                    }
+                    walls
+                },
             }
         },
         content_hash: u64::from_le_bytes(

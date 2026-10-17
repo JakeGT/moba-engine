@@ -10,6 +10,8 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 ambient;
     vec4 vision_circles[16];
     uvec4 vision_count;
+    vec4 vision_walls[32];
+    uvec4 wall_count;
 } camera;
 
 layout(location = 0) in vec3 in_position;

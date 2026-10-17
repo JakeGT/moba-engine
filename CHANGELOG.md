@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Runtime map vision blockers: TOML `[[map.walls]]`, server LOS filtering, shader
+  per-pixel wall shadows and wall data in the handshake map.
 - `match-soak` 50-match deterministic harness with composition rotation and `content-check`
   validator; mirrored hero spawn/pick fairness fixes and alternating wave/command order.
 - Per-address UDP token-bucket rate limiting (`--max-pps`) with bounded/LRU buckets, drop

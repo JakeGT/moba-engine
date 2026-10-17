@@ -466,7 +466,12 @@ impl Simulation {
             let visible = viewer.is_none()
                 || allied
                 || kind.is_structure()
-                || (!dead && unit_in_vision(position.0, &sources[..source_count]));
+                || (!dead
+                    && unit_in_vision(
+                        position.0,
+                        &sources[..source_count],
+                        &self.content.map.walls,
+                    ));
             if !visible {
                 continue;
             }
@@ -1827,10 +1832,35 @@ const fn unit_gold(kind: UnitKind) -> u32 {
     }
 }
 
-fn unit_in_vision(position: FixVec2, sources: &[(FixVec2, Fix)]) -> bool {
-    sources
-        .iter()
-        .any(|&(source, range)| position.distance_sq(source) <= range * range)
+fn unit_in_vision(
+    position: FixVec2,
+    sources: &[(FixVec2, Fix)],
+    walls: &[moba_game::WallSpec],
+) -> bool {
+    sources.iter().any(|&(source, range)| {
+        position.distance_sq(source) <= range * range
+            && walls
+                .iter()
+                .all(|wall| !segments_intersect(source, position, wall.a, wall.b))
+    })
+}
+
+fn cross(a: FixVec2, b: FixVec2) -> Fix {
+    a.x * b.y - a.y * b.x
+}
+
+fn segments_intersect(a: FixVec2, b: FixVec2, c: FixVec2, d: FixVec2) -> bool {
+    let ab = b - a;
+    let cd = d - c;
+    let ac = c - a;
+    let ad = d - a;
+    let ca = a - c;
+    let cb = b - c;
+    let d1 = cross(ab, ac);
+    let d2 = cross(ab, ad);
+    let d3 = cross(cd, ca);
+    let d4 = cross(cd, cb);
+    ((d1 > Fix::ZERO) != (d2 > Fix::ZERO)) && ((d3 > Fix::ZERO) != (d4 > Fix::ZERO))
 }
 
 fn clamp_position(position: FixVec2) -> FixVec2 {
@@ -2075,6 +2105,28 @@ mod tests {
             .expect("own hero");
         assert_eq!(own.items[0], 0);
         assert!(own.gold < 500);
+    }
+
+    #[test]
+    fn walls_block_line_of_sight() {
+        use moba_game::{GameContent, WallSpec};
+        let mut content = GameContent::default();
+        content.map.walls.push(WallSpec {
+            a: FixVec2::from_ints(105, 90),
+            b: FixVec2::from_ints(105, 170),
+        });
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        sim.world.get_mut::<Position>(blue).unwrap().0 = FixVec2::from_ints(100, 128);
+        sim.world.get_mut::<Position>(red).unwrap().0 = FixVec2::from_ints(110, 128);
+        let mut observed = Vec::new();
+        sim.observed_units(Team::Blue, &mut observed);
+        assert!(
+            observed.iter().all(|unit| unit.hero_slot != Some(5)),
+            "wall blocks the enemy hero"
+        );
     }
 
     #[test]

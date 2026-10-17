@@ -7,6 +7,8 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 ambient;
     vec4 vision_circles[16];
     uvec4 vision_count;
+    vec4 vision_walls[32];
+    uvec4 wall_count;
 } camera;
 
 layout(location = 0) in vec3 in_normal;
@@ -41,7 +43,34 @@ void main() {
         }
         vec4 circle = camera.vision_circles[i];
         float distance_to_vision = length(in_world_pos.xz - circle.xy);
-        visibility = max(visibility, 1.0 - smoothstep(circle.z - 2.0, circle.z + 2.0, distance_to_vision));
+        if (distance_to_vision > circle.z + 2.0) {
+            continue;
+        }
+        bool blocked = false;
+        for (int wall_index = 0; wall_index < 32; wall_index++) {
+            if (wall_index >= int(camera.wall_count.x)) {
+                break;
+            }
+            vec4 wall = camera.vision_walls[wall_index];
+            vec2 from = circle.xy;
+            vec2 to = in_world_pos.xz;
+            vec2 ray = to - from;
+            vec2 segment = wall.zw - wall.xy;
+            float denominator = ray.x * segment.y - ray.y * segment.x;
+            if (abs(denominator) < 1e-5) {
+                continue;
+            }
+            vec2 offset = wall.xy - from;
+            float along_ray = (offset.x * segment.y - offset.y * segment.x) / denominator;
+            float along_wall = (offset.x * ray.y - offset.y * ray.x) / denominator;
+            if (along_ray > 0.0 && along_ray < 1.0 && along_wall >= 0.0 && along_wall <= 1.0) {
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked) {
+            visibility = max(visibility, 1.0 - smoothstep(circle.z - 2.0, circle.z + 2.0, distance_to_vision));
+        }
     }
     if (camera.vision_count.x > 0u) {
         vec3 fog_color = vec3(0.012, 0.020, 0.035);
