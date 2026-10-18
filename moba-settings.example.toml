@@ -1,0 +1,15 @@
+ui_scale = 1.0
+
+[controls]
+move_up = "W"
+move_down = "S"
+move_left = "A"
+move_right = "D"
+cast_q = "Q"
+cast_w = "W"
+cast_e = "E"
+stop = "Space"
+shop = "B"
+scoreboard = "Tab"
+ready = "R"
+surrender = "F5"

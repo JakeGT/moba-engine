@@ -2,6 +2,7 @@
 
 mod app;
 mod hud;
+mod settings;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     app::run()
