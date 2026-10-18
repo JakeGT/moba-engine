@@ -10,7 +10,11 @@ use moba_net::{NetServer, ServerConfig};
 
 #[test]
 fn mismatched_protocol_is_rejected_with_disconnect() {
-    let server = NetServer::bind(ServerConfig::default()).expect("bind");
+    let server = NetServer::bind(ServerConfig {
+        bind: "127.0.0.1:0".parse().expect("bind address"),
+        ..ServerConfig::default()
+    })
+    .expect("bind");
     let addr = server.local_addr().expect("addr");
     let handle = std::thread::spawn(move || {
         let mut server = server;
