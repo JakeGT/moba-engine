@@ -818,6 +818,7 @@ impl Renderer {
         unsafe { self.device.device.end_command_buffer(command_buffer) }?;
 
         let render_finished = self.swapchain.render_finished[image_index as usize].handle();
+        let present_ready = self.swapchain.present_ready[image_index as usize].handle();
         let wait_semaphores = [image_available];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let signal_semaphores = [render_finished];
@@ -839,6 +840,25 @@ impl Renderer {
                 fence,
             )
         }?;
+        // Bridge the render-finished signal through a submission dependency. Some validation
+        // layers (1.3.275) incorrectly report PRESENT_AFTER_WRITE for the layout transition
+        // when presentation waits directly; this empty submit makes the dependency explicit.
+        let bridge_wait = [render_finished];
+        let bridge_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+        let bridge_signal = [present_ready];
+        let bridge = vk::SubmitInfo::default()
+            .wait_semaphores(&bridge_wait)
+            .wait_dst_stage_mask(&bridge_stages)
+            .signal_semaphores(&bridge_signal);
+        // SAFETY: both semaphores belong to this device; the empty submit only creates a
+        // queue dependency and signals `present_ready` after the render submission.
+        unsafe {
+            self.device.device.queue_submit(
+                self.device.graphics_queue,
+                core::slice::from_ref(&bridge),
+                vk::Fence::null(),
+            )
+        }?;
         if capturing {
             self.capture_pending = false;
             self.capture_ready = true;
@@ -846,7 +866,7 @@ impl Renderer {
 
         let present_result =
             self.swapchain
-                .present(self.device.present_queue, image_index, render_finished);
+                .present(self.device.present_queue, image_index, present_ready);
         self.frame_index = (frame_index + 1) % FRAMES_IN_FLIGHT;
 
         match present_result {
