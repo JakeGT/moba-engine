@@ -2447,6 +2447,45 @@ mod tests {
     }
 
     #[test]
+    fn state_hash_covers_status_components() {
+        use moba_game::GameContent;
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(GameContent::default()),
+        );
+        let hero = sim.hero_entities[0];
+        let baseline = sim.state_hash();
+        let _ = sim.world.insert(
+            hero,
+            Shield {
+                amount: 10,
+                remaining: 5,
+            },
+        );
+        assert_ne!(sim.state_hash(), baseline);
+        let _ = sim.world.remove::<Shield>(hero);
+        let _ = sim.world.insert(
+            hero,
+            Slow {
+                base: moba_core::Fix::from_i32(4),
+                factor: moba_core::Fix::from_f32(0.5),
+                remaining: 5,
+            },
+        );
+        assert_ne!(sim.state_hash(), baseline);
+        let _ = sim.world.remove::<Slow>(hero);
+        let _ = sim.world.insert(hero, Root { remaining: 5 });
+        assert_ne!(sim.state_hash(), baseline);
+        let _ = sim.world.remove::<Root>(hero);
+        let _ = sim.world.insert(hero, Silence { remaining: 5 });
+        assert_ne!(sim.state_hash(), baseline);
+        let _ = sim.world.remove::<Silence>(hero);
+    }
+
+    #[test]
     fn state_hash_tracks_burn_source_and_type() {
         use moba_game::GameContent;
         let mut sim = Simulation::new_with_content(
