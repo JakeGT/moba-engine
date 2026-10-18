@@ -130,7 +130,7 @@ cargo run -p moba-engine --example custom_content
 | Upstream/client | ≤ 4 KB/s; soak ~1.17 KiB/s |
 | Network condition | 150 ms RTT, 5% loss, 30 ms jitter playable |
 | Client frame | ≤ 6.9 ms min-spec, never >16.6 ms (hardware validation still open) |
-| Allocation guard | ≤30 allocations / ≤4 KiB per 300 steady ticks |
+| Allocation guard | ≤8 allocations / ≤1 KiB per 300-tick window (steady/teamfight/respawn ≤2, shop/modifiers 0) |
 
 If a hot path changes, run the relevant benchmark and record evidence in
 `docs/perf/` rather than asserting a win.
