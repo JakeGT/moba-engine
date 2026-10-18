@@ -1,7 +1,15 @@
 //! HUD status.
 
 use super::{Camera, FixVec2, UiDrawList, Vec2, Vec3, Vec4, project_to_screen};
+use std::sync::OnceLock;
+
 use crate::hud_fmt;
+
+static CAPTURE_ACTIVE: OnceLock<bool> = OnceLock::new();
+
+fn capture_active() -> bool {
+    *CAPTURE_ACTIVE.get_or_init(|| std::env::var_os("MOBA_CAPTURE").is_some())
+}
 
 pub(crate) fn draw_world_circle(
     ui: &mut UiDrawList,
@@ -31,7 +39,7 @@ pub(crate) fn draw_world_circle(
 
 pub(crate) fn draw_perf(ui: &mut UiDrawList, width: f32, frame_ms: f32, fps: f32) {
     // Capture/golden images must not depend on wall-clock frame timing.
-    if std::env::var_os("MOBA_CAPTURE").is_some() {
+    if capture_active() {
         return;
     }
     let truncated = moba_render::ui_vertices_truncated();
