@@ -133,6 +133,22 @@ pub struct ServerStats {
     pub tick_nanos: u64,
     /// Longest simulation tick.
     pub tick_max_nanos: u64,
+    /// Simulation tick number of the longest tick.
+    pub tick_max_at: u32,
+    /// Wave number during the longest tick.
+    pub tick_max_wave: u32,
+    /// Live units during the longest tick.
+    pub tick_max_units: u32,
+    /// Simulation ticks at or above 500 µs.
+    pub tick_slow_500us: u64,
+    /// Simulation ticks at or above 1 ms.
+    pub tick_slow_1ms: u64,
+    /// Longest total server frame (inputs + simulation + snapshots).
+    pub frame_max_nanos: u64,
+    /// Server frame number of the longest frame.
+    pub frame_max_at: u32,
+    /// Server frames at or above 1 ms.
+    pub frame_slow_1ms: u64,
     /// Mean simulation tick, filled by [`NetServer::stats`].
     pub tick_avg_nanos: u64,
 }
@@ -981,6 +997,7 @@ impl NetServer {
     /// # Errors
     /// Returns a socket error when snapshots cannot be sent.
     pub fn tick(&mut self) -> io::Result<()> {
+        let frame_started = Instant::now();
         self.frame = self.frame.wrapping_add(1);
         if self.frame % 30 == 0 {
             self.poll_content_reload();
@@ -1016,6 +1033,14 @@ impl NetServer {
         let interval = u64::from(self.config.snapshot_interval.max(1));
         if self.frame % interval == 0 {
             self.send_snapshots()?;
+        }
+        let frame_nanos = frame_started.elapsed().as_nanos() as u64;
+        if frame_nanos >= 1_000_000 {
+            self.stats.frame_slow_1ms += 1;
+        }
+        if frame_nanos > self.stats.frame_max_nanos {
+            self.stats.frame_max_nanos = frame_nanos;
+            self.stats.frame_max_at = u32::try_from(self.frame).unwrap_or(u32::MAX);
         }
         Ok(())
     }

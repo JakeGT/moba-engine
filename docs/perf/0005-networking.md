@@ -149,3 +149,20 @@ That is ~3.7 / 3.7 / 3.6 ns per visible entity — cost tracks the view size, no
 The 40-minute view has more entities because later waves/skirmishes leave more units alive.
 No super-linear growth was observed; the earlier “3 ms max tick” is not attributable to
 snapshot construction in this benchmark.
+
+## Server max-tick profile (5 minutes, 10 clients)
+
+`cargo run --release -p moba-tools --bin soak -- --seconds 300` now reports both the
+simulation tick and the whole frame (inputs + simulation + snapshots):
+
+- 9,117 ticks / 90,310 snapshots, 16,061 KiB sent;
+- average simulation tick **16 µs**, max **116 µs**;
+- average whole frame bounded by tick rate; max frame **363 µs** at frame 3,053;
+- frames ≥1 ms: **0**; simulation ticks ≥1 ms: **0**;
+- no rate limiting, all clients connected.
+
+The previously observed ~3 ms max tick did not reproduce; the instrumented run shows no
+sustained or isolated >1 ms frame. Snapshot construction was separately measured at
+~3.6–3.7 ns per visible entity (#87), so the old spike is most consistent with an OS/scheduler
+or pre-optimisation transient rather than snapshot growth. The soak output now keeps the
+location (`max_at_tick`, `max_wave`, `max_units`, frame index) for future regressions.

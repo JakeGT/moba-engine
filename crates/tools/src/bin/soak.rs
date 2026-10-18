@@ -197,7 +197,7 @@ fn main() {
     }
     let (server_stats, hash) = server_thread.join().expect("server thread");
     eprintln!(
-        "server: ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} replayed_hellos={} avg_tick_us={} max_tick_us={} hash={:#x}",
+        "server: ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} replayed_hellos={} avg_tick_us={} max_tick_us={} max_at_tick={} max_wave={} max_units={} slow_500us={} slow_1ms={} frame_max_us={} frame_max_at={} frame_slow_1ms={} hash={:#x}",
         server_stats.ticks,
         server_stats.snapshots_sent,
         server_stats.bytes_sent / 1024,
@@ -206,6 +206,14 @@ fn main() {
         server_stats.replayed_hellos,
         server_stats.tick_avg_nanos / 1_000,
         server_stats.tick_max_nanos / 1_000,
+        server_stats.tick_max_at,
+        server_stats.tick_max_wave,
+        server_stats.tick_max_units,
+        server_stats.tick_slow_500us,
+        server_stats.tick_slow_1ms,
+        server_stats.frame_max_nanos / 1_000,
+        server_stats.frame_max_at,
+        server_stats.frame_slow_1ms,
         hash
     );
     if failed {
