@@ -119,15 +119,25 @@ impl World {
         let archetype_index = location.archetype as usize;
         let row = location.row as usize;
         let component_count = self.archetypes[archetype_index].component_ids().len();
+        // Remove every value from storage without running user `Drop` yet. If a component
+        // drops later, the entity/row bookkeeping is already consistent and queries can
+        // safely continue after `catch_unwind`.
+        let mut deferred = Vec::new();
         for column_index in 0..component_count {
             let id = self.archetypes[archetype_index].component_ids()[column_index];
             let column = self.archetypes[archetype_index]
                 .column_mut(id)
                 .expect("archetype lists a component without a column");
-            column.swap_remove_drop(row);
+            if column.needs_drop() {
+                deferred.push(column.swap_remove_boxed(row));
+            } else {
+                // No destructor: forgetting the moved value is allocation-free and cannot
+                // run user code.
+                column.swap_remove_forget(row);
+            }
         }
         let moved = self.archetypes[archetype_index].entities.swap_remove(row);
-        debug_assert_eq!(moved, entity);
+        assert_eq!(moved, entity, "entity/archetype row bookkeeping diverged");
         if row < self.archetypes[archetype_index].entities.len() {
             let moved_entity = self.archetypes[archetype_index].entities[row];
             self.locations[moved_entity.index() as usize].row =
@@ -135,6 +145,7 @@ impl World {
         }
         self.locations[entity.index() as usize] = Location::INVALID;
         self.entities.despawn(entity);
+        drop(deferred);
         true
     }
 
@@ -380,7 +391,7 @@ impl World {
     /// Removes the entity record from `archetype` and fixes up the swapped entity.
     fn remove_entity_row(&mut self, archetype: usize, row: usize, entity: Entity) {
         let moved = self.archetypes[archetype].entities.swap_remove(row);
-        debug_assert_eq!(moved, entity, "entity/archetype row bookkeeping diverged");
+        assert_eq!(moved, entity, "entity/archetype row bookkeeping diverged");
         if row < self.archetypes[archetype].entities.len() {
             let moved_entity = self.archetypes[archetype].entities[row];
             self.locations[moved_entity.index() as usize].row =

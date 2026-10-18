@@ -51,8 +51,15 @@ pub(crate) trait AnyColumn: Any + Send + Sync {
     /// Removes `row` by swapping in the last value, without dropping the removed value.
     fn swap_remove_forget(&mut self, row: usize);
 
-    /// Removes `row` by swapping in the last value, dropping the removed value.
-    fn swap_remove_drop(&mut self, row: usize);
+    /// Whether dropping values of this component type can run user code.
+    fn needs_drop(&self) -> bool;
+
+    /// Removes `row` by swapping in the last value and boxing the removed value.
+    ///
+    /// Only called when [`AnyColumn::needs_drop`] is true. Boxing lets the world finish
+    /// structural bookkeeping before invoking user `Drop` code, so a panicking component
+    /// cannot leave rows mismatched.
+    fn swap_remove_boxed(&mut self, row: usize) -> Box<dyn Any + Send + Sync>;
 }
 
 /// The concrete column implementation for component type `T`.
@@ -92,14 +99,14 @@ impl<T: Component> AnyColumn for VecColumn<T> {
     }
 
     fn value_ptr(&self, row: usize) -> *const u8 {
-        debug_assert!(row < self.data.len(), "row out of bounds");
-        // SAFETY: `row` is in bounds (debug-asserted and upheld by all callers), so the
+        assert!(row < self.data.len(), "row out of bounds");
+        // SAFETY: `row` is in bounds (asserted and upheld by all callers), so the
         // pointer stays inside the allocation. It is returned, not dereferenced here.
         unsafe { self.data.as_ptr().add(row).cast() }
     }
 
     fn value_ptr_mut(&mut self, row: usize) -> *mut u8 {
-        debug_assert!(row < self.data.len(), "row out of bounds");
+        assert!(row < self.data.len(), "row out of bounds");
         // SAFETY: `row` is in bounds, so the pointer stays inside the allocation.
         unsafe { self.data.as_mut_ptr().add(row).cast() }
     }
@@ -140,10 +147,14 @@ impl<T: Component> AnyColumn for VecColumn<T> {
         self.changed.swap_remove(row);
     }
 
-    fn swap_remove_drop(&mut self, row: usize) {
-        // Dropping the returned value is exactly what we want for despawn.
-        self.data.swap_remove(row);
+    fn needs_drop(&self) -> bool {
+        mem::needs_drop::<T>()
+    }
+
+    fn swap_remove_boxed(&mut self, row: usize) -> Box<dyn Any + Send + Sync> {
+        let value = self.data.swap_remove(row);
         self.changed.swap_remove(row);
+        Box::new(value)
     }
 }
 
@@ -295,6 +306,9 @@ impl Archetype {
 
     pub(crate) fn get<T: Component>(&self, id: u32, row: usize) -> Option<&T> {
         let column = self.column(id)?;
+        if row >= column.len() {
+            return None;
+        }
         let ptr = column.value_ptr(row).cast::<T>();
         // SAFETY: the column registered for `id` stores `T`, and the caller supplies an
         // in-bounds row. The shared reference cannot alias a mutable one because `World`
@@ -305,6 +319,9 @@ impl Archetype {
     #[allow(clippy::mut_from_ref)] // Same invariant as `column_mut`.
     pub(crate) fn get_mut<T: Component>(&self, id: u32, row: usize, tick: u32) -> Option<&mut T> {
         let column = self.column_mut(id)?;
+        if row >= column.len() {
+            return None;
+        }
         column.mark_changed(row, tick);
         let ptr = column.value_ptr_mut(row).cast::<T>();
         // SAFETY: same type/in-bounds argument as `get`; `World` exclusivity means no other
