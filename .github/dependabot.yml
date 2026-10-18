@@ -5,7 +5,28 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      # RustCrypto crates share `digest`/`crypto-common` versions and must move together.
+      rustcrypto:
+        patterns:
+          - "sha2"
+          - "hkdf"
+          - "hmac"
+          - "digest"
+          - "chacha20poly1305"
+          - "ed25519-dalek"
+          - "curve25519-dalek"
+          - "rand_core"
+          - "getrandom"
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
