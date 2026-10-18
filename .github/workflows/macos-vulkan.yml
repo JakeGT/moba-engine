@@ -24,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install MoltenVK
         run: |
-          brew install molten-vk
+          brew install molten-vk glslang
           PREFIX=$(brew --prefix molten-vk)
           ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
           test -n "$ICD" || { echo "MoltenVK ICD json not found"; find "$PREFIX" -name '*icd*.json'; exit 1; }
