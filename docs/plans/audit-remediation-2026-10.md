@@ -194,7 +194,7 @@ Order matters: golden image first, then structural refactors it can protect.
 - [ ] **#12 asset/model mappings + per-map rendering**, linked to #44/#7.
 - [ ] **#19 settings/remapping/UI scale** after #42/#44 layout seams.
 - [x] **#18 audio** consuming #41 presentation events.
-- [ ] **#20 map selection** after #40/#10/#39.
+- [x] **#20 map selection** after #40/#10/#39.
 - [ ] **#10 per-client content updates** after #40/#20 (protocol bump documented).
 - [x] **#11 manifest signing/attestation** (content/security).
 - [ ] **#9 hardware/min-spec + Windows/macOS renderer validation** after #32.

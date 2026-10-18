@@ -10,6 +10,7 @@ wave_interval_ticks = 900
 first_wave_ticks = 30
 
 [map]
+name = "1v1 Mid"
 extent = 128
 blue_spawn = [16, 64]
 red_spawn = [112, 64]

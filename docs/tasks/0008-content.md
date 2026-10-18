@@ -61,3 +61,10 @@ deterministic playback and server authority.
   `content-check --require-attestation/--publisher`, server `--require-content-attestation`
   and pinned `--content-publisher`.
 - [x] Attestation covers manifest + content hash and does not alter the catalogue hash.
+
+## Map rotation
+
+- [x] Repeated `--items FILE` (or `items_rotation` config) rotates packs between empty-lobby
+  matches; servers log/announce the selected map and content hash.
+- [x] Map display name is hashed and carried in protocol v23; client HUD shows it.
+- [x] Replays already record content hash/name/version.

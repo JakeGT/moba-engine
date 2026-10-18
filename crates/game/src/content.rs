@@ -328,6 +328,8 @@ impl Default for RulesSpec {
 /// An owned runtime map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapSpec {
+    /// Display name.
+    pub name: String,
     /// Square world extent in world units.
     pub extent: Fix,
     /// Lanes in stable order.
@@ -345,6 +347,7 @@ pub struct MapSpec {
 impl From<&MapDef> for MapSpec {
     fn from(map: &MapDef) -> Self {
         Self {
+            name: String::from("Map"),
             extent: Fix::from_i32(DEFAULT_MAP_EXTENT),
             lanes: map
                 .lanes
@@ -976,6 +979,12 @@ impl GameContent {
                 return Err(ContentError::BadModifiers);
             }
         }
+        if self.map.name.is_empty()
+            || self.map.name.len() > MAX_MANIFEST_FIELD
+            || !self.map.name.is_ascii()
+        {
+            return Err(ContentError::BadMap);
+        }
         if self.map.lanes.is_empty()
             || self.map.lanes.len() > MAX_CONTENT_LANES
             || self.map.structures.len() > MAX_CONTENT_STRUCTURES
@@ -1274,6 +1283,8 @@ impl GameContent {
         ] {
             feed(&value.to_le_bytes());
         }
+        feed(self.map.name.as_bytes());
+        feed(&[0]);
         feed(&self.map.extent.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
@@ -1494,6 +1505,8 @@ impl Default for RulesEntry {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MapEntry {
+    #[serde(default = "default_map_name")]
+    name: String,
     #[serde(default = "default_map_extent")]
     extent: i32,
     blue_spawn: [i32; 2],
@@ -1586,6 +1599,10 @@ struct AbilityEntry {
     /// Period between zone applications (defaults to 30).
     #[serde(default)]
     period_ticks: u32,
+}
+
+fn default_map_name() -> String {
+    String::from("Map")
 }
 
 const fn default_map_extent() -> i32 {
@@ -1932,6 +1949,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
     let map = match file.map {
         Some(map) => {
             let MapEntry {
+                name,
                 blue_spawn,
                 red_spawn,
                 lanes,
@@ -1951,6 +1969,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             MapSpec {
+                name,
                 extent: Fix::from_i32(extent),
                 blue_spawn: FixVec2::from_ints(blue_spawn[0], blue_spawn[1]),
                 red_spawn: FixVec2::from_ints(red_spawn[0], red_spawn[1]),

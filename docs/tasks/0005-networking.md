@@ -94,6 +94,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v20 adds team size / bot-fill policy to the rules.
 - v21 adds level/XP curve and minion/tower vision to the rules for client-side HUD math.
 - v22 carries runtime minion/tower combat stats.
+- v23 carries the map display name for selection/rotation.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 
