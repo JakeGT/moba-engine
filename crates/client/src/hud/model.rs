@@ -693,6 +693,18 @@ mod tests {
     }
 
     #[test]
+    fn local_hud_has_zero_steady_state_allocations() {
+        let simulation = Simulation::new(SimConfig::default());
+        let mut ui = UiDrawList::new();
+        // Warm retained draw-list capacity before measuring.
+        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
+        let ((), allocations) = crate::app::allocation_probe::probe(|| {
+            build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
+        });
+        assert_eq!(allocations, 0, "steady-state HUD allocation");
+    }
+
+    #[test]
     fn hud_text_is_stack_bounded() {
         let text = hud_fmt!("{}", "x".repeat(400));
         assert_eq!(text.capacity(), 256);

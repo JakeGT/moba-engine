@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- A test-only allocation counter proves a warmed local-HUD frame performs **zero heap
+  allocations** on the calling thread (`forbid(unsafe_code)` remains in non-test builds).
 - HUD text now formats into fixed 256-byte stack buffers (`hud_fmt!`/`hud_static!`); item
   summaries, timers, scoreboard and shop labels no longer allocate per frame.
 - Client HUD split into `hud/{theme,geometry,healthbars,minimap,status,model}` with shared
