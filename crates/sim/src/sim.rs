@@ -1168,7 +1168,7 @@ impl Simulation {
     }
 
     #[allow(clippy::too_many_lines)] // Ability execution is one validated match.
-    fn cast_ability(&mut self, caster: Entity, slot: u8, target: FixVec2) {
+    fn cast_ability(&mut self, caster: Entity, slot: u8, mut target: FixVec2) {
         let Some(identity) = self.world.get::<HeroIdentity>(caster).copied() else {
             return;
         };
@@ -1222,6 +1222,22 @@ impl Simulation {
         if is_directed {
             let distance = position.distance(target);
             if distance == Fix::ZERO || distance > ability.cast_range {
+                return;
+            }
+        }
+        let is_point_targeted = matches!(
+            ability.kind,
+            moba_game::AbilityKind::Slow { .. }
+                | moba_game::AbilityKind::Root { .. }
+                | moba_game::AbilityKind::Silence { .. }
+                | moba_game::AbilityKind::Burn { .. }
+                | moba_game::AbilityKind::Burst { .. }
+        );
+        if is_point_targeted {
+            if ability.cast_range == Fix::ZERO {
+                // Zero range means self-centred; commands cannot place the area remotely.
+                target = position;
+            } else if position.distance(target) > ability.cast_range {
                 return;
             }
         }
@@ -1434,8 +1450,7 @@ impl Simulation {
                 for (entity, (other_position, other_team)) in
                     self.world.query::<(&Position, &Team)>()
                 {
-                    if *other_team == team
-                        || other_position.0.distance_sq(position) > radius * radius
+                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
                     {
                         continue;
                     }
@@ -3050,6 +3065,146 @@ mod tests {
         assert_eq!(
             sim.content.map.nexus_position(Team::Blue),
             FixVec2::from_ints(20, 128)
+        );
+    }
+
+    #[test]
+    fn point_abilities_reject_out_of_range_targets() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let kinds = [
+            AbilityKind::Slow {
+                radius: Fix::from_i32(1_000),
+                factor: Fix::from_f32(0.5),
+                duration_ticks: 10,
+            },
+            AbilityKind::Root {
+                radius: Fix::from_i32(1_000),
+                duration_ticks: 10,
+            },
+            AbilityKind::Silence {
+                radius: Fix::from_i32(1_000),
+                duration_ticks: 10,
+            },
+            AbilityKind::Burn {
+                radius: Fix::from_i32(1_000),
+                duration_ticks: 10,
+                damage_per_tick: 10,
+                damage_type: DamageType::Magic,
+            },
+            AbilityKind::Burst {
+                radius: Fix::from_i32(1_000),
+                damage: 10,
+                damage_type: DamageType::Magic,
+            },
+        ];
+        for kind in kinds {
+            let mut content = GameContent::default();
+            content.abilities[0] = AbilitySpec {
+                name: String::from("Range Probe"),
+                cooldown_ticks: 60,
+                mana_cost: 10,
+                cast_range: Fix::from_i32(5),
+                kind,
+            };
+            for hero in &mut content.heroes {
+                hero.abilities = [0, 1, 2];
+            }
+            let mut sim = Simulation::new_with_content(
+                SimConfig {
+                    bot_mask: 0,
+                    spawn_waves: false,
+                    hero_picks: [0; MAX_PLAYERS],
+                    ..SimConfig::default()
+                },
+                std::sync::Arc::new(content),
+            );
+            let blue = sim.hero_entities[0];
+            let red = sim.hero_entities[5];
+            let blue_position = sim.world.get::<Position>(blue).expect("position").0;
+            let target = blue_position + FixVec2::from_ints(100, 0);
+            sim.world.get_mut::<Position>(red).expect("position").0 = target;
+            let mana_before = sim.world.get::<Mana>(blue).expect("mana").current;
+            let red_health = sim.world.get::<Health>(red).expect("health").current;
+            let mut inputs = TickInputs::new();
+            inputs.set(0, PlayerCommand::CastAbility { slot: 0, target });
+            sim.tick(&inputs);
+            assert_eq!(
+                sim.world.get::<Mana>(blue).expect("mana").current,
+                mana_before,
+                "out-of-range cast spends no mana"
+            );
+            assert_eq!(
+                sim.world.get::<Cooldowns>(blue).expect("cooldowns").0[0],
+                0,
+                "out-of-range cast starts no cooldown"
+            );
+            assert!(
+                self::matches_no_status(&sim, red, kind),
+                "out-of-range point effect was not applied"
+            );
+            assert_eq!(
+                sim.world.get::<Health>(red).expect("health").current,
+                red_health,
+                "out-of-range burst deals no damage"
+            );
+        }
+    }
+
+    fn matches_no_status(sim: &Simulation, entity: Entity, kind: moba_game::AbilityKind) -> bool {
+        match kind {
+            moba_game::AbilityKind::Slow { .. } => sim.world.get::<Slow>(entity).is_none(),
+            moba_game::AbilityKind::Root { .. } => sim.world.get::<Root>(entity).is_none(),
+            moba_game::AbilityKind::Silence { .. } => sim.world.get::<Silence>(entity).is_none(),
+            moba_game::AbilityKind::Burn { .. } => sim.world.get::<Burn>(entity).is_none(),
+            _ => true,
+        }
+    }
+
+    #[test]
+    fn burst_is_centred_on_the_validated_target_point() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Targeted Burst"),
+            cooldown_ticks: 60,
+            mana_cost: 0,
+            cast_range: Fix::from_i32(20),
+            kind: AbilityKind::Burst {
+                radius: Fix::from_i32(5),
+                damage: 50,
+                damage_type: DamageType::Magic,
+            },
+        };
+        for hero in &mut content.heroes {
+            hero.abilities = [0, 1, 2];
+        }
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                spawn_waves: false,
+                hero_picks: [0; MAX_PLAYERS],
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let blue_position = sim.world.get::<Position>(blue).expect("position").0;
+        let target = blue_position + FixVec2::from_ints(10, 0);
+        sim.world.get_mut::<Position>(red).expect("position").0 = target;
+        let blue_health = sim.world.get::<Health>(blue).expect("health").current;
+        let red_health = sim.world.get::<Health>(red).expect("health").current;
+        let mut inputs = TickInputs::new();
+        inputs.set(0, PlayerCommand::CastAbility { slot: 0, target });
+        sim.tick(&inputs);
+        assert!(
+            sim.world.get::<Health>(red).expect("health").current < red_health,
+            "target-centred burst damages the enemy at the target"
+        );
+        assert_eq!(
+            sim.world.get::<Health>(blue).expect("health").current,
+            blue_health,
+            "caster is outside the target-centred area"
         );
     }
 
