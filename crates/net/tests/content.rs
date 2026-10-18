@@ -11,6 +11,7 @@ use moba_sim::SimConfig;
 
 fn custom_content() -> GameContent {
     GameContent {
+        rules: moba_game::RulesSpec::default(),
         manifest: moba_game::ContentManifest::default(),
         items: vec![
             ItemSpec {

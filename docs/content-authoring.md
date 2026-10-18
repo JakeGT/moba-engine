@@ -168,6 +168,19 @@ damage_type = "magic"
 Adding a *new effect primitive* still requires engine code and a protocol bump; combining
 existing primitives and modifiers is data-only.
 
+## Rules
+
+```toml
+[rules]
+hero_respawn_ticks = 300
+respawn_per_level = 0
+wave_interval_ticks = 900
+first_wave_ticks = 30
+```
+
+All rules are optional (defaults shown), must be positive, and are hashed/carried in the
+handshake. Team-size/bot-fill/minion-stat rules are not yet exposed.
+
 ## Maps
 
 ```toml

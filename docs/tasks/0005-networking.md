@@ -90,6 +90,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v16 adds a bounded per-snapshot presentation-event list and wide `status_bits`.
 - v17 adds projectile arc height to wire effects and spawn events.
 - v18 carries the map world extent in the handshake and derives simulation bounds from it.
+- v19 carries tunable match rules (respawn, wave cadence) in the handshake.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 
