@@ -23,8 +23,8 @@ pub struct UiVertex {
 pub(crate) const ATLAS_CELL: u32 = 8;
 /// Atlas width in pixels (16 cells).
 pub const ATLAS_WIDTH: u32 = 16 * ATLAS_CELL;
-/// Atlas height in pixels (6 rows of cells).
-pub const ATLAS_HEIGHT: u32 = 6 * ATLAS_CELL;
+/// Atlas height in pixels (8 rows: 6 glyph rows + 2 icon rows).
+pub const ATLAS_HEIGHT: u32 = 8 * ATLAS_CELL;
 /// White texel used by solid geometry.
 pub(crate) const WHITE_UV: [f32; 2] = [0.5 / ATLAS_WIDTH as f32, 0.5 / ATLAS_HEIGHT as f32];
 
@@ -52,6 +52,16 @@ pub fn build_atlas() -> Vec<u8> {
             }
         }
     }
+    for (icon, pattern) in ICON_PATTERNS.iter().enumerate() {
+        let cell = 96 + icon as u32;
+        for (row, line) in pattern.iter().enumerate() {
+            for (column, byte) in line.bytes().enumerate() {
+                if byte == b'#' {
+                    put(cell, column as u32, row as u32);
+                }
+            }
+        }
+    }
     pixels
 }
 
@@ -67,6 +77,96 @@ pub(crate) fn glyph_uv(character: char) -> ([f32; 2], [f32; 2]) {
     let u1 = (x + 6.0) / ATLAS_WIDTH as f32;
     let v1 = (y + 8.0) / ATLAS_HEIGHT as f32;
     ([u0, v0], [u1, v1])
+}
+
+/// Number of 8x8 icon cells in the atlas.
+pub(crate) const ICON_COUNT: u32 = 16;
+
+const ICON_PATTERNS: [[&str; 8]; 16] = [
+    [
+        "........", "......#.", ".....##.", "....##..", "..###...", ".##.....", "#.......",
+        "........",
+    ],
+    [
+        "..####..", ".######.", "##....##", "##....##", "##....##", ".######.", "..####..",
+        "........",
+    ],
+    [
+        "...##...", "...##...", "..####..", ".######.", ".#.##.#.", ".######.", "..####..",
+        "........",
+    ],
+    [
+        "..##....", ".####...", "..##....", "..##....", "..##....", ".####...", "######..",
+        "........",
+    ],
+    [
+        "...##...", "..####..", ".######.", "########", ".######.", "..####..", "...##...",
+        "........",
+    ],
+    [
+        "..####..", ".##..##.", "##....##", "##....##", "##....##", ".##..##.", "..####..",
+        "........",
+    ],
+    [
+        "...##...", "..####..", ".######.", "##.##.##", ".######.", "..####..", "...##...",
+        "........",
+    ],
+    [
+        "########", "#......#", "#.####.#", "#.#..#.#", "#.####.#", "#......#", "########",
+        "........",
+    ],
+    [
+        "...#....", "..###...", ".#####..", "#######.", ".#####..", "..###...", "...#....",
+        "........",
+    ],
+    [
+        "#..#..#.", ".#.#.#..", "..#.#...", "#######.", "..#.#...", ".#.#.#..", "#..#..#.",
+        "........",
+    ],
+    [
+        "..###...", ".#...#..", "#.....#.", "#.....#.", "#.....#.", ".#...#..", "..###...",
+        "........",
+    ],
+    [
+        "...##...", "..####..", ".######.", "##.##.##", "##.##.##", ".######.", "..####..",
+        "...##...",
+    ],
+    [
+        "#......#", ".#....#.", "..#..#..", "...#.#..", "...#.#..", "..#..#..", ".#....#.",
+        "#......#",
+    ],
+    [
+        "..####..", ".#....#.", "#..##..#", "#.####.#", "#.####.#", "#..##..#", ".#....#.",
+        "..####..",
+    ],
+    [
+        "...#....", "..###...", ".#####..", "#######.", "#######.", ".#####..", "..###...",
+        "...#....",
+    ],
+    [
+        "........", ".######.", "#......#", "#.####.#", "#......#", ".######.", "........",
+        "........",
+    ],
+];
+
+/// UV rectangle for one icon cell.
+#[must_use]
+pub(crate) fn icon_uv(index: u32) -> ([f32; 2], [f32; 2]) {
+    let index = index.min(ICON_COUNT - 1);
+    let cell = 96 + index;
+    let x = (cell % 16) as f32 * ATLAS_CELL as f32;
+    let y = (cell / 16) as f32 * ATLAS_CELL as f32;
+    let inset = 0.5 / ATLAS_CELL as f32;
+    (
+        [
+            (x + inset) / ATLAS_WIDTH as f32,
+            (y + inset) / ATLAS_HEIGHT as f32,
+        ],
+        [
+            (x + ATLAS_CELL as f32 - inset) / ATLAS_WIDTH as f32,
+            (y + ATLAS_CELL as f32 - inset) / ATLAS_HEIGHT as f32,
+        ],
+    )
 }
 
 /// CPU-built list of UI triangles for one frame.
@@ -302,6 +402,54 @@ impl UiDrawList {
         }
     }
 
+    /// Adds one atlas icon scaled to a square.
+    pub fn icon(&mut self, x: f32, y: f32, size: f32, index: u32, color: Vec4) {
+        if size <= 0.0 {
+            return;
+        }
+        let ([u0, v0], [u1, v1]) = icon_uv(index);
+        let color = color.to_array();
+        let vertices = [
+            UiVertex {
+                position: [x, y],
+                uv: [u0, v0],
+                atlas: 0,
+                color,
+            },
+            UiVertex {
+                position: [x + size, y],
+                uv: [u1, v0],
+                atlas: 0,
+                color,
+            },
+            UiVertex {
+                position: [x + size, y + size],
+                uv: [u1, v1],
+                atlas: 0,
+                color,
+            },
+            UiVertex {
+                position: [x, y],
+                uv: [u0, v0],
+                atlas: 0,
+                color,
+            },
+            UiVertex {
+                position: [x + size, y + size],
+                uv: [u1, v1],
+                atlas: 0,
+                color,
+            },
+            UiVertex {
+                position: [x, y + size],
+                uv: [u0, v1],
+                atlas: 0,
+                color,
+            },
+        ];
+        self.vertices.extend_from_slice(&vertices);
+    }
+
     /// Adds text with a one-pixel-scale drop shadow.
     pub fn text_shadowed(&mut self, x: f32, y: f32, scale: f32, color: Vec4, text: &str) {
         let shadow = Vec4::new(0.0, 0.0, 0.0, 0.8);
@@ -337,6 +485,17 @@ mod tests {
         let (u0, v0) = glyph_uv('A');
         assert!(u0[0] > 0.0 && u0[1] > 0.0);
         assert!(u0[0] < v0[0] && u0[1] < v0[1]);
+    }
+
+    #[test]
+    fn icons_sample_a_distinct_atlas_cell() {
+        let mut ui = UiDrawList::new();
+        ui.icon(10.0, 20.0, 16.0, 3, Vec4::ONE);
+        assert_eq!(ui.len(), 6);
+        let (a, b) = icon_uv(3);
+        let (c, _d) = icon_uv(4);
+        assert_ne!(a, c);
+        assert!(b[0] > a[0] && b[1] > a[1]);
     }
 
     #[test]

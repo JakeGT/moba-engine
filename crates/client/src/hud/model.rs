@@ -484,7 +484,9 @@ pub(crate) fn build_network_hud(
             let key = ["Q", "W", "E"][slot];
             ui.rect(bx, by, box_size, box_size, track);
             ui.outline(bx, by, box_size, box_size, 1.0, border);
-            ui.text(bx + 8.0, by + 8.0, 2.5, text, key);
+            let icon = [0u32, 1, 6][slot];
+            ui.icon(bx + 9.0, by + 5.0, 20.0, icon, text);
+            ui.text(bx + 3.0, by + 27.0, 1.6, muted, key);
             register(
                 hits,
                 HudAction::Ability(u8::try_from(slot).unwrap_or(0)),
@@ -592,9 +594,10 @@ pub(crate) fn build_network_hud(
             let item = progress.items[slot];
             if item != 0xFF {
                 if let Some(definition) = network.client.items().get(usize::from(item)) {
+                    ui.icon(bx + 7.0, by + 3.0, 20.0, u32::from(item) % 16, text);
                     let name = definition.name_str();
-                    let short = name.get(..5).unwrap_or(name);
-                    ui.text(bx + 2.0, by + 8.0, 1.4, text, short);
+                    let short = name.get(..4).unwrap_or(name);
+                    ui.text(bx + 1.0, by + 19.0, 1.2, muted, short);
                 }
             }
         }
@@ -741,6 +744,13 @@ pub(crate) fn build_network_hud(
                 2.0,
                 muted,
                 &hud_fmt!("[{}]", page * 8 + index + 1),
+            );
+            ui.icon(
+                sx + 46.0,
+                row_y - 2.0,
+                20.0,
+                u32::from(item_index) % 16,
+                text,
             );
             ui.text(sx + 70.0, row_y, 2.0, name_color, item.name_str());
             ui.text(
