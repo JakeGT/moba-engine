@@ -673,7 +673,10 @@ impl Simulation {
             }
             if let Some(burn) = self.world.get::<Burn>(entity) {
                 hasher.write_u32(7);
+                hasher.write_u32(burn.source.index());
+                hasher.write_u32(burn.source.generation());
                 hasher.write_u32(burn.damage as u32);
+                hasher.write_u32(burn.damage_type as u32);
                 hasher.write_u32(burn.remaining);
             }
             if let Some(silence) = self.world.get::<Silence>(entity) {
@@ -2441,6 +2444,40 @@ mod tests {
         sim.grant_xp(blue, 2_000);
         assert!(sim.world.get::<Progression>(blue).expect("progress").level > 1);
         assert_eq!(sim.world.get::<Health>(blue).expect("health").max, health);
+    }
+
+    #[test]
+    fn state_hash_tracks_burn_source_and_type() {
+        use moba_game::GameContent;
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(GameContent::default()),
+        );
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let _ = sim.world.insert(
+            red,
+            Burn {
+                source: blue,
+                damage: 20,
+                damage_type: DamageType::Magic,
+                remaining: 10,
+            },
+        );
+        let magic = sim.state_hash();
+        let _ = sim.world.insert(
+            red,
+            Burn {
+                source: blue,
+                damage: 20,
+                damage_type: DamageType::Physical,
+                remaining: 10,
+            },
+        );
+        assert_ne!(sim.state_hash(), magic);
     }
 
     #[test]

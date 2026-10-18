@@ -6,7 +6,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 
 ## [Unreleased]
 
-### Added
+### Fixed
+- Burn state hashing now includes applying entity and damage type.
 - Free-pan/rotate/zoom spectator camera (WASD, arrows, Shift boost).
 - Refreshed sim/snapshot benchmark capture after the status-effect work.
 - Shop pagination (arrows) so packs with more than eight items are purchasable.
