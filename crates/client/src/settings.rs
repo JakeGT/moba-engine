@@ -11,6 +11,21 @@ pub(crate) const DEFAULT_PATH: &str = "moba-settings.toml";
 pub(crate) const UI_SCALE_MIN: f32 = 0.5;
 /// UI scale bounds.
 pub(crate) const UI_SCALE_MAX: f32 = 3.0;
+/// Camera sensitivity bounds.
+pub(crate) const SENSITIVITY_MIN: f32 = 0.25;
+/// Camera sensitivity bounds.
+pub(crate) const SENSITIVITY_MAX: f32 = 3.0;
+/// Spectator zoom bounds.
+pub(crate) const CAMERA_ZOOM_MIN: f32 = 70.0;
+/// Spectator zoom bounds.
+pub(crate) const CAMERA_ZOOM_MAX: f32 = 420.0;
+
+/// Mouse button used for attack orders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MouseBinding {
+    Left,
+    Right,
+}
 
 /// A key binding name that can be parsed and validated.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +43,11 @@ pub(crate) struct Controls {
     pub(crate) scoreboard: String,
     pub(crate) ready: String,
     pub(crate) surrender: String,
+    pub(crate) attack_button: String,
+    pub(crate) camera_left: String,
+    pub(crate) camera_right: String,
+    pub(crate) camera_up: String,
+    pub(crate) camera_down: String,
 }
 
 impl Default for Controls {
@@ -45,6 +65,11 @@ impl Default for Controls {
             scoreboard: String::from("Tab"),
             ready: String::from("R"),
             surrender: String::from("F5"),
+            attack_button: String::from("left"),
+            camera_left: String::from("Left"),
+            camera_right: String::from("Right"),
+            camera_up: String::from("Up"),
+            camera_down: String::from("Down"),
         }
     }
 }
@@ -64,6 +89,11 @@ pub(crate) struct Bindings {
     pub(crate) scoreboard: Key,
     pub(crate) ready: Key,
     pub(crate) surrender: Key,
+    pub(crate) attack_button: MouseBinding,
+    pub(crate) camera_left: Key,
+    pub(crate) camera_right: Key,
+    pub(crate) camera_up: Key,
+    pub(crate) camera_down: Key,
 }
 
 impl Bindings {
@@ -81,6 +111,10 @@ impl Bindings {
         scoreboard: Key,
         ready: Key,
         surrender: Key,
+        camera_left: Key,
+        camera_right: Key,
+        camera_up: Key,
+        camera_down: Key,
     ) -> Self {
         Self {
             move_up,
@@ -95,6 +129,11 @@ impl Bindings {
             scoreboard,
             ready,
             surrender,
+            attack_button: MouseBinding::Left,
+            camera_left,
+            camera_right,
+            camera_up,
+            camera_down,
         }
     }
 }
@@ -104,6 +143,8 @@ impl Bindings {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
+    pub(crate) camera_sensitivity: f32,
+    pub(crate) camera_zoom: f32,
     pub(crate) controls: Controls,
 }
 
@@ -111,6 +152,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ui_scale: 1.0,
+            camera_sensitivity: 1.0,
+            camera_zoom: 240.0,
             controls: Controls::default(),
         }
     }
@@ -167,8 +210,24 @@ impl Settings {
             ),
             (&self.controls.ready, &defaults.ready, "ready"),
             (&self.controls.surrender, &defaults.surrender, "surrender"),
+            (
+                &self.controls.camera_left,
+                &defaults.camera_left,
+                "camera_left",
+            ),
+            (
+                &self.controls.camera_right,
+                &defaults.camera_right,
+                "camera_right",
+            ),
+            (&self.controls.camera_up, &defaults.camera_up, "camera_up"),
+            (
+                &self.controls.camera_down,
+                &defaults.camera_down,
+                "camera_down",
+            ),
         ];
-        let mut resolved = [Key::W; 12];
+        let mut resolved = [Key::W; 16];
         for (index, (value, fallback, name)) in keys.into_iter().enumerate() {
             resolved[index] = parse_key(value).unwrap_or_else(|| {
                 warnings.push(format!("settings: invalid binding {name}={value:?}"));
@@ -188,7 +247,18 @@ impl Settings {
             resolved[9],
             resolved[10],
             resolved[11],
+            resolved[12],
+            resolved[13],
+            resolved[14],
+            resolved[15],
         );
+        bindings.attack_button = parse_mouse(&self.controls.attack_button).unwrap_or_else(|| {
+            warnings.push(format!(
+                "settings: invalid attack_button={:?}",
+                self.controls.attack_button
+            ));
+            MouseBinding::Left
+        });
         if bindings.move_up == bindings.move_down {
             warnings.push(String::from("settings: duplicate movement binding reset"));
             bindings = Bindings::new(
@@ -204,6 +274,10 @@ impl Settings {
                 Key::Tab,
                 Key::R,
                 Key::F5,
+                Key::ArrowLeft,
+                Key::ArrowRight,
+                Key::ArrowUp,
+                Key::ArrowDown,
             );
         }
         (bindings, warnings)
@@ -218,6 +292,22 @@ impl Settings {
         } else if !(UI_SCALE_MIN..=UI_SCALE_MAX).contains(&self.ui_scale) {
             self.ui_scale = self.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
             warnings.push(String::from("settings: ui_scale clamped"));
+        }
+        if !self.camera_sensitivity.is_finite() {
+            self.camera_sensitivity = 1.0;
+            warnings.push(String::from("settings: camera_sensitivity reset"));
+        } else if !(SENSITIVITY_MIN..=SENSITIVITY_MAX).contains(&self.camera_sensitivity) {
+            self.camera_sensitivity = self
+                .camera_sensitivity
+                .clamp(SENSITIVITY_MIN, SENSITIVITY_MAX);
+            warnings.push(String::from("settings: camera_sensitivity clamped"));
+        }
+        if !self.camera_zoom.is_finite() {
+            self.camera_zoom = 240.0;
+            warnings.push(String::from("settings: camera_zoom reset"));
+        } else if !(CAMERA_ZOOM_MIN..=CAMERA_ZOOM_MAX).contains(&self.camera_zoom) {
+            self.camera_zoom = self.camera_zoom.clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
+            warnings.push(String::from("settings: camera_zoom clamped"));
         }
         warnings
     }
@@ -268,6 +358,14 @@ pub(crate) fn parse_key(name: &str) -> Option<Key> {
     })
 }
 
+fn parse_mouse(name: &str) -> Option<MouseBinding> {
+    match name.to_ascii_lowercase().as_str() {
+        "left" => Some(MouseBinding::Left),
+        "right" => Some(MouseBinding::Right),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +391,24 @@ mod tests {
     }
 
     #[test]
+    fn camera_and_attack_settings_validate() {
+        let mut settings = Settings {
+            camera_sensitivity: 99.0,
+            camera_zoom: 1.0,
+            ..Settings::default()
+        };
+        let warnings = settings.sanitize();
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(settings.camera_sensitivity, SENSITIVITY_MAX);
+        assert_eq!(settings.camera_zoom, CAMERA_ZOOM_MIN);
+
+        settings.controls.attack_button = String::from("right");
+        let (bindings, warnings) = settings.bindings();
+        assert_eq!(warnings.len(), 0);
+        assert_eq!(bindings.attack_button, MouseBinding::Right);
+    }
+
+    #[test]
     fn settings_save_and_load_round_trip() {
         let path = std::env::temp_dir().join(format!("moba-settings-{}.toml", std::process::id()));
         let mut settings = Settings::default();
@@ -312,6 +428,7 @@ mod tests {
                 shop: String::from("M"),
                 ..Controls::default()
             },
+            ..Settings::default()
         };
         let warnings = settings.sanitize();
         assert_eq!(settings.ui_scale, UI_SCALE_MAX);
