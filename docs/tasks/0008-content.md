@@ -37,7 +37,7 @@ deterministic playback and server authority.
 - Shield kind: temporary absorption with duration, snapshot flag and cyan client tint.
 - Burn kind: radius/duration/per-tick damage with state-hash and client flag.
 - Silence kind: radius/duration blocking ability casts, with expiry/respawn removal and flag.
-- Root kind: radius/duration with move-command blocking, expiry/respawn removal and a flag.
+- Root kind: radius/duration with move-command and dash blocking, expiry/respawn removal and a flag.
 - Slow kind: radius/factor/duration, movement multiplier with expiry/respawn restore and a
   snapshot flag.
 - Per-hero level-growth stats in content (health/mana/damage/armour/MR), with defaults.

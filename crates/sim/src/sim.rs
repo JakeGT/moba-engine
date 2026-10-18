@@ -1176,6 +1176,11 @@ impl Simulation {
         if self.world.get::<Silence>(caster).is_some() {
             return;
         }
+        if self.world.get::<Root>(caster).is_some()
+            && matches!(ability.kind, moba_game::AbilityKind::Dash { .. })
+        {
+            return;
+        }
 
         let is_directed = matches!(
             ability.kind,
@@ -2617,6 +2622,78 @@ mod tests {
         assert!(
             sim.world.get::<Mana>(red).expect("mana").current < mana_before,
             "cast works after silence expires"
+        );
+    }
+
+    #[test]
+    fn root_blocks_dash_but_not_after_expiry() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Root"),
+            cooldown_ticks: 120,
+            mana_cost: 5,
+            cast_range: 0.into(),
+            kind: AbilityKind::Root {
+                radius: 1_000.into(),
+                duration_ticks: 60,
+            },
+        };
+        content.abilities[1] = AbilitySpec {
+            name: String::from("Test Dash"),
+            cooldown_ticks: 60,
+            mana_cost: 0,
+            cast_range: moba_core::Fix::from_i32(50),
+            kind: AbilityKind::Dash {
+                range: moba_core::Fix::from_i32(50),
+            },
+        };
+        content.heroes[0].abilities = [0, 1, 2];
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let red = sim.hero_entities[5];
+        let red_position = sim.world.get::<Position>(red).expect("position").0;
+        let mut root = TickInputs::new();
+        root.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: red_position,
+            },
+        );
+        sim.tick(&root);
+        let mut dash = TickInputs::new();
+        dash.set(
+            5,
+            PlayerCommand::CastAbility {
+                slot: 1,
+                target: red_position + FixVec2::from_ints(40, 0),
+            },
+        );
+        sim.tick(&dash);
+        assert_eq!(
+            sim.world.get::<Position>(red).expect("position").0,
+            red_position,
+            "rooted hero cannot dash"
+        );
+        assert_eq!(
+            sim.world.get::<Cooldowns>(red).expect("cooldowns").0[1],
+            0,
+            "blocked dash does not start cooldown"
+        );
+        for _ in 0..61 {
+            sim.tick(&TickInputs::new());
+        }
+        sim.tick(&dash);
+        assert_ne!(
+            sim.world.get::<Position>(red).expect("position").0,
+            red_position,
+            "dash works after root expires"
         );
     }
 
