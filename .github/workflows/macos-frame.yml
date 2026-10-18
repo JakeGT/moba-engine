@@ -1,0 +1,43 @@
+name: macos frame benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frame:
+    name: MoltenVK client frame log
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install MoltenVK and shader compiler
+        run: |
+          brew install molten-vk vulkan-loader glslang
+          PREFIX=$(brew --prefix molten-vk)
+          LOADER=$(brew --prefix vulkan-loader)
+          ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
+          test -n "$ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Build client
+        run: cargo build --release --locked -p moba-client
+      - name: Run frame benchmark
+        run: |
+          MOBA_WARMUP_TICKS=300 MOBA_SMOKE_FRAMES=300 MOBA_VSYNC=0 MOBA_FRAME_LOG=frame.log \
+            ./target/release/moba-client
+          cat frame.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-frame-log
+          path: frame.log
+          if-no-files-found: ignore
