@@ -74,3 +74,13 @@ cargo run --release -p moba-tools --bin image-check -- /tmp/render.ppm \
 Regenerate deliberately with `--write` only for intentional visual changes; upload the actual
 and diff PPM artifacts from CI when reviewing a mismatch. Trigger on a PR by adding the
 `render-golden` label.
+
+### Known validation-layer workaround
+
+Ubuntu's VVL 1.3.275 reports a submit-time `SYNC-HAZARD-PRESENT-AFTER-WRITE` for the
+swapchain→present layout transition even though present waits on the render-finished
+semaphore; upstream fixed this in [VVL #7480](https://github.com/KhronosGroup/Vulkan-ValidationLayers/pull/7480)
+([issue #7479](https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7479)). The
+golden workflow sets `MOBA_IGNORE_KNOWN_PRESENT_HAZARD=1`, which suppresses **only** that exact
+message from the error count/log. Every other validation error still fails the capture.
+Remove the variable when the runner ships a newer layer.

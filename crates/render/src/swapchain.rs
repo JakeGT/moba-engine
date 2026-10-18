@@ -21,7 +21,6 @@ pub(crate) struct Swapchain {
     pub(crate) color_layouts: Vec<vk::ImageLayout>,
     pub(crate) depth_layouts: Vec<vk::ImageLayout>,
     pub(crate) render_finished: Vec<Semaphore>,
-    pub(crate) present_ready: Vec<Semaphore>,
     pub(crate) transfer_src: bool,
 }
 
@@ -119,7 +118,6 @@ impl Swapchain {
         let mut color_layouts = Vec::with_capacity(images.len());
         let mut depth_layouts = Vec::with_capacity(images.len());
         let mut render_finished = Vec::with_capacity(images.len());
-        let mut present_ready = Vec::with_capacity(images.len());
         let (depth_format, depth_aspect) =
             choose_depth_format(&instance_context.instance, device_context);
         for (index, image) in images.iter().enumerate() {
@@ -141,7 +139,6 @@ impl Swapchain {
             color_layouts.push(vk::ImageLayout::UNDEFINED);
             depth_layouts.push(vk::ImageLayout::UNDEFINED);
             render_finished.push(Semaphore::new(device_context.device.clone())?);
-            present_ready.push(Semaphore::new(device_context.device.clone())?);
         }
 
         Ok(Self {
@@ -158,7 +155,6 @@ impl Swapchain {
             color_layouts,
             depth_layouts,
             render_finished,
-            present_ready,
             transfer_src,
         })
     }
