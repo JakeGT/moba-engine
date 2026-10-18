@@ -227,7 +227,24 @@ impl ClientApp {
                 Err(error) => app.startup_error = Some(error),
             },
             _ => {
-                let mut simulation = Simulation::new(SimConfig::default());
+                let loaded = std::env::var("MOBA_CONTENT").ok().and_then(|path| {
+                    match moba_game::load_content_file(std::path::Path::new(&path)) {
+                        Ok(content) => Some(content),
+                        Err(error) => {
+                            eprintln!("MOBA_CONTENT load failed: {error}");
+                            None
+                        }
+                    }
+                });
+                let mut simulation = loaded.map_or_else(
+                    || Simulation::new(SimConfig::default()),
+                    |content| {
+                        Simulation::new_with_content(
+                            SimConfig::default(),
+                            std::sync::Arc::new(content),
+                        )
+                    },
+                );
                 let warmup: u32 = std::env::var("MOBA_WARMUP_TICKS")
                     .ok()
                     .and_then(|value| value.parse().ok())
@@ -471,7 +488,9 @@ impl App for ClientApp {
                         );
                         network.update_effects(frame_ms);
                         let vision = build_vision(network);
-                        let scene = Scene::with_vision(camera, units, vision);
+                        let tint = map_theme(network.client.map().theme).0;
+                        let scene =
+                            Scene::with_vision(camera, units, vision).with_terrain_tint(tint);
                         if let Some(renderer) = renderer.as_mut() {
                             if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                                 capture_and_exit(
@@ -541,7 +560,8 @@ impl App for ClientApp {
                         hit_rects,
                     );
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
-                    let scene = Scene::new(camera, units);
+                    let tint = map_theme(simulation.content().map.theme.id()).0;
+                    let scene = Scene::new(camera, units).with_terrain_tint(tint);
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
@@ -704,6 +724,16 @@ fn connect_network(spec: &str) -> Result<NetClient, String> {
     }
 }
 
+fn map_theme(theme: u8) -> ([f32; 4], Vec4) {
+    match theme {
+        1 => ([0.20, 0.20, 0.19, 1.0], Vec4::new(0.34, 0.33, 0.30, 1.0)),
+        2 => ([0.48, 0.56, 0.68, 1.0], Vec4::new(0.62, 0.68, 0.76, 1.0)),
+        3 => ([0.34, 0.25, 0.14, 1.0], Vec4::new(0.48, 0.36, 0.22, 1.0)),
+        4 => ([0.15, 0.08, 0.26, 1.0], Vec4::new(0.32, 0.24, 0.44, 1.0)),
+        _ => ([0.10, 0.16, 0.11, 1.0], Vec4::new(0.24, 0.21, 0.16, 1.0)),
+    }
+}
+
 fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
     units.clear();
     let Some(latest) = network.interpolator.latest() else {
@@ -711,6 +741,7 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
     };
     let wire_map = network.client.map();
     let center = map_center(network);
+    let (_, wall_color) = map_theme(wire_map.theme);
     for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
         let a = Vec2::new(f32::from(wall.a[0]), f32::from(wall.a[1]));
         let b = Vec2::new(f32::from(wall.b[0]), f32::from(wall.b[1]));
@@ -723,10 +754,7 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
             Quat::from_rotation_y(-angle),
             Vec3::new(mid.x - center, 2.0, mid.y - center),
         );
-        units.push(UnitInstance::new(
-            transform,
-            Vec4::new(0.24, 0.21, 0.16, 1.0),
-        ));
+        units.push(UnitInstance::new(transform, wall_color));
     }
     let render_tick = network.interpolator.render_tick(Instant::now());
     for entity in &latest.entities {

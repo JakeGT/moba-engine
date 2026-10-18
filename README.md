@@ -44,6 +44,7 @@ Or run a self-contained loopback match (spawns a local server inside the client)
 
 ```bash
 MOBA_SERVER=local cargo run -p moba-client
+MOBA_CONTENT=content/aram.toml cargo run -p moba-client   # local preview of a pack
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
