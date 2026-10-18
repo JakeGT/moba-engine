@@ -26,11 +26,13 @@ jobs:
         run: |
           brew install molten-vk vulkan-loader glslang
           PREFIX=$(brew --prefix molten-vk)
+          LOADER=$(brew --prefix vulkan-loader)
           ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
           test -n "$ICD" || { echo "MoltenVK ICD json not found"; find "$PREFIX" -name '*icd*.json'; exit 1; }
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          ls "$LOADER/lib"
           echo "Using $ICD"
       - name: Build probe
         run: cargo build --release --locked -p moba-tools --bin vulkan-probe
