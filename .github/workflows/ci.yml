@@ -23,6 +23,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Exclude workspace from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-nextest
