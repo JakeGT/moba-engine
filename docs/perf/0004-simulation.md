@@ -45,13 +45,17 @@ thread. Latest 300-tick windows:
 
 | Case | Allocations | Bytes |
 |---|---:|---:|
-| steady bots | 1 | 192 |
-| 10-hero teamfight | 1 | 192 |
+| steady bots | 0 | 0 |
+| 10-hero teamfight | 0 | 0 |
 | wave spawn window | 2 | 192 |
 | status modifier pack (all kinds) | 0 | 0 |
 | respawn window (900 ticks) | 0 | 0 |
 | shop purchases | 0 | 0 |
 
-Budgets are now ≤8 allocations / ≤1 KiB per window, with steady/teamfight/respawn ≤2 and
-shop/status paths expected to be zero. The earlier 30-allocation budget was masking
-cross-test allocator contention as well as real wave-spawn growth.
+Budgets are ≤8 allocations / ≤1 KiB per window; steady, teamfight, respawn, shop and status
+paths are expected to be zero (wave spawn may allocate to grow pools). The earlier
+30-allocation budget was masking cross-test allocator contention as well as real wave growth.
+
+The spatial grid is now flat: items/cell indices append into reusable vectors, and a stable
+counting sort rebuilds row-major cell ranges only after inserts. This removed the `Vec<Vec<T>>`
+per-cell allocations and the per-query scratch clone; steady ticks are fully allocation-free.
