@@ -60,60 +60,122 @@ pub struct Health {
     pub max: i32,
 }
 
-/// Temporary damage absorption.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub struct Shield {
-    /// Remaining absorption.
+/// Maximum simultaneous modifiers on one unit.
+pub const MAX_MODIFIERS: usize = 8;
+
+/// Fixed-capacity status modifier kinds.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModifierKind {
+    /// Temporary damage absorption.
+    Shield = 0,
+    /// Movement multiplier below one.
+    Slow = 1,
+    /// Movement multiplier above one.
+    Haste = 2,
+    /// Prevents movement orders.
+    Root = 3,
+    /// Prevents ability casts.
+    Silence = 4,
+    /// Damage over time.
+    Burn = 5,
+}
+
+/// One active modifier instance.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Modifier {
+    /// Definition/behaviour kind.
+    pub kind: ModifierKind,
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+    /// Movement multiplier (slow/haste), otherwise one.
+    pub factor: Fix,
+    /// Shield absorption or per-tick burn damage.
     pub amount: i32,
-    /// Remaining duration in ticks.
-    pub remaining: u32,
-}
-
-/// Temporary movement slow.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Slow {
-    /// Movement multiplier (0..1).
-    pub factor: Fix,
-    /// Remaining duration in ticks.
-    pub remaining: u32,
-}
-
-/// Temporary movement root.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Root {
-    /// Remaining duration in ticks.
-    pub remaining: u32,
-}
-
-/// Temporary silence.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Silence {
-    /// Remaining duration in ticks.
-    pub remaining: u32,
-}
-
-/// Damage over time.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Burn {
-    /// Entity that applied the burn.
-    pub source: Entity,
-    /// Damage applied each tick.
-    pub damage: i32,
-    /// Mitigation type.
+    /// Burn mitigation type.
     pub damage_type: moba_game::DamageType,
-    /// Remaining duration in ticks.
-    pub remaining: u32,
+    /// Entity that applied the modifier (kill/credit source).
+    pub source: Entity,
 }
 
-/// Temporary movement-speed boost.
+impl Default for Modifier {
+    fn default() -> Self {
+        Self {
+            kind: ModifierKind::Shield,
+            remaining: 0,
+            factor: Fix::ONE,
+            amount: 0,
+            damage_type: moba_game::DamageType::Physical,
+            source: Entity::from_bits(0),
+        }
+    }
+}
+
+/// Always-present fixed-capacity modifier list.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Haste {
-    /// Movement multiplier (>1).
-    pub factor: Fix,
-    /// Remaining duration in ticks.
-    pub remaining: u32,
+pub struct Modifiers {
+    pub(crate) entries: [Modifier; MAX_MODIFIERS],
+    pub(crate) len: u8,
 }
 
+impl Default for Modifiers {
+    fn default() -> Self {
+        Self {
+            entries: [Modifier::default(); MAX_MODIFIERS],
+            len: 0,
+        }
+    }
+}
+
+impl Modifiers {
+    /// Active modifiers in application order.
+    #[must_use]
+    pub fn entries(&self) -> &[Modifier] {
+        &self.entries[..usize::from(self.len)]
+    }
+
+    /// Whether any active modifier has `kind`.
+    #[must_use]
+    pub fn has(&self, kind: ModifierKind) -> bool {
+        self.entries().iter().any(|modifier| modifier.kind == kind)
+    }
+
+    /// Product of all movement factors (slow/haste), or one.
+    #[must_use]
+    pub fn move_factor(&self) -> Fix {
+        self.entries()
+            .iter()
+            .filter(|modifier| matches!(modifier.kind, ModifierKind::Slow | ModifierKind::Haste))
+            .fold(Fix::ONE, |factor, modifier| factor * modifier.factor)
+    }
+
+    /// Total remaining shield absorption.
+    #[must_use]
+    pub fn shield_total(&self) -> i32 {
+        self.entries()
+            .iter()
+            .filter(|modifier| modifier.kind == ModifierKind::Shield)
+            .map(|modifier| modifier.amount.max(0))
+            .sum()
+    }
+
+    /// Adds a modifier when capacity remains.
+    pub fn push(&mut self, modifier: Modifier) -> bool {
+        if usize::from(self.len) >= MAX_MODIFIERS {
+            return false;
+        }
+        self.entries[usize::from(self.len)] = modifier;
+        self.len += 1;
+        true
+    }
+
+    /// Removes every modifier.
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+}
+
+/// Mana.
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {

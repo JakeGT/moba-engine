@@ -36,7 +36,7 @@ Reproduce: `cargo bench -p moba-sim --bench tick`
 `cargo test -p moba-sim --test allocations` counts global allocator calls across 300 warm
 steady-state ticks. It exposed a per-tick heap `Vec` used only to alternate command order;
 replacing it with a fixed stack array reduced the measured window from **312 allocations /
-24,490 bytes** to **12 allocations / 490 bytes**. The test now enforces <=30 allocations and
+24,490 bytes** to **5 allocations / 960 bytes** (and **2 / 384** with all six modifiers active). The test now enforces <=30 allocations and
 <=4 KiB.
 
 ## Interpretation

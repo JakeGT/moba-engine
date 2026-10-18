@@ -48,7 +48,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 ## Landed evidence
 - 50-match deterministic harness (509,820 ticks, rotated compositions) and per-address/global
   rate limits.
-- Allocation regression guard: 300 steady ticks at 12 allocations / 490 bytes after removing
+- Allocation regression guard: 300 steady ticks at 5 allocations / 960 bytes; all six modifiers active 2 allocations / 384 bytes after removing
   a per-tick command-order `Vec` (previously 312 / 24,490).
 - Criterion captures: snapshot codec and simulation ticks in `docs/perf/0007-profiling.md`.
 - Final one-hour v12 fuzz and 10-client lossy soak.
