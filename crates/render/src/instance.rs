@@ -2,6 +2,7 @@
 
 use ash::{Entry, Instance, vk};
 use core::ffi::{CStr, c_char};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{RenderError, RenderResult};
 
@@ -18,6 +19,8 @@ pub enum ValidationMode {
 }
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
+const PORTABILITY_ENUMERATION: &CStr = c"VK_KHR_portability_enumeration";
+static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Owns the Vulkan entry point and instance.
 pub(crate) struct InstanceContext {
@@ -62,6 +65,13 @@ impl InstanceContext {
             .iter()
             .map(|name| name.as_ptr())
             .collect();
+        let mut create_flags = vk::InstanceCreateFlags::empty();
+        if extension_supported(&available_extensions, PORTABILITY_ENUMERATION) {
+            create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+            if !required_extensions.contains(&PORTABILITY_ENUMERATION) {
+                extensions.push(PORTABILITY_ENUMERATION.as_ptr());
+            }
+        }
         for name in required_extensions {
             if !extension_supported(&available_extensions, name) {
                 return Err(RenderError::MissingInstanceExtension(
@@ -105,9 +115,14 @@ impl InstanceContext {
         let mut create_info = vk::InstanceCreateInfo::default()
             .application_info(&application_info)
             .enabled_extension_names(&extensions)
-            .enabled_layer_names(&layers);
-        if cfg!(target_os = "macos") {
-            create_info = create_info.flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
+            .enabled_layer_names(&layers)
+            .flags(create_flags);
+        let mut synchronization_validation = vk::ValidationFeaturesEXT::default()
+            .enabled_validation_features(&[
+                vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+            ]);
+        if validation_enabled && validation == ValidationMode::Required {
+            create_info = create_info.push_next(&mut synchronization_validation);
         }
 
         // SAFETY: `create_info` points at live arrays for the duration of the call, and
@@ -145,6 +160,10 @@ impl InstanceContext {
 
     pub(crate) fn validation_enabled(&self) -> bool {
         self.validation_enabled
+    }
+
+    pub(crate) fn validation_error_count() -> u64 {
+        VALIDATION_ERRORS.load(Ordering::Relaxed)
     }
 
     pub(crate) fn instance_version(&self) -> u32 {
@@ -189,6 +208,9 @@ unsafe extern "system" fn debug_callback(
     // SAFETY: Vulkan only calls the callback with a valid pointer to callback data for the
     // duration of the call.
     let data = unsafe { &*callback_data };
+    if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
+    }
     let message = if data.p_message.is_null() {
         "<no message>"
     } else {

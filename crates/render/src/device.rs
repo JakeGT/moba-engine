@@ -110,7 +110,6 @@ impl DeviceContext {
                 continue;
             }
 
-            let features_12 = query_vulkan12(instance, physical);
             let (supports_dynamic_rendering, supports_synchronization2) = if core_13 {
                 let features_13 = query_vulkan13(instance, physical);
                 (
@@ -125,11 +124,6 @@ impl DeviceContext {
                 let _ = writeln!(reasons, "{name}: required features unsupported; ");
                 continue;
             }
-            if !supports_descriptor_indexing(&features_12) {
-                let _ = writeln!(reasons, "{name}: descriptor indexing unsupported; ");
-                continue;
-            }
-
             let mut extensions = vec![SWAPCHAIN];
             if extension_supported(&available, PORTABILITY_SUBSET) {
                 extensions.push(PORTABILITY_SUBSET);
@@ -186,12 +180,6 @@ impl DeviceContext {
         let instance = &context.instance;
         let physical = candidate.physical;
 
-        let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
-            .descriptor_indexing(true)
-            .shader_sampled_image_array_non_uniform_indexing(true)
-            .shader_storage_buffer_array_non_uniform_indexing(true)
-            .descriptor_binding_partially_bound(true)
-            .runtime_descriptor_array(true);
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -200,7 +188,7 @@ impl DeviceContext {
         let mut synchronization2 =
             vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
 
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features_12);
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default();
         if candidate.core_13 {
             features_2 = features_2.push_next(&mut features_13);
         } else {
@@ -393,20 +381,6 @@ fn extension_supported(available: &[vk::ExtensionProperties], name: &CStr) -> bo
     })
 }
 
-fn query_vulkan12(
-    instance: &Instance,
-    physical: vk::PhysicalDevice,
-) -> vk::PhysicalDeviceVulkan12Features<'static> {
-    let mut features = vk::PhysicalDeviceVulkan12Features::default();
-    {
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
-        // SAFETY: the physical device belongs to this instance and the feature chain is
-        // valid for the duration of the call.
-        unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
-    }
-    features
-}
-
 fn query_vulkan13(
     instance: &Instance,
     physical: vk::PhysicalDevice,
@@ -436,12 +410,4 @@ fn query_extension_features(instance: &Instance, physical: vk::PhysicalDevice) -
         dynamic_rendering.dynamic_rendering == vk::TRUE,
         synchronization2.synchronization2 == vk::TRUE,
     )
-}
-
-fn supports_descriptor_indexing(features: &vk::PhysicalDeviceVulkan12Features) -> bool {
-    features.descriptor_indexing == vk::TRUE
-        && features.runtime_descriptor_array == vk::TRUE
-        && features.descriptor_binding_partially_bound == vk::TRUE
-        && features.shader_sampled_image_array_non_uniform_indexing == vk::TRUE
-        && features.shader_storage_buffer_array_non_uniform_indexing == vk::TRUE
 }
