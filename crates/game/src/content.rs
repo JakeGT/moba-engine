@@ -11,8 +11,8 @@ use moba_core::{Fix, FixVec2};
 use serde::Deserialize;
 
 use crate::{
-    ABILITIES, AbilityDef, AbilityKind, DamageType, ITEMS, ItemDef, MAP, MapDef, StructureKind,
-    Team,
+    ABILITIES, AbilityDef, AreaEffect, AreaEffectList, DamageType, Effect, EffectList, ITEMS,
+    ItemDef, MAP, MapDef, StructureKind, Targeting, Team,
 };
 
 /// Maximum length of a manifest field.
@@ -274,10 +274,36 @@ pub struct AbilitySpec {
     pub cooldown_ticks: u32,
     /// Mana cost.
     pub mana_cost: i32,
-    /// Maximum cast distance.
-    pub cast_range: Fix,
-    /// Effect/behaviour.
-    pub kind: AbilityKind,
+    /// Targeting mode.
+    pub targeting: Targeting,
+    /// Ordered effects.
+    pub effects: EffectList,
+}
+
+impl AbilitySpec {
+    /// Maximum cast range (`0` for self-cast).
+    #[must_use]
+    pub const fn cast_range(&self) -> Fix {
+        self.targeting.range()
+    }
+
+    /// Largest display radius across area/zone/projectile effects.
+    #[must_use]
+    pub fn display_radius(&self) -> Fix {
+        let mut radius = Fix::ZERO;
+        for effect in self.effects.iter() {
+            let candidate = match effect {
+                Effect::Projectile { radius, .. }
+                | Effect::Area { radius, .. }
+                | Effect::Zone { radius, .. } => *radius,
+                _ => Fix::ZERO,
+            };
+            if candidate > radius {
+                radius = candidate;
+            }
+        }
+        radius
+    }
 }
 
 impl From<&AbilityDef> for AbilitySpec {
@@ -286,8 +312,8 @@ impl From<&AbilityDef> for AbilitySpec {
             name: ability.name.to_owned(),
             cooldown_ticks: ability.cooldown_ticks,
             mana_cost: ability.mana_cost,
-            cast_range: ability.cast_range,
-            kind: ability.kind,
+            targeting: ability.targeting,
+            effects: ability.effects,
         }
     }
 }
@@ -460,8 +486,6 @@ pub enum ContentError {
     DuplicateAbilityName,
     /// Ability cooldown mana or cast range is invalid.
     BadAbilityStats,
-    /// Ability kind parameters are invalid.
-    BadAbilityKind,
     /// Modifier definitions are invalid.
     BadModifiers,
     /// Map has no lanes or too many lanes/points/structures.
@@ -498,7 +522,6 @@ impl core::fmt::Display for ContentError {
             Self::BadAbilityStats => {
                 f.write_str("ability cooldown must be positive and mana/cast range non-negative")
             }
-            Self::BadAbilityKind => f.write_str("ability kind parameters must be positive"),
             Self::BadModifiers => f.write_str("modifier names/kinds are invalid or duplicated"),
             Self::BadMap => f.write_str("map limits are invalid"),
             Self::BadMapData => f.write_str("map lanes/structures are invalid"),
@@ -509,6 +532,190 @@ impl core::fmt::Display for ContentError {
 }
 
 impl std::error::Error for ContentError {}
+
+fn area_effect_valid(effect: &AreaEffect, modifiers: &[ModifierDef]) -> bool {
+    match effect {
+        AreaEffect::None => true,
+        AreaEffect::Damage { amount, .. } => (0..=MAX_STAT).contains(amount),
+        AreaEffect::ApplyModifier {
+            modifier,
+            duration_ticks,
+            factor,
+            amount,
+            ..
+        } => {
+            let Some(definition) = modifiers.get(usize::from(*modifier)) else {
+                return false;
+            };
+            if !(1..=MAX_DURATION_TICKS).contains(duration_ticks) {
+                return false;
+            }
+            match definition.kind {
+                ModifierKind::Shield => (0..=MAX_STAT).contains(amount),
+                ModifierKind::Slow => *factor > Fix::ZERO && *factor < Fix::ONE,
+                ModifierKind::Haste => *factor > Fix::ONE,
+                ModifierKind::Burn => (1..=MAX_STAT).contains(amount),
+                ModifierKind::Root | ModifierKind::Silence => true,
+            }
+        }
+    }
+}
+
+fn area_effects_valid(effects: &AreaEffectList, modifiers: &[ModifierDef]) -> bool {
+    !effects.is_empty()
+        && effects
+            .iter()
+            .all(|effect| area_effect_valid(effect, modifiers))
+}
+
+fn effect_valid(effect: &Effect, modifiers: &[ModifierDef]) -> bool {
+    let in_range = |value: Fix| value > Fix::ZERO && value <= Fix::from_i32(MAX_RANGE);
+    match effect {
+        Effect::None => false,
+        Effect::Damage { amount, .. } | Effect::Heal { amount } => (0..=MAX_STAT).contains(amount),
+        Effect::ApplyModifier {
+            modifier,
+            duration_ticks,
+            factor,
+            amount,
+            ..
+        } => area_effect_valid(
+            &AreaEffect::ApplyModifier {
+                modifier: *modifier,
+                duration_ticks: *duration_ticks,
+                factor: *factor,
+                amount: *amount,
+                damage_type: DamageType::Physical,
+            },
+            modifiers,
+        ),
+        Effect::Displace { range } => in_range(*range),
+        Effect::Projectile {
+            speed_per_sec,
+            range,
+            radius,
+            on_hit,
+        } => {
+            in_range(*speed_per_sec)
+                && in_range(*range)
+                && in_range(*radius)
+                && area_effects_valid(on_hit, modifiers)
+        }
+        Effect::Area { radius, effects } => {
+            in_range(*radius) && area_effects_valid(effects, modifiers)
+        }
+        Effect::Zone {
+            radius,
+            duration_ticks,
+            period_ticks,
+            effects,
+        } => {
+            in_range(*radius)
+                && (1..=MAX_DURATION_TICKS).contains(duration_ticks)
+                && (1..=MAX_DURATION_TICKS).contains(period_ticks)
+                && area_effects_valid(effects, modifiers)
+        }
+    }
+}
+
+fn hash_area_effects(feed: &mut dyn FnMut(&[u8]), effects: &AreaEffectList) {
+    feed(&[u8::try_from(effects.iter().count()).unwrap_or(u8::MAX)]);
+    for effect in effects.iter() {
+        match effect {
+            AreaEffect::None => {}
+            AreaEffect::Damage {
+                amount,
+                damage_type,
+            } => {
+                feed(&[0]);
+                feed(&amount.to_le_bytes());
+                feed(&[*damage_type as u8]);
+            }
+            AreaEffect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            } => {
+                feed(&[1]);
+                feed(&modifier.to_le_bytes());
+                feed(&duration_ticks.to_le_bytes());
+                feed(&factor.to_bits().to_le_bytes());
+                feed(&amount.to_le_bytes());
+                feed(&[*damage_type as u8]);
+            }
+        }
+    }
+}
+
+fn hash_effects(feed: &mut dyn FnMut(&[u8]), effects: &EffectList) {
+    feed(&[u8::try_from(effects.iter().count()).unwrap_or(u8::MAX)]);
+    for effect in effects.iter() {
+        match effect {
+            Effect::None => {}
+            Effect::Damage {
+                amount,
+                damage_type,
+            } => {
+                feed(&[0]);
+                feed(&amount.to_le_bytes());
+                feed(&[*damage_type as u8]);
+            }
+            Effect::Heal { amount } => {
+                feed(&[1]);
+                feed(&amount.to_le_bytes());
+            }
+            Effect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            } => {
+                feed(&[2]);
+                feed(&modifier.to_le_bytes());
+                feed(&duration_ticks.to_le_bytes());
+                feed(&factor.to_bits().to_le_bytes());
+                feed(&amount.to_le_bytes());
+                feed(&[*damage_type as u8]);
+            }
+            Effect::Displace { range } => {
+                feed(&[3]);
+                feed(&range.to_bits().to_le_bytes());
+            }
+            Effect::Projectile {
+                speed_per_sec,
+                range,
+                radius,
+                on_hit,
+            } => {
+                feed(&[4]);
+                feed(&speed_per_sec.to_bits().to_le_bytes());
+                feed(&range.to_bits().to_le_bytes());
+                feed(&radius.to_bits().to_le_bytes());
+                hash_area_effects(feed, on_hit);
+            }
+            Effect::Area { radius, effects } => {
+                feed(&[5]);
+                feed(&radius.to_bits().to_le_bytes());
+                hash_area_effects(feed, effects);
+            }
+            Effect::Zone {
+                radius,
+                duration_ticks,
+                period_ticks,
+                effects,
+            } => {
+                feed(&[6]);
+                feed(&radius.to_bits().to_le_bytes());
+                feed(&duration_ticks.to_le_bytes());
+                feed(&period_ticks.to_le_bytes());
+                hash_area_effects(feed, effects);
+            }
+        }
+    }
+}
 
 impl GameContent {
     /// Validates names, counts and costs.
@@ -585,76 +792,15 @@ impl GameContent {
                 || ability.cooldown_ticks > MAX_COOLDOWN_TICKS
                 || ability.mana_cost < 0
                 || ability.mana_cost > MAX_STAT
-                || ability.cast_range < Fix::ZERO
-                || ability.cast_range > Fix::from_i32(MAX_RANGE)
+                || ability.targeting.range() < Fix::ZERO
+                || ability.targeting.range() > Fix::from_i32(MAX_RANGE)
+                || ability.effects.is_empty()
+                || !ability
+                    .effects
+                    .iter()
+                    .all(|effect| effect_valid(effect, &self.modifiers))
             {
                 return Err(ContentError::BadAbilityStats);
-            }
-            let in_range = |value: Fix| value > Fix::ZERO && value <= Fix::from_i32(MAX_RANGE);
-            let kind_ok = match ability.kind {
-                AbilityKind::Skillshot {
-                    speed_per_sec,
-                    range,
-                    radius,
-                    damage,
-                    ..
-                } => {
-                    in_range(speed_per_sec)
-                        && in_range(range)
-                        && in_range(radius)
-                        && (0..=MAX_STAT).contains(&damage)
-                }
-                AbilityKind::Dash { range } => in_range(range),
-                AbilityKind::Shield {
-                    amount,
-                    duration_ticks,
-                } => {
-                    (0..=MAX_STAT).contains(&amount)
-                        && (1..=MAX_DURATION_TICKS).contains(&duration_ticks)
-                }
-                AbilityKind::Slow {
-                    radius,
-                    factor,
-                    duration_ticks,
-                } => {
-                    in_range(radius)
-                        && factor > Fix::ZERO
-                        && factor < Fix::ONE
-                        && (1..=MAX_DURATION_TICKS).contains(&duration_ticks)
-                }
-                AbilityKind::Root {
-                    radius,
-                    duration_ticks,
-                }
-                | AbilityKind::Silence {
-                    radius,
-                    duration_ticks,
-                } => in_range(radius) && (1..=MAX_DURATION_TICKS).contains(&duration_ticks),
-                AbilityKind::Burn {
-                    radius,
-                    duration_ticks,
-                    damage_per_tick,
-                    ..
-                } => {
-                    in_range(radius)
-                        && (1..=MAX_DURATION_TICKS).contains(&duration_ticks)
-                        && (1..=MAX_STAT).contains(&damage_per_tick)
-                }
-                AbilityKind::Haste {
-                    factor,
-                    duration_ticks,
-                } => factor > Fix::ONE && (1..=MAX_DURATION_TICKS).contains(&duration_ticks),
-                AbilityKind::Heal { amount, radius } => {
-                    (0..=MAX_STAT).contains(&amount)
-                        && radius >= Fix::ZERO
-                        && radius <= Fix::from_i32(MAX_RANGE)
-                }
-                AbilityKind::Burst { radius, damage, .. } => {
-                    in_range(radius) && (0..=MAX_STAT).contains(&damage)
-                }
-            };
-            if !kind_ok {
-                return Err(ContentError::BadAbilityKind);
             }
         }
         if self.modifiers.is_empty() || self.modifiers.len() > MAX_CONTENT_MODIFIERS {
@@ -857,96 +1003,18 @@ impl GameContent {
             feed(&[0]);
             feed(&ability.cooldown_ticks.to_le_bytes());
             feed(&(ability.mana_cost as u32).to_le_bytes());
-            feed(&ability.cast_range.to_bits().to_le_bytes());
-            match ability.kind {
-                AbilityKind::Skillshot {
-                    speed_per_sec,
-                    range,
-                    radius,
-                    damage,
-                    damage_type,
-                } => {
-                    feed(&[0]);
-                    feed(&speed_per_sec.to_bits().to_le_bytes());
-                    feed(&range.to_bits().to_le_bytes());
-                    feed(&radius.to_bits().to_le_bytes());
-                    feed(&(damage as u32).to_le_bytes());
-                    feed(&[damage_type as u8]);
-                }
-                AbilityKind::Dash { range } => {
+            match ability.targeting {
+                Targeting::SelfCast => feed(&[0]),
+                Targeting::Point { range } => {
                     feed(&[1]);
                     feed(&range.to_bits().to_le_bytes());
                 }
-                AbilityKind::Heal { amount, radius } => {
+                Targeting::Direction { range } => {
                     feed(&[2]);
-                    feed(&(amount as u32).to_le_bytes());
-                    feed(&radius.to_bits().to_le_bytes());
-                }
-                AbilityKind::Haste {
-                    factor,
-                    duration_ticks,
-                } => {
-                    feed(&[9]);
-                    feed(&factor.to_bits().to_le_bytes());
-                    feed(&duration_ticks.to_le_bytes());
-                }
-                AbilityKind::Burn {
-                    radius,
-                    duration_ticks,
-                    damage_per_tick,
-                    damage_type,
-                } => {
-                    feed(&[8]);
-                    feed(&radius.to_bits().to_le_bytes());
-                    feed(&duration_ticks.to_le_bytes());
-                    feed(&(damage_per_tick as u32).to_le_bytes());
-                    feed(&[damage_type as u8]);
-                }
-                AbilityKind::Silence {
-                    radius,
-                    duration_ticks,
-                } => {
-                    feed(&[7]);
-                    feed(&radius.to_bits().to_le_bytes());
-                    feed(&duration_ticks.to_le_bytes());
-                }
-                AbilityKind::Root {
-                    radius,
-                    duration_ticks,
-                } => {
-                    feed(&[6]);
-                    feed(&radius.to_bits().to_le_bytes());
-                    feed(&duration_ticks.to_le_bytes());
-                }
-                AbilityKind::Slow {
-                    radius,
-                    factor,
-                    duration_ticks,
-                } => {
-                    feed(&[5]);
-                    feed(&radius.to_bits().to_le_bytes());
-                    feed(&factor.to_bits().to_le_bytes());
-                    feed(&duration_ticks.to_le_bytes());
-                }
-                AbilityKind::Shield {
-                    amount,
-                    duration_ticks,
-                } => {
-                    feed(&[4]);
-                    feed(&(amount as u32).to_le_bytes());
-                    feed(&duration_ticks.to_le_bytes());
-                }
-                AbilityKind::Burst {
-                    radius,
-                    damage,
-                    damage_type,
-                } => {
-                    feed(&[3]);
-                    feed(&radius.to_bits().to_le_bytes());
-                    feed(&(damage as u32).to_le_bytes());
-                    feed(&[damage_type as u8]);
+                    feed(&range.to_bits().to_le_bytes());
                 }
             }
+            hash_effects(&mut feed, &ability.effects);
         }
         for hero in &self.heroes {
             feed(hero.name.as_bytes());
@@ -1149,6 +1217,15 @@ struct AbilityEntry {
     factor: f32,
     #[serde(default = "default_damage_type")]
     damage_type: String,
+    /// Optional status kind applied on a skillshot hit (e.g. `root`).
+    #[serde(default)]
+    on_hit: Option<String>,
+    /// Duration for the on-hit status (falls back to `duration_ticks`).
+    #[serde(default)]
+    on_hit_duration_ticks: u32,
+    /// Period between zone applications (defaults to 30).
+    #[serde(default)]
+    period_ticks: u32,
 }
 
 fn default_damage_type() -> String {
@@ -1293,71 +1370,6 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             .collect::<Result<Vec<_>, _>>()?,
         None => GameContent::default().heroes,
     };
-    let abilities = match file.abilities {
-        Some(abilities) => abilities
-            .into_iter()
-            .map(|ability| {
-                let damage_type = parse_damage_type(&ability.damage_type)?;
-                let kind = match ability.kind.as_str() {
-                    "skillshot" => AbilityKind::Skillshot {
-                        speed_per_sec: fix_param(ability.speed, "abilities.speed")?,
-                        range: fix_param(ability.range, "abilities.range")?,
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                        damage: ability.damage,
-                        damage_type,
-                    },
-                    "dash" => AbilityKind::Dash {
-                        range: fix_param(ability.range, "abilities.range")?,
-                    },
-                    "heal" => AbilityKind::Heal {
-                        amount: ability.amount,
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                    },
-                    "haste" => AbilityKind::Haste {
-                        factor: fix_param(ability.factor, "abilities.factor")?,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    "burn" => AbilityKind::Burn {
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                        duration_ticks: ability.duration_ticks,
-                        damage_per_tick: ability.damage,
-                        damage_type,
-                    },
-                    "silence" => AbilityKind::Silence {
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    "root" => AbilityKind::Root {
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    "slow" => AbilityKind::Slow {
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                        factor: fix_param(ability.factor, "abilities.factor")?,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    "shield" => AbilityKind::Shield {
-                        amount: ability.amount,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    "burst" => AbilityKind::Burst {
-                        radius: fix_param(ability.radius, "abilities.radius")?,
-                        damage: ability.damage,
-                        damage_type,
-                    },
-                    other => return Err(invalid_field("abilities.kind", other)),
-                };
-                Ok::<AbilitySpec, ContentLoadError>(AbilitySpec {
-                    name: ability.name,
-                    cooldown_ticks: ability.cooldown_ticks,
-                    mana_cost: ability.mana_cost,
-                    cast_range: fix_param(ability.cast_range, "abilities.cast_range")?,
-                    kind,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        None => GameContent::default().abilities,
-    };
     let modifiers = match file.modifiers {
         Some(modifiers) => modifiers
             .into_iter()
@@ -1369,6 +1381,177 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             })
             .collect::<Result<Vec<_>, ContentLoadError>>()?,
         None => GameContent::default().modifiers,
+    };
+    let abilities = match file.abilities {
+        Some(abilities) => abilities
+            .into_iter()
+            .map(|ability| {
+                let damage_type = parse_damage_type(&ability.damage_type)?;
+                let cast_range = fix_param(ability.cast_range, "abilities.cast_range")?;
+                let radius = fix_param(ability.radius, "abilities.radius")?;
+                let factor = fix_param(ability.factor, "abilities.factor")?;
+                let modifier_id = |kind: ModifierKind| {
+                    modifiers
+                        .iter()
+                        .position(|definition| definition.kind == kind)
+                        .and_then(|index| u16::try_from(index).ok())
+                        .unwrap_or(0)
+                };
+                let apply = |kind: ModifierKind, duration_ticks: u32, amount: i32| {
+                    AreaEffect::ApplyModifier {
+                        modifier: modifier_id(kind),
+                        duration_ticks,
+                        factor,
+                        amount,
+                        damage_type,
+                    }
+                };
+                let (targeting, effects) = match ability.kind.as_str() {
+                    "skillshot" => {
+                        let mut on_hit = AreaEffectList::one(AreaEffect::Damage {
+                            amount: ability.damage,
+                            damage_type,
+                        });
+                        if let Some(status) = ability.on_hit.as_deref() {
+                            let kind = parse_modifier_kind(status)?;
+                            let duration = if ability.on_hit_duration_ticks == 0 {
+                                ability.duration_ticks
+                            } else {
+                                ability.on_hit_duration_ticks
+                            };
+                            on_hit.effects[1] = AreaEffect::ApplyModifier {
+                                modifier: modifier_id(kind),
+                                duration_ticks: duration,
+                                factor: Fix::ONE,
+                                amount: 0,
+                                damage_type,
+                            };
+                        }
+                        (
+                            Targeting::Direction { range: cast_range },
+                            EffectList::one(Effect::Projectile {
+                                speed_per_sec: fix_param(ability.speed, "abilities.speed")?,
+                                range: fix_param(ability.range, "abilities.range")?,
+                                radius,
+                                on_hit,
+                            }),
+                        )
+                    }
+                    "dash" => (
+                        Targeting::Direction { range: cast_range },
+                        EffectList::one(Effect::Displace {
+                            range: fix_param(ability.range, "abilities.range")?,
+                        }),
+                    ),
+                    "heal" => (
+                        Targeting::SelfCast,
+                        EffectList::one(Effect::Heal {
+                            amount: ability.amount,
+                        }),
+                    ),
+                    "haste" => (
+                        Targeting::SelfCast,
+                        EffectList::one(Effect::ApplyModifier {
+                            modifier: modifier_id(ModifierKind::Haste),
+                            duration_ticks: ability.duration_ticks,
+                            factor,
+                            amount: 0,
+                            damage_type,
+                        }),
+                    ),
+                    "burn" => (
+                        Targeting::Point { range: cast_range },
+                        EffectList::one(Effect::Area {
+                            radius,
+                            effects: AreaEffectList::one(apply(
+                                ModifierKind::Burn,
+                                ability.duration_ticks,
+                                ability.damage,
+                            )),
+                        }),
+                    ),
+                    "silence" => (
+                        Targeting::Point { range: cast_range },
+                        EffectList::one(Effect::Area {
+                            radius,
+                            effects: AreaEffectList::one(apply(
+                                ModifierKind::Silence,
+                                ability.duration_ticks,
+                                0,
+                            )),
+                        }),
+                    ),
+                    "root" => (
+                        Targeting::Point { range: cast_range },
+                        EffectList::one(Effect::Area {
+                            radius,
+                            effects: AreaEffectList::one(apply(
+                                ModifierKind::Root,
+                                ability.duration_ticks,
+                                0,
+                            )),
+                        }),
+                    ),
+                    "slow" => (
+                        Targeting::Point { range: cast_range },
+                        EffectList::one(Effect::Area {
+                            radius,
+                            effects: AreaEffectList::one(apply(
+                                ModifierKind::Slow,
+                                ability.duration_ticks,
+                                0,
+                            )),
+                        }),
+                    ),
+                    "shield" => (
+                        Targeting::SelfCast,
+                        EffectList::one(Effect::ApplyModifier {
+                            modifier: modifier_id(ModifierKind::Shield),
+                            duration_ticks: ability.duration_ticks,
+                            factor: Fix::ONE,
+                            amount: ability.amount,
+                            damage_type,
+                        }),
+                    ),
+                    "burn_zone" => (
+                        Targeting::Point { range: cast_range },
+                        EffectList::one(Effect::Zone {
+                            radius,
+                            duration_ticks: ability.duration_ticks,
+                            period_ticks: if ability.period_ticks == 0 {
+                                30
+                            } else {
+                                ability.period_ticks
+                            },
+                            effects: AreaEffectList::one(apply(
+                                ModifierKind::Burn,
+                                ability.duration_ticks,
+                                ability.damage,
+                            )),
+                        }),
+                    ),
+                    "burst" => (
+                        Targeting::Point { range: cast_range },
+                        EffectList::one(Effect::Area {
+                            radius,
+                            effects: AreaEffectList::one(AreaEffect::Damage {
+                                amount: ability.damage,
+                                damage_type,
+                            }),
+                        }),
+                    ),
+                    other => return Err(invalid_field("abilities.kind", other)),
+                };
+                Ok::<AbilitySpec, ContentLoadError>(AbilitySpec {
+                    name: ability.name,
+                    cooldown_ticks: ability.cooldown_ticks,
+                    mana_cost: ability.mana_cost,
+                    targeting,
+                    effects,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => GameContent::default().abilities,
     };
     let map = match file.map {
         Some(map) => {
@@ -1530,9 +1713,17 @@ abilities = [0, 0, 0]
         assert_eq!(content.abilities.len(), 1);
         assert_eq!(content.abilities[0].name, "Zap");
         assert!(matches!(
-            content.abilities[0].kind,
-            AbilityKind::Burst { damage: 50, .. }
+            content.abilities[0].targeting,
+            Targeting::Point { .. }
         ));
+        assert!(content.abilities[0].effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Area { effects, .. }
+                if effects.iter().any(|effect| matches!(
+                    effect,
+                    AreaEffect::Damage { amount: 50, .. }
+                ))
+        )));
     }
 
     #[test]

@@ -6,9 +6,10 @@ use std::sync::Arc;
 use moba_core::{Fix, FixVec2, Rng, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
-    DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP,
-    LEVEL_GROWTH, MELEE_MINION, ModifierKind, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD,
-    TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
+    AreaEffect, AreaEffectList, DamageType, EMPTY_ITEM, Effect, GOLD_PER_INTERVAL,
+    GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP, LEVEL_GROWTH, MELEE_MINION, ModifierKind,
+    NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Targeting, Team, XP_RADIUS,
+    mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
 
@@ -45,9 +46,12 @@ const HASH_BASE_MOVE_SPEED: u32 = 25;
 const HASH_LAST_HIT_BY: u32 = 26;
 const HASH_ATTACK_DAMAGE_TYPE: u32 = 27;
 const HASH_PROJECTILE: u32 = 28;
+const HASH_ZONE: u32 = 29;
 
 /// Hard cap on in-flight projectiles.
 pub const MAX_PROJECTILES: usize = 64;
+/// Hard cap on active zones.
+pub const MAX_ZONES: usize = 16;
 /// Hard cap on queued events; events beyond this are dropped, never allocated.
 pub const MAX_EVENTS: usize = 256;
 /// Ticks between minion waves (30 seconds at 30 Hz).
@@ -204,8 +208,19 @@ struct Projectile {
     speed_per_tick: Fix,
     remaining: Fix,
     radius: Fix,
-    damage: i32,
-    damage_type: DamageType,
+    on_hit: AreaEffectList,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Zone {
+    owner: Entity,
+    team: Team,
+    position: FixVec2,
+    radius: Fix,
+    remaining: u32,
+    period_ticks: u32,
+    cooldown: u32,
+    effects: AreaEffectList,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -294,6 +309,7 @@ pub struct Simulation {
     blue_score: u32,
     red_score: u32,
     projectiles: Vec<Projectile>,
+    zones: Vec<Zone>,
     events: Vec<SimEvent>,
     grid: SpatialGrid<TargetRef>,
     hero_views: Vec<HeroView>,
@@ -332,6 +348,7 @@ impl Simulation {
             blue_score: 0,
             red_score: 0,
             projectiles: Vec::with_capacity(MAX_PROJECTILES),
+            zones: Vec::with_capacity(MAX_ZONES),
             events: Vec::with_capacity(MAX_EVENTS),
             grid: SpatialGrid::new(
                 FixVec2::ZERO,
@@ -619,6 +636,7 @@ impl Simulation {
         self.refresh_spatial();
         self.resolve_attacks();
         self.update_projectiles();
+        self.tick_zones();
         self.resolve_deaths();
         if self.tick.get() >= self.next_wave_tick && self.config.spawn_waves {
             self.spawn_wave();
@@ -668,8 +686,19 @@ impl Simulation {
             hasher.write_u64(projectile.speed_per_tick.to_bits() as u64);
             hasher.write_u64(projectile.remaining.to_bits() as u64);
             hasher.write_u64(projectile.radius.to_bits() as u64);
-            hasher.write_u32(projectile.damage as u32);
-            hasher.write_u32(projectile.damage_type as u32);
+            hash_runtime_area_effects(&mut hasher, &projectile.on_hit);
+        }
+        for zone in &self.zones {
+            hasher.write_u32(HASH_ZONE);
+            hasher.write_u64(zone.owner.to_bits());
+            hasher.write_u32(zone.team.index() as u32);
+            hasher.write_u64(zone.position.x.to_bits() as u64);
+            hasher.write_u64(zone.position.y.to_bits() as u64);
+            hasher.write_u64(zone.radius.to_bits() as u64);
+            hasher.write_u32(zone.remaining);
+            hasher.write_u32(zone.period_ticks);
+            hasher.write_u32(zone.cooldown);
+            hash_runtime_area_effects(&mut hasher, &zone.effects);
         }
 
         for entity in self.world.entities() {
@@ -1037,20 +1066,21 @@ impl Simulation {
     fn apply_modifier(
         &mut self,
         entity: Entity,
-        kind: ModifierKind,
+        def_id: u16,
         remaining: u32,
         factor: Fix,
         amount: i32,
         source: Entity,
         damage_type: DamageType,
     ) {
-        let def_id = self
+        let Some(kind) = self
             .content
             .modifiers
-            .iter()
-            .position(|definition| definition.kind == kind)
-            .and_then(|index| u16::try_from(index).ok())
-            .unwrap_or(0);
+            .get(usize::from(def_id))
+            .map(|definition| definition.kind)
+        else {
+            return;
+        };
         let Some(modifiers) = self.world.get_mut::<Modifiers>(entity) else {
             return;
         };
@@ -1307,7 +1337,7 @@ impl Simulation {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // Ability execution is one validated match.
+    #[allow(clippy::too_many_lines)] // One validated targeting/effect pass.
     fn cast_ability(&mut self, caster: Entity, slot: u8, mut target: FixVec2) {
         let Some(identity) = self.world.get::<HeroIdentity>(caster).copied() else {
             return;
@@ -1325,8 +1355,8 @@ impl Simulation {
         };
         let cooldown_ticks = ability.cooldown_ticks;
         let mana_cost = ability.mana_cost;
-        let cast_range = ability.cast_range;
-        let ability_kind = ability.kind;
+        let targeting = ability.targeting;
+        let effects = ability.effects;
         let Some(cooldowns) = self.world.get::<Cooldowns>(caster).copied() else {
             return;
         };
@@ -1356,198 +1386,118 @@ impl Simulation {
             .world
             .get::<Modifiers>(caster)
             .is_some_and(|m| m.has(ModifierKind::Root))
-            && matches!(ability_kind, moba_game::AbilityKind::Dash { .. })
+            && effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Displace { .. }))
         {
             return;
         }
-
-        let is_directed = matches!(
-            ability_kind,
-            moba_game::AbilityKind::Skillshot { .. } | moba_game::AbilityKind::Dash { .. }
-        );
-        if is_directed {
-            let distance = position.distance(target);
-            if distance == Fix::ZERO || distance > cast_range {
-                return;
-            }
-        }
-        let is_point_targeted = matches!(
-            ability_kind,
-            moba_game::AbilityKind::Slow { .. }
-                | moba_game::AbilityKind::Root { .. }
-                | moba_game::AbilityKind::Silence { .. }
-                | moba_game::AbilityKind::Burn { .. }
-                | moba_game::AbilityKind::Burst { .. }
-        );
-        if is_point_targeted {
-            if cast_range == Fix::ZERO {
-                target = position;
-            } else if position.distance(target) > cast_range {
-                return;
-            }
-        }
-
-        match ability_kind {
-            moba_game::AbilityKind::Skillshot {
-                speed_per_sec,
-                range,
-                radius,
-                damage,
-                damage_type,
-            } => {
-                let direction = (target - position).normalize_or_zero();
-                if direction == FixVec2::ZERO || self.projectiles.len() >= MAX_PROJECTILES {
+        match targeting {
+            Targeting::SelfCast => target = position,
+            Targeting::Point { range } => {
+                if range == Fix::ZERO {
+                    target = position;
+                } else if position.distance(target) > range {
                     return;
                 }
-                self.projectiles.push(Projectile {
-                    owner: caster,
-                    team,
-                    position,
-                    direction,
-                    speed_per_tick: speed_per_sec * ONE_TICK,
-                    remaining: range,
-                    radius,
-                    damage,
-                    damage_type,
-                });
             }
-            moba_game::AbilityKind::Dash { range } => {
-                let delta = target - position;
-                let distance = delta.length().min(range);
-                if distance > Fix::ZERO {
-                    let destination =
-                        clamp_position(position + delta.normalize_or_zero() * distance);
-                    if let Some(current) = self.world.get_mut::<Position>(caster) {
-                        current.0 = destination;
+            Targeting::Direction { range } => {
+                let distance = position.distance(target);
+                if distance == Fix::ZERO || distance > range {
+                    return;
+                }
+            }
+        }
+        for effect in effects.iter() {
+            match effect {
+                Effect::None => {}
+                Effect::Damage {
+                    amount,
+                    damage_type,
+                } => {
+                    self.gather_enemies(team, target, Fix::ONE);
+                    let mut hits = core::mem::take(&mut self.damage_hits);
+                    for target_entity in hits.drain(..) {
+                        self.damage(target_entity, *amount, *damage_type, caster);
+                    }
+                    self.damage_hits = hits;
+                }
+                Effect::Heal { amount } => {
+                    if let Some(health) = self.world.get_mut::<Health>(caster) {
+                        health.current = (health.current + amount).min(health.max);
                     }
                 }
-            }
-            moba_game::AbilityKind::Heal { amount, .. } => {
-                if let Some(health) = self.world.get_mut::<Health>(caster) {
-                    health.current = (health.current + amount).min(health.max);
-                }
-            }
-            moba_game::AbilityKind::Shield {
-                amount,
-                duration_ticks,
-            } => {
-                self.apply_modifier(
-                    caster,
-                    ModifierKind::Shield,
-                    duration_ticks,
-                    Fix::ONE,
-                    amount,
-                    caster,
-                    DamageType::Physical,
-                );
-            }
-            moba_game::AbilityKind::Burn {
-                radius,
-                duration_ticks,
-                damage_per_tick,
-                damage_type,
-            } => {
-                self.gather_enemies(team, target, radius);
-                let mut hits = core::mem::take(&mut self.damage_hits);
-                for target_entity in hits.drain(..) {
-                    self.apply_modifier(
-                        target_entity,
-                        ModifierKind::Burn,
-                        duration_ticks,
-                        Fix::ONE,
-                        damage_per_tick,
-                        caster,
-                        damage_type,
-                    );
-                }
-                self.damage_hits = hits;
-            }
-            moba_game::AbilityKind::Haste {
-                factor,
-                duration_ticks,
-            } => {
-                self.apply_modifier(
-                    caster,
-                    ModifierKind::Haste,
+                Effect::ApplyModifier {
+                    modifier,
                     duration_ticks,
                     factor,
-                    0,
-                    caster,
-                    DamageType::Physical,
-                );
-            }
-            moba_game::AbilityKind::Silence {
-                radius,
-                duration_ticks,
-            } => {
-                self.gather_enemies(team, target, radius);
-                let mut hits = core::mem::take(&mut self.damage_hits);
-                for target_entity in hits.drain(..) {
+                    amount,
+                    damage_type,
+                } => {
                     self.apply_modifier(
-                        target_entity,
-                        ModifierKind::Silence,
-                        duration_ticks,
-                        Fix::ONE,
-                        0,
                         caster,
-                        DamageType::Physical,
+                        *modifier,
+                        *duration_ticks,
+                        *factor,
+                        *amount,
+                        caster,
+                        *damage_type,
                     );
                 }
-                self.damage_hits = hits;
-            }
-            moba_game::AbilityKind::Root {
-                radius,
-                duration_ticks,
-            } => {
-                self.gather_enemies(team, target, radius);
-                let mut hits = core::mem::take(&mut self.damage_hits);
-                for target_entity in hits.drain(..) {
-                    self.apply_modifier(
-                        target_entity,
-                        ModifierKind::Root,
-                        duration_ticks,
-                        Fix::ONE,
-                        0,
-                        caster,
-                        DamageType::Physical,
-                    );
-                    if let Some(move_target) = self.world.get_mut::<MoveTarget>(target_entity) {
-                        move_target.0 = None;
+                Effect::Displace { range } => {
+                    let delta = target - position;
+                    let distance = delta.length().min(*range);
+                    if distance > Fix::ZERO {
+                        let destination =
+                            clamp_position(position + delta.normalize_or_zero() * distance);
+                        if let Some(current) = self.world.get_mut::<Position>(caster) {
+                            current.0 = destination;
+                        }
                     }
                 }
-                self.damage_hits = hits;
-            }
-            moba_game::AbilityKind::Slow {
-                radius,
-                factor,
-                duration_ticks,
-            } => {
-                self.gather_enemies(team, target, radius);
-                let mut hits = core::mem::take(&mut self.damage_hits);
-                for target_entity in hits.drain(..) {
-                    self.apply_modifier(
-                        target_entity,
-                        ModifierKind::Slow,
-                        duration_ticks,
-                        factor,
-                        0,
-                        caster,
-                        DamageType::Physical,
-                    );
+                Effect::Projectile {
+                    speed_per_sec,
+                    range,
+                    radius,
+                    on_hit,
+                } => {
+                    let direction = (target - position).normalize_or_zero();
+                    if direction == FixVec2::ZERO || self.projectiles.len() >= MAX_PROJECTILES {
+                        continue;
+                    }
+                    self.projectiles.push(Projectile {
+                        owner: caster,
+                        team,
+                        position,
+                        direction,
+                        speed_per_tick: *speed_per_sec * ONE_TICK,
+                        remaining: *range,
+                        radius: *radius,
+                        on_hit: *on_hit,
+                    });
                 }
-                self.damage_hits = hits;
-            }
-            moba_game::AbilityKind::Burst {
-                radius,
-                damage,
-                damage_type,
-            } => {
-                self.gather_enemies(team, target, radius);
-                let mut hits = core::mem::take(&mut self.damage_hits);
-                for target in hits.drain(..) {
-                    self.damage(target, damage, damage_type, caster);
+                Effect::Area { radius, effects } => {
+                    self.apply_area_effects(caster, team, target, *radius, *effects);
                 }
-                self.damage_hits = hits;
+                Effect::Zone {
+                    radius,
+                    duration_ticks,
+                    period_ticks,
+                    effects,
+                } => {
+                    if self.zones.len() < MAX_ZONES {
+                        self.zones.push(Zone {
+                            owner: caster,
+                            team,
+                            position: target,
+                            radius: *radius,
+                            remaining: *duration_ticks,
+                            period_ticks: *period_ticks,
+                            cooldown: 0,
+                            effects: *effects,
+                        });
+                    }
+                }
             }
         }
 
@@ -1556,6 +1506,74 @@ impl Simulation {
         }
         if let Some(cooldowns) = self.world.get_mut::<Cooldowns>(caster) {
             cooldowns.0[ability_index] = cooldown_ticks;
+        }
+    }
+
+    fn apply_area_effects(
+        &mut self,
+        caster: Entity,
+        team: Team,
+        center: FixVec2,
+        radius: Fix,
+        effects: AreaEffectList,
+    ) {
+        self.gather_enemies(team, center, radius);
+        let mut hits = core::mem::take(&mut self.damage_hits);
+        for target in hits.drain(..) {
+            self.apply_area_effects_to(caster, target, effects);
+        }
+        self.damage_hits = hits;
+    }
+
+    fn apply_area_effects_to(&mut self, caster: Entity, target: Entity, effects: AreaEffectList) {
+        for effect in effects.iter() {
+            match effect {
+                AreaEffect::None => {}
+                AreaEffect::Damage {
+                    amount,
+                    damage_type,
+                } => self.damage(target, *amount, *damage_type, caster),
+                AreaEffect::ApplyModifier {
+                    modifier,
+                    duration_ticks,
+                    factor,
+                    amount,
+                    damage_type,
+                } => self.apply_modifier(
+                    target,
+                    *modifier,
+                    *duration_ticks,
+                    *factor,
+                    *amount,
+                    caster,
+                    *damage_type,
+                ),
+            }
+        }
+    }
+
+    fn tick_zones(&mut self) {
+        let mut index = 0;
+        while index < self.zones.len() {
+            let mut zone = self.zones[index];
+            if zone.cooldown == 0 {
+                self.apply_area_effects(
+                    zone.owner,
+                    zone.team,
+                    zone.position,
+                    zone.radius,
+                    zone.effects,
+                );
+                zone.cooldown = zone.period_ticks;
+            }
+            zone.cooldown = zone.cooldown.saturating_sub(1);
+            zone.remaining = zone.remaining.saturating_sub(1);
+            if zone.remaining == 0 {
+                self.zones.swap_remove(index);
+            } else {
+                self.zones[index] = zone;
+                index += 1;
+            }
         }
     }
 
@@ -1767,12 +1785,7 @@ impl Simulation {
                     }
                 });
             if let Some((_, target)) = hit {
-                self.damage(
-                    target,
-                    projectile.damage,
-                    projectile.damage_type,
-                    projectile.owner,
-                );
+                self.apply_area_effects_to(projectile.owner, target, projectile.on_hit);
                 self.projectiles.swap_remove(index);
             } else {
                 self.projectiles[index] = projectile;
@@ -2154,7 +2167,7 @@ impl Simulation {
                             .content
                             .abilities
                             .get(usize::from(*id))
-                            .map_or(Fix::ZERO, |ability| ability.cast_range);
+                            .map_or(Fix::ZERO, moba_game::AbilitySpec::cast_range);
                     }
                     range
                 },
@@ -2356,6 +2369,37 @@ fn hash_team(world: &World, entity: Entity, hasher: &mut StableHasher) {
     }
 }
 
+fn hash_runtime_area_effects(hasher: &mut StableHasher, effects: &AreaEffectList) {
+    hasher.write_u32(u32::try_from(effects.iter().count()).unwrap_or(u32::MAX));
+    for effect in effects.iter() {
+        match effect {
+            AreaEffect::None => {}
+            AreaEffect::Damage {
+                amount,
+                damage_type,
+            } => {
+                hasher.write_u32(0);
+                hasher.write_u32(*amount as u32);
+                hasher.write_u32(*damage_type as u32);
+            }
+            AreaEffect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            } => {
+                hasher.write_u32(1);
+                hasher.write_u32(u32::from(*modifier));
+                hasher.write_u32(*duration_ticks);
+                hasher.write_u64(factor.to_bits() as u64);
+                hasher.write_u32(*amount as u32);
+                hasher.write_u32(*damage_type as u32);
+            }
+        }
+    }
+}
+
 fn hash_kind(world: &World, entity: Entity, hasher: &mut StableHasher) {
     if let Some(kind) = world.get::<UnitKind>(entity) {
         hasher.write_u32(HASH_KIND);
@@ -2378,6 +2422,7 @@ impl fmt::Debug for Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moba_game::EffectList;
     use std::any::TypeId;
 
     fn idle(picks: [u8; MAX_PLAYERS]) -> Simulation {
@@ -2386,6 +2431,42 @@ mod tests {
             spawn_waves: false,
             hero_picks: picks,
             ..SimConfig::default()
+        })
+    }
+
+    fn area_status(
+        modifier: u16,
+        radius: Fix,
+        duration_ticks: u32,
+        factor: Fix,
+        amount: i32,
+        damage_type: DamageType,
+    ) -> EffectList {
+        EffectList::one(Effect::Area {
+            radius,
+            effects: AreaEffectList::one(AreaEffect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            }),
+        })
+    }
+
+    fn self_modifier(
+        modifier: u16,
+        duration_ticks: u32,
+        factor: Fix,
+        amount: i32,
+        damage_type: DamageType,
+    ) -> EffectList {
+        EffectList::one(Effect::ApplyModifier {
+            modifier,
+            duration_ticks,
+            factor,
+            amount,
+            damage_type,
         })
     }
 
@@ -2813,6 +2894,82 @@ mod tests {
     }
 
     #[test]
+    fn data_only_root_on_hit_skillshot_applies_root() {
+        let content =
+            moba_game::load_content_toml(include_str!("../../../content/ability-pack.toml"))
+                .expect("ability pack");
+        let index = content
+            .abilities
+            .iter()
+            .position(|ability| ability.name == "Rooting Shot")
+            .expect("rooting shot");
+        let mut content = content;
+        content.heroes[0].abilities = [u8::try_from(index).expect("id"), 1, 2];
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                spawn_waves: false,
+                hero_picks: [0; MAX_PLAYERS],
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let blue_position = sim.world.get::<Position>(blue).expect("position").0;
+        sim.world.get_mut::<Position>(red).expect("position").0 =
+            blue_position + FixVec2::from_ints(5, 0);
+        let target = sim.world.get::<Position>(red).expect("position").0;
+        let health = sim.world.get::<Health>(red).expect("health").current;
+        let mut cast = TickInputs::new();
+        cast.set(0, PlayerCommand::CastAbility { slot: 0, target });
+        sim.tick(&cast);
+        for _ in 0..30 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(has_modifier(&sim, red, ModifierKind::Root));
+        assert!(sim.world.get::<Health>(red).expect("health").current < health);
+    }
+
+    #[test]
+    fn data_only_burn_zone_periodically_damages() {
+        let content =
+            moba_game::load_content_toml(include_str!("../../../content/ability-pack.toml"))
+                .expect("ability pack");
+        let index = content
+            .abilities
+            .iter()
+            .position(|ability| ability.name == "Cinder Zone")
+            .expect("cinder zone");
+        let mut content = content;
+        content.heroes[0].abilities = [u8::try_from(index).expect("id"), 1, 2];
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                spawn_waves: false,
+                hero_picks: [0; MAX_PLAYERS],
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let blue_position = sim.world.get::<Position>(blue).expect("position").0;
+        sim.world.get_mut::<Position>(red).expect("position").0 =
+            blue_position + FixVec2::from_ints(3, 0);
+        let target = sim.world.get::<Position>(red).expect("position").0;
+        let health = sim.world.get::<Health>(red).expect("health").current;
+        let mut cast = TickInputs::new();
+        cast.set(0, PlayerCommand::CastAbility { slot: 0, target });
+        sim.tick(&cast);
+        for _ in 0..75 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(has_modifier(&sim, red, ModifierKind::Burn));
+        assert!(sim.world.get::<Health>(red).expect("health").current < health);
+    }
+
+    #[test]
     fn every_unit_has_an_always_present_modifier_list() {
         let sim = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
         for entity in sim.world().entities() {
@@ -2886,19 +3043,21 @@ mod tests {
 
     #[test]
     fn burn_ability_deals_damage_over_time_and_expires() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Burn"),
             cooldown_ticks: 120,
             mana_cost: 5,
-            cast_range: 0.into(),
-            kind: AbilityKind::Burn {
-                radius: 1_000.into(),
-                duration_ticks: 10,
-                damage_per_tick: 20,
-                damage_type: DamageType::Magic,
-            },
+            targeting: Targeting::Point { range: Fix::ZERO },
+            effects: area_status(
+                moba_game::MODIFIER_BURN,
+                1_000.into(),
+                10,
+                Fix::ONE,
+                20,
+                DamageType::Magic,
+            ),
         };
         let mut sim = Simulation::new_with_content(
             SimConfig {
@@ -2926,17 +3085,21 @@ mod tests {
 
     #[test]
     fn silence_ability_blocks_casting_and_expires() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Silence"),
             cooldown_ticks: 120,
             mana_cost: 5,
-            cast_range: 0.into(),
-            kind: AbilityKind::Silence {
-                radius: 1_000.into(),
-                duration_ticks: 60,
-            },
+            targeting: Targeting::Point { range: Fix::ZERO },
+            effects: area_status(
+                moba_game::MODIFIER_SILENCE,
+                1_000.into(),
+                60,
+                Fix::ONE,
+                0,
+                DamageType::Physical,
+            ),
         };
         let mut sim = Simulation::new_with_content(
             SimConfig {
@@ -2987,26 +3150,32 @@ mod tests {
 
     #[test]
     fn root_blocks_dash_but_not_after_expiry() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Root"),
             cooldown_ticks: 120,
             mana_cost: 5,
-            cast_range: 0.into(),
-            kind: AbilityKind::Root {
-                radius: 1_000.into(),
-                duration_ticks: 60,
-            },
+            targeting: Targeting::Point { range: Fix::ZERO },
+            effects: area_status(
+                moba_game::MODIFIER_ROOT,
+                1_000.into(),
+                60,
+                Fix::ONE,
+                0,
+                DamageType::Physical,
+            ),
         };
         content.abilities[1] = AbilitySpec {
             name: String::from("Test Dash"),
             cooldown_ticks: 60,
             mana_cost: 0,
-            cast_range: moba_core::Fix::from_i32(50),
-            kind: AbilityKind::Dash {
-                range: moba_core::Fix::from_i32(50),
+            targeting: Targeting::Direction {
+                range: Fix::from_i32(50),
             },
+            effects: EffectList::one(Effect::Displace {
+                range: Fix::from_i32(50),
+            }),
         };
         content.heroes[0].abilities = [0, 1, 2];
         let mut sim = Simulation::new_with_content(
@@ -3059,17 +3228,21 @@ mod tests {
 
     #[test]
     fn root_ability_blocks_movement_and_expires() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Root"),
             cooldown_ticks: 120,
             mana_cost: 5,
-            cast_range: 0.into(),
-            kind: AbilityKind::Root {
-                radius: 1_000.into(),
-                duration_ticks: 60,
-            },
+            targeting: Targeting::Point { range: Fix::ZERO },
+            effects: area_status(
+                moba_game::MODIFIER_ROOT,
+                1_000.into(),
+                60,
+                Fix::ONE,
+                0,
+                DamageType::Physical,
+            ),
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
@@ -3117,28 +3290,34 @@ mod tests {
     }
 
     fn speed_fixture(haste_ticks: u32, slow_ticks: u32) -> (Simulation, Entity, Entity, Fix) {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Fixture Haste"),
             cooldown_ticks: 30,
             mana_cost: 0,
-            cast_range: 0.into(),
-            kind: AbilityKind::Haste {
-                factor: Fix::from_f32(1.5),
-                duration_ticks: haste_ticks,
-            },
+            targeting: Targeting::SelfCast,
+            effects: self_modifier(
+                moba_game::MODIFIER_HASTE,
+                haste_ticks,
+                Fix::from_f32(1.5),
+                0,
+                DamageType::Physical,
+            ),
         };
         content.abilities[1] = AbilitySpec {
             name: String::from("Fixture Slow"),
             cooldown_ticks: 30,
             mana_cost: 0,
-            cast_range: 0.into(),
-            kind: AbilityKind::Slow {
-                radius: Fix::from_i32(10_000),
-                factor: Fix::from_f32(0.5),
-                duration_ticks: slow_ticks,
-            },
+            targeting: Targeting::Point { range: Fix::ZERO },
+            effects: area_status(
+                moba_game::MODIFIER_SLOW,
+                Fix::from_i32(10_000),
+                slow_ticks,
+                Fix::from_f32(0.5),
+                0,
+                DamageType::Physical,
+            ),
         };
         for hero in &mut content.heroes {
             hero.abilities = [0, 1, 2];
@@ -3232,17 +3411,20 @@ mod tests {
 
     #[test]
     fn haste_ability_boosts_speed_and_expires() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Haste"),
             cooldown_ticks: 120,
             mana_cost: 5,
-            cast_range: 0.into(),
-            kind: AbilityKind::Haste {
-                factor: moba_core::Fix::from_f32(1.5),
-                duration_ticks: 60,
-            },
+            targeting: Targeting::SelfCast,
+            effects: self_modifier(
+                moba_game::MODIFIER_HASTE,
+                60,
+                Fix::from_f32(1.5),
+                0,
+                DamageType::Physical,
+            ),
         };
         let mut sim = Simulation::new_with_content(
             SimConfig {
@@ -3273,18 +3455,21 @@ mod tests {
 
     #[test]
     fn slow_ability_reduces_speed_and_expires() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Slow"),
             cooldown_ticks: 120,
             mana_cost: 5,
-            cast_range: 0.into(),
-            kind: AbilityKind::Slow {
-                radius: 1_000.into(),
-                factor: moba_core::Fix::from_f32(0.5),
-                duration_ticks: 60,
-            },
+            targeting: Targeting::Point { range: Fix::ZERO },
+            effects: area_status(
+                moba_game::MODIFIER_SLOW,
+                1_000.into(),
+                60,
+                Fix::from_f32(0.5),
+                0,
+                DamageType::Physical,
+            ),
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
@@ -3312,17 +3497,20 @@ mod tests {
 
     #[test]
     fn shield_ability_absorbs_damage_and_expires() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Shield"),
             cooldown_ticks: 120,
             mana_cost: 10,
-            cast_range: 0.into(),
-            kind: AbilityKind::Shield {
-                amount: 100,
-                duration_ticks: 60,
-            },
+            targeting: Targeting::SelfCast,
+            effects: self_modifier(
+                moba_game::MODIFIER_SHIELD,
+                60,
+                Fix::ONE,
+                100,
+                DamageType::Physical,
+            ),
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
@@ -3370,42 +3558,75 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table covers every point-target kind.
     fn point_abilities_reject_out_of_range_targets() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
-        let kinds = [
-            AbilityKind::Slow {
-                radius: Fix::from_i32(1_000),
-                factor: Fix::from_f32(0.5),
-                duration_ticks: 10,
-            },
-            AbilityKind::Root {
-                radius: Fix::from_i32(1_000),
-                duration_ticks: 10,
-            },
-            AbilityKind::Silence {
-                radius: Fix::from_i32(1_000),
-                duration_ticks: 10,
-            },
-            AbilityKind::Burn {
-                radius: Fix::from_i32(1_000),
-                duration_ticks: 10,
-                damage_per_tick: 10,
-                damage_type: DamageType::Magic,
-            },
-            AbilityKind::Burst {
-                radius: Fix::from_i32(1_000),
-                damage: 10,
-                damage_type: DamageType::Magic,
-            },
+        use moba_game::{AbilitySpec, GameContent};
+        let cases = [
+            (
+                area_status(
+                    moba_game::MODIFIER_SLOW,
+                    Fix::from_i32(1_000),
+                    10,
+                    Fix::from_f32(0.5),
+                    0,
+                    DamageType::Physical,
+                ),
+                Some(ModifierKind::Slow),
+            ),
+            (
+                area_status(
+                    moba_game::MODIFIER_ROOT,
+                    Fix::from_i32(1_000),
+                    10,
+                    Fix::ONE,
+                    0,
+                    DamageType::Physical,
+                ),
+                Some(ModifierKind::Root),
+            ),
+            (
+                area_status(
+                    moba_game::MODIFIER_SILENCE,
+                    Fix::from_i32(1_000),
+                    10,
+                    Fix::ONE,
+                    0,
+                    DamageType::Physical,
+                ),
+                Some(ModifierKind::Silence),
+            ),
+            (
+                area_status(
+                    moba_game::MODIFIER_BURN,
+                    Fix::from_i32(1_000),
+                    10,
+                    Fix::ONE,
+                    10,
+                    DamageType::Magic,
+                ),
+                Some(ModifierKind::Burn),
+            ),
+            (
+                EffectList::one(Effect::Area {
+                    radius: Fix::from_i32(1_000),
+                    effects: AreaEffectList::one(AreaEffect::Damage {
+                        amount: 10,
+                        damage_type: DamageType::Magic,
+                    }),
+                }),
+                None,
+            ),
         ];
-        for kind in kinds {
+        for (effects, expected_status) in cases {
             let mut content = GameContent::default();
             content.abilities[0] = AbilitySpec {
                 name: String::from("Range Probe"),
                 cooldown_ticks: 60,
                 mana_cost: 10,
-                cast_range: Fix::from_i32(5),
-                kind,
+                targeting: Targeting::Point {
+                    range: Fix::from_i32(5),
+                },
+                effects,
             };
             for hero in &mut content.heroes {
                 hero.abilities = [0, 1, 2];
@@ -3439,44 +3660,38 @@ mod tests {
                 0,
                 "out-of-range cast starts no cooldown"
             );
-            assert!(
-                self::matches_no_status(&sim, red, kind),
-                "out-of-range point effect was not applied"
-            );
+            if let Some(kind) = expected_status {
+                assert!(
+                    !has_modifier(&sim, red, kind),
+                    "out-of-range point effect was not applied"
+                );
+            }
             assert_eq!(
                 sim.world.get::<Health>(red).expect("health").current,
                 red_health,
-                "out-of-range burst deals no damage"
+                "out-of-range effect deals no damage"
             );
-        }
-    }
-
-    fn matches_no_status(sim: &Simulation, entity: Entity, kind: moba_game::AbilityKind) -> bool {
-        match kind {
-            moba_game::AbilityKind::Slow { .. } => !has_modifier(sim, entity, ModifierKind::Slow),
-            moba_game::AbilityKind::Root { .. } => !has_modifier(sim, entity, ModifierKind::Root),
-            moba_game::AbilityKind::Silence { .. } => {
-                !has_modifier(sim, entity, ModifierKind::Silence)
-            }
-            moba_game::AbilityKind::Burn { .. } => !has_modifier(sim, entity, ModifierKind::Burn),
-            _ => true,
         }
     }
 
     #[test]
     fn burst_is_centred_on_the_validated_target_point() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Targeted Burst"),
             cooldown_ticks: 60,
             mana_cost: 0,
-            cast_range: Fix::from_i32(20),
-            kind: AbilityKind::Burst {
-                radius: Fix::from_i32(5),
-                damage: 50,
-                damage_type: DamageType::Magic,
+            targeting: Targeting::Point {
+                range: Fix::from_i32(20),
             },
+            effects: EffectList::one(Effect::Area {
+                radius: Fix::from_i32(5),
+                effects: AreaEffectList::one(AreaEffect::Damage {
+                    amount: 50,
+                    damage_type: DamageType::Magic,
+                }),
+            }),
         };
         for hero in &mut content.heroes {
             hero.abilities = [0, 1, 2];
@@ -3513,18 +3728,22 @@ mod tests {
 
     #[test]
     fn custom_ability_content_drives_casting() {
-        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        use moba_game::{AbilitySpec, GameContent};
         let mut content = GameContent::default();
         content.abilities[0] = AbilitySpec {
             name: String::from("Test Zap"),
             cooldown_ticks: 60,
             mana_cost: 10,
-            cast_range: moba_core::Fix::from_i32(12),
-            kind: AbilityKind::Burst {
-                radius: moba_core::Fix::from_i32(6),
-                damage: 100,
-                damage_type: DamageType::Magic,
+            targeting: Targeting::Point {
+                range: Fix::from_i32(12),
             },
+            effects: EffectList::one(Effect::Area {
+                radius: Fix::from_i32(6),
+                effects: AreaEffectList::one(AreaEffect::Damage {
+                    amount: 100,
+                    damage_type: DamageType::Magic,
+                }),
+            }),
         };
         let mut sim =
             Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));

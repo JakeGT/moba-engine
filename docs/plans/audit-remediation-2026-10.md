@@ -32,7 +32,7 @@ changes. It does **not** treat the engine as 0.1-complete until the exit gates b
 | W0 | Stabilize | None (one possible behavior-only cast-range fix) | green CI + validation evidence |
 | W1 | Determinism & replay | **Replay v5** + `SIM_LOGIC_VERSION`; state-hash changes | re-recorded golden replay; human-purchase replay |
 | W2 | Contracts & catalogue | **Protocol v13**, content-hash/wire parity | parity tests and client range/tooltips data |
-| W3 | Extensible simulation | **Content schema v2**, **protocol v14** (status/events) | data-only skillshot-root/burn-zone examples |
+| W3 | Extensible simulation | **Protocol v15** composition, **v16** status/events | data-only skillshot-root/burn-zone examples |
 | W4 | Client / renderer | UI/protocol changes as needed | golden screenshots + HUD tests |
 | W5 | Hardening & release | Publishing metadata only | 0.2 tag/release candidate |
 
@@ -144,7 +144,7 @@ range indicators and later content updates.
 #39 and #45. This is the largest wave and may span multiple releases.
 
 ### W3.1 Modifiers and effect composition
-- [ ] **#38 data-driven ability effects + fixed-capacity `Modifiers`.**
+- [x] **#38 data-driven ability effects + fixed-capacity `Modifiers`.**
   - Targeting (self/point/direction/unit/range) + effect lists + triggers.
   - Replace six status components with one modifier list; recompute effective stats from
     base + items + modifiers (removes the #24 class of bugs).
@@ -167,11 +167,11 @@ range indicators and later content updates.
     ordering.
   - 1v1-mid and ARAM-style packs in match-soak with replay verification.
   - Client stops importing gameplay constants.
-- [ ] **#17 balanced bots** after #39 lets us sweep fixed compositions reliably.
+- [x] **#17 balanced bots** seeded sweep landed early; re-run after #39.
 
 **W3 exit**
 - [ ] All 10 existing kinds expressed as data; old-vs-new per-tick stream comparison matches.
-- [ ] Content schema v2, protocol v14, replay v6 (or next) documented and re-recorded.
+- [ ] Protocol v16 status/events documented and re-recorded; composition v15 is landed.
 - [ ] No hot-path status-effect allocation; allocation guard uses an all-kinds pack.
 - [ ] 1v1/ARAM packs + custom system embedding example.
 - [ ] Event/status bandwidth measured.
@@ -302,10 +302,10 @@ Order matters: golden image first, then structural refactors it can protect.
 | **#35 CI gates** | **W0/W5** | golden hash, nightly, bench |
 | **#36 branch protection** | **W5** | after #35/#34 |
 | **#37 docs truth** | **W0 + each wave** | final close after W5 |
-| **#38 modifiers/effects** | **W3** | protocol v14 with #41 |
+| **#38 modifiers/effects** | **W3** | protocol v15; #41 later |
 | **#39 rules/modes** | **W3** | content schema v2 |
 | **#40 catalogue parity** | **W2** | protocol v13 |
-| **#41 presentation events** | **W3** | protocol v14 with #38 |
+| **#41 presentation events** | **W3** | protocol v16 after #38 |
 | **#42 HUD split** | **W4** | #8 |
 | **#43 hit-testing** | **W4** | #42 |
 | **#44 textured UI** | **W4** | #8, #42 |

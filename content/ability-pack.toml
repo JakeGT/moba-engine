@@ -90,3 +90,31 @@ armor = 14
 magic_resist = 24
 vision_range = 14.0
 abilities = [6, 2, 1]
+
+# Data-only examples for composition (#38): a skillshot that roots on hit and a
+# periodic burn zone. No engine code is specific to either ability.
+[[abilities]]
+name = "Rooting Shot"
+cooldown_ticks = 240
+mana_cost = 30
+cast_range = 9.0
+kind = "skillshot"
+speed = 24.0
+range = 9.0
+radius = 1.0
+damage = 70
+damage_type = "physical"
+on_hit = "root"
+on_hit_duration_ticks = 45
+
+[[abilities]]
+name = "Cinder Zone"
+cooldown_ticks = 300
+mana_cost = 40
+cast_range = 6.0
+kind = "burn_zone"
+radius = 100.0
+duration_ticks = 180
+period_ticks = 30
+damage = 12
+damage_type = "magic"

@@ -8,91 +8,200 @@ use moba_core::Fix;
 
 use crate::combat::DamageType;
 
-/// What happens when an ability is cast.
+/// Maximum top-level effects per ability.
+pub const MAX_ABILITY_EFFECTS: usize = 3;
+/// Maximum area/on-hit effects per list.
+pub const MAX_AREA_EFFECTS: usize = 3;
+
+/// How an ability chooses its target point.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum AbilityKind {
-    /// Fires a projectile in the direction of the target point.
-    Skillshot {
-        /// Travel speed in world units per second.
-        speed_per_sec: Fix,
-        /// Maximum travel distance.
+pub enum Targeting {
+    /// Applies at the caster's position.
+    SelfCast,
+    /// A ground point within `range` (zero means self-centred).
+    Point {
+        /// Maximum cast distance.
         range: Fix,
-        /// Collision radius around the projectile path.
-        radius: Fix,
-        /// Damage on hit.
-        damage: i32,
+    },
+    /// A direction/point at distance `0..=range`.
+    Direction {
+        /// Maximum cast distance.
+        range: Fix,
+    },
+}
+
+impl Targeting {
+    /// Maximum cast range (`0` for self-cast).
+    #[must_use]
+    pub const fn range(self) -> Fix {
+        match self {
+            Self::SelfCast => Fix::ZERO,
+            Self::Point { range } | Self::Direction { range } => range,
+        }
+    }
+}
+
+/// One effect applied to every valid target in an area or on projectile hit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AreaEffect {
+    /// No effect (empty slot).
+    None,
+    /// Damage with mitigation type.
+    Damage {
+        /// Raw damage.
+        amount: i32,
         /// Mitigation type.
         damage_type: DamageType,
     },
-    /// Instantly moves the caster toward the target point by at most `range`.
-    Dash {
-        /// Maximum dash distance.
-        range: Fix,
+    /// Apply a content modifier definition.
+    ApplyModifier {
+        /// Modifier definition id.
+        modifier: u16,
+        /// Duration in ticks.
+        duration_ticks: u32,
+        /// Movement factor for slow/haste.
+        factor: Fix,
+        /// Shield absorption or per-tick burn damage.
+        amount: i32,
+        /// Burn mitigation type.
+        damage_type: DamageType,
     },
-    /// Instantly heals the caster.
+}
+
+/// Fixed-capacity area effect list.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AreaEffectList {
+    /// Effect slots.
+    pub effects: [AreaEffect; MAX_AREA_EFFECTS],
+}
+
+impl AreaEffectList {
+    /// Empty list.
+    pub const EMPTY: Self = Self {
+        effects: [AreaEffect::None; MAX_AREA_EFFECTS],
+    };
+
+    /// List with one effect.
+    #[must_use]
+    pub const fn one(effect: AreaEffect) -> Self {
+        let mut list = Self::EMPTY;
+        list.effects[0] = effect;
+        list
+    }
+
+    /// Iterates populated effects.
+    pub fn iter(&self) -> impl Iterator<Item = &AreaEffect> {
+        self.effects
+            .iter()
+            .filter(|effect| !matches!(effect, AreaEffect::None))
+    }
+
+    /// Whether the list has no effects.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+/// One top-level ability effect.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// No effect (empty slot).
+    None,
+    /// Immediate damage to enemies at the target.
+    Damage {
+        /// Raw damage.
+        amount: i32,
+        /// Mitigation type.
+        damage_type: DamageType,
+    },
+    /// Heal the caster.
     Heal {
         /// Health restored.
         amount: i32,
-        /// Visual/UI radius (unused by the simulation maths).
-        radius: Fix,
     },
-    /// Grants the caster a temporary damage-absorbing shield.
-    Shield {
-        /// Damage absorbed before health.
+    /// Apply a content modifier to the caster.
+    ApplyModifier {
+        /// Modifier definition id.
+        modifier: u16,
+        /// Duration in ticks.
+        duration_ticks: u32,
+        /// Movement factor (slow/haste).
+        factor: Fix,
+        /// Shield absorption or per-tick burn damage.
         amount: i32,
-        /// Duration in simulation ticks.
-        duration_ticks: u32,
-    },
-    /// Slows enemies around the target point for a duration.
-    Slow {
-        /// Effect radius.
-        radius: Fix,
-        /// Movement multiplier (0..1).
-        factor: Fix,
-        /// Duration in simulation ticks.
-        duration_ticks: u32,
-    },
-    /// Roots enemies around the target point, preventing movement.
-    Root {
-        /// Effect radius.
-        radius: Fix,
-        /// Duration in simulation ticks.
-        duration_ticks: u32,
-    },
-    /// Grants the caster a temporary movement-speed boost.
-    Haste {
-        /// Movement multiplier (>1).
-        factor: Fix,
-        /// Duration in simulation ticks.
-        duration_ticks: u32,
-    },
-    /// Silences enemies around the target point, preventing ability casts.
-    Silence {
-        /// Effect radius.
-        radius: Fix,
-        /// Duration in simulation ticks.
-        duration_ticks: u32,
-    },
-    /// Burns enemies around the target point for damage over time.
-    Burn {
-        /// Effect radius.
-        radius: Fix,
-        /// Duration in simulation ticks.
-        duration_ticks: u32,
-        /// Damage applied each tick.
-        damage_per_tick: i32,
-        /// Mitigation type.
+        /// Burn mitigation type.
         damage_type: DamageType,
     },
-    /// Instantly damages enemies around the caster.
-    Burst {
+    /// Displace the caster toward the target point.
+    Displace {
+        /// Maximum displacement.
+        range: Fix,
+    },
+    /// Spawn a projectile with on-hit area effects.
+    Projectile {
+        /// Travel speed per second.
+        speed_per_sec: Fix,
+        /// Maximum travel distance.
+        range: Fix,
+        /// Collision radius.
+        radius: Fix,
+        /// Effects applied to the first enemy hit.
+        on_hit: AreaEffectList,
+    },
+    /// Apply effects to enemies around the target point.
+    Area {
         /// Effect radius.
         radius: Fix,
-        /// Damage dealt.
-        damage: i32,
-        /// Mitigation type.
-        damage_type: DamageType,
+        /// Effects applied to each enemy.
+        effects: AreaEffectList,
     },
+    /// Spawn a persistent periodic zone.
+    Zone {
+        /// Zone radius.
+        radius: Fix,
+        /// Lifetime in ticks.
+        duration_ticks: u32,
+        /// Ticks between applications.
+        period_ticks: u32,
+        /// Effects applied per period.
+        effects: AreaEffectList,
+    },
+}
+
+/// Fixed-capacity top-level effect list.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct EffectList {
+    /// Effect slots.
+    pub effects: [Effect; MAX_ABILITY_EFFECTS],
+}
+
+impl EffectList {
+    /// Empty list.
+    pub const EMPTY: Self = Self {
+        effects: [Effect::None; MAX_ABILITY_EFFECTS],
+    };
+
+    /// List with one effect.
+    #[must_use]
+    pub const fn one(effect: Effect) -> Self {
+        let mut list = Self::EMPTY;
+        list.effects[0] = effect;
+        list
+    }
+
+    /// Iterates populated effects.
+    pub fn iter(&self) -> impl Iterator<Item = &Effect> {
+        self.effects
+            .iter()
+            .filter(|effect| !matches!(effect, Effect::None))
+    }
+
+    /// Whether the list has no effects.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
 }
 
 /// A castable ability.
@@ -104,10 +213,10 @@ pub struct AbilityDef {
     pub cooldown_ticks: u32,
     /// Mana cost.
     pub mana_cost: i32,
-    /// Maximum cast distance from the caster.
-    pub cast_range: Fix,
-    /// Effect.
-    pub kind: AbilityKind,
+    /// Targeting mode.
+    pub targeting: Targeting,
+    /// Ordered effects.
+    pub effects: EffectList,
 }
 
 const fn fx(value: i32) -> Fix {
@@ -121,160 +230,162 @@ pub const ABILITIES: &[AbilityDef] = &[
         name: "Blade Dash",
         cooldown_ticks: 240,
         mana_cost: 40,
-        cast_range: fx(7),
-        kind: AbilityKind::Dash { range: fx(7) },
+        targeting: Targeting::Direction { range: fx(7) },
+        effects: EffectList::one(Effect::Displace { range: fx(7) }),
     },
     AbilityDef {
         name: "Second Wind",
         cooldown_ticks: 480,
         mana_cost: 30,
-        cast_range: fx(0),
-        kind: AbilityKind::Heal {
-            amount: 140,
-            radius: fx(1),
-        },
+        targeting: Targeting::SelfCast,
+        effects: EffectList::one(Effect::Heal { amount: 140 }),
     },
     AbilityDef {
         name: "Cleaving Throw",
         cooldown_ticks: 300,
         mana_cost: 50,
-        cast_range: fx(11),
-        kind: AbilityKind::Skillshot {
+        targeting: Targeting::Direction { range: fx(11) },
+        effects: EffectList::one(Effect::Projectile {
             speed_per_sec: fx(26),
             range: fx(11),
             radius: fx(1),
-            damage: 110,
-            damage_type: DamageType::Physical,
-        },
+            on_hit: AreaEffectList::one(AreaEffect::Damage {
+                amount: 110,
+                damage_type: DamageType::Physical,
+            }),
+        }),
     },
     // Ranger: long physical skillshot, heal, short dash.
     AbilityDef {
         name: "Piercing Arrow",
         cooldown_ticks: 300,
         mana_cost: 45,
-        cast_range: fx(14),
-        kind: AbilityKind::Skillshot {
+        targeting: Targeting::Direction { range: fx(14) },
+        effects: EffectList::one(Effect::Projectile {
             speed_per_sec: fx(30),
             range: fx(14),
             radius: fx(1),
-            damage: 125,
-            damage_type: DamageType::Physical,
-        },
+            on_hit: AreaEffectList::one(AreaEffect::Damage {
+                amount: 125,
+                damage_type: DamageType::Physical,
+            }),
+        }),
     },
     AbilityDef {
         name: "Field Dressing",
         cooldown_ticks: 480,
         mana_cost: 35,
-        cast_range: fx(0),
-        kind: AbilityKind::Heal {
-            amount: 100,
-            radius: fx(1),
-        },
+        targeting: Targeting::SelfCast,
+        effects: EffectList::one(Effect::Heal { amount: 100 }),
     },
     AbilityDef {
         name: "Evade",
         cooldown_ticks: 360,
         mana_cost: 40,
-        cast_range: fx(6),
-        kind: AbilityKind::Dash { range: fx(6) },
+        targeting: Targeting::Direction { range: fx(6) },
+        effects: EffectList::one(Effect::Displace { range: fx(6) }),
     },
     // Mage: magic skillshot, point-blank nova, short blink.
     AbilityDef {
         name: "Arc Bolt",
         cooldown_ticks: 240,
         mana_cost: 50,
-        cast_range: fx(13),
-        kind: AbilityKind::Skillshot {
+        targeting: Targeting::Direction { range: fx(13) },
+        effects: EffectList::one(Effect::Projectile {
             speed_per_sec: fx(24),
             range: fx(13),
             radius: fx(1),
-            damage: 135,
-            damage_type: DamageType::Magic,
-        },
+            on_hit: AreaEffectList::one(AreaEffect::Damage {
+                amount: 135,
+                damage_type: DamageType::Magic,
+            }),
+        }),
     },
     AbilityDef {
         name: "Nova",
         cooldown_ticks: 420,
         mana_cost: 70,
-        cast_range: fx(0),
-        kind: AbilityKind::Burst {
+        targeting: Targeting::Point { range: fx(0) },
+        effects: EffectList::one(Effect::Area {
             radius: fx(5),
-            damage: 120,
-            damage_type: DamageType::Magic,
-        },
+            effects: AreaEffectList::one(AreaEffect::Damage {
+                amount: 120,
+                damage_type: DamageType::Magic,
+            }),
+        }),
     },
     AbilityDef {
         name: "Blink Step",
         cooldown_ticks: 360,
         mana_cost: 40,
-        cast_range: fx(5),
-        kind: AbilityKind::Dash { range: fx(5) },
+        targeting: Targeting::Direction { range: fx(5) },
+        effects: EffectList::one(Effect::Displace { range: fx(5) }),
     },
     // Guardian: shield bash, large heal, magic skillshot.
     AbilityDef {
         name: "Shield Bash",
         cooldown_ticks: 360,
         mana_cost: 50,
-        cast_range: fx(0),
-        kind: AbilityKind::Burst {
+        targeting: Targeting::Point { range: fx(0) },
+        effects: EffectList::one(Effect::Area {
             radius: fx(4),
-            damage: 90,
-            damage_type: DamageType::Physical,
-        },
+            effects: AreaEffectList::one(AreaEffect::Damage {
+                amount: 90,
+                damage_type: DamageType::Physical,
+            }),
+        }),
     },
     AbilityDef {
         name: "Bulwark",
         cooldown_ticks: 480,
         mana_cost: 50,
-        cast_range: fx(0),
-        kind: AbilityKind::Heal {
-            amount: 180,
-            radius: fx(2),
-        },
+        targeting: Targeting::SelfCast,
+        effects: EffectList::one(Effect::Heal { amount: 180 }),
     },
     AbilityDef {
         name: "Judgement",
         cooldown_ticks: 300,
         mana_cost: 45,
-        cast_range: fx(10),
-        kind: AbilityKind::Skillshot {
+        targeting: Targeting::Direction { range: fx(10) },
+        effects: EffectList::one(Effect::Projectile {
             speed_per_sec: fx(22),
             range: fx(10),
             radius: fx(1),
-            damage: 95,
-            damage_type: DamageType::Magic,
-        },
+            on_hit: AreaEffectList::one(AreaEffect::Damage {
+                amount: 95,
+                damage_type: DamageType::Magic,
+            }),
+        }),
     },
     // Assassin: dash, heal, high-damage skillshot.
     AbilityDef {
         name: "Shadow Step",
         cooldown_ticks: 300,
         mana_cost: 45,
-        cast_range: fx(8),
-        kind: AbilityKind::Dash { range: fx(8) },
+        targeting: Targeting::Direction { range: fx(8) },
+        effects: EffectList::one(Effect::Displace { range: fx(8) }),
     },
     AbilityDef {
         name: "Blood Rite",
         cooldown_ticks: 420,
         mana_cost: 35,
-        cast_range: fx(0),
-        kind: AbilityKind::Heal {
-            amount: 90,
-            radius: fx(1),
-        },
+        targeting: Targeting::SelfCast,
+        effects: EffectList::one(Effect::Heal { amount: 90 }),
     },
     AbilityDef {
         name: "Venom Dart",
         cooldown_ticks: 240,
         mana_cost: 55,
-        cast_range: fx(12),
-        kind: AbilityKind::Skillshot {
+        targeting: Targeting::Direction { range: fx(12) },
+        effects: EffectList::one(Effect::Projectile {
             speed_per_sec: fx(28),
             range: fx(12),
             radius: fx(1),
-            damage: 140,
-            damage_type: DamageType::Physical,
-        },
+            on_hit: AreaEffectList::one(AreaEffect::Damage {
+                amount: 140,
+                damage_type: DamageType::Physical,
+            }),
+        }),
     },
 ];
 
@@ -288,55 +399,43 @@ mod tests {
         for ability in ABILITIES {
             assert!(ability.cooldown_ticks > 0);
             assert!(ability.mana_cost >= 0);
-            match ability.kind {
-                AbilityKind::Skillshot { damage, .. } | AbilityKind::Burst { damage, .. } => {
-                    assert!(damage > 0);
-                }
-                AbilityKind::Heal { amount, .. } => assert!(amount > 0),
-                AbilityKind::Dash { range } => assert!(range > Fix::ZERO),
-                AbilityKind::Shield {
-                    amount,
-                    duration_ticks,
-                } => {
-                    assert!(amount > 0);
-                    assert!(duration_ticks > 0);
-                }
-                AbilityKind::Slow {
-                    radius,
-                    factor,
-                    duration_ticks,
-                } => {
-                    assert!(radius > Fix::ZERO);
-                    assert!(factor > Fix::ZERO && factor < Fix::ONE);
-                    assert!(duration_ticks > 0);
-                }
-                AbilityKind::Root {
-                    radius,
-                    duration_ticks,
-                }
-                | AbilityKind::Silence {
-                    radius,
-                    duration_ticks,
-                } => {
-                    assert!(radius > Fix::ZERO);
-                    assert!(duration_ticks > 0);
-                }
-                AbilityKind::Burn {
-                    radius,
-                    duration_ticks,
-                    damage_per_tick,
-                    ..
-                } => {
-                    assert!(radius > Fix::ZERO);
-                    assert!(duration_ticks > 0);
-                    assert!(damage_per_tick > 0);
-                }
-                AbilityKind::Haste {
-                    factor,
-                    duration_ticks,
-                } => {
-                    assert!(factor > Fix::ONE);
-                    assert!(duration_ticks > 0);
+            assert!(!ability.effects.is_empty());
+            for effect in ability.effects.iter() {
+                match effect {
+                    Effect::None => panic!("empty effect slot in default table"),
+                    Effect::Damage { amount, .. } | Effect::Heal { amount } => {
+                        assert!(*amount > 0);
+                    }
+                    Effect::ApplyModifier { duration_ticks, .. } => {
+                        assert!(*duration_ticks > 0);
+                    }
+                    Effect::Displace { range } => assert!(*range > Fix::ZERO),
+                    Effect::Projectile {
+                        speed_per_sec,
+                        range,
+                        radius,
+                        on_hit,
+                    } => {
+                        assert!(*speed_per_sec > Fix::ZERO);
+                        assert!(*range > Fix::ZERO);
+                        assert!(*radius > Fix::ZERO);
+                        assert!(!on_hit.is_empty());
+                    }
+                    Effect::Area { radius, effects } => {
+                        assert!(*radius > Fix::ZERO);
+                        assert!(!effects.is_empty());
+                    }
+                    Effect::Zone {
+                        radius,
+                        duration_ticks,
+                        period_ticks,
+                        effects,
+                    } => {
+                        assert!(*radius > Fix::ZERO);
+                        assert!(*duration_ticks > 0);
+                        assert!(*period_ticks > 0);
+                        assert!(!effects.is_empty());
+                    }
                 }
             }
         }
