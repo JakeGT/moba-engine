@@ -43,8 +43,8 @@ use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
 
 use crate::hud::{
-    HitList, HudAction, HudUnit, build_local_hud, build_network_hud, build_vision, minimap_world,
-    rect_at, rendered_entity_position,
+    HitList, HudAction, HudUnit, build_local_hud, build_network_hud, build_vision, map_center,
+    minimap_world, rect_at, rendered_entity_position,
 };
 
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
@@ -457,7 +457,15 @@ impl App for ClientApp {
                         continue;
                     }
                     let fraction = health.current as f32 / health.max as f32;
-                    push_unit(units, position.0, *kind, *team, fraction, 0);
+                    push_unit(
+                        units,
+                        position.0,
+                        *kind,
+                        *team,
+                        fraction,
+                        0,
+                        simulation.content().map.extent.to_f32() * 0.5,
+                    );
                 }
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
@@ -637,17 +645,18 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
         return;
     };
     let wire_map = network.client.map();
+    let center = map_center(network);
     for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
         let a = Vec2::new(f32::from(wall.a[0]), f32::from(wall.a[1]));
         let b = Vec2::new(f32::from(wall.b[0]), f32::from(wall.b[1]));
         let direction = b - a;
         let length = direction.length().max(0.5);
         let angle = direction.y.atan2(direction.x);
-        let center = (a + b) * 0.5;
+        let mid = (a + b) * 0.5;
         let transform = Mat4::from_scale_rotation_translation(
             Vec3::new(length, 4.0, 2.5),
             Quat::from_rotation_y(-angle),
-            Vec3::new(center.x - 128.0, 2.0, center.y - 128.0),
+            Vec3::new(mid.x - center, 2.0, mid.y - center),
         );
         units.push(UnitInstance::new(
             transform,
@@ -671,7 +680,15 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
         } else {
             f32::from(entity.health) / f32::from(entity.max_health)
         };
-        push_unit(units, position, kind, team, fraction, entity.status_bits);
+        push_unit(
+            units,
+            position,
+            kind,
+            team,
+            fraction,
+            entity.status_bits,
+            center,
+        );
     }
     for projectile in &network.projectiles {
         let color = if projectile.team == 0 {
@@ -681,9 +698,9 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
         };
         units.push(UnitInstance::at(
             Vec3::new(
-                projectile.position.x.to_f32() - 128.0,
+                projectile.position.x.to_f32() - center,
                 1.2,
-                projectile.position.y.to_f32() - 128.0,
+                projectile.position.y.to_f32() - center,
             ),
             1.2 + projectile.radius * 0.2 + projectile.arc_height(),
             color,
@@ -698,6 +715,7 @@ fn push_unit(
     team: Team,
     health_fraction: f32,
     status: u16,
+    center: f32,
 ) {
     let team_color = match team {
         Team::Blue => Vec4::new(0.20, 0.46, 1.0, 1.0),
@@ -757,9 +775,9 @@ fn push_unit(
         color = color * 0.75 + Vec4::new(0.25, 0.95, 0.4, 1.0) * 0.25;
     }
     let world_position = Vec3::new(
-        position.x.to_f32() - 128.0,
+        position.x.to_f32() - center,
         0.0,
-        position.y.to_f32() - 128.0,
+        position.y.to_f32() - center,
     );
     units.push(UnitInstance::at(world_position, height, color));
 }
@@ -798,10 +816,11 @@ fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
         return Camera::orbit(Vec3::ZERO, 240.0, -0.7, 0.92, aspect);
     }
     let predicted = network.prediction.position();
+    let world_center = map_center(network);
     let center = Vec3::new(
-        predicted.x.to_f32() - 128.0,
+        predicted.x.to_f32() - world_center,
         0.0,
-        predicted.y.to_f32() - 128.0,
+        predicted.y.to_f32() - world_center,
     );
     Camera::orbit(center, 46.0, -0.7, 0.95, aspect)
 }
@@ -824,8 +843,9 @@ fn handle_spectator_input(network: &mut NetworkView, input: &InputState) {
     if input.is_key_down(Key::D) {
         network.spectator_pan.x += pan_speed;
     }
-    network.spectator_pan.x = network.spectator_pan.x.clamp(-128.0, 128.0);
-    network.spectator_pan.z = network.spectator_pan.z.clamp(-128.0, 128.0);
+    let pan_limit = map_center(network);
+    network.spectator_pan.x = network.spectator_pan.x.clamp(-pan_limit, pan_limit);
+    network.spectator_pan.z = network.spectator_pan.z.clamp(-pan_limit, pan_limit);
     if input.is_key_down(Key::ArrowLeft) {
         network.spectator_yaw -= 0.03;
     }
@@ -955,7 +975,7 @@ fn handle_network_input(
     if ui_action.is_some() {
         return;
     }
-    let Some(ground) = cursor_ground(camera, cursor, width, height) else {
+    let Some(ground) = cursor_ground(camera, cursor, width, height, map_center(network)) else {
         return;
     };
 
@@ -1009,7 +1029,13 @@ fn nearest_enemy(network: &NetworkView, ground: FixVec2) -> Option<u16> {
     best.map(|(_, id)| id)
 }
 
-fn cursor_ground(camera: &Camera, cursor: Vec2, width: u32, height: u32) -> Option<FixVec2> {
+fn cursor_ground(
+    camera: &Camera,
+    cursor: Vec2,
+    width: u32,
+    height: u32,
+    center: f32,
+) -> Option<FixVec2> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -1033,8 +1059,8 @@ fn cursor_ground(camera: &Camera, cursor: Vec2, width: u32, height: u32) -> Opti
     }
     let hit = near + direction * distance;
     Some(FixVec2::new(
-        Fix::from_f32(hit.x + 128.0),
-        Fix::from_f32(hit.z + 128.0),
+        Fix::from_f32(hit.x + center),
+        Fix::from_f32(hit.z + center),
     ))
 }
 
@@ -1229,7 +1255,7 @@ mod tests {
     #[test]
     fn centre_cursor_maps_to_camera_target() {
         let camera = Camera::orbit(Vec3::ZERO, 46.0, -0.7, 0.95, 16.0 / 9.0);
-        let ground = cursor_ground(&camera, Vec2::new(640.0, 360.0), 1280, 720)
+        let ground = cursor_ground(&camera, Vec2::new(640.0, 360.0), 1280, 720, 128.0)
             .expect("centre ray hits the ground");
         assert!(
             ground.distance(FixVec2::from_ints(128, 128)) < Fix::from_f64(0.25),

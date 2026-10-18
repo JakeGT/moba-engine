@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 17;
+pub const PROTOCOL_VERSION: u8 = 18;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -557,6 +557,8 @@ pub struct WireWall {
 /// Minimap geometry carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireMap {
+    /// Square world extent in world units.
+    pub extent: u16,
     /// Number of valid lanes.
     pub lane_count: u8,
     /// Lane paths.
@@ -591,6 +593,7 @@ pub struct WireStructure {
 impl Default for WireMap {
     fn default() -> Self {
         Self {
+            extent: 256,
             lane_count: 0,
             lanes: [WireLane::default(); MAX_WIRE_LANES],
             blue_spawn: [0; 2],
@@ -937,6 +940,7 @@ impl From<&GameContent> for WireCatalog {
         }
 
         let MapSpec {
+            extent,
             lanes: content_lanes,
             structures: content_structures,
             walls: content_walls,
@@ -956,6 +960,7 @@ impl From<&GameContent> for WireCatalog {
                 target[1] = i16::try_from(point.y.to_i64()).unwrap_or(0);
             }
         }
+        map.extent = u16::try_from(extent.to_i64()).unwrap_or(256);
         map.blue_spawn = [
             i16::try_from(blue_spawn.x.to_i64()).unwrap_or(0),
             i16::try_from(blue_spawn.y.to_i64()).unwrap_or(0),
@@ -1249,6 +1254,7 @@ impl WireCatalog {
             abilities,
             modifiers,
             map: MapSpec {
+                extent: Fix::from_i32(i32::from(map.extent)),
                 lanes,
                 structures,
                 walls,
@@ -1486,6 +1492,7 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.push(modifier.kind);
     }
     let map = &catalog.map;
+    out.extend_from_slice(&map.extent.to_le_bytes());
     out.push(map.lane_count);
     for lane in &map.lanes {
         out.extend_from_slice(&lane.name);
@@ -1617,6 +1624,7 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         modifier.kind = reader.u8()?;
     }
     let map = &mut catalog.map;
+    map.extent = reader.u16()?;
     map.lane_count = reader.u8()?;
     for lane in &mut map.lanes {
         lane.name.copy_from_slice(reader.bytes(WIRE_LANE_NAME)?);
@@ -3033,6 +3041,20 @@ mod tests {
             cooldowns: [0, 0, 0],
             progress: NetProgress::default(),
         }
+    }
+
+    #[test]
+    fn wire_catalogue_round_trips_map_extent() {
+        use moba_game::GameContent;
+        let mut content = GameContent::default();
+        content.map.extent = moba_core::Fix::from_i32(128);
+        content.map.blue_spawn = moba_core::FixVec2::from_ints(10, 10);
+        content.map.red_spawn = moba_core::FixVec2::from_ints(118, 118);
+        let wire = WireCatalog::from(&content);
+        assert_eq!(wire.map.extent, 128);
+        let decoded = wire.to_content().expect("round trip");
+        assert_eq!(decoded.map.extent, content.map.extent);
+        assert_eq!(decoded.hash(), content.hash());
     }
 
     #[test]

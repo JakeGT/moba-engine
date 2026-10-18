@@ -172,8 +172,8 @@ existing primitives and modifiers is data-only.
 
 ```toml
 [map]
-blue_spawn = [32, 128]
-red_spawn = [224, 128]
+blue_spawn = [16, 64]
+red_spawn = [112, 64]
 
 [[map.lanes]]
 name = "Mid"

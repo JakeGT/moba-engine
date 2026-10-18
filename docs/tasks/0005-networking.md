@@ -89,6 +89,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v15 replaces ability kinds with targeting + effect lists (projectile on-hit, areas, zones).
 - v16 adds a bounded per-snapshot presentation-event list and wide `status_bits`.
 - v17 adds projectile arc height to wire effects and spawn events.
+- v18 carries the map world extent in the handshake and derives simulation bounds from it.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 

@@ -11,8 +11,8 @@ use moba_core::{Fix, FixVec2};
 use serde::Deserialize;
 
 use crate::{
-    ABILITIES, AbilityDef, AreaEffect, AreaEffectList, DamageType, Effect, EffectList, ITEMS,
-    ItemDef, MAP, MapDef, StructureKind, Targeting, Team,
+    ABILITIES, AbilityDef, AreaEffect, AreaEffectList, DEFAULT_MAP_EXTENT, DamageType, Effect,
+    EffectList, ITEMS, ItemDef, MAP, MapDef, StructureKind, Targeting, Team,
 };
 
 /// Maximum length of a manifest field.
@@ -195,6 +195,8 @@ pub struct WallSpec {
 /// An owned runtime map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapSpec {
+    /// Square world extent in world units.
+    pub extent: Fix,
     /// Lanes in stable order.
     pub lanes: Vec<LaneSpec>,
     /// Structures in stable order.
@@ -210,6 +212,7 @@ pub struct MapSpec {
 impl From<&MapDef> for MapSpec {
     fn from(map: &MapDef) -> Self {
         Self {
+            extent: Fix::from_i32(DEFAULT_MAP_EXTENT),
             lanes: map
                 .lanes
                 .iter()
@@ -866,11 +869,12 @@ impl GameContent {
                 return Err(ContentError::BadMapData);
             }
         }
+        if self.map.extent <= Fix::ZERO || self.map.extent > Fix::from_i32(MAX_MAP_COORD) {
+            return Err(ContentError::BadMap);
+        }
+        let extent = self.map.extent;
         let in_world = |point: FixVec2| {
-            point.x >= Fix::ZERO
-                && point.x <= Fix::from_i32(MAX_MAP_COORD)
-                && point.y >= Fix::ZERO
-                && point.y <= Fix::from_i32(MAX_MAP_COORD)
+            point.x >= Fix::ZERO && point.x <= extent && point.y >= Fix::ZERO && point.y <= extent
         };
         if !in_world(self.map.blue_spawn)
             || !in_world(self.map.red_spawn)
@@ -1054,6 +1058,7 @@ impl GameContent {
                 feed(&value.to_le_bytes());
             }
         }
+        feed(&self.map.extent.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
         feed(&self.map.red_spawn.x.to_bits().to_le_bytes());
@@ -1144,6 +1149,8 @@ struct ContentFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MapEntry {
+    #[serde(default = "default_map_extent")]
+    extent: i32,
     blue_spawn: [i32; 2],
     red_spawn: [i32; 2],
     lanes: Vec<LaneEntry>,
@@ -1234,6 +1241,10 @@ struct AbilityEntry {
     /// Period between zone applications (defaults to 30).
     #[serde(default)]
     period_ticks: u32,
+}
+
+const fn default_map_extent() -> i32 {
+    DEFAULT_MAP_EXTENT
 }
 
 fn default_damage_type() -> String {
@@ -1570,6 +1581,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 lanes,
                 structures,
                 walls,
+                extent,
             } = map;
             let structures = structures
                 .into_iter()
@@ -1583,6 +1595,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             MapSpec {
+                extent: Fix::from_i32(extent),
                 blue_spawn: FixVec2::from_ints(blue_spawn[0], blue_spawn[1]),
                 red_spawn: FixVec2::from_ints(red_spawn[0], red_spawn[1]),
                 lanes: lanes
@@ -1677,6 +1690,33 @@ b = [80, 160]
         assert_eq!(content.map.lanes.len(), 1);
         assert_eq!(content.map.walls.len(), 1);
         assert_eq!(content.map.nexus_position(Team::Blue).x.to_i64(), 20);
+    }
+
+    #[test]
+    fn map_extent_parses_and_scales_positions() {
+        let text = r#"
+[map]
+extent = 128
+blue_spawn = [10, 10]
+red_spawn = [118, 118]
+
+[[map.lanes]]
+name = "Mid"
+path = [[10, 10], [64, 64], [118, 118]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [10, 10]
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [118, 118]
+"#;
+        let content = load_toml(text).expect("parse");
+        assert_eq!(content.map.extent, Fix::from_i32(128));
+        content.validate().expect("valid 128 map");
     }
 
     #[test]
