@@ -21,6 +21,7 @@ pub(crate) struct Swapchain {
     pub(crate) color_layouts: Vec<vk::ImageLayout>,
     pub(crate) depth_layouts: Vec<vk::ImageLayout>,
     pub(crate) render_finished: Vec<Semaphore>,
+    pub(crate) transfer_src: bool,
 }
 
 impl Swapchain {
@@ -69,11 +70,11 @@ impl Swapchain {
         } else {
             (capabilities.min_image_count + 1).min(capabilities.max_image_count)
         };
-        let mut usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
-        if capabilities
+        let transfer_src = capabilities
             .supported_usage_flags
-            .contains(vk::ImageUsageFlags::TRANSFER_SRC)
-        {
+            .contains(vk::ImageUsageFlags::TRANSFER_SRC);
+        let mut usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        if transfer_src {
             usage |= vk::ImageUsageFlags::TRANSFER_SRC;
         }
         let composite_alpha = choose_composite_alpha(capabilities.supported_composite_alpha);
@@ -154,6 +155,7 @@ impl Swapchain {
             color_layouts,
             depth_layouts,
             render_finished,
+            transfer_src,
         })
     }
 
@@ -252,7 +254,10 @@ fn choose_present_mode(modes: &[vk::PresentModeKHR], vsync: bool) -> vk::Present
     vk::PresentModeKHR::FIFO
 }
 
-fn choose_extent(capabilities: vk::SurfaceCapabilitiesKHR, desired: vk::Extent2D) -> vk::Extent2D {
+pub(crate) fn choose_extent(
+    capabilities: vk::SurfaceCapabilitiesKHR,
+    desired: vk::Extent2D,
+) -> vk::Extent2D {
     if capabilities.current_extent.width != u32::MAX {
         return capabilities.current_extent;
     }

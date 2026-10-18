@@ -75,7 +75,12 @@ impl GpuBuffer {
         let memory = unsafe { allocation.memory() };
         let memory_offset = allocation.offset();
         // SAFETY: the allocation satisfies this buffer's memory requirements.
-        unsafe { device.bind_buffer_memory(buffer, memory, memory_offset) }?;
+        if let Err(error) = unsafe { device.bind_buffer_memory(buffer, memory, memory_offset) } {
+            drop_allocator_free(&allocator, allocation);
+            // SAFETY: the buffer is unbound and destroyed once.
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(error.into());
+        }
 
         Ok(Self {
             device,
@@ -121,12 +126,11 @@ impl GpuBuffer {
         let bytes = core::mem::size_of::<T>()
             .checked_mul(count)
             .filter(|bytes| *bytes <= self.size as usize)?;
-        if bytes == 0 {
+        if bytes == 0 || (mapped.as_ptr() as usize) % core::mem::align_of::<T>() != 0 {
             return None;
         }
-        // SAFETY: the requested byte range is inside the mapping, the pointer is aligned
-        // for `T` (Vulkan mappings are at least 256-byte aligned), and `&mut self`
-        // guarantees exclusive access.
+        // SAFETY: the requested byte range is inside the mapping, the mapped pointer is
+        // aligned for `T`, and `&mut self` guarantees exclusive access.
         Some(unsafe { core::slice::from_raw_parts_mut(mapped.as_ptr().cast::<T>(), count) })
     }
 }

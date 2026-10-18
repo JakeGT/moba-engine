@@ -82,7 +82,6 @@ impl Drop for Surface {
 /// resources are declared before the device and the device before the surface/instance so
 /// that Rust drops them children-first.
 pub struct Renderer {
-    window: Window,
     swapchain: Swapchain,
     terrain_mesh: GpuMesh,
     unit_mesh: GpuMesh,
@@ -104,6 +103,8 @@ pub struct Renderer {
     surface: Surface,
     instance: InstanceContext,
     config: RenderConfig,
+    // Declared last so the window outlives the surface/instance during drop.
+    window: Window,
 }
 
 impl Renderer {
@@ -352,6 +353,12 @@ impl Renderer {
         self.instance.validation_enabled()
     }
 
+    /// Number of Vulkan validation ERROR messages seen by the process.
+    #[must_use]
+    pub fn validation_error_count(&self) -> u64 {
+        InstanceContext::validation_error_count()
+    }
+
     /// Current swapchain extent in physical pixels.
     #[must_use]
     pub fn extent(&self) -> [u32; 2] {
@@ -381,7 +388,30 @@ impl Renderer {
             return Ok(());
         }
         if width != self.swapchain.extent.width || height != self.swapchain.extent.height {
-            self.recreate_swapchain()?;
+            // A fixed surface extent (common on Wayland/HiDPI) can legitimately differ from
+            // the logical window size forever; only recreate when the chosen extent changes.
+            // SAFETY: the surface and physical device belong to this instance.
+            let capabilities = unsafe {
+                self.device
+                    .surface
+                    .get_physical_device_surface_capabilities(
+                        self.device.physical,
+                        self.surface.handle,
+                    )
+            }?;
+            let desired =
+                crate::swapchain::choose_extent(capabilities, vk::Extent2D { width, height });
+            if desired != self.swapchain.extent {
+                self.recreate_swapchain()?;
+            }
+        }
+        if self.capture_pending {
+            if !self.swapchain.transfer_src {
+                return Err(RenderError::NoSuitableDevice(String::from(
+                    "swapchain does not support TRANSFER_SRC for capture",
+                )));
+            }
+            self.ensure_capture_buffer()?;
         }
 
         let frame_index = self.frame_index;
@@ -410,11 +440,6 @@ impl Renderer {
             }?;
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
-        // Waiting does not clear the fence, and the next submit requires it unsignalled.
-        // Reset after the image wait: the image may have been last used by this same frame
-        // slot, in which case its fence is the one we just waited on.
-        // SAFETY: the fence belongs to this device and is no longer in use by a submit.
-        unsafe { self.device.device.reset_fences(&[fence]) }?;
 
         let unit_count = scene.units.len().min(self.config.max_instances);
         {
@@ -513,7 +538,7 @@ impl Renderer {
             .image_view(self.swapchain.depth_images[image_index as usize].view())
             .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
             .clear_value(depth_clear);
         let render_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
@@ -710,10 +735,20 @@ impl Renderer {
                 vk::PipelineStageFlags2::TRANSFER,
                 vk::AccessFlags2::TRANSFER_READ,
             );
-            let capture = self
-                .capture_buffer
-                .as_ref()
-                .expect("capture buffer exists while capture is pending");
+            let capture = self.capture_buffer.as_mut().ok_or_else(|| {
+                RenderError::NoSuitableDevice(String::from(
+                    "capture buffer missing while capture is pending",
+                ))
+            })?;
+            let required = u64::from(self.swapchain.extent.width)
+                * u64::from(self.swapchain.extent.height)
+                * 4;
+            if capture.size() < required {
+                return Err(RenderError::NoSuitableDevice(format!(
+                    "capture buffer too small: {} < {required}",
+                    capture.size()
+                )));
+            }
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
                 .buffer_row_length(0)
@@ -792,8 +827,11 @@ impl Renderer {
             .wait_dst_stage_mask(&wait_stages)
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores);
-        // SAFETY: the command buffer is executable, the semaphores are live, and the fence
-        // is reset because it was waited on above.
+        // Reset as late as possible: every fallible recording step is complete, so a
+        // failure before this point cannot leave an unsignalled fence for the next wait.
+        // SAFETY: the fence was waited on above and is not in use by a submit.
+        unsafe { self.device.device.reset_fences(&[fence]) }?;
+        // SAFETY: the command buffer is executable and the semaphores are live.
         unsafe {
             self.device.device.queue_submit(
                 self.device.graphics_queue,
@@ -882,7 +920,6 @@ impl Renderer {
         scene: &Scene<'_>,
         ui: Option<&UiDrawList>,
     ) -> RenderResult<CapturedFrame> {
-        self.ensure_capture_buffer()?;
         self.capture_ready = false;
         self.capture_pending = true;
         self.render_internal(scene, ui)?;
@@ -907,13 +944,25 @@ impl Renderer {
                 RenderError::NoSuitableDevice(String::from("capture buffer is not host visible"))
             })?
             .to_vec();
-        // The swapchain uses B8G8R8A8_SRGB; expose conventional RGBA to callers.
-        debug_assert!(matches!(
-            self.swapchain.format,
-            vk::Format::B8G8R8A8_SRGB | vk::Format::B8G8R8A8_UNORM
-        ));
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
+        // Expose conventional tightly packed RGBA to callers.
+        match self.swapchain.format {
+            vk::Format::B8G8R8A8_SRGB | vk::Format::B8G8R8A8_UNORM => {
+                for pixel in rgba.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+            }
+            vk::Format::R8G8B8A8_SRGB | vk::Format::R8G8B8A8_UNORM => {}
+            format => {
+                return Err(RenderError::NoSuitableDevice(format!(
+                    "unsupported capture format {format:?}"
+                )));
+            }
+        }
+        if InstanceContext::validation_error_count() > 0 {
+            return Err(RenderError::NoSuitableDevice(format!(
+                "Vulkan validation reported {} errors",
+                InstanceContext::validation_error_count()
+            )));
         }
         self.capture_ready = false;
         Ok(CapturedFrame {
@@ -1043,7 +1092,7 @@ fn transition_color(
     let (src_stage, src_access, dst_stage, dst_access) = if old_layout == vk::ImageLayout::UNDEFINED
     {
         (
-            vk::PipelineStageFlags2::NONE,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             vk::AccessFlags2::NONE,
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,

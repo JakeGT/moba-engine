@@ -24,7 +24,9 @@ without a GPU.
 
 ## Status
 
-Core rendering, fog/LOS, HUD and readback are landed. The open items below are tracked as
+Core rendering, fog/LOS, HUD and readback are landed. The 2026-10 audit fixes (portable
+instance enumeration, acquire ordering, capture safety, validation counting) landed in #32;
+golden-image CI, skinning and hardware timing remain open. The open items below are tracked as
 GitHub issues; this task is not exit-complete until they close.
 
 ## Non-goals / still open
