@@ -90,4 +90,6 @@ Remove the variable when the runner ships a newer layer.
 `cargo run --release -p moba-tools --bin vulkan-probe` creates an instance (without a surface)
 and enumerates physical devices. It reports whether `VK_KHR_portability_enumeration` was
 available, exercising the macOS path. The `macos vulkan probe` workflow installs MoltenVK via
-Homebrew and runs it on `macos-latest`; trigger manually or label a PR `macos-vulkan`.
+Homebrew and runs it on `macos-latest`; trigger manually or label a PR `macos-vulkan`. It also
+runs in the nightly workflow. Latest green dispatch:
+`vulkan probe: api=1.3.0 devices=1 portability=true` (run 39153270394).

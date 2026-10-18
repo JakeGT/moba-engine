@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Nightly macOS MoltenVK probe job; green dispatch enumerated 1 device with portability enabled.
 - Headless `vulkan-probe` tool plus a macOS MoltenVK workflow for instance/device enumeration
   coverage (#32).
 - HUD network-type boundary: `hud/model.rs` is now the only HUD module naming `moba_net`;
