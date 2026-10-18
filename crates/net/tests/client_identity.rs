@@ -37,7 +37,7 @@ fn spawn_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
     (addr, public, handle)
 }
 
-fn spawn_combined_server() -> (SocketAddr, std::thread::JoinHandle<()>) {
+fn spawn_combined_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
     let token = [0x55; 32];
     let mut server = NetServer::bind(ServerConfig {
         bind: "127.0.0.1:0".parse().unwrap(),
@@ -58,22 +58,24 @@ fn spawn_combined_server() -> (SocketAddr, std::thread::JoinHandle<()>) {
     .expect("bind");
     server.add_client_key(token);
     server.require_client_identity([identity_public_key(&SEED)]);
+    let server_public = server.set_server_identity([0x77; 32]);
     let addr = server.local_addr().expect("addr");
     let handle = std::thread::spawn(move || {
         server.run_for(Duration::from_secs(4)).expect("server");
     });
-    (addr, handle)
+    (addr, server_public, handle)
 }
 
 #[test]
 fn identity_and_token_modes_compose() {
-    let (addr, server) = spawn_combined_server();
+    let (addr, server_public, server) = spawn_combined_server();
     let token = [0x55; 32];
     let both = NetClient::connect_with_auth(
         addr,
         Duration::from_secs(2),
         ClientAuth {
             pre_shared_key: Some(token),
+            expected_server: Some(server_public),
             identity_seed: Some(SEED),
             ..ClientAuth::default()
         },

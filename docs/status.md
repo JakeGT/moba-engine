@@ -179,3 +179,6 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 - Local Markdown links: 0 broken across README/security/contributing/docs.
 - Content packs: items, example, map and ability packs validate.
 - cargo-deny and Miri are unavailable locally but remain CI jobs.
+
+- All authentication layers: pinned Ed25519 server + client identity + per-client token
+  connected end-to-end and produced a verified 314-tick replay; covered by integration test.
