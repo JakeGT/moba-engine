@@ -35,8 +35,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **176 passed**, 0 failed, 3 ignored.
-- `cargo test --workspace --release --locked`: **176 passed**, 0 failed.
+- `cargo test --workspace --locked`: **177 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --release --locked`: **177 passed**, 0 failed.
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks

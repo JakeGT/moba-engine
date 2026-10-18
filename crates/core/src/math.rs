@@ -14,6 +14,36 @@ pub const TAU: f32 = core::f32::consts::TAU;
 /// Half turn in radians.
 pub const PI: f32 = core::f32::consts::PI;
 
+/// Right-handed look-at view matrix (Vulkan-compatible logic).
+///
+/// Implemented here rather than relying on platform-specific glam backends: newer glam
+/// NEON builds do not expose `Mat4::look_at_rh` on every target.
+#[must_use]
+pub fn look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
+    let forward = (target - eye).normalize();
+    let side = forward.cross(up).normalize();
+    let up = side.cross(forward);
+    Mat4::from_cols(
+        Vec4::new(side.x, up.x, -forward.x, 0.0),
+        Vec4::new(side.y, up.y, -forward.y, 0.0),
+        Vec4::new(side.z, up.z, -forward.z, 0.0),
+        Vec4::new(-side.dot(eye), -up.dot(eye), forward.dot(eye), 1.0),
+    )
+}
+
+/// Right-handed perspective projection with Vulkan clip-space depth in `[0, 1]`.
+#[must_use]
+pub fn perspective_rh(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let f = 1.0 / (fov_y_radians * 0.5).tan();
+    let range = near - far;
+    Mat4::from_cols(
+        Vec4::new(f / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, f, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, far / range, -1.0),
+        Vec4::new(0.0, 0.0, (far * near) / range, 0.0),
+    )
+}
+
 /// Converts an authoritative ground-plane position to presentation space (X, 0, Z).
 #[inline]
 #[must_use]
@@ -237,6 +267,19 @@ mod tests {
         assert_eq!(move_towards(0.0, 10.0, 30.0), 10.0);
         assert_eq!(move_towards(0.0, -10.0, 3.0), -3.0);
         assert!((damp(10.0, 0.0, 5.0, 1.0) - 10.0 * (-5.0f32).exp()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn camera_matrices_use_vulkan_depth() {
+        let view = look_at_rh(Vec3::new(0.0, 0.0, 10.0), Vec3::ZERO, Vec3::Y);
+        let target = view * Vec4::new(0.0, 0.0, 0.0, 1.0);
+        assert!((target.z + 10.0).abs() < 1e-4);
+        assert!(target.x.abs() < 1e-6 && target.y.abs() < 1e-6);
+        let projection = perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
+        let near = projection * Vec4::new(0.0, 0.0, -0.1, 1.0);
+        let far = projection * Vec4::new(0.0, 0.0, -100.0, 1.0);
+        assert!((near.z / near.w).abs() < 1e-4);
+        assert!((far.z / far.w - 1.0).abs() < 1e-4);
     }
 
     #[test]

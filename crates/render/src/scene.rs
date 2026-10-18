@@ -1,7 +1,7 @@
 //! Presentation-side scene data: camera and per-instance transforms.
 
 use bytemuck::{Pod, Zeroable};
-use moba_core::math::{Mat4, Quat, Vec3, Vec4};
+use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, perspective_rh};
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,8 +30,8 @@ impl Camera {
         near: f32,
         far: f32,
     ) -> Self {
-        let view = Mat4::look_at_rh(eye, target, up);
-        let projection = Mat4::perspective_rh(fov_y_radians, aspect.max(1e-4), near, far);
+        let view = look_at_rh(eye, target, up);
+        let projection = perspective_rh(fov_y_radians, aspect.max(1e-4), near, far);
         Self {
             view_proj: projection * view,
             position: eye,

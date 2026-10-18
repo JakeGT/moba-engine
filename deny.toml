@@ -4,6 +4,10 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser -> ttf-parser. The font parser is
+# unmaintained (RUSTSEC-2026-0192); replacing it requires a winit/ab_glyph upgrade. Remove this
+# ignore once a maintained dependency path is available.
+ignore = ["RUSTSEC-2026-0192"]
 
 [licenses]
 version = 2
