@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Soak instrumentation for max simulation tick and whole-frame timing, plus 5-minute profile
+  showing zero >1 ms frames (max 363 µs).
 - 1/20/40-minute snapshot scaling benchmark; build+encode stays ~3.6–3.7 ns per visible
   entity, i.e. cost tracks view size rather than match age.
 - Snapshot history recycles per-client entity buffers instead of cloning each snapshot.
