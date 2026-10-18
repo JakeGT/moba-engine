@@ -182,7 +182,8 @@ first_wave_ticks = 30
 
 All rules are optional (defaults shown), validated and hashed/carried in the handshake.
 `team_size` is 1..=5; `bot_fill = false` leaves empty player slots empty. Example packs:
-`content/1v1-mid.toml`, `content/aram.toml`. Minion/tower stat blocks are not yet exposed.
+`content/1v1-mid.toml`, `content/aram.toml`; both are exercised by
+`cargo test -p moba-sim --test mode_packs`. Minion/tower stat blocks are not yet exposed.
 
 ## Maps
 
