@@ -24,7 +24,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, paginated shop, Tab scoreboard, controls and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 193 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 195 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -66,7 +66,7 @@ MOBA_SERVER=127.0.0.1:7777 cargo run -p moba-client
 ```
 
 Packs carry `name`/`version`/`author` metadata; replays record the pack identity alongside the
-content hash. The client shop/HUD, cooldowns, vision and minimap use the received catalogs; simulation purchases, hero stats, ability effects and map geometry use the same definitions.
+content hash. The client shop/HUD, cooldowns, range/radius overlays, vision and minimap use the received complete catalogue, verified against `GameContent::hash`; simulation purchases, hero stats, ability effects and map geometry use the same definitions.
 
 `--reload-content` watches the pack and reloads it when the lobby has no connected clients
 (connected clients keep their handshake catalogue until they reconnect).

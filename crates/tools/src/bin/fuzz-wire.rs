@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use moba_core::Rng;
 use moba_net::protocol::{
-    Header, Hello, InputMessage, NetEntity, PacketKind, SnapshotDelta, Welcome, WireCommand,
-    decode_hello, decode_input, decode_packet, decode_snapshot, decode_welcome, encode_hello,
-    encode_input, encode_packet, encode_snapshot, encode_welcome,
+    Header, Hello, InputMessage, NetEntity, PacketKind, SnapshotDelta, Welcome, WireCatalog,
+    WireCommand, decode_hello, decode_input, decode_packet, decode_snapshot, decode_welcome,
+    encode_hello, encode_input, encode_packet, encode_snapshot, encode_welcome,
 };
 
 fn main() {
@@ -84,14 +84,7 @@ fn fuzz_once(rng: &mut Rng) {
         server_nonce: rng.next_u64(),
         auth: [0; 32],
         spectator: rng.next_bool(),
-        item_count: 0,
-        items: [moba_net::protocol::WireItem::default(); moba_net::protocol::MAX_WIRE_ITEMS],
-        hero_count: 0,
-        heroes: [moba_net::protocol::WireHero::default(); moba_net::protocol::MAX_WIRE_HEROES],
-        ability_count: 0,
-        abilities: [moba_net::protocol::WireAbility::default();
-            moba_net::protocol::MAX_WIRE_ABILITIES],
-        map: moba_net::protocol::WireMap::default(),
+        catalog: WireCatalog::default(),
         content_hash: 0,
         identity: false,
         server_public_key: [0; 32],

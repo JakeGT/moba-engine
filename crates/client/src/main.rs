@@ -360,6 +360,7 @@ impl App for ClientApp {
                             network,
                             *scoreboard_visible,
                             *shop_visible,
+                            frame.input(),
                             &camera,
                             width,
                             height,
@@ -991,6 +992,32 @@ fn unit_hud_height(kind: u8) -> f32 {
     }
 }
 
+fn draw_world_circle(
+    ui: &mut UiDrawList,
+    camera: &Camera,
+    center: FixVec2,
+    radius: f32,
+    width: u32,
+    height: u32,
+    color: Vec4,
+) {
+    let segments = 64;
+    let mut previous: Option<Vec2> = None;
+    for index in 0..=segments {
+        let angle = std::f32::consts::TAU * index as f32 / segments as f32;
+        let world = Vec3::new(
+            center.x.to_f32() + angle.cos() * radius,
+            center.y.to_f32() + angle.sin() * radius,
+            0.08,
+        );
+        let current = project_to_screen(camera, world, width, height);
+        if let (Some(from), Some(to)) = (previous, current) {
+            ui.line(from.x, from.y, to.x, to.y, 1.5, color);
+        }
+        previous = current;
+    }
+}
+
 fn draw_health_bars(
     ui: &mut UiDrawList,
     network: &NetworkView,
@@ -1206,6 +1233,7 @@ fn build_network_hud(
     network: &NetworkView,
     scoreboard: bool,
     shop: bool,
+    input: &InputState,
     camera: &Camera,
     width: u32,
     height: u32,
@@ -1228,6 +1256,44 @@ fn build_network_hud(
     draw_perf(ui, width_f, frame_ms, fps);
 
     draw_health_bars(ui, network, camera, width, height);
+    let center = network.prediction.position();
+    {
+        let hero = network
+            .client
+            .heroes()
+            .get(usize::from(network.client.hero_pick()));
+        if let Some(hero) = hero {
+            for (key, slot) in [(Key::Q, 0usize), (Key::W, 1), (Key::E, 2)] {
+                if !input.is_key_down(key) {
+                    continue;
+                }
+                let Some(ability) = network
+                    .client
+                    .abilities()
+                    .get(usize::from(hero.abilities[slot]))
+                else {
+                    continue;
+                };
+                let range = Fix::from_bits(ability.cast_range_bits).to_f32();
+                let radius = Fix::from_bits(ability.radius_bits).to_f32();
+                let ring = Vec4::new(0.35, 0.78, 1.0, 0.55);
+                if range > 0.0 {
+                    draw_world_circle(ui, camera, center, range, width, height, ring);
+                }
+                if radius > 0.0 {
+                    draw_world_circle(
+                        ui,
+                        camera,
+                        center,
+                        radius,
+                        width,
+                        height,
+                        Vec4::new(1.0, 0.78, 0.30, 0.50),
+                    );
+                }
+            }
+        }
+    }
     let snapshot = network.client.snapshot();
     let own = network
         .own_net_id

@@ -15,13 +15,11 @@ use crate::crypto::{
     verify_hello_tag, welcome_tag,
 };
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MAX_WIRE_ABILITIES, MAX_WIRE_HEROES,
-    MAX_WIRE_ITEMS, MAX_WIRE_LANE_POINTS, MAX_WIRE_LANES, MAX_WIRE_WALLS, MatchPhase, NetEntity,
-    NetId, PacketKind, SnapshotDelta, SnapshotState, WIRE_ABILITY_NAME, WIRE_HERO_NAME,
-    WIRE_ITEM_NAME, WIRE_LANE_NAME, Welcome, WireAbility, WireCommand, WireHero, WireItem,
-    WireLane, WireMap, WireWall, build_delta, catalog_hash, decode_hello, decode_input,
-    dequantize_position, encode_snapshot, encode_welcome, sequence_after,
+    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MatchPhase, NetEntity, NetId, PacketKind,
+    SnapshotDelta, SnapshotState, Welcome, WireCatalog, WireCommand, build_delta, decode_hello,
+    decode_input, dequantize_position, encode_snapshot, encode_welcome, sequence_after,
 };
+
 use crate::transport::{ReceivedMessage, UdpTransport};
 
 /// How long a silent client is kept before it is dropped and its slot reverts to a bot.
@@ -1048,6 +1046,8 @@ impl NetServer {
                     return Ok(());
                 };
                 if hello.protocol != u16::from(crate::protocol::PROTOCOL_VERSION) {
+                    // Explicitly reject stale clients instead of silently dropping them.
+                    self.reject_client(message.addr, message.header.session, 1)?;
                     return Ok(());
                 }
                 if self.require_client_identity {
@@ -1356,95 +1356,8 @@ impl NetServer {
             .get(slot)
             .and_then(|client| client.as_ref())
             .map_or((0xFF, true), |client| (client.slot, client.spectator));
-        let item_count = u8::try_from(self.content.items.len().min(MAX_WIRE_ITEMS))
-            .unwrap_or(MAX_WIRE_ITEMS as u8);
-        let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
-        for (slot, source) in items.iter_mut().zip(self.content.items.iter()) {
-            let bytes = source.name.as_bytes();
-            let length = bytes.len().min(WIRE_ITEM_NAME);
-            slot.name[..length].copy_from_slice(&bytes[..length]);
-            slot.name_len = u8::try_from(length).unwrap_or(WIRE_ITEM_NAME as u8);
-            slot.cost = source.cost;
-            slot.health = source.health;
-            slot.mana = source.mana;
-            slot.attack_damage = source.attack_damage;
-            slot.armor = source.armor;
-            slot.magic_resist = source.magic_resist;
-            slot.move_speed_bits = source.move_speed_per_sec.to_bits();
-        }
-        let hero_count = u8::try_from(self.content.heroes.len().min(MAX_WIRE_HEROES))
-            .unwrap_or(MAX_WIRE_HEROES as u8);
-        let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
-        for (slot, source) in heroes.iter_mut().zip(self.content.heroes.iter()) {
-            let bytes = source.name.as_bytes();
-            let length = bytes.len().min(WIRE_HERO_NAME);
-            slot.name[..length].copy_from_slice(&bytes[..length]);
-            slot.name_len = u8::try_from(length).unwrap_or(WIRE_HERO_NAME as u8);
-            slot.move_speed_bits = source.move_speed_per_sec.to_bits();
-            slot.vision_bits = source.vision_range.to_bits();
-            slot.abilities = source.abilities;
-        }
-        let ability_count = u8::try_from(self.content.abilities.len().min(MAX_WIRE_ABILITIES))
-            .unwrap_or(MAX_WIRE_ABILITIES as u8);
-        let mut abilities = [WireAbility::default(); MAX_WIRE_ABILITIES];
-        for (slot, source) in abilities.iter_mut().zip(self.content.abilities.iter()) {
-            let bytes = source.name.as_bytes();
-            let length = bytes.len().min(WIRE_ABILITY_NAME);
-            slot.name[..length].copy_from_slice(&bytes[..length]);
-            slot.name_len = u8::try_from(length).unwrap_or(WIRE_ABILITY_NAME as u8);
-            slot.cooldown_ticks = source.cooldown_ticks;
-            slot.mana_cost = u16::try_from(source.mana_cost.max(0)).unwrap_or(u16::MAX);
-        }
-        let wire_map = {
-            let mut lanes = [WireLane::default(); MAX_WIRE_LANES];
-            for (slot, source) in lanes.iter_mut().zip(self.content.map.lanes.iter()) {
-                let bytes = source.name.as_bytes();
-                let length = bytes.len().min(WIRE_LANE_NAME);
-                slot.name[..length].copy_from_slice(&bytes[..length]);
-                slot.name_len = u8::try_from(length).unwrap_or(WIRE_LANE_NAME as u8);
-                slot.point_count = u8::try_from(source.path.len().min(MAX_WIRE_LANE_POINTS))
-                    .unwrap_or(MAX_WIRE_LANE_POINTS as u8);
-                for (target, point) in slot.points.iter_mut().zip(source.path.iter()) {
-                    target[0] = i16::try_from(point.x.to_i64()).unwrap_or(0);
-                    target[1] = i16::try_from(point.y.to_i64()).unwrap_or(0);
-                }
-            }
-            WireMap {
-                lane_count: u8::try_from(self.content.map.lanes.len().min(MAX_WIRE_LANES))
-                    .unwrap_or(MAX_WIRE_LANES as u8),
-                lanes,
-                blue_spawn: [
-                    i16::try_from(self.content.map.blue_spawn.x.to_i64()).unwrap_or(0),
-                    i16::try_from(self.content.map.blue_spawn.y.to_i64()).unwrap_or(0),
-                ],
-                red_spawn: [
-                    i16::try_from(self.content.map.red_spawn.x.to_i64()).unwrap_or(0),
-                    i16::try_from(self.content.map.red_spawn.y.to_i64()).unwrap_or(0),
-                ],
-                wall_count: u8::try_from(self.content.map.walls.len().min(MAX_WIRE_WALLS))
-                    .unwrap_or(MAX_WIRE_WALLS as u8),
-                walls: {
-                    let mut walls = [WireWall::default(); MAX_WIRE_WALLS];
-                    for (target, source) in walls.iter_mut().zip(self.content.map.walls.iter()) {
-                        target.a = [
-                            i16::try_from(source.a.x.to_i64()).unwrap_or(0),
-                            i16::try_from(source.a.y.to_i64()).unwrap_or(0),
-                        ];
-                        target.b = [
-                            i16::try_from(source.b.x.to_i64()).unwrap_or(0),
-                            i16::try_from(source.b.y.to_i64()).unwrap_or(0),
-                        ];
-                    }
-                    walls
-                },
-            }
-        };
-        let content_hash = catalog_hash(
-            &items[..usize::from(item_count)],
-            &heroes[..usize::from(hero_count)],
-            &abilities[..usize::from(ability_count)],
-            &wire_map,
-        );
+        let catalog = WireCatalog::from(&*self.content);
+        let content_hash = self.content.hash();
         let mut server_nonce = 0;
         let mut auth = [0u8; 32];
         let mut crypto = None;
@@ -1492,13 +1405,7 @@ impl NetServer {
             server_nonce,
             auth,
             spectator,
-            item_count,
-            items,
-            hero_count,
-            heroes,
-            ability_count,
-            abilities,
-            map: wire_map,
+            catalog,
             content_hash,
             identity,
             server_public_key,

@@ -165,7 +165,9 @@ datagrams and average/max simulation tick nanoseconds for operators and the soak
 `GameContent` owns the runtime item, hero, ability and map catalogues; the simulation holds
 an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` accepts a validated pack;
 the server publishes it in `Welcome`, and clients use the received `WireItem`, `WireHero`,
-`WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability
+`WireCatalog`/`WireAbility` and `WireMap` entries for shop, HUD, vision, range/radius overlays
+and minimap rendering. The wire catalogue is a complete, destructured projection of
+`GameContent`; the client reconstructs it and verifies `GameContent::hash`. Ability
 behaviour kinds are code-defined, but their numbers and hero bindings come from the pack; map,
 lane, structure and wall geometry are fully data-driven. Packs hot-reload only in an empty
 lobby so connected clients keep a consistent handshake catalogue.
@@ -194,7 +196,7 @@ this for per-player access and key rotation without wire changes.
 ## Server identity
 
 An operator can install a 32-byte Ed25519 seed (`--server-key FILE`). `Welcome` then carries
-the public key and a signature over protocol, nonces, session, slot and catalogue hash.
+the public key and a signature over protocol, nonces, session, slot and `GameContent::hash`.
 Clients that pin `MOBA_SERVER_PUBKEY` require a matching signature; unpinned clients continue
 to work. Identity is independent of the optional PSK encryption mode.
 

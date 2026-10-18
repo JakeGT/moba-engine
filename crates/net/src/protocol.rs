@@ -7,12 +7,16 @@
 use core::fmt;
 
 use moba_core::{Fix, FixVec2};
+use moba_game::{
+    AbilityKind, AbilitySpec, ContentManifest, DamageType, GameContent, HeroSpec, ItemSpec,
+    LaneSpec, MapSpec, StructureKind, StructureSpec, Team, WallSpec,
+};
 use moba_sim::ObservedUnit;
 
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 12;
+pub const PROTOCOL_VERSION: u8 = 13;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -255,6 +259,10 @@ pub const MAX_WIRE_LANE_POINTS: usize = 16;
 pub const WIRE_LANE_NAME: usize = 16;
 /// Maximum vision-wall segments in a handshake map.
 pub const MAX_WIRE_WALLS: usize = 32;
+/// Maximum structures in a handshake map.
+pub const MAX_WIRE_STRUCTURES: usize = 32;
+/// Fixed manifest-field bytes on the wire.
+pub const WIRE_MANIFEST_FIELD: usize = 32;
 
 const _: () = {
     assert!(MAX_WIRE_ITEMS == moba_game::MAX_CONTENT_ITEMS);
@@ -263,6 +271,8 @@ const _: () = {
     assert!(MAX_WIRE_LANES == moba_game::MAX_CONTENT_LANES);
     assert!(MAX_WIRE_LANE_POINTS == moba_game::MAX_LANE_POINTS);
     assert!(MAX_WIRE_WALLS == moba_game::MAX_CONTENT_WALLS);
+    assert!(MAX_WIRE_STRUCTURES == moba_game::MAX_CONTENT_STRUCTURES);
+    assert!(WIRE_MANIFEST_FIELD == moba_game::MAX_MANIFEST_FIELD);
     assert!(WIRE_ITEM_NAME == moba_game::MAX_ITEM_NAME);
     assert!(WIRE_HERO_NAME == moba_game::MAX_HERO_NAME);
     assert!(WIRE_ABILITY_NAME == moba_game::MAX_ABILITY_NAME);
@@ -323,12 +333,40 @@ pub struct WireHero {
     pub name: [u8; WIRE_HERO_NAME],
     /// Used bytes in `name`.
     pub name_len: u8,
+    /// Maximum health.
+    pub max_health: i32,
+    /// Maximum mana.
+    pub max_mana: i32,
+    /// Health regenerated per tick.
+    pub health_regen_per_tick: i32,
+    /// Mana regenerated per tick.
+    pub mana_regen_per_tick: i32,
+    /// Basic attack damage.
+    pub attack_damage: i32,
+    /// Basic attack range in raw fixed-point bits.
+    pub attack_range_bits: i64,
+    /// Basic attack interval in ticks.
+    pub attack_interval_ticks: u32,
     /// Movement speed in raw fixed-point bits.
     pub move_speed_bits: i64,
+    /// Armour.
+    pub armor: i32,
+    /// Magic resistance.
+    pub magic_resist: i32,
     /// Vision radius in raw fixed-point bits.
     pub vision_bits: i64,
     /// Ability ids for Q/W/E.
     pub abilities: [u8; 3],
+    /// Health gained per level.
+    pub health_per_level: i32,
+    /// Mana gained per level.
+    pub mana_per_level: i32,
+    /// Attack damage gained per level.
+    pub attack_damage_per_level: i32,
+    /// Armour gained per level.
+    pub armor_per_level: i32,
+    /// Magic resistance gained per level.
+    pub magic_resist_per_level: i32,
 }
 
 impl Default for WireHero {
@@ -336,9 +374,23 @@ impl Default for WireHero {
         Self {
             name: [0; WIRE_HERO_NAME],
             name_len: 0,
+            max_health: 0,
+            max_mana: 0,
+            health_regen_per_tick: 0,
+            mana_regen_per_tick: 0,
+            attack_damage: 0,
+            attack_range_bits: 0,
+            attack_interval_ticks: 0,
             move_speed_bits: 0,
+            armor: 0,
+            magic_resist: 0,
             vision_bits: 0,
             abilities: [0; 3],
+            health_per_level: 0,
+            mana_per_level: 0,
+            attack_damage_per_level: 0,
+            armor_per_level: 0,
+            magic_resist_per_level: 0,
         }
     }
 }
@@ -362,7 +414,27 @@ pub struct WireAbility {
     /// Cooldown in ticks.
     pub cooldown_ticks: u32,
     /// Mana cost.
-    pub mana_cost: u16,
+    pub mana_cost: i32,
+    /// Maximum cast distance in raw fixed-point bits.
+    pub cast_range_bits: i64,
+    /// Ability kind discriminant.
+    pub kind: u8,
+    /// Effect radius in raw fixed-point bits.
+    pub radius_bits: i64,
+    /// Travel/effect range in raw fixed-point bits.
+    pub range_bits: i64,
+    /// Projectile speed in raw fixed-point bits.
+    pub speed_bits: i64,
+    /// Slow/haste multiplier in raw fixed-point bits.
+    pub factor_bits: i64,
+    /// Heal/shield amount.
+    pub amount: i32,
+    /// Damage amount.
+    pub damage: i32,
+    /// Duration in ticks.
+    pub duration_ticks: u32,
+    /// Damage type discriminant.
+    pub damage_type: u8,
 }
 
 impl Default for WireAbility {
@@ -372,6 +444,16 @@ impl Default for WireAbility {
             name_len: 0,
             cooldown_ticks: 0,
             mana_cost: 0,
+            cast_range_bits: 0,
+            kind: 0,
+            radius_bits: 0,
+            range_bits: 0,
+            speed_bits: 0,
+            factor_bits: 0,
+            amount: 0,
+            damage: 0,
+            duration_ticks: 0,
+            damage_type: 0,
         }
     }
 }
@@ -438,10 +520,27 @@ pub struct WireMap {
     pub blue_spawn: [i16; 2],
     /// Red spawn.
     pub red_spawn: [i16; 2],
+    /// Number of valid structures.
+    pub structure_count: u8,
+    /// Placed structures.
+    pub structures: [WireStructure; MAX_WIRE_STRUCTURES],
     /// Number of valid walls.
     pub wall_count: u8,
     /// Vision-blocking walls.
     pub walls: [WireWall; MAX_WIRE_WALLS],
+}
+
+/// One placed structure carried in the handshake map.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireStructure {
+    /// Team index (blue 0, red 1).
+    pub team: u8,
+    /// Structure kind (tower 0, nexus 1).
+    pub kind: u8,
+    /// World position.
+    pub position: [i16; 2],
+    /// Lane index, or `0xFF` for none.
+    pub lane: u8,
 }
 
 impl Default for WireMap {
@@ -451,9 +550,557 @@ impl Default for WireMap {
             lanes: [WireLane::default(); MAX_WIRE_LANES],
             blue_spawn: [0; 2],
             red_spawn: [0; 2],
+            structure_count: 0,
+            structures: [WireStructure::default(); MAX_WIRE_STRUCTURES],
             wall_count: 0,
             walls: [WireWall::default(); MAX_WIRE_WALLS],
         }
+    }
+}
+
+/// Complete runtime catalogue carried in the handshake.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WireCatalog {
+    /// Manifest name bytes.
+    pub manifest_name: [u8; WIRE_MANIFEST_FIELD],
+    /// Used manifest name bytes.
+    pub manifest_name_len: u8,
+    /// Manifest version bytes.
+    pub manifest_version: [u8; WIRE_MANIFEST_FIELD],
+    /// Used manifest version bytes.
+    pub manifest_version_len: u8,
+    /// Manifest author bytes.
+    pub manifest_author: [u8; WIRE_MANIFEST_FIELD],
+    /// Used manifest author bytes.
+    pub manifest_author_len: u8,
+    /// Number of valid items.
+    pub item_count: u8,
+    /// Item catalogue.
+    pub items: [WireItem; MAX_WIRE_ITEMS],
+    /// Number of valid heroes.
+    pub hero_count: u8,
+    /// Hero catalogue.
+    pub heroes: [WireHero; MAX_WIRE_HEROES],
+    /// Number of valid abilities.
+    pub ability_count: u8,
+    /// Ability catalogue.
+    pub abilities: [WireAbility; MAX_WIRE_ABILITIES],
+    /// Map geometry.
+    pub map: WireMap,
+}
+
+impl Default for WireCatalog {
+    fn default() -> Self {
+        Self {
+            manifest_name: [0; WIRE_MANIFEST_FIELD],
+            manifest_name_len: 0,
+            manifest_version: [0; WIRE_MANIFEST_FIELD],
+            manifest_version_len: 0,
+            manifest_author: [0; WIRE_MANIFEST_FIELD],
+            manifest_author_len: 0,
+            item_count: 0,
+            items: [WireItem::default(); MAX_WIRE_ITEMS],
+            hero_count: 0,
+            heroes: [WireHero::default(); MAX_WIRE_HEROES],
+            ability_count: 0,
+            abilities: [WireAbility::default(); MAX_WIRE_ABILITIES],
+            map: WireMap::default(),
+        }
+    }
+}
+
+impl From<&GameContent> for WireCatalog {
+    #[allow(clippy::too_many_lines)] // One exhaustive destructured conversion.
+    fn from(content: &GameContent) -> Self {
+        let GameContent {
+            manifest,
+            items: content_items,
+            heroes: content_heroes,
+            abilities: content_abilities,
+            map: content_map,
+        } = content;
+        let ContentManifest {
+            name,
+            version,
+            author,
+        } = manifest;
+        let mut catalog = Self::default();
+        catalog.manifest_name_len = put_wire_name(&mut catalog.manifest_name, name);
+        catalog.manifest_version_len = put_wire_name(&mut catalog.manifest_version, version);
+        catalog.manifest_author_len = put_wire_name(&mut catalog.manifest_author, author);
+
+        catalog.item_count = u8::try_from(content_items.len().min(MAX_WIRE_ITEMS))
+            .unwrap_or(u8::try_from(MAX_WIRE_ITEMS).unwrap_or(u8::MAX));
+        for (wire, item) in catalog.items.iter_mut().zip(content_items) {
+            let ItemSpec {
+                name,
+                cost,
+                health,
+                mana,
+                attack_damage,
+                armor,
+                magic_resist,
+                move_speed_per_sec,
+            } = item;
+            wire.name_len = put_wire_name(&mut wire.name, name);
+            wire.cost = *cost;
+            wire.health = *health;
+            wire.mana = *mana;
+            wire.attack_damage = *attack_damage;
+            wire.armor = *armor;
+            wire.magic_resist = *magic_resist;
+            wire.move_speed_bits = move_speed_per_sec.to_bits();
+        }
+
+        catalog.hero_count = u8::try_from(content_heroes.len().min(MAX_WIRE_HEROES))
+            .unwrap_or(u8::try_from(MAX_WIRE_HEROES).unwrap_or(u8::MAX));
+        for (wire, hero) in catalog.heroes.iter_mut().zip(content_heroes) {
+            let HeroSpec {
+                name,
+                max_health,
+                max_mana,
+                health_regen_per_tick,
+                mana_regen_per_tick,
+                attack_damage,
+                attack_range,
+                attack_interval_ticks,
+                move_speed_per_sec,
+                armor,
+                magic_resist,
+                vision_range,
+                abilities,
+                health_per_level,
+                mana_per_level,
+                attack_damage_per_level,
+                armor_per_level,
+                magic_resist_per_level,
+            } = hero;
+            wire.name_len = put_wire_name(&mut wire.name, name);
+            wire.max_health = *max_health;
+            wire.max_mana = *max_mana;
+            wire.health_regen_per_tick = *health_regen_per_tick;
+            wire.mana_regen_per_tick = *mana_regen_per_tick;
+            wire.attack_damage = *attack_damage;
+            wire.attack_range_bits = attack_range.to_bits();
+            wire.attack_interval_ticks = *attack_interval_ticks;
+            wire.move_speed_bits = move_speed_per_sec.to_bits();
+            wire.armor = *armor;
+            wire.magic_resist = *magic_resist;
+            wire.vision_bits = vision_range.to_bits();
+            wire.abilities = *abilities;
+            wire.health_per_level = *health_per_level;
+            wire.mana_per_level = *mana_per_level;
+            wire.attack_damage_per_level = *attack_damage_per_level;
+            wire.armor_per_level = *armor_per_level;
+            wire.magic_resist_per_level = *magic_resist_per_level;
+        }
+
+        catalog.ability_count = u8::try_from(content_abilities.len().min(MAX_WIRE_ABILITIES))
+            .unwrap_or(u8::try_from(MAX_WIRE_ABILITIES).unwrap_or(u8::MAX));
+        for (wire, ability) in catalog.abilities.iter_mut().zip(content_abilities) {
+            let AbilitySpec {
+                name,
+                cooldown_ticks,
+                mana_cost,
+                cast_range,
+                kind,
+            } = ability;
+            wire.name_len = put_wire_name(&mut wire.name, name);
+            wire.cooldown_ticks = *cooldown_ticks;
+            wire.mana_cost = *mana_cost;
+            wire.cast_range_bits = cast_range.to_bits();
+            match *kind {
+                AbilityKind::Skillshot {
+                    speed_per_sec,
+                    range,
+                    radius,
+                    damage,
+                    damage_type,
+                } => {
+                    wire.kind = 0;
+                    wire.speed_bits = speed_per_sec.to_bits();
+                    wire.range_bits = range.to_bits();
+                    wire.radius_bits = radius.to_bits();
+                    wire.damage = damage;
+                    wire.damage_type = damage_type_code(damage_type);
+                }
+                AbilityKind::Dash { range } => {
+                    wire.kind = 1;
+                    wire.range_bits = range.to_bits();
+                }
+                AbilityKind::Heal { amount, radius } => {
+                    wire.kind = 2;
+                    wire.amount = amount;
+                    wire.radius_bits = radius.to_bits();
+                }
+                AbilityKind::Shield {
+                    amount,
+                    duration_ticks,
+                } => {
+                    wire.kind = 3;
+                    wire.amount = amount;
+                    wire.duration_ticks = duration_ticks;
+                }
+                AbilityKind::Slow {
+                    radius,
+                    factor,
+                    duration_ticks,
+                } => {
+                    wire.kind = 4;
+                    wire.radius_bits = radius.to_bits();
+                    wire.factor_bits = factor.to_bits();
+                    wire.duration_ticks = duration_ticks;
+                }
+                AbilityKind::Root {
+                    radius,
+                    duration_ticks,
+                } => {
+                    wire.kind = 5;
+                    wire.radius_bits = radius.to_bits();
+                    wire.duration_ticks = duration_ticks;
+                }
+                AbilityKind::Silence {
+                    radius,
+                    duration_ticks,
+                } => {
+                    wire.kind = 6;
+                    wire.radius_bits = radius.to_bits();
+                    wire.duration_ticks = duration_ticks;
+                }
+                AbilityKind::Burn {
+                    radius,
+                    duration_ticks,
+                    damage_per_tick,
+                    damage_type,
+                } => {
+                    wire.kind = 7;
+                    wire.radius_bits = radius.to_bits();
+                    wire.duration_ticks = duration_ticks;
+                    wire.damage = damage_per_tick;
+                    wire.damage_type = damage_type_code(damage_type);
+                }
+                AbilityKind::Haste {
+                    factor,
+                    duration_ticks,
+                } => {
+                    wire.kind = 8;
+                    wire.factor_bits = factor.to_bits();
+                    wire.duration_ticks = duration_ticks;
+                }
+                AbilityKind::Burst {
+                    radius,
+                    damage,
+                    damage_type,
+                } => {
+                    wire.kind = 9;
+                    wire.radius_bits = radius.to_bits();
+                    wire.damage = damage;
+                    wire.damage_type = damage_type_code(damage_type);
+                }
+            }
+        }
+
+        let MapSpec {
+            lanes: content_lanes,
+            structures: content_structures,
+            walls: content_walls,
+            blue_spawn,
+            red_spawn,
+        } = content_map;
+        let map = &mut catalog.map;
+        map.lane_count = u8::try_from(content_lanes.len().min(MAX_WIRE_LANES))
+            .unwrap_or(u8::try_from(MAX_WIRE_LANES).unwrap_or(u8::MAX));
+        for (wire, lane) in map.lanes.iter_mut().zip(content_lanes) {
+            let LaneSpec { name, path } = lane;
+            wire.name_len = put_wire_name(&mut wire.name, name);
+            wire.point_count = u8::try_from(path.len().min(MAX_WIRE_LANE_POINTS))
+                .unwrap_or(u8::try_from(MAX_WIRE_LANE_POINTS).unwrap_or(u8::MAX));
+            for (target, point) in wire.points.iter_mut().zip(path) {
+                target[0] = i16::try_from(point.x.to_i64()).unwrap_or(0);
+                target[1] = i16::try_from(point.y.to_i64()).unwrap_or(0);
+            }
+        }
+        map.blue_spawn = [
+            i16::try_from(blue_spawn.x.to_i64()).unwrap_or(0),
+            i16::try_from(blue_spawn.y.to_i64()).unwrap_or(0),
+        ];
+        map.red_spawn = [
+            i16::try_from(red_spawn.x.to_i64()).unwrap_or(0),
+            i16::try_from(red_spawn.y.to_i64()).unwrap_or(0),
+        ];
+        map.structure_count = u8::try_from(content_structures.len().min(MAX_WIRE_STRUCTURES))
+            .unwrap_or(u8::try_from(MAX_WIRE_STRUCTURES).unwrap_or(u8::MAX));
+        for (wire, structure) in map.structures.iter_mut().zip(content_structures) {
+            let StructureSpec {
+                team,
+                position,
+                kind,
+                lane,
+            } = structure;
+            wire.team = team.index() as u8;
+            wire.kind = match kind {
+                StructureKind::Tower => 0,
+                StructureKind::Nexus => 1,
+            };
+            wire.position = [
+                i16::try_from(position.x.to_i64()).unwrap_or(0),
+                i16::try_from(position.y.to_i64()).unwrap_or(0),
+            ];
+            wire.lane = lane.unwrap_or(0xFF);
+        }
+        map.wall_count = u8::try_from(content_walls.len().min(MAX_WIRE_WALLS))
+            .unwrap_or(u8::try_from(MAX_WIRE_WALLS).unwrap_or(u8::MAX));
+        for (wire, wall) in map.walls.iter_mut().zip(content_walls) {
+            let WallSpec { a, b } = wall;
+            wire.a = [
+                i16::try_from(a.x.to_i64()).unwrap_or(0),
+                i16::try_from(a.y.to_i64()).unwrap_or(0),
+            ];
+            wire.b = [
+                i16::try_from(b.x.to_i64()).unwrap_or(0),
+                i16::try_from(b.y.to_i64()).unwrap_or(0),
+            ];
+        }
+        catalog
+    }
+}
+
+impl WireCatalog {
+    /// Reconstructs the runtime content represented by this catalogue.
+    ///
+    /// # Errors
+    /// Returns [`WireError::BadValue`] for invalid enum/UTF-8/count fields.
+    #[allow(clippy::too_many_lines)] // One exhaustive reconstruction.
+    pub fn to_content(&self) -> Result<GameContent, WireError> {
+        macro_rules! count {
+            ($value:expr, $max:expr) => {{
+                let count = usize::from($value);
+                if count > $max {
+                    return Err(WireError::BadValue);
+                }
+                count
+            }};
+        }
+        let items = (0..count!(self.item_count, MAX_WIRE_ITEMS))
+            .map(|index| {
+                let item = &self.items[index];
+                Ok(ItemSpec {
+                    name: read_wire_name(&item.name, item.name_len, WIRE_ITEM_NAME)?,
+                    cost: item.cost,
+                    health: item.health,
+                    mana: item.mana,
+                    attack_damage: item.attack_damage,
+                    armor: item.armor,
+                    magic_resist: item.magic_resist,
+                    move_speed_per_sec: Fix::from_bits(item.move_speed_bits),
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        let heroes = (0..count!(self.hero_count, MAX_WIRE_HEROES))
+            .map(|index| {
+                let hero = &self.heroes[index];
+                Ok(HeroSpec {
+                    name: read_wire_name(&hero.name, hero.name_len, WIRE_HERO_NAME)?,
+                    max_health: hero.max_health,
+                    max_mana: hero.max_mana,
+                    health_regen_per_tick: hero.health_regen_per_tick,
+                    mana_regen_per_tick: hero.mana_regen_per_tick,
+                    attack_damage: hero.attack_damage,
+                    attack_range: Fix::from_bits(hero.attack_range_bits),
+                    attack_interval_ticks: hero.attack_interval_ticks,
+                    move_speed_per_sec: Fix::from_bits(hero.move_speed_bits),
+                    armor: hero.armor,
+                    magic_resist: hero.magic_resist,
+                    vision_range: Fix::from_bits(hero.vision_bits),
+                    abilities: hero.abilities,
+                    health_per_level: hero.health_per_level,
+                    mana_per_level: hero.mana_per_level,
+                    attack_damage_per_level: hero.attack_damage_per_level,
+                    armor_per_level: hero.armor_per_level,
+                    magic_resist_per_level: hero.magic_resist_per_level,
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        let abilities = (0..count!(self.ability_count, MAX_WIRE_ABILITIES))
+            .map(|index| {
+                let ability = &self.abilities[index];
+                let radius = Fix::from_bits(ability.radius_bits);
+                let range = Fix::from_bits(ability.range_bits);
+                let damage_type = damage_type_from_code(ability.damage_type)?;
+                let kind = match ability.kind {
+                    0 => AbilityKind::Skillshot {
+                        speed_per_sec: Fix::from_bits(ability.speed_bits),
+                        range,
+                        radius,
+                        damage: ability.damage,
+                        damage_type,
+                    },
+                    1 => AbilityKind::Dash { range },
+                    2 => AbilityKind::Heal {
+                        amount: ability.amount,
+                        radius,
+                    },
+                    3 => AbilityKind::Shield {
+                        amount: ability.amount,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    4 => AbilityKind::Slow {
+                        radius,
+                        factor: Fix::from_bits(ability.factor_bits),
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    5 => AbilityKind::Root {
+                        radius,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    6 => AbilityKind::Silence {
+                        radius,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    7 => AbilityKind::Burn {
+                        radius,
+                        duration_ticks: ability.duration_ticks,
+                        damage_per_tick: ability.damage,
+                        damage_type,
+                    },
+                    8 => AbilityKind::Haste {
+                        factor: Fix::from_bits(ability.factor_bits),
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    9 => AbilityKind::Burst {
+                        radius,
+                        damage: ability.damage,
+                        damage_type,
+                    },
+                    _ => return Err(WireError::BadValue),
+                };
+                Ok(AbilitySpec {
+                    name: read_wire_name(&ability.name, ability.name_len, WIRE_ABILITY_NAME)?,
+                    cooldown_ticks: ability.cooldown_ticks,
+                    mana_cost: ability.mana_cost,
+                    cast_range: Fix::from_bits(ability.cast_range_bits),
+                    kind,
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        let map = &self.map;
+        let lanes = (0..count!(map.lane_count, MAX_WIRE_LANES))
+            .map(|index| {
+                let lane = &map.lanes[index];
+                let point_count = count!(lane.point_count, MAX_WIRE_LANE_POINTS);
+                Ok(LaneSpec {
+                    name: read_wire_name(&lane.name, lane.name_len, WIRE_LANE_NAME)?,
+                    path: lane.points[..point_count]
+                        .iter()
+                        .map(|point| FixVec2::from_ints(i32::from(point[0]), i32::from(point[1])))
+                        .collect(),
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        let structures = (0..count!(map.structure_count, MAX_WIRE_STRUCTURES))
+            .map(|index| {
+                let structure = &map.structures[index];
+                Ok(StructureSpec {
+                    team: match structure.team {
+                        0 => Team::Blue,
+                        1 => Team::Red,
+                        _ => return Err(WireError::BadValue),
+                    },
+                    position: FixVec2::from_ints(
+                        i32::from(structure.position[0]),
+                        i32::from(structure.position[1]),
+                    ),
+                    kind: match structure.kind {
+                        0 => StructureKind::Tower,
+                        1 => StructureKind::Nexus,
+                        _ => return Err(WireError::BadValue),
+                    },
+                    lane: (structure.lane != 0xFF).then_some(structure.lane),
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        let walls = (0..count!(map.wall_count, MAX_WIRE_WALLS))
+            .map(|index| {
+                let wall = &map.walls[index];
+                Ok(WallSpec {
+                    a: FixVec2::from_ints(i32::from(wall.a[0]), i32::from(wall.a[1])),
+                    b: FixVec2::from_ints(i32::from(wall.b[0]), i32::from(wall.b[1])),
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        Ok(GameContent {
+            manifest: ContentManifest {
+                name: read_wire_name(
+                    &self.manifest_name,
+                    self.manifest_name_len,
+                    WIRE_MANIFEST_FIELD,
+                )?,
+                version: read_wire_name(
+                    &self.manifest_version,
+                    self.manifest_version_len,
+                    WIRE_MANIFEST_FIELD,
+                )?,
+                author: read_wire_name(
+                    &self.manifest_author,
+                    self.manifest_author_len,
+                    WIRE_MANIFEST_FIELD,
+                )?,
+            },
+            items,
+            heroes,
+            abilities,
+            map: MapSpec {
+                lanes,
+                structures,
+                walls,
+                blue_spawn: FixVec2::from_ints(
+                    i32::from(map.blue_spawn[0]),
+                    i32::from(map.blue_spawn[1]),
+                ),
+                red_spawn: FixVec2::from_ints(
+                    i32::from(map.red_spawn[0]),
+                    i32::from(map.red_spawn[1]),
+                ),
+            },
+        })
+    }
+
+    /// Hashes the reconstructed catalogue with [`GameContent::hash`].
+    ///
+    /// # Errors
+    /// Returns [`WireError::BadValue`] for an invalid catalogue.
+    pub fn content_hash(&self) -> Result<u64, WireError> {
+        Ok(self.to_content()?.hash())
+    }
+}
+
+fn put_wire_name<const N: usize>(target: &mut [u8; N], name: &str) -> u8 {
+    let bytes = name.as_bytes();
+    let length = bytes.len().min(N);
+    target[..length].copy_from_slice(&bytes[..length]);
+    u8::try_from(length).unwrap_or(u8::MAX)
+}
+
+fn read_wire_name(bytes: &[u8], used: u8, capacity: usize) -> Result<String, WireError> {
+    let used = usize::from(used);
+    if used > capacity || used > bytes.len() {
+        return Err(WireError::BadValue);
+    }
+    String::from_utf8(bytes[..used].to_vec()).map_err(|_| WireError::BadValue)
+}
+
+const fn damage_type_code(damage_type: DamageType) -> u8 {
+    match damage_type {
+        DamageType::Physical => 0,
+        DamageType::Magic => 1,
+    }
+}
+
+const fn damage_type_from_code(code: u8) -> Result<DamageType, WireError> {
+    match code {
+        0 => Ok(DamageType::Physical),
+        1 => Ok(DamageType::Magic),
+        _ => Err(WireError::BadValue),
     }
 }
 
@@ -480,21 +1127,9 @@ pub struct Welcome {
     pub auth: [u8; 32],
     /// This connection is a read-only spectator.
     pub spectator: bool,
-    /// Number of valid entries in `items`.
-    pub item_count: u8,
-    /// Runtime item catalogue for shop/HUD rendering.
-    pub items: [WireItem; MAX_WIRE_ITEMS],
-    /// Number of valid entries in `heroes`.
-    pub hero_count: u8,
-    /// Runtime hero catalogue for HUD/vision rendering.
-    pub heroes: [WireHero; MAX_WIRE_HEROES],
-    /// Number of valid entries in `abilities`.
-    pub ability_count: u8,
-    /// Runtime ability catalogue for HUD rendering.
-    pub abilities: [WireAbility; MAX_WIRE_ABILITIES],
-    /// Minimap lane geometry.
-    pub map: WireMap,
-    /// Hash of the wire item/hero/ability/map catalogue (also authenticated by the Welcome HMAC).
+    /// Complete runtime catalogue.
+    pub catalog: WireCatalog,
+    /// `GameContent::hash` of the catalogue (also authenticated by the Welcome HMAC).
     pub content_hash: u64,
     /// Whether a pinned server identity signature is present.
     pub identity: bool,
@@ -559,68 +1194,243 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
     Ok(hello)
 }
 
-/// Hashes the catalogue bytes exactly as sent in the handshake.
-#[must_use]
-pub fn catalog_hash(
-    items: &[WireItem],
-    heroes: &[WireHero],
-    abilities: &[WireAbility],
-    map: &WireMap,
-) -> u64 {
-    let mut hash = 0xCBF2_9CE4_8422_2325u64;
-    let mut feed = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-        }
-    };
-    for item in items {
-        feed(&item.name);
-        feed(&[item.name_len]);
+fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
+    out.extend_from_slice(&catalog.manifest_name);
+    out.push(catalog.manifest_name_len);
+    out.extend_from_slice(&catalog.manifest_version);
+    out.push(catalog.manifest_version_len);
+    out.extend_from_slice(&catalog.manifest_author);
+    out.push(catalog.manifest_author_len);
+    out.push(catalog.item_count);
+    for item in &catalog.items {
+        out.extend_from_slice(&item.name);
+        out.push(item.name_len);
+        put_u32(out, item.cost);
+        put_u32(out, item.health as u32);
+        put_u32(out, item.mana as u32);
+        put_u32(out, item.attack_damage as u32);
+        put_u32(out, item.armor as u32);
+        put_u32(out, item.magic_resist as u32);
+        out.extend_from_slice(&item.move_speed_bits.to_le_bytes());
+    }
+    out.push(catalog.hero_count);
+    for hero in &catalog.heroes {
+        out.extend_from_slice(&hero.name);
+        out.push(hero.name_len);
         for value in [
-            item.cost,
-            item.health as u32,
-            item.mana as u32,
-            item.attack_damage as u32,
-            item.armor as u32,
-            item.magic_resist as u32,
+            hero.max_health,
+            hero.max_mana,
+            hero.health_regen_per_tick,
+            hero.mana_regen_per_tick,
+            hero.attack_damage,
         ] {
-            feed(&value.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
         }
-        feed(&item.move_speed_bits.to_le_bytes());
+        out.extend_from_slice(&hero.attack_range_bits.to_le_bytes());
+        out.extend_from_slice(&hero.attack_interval_ticks.to_le_bytes());
+        out.extend_from_slice(&hero.move_speed_bits.to_le_bytes());
+        out.extend_from_slice(&hero.armor.to_le_bytes());
+        out.extend_from_slice(&hero.magic_resist.to_le_bytes());
+        out.extend_from_slice(&hero.vision_bits.to_le_bytes());
+        out.extend_from_slice(&hero.abilities);
+        for value in [
+            hero.health_per_level,
+            hero.mana_per_level,
+            hero.attack_damage_per_level,
+            hero.armor_per_level,
+            hero.magic_resist_per_level,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
     }
-    for hero in heroes {
-        feed(&hero.name);
-        feed(&[hero.name_len]);
-        feed(&hero.move_speed_bits.to_le_bytes());
-        feed(&hero.vision_bits.to_le_bytes());
-        feed(&hero.abilities);
+    out.push(catalog.ability_count);
+    for ability in &catalog.abilities {
+        out.extend_from_slice(&ability.name);
+        out.push(ability.name_len);
+        out.extend_from_slice(&ability.cooldown_ticks.to_le_bytes());
+        out.extend_from_slice(&ability.mana_cost.to_le_bytes());
+        out.extend_from_slice(&ability.cast_range_bits.to_le_bytes());
+        out.push(ability.kind);
+        out.extend_from_slice(&ability.radius_bits.to_le_bytes());
+        out.extend_from_slice(&ability.range_bits.to_le_bytes());
+        out.extend_from_slice(&ability.speed_bits.to_le_bytes());
+        out.extend_from_slice(&ability.factor_bits.to_le_bytes());
+        out.extend_from_slice(&ability.amount.to_le_bytes());
+        out.extend_from_slice(&ability.damage.to_le_bytes());
+        out.extend_from_slice(&ability.duration_ticks.to_le_bytes());
+        out.push(ability.damage_type);
     }
-    for ability in abilities {
-        feed(&ability.name);
-        feed(&[ability.name_len]);
-        feed(&ability.cooldown_ticks.to_le_bytes());
-        feed(&ability.mana_cost.to_le_bytes());
-    }
-    for lane in map.lanes.iter().take(usize::from(map.lane_count)) {
-        feed(&lane.name);
-        feed(&[lane.name_len, lane.point_count]);
-        for point in lane.points {
-            feed(&point[0].to_le_bytes());
-            feed(&point[1].to_le_bytes());
+    let map = &catalog.map;
+    out.push(map.lane_count);
+    for lane in &map.lanes {
+        out.extend_from_slice(&lane.name);
+        out.push(lane.name_len);
+        out.push(lane.point_count);
+        for point in &lane.points {
+            out.extend_from_slice(&point[0].to_le_bytes());
+            out.extend_from_slice(&point[1].to_le_bytes());
         }
     }
     for point in [map.blue_spawn, map.red_spawn] {
-        feed(&point[0].to_le_bytes());
-        feed(&point[1].to_le_bytes());
+        out.extend_from_slice(&point[0].to_le_bytes());
+        out.extend_from_slice(&point[1].to_le_bytes());
     }
-    for wall in map.walls.iter().take(usize::from(map.wall_count)) {
+    out.push(map.structure_count);
+    for structure in &map.structures {
+        out.push(structure.team);
+        out.push(structure.kind);
+        out.extend_from_slice(&structure.position[0].to_le_bytes());
+        out.extend_from_slice(&structure.position[1].to_le_bytes());
+        out.push(structure.lane);
+    }
+    out.push(map.wall_count);
+    for wall in &map.walls {
         for point in [wall.a, wall.b] {
-            feed(&point[0].to_le_bytes());
-            feed(&point[1].to_le_bytes());
+            out.extend_from_slice(&point[0].to_le_bytes());
+            out.extend_from_slice(&point[1].to_le_bytes());
         }
     }
-    hash
+}
+
+#[allow(clippy::too_many_lines)] // Wire field order mirrors `encode_catalog`.
+fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
+    let mut catalog = WireCatalog::default();
+    catalog
+        .manifest_name
+        .copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);
+    catalog.manifest_name_len = reader.u8()?;
+    catalog
+        .manifest_version
+        .copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);
+    catalog.manifest_version_len = reader.u8()?;
+    catalog
+        .manifest_author
+        .copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);
+    catalog.manifest_author_len = reader.u8()?;
+    catalog.item_count = reader.u8()?;
+    for item in &mut catalog.items {
+        item.name.copy_from_slice(reader.bytes(WIRE_ITEM_NAME)?);
+        item.name_len = reader.u8()?;
+        item.cost = reader.u32()?;
+        item.health = reader.i32()?;
+        item.mana = reader.i32()?;
+        item.attack_damage = reader.i32()?;
+        item.armor = reader.i32()?;
+        item.magic_resist = reader.i32()?;
+        item.move_speed_bits = reader.i64()?;
+    }
+    catalog.hero_count = reader.u8()?;
+    for hero in &mut catalog.heroes {
+        hero.name.copy_from_slice(reader.bytes(WIRE_HERO_NAME)?);
+        hero.name_len = reader.u8()?;
+        hero.max_health = reader.i32()?;
+        hero.max_mana = reader.i32()?;
+        hero.health_regen_per_tick = reader.i32()?;
+        hero.mana_regen_per_tick = reader.i32()?;
+        hero.attack_damage = reader.i32()?;
+        hero.attack_range_bits = reader.i64()?;
+        hero.attack_interval_ticks = reader.u32()?;
+        hero.move_speed_bits = reader.i64()?;
+        hero.armor = reader.i32()?;
+        hero.magic_resist = reader.i32()?;
+        hero.vision_bits = reader.i64()?;
+        hero.abilities.copy_from_slice(reader.bytes(3)?);
+        hero.health_per_level = reader.i32()?;
+        hero.mana_per_level = reader.i32()?;
+        hero.attack_damage_per_level = reader.i32()?;
+        hero.armor_per_level = reader.i32()?;
+        hero.magic_resist_per_level = reader.i32()?;
+    }
+    catalog.ability_count = reader.u8()?;
+    for ability in &mut catalog.abilities {
+        ability
+            .name
+            .copy_from_slice(reader.bytes(WIRE_ABILITY_NAME)?);
+        ability.name_len = reader.u8()?;
+        ability.cooldown_ticks = reader.u32()?;
+        ability.mana_cost = reader.i32()?;
+        ability.cast_range_bits = reader.i64()?;
+        ability.kind = reader.u8()?;
+        ability.radius_bits = reader.i64()?;
+        ability.range_bits = reader.i64()?;
+        ability.speed_bits = reader.i64()?;
+        ability.factor_bits = reader.i64()?;
+        ability.amount = reader.i32()?;
+        ability.damage = reader.i32()?;
+        ability.duration_ticks = reader.u32()?;
+        ability.damage_type = reader.u8()?;
+    }
+    let map = &mut catalog.map;
+    map.lane_count = reader.u8()?;
+    for lane in &mut map.lanes {
+        lane.name.copy_from_slice(reader.bytes(WIRE_LANE_NAME)?);
+        lane.name_len = reader.u8()?;
+        lane.point_count = reader.u8()?;
+        for point in &mut lane.points {
+            point[0] = i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            );
+            point[1] = i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            );
+        }
+    }
+    for point in [&mut map.blue_spawn, &mut map.red_spawn] {
+        point[0] = i16::from_le_bytes(
+            reader
+                .bytes(2)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        );
+        point[1] = i16::from_le_bytes(
+            reader
+                .bytes(2)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        );
+    }
+    map.structure_count = reader.u8()?;
+    for structure in &mut map.structures {
+        structure.team = reader.u8()?;
+        structure.kind = reader.u8()?;
+        structure.position[0] = i16::from_le_bytes(
+            reader
+                .bytes(2)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        );
+        structure.position[1] = i16::from_le_bytes(
+            reader
+                .bytes(2)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        );
+        structure.lane = reader.u8()?;
+    }
+    map.wall_count = reader.u8()?;
+    for wall in &mut map.walls {
+        for point in [&mut wall.a, &mut wall.b] {
+            point[0] = i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            );
+            point[1] = i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            );
+        }
+    }
+    Ok(catalog)
 }
 
 /// Encodes a handshake response.
@@ -637,54 +1447,7 @@ pub fn encode_welcome(welcome: &Welcome) -> Vec<u8> {
     out.extend_from_slice(&welcome.server_nonce.to_le_bytes());
     out.extend_from_slice(&welcome.auth);
     out.push(u8::from(welcome.spectator));
-    out.push(welcome.item_count);
-    for item in welcome.items.iter().take(MAX_WIRE_ITEMS) {
-        out.extend_from_slice(&item.name);
-        out.push(item.name_len);
-        put_u32(&mut out, item.cost);
-        put_u32(&mut out, item.health as u32);
-        put_u32(&mut out, item.mana as u32);
-        put_u32(&mut out, item.attack_damage as u32);
-        put_u32(&mut out, item.armor as u32);
-        put_u32(&mut out, item.magic_resist as u32);
-        out.extend_from_slice(&item.move_speed_bits.to_le_bytes());
-    }
-    out.push(welcome.hero_count);
-    for hero in welcome.heroes.iter().take(MAX_WIRE_HEROES) {
-        out.extend_from_slice(&hero.name);
-        out.push(hero.name_len);
-        out.extend_from_slice(&hero.move_speed_bits.to_le_bytes());
-        out.extend_from_slice(&hero.vision_bits.to_le_bytes());
-        out.extend_from_slice(&hero.abilities);
-    }
-    out.push(welcome.ability_count);
-    for ability in welcome.abilities.iter().take(MAX_WIRE_ABILITIES) {
-        out.extend_from_slice(&ability.name);
-        out.push(ability.name_len);
-        put_u32(&mut out, ability.cooldown_ticks);
-        put_u16(&mut out, ability.mana_cost);
-    }
-    out.push(welcome.map.lane_count);
-    for lane in welcome.map.lanes.iter().take(MAX_WIRE_LANES) {
-        out.extend_from_slice(&lane.name);
-        out.push(lane.name_len);
-        out.push(lane.point_count);
-        for point in lane.points {
-            out.extend_from_slice(&point[0].to_le_bytes());
-            out.extend_from_slice(&point[1].to_le_bytes());
-        }
-    }
-    out.extend_from_slice(&welcome.map.blue_spawn[0].to_le_bytes());
-    out.extend_from_slice(&welcome.map.blue_spawn[1].to_le_bytes());
-    out.extend_from_slice(&welcome.map.red_spawn[0].to_le_bytes());
-    out.extend_from_slice(&welcome.map.red_spawn[1].to_le_bytes());
-    out.push(welcome.map.wall_count);
-    for wall in welcome.map.walls.iter().take(MAX_WIRE_WALLS) {
-        out.extend_from_slice(&wall.a[0].to_le_bytes());
-        out.extend_from_slice(&wall.a[1].to_le_bytes());
-        out.extend_from_slice(&wall.b[0].to_le_bytes());
-        out.extend_from_slice(&wall.b[1].to_le_bytes());
-    }
+    encode_catalog(&welcome.catalog, &mut out);
     out.extend_from_slice(&welcome.content_hash.to_le_bytes());
     out.push(u8::from(welcome.identity));
     out.extend_from_slice(&welcome.server_public_key);
@@ -725,183 +1488,7 @@ pub fn decode_welcome(data: &[u8]) -> Result<Welcome, WireError> {
             .try_into()
             .map_err(|_| WireError::Truncated)?,
         spectator: reader.u8()? != 0,
-        item_count: reader.u8()?,
-        items: {
-            let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
-            for item in &mut items {
-                let mut name = [0; WIRE_ITEM_NAME];
-                name.copy_from_slice(reader.bytes(WIRE_ITEM_NAME)?);
-                item.name = name;
-                item.name_len = reader.u8()?;
-                item.cost = reader.u32()?;
-                item.health = i32::from_le_bytes(
-                    reader
-                        .bytes(4)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                item.mana = i32::from_le_bytes(
-                    reader
-                        .bytes(4)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                item.attack_damage = i32::from_le_bytes(
-                    reader
-                        .bytes(4)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                item.armor = i32::from_le_bytes(
-                    reader
-                        .bytes(4)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                item.magic_resist = i32::from_le_bytes(
-                    reader
-                        .bytes(4)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                item.move_speed_bits = i64::from_le_bytes(
-                    reader
-                        .bytes(8)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-            }
-            items
-        },
-        hero_count: reader.u8()?,
-        heroes: {
-            let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
-            for hero in &mut heroes {
-                let mut name = [0; WIRE_HERO_NAME];
-                name.copy_from_slice(reader.bytes(WIRE_HERO_NAME)?);
-                hero.name = name;
-                hero.name_len = reader.u8()?;
-                hero.move_speed_bits = i64::from_le_bytes(
-                    reader
-                        .bytes(8)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                hero.vision_bits = i64::from_le_bytes(
-                    reader
-                        .bytes(8)?
-                        .try_into()
-                        .map_err(|_| WireError::Truncated)?,
-                );
-                hero.abilities.copy_from_slice(reader.bytes(3)?);
-            }
-            heroes
-        },
-        ability_count: reader.u8()?,
-        abilities: {
-            let mut abilities = [WireAbility::default(); MAX_WIRE_ABILITIES];
-            for ability in &mut abilities {
-                let mut name = [0; WIRE_ABILITY_NAME];
-                name.copy_from_slice(reader.bytes(WIRE_ABILITY_NAME)?);
-                ability.name = name;
-                ability.name_len = reader.u8()?;
-                ability.cooldown_ticks = reader.u32()?;
-                ability.mana_cost = reader.u16()?;
-            }
-            abilities
-        },
-        map: {
-            let lane_count = reader.u8()?;
-            let mut lanes = [WireLane::default(); MAX_WIRE_LANES];
-            for lane in &mut lanes {
-                let mut name = [0; WIRE_LANE_NAME];
-                name.copy_from_slice(reader.bytes(WIRE_LANE_NAME)?);
-                lane.name = name;
-                lane.name_len = reader.u8()?;
-                lane.point_count = reader.u8()?;
-                for point in &mut lane.points {
-                    point[0] = i16::from_le_bytes(
-                        reader
-                            .bytes(2)?
-                            .try_into()
-                            .map_err(|_| WireError::Truncated)?,
-                    );
-                    point[1] = i16::from_le_bytes(
-                        reader
-                            .bytes(2)?
-                            .try_into()
-                            .map_err(|_| WireError::Truncated)?,
-                    );
-                }
-            }
-            WireMap {
-                lane_count,
-                lanes,
-                blue_spawn: [
-                    i16::from_le_bytes(
-                        reader
-                            .bytes(2)?
-                            .try_into()
-                            .map_err(|_| WireError::Truncated)?,
-                    ),
-                    i16::from_le_bytes(
-                        reader
-                            .bytes(2)?
-                            .try_into()
-                            .map_err(|_| WireError::Truncated)?,
-                    ),
-                ],
-                red_spawn: [
-                    i16::from_le_bytes(
-                        reader
-                            .bytes(2)?
-                            .try_into()
-                            .map_err(|_| WireError::Truncated)?,
-                    ),
-                    i16::from_le_bytes(
-                        reader
-                            .bytes(2)?
-                            .try_into()
-                            .map_err(|_| WireError::Truncated)?,
-                    ),
-                ],
-                wall_count: reader.u8()?,
-                walls: {
-                    let mut walls = [WireWall::default(); MAX_WIRE_WALLS];
-                    for wall in &mut walls {
-                        wall.a = [
-                            i16::from_le_bytes(
-                                reader
-                                    .bytes(2)?
-                                    .try_into()
-                                    .map_err(|_| WireError::Truncated)?,
-                            ),
-                            i16::from_le_bytes(
-                                reader
-                                    .bytes(2)?
-                                    .try_into()
-                                    .map_err(|_| WireError::Truncated)?,
-                            ),
-                        ];
-                        wall.b = [
-                            i16::from_le_bytes(
-                                reader
-                                    .bytes(2)?
-                                    .try_into()
-                                    .map_err(|_| WireError::Truncated)?,
-                            ),
-                            i16::from_le_bytes(
-                                reader
-                                    .bytes(2)?
-                                    .try_into()
-                                    .map_err(|_| WireError::Truncated)?,
-                            ),
-                        ];
-                    }
-                    walls
-                },
-            }
-        },
+        catalog: decode_catalog(&mut reader)?,
         content_hash: u64::from_le_bytes(
             reader
                 .bytes(8)?
@@ -1769,6 +2356,22 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn i32(&mut self) -> Result<i32, WireError> {
+        Ok(i32::from_le_bytes(
+            self.bytes(4)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        ))
+    }
+
+    fn i64(&mut self) -> Result<i64, WireError> {
+        Ok(i64::from_le_bytes(
+            self.bytes(8)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        ))
+    }
+
     fn bytes(&mut self, length: usize) -> Result<&'a [u8], WireError> {
         let end = self
             .position
@@ -1811,24 +2414,61 @@ mod tests {
     }
 
     #[test]
-    fn catalog_hash_covers_item_and_hero_catalogue() {
-        let mut items = [WireItem::default(); MAX_WIRE_ITEMS];
-        items[0].name[..5].copy_from_slice(b"Blade");
-        items[0].name_len = 5;
-        let mut heroes = [WireHero::default(); MAX_WIRE_HEROES];
-        heroes[0].name[..4].copy_from_slice(b"Hero");
-        heroes[0].name_len = 4;
-        let baseline = catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default());
-        items[0].cost = 1;
-        assert_ne!(
-            catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default()),
-            baseline
+    fn welcome_round_trip_carries_verified_catalogue() {
+        let content = GameContent::default();
+        let welcome = Welcome {
+            slot: 3,
+            tick_rate: 30,
+            snapshot_interval: 1,
+            tick: 42,
+            seed: 0x1234,
+            hero_pick: 2,
+            nonce: 7,
+            server_nonce: 9,
+            auth: [0; 32],
+            spectator: false,
+            catalog: WireCatalog::from(&content),
+            content_hash: content.hash(),
+            identity: false,
+            server_public_key: [0; 32],
+            server_signature: [0; 64],
+        };
+        let encoded = encode_welcome(&welcome);
+        let decoded = decode_welcome(&encoded).expect("welcome decodes");
+        assert_eq!(decoded, welcome);
+        assert_eq!(
+            decoded.catalog.content_hash().expect("catalogue hash"),
+            decoded.content_hash
         );
-        items[0].cost = 0;
-        heroes[0].abilities[0] = 1;
+    }
+
+    #[test]
+    fn catalogue_round_trip_preserves_content_hash() {
+        let content = GameContent::default();
+        let wire = WireCatalog::from(&content);
+        assert_eq!(wire.content_hash().expect("catalogue hash"), content.hash());
+        let mut bytes = Vec::new();
+        encode_catalog(&wire, &mut bytes);
+        let mut reader = Reader::new(&bytes);
+        let decoded = decode_catalog(&mut reader).expect("decode catalogue");
+        assert_eq!(reader.remaining(), 0);
+        assert_eq!(decoded, wire);
+        assert_eq!(
+            decoded.to_content().expect("content").hash(),
+            content.hash()
+        );
+
+        let mut changed = GameContent::default();
+        changed.heroes[0].attack_damage += 1;
         assert_ne!(
-            catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default()),
-            baseline
+            WireCatalog::from(&changed).content_hash(),
+            wire.content_hash()
+        );
+        let mut changed = GameContent::default();
+        changed.abilities[0].cast_range += Fix::ONE;
+        assert_ne!(
+            WireCatalog::from(&changed).content_hash(),
+            wire.content_hash()
         );
     }
 

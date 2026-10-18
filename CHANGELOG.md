@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Protocol v13 complete `WireCatalog` handshake projection: full hero/ability/map/structure
+  fields, exact `GameContent::hash` verification on the client, destructured parity conversion,
+  and client range/radius overlays from wire data.
 - Documentation truth pass: milestone grading/evidence links, security/contributing/API/perf
   corrections, runtime-support wording, and contributor checklists for item stats, statuses
   and ability kinds.

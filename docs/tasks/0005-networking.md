@@ -81,6 +81,13 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 [Valve lag compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation),
 [RFC 1982 serial arithmetic](https://www.rfc-editor.org/rfc/rfc1982).
 
+## Protocol v13 catalogue contract
+- `Welcome` carries one complete `WireCatalog` (manifest, items, heroes, abilities, map
+  structures/walls) built only by `From<&GameContent>`; clients reconstruct it and verify
+  `GameContent::hash`.
+- Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
+- Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
+
 ## Budgets touched
 Downstream ≤ 20 KB/s typical / 40 KB/s teamfight; upstream ≤ 4 KB/s. Measured far inside
 both at 30 snapshots/s with server-side delta compression. See
