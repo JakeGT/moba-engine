@@ -41,8 +41,9 @@ deterministic playback and server authority.
 - Root kind: radius/duration with move-command and dash blocking, expiry/respawn removal and a flag.
 - Slow kind: radius/factor/duration, stacking with haste and restored on expiry/respawn.
 - Per-hero level-growth stats in content (health/mana/damage/armour/MR), with defaults.
-- Hot reload: `--reload-content` swaps packs only in an empty lobby; connected clients keep
-  their handshake catalogue. Test covers reload with zero clients.
+- Hot reload: `--reload-content` broadcasts a protocol-v24 catalogue update in Lobby/Results;
+  connected clients atomically replace items/heroes/abilities/map/vision state and reconnect
+  prediction. Live `Playing` matches are never hot-swapped. Test covers reload with zero clients.
 
 ## Next
 - Per-client content-update packets (connected clients currently keep their handshake pack).

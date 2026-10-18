@@ -350,6 +350,26 @@ impl App for ClientApp {
                             }
                             ClientEvent::Connected { slot } => network.own_slot = slot,
                             ClientEvent::GameEvent(event) => network.handle_game_event(event),
+                            ClientEvent::ContentUpdated { .. } => {
+                                let hero = usize::from(network.client.hero_pick())
+                                    % network.client.heroes().len().max(1);
+                                let speed = network
+                                    .client
+                                    .heroes()
+                                    .get(hero)
+                                    .map_or(Fix::from_i32(7), |hero| {
+                                        Fix::from_bits(hero.move_speed_bits)
+                                    });
+                                network.prediction = PredictionState::new(speed);
+                                network.interpolator = Interpolator::new(
+                                    SNAPSHOT_DELAY_TICKS,
+                                    f32::from(network.client.tick_rate()),
+                                );
+                                network.own_net_id = None;
+                                network.last_snapshot_seq = 0;
+                                network.projectiles.clear();
+                                network.kill_feed.clear();
+                            }
                             ClientEvent::Snapshot { .. } => {}
                         }
                     }

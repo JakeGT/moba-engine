@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 23;
+pub const PROTOCOL_VERSION: u8 = 24;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -53,6 +53,8 @@ pub enum PacketKind {
     Fragment = 9,
     /// Server -> client identity challenge.
     Challenge = 10,
+    /// Server -> client full catalogue update between matches.
+    ContentUpdate = 11,
 }
 
 impl PacketKind {
@@ -69,6 +71,7 @@ impl PacketKind {
             8 => Self::Disconnect,
             9 => Self::Fragment,
             10 => Self::Challenge,
+            11 => Self::ContentUpdate,
             _ => return None,
         })
     }
@@ -1572,6 +1575,27 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
 }
 
 #[allow(clippy::too_many_lines)] // Wire field order mirrors `decode_catalog`.
+/// Encodes a full catalogue update payload.
+pub fn encode_content_update(catalog: &WireCatalog, content_hash: u64, out: &mut Vec<u8>) {
+    out.extend_from_slice(&content_hash.to_le_bytes());
+    encode_catalog(catalog, out);
+}
+
+/// Decodes and validates a full catalogue update payload.
+pub fn decode_content_update(data: &[u8]) -> Result<(WireCatalog, u64), WireError> {
+    let mut reader = Reader::new(data);
+    let content_hash = reader.u64()?;
+    let catalog = decode_catalog(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(WireError::BadValue);
+    }
+    if catalog.content_hash()? != content_hash {
+        return Err(WireError::BadValue);
+    }
+    Ok((catalog, content_hash))
+}
+
+#[allow(clippy::too_many_lines)] // Wire field order mirrors the catalogue schema.
 fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
     out.extend_from_slice(&catalog.manifest_name);
     out.push(catalog.manifest_name_len);
@@ -3056,6 +3080,13 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn u64(&mut self) -> Result<u64, WireError> {
+        let bytes = self.bytes(8)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
     fn i32(&mut self) -> Result<i32, WireError> {
         Ok(i32::from_le_bytes(
             self.bytes(4)?
@@ -3298,6 +3329,19 @@ mod tests {
             cooldowns: [0, 0, 0],
             progress: NetProgress::default(),
         }
+    }
+
+    #[test]
+    fn content_update_round_trips_catalogue_and_hash() {
+        let content = moba_game::GameContent::default();
+        let catalog = WireCatalog::from(&content);
+        let mut payload = Vec::new();
+        encode_content_update(&catalog, content.hash(), &mut payload);
+        let (decoded, hash) = decode_content_update(&payload).expect("decode");
+        assert_eq!(hash, content.hash());
+        assert_eq!(decoded, catalog);
+        payload[0] ^= 0xFF;
+        assert!(decode_content_update(&payload).is_err());
     }
 
     #[test]

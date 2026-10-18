@@ -75,7 +75,8 @@ MOBA_SERVER=127.0.0.1:7777 cargo run -p moba-client
 Packs carry `name`/`version`/`author` metadata; replays record the pack identity alongside the
 content hash. The client shop/HUD, cooldowns, range/radius overlays, vision and minimap use the received complete catalogue, verified against `GameContent::hash`; simulation purchases, hero stats, ability effects and map geometry use the same definitions.
 
-`--reload-content` watches the pack and reloads it when the lobby has no connected clients.
+`--reload-content` watches the pack and broadcasts a catalogue update to connected clients in
+the lobby/results phase (never mid-match).
 Servers with repeated `--items FILE` rotate maps between empty-lobby matches and announce the
 selected map. Client identity keys can be rotated/revoked with `--rotate-client-key OLD:NEW` and
 `--revoke-client-key KEY`. Signed packs can be required with `--require-content-attestation --content-publisher HEX`

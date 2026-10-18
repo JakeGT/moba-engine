@@ -152,8 +152,8 @@ values, and secrets can reference paths or 64-hex strings.
 Ctrl-C/SIGINT, then flushes the recording before exiting.
 
 `NetServer` can watch a content file (`watch_content`/`--reload-content`) and swap it only
-when the phase is Lobby and no clients are connected; the simulation is recreated with the
-new catalogue for the next match.
+in Lobby/Results (never `Playing`); the simulation is recreated and connected clients receive a
+full catalogue `ContentUpdate` for the next match.
 
 `NetServer` applies a token-bucket rate limit per source address (default 120 pps) and a
 global packet budget (default 2000 pps) before message decoding; `0` disables either. Buckets are bounded and evicted LRU to cap
@@ -172,8 +172,8 @@ run periodic area effects. Snapshots also carry a bounded, fog-filtered presenta
 list (casts, projectile spawn/hit, deaths, objectives) for the client kill feed/VFX and audio. The wire catalogue is a complete, destructured projection of
 `GameContent`; the client reconstructs it and verifies `GameContent::hash`. Ability
 behaviour kinds are code-defined, but their numbers and hero bindings come from the pack; map,
-lane, structure and wall geometry are fully data-driven. Packs hot-reload only in an empty
-lobby so connected clients keep a consistent handshake catalogue.
+lane, structure and wall geometry are fully data-driven. Packs hot-reload only between matches
+(Lobby/Results), never during a live simulation so connected clients keep a consistent handshake catalogue.
 
 ## Handshake replay window
 
