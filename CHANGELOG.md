@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Client identity allowlist rotation/revocation and ADR 0006 trust-boundary/threat-model docs.
 - Map names and empty-lobby server map rotation (protocol v23).
 - Client-only procedural audio: event mapping, volume/mute settings, graceful no-device fallback.
 - Optional Ed25519 content-pack attestations with signing/verification CLI and server pinning.

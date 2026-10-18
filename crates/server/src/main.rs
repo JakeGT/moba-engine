@@ -31,6 +31,8 @@ fn main() {
     let mut content_publisher: Option<[u8; 32]> = None;
     let mut client_tokens: Vec<[u8; 32]> = Vec::new();
     let mut client_identity_keys: Vec<[u8; 32]> = Vec::new();
+    let mut rotate_client_keys: Vec<([u8; 32], [u8; 32])> = Vec::new();
+    let mut revoke_client_keys: Vec<[u8; 32]> = Vec::new();
     let mut results_log: Option<std::path::PathBuf> = None;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
@@ -99,6 +101,12 @@ fn main() {
         }
         if let Some(keys) = file.client_identity_keys {
             client_identity_keys = keys.iter().map(|key| parse_secret(key)).collect();
+        }
+        if let Some(keys) = file.rotate_client_keys {
+            rotate_client_keys = keys.iter().map(|pair| parse_key_pair(pair)).collect();
+        }
+        if let Some(keys) = file.revoke_client_keys {
+            revoke_client_keys = keys.iter().map(|key| parse_secret(key)).collect();
         }
         if let Some(value) = file.max_total_pps {
             max_total_packets_per_second = value;
@@ -177,6 +185,20 @@ fn main() {
                 };
                 client_tokens.push(parse_secret(&value));
             }
+            "--rotate-client-key" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--rotate-client-key needs OLD:NEW 64-hex keys");
+                    std::process::exit(2);
+                };
+                rotate_client_keys.push(parse_key_pair(&value));
+            }
+            "--revoke-client-key" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--revoke-client-key needs 64 hex characters");
+                    std::process::exit(2);
+                };
+                revoke_client_keys.push(parse_secret(&value));
+            }
             "--reload-content" => reload_content = true,
             "--require-content-attestation" => require_attestation = true,
             "--content-publisher" => {
@@ -192,7 +214,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--rotate-client-key OLD:NEW] [--revoke-client-key HEX] [--config FILE]"
                 );
                 return;
             }
@@ -277,6 +299,22 @@ fn main() {
         }
         if !client_identity_keys.is_empty() {
             server.require_client_identity(client_identity_keys.iter().copied());
+        }
+        for (old, new) in &rotate_client_keys {
+            if !server.rotate_client_key(*old, *new) {
+                eprintln!("client key rotation skipped: old key is not in the allowlist");
+            }
+        }
+        for key in &revoke_client_keys {
+            if !server.revoke_client_key(*key) {
+                eprintln!("client key revocation skipped: key is not in the allowlist");
+            }
+        }
+        if !rotate_client_keys.is_empty() || !revoke_client_keys.is_empty() {
+            eprintln!(
+                "client identity allowlist: {} key(s)",
+                server.allowed_client_key_count()
+            );
         }
         if let Some(path) = results_log.clone() {
             server.set_results_log(path);
@@ -475,6 +513,16 @@ struct FileServerConfig {
     max_total_pps: Option<u32>,
     client_tokens: Option<Vec<String>>,
     client_identity_keys: Option<Vec<String>>,
+    rotate_client_keys: Option<Vec<String>>,
+    revoke_client_keys: Option<Vec<String>>,
+}
+
+fn parse_key_pair(value: &str) -> ([u8; 32], [u8; 32]) {
+    let Some((old, new)) = value.split_once(':') else {
+        eprintln!("key rotation must be OLD:NEW");
+        std::process::exit(2);
+    };
+    (parse_secret(old), parse_secret(new))
 }
 
 fn load_server_config(path: &std::path::Path) -> FileServerConfig {

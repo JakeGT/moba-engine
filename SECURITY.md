@@ -63,3 +63,13 @@ require a valid attestation and pin the publisher key with `--require-content-at
 `--content-publisher`. Unverified packs are rejected before bind. The signature covers the pack
 manifest plus content hash; rotating keys requires a server restart, and revocation is an
 out-of-band trust-policy change (no online revocation list).
+
+## Identity allowlists and rotation
+
+Client identity allowlists are local to each server. `--rotate-client-key OLD:NEW` replaces a
+key, `--revoke-client-key KEY` removes it; config fields are `rotate_client_keys` and
+`revoke_client_keys`. Revoking the last key leaves identity enforcement enabled, so every client
+is rejected rather than falling open. Rotation/revocation applies before the next match; connected
+sessions are not re-authenticated mid-match. Account identities, reputation and transparency
+feeds are external integrations (see `docs/adr/0006-identity-trust.md`). Optional player-count
+attestations are signed by the pinned server key and are advisory, not independent proof.
