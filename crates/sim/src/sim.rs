@@ -477,7 +477,8 @@ impl Simulation {
             }),
         };
         simulation.spawn_structures();
-        for slot in 0..MAX_PLAYERS {
+        let active_players = usize::from(rules.team_size) * 2;
+        for slot in 0..active_players.min(MAX_PLAYERS) {
             let entity = simulation.spawn_hero(slot);
             simulation.hero_entities[slot] = entity;
         }
@@ -986,7 +987,12 @@ impl Simulation {
     }
 
     fn spawn_hero(&mut self, slot: usize) -> Entity {
-        let team = if slot < 5 { Team::Blue } else { Team::Red };
+        let team_size = usize::from(self.content.rules.team_size);
+        let team = if slot < team_size {
+            Team::Blue
+        } else {
+            Team::Red
+        };
         let pick = usize::from(self.config.hero_picks[slot]) % self.content.heroes.len();
         let hero_id = HeroId(u8::try_from(pick).expect("hero index fits u8"));
         let def = &self.content.heroes[pick];
@@ -996,7 +1002,7 @@ impl Simulation {
             Position(
                 self.content
                     .map
-                    .hero_spawn(team, u8::try_from(slot % 5).expect("slot fits u8")),
+                    .hero_spawn(team, u8::try_from(slot % team_size).expect("slot fits u8")),
             ),
         );
         let _ = self.world.insert(entity, team);
@@ -1355,7 +1361,10 @@ impl Simulation {
         }
         self.recompute_move_speed(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
-            position.0 = self.content.map.hero_spawn(team, slot % 5);
+            position.0 = self
+                .content
+                .map
+                .hero_spawn(team, slot % self.content.rules.team_size);
         }
         if let Some(health) = self.world.get_mut::<Health>(entity) {
             health.current = health.max;
@@ -2758,6 +2767,33 @@ mod tests {
         }
         let after = sim.world.get::<Health>(red).unwrap().current;
         assert!(after < start, "skillshot should hit ({start} -> {after})");
+    }
+
+    #[test]
+    fn team_size_one_spawns_only_two_heroes() {
+        let mut content = moba_game::GameContent::default();
+        content.rules.team_size = 1;
+        content.rules.bot_fill = false;
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0x3,
+                spawn_waves: false,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let heroes = sim
+            .world
+            .entities()
+            .filter(|entity| sim.world.get::<UnitKind>(*entity) == Some(&UnitKind::Hero))
+            .count();
+        assert_eq!(heroes, 2);
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[1];
+        assert_eq!(sim.world.get::<Team>(blue).copied(), Some(Team::Blue));
+        assert_eq!(sim.world.get::<Team>(red).copied(), Some(Team::Red));
+        sim.tick_with_bots();
+        assert!(sim.state_hash() != 0);
     }
 
     #[test]

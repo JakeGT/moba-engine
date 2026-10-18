@@ -1,0 +1,29 @@
+name = "1v1 Mid"
+version = "1"
+author = "moba-engine"
+
+[rules]
+team_size = 1
+bot_fill = true
+hero_respawn_ticks = 300
+wave_interval_ticks = 900
+first_wave_ticks = 30
+
+[map]
+extent = 128
+blue_spawn = [16, 64]
+red_spawn = [112, 64]
+
+[[map.lanes]]
+name = "Mid"
+path = [[16, 64], [64, 64], [112, 64]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [16, 64]
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [112, 64]

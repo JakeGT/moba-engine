@@ -1,0 +1,29 @@
+name = "ARAM"
+version = "1"
+author = "moba-engine"
+
+[rules]
+team_size = 5
+bot_fill = true
+hero_respawn_ticks = 300
+wave_interval_ticks = 600
+first_wave_ticks = 30
+
+[map]
+extent = 200
+blue_spawn = [20, 100]
+red_spawn = [180, 100]
+
+[[map.lanes]]
+name = "ARAM"
+path = [[20, 100], [100, 100], [180, 100]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [20, 100]
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [180, 100]

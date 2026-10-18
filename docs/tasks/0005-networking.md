@@ -91,6 +91,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v17 adds projectile arc height to wire effects and spawn events.
 - v18 carries the map world extent in the handshake and derives simulation bounds from it.
 - v19 carries tunable match rules (respawn, wave cadence) in the handshake.
+- v20 adds team size / bot-fill policy to the rules.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 
