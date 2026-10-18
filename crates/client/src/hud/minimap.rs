@@ -2,11 +2,17 @@
 
 use super::theme;
 use super::{
-    Fix, FixVec2, MELEE_MINION, NEXUS, NetworkView, RANGED_MINION, TOWER, UiDrawList, Vec2, Vec4,
-    VisionCircles, dequantize_position,
+    Fix, FixVec2, HitList, HudAction, MELEE_MINION, NEXUS, NetworkView, RANGED_MINION, TOWER,
+    UiDrawList, Vec2, Vec4, VisionCircles, dequantize_position, register,
 };
 
-pub(crate) fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u32, height: u32) {
+pub(crate) fn draw_minimap(
+    ui: &mut UiDrawList,
+    network: &NetworkView,
+    width: u32,
+    height: u32,
+    hits: &mut HitList,
+) {
     let Some(snapshot) = network.client.snapshot() else {
         return;
     };
@@ -22,6 +28,7 @@ pub(crate) fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u3
         Vec4::new(0.01, 0.02, 0.035, 0.82),
         theme::PANEL_CHROME,
     );
+    register(hits, HudAction::Block, x, y, size, size);
     let inner = size - 20.0;
     let left = x + 10.0;
     let top = y + 10.0;
