@@ -20,7 +20,7 @@ deterministic playback and server authority.
   `WireHero` handshake entries for client HUD/vision; simulation spawns/casts from content.
 - Runtime ability catalogue: `AbilitySpec` over the engine's skillshot/dash/heal/shield/burst
   kinds,
-  TOML `[[abilities]]`, validation, `WireAbility` handshake entries for HUD cooldowns; a
+  TOML `[[abilities]]`, validation, a complete `WireCatalog` handshake projection (`WireAbility` carries kind/range/radius/duration) verified by `GameContent::hash`; a
   custom burst ability is exercised by a simulation test (content/ability-pack.toml).
 - Runtime maps: `MapSpec` lanes/spawns/structures/walls, partial TOML `[map]` overlay,
   validation, simulation placement, and `WireMap` lane/wall geometry for the client. Map-only

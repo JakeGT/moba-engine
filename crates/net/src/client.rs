@@ -13,8 +13,8 @@ use crate::crypto::{
 };
 use crate::protocol::{
     FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotDelta, SnapshotState,
-    WireCommand, catalog_hash, decode_hello, decode_packet, decode_snapshot, decode_welcome,
-    encode_hello, encode_input, encode_packet, sequence_after,
+    WireCommand, decode_hello, decode_packet, decode_snapshot, decode_welcome, encode_hello,
+    encode_input, encode_packet, sequence_after,
 };
 use crate::transport::UdpTransport;
 
@@ -500,21 +500,19 @@ impl NetClient {
                     if welcome.nonce != self.nonce {
                         continue;
                     }
-                    let item_count =
-                        usize::from(welcome.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
-                    let hero_count =
-                        usize::from(welcome.hero_count).min(crate::protocol::MAX_WIRE_HEROES);
-                    let ability_count =
-                        usize::from(welcome.ability_count).min(crate::protocol::MAX_WIRE_ABILITIES);
-                    let content_hash = catalog_hash(
-                        &welcome.items[..item_count],
-                        &welcome.heroes[..hero_count],
-                        &welcome.abilities[..ability_count],
-                        &welcome.map,
-                    );
+                    let Ok(content_hash) = welcome.catalog.content_hash() else {
+                        continue;
+                    };
                     if content_hash != welcome.content_hash {
                         continue;
                     }
+                    let catalog = &welcome.catalog;
+                    let item_count =
+                        usize::from(catalog.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
+                    let hero_count =
+                        usize::from(catalog.hero_count).min(crate::protocol::MAX_WIRE_HEROES);
+                    let ability_count =
+                        usize::from(catalog.ability_count).min(crate::protocol::MAX_WIRE_ABILITIES);
                     if let Some(pinned) = self.expected_server {
                         if !welcome.identity
                             || welcome.server_public_key != pinned
@@ -569,13 +567,13 @@ impl NetClient {
                     self.seed = welcome.seed;
                     self.hero_pick = welcome.hero_pick;
                     self.items.clear();
-                    self.items.extend_from_slice(&welcome.items[..item_count]);
+                    self.items.extend_from_slice(&catalog.items[..item_count]);
                     self.heroes.clear();
-                    self.heroes.extend_from_slice(&welcome.heroes[..hero_count]);
+                    self.heroes.extend_from_slice(&catalog.heroes[..hero_count]);
                     self.abilities.clear();
                     self.abilities
-                        .extend_from_slice(&welcome.abilities[..ability_count]);
-                    self.map = welcome.map;
+                        .extend_from_slice(&catalog.abilities[..ability_count]);
+                    self.map = catalog.map;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });

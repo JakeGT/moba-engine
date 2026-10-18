@@ -1,6 +1,6 @@
 # Audit remediation plan — 2026-10-18
 
-Status: **executing** (W0/W1 complete; W2 in progress)  
+Status: **executing** (W0/W1/W2 complete; W3 next)  
 Tracking issue: [#46](https://github.com/JakeGT/moba-engine/issues/46)  
 Scope: all open GitHub issues as of 2026-10-18, especially the audit findings #23–#45.
 
@@ -122,17 +122,17 @@ data structures.
 range indicators and later content updates.
 
 - [x] **#31 strict schema** (landed in W0).
-- [ ] **#40 single `GameContent -> WireCatalog` conversion.**
+- [x] **#40 single `GameContent -> WireCatalog` conversion.**
   - Move conversion into `moba-net`; only conversion path.
   - Ship ability kind, cast range, radius, duration and other display fields.
   - Send `GameContent::hash` (or derive catalogue hash from it); client verifies.
   - Compile-failing destructuring + content→wire→client parity test.
-- [ ] **Protocol v13** and parity tests; document that wire hashes are no longer a lossy subset.
+- [x] **Protocol v13** and parity tests; document that wire hashes are no longer a lossy subset.
 
 **W2 exit**
-- [ ] Client can render range/radius indicators from wire data.
-- [ ] New content field cannot be silently omitted; parity test in CI.
-- [ ] Protocol bump documented; old clients rejected clearly.
+- [x] Client can render range/radius indicators from wire data.
+- [x] New content field cannot be silently omitted; parity test in CI.
+- [x] Protocol bump documented; old clients rejected clearly.
 
 *#10 (per-client updates) becomes implementable next; do not start it before #40.*
 
