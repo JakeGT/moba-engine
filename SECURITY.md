@@ -30,14 +30,16 @@ is **not** a complete public-internet security model:
 - replay is limited by sequence/ack semantics, not a formal anti-replay window;
 - a compromised client or key compromises that match.
 
-Do not expose a plaintext server to the public internet. For public deployments, terminate
-transport security in a trusted gateway or wait for the M7 authenticated key-exchange work.
+Do not expose a plaintext server to the public internet. For public deployments use the
+pre-shared-key or per-client token modes behind a trusted gateway. Authenticated encryption is
+implemented, but there is still no account system, key rotation/revocation service or
+post-compromise key-transparency guarantee.
 
 ## Reporting a vulnerability
 
 Please report suspected vulnerabilities privately via the repository's **GitHub Security
-Advisories** ("Report a vulnerability" on the Security tab) once the public repository is
-available. Include:
+Advisories** ("Report a vulnerability" on the Security tab) of the public repository at
+<https://github.com/JakeGT/moba-engine>. Include:
 
 - affected crate/version and platform;
 - reproduction steps or a packet capture;

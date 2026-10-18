@@ -1,6 +1,6 @@
 # Audit remediation plan — 2026-10-18
 
-Status: **proposed / awaiting execution approval**  
+Status: **executing** (W0/W1 complete; W2 in progress)  
 Tracking issue: [#46](https://github.com/JakeGT/moba-engine/issues/46)  
 Scope: all open GitHub issues as of 2026-10-18, especially the audit findings #23–#45.
 
@@ -47,43 +47,43 @@ fuzzers, parity/golden tests, replay fixtures, `CHANGELOG.md`, `AGENTS.md` and r
 before refactoring.
 
 ### W0.1 Safety / authority
-- [ ] **#33 ECS despawn panic safety.** Move/drop guard + `assert_eq!` + bounds-checked access
+- [x] **#33 ECS despawn panic safety.** Move/drop guard + `assert_eq!` + bounds-checked access
   and a Miri drop-panic test. *Blocks all trusted embedding.*
-- [ ] **#25 point-AoE `cast_range`.** Validate Slow/Root/Silence/Burn; define `cast_range = 0`
+- [x] **#25 point-AoE `cast_range`.** Validate Slow/Root/Silence/Burn; define `cast_range = 0`
   as self-centred; fix Burst behavior/docs; content-check warning; no mana/cooldown on reject.
-- [ ] **#24 Haste/Slow base bug.** Separate base speed from effective speed; tests for
+- [x] **#24 Haste/Slow base bug.** Separate base speed from effective speed; tests for
   Haste→Slow, Slow→Haste, re-application and item purchase during effects.
-- [ ] **#23 human shop replay divergence.** Queue purchases through `TickInputs` (recommended:
+- [x] **#23 human shop replay divergence.** Queue purchases through `TickInputs` (recommended:
   dedicated per-slot purchase field so move+shop in one tick remains possible), phase-gate to
   `Playing`, record it, and test a real-UDP human purchase replay.
-- [ ] **#28 decoder allocation bounds.** Replay frame/checkpoint counts and wire snapshot
+- [x] **#28 decoder allocation bounds.** Replay frame/checkpoint counts and wire snapshot
   counts; caps by `remaining/MIN_RECORD`; regression tests + fuzz count mutations.
-- [ ] **#32 renderer audit.**
-  - macOS `VK_KHR_portability_enumeration` extension + runtime enable path.
-  - swapchain acquire barrier (`COLOR_ATTACHMENT_OUTPUT` source stage).
-  - capture buffer resize/format/TRANSFER_SRC validation.
-  - optional descriptor-indexing features; resize/fence/drop-order fixes.
-  - validation error count + sync validation in Required mode.
+- [x] **#32 renderer audit.**
+  - [x] macOS `VK_KHR_portability_enumeration` extension + runtime enable path.
+  - [x] swapchain acquire barrier (`COLOR_ATTACHMENT_OUTPUT` source stage).
+  - [x] capture buffer resize/format/TRANSFER_SRC validation.
+  - [x] optional descriptor-indexing features; resize/fence/drop-order fixes.
+  - [x] validation error count + sync validation in Required mode.
 
 ### W0.2 CI trust
-- [ ] **#34 duplicate example target name and clock/UDP flake.** Rename one example; timeout
+- [x] **#34 duplicate example target name and clock/UDP flake.** Rename one example; timeout
   ≥3× ping or inject a clock; drain transient socket errors with `continue`; consider
   `SIO_UDP_CONNRESET = FALSE`.
-- [ ] **#35 CI gates:** cross-OS fixed state hash, release tests, nightly 1h fuzz + 5m soak +
+- [x] **#35 CI gates:** cross-OS fixed state hash, release tests, nightly 1h fuzz + 5m soak +
   match-soak, MSRV, doctests, concurrency cancellation, bench gate (warn/fail thresholds).
-- [ ] **#31 strict content schema:** `deny_unknown_fields`, typed enums (no silent physical/
+- [x] **#31 strict content schema:** `deny_unknown_fields`, typed enums (no silent physical/
   blue/tower fallbacks), coordinate/stat bounds, saturating/i64 math, wire/content limit
   assertions, content-check rejection tests.
-- [ ] **#37 docs truth pass:** milestone evidence links, tooling/Miri wording, CHANGELOG,
+- [x] **#37 docs truth pass:** milestone evidence links, tooling/Miri wording, CHANGELOG,
   SECURITY, CONTRIBUTING, perf log, AGENTS repo map, API tiers, contributor extension
   checklists.
 
 **W0 exit**
-- [ ] `cargo fmt`, clippy, docs, 178+ tests and release tests green on Linux/Windows/macOS.
-- [ ] Miri drop-panic test green; validation + sync validation zero messages for client/capture.
-- [ ] No direct replay-format change yet (purchases still need W1).
-- [ ] New regression tests for #23/#24/#25/#28/#33/#34.
-- [ ] Status docs no longer claim ✅ without evidence.
+- [x] `cargo fmt`, clippy, docs, 178+ tests and release tests green on Linux/Windows/macOS.
+- [x] Miri drop-panic test green; validation + sync validation zero messages for client/capture.
+- [x] W0 closed before replay v5; purchases landed in the W1 train.
+- [x] New regression tests for #23/#24/#25/#28/#33/#34.
+- [x] Status docs no longer claim ✅ without evidence.
 
 ---
 
@@ -93,26 +93,26 @@ before refactoring.
 data structures.
 
 ### W1.1 State hash contract
-- [ ] **#26 state hash coverage.** Hash every listed component/field (MoveSpeed, Resistances,
+- [x] **#26 state hash coverage.** Hash every listed component/field (MoveSpeed, Resistances,
   Regen, VisionRange, LastHitBy, AttackDamageType, HeroSlot; Health/Mana max; AttackStats
   fields; projectile direction/speed/radius/type). Unique tags. Single registry or `HashState`
   trait; destructure structs; coverage test enumerates every registered component.
 
 ### W1.2 Replay format v5
-- [ ] **#27 replay version.** Set `VERSION = 4` (then publish v5 with this wave), add
+- [x] **#27 replay version.** Set `VERSION = 4` (then publish v5 with this wave), add
   `ReplayError::UnsupportedVersion`, add `SIM_LOGIC_VERSION`; module docs match encoder.
-- [ ] **#23 purchase frames** (from W0) encoded in replay v5.
-- [ ] Re-record checked-in golden/custom replays and checkpoints; retain at least one legacy
+- [x] **#23 purchase frames** (from W0) encoded in replay v5.
+- [x] Re-record checked-in golden/custom replays and checkpoints; retain at least one legacy
   v1-header fixture to prove a clear version error.
-- [ ] Hash/order changes documented as expected divergence; add a human-purchase replay test.
+- [x] Hash/order changes documented as expected divergence; add a human-purchase replay test.
 
 **W1 exit**
-- [ ] A cross-OS golden state-hash test runs on Linux/Windows/macOS with a fixed seed/content/
+- [x] A cross-OS golden state-hash test runs on Linux/Windows/macOS with a fixed seed/content/
   script.
-- [ ] Human-purchase replay verifies all checkpoints.
-- [ ] Replay `VERSION`/`SIM_LOGIC_VERSION`/docs/CHANGELOG agree.
-- [ ] A coverage test fails if a new gameplay component is added without hashing.
-- [ ] Re-baseline golden hashes deliberately and record the commit.
+- [x] Human-purchase replay verifies all checkpoints.
+- [x] Replay `VERSION`/`SIM_LOGIC_VERSION`/docs/CHANGELOG agree.
+- [x] A coverage test fails if a new gameplay component is added without hashing.
+- [x] Re-baseline golden hashes deliberately and record the commit.
 
 ---
 
@@ -121,7 +121,7 @@ data structures.
 **Goal:** make the client catalogue and server content one source of truth; unblock tooltips,
 range indicators and later content updates.
 
-- [ ] **#31 strict schema** (landed in W0 if possible; otherwise finish here).
+- [x] **#31 strict schema** (landed in W0).
 - [ ] **#40 single `GameContent -> WireCatalog` conversion.**
   - Move conversion into `moba-net`; only conversion path.
   - Ship ability kind, cast range, radius, duration and other display fields.

@@ -7,15 +7,15 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 | # | Milestone | State | Notes |
 |---|---|---|---|
-| M0 | Bootstrap | ✅ | Workspace, lints, CI, justfile, agent instructions. |
-| M1 | Core runtime | ✅ | Fixed-point core, SoA archetype ECS, work-stealing jobs, arenas/bitsets, Miri jobs in CI. Loom model of the job-scope counter remains. |
-| M2 | Platform | ✅ (Linux verified; CI configured for Windows/macOS) | winit window/input, 30 Hz fixed step, headless smoke/capture modes. |
-| M3 | Renderer | 🟡 | Vulkan 1.2 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, bitmap UI and readback; validated on lavapipe. Skinning, golden-image CI, min-spec frame timings and Windows/macOS validation remain. |
-| M4 | Simulation | ✅ (Linux verified) | Deterministic 5v5, 3 lanes, towers/nexuses, minions, bots, respawns, XP/gold/items, vision filtering; **13.3 µs/tick** steady benchmark. |
-| M5 | Networking | ✅ (Linux verified) | UDP, fragmentation, delta snapshots, prediction/interpolation, reconnect, spectators, protocol v12 identity/auth; final one-hour v12 fuzz passed. |
-| M6 | Vertical slice | ✅ (Linux verified) | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons. Audio/settings deferred. |
-| M7 | Hardening | ✅ (Linux verified) | AEAD, per-client tokens, Ed25519 server/client identity, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence. |
-| M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs, manifests, hot reload (empty lobby), 10 ability kinds, per-hero growth. Per-client live updates, manifest attestation and asset mapping remain. |
+| M0 | Bootstrap | ✅ [evidence](../README.md) | Workspace, lints, CI, justfile, agent instructions. |
+| M1 | Core runtime | 🟡 [evidence](tasks/0001-core-runtime.md) | Fixed-point core, SoA ECS, work stealing, arenas/bitsets; Miri is green in CI. The Loom model of the job-scope counter is still open (#16), so the milestone is not complete. |
+| M2 | Platform | 🟡 [evidence](tasks/0002-platform.md) | Linux runtime verified; Windows/macOS are compile/CI checked but not runtime-validated. winit/input, 30 Hz step and headless modes are present. |
+| M3 | Renderer | 🟡 [evidence](tasks/0003-renderer.md) | Vulkan 1.2 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, bitmap UI and readback; validated on lavapipe. Skinning, golden-image CI, min-spec frame timings and Windows/macOS validation remain. |
+| M4 | Simulation | ✅ [evidence](tasks/0004-simulation.md) | Deterministic 5v5, 3 lanes, towers/nexuses, minions, bots, respawns, XP/gold/items, vision filtering; **13.3 µs/tick** steady benchmark. |
+| M5 | Networking | ✅ [evidence](tasks/0005-networking.md) | UDP, fragmentation, delta snapshots, prediction/interpolation, reconnect, spectators, protocol v12 identity/auth; final one-hour v12 fuzz passed. |
+| M6 | Vertical slice | 🟡 [evidence](tasks/0006-vertical-slice.md) | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons. Audio/settings deferred; a 10-client playtest on a real network has not been recorded. |
+| M7 | Hardening | 🟡 [evidence](tasks/0007-hardening.md) | AEAD, per-client tokens, Ed25519 server/client identity, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence. 50 *concurrent* matches per box and independent code-review evidence remain open. |
+| M8 | Content pipeline | 🟡 [evidence](tasks/0008-content.md) | Runtime item/hero/ability/map packs, manifests, hot reload (empty lobby), 10 ability kinds, per-hero growth. Per-client live updates, manifest attestation and asset mapping remain. |
 
 ## Core capabilities
 
@@ -35,8 +35,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **192 passed**, 0 failed, 3 ignored.
-- `cargo test --workspace --release --locked`: **192 passed**, 0 failed.
+- `cargo test --workspace --locked`: **193 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --release --locked`: **193 passed**, 0 failed.
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
@@ -55,26 +55,28 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 - Allocation guard: **12 allocations / 490 bytes per 300 steady ticks**.
 - Auth smoke: pinned server + client identity + per-client token produced a verified
   314-tick replay. Missing/wrong identity/token/pin paths are covered by tests.
-- Replay: custom Example Pack 1.0.0 replay verified at content `0x717e1ddd76abfabe` /
-  state `0xd101300c1c113b98`, 3 checkpoints.
+- Replay v5: round-trip, checkpoint, human-purchase and unsupported-version tests pass;
+  cross-OS golden state hash `0xb852fe4bba4e7c28`. The old custom-pack state hash is
+  intentionally retired by the #26/#27 hash/format change.
 - Release audit: 0 broken local Markdown links; every example/map/ability content pack
   validates.
 - Renderer audit: validation-required + sync-validation client capture passes with zero
   messages (Linux/lavapipe); macOS instance creation is fixed but awaiting macOS runtime CI.
 - CI: cross-OS golden state hash, release tests/doctests, MSRV 1.85 and nightly fuzz/soak/
   match-soak/bench workflows are configured.
-- GitHub CI is green on Ubuntu, Windows and macOS, plus the Miri, cargo-deny and tools/soak
-  jobs (`ci` run 39115696239).
+- GitHub CI is green on Ubuntu, Windows and macOS, plus Miri, cargo-deny and the `tools` job
+  (deterministic match soak/bench compilation). The recurring network soak runs in the nightly
+  workflow; see [Actions](https://github.com/JakeGT/moba-engine/actions).
 
 Screenshots are in [the gallery](screenshots.md). Renderer/network captures use lavapipe and
 headless readback; see [software Vulkan](dev/software-vulkan.md).
 
 ## Tooling availability
 
-`just`, `cargo-nextest`, `cargo-deny` and Miri were not available in the local build
-environment during the final rounds. Equivalent commands were run manually; CI jobs for
-cargo-deny and Miri are configured. Miri results in the task history are from earlier
-local runs, not a final-round rerun.
+The local build container does not provide `just`, `cargo-nextest`, `cargo-deny` or Miri.
+Equivalent cargo commands were run manually; CI runs Miri over the unsafe containers and
+`cargo-deny`, and the nightly workflow runs the one-hour fuzz/network soak. Local Miri
+evidence predates the final round; the authoritative result is the green CI `miri` job.
 
 ## Known gaps and tracked work
 

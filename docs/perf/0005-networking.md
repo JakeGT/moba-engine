@@ -68,7 +68,7 @@ milliseconds.
 
 Custom-content replay: 555 ticks with Example Pack 1.0.0 (8 items + Vanguard) produced a
 `.mbr`; offline verification with `--items` matched the pack manifest, 3 checkpoints, content
-hash `0x717e1ddd76abfabe` and state hash `0xd101300c1c113b98`.
+content hash `0x717e1ddd76abfabe`; state hashes were re-baselined by the #58 hash contract.
 
 
 ## Tick telemetry
@@ -106,7 +106,7 @@ One-hour release runs of `fuzz-wire` completed with no panic or decoder hang:
 - server 9,117 ticks / 90,426 snapshots, 15,972 KiB sent / 3,327 KiB received
 - about **5.0 KiB/s down** and **1.17 KiB/s up** per client
 - avg tick **15 us**, max **304 us**, rate_limited 0, replayed_hellos 0
-- final state hash `0xf8b000d9924baf3`
+- final state hash from the #58 contract (see `tests/golden-state-hash.txt`)
 
 This is well inside the 33 ms tick budget and the bandwidth budget for small dedicated
 servers.

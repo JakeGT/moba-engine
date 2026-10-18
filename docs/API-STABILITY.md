@@ -7,12 +7,14 @@ tiers make breakage predictable and reviews honest.
 |---|---|---|
 | Foundation | `moba-core`, `moba-ecs`, `moba-jobs` | API is settling; breaking changes documented and deprecation preferred within a minor line |
 | Engine | `moba-game`, `moba-sim`, `moba-net`, `moba-nav`, `moba-render`, `moba-platform` | Preview: breaking changes allowed between minor versions; migration notes in `CHANGELOG.md` |
-| Applications | `moba-engine`, `moba-client`, `moba-server`, `moba-tools`, `moba-netsim`, `moba-shaders` | Binaries/internal crates; no API promise |
+| Applications | `moba-client`, `moba-server`, `moba-tools`, `moba-netsim`, `moba-shaders` | Binaries/internal crates; no API promise |
+| Embedding | `moba-engine` | Umbrella facade for embedders; follows the Engine tier. Prefer feature-gated re-exports over new facade-only types. |
 
 ## Rules for changes
 
-1. Prefer additive changes: new types, new fields behind constructors, new enum variants only
-   when callers are expected to be non-exhaustive.
+1. Prefer additive changes: new types, new fields behind constructors, and new enum variants
+   only after marking the enum `#[non_exhaustive]` (most public enums are not yet marked, so
+   adding a variant is a breaking change today).
 2. Renaming/removing public items requires a `CHANGELOG.md` entry and a deprecation where
    feasible.
 3. Wire protocol changes bump `PROTOCOL_VERSION`; never reinterpret an existing version.
@@ -24,8 +26,8 @@ tiers make breakage predictable and reviews honest.
 
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` must pass.
 - CI runs the test suite on Linux, Windows and macOS.
-- Before a tagged release, run `cargo-semver-checks` against the previous tag (tooling to be
-  wired into the release workflow; see the Bevy/Rust guidance below).
+- `cargo-semver-checks` is **not wired up yet** (#21); running it against the previous tag is a
+  release blocker once a first tag exists.
 - `cargo-public-api` diffs are reviewed when preparing release notes.
 
 ## Publishing

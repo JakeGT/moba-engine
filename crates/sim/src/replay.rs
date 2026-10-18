@@ -562,6 +562,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_header_is_rejected_clearly() {
+        let mut data = MAGIC.to_vec();
+        data.push(1);
+        assert!(matches!(
+            Replay::decode(&data),
+            Err(ReplayError::UnsupportedVersion {
+                found: 1,
+                supported: VERSION
+            })
+        ));
+    }
+
+    #[test]
     fn replay_rejects_unknown_layout_or_logic_versions() {
         let mut encoded = Replay::new(SimConfig::default()).encode();
         encoded[8] = VERSION + 1;
