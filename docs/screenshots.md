@@ -6,6 +6,12 @@ preview-quality and will evolve.
 
 ## Renderer and simulation
 
+### Animated hero rig
+![Animated hero rig](images/m8-hero-rig.png)
+
+Local preview with procedural multi-part hero rigs (torso/head/arms/legs) animated from the
+deterministic simulation tick; minions and structures retain the instanced-cube path.
+
 ### Real NVIDIA hardware (1920×1080)
 ![Real NVIDIA hardware](images/m8-nvidia-teamfight.png)
 

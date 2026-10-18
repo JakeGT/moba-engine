@@ -68,3 +68,9 @@ extension selection and physical-device enumeration under MoltenVK. See
 - [x] `MOBA_FRAME_LOG`/`MOBA_VSYNC` benchmark path documented in
   `docs/perf/0007-real-hardware.md`; Windows/macOS commands recorded there (no real GPU in CI).
 - [x] Capture artifact `docs/images/m8-nvidia-teamfight.png`.
+
+## Animated hero rig
+
+- [x] Procedural multi-part hero rig (torso/head/arms/legs) animated from ticks; no per-frame
+  heap allocation, existing instance pipeline.
+- [ ] GPU skinning/joint-weight mesh path (full task remains open).
