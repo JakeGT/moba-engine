@@ -13,8 +13,8 @@ use moba_game::{
 use moba_nav::SpatialGrid;
 
 use crate::components::{
-    AttackDamageType, AttackStats, AttackTarget, Burn, Cooldowns, Dead, Haste, Health,
-    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position,
+    AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Burn, Cooldowns, Dead, Haste,
+    Health, HeroIdentity, HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position,
     Progression, Regen, Resistances, Root, Shield, Silence, Slow, UnitKind, VisionRange,
 };
 
@@ -684,7 +684,6 @@ impl Simulation {
             }
             if let Some(haste) = self.world.get::<Haste>(entity) {
                 hasher.write_u32(8);
-                hasher.write_u64(haste.base.to_bits() as u64);
                 hasher.write_u64(haste.factor.to_bits() as u64);
                 hasher.write_u32(haste.remaining);
             }
@@ -698,7 +697,6 @@ impl Simulation {
             }
             if let Some(slow) = self.world.get::<Slow>(entity) {
                 hasher.write_u32(4);
-                hasher.write_u64(slow.base.to_bits() as u64);
                 hasher.write_u64(slow.factor.to_bits() as u64);
                 hasher.write_u32(slow.remaining);
             }
@@ -807,9 +805,9 @@ impl Simulation {
                 magic_resist: def.magic_resist,
             },
         );
-        let _ = self
-            .world
-            .insert(entity, MoveSpeed(def.move_speed_per_sec * ONE_TICK));
+        let base_speed = def.move_speed_per_sec * ONE_TICK;
+        let _ = self.world.insert(entity, MoveSpeed(base_speed));
+        let _ = self.world.insert(entity, BaseMoveSpeed(base_speed));
         let _ = self.world.insert(entity, MoveTarget::default());
         let _ = self.world.insert(entity, AttackTarget::default());
         let _ = self
@@ -883,9 +881,9 @@ impl Simulation {
                 magic_resist: def.magic_resist,
             },
         );
-        let _ = self
-            .world
-            .insert(entity, MoveSpeed(def.move_speed_per_sec * ONE_TICK));
+        let base_speed = def.move_speed_per_sec * ONE_TICK;
+        let _ = self.world.insert(entity, MoveSpeed(base_speed));
+        let _ = self.world.insert(entity, BaseMoveSpeed(base_speed));
         let _ = self.world.insert(entity, MoveTarget::default());
         let _ = self.world.insert(entity, AttackTarget::default());
         let _ = self.world.insert(
@@ -936,6 +934,27 @@ impl Simulation {
             }
         }
         self.push_event(SimEvent::WaveSpawned { wave: self.wave });
+    }
+
+    fn recompute_move_speed(&mut self, entity: Entity) {
+        let base = self
+            .world
+            .get::<BaseMoveSpeed>(entity)
+            .map(|base| base.0)
+            .or_else(|| self.world.get::<MoveSpeed>(entity).map(|speed| speed.0));
+        let Some(base) = base else {
+            return;
+        };
+        let mut factor = Fix::ONE;
+        if let Some(slow) = self.world.get::<Slow>(entity) {
+            factor *= slow.factor;
+        }
+        if let Some(haste) = self.world.get::<Haste>(entity) {
+            factor *= haste.factor;
+        }
+        if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
+            speed.0 = base * factor;
+        }
     }
 
     #[allow(clippy::too_many_lines)] // One ordered status/timer pass.
@@ -993,12 +1012,8 @@ impl Simulation {
             }
         }
         for entity in expired_hastes {
-            if let Some(haste) = self.world.get::<Haste>(entity).copied() {
-                if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
-                    speed.0 = haste.base;
-                }
-            }
             let _ = self.world.remove::<Haste>(entity);
+            self.recompute_move_speed(entity);
         }
         let mut expired_roots = Vec::new();
         for (entity, root) in self.world.query::<&mut Root>() {
@@ -1018,12 +1033,8 @@ impl Simulation {
             }
         }
         for entity in expired_slows {
-            if let Some(slow) = self.world.get::<Slow>(entity).copied() {
-                if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
-                    speed.0 = slow.base;
-                }
-            }
             let _ = self.world.remove::<Slow>(entity);
+            self.recompute_move_speed(entity);
         }
         let mut expired_shields = Vec::new();
         for (entity, shield) in self.world.query::<&mut Shield>() {
@@ -1060,18 +1071,9 @@ impl Simulation {
         let _ = self.world.remove::<Dead>(entity);
         let _ = self.world.remove::<LastHitBy>(entity);
         let _ = self.world.remove::<Shield>(entity);
-        if let Some(slow) = self.world.get::<Slow>(entity).copied() {
-            if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
-                speed.0 = slow.base;
-            }
-        }
-        if let Some(haste) = self.world.get::<Haste>(entity).copied() {
-            if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
-                speed.0 = haste.base;
-            }
-        }
         let _ = self.world.remove::<Slow>(entity);
         let _ = self.world.remove::<Haste>(entity);
+        self.recompute_move_speed(entity);
         let _ = self.world.remove::<Root>(entity);
         let _ = self.world.remove::<Silence>(entity);
         let _ = self.world.remove::<Burn>(entity);
@@ -1322,29 +1324,18 @@ impl Simulation {
                 factor,
                 duration_ticks,
             } => {
-                let current = self.world.get::<MoveSpeed>(caster).map(|speed| speed.0);
-                let Some(current) = current else {
-                    return;
-                };
-                let base = self
-                    .world
-                    .get::<Slow>(caster)
-                    .map(|slow| slow.base)
-                    .or_else(|| self.world.get::<Haste>(caster).map(|haste| haste.base))
-                    .unwrap_or(current);
-                let _ = self.world.remove::<Slow>(caster);
-                let _ = self.world.remove::<Haste>(caster);
-                if let Some(speed) = self.world.get_mut::<MoveSpeed>(caster) {
-                    speed.0 = base * factor;
-                }
+                let existing = self.world.get::<Haste>(caster).copied();
+                let applied = existing.map_or(factor, |haste| haste.factor.max(factor));
+                let remaining =
+                    existing.map_or(duration_ticks, |haste| haste.remaining.max(duration_ticks));
                 let _ = self.world.insert(
                     caster,
                     Haste {
-                        base,
-                        factor,
-                        remaining: duration_ticks,
+                        factor: applied,
+                        remaining,
                     },
                 );
+                self.recompute_move_speed(caster);
             }
             moba_game::AbilityKind::Silence {
                 radius,
@@ -1416,29 +1407,21 @@ impl Simulation {
                 }
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target_entity in hits.drain(..) {
-                    let current = self
-                        .world
-                        .get::<MoveSpeed>(target_entity)
-                        .map(|speed| speed.0);
-                    let Some(current) = current else {
+                    if !self.world.has::<MoveSpeed>(target_entity) {
                         continue;
-                    };
+                    }
                     let existing = self.world.get::<Slow>(target_entity).copied();
-                    let base = existing.map_or(current, |slow| slow.base);
-                    let applied_factor = existing.map_or(factor, |slow| slow.factor.min(factor));
+                    let applied = existing.map_or(factor, |slow| slow.factor.min(factor));
                     let remaining =
                         existing.map_or(duration_ticks, |slow| slow.remaining.max(duration_ticks));
                     let _ = self.world.insert(
                         target_entity,
                         Slow {
-                            base,
-                            factor: applied_factor,
+                            factor: applied,
                             remaining,
                         },
                     );
-                    if let Some(speed) = self.world.get_mut::<MoveSpeed>(target_entity) {
-                        speed.0 = base * applied_factor;
-                    }
+                    self.recompute_move_speed(target_entity);
                 }
                 self.damage_hits = hits;
             }
@@ -1951,22 +1934,12 @@ impl Simulation {
             resistances.magic_resist = resistances.magic_resist.saturating_add(item.magic_resist);
         }
         let bonus = item.move_speed_per_sec * ONE_TICK;
-        let factor = self
-            .world
-            .get::<Slow>(hero)
-            .map(|slow| slow.factor)
-            .or_else(|| self.world.get::<Haste>(hero).map(|haste| haste.factor));
-        if let Some(speed) = self.world.get_mut::<MoveSpeed>(hero) {
-            speed.0 += factor.map_or(bonus, |factor| bonus * factor);
+        if let Some(base) = self.world.get_mut::<BaseMoveSpeed>(hero) {
+            base.0 += bonus;
+        } else if let Some(speed) = self.world.get_mut::<MoveSpeed>(hero) {
+            speed.0 += bonus;
         }
-        if let Some(mut slow) = self.world.get::<Slow>(hero).copied() {
-            slow.base += bonus;
-            let _ = self.world.insert(hero, slow);
-        }
-        if let Some(mut haste) = self.world.get::<Haste>(hero).copied() {
-            haste.base += bonus;
-            let _ = self.world.insert(hero, haste);
-        }
+        self.recompute_move_speed(hero);
         true
     }
 
@@ -2538,7 +2511,6 @@ mod tests {
         let _ = sim.world.insert(
             hero,
             Slow {
-                base: moba_core::Fix::from_i32(4),
                 factor: moba_core::Fix::from_f32(0.5),
                 remaining: 5,
             },
@@ -2554,7 +2526,6 @@ mod tests {
         let _ = sim.world.insert(
             hero,
             Haste {
-                base: moba_core::Fix::from_i32(4),
                 factor: moba_core::Fix::from_f32(1.5),
                 remaining: 5,
             },
@@ -2826,6 +2797,120 @@ mod tests {
                 .expect("target")
                 .0
                 .is_some()
+        );
+    }
+
+    fn speed_fixture(haste_ticks: u32, slow_ticks: u32) -> (Simulation, Entity, Entity, Fix) {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Fixture Haste"),
+            cooldown_ticks: 30,
+            mana_cost: 0,
+            cast_range: 0.into(),
+            kind: AbilityKind::Haste {
+                factor: Fix::from_f32(1.5),
+                duration_ticks: haste_ticks,
+            },
+        };
+        content.abilities[1] = AbilitySpec {
+            name: String::from("Fixture Slow"),
+            cooldown_ticks: 30,
+            mana_cost: 0,
+            cast_range: 0.into(),
+            kind: AbilityKind::Slow {
+                radius: Fix::from_i32(10_000),
+                factor: Fix::from_f32(0.5),
+                duration_ticks: slow_ticks,
+            },
+        };
+        for hero in &mut content.heroes {
+            hero.abilities = [0, 1, 2];
+        }
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                spawn_waves: false,
+                hero_picks: [0; MAX_PLAYERS],
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        let base = sim.world.get::<BaseMoveSpeed>(blue).expect("base speed").0;
+        let blue_position = sim.world.get::<Position>(blue).expect("position").0;
+        let mut inputs = TickInputs::new();
+        inputs.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: FixVec2::ZERO,
+            },
+        );
+        inputs.set(
+            5,
+            PlayerCommand::CastAbility {
+                slot: 1,
+                target: blue_position,
+            },
+        );
+        sim.tick(&inputs);
+        (sim, blue, red, base)
+    }
+
+    #[test]
+    fn haste_and_slow_expire_cleanly_in_either_order() {
+        let (mut sim, blue, _red, base) = speed_fixture(30, 60);
+        assert_eq!(
+            sim.world.get::<MoveSpeed>(blue).expect("speed").0,
+            base * Fix::from_f32(0.75)
+        );
+        for _ in 0..35 {
+            sim.tick(&TickInputs::new());
+        }
+        assert_eq!(
+            sim.world.get::<MoveSpeed>(blue).expect("speed").0,
+            base * Fix::from_f32(0.5)
+        );
+        for _ in 0..30 {
+            sim.tick(&TickInputs::new());
+        }
+        assert_eq!(sim.world.get::<MoveSpeed>(blue).expect("speed").0, base);
+
+        let (mut sim, blue, _red, base) = speed_fixture(60, 30);
+        for _ in 0..35 {
+            sim.tick(&TickInputs::new());
+        }
+        assert_eq!(
+            sim.world.get::<MoveSpeed>(blue).expect("speed").0,
+            base * Fix::from_f32(1.5)
+        );
+        for _ in 0..30 {
+            sim.tick(&TickInputs::new());
+        }
+        assert_eq!(sim.world.get::<MoveSpeed>(blue).expect("speed").0, base);
+    }
+
+    #[test]
+    fn item_purchase_while_slowed_updates_base_speed() {
+        let (mut sim, blue, _red, base) = speed_fixture(60, 60);
+        let nexus = sim.content.map.nexus_position(Team::Blue);
+        sim.world.get_mut::<Position>(blue).expect("position").0 = nexus;
+        sim.world
+            .get_mut::<Progression>(blue)
+            .expect("progress")
+            .gold = 5_000;
+        assert!(sim.purchase(0, 3), "Swift Boots purchase succeeds");
+        let bonus = sim.content.items[3].move_speed_per_sec * ONE_TICK;
+        let expected = (base + bonus) * Fix::from_f32(0.75);
+        assert_eq!(sim.world.get::<MoveSpeed>(blue).expect("speed").0, expected);
+        for _ in 0..65 {
+            sim.tick(&TickInputs::new());
+        }
+        assert_eq!(
+            sim.world.get::<MoveSpeed>(blue).expect("speed").0,
+            base + bonus
         );
     }
 
