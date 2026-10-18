@@ -143,6 +143,9 @@ If a hot path changes, run the relevant benchmark and record evidence in
    content-check and a short fuzz/soak.
 6. Commit with conventional messages (`feat(area): ...`, `fix(area): ...`, `docs: ...`).
 7. Open a PR using `.github/PULL_REQUEST_TEMPLATE.md`; include commands and evidence.
+   `main` is protected by a ruleset (no direct or force pushes; required checks `gates` ×3 OS,
+   `tools + deterministic soak`, `deny`, `miri`; linear history). Never push to `main`; push a
+   branch and open a PR. Renaming a CI job requires updating the ruleset's required checks.
 8. Do not mark work complete while a linked issue has unfinished acceptance criteria.
 
 ### Tests that need care
