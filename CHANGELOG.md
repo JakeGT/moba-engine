@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Removed the ttf-parser advisory ignore by dropping winit's ab_glyph CSD feature (#22).
 - Settings camera sensitivity/zoom, attack mouse button, spectator camera keys and reset.
 - Client TOML settings: remappable movement/cast/stop/shop/scoreboard/ready/surrender keys,
   validation with safe fallbacks, save/load, reset defaults and documented example file.

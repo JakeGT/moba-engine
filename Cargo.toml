@@ -49,7 +49,7 @@ toml = "0.8"
 glam = "0.30"
 gpu-allocator = "0.27"
 raw-window-handle = "0.6"
-winit = "0.30"
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 
 # Dev-only.
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
