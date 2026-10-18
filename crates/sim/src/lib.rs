@@ -23,7 +23,7 @@ pub use components::{
 pub use moba_game::ModifierKind;
 pub use replay::{Replay, ReplayError, ReplayResult, SIM_LOGIC_VERSION};
 pub use sim::{
-    HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, MAX_ZONES,
-    ObservedUnit, PlayerCommand, SimConfig, SimEvent, Simulation, TICK_DURATION, TickInputs,
-    WAVE_DELAY_TICKS, WAVE_INTERVAL_TICKS, WORLD_EXTENT,
+    BotPolicy, DefaultBotPolicy, HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES,
+    MAX_UNITS, MAX_ZONES, ObservedUnit, PlayerCommand, SimConfig, SimEvent, Simulation,
+    TICK_DURATION, TickInputs, WAVE_DELAY_TICKS, WAVE_INTERVAL_TICKS, WORLD_EXTENT,
 };

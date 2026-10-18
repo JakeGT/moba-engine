@@ -68,6 +68,27 @@ regression test with the same seed and assert `state_hash()`.
 insertion order. Systems receive `&mut Simulation` and `ServerPhase`; keep work deterministic
 and content-hashed because it participates in the same match/replay state.
 
+## Custom bot policies
+
+```rust
+use moba_sim::{BotPolicy, Simulation, TickInputs};
+
+struct DefensivePolicy;
+
+impl BotPolicy for DefensivePolicy {
+    fn inputs(&mut self, simulation: &mut Simulation) -> TickInputs {
+        // Read world state, return commands; no wall-clock or external state.
+        let _ = simulation.unit_count();
+        TickInputs::new()
+    }
+}
+
+simulation.set_bot_policy(Some(Box::new(DefensivePolicy)));
+```
+
+Policies run inside the authoritative tick and must stay deterministic. `set_bot_policy(None)`
+restores the built-in lane/farm/fight policy.
+
 ## Content packs
 
 Runtime packs are TOML validated by `moba-game` and carried by `Welcome`:

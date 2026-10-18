@@ -374,6 +374,25 @@ pub struct ObservedUnit {
     pub hasted: bool,
 }
 
+/// Strategy that produces bot commands each tick.
+///
+/// Policies run deterministically inside the authoritative simulation and receive mutable
+/// world access. Implementations must not consult wall-clock time or external state.
+pub trait BotPolicy: Send + Sync {
+    /// Produces one tick of inputs. Slots left `None` keep their current order.
+    fn inputs(&mut self, simulation: &mut Simulation) -> TickInputs;
+}
+
+/// Built-in bot policy: lane assignment, farming, fighting and shopping.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct DefaultBotPolicy;
+
+impl BotPolicy for DefaultBotPolicy {
+    fn inputs(&mut self, simulation: &mut Simulation) -> TickInputs {
+        simulation.default_bot_inputs()
+    }
+}
+
 /// The authoritative MOBA simulation.
 pub struct Simulation {
     world: World,
@@ -399,6 +418,7 @@ pub struct Simulation {
     modifier_entities: Vec<Entity>,
     burn_hits: Vec<(Entity, i32, DamageType, Entity)>,
     observed_candidates: Vec<ObservedCandidate>,
+    bot_policy: Option<Box<dyn BotPolicy>>,
     bot_rng: [Rng; MAX_PLAYERS],
 }
 
@@ -448,6 +468,7 @@ impl Simulation {
             modifier_entities: Vec::with_capacity(MAX_UNITS),
             burn_hits: Vec::with_capacity(MAX_UNITS),
             observed_candidates: Vec::with_capacity(MAX_UNITS),
+            bot_policy: None,
             bot_rng: core::array::from_fn(|index| {
                 Rng::from_seed(
                     bot_seed ^ (0xB0B0_0000_0000_0000 | (index % 5).wrapping_mul(0x9E37) as u64),
@@ -2265,10 +2286,26 @@ impl Simulation {
         }
     }
 
+    /// Installs a custom bot policy (or restores the default with `None`).
+    pub fn set_bot_policy(&mut self, policy: Option<Box<dyn BotPolicy>>) {
+        self.bot_policy = policy;
+    }
+
     /// Deterministic bot AI. Returns one command per bot-controlled slot.
     #[must_use]
-    #[allow(clippy::too_many_lines)] // Explicit priority ladder is easier to audit.
     pub fn bot_inputs(&mut self) -> TickInputs {
+        if let Some(mut policy) = self.bot_policy.take() {
+            let inputs = policy.inputs(self);
+            self.bot_policy = Some(policy);
+            inputs
+        } else {
+            self.default_bot_inputs()
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_lines)] // Explicit priority ladder is easier to audit.
+    fn default_bot_inputs(&mut self) -> TickInputs {
         self.refresh_spatial();
         self.hero_views.clear();
         for (_entity, (slot, team, position, health, mana, cooldowns, identity, stats)) in
@@ -3694,6 +3731,28 @@ mod tests {
             sim.content.map.nexus_position(Team::Blue),
             FixVec2::from_ints(20, 128)
         );
+    }
+
+    #[test]
+    fn custom_bot_policy_replaces_default_inputs() {
+        struct StopPolicy;
+
+        impl BotPolicy for StopPolicy {
+            fn inputs(&mut self, _simulation: &mut Simulation) -> TickInputs {
+                let mut inputs = TickInputs::new();
+                inputs.set(0, PlayerCommand::Stop);
+                inputs
+            }
+        }
+
+        let mut simulation = Simulation::new(SimConfig::default());
+        simulation.set_bot_policy(Some(Box::new(StopPolicy)));
+        let inputs = simulation.bot_inputs();
+        assert_eq!(inputs.players[0], Some(PlayerCommand::Stop));
+        assert!(inputs.players[1..].iter().all(Option::is_none));
+        simulation.set_bot_policy(None);
+        let default = simulation.bot_inputs();
+        assert!(default.players.iter().any(Option::is_some));
     }
 
     #[test]
