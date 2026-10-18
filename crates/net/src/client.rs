@@ -50,6 +50,8 @@ pub enum ClientEvent {
         /// Server tick.
         tick: u32,
     },
+    /// A presentation event from a snapshot.
+    GameEvent(crate::protocol::NetEvent),
     /// The connection ended.
     Disconnected,
 }
@@ -850,6 +852,9 @@ impl NetClient {
         if sequence_after(seq, self.last_acked_snapshot) {
             self.last_acked_snapshot = seq;
             self.send_ack(seq, false);
+        }
+        for event in &delta.events {
+            self.push_event(ClientEvent::GameEvent(*event));
         }
         self.push_event(ClientEvent::Snapshot {
             seq,

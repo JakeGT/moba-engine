@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Protocol v16 presentation events (cast/projectile/hit/death/objective/zone) with per-viewer
+  fog filtering, projectile extrapolation, client kill feed/projectile rendering and a wide
+  `status_bits` field. 30 s 10-client soak measured 4.7–6.3 KiB/s down per client.
 - Protocol v15 data-driven ability composition: targeting + fixed-capacity effect lists,
   projectile on-hit effects, periodic zones, all 10 legacy kinds expressed as data, and
   `AbilityKind` removed. Data-only root-on-hit and burn-zone examples ship in

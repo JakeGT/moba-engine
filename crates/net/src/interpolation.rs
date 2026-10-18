@@ -129,6 +129,7 @@ mod tests {
             hero_slot: 0,
             hero_pick: 0,
             flags: 0,
+            status_bits: 0,
             max_health: 600,
             max_mana: 300,
             x,
