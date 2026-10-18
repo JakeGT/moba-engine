@@ -153,11 +153,11 @@ range indicators and later content updates.
   - Keep old implementation under `cfg(test)` for one release and diff per-tick `ObservedUnit`
     streams sorted by entity for a pack covering all 10 kinds.
   - Protocol bump for status/visual tags (coordinate with #41).
-- [ ] **#41 presentation event channel** (coordinate one protocol bump):
-  - Bounded, team-filtered events (cast/projectile/hit/death/objective); visibility safe.
-  - Widen flags/status bitset; replicate projectiles or extrapolatable events.
-  - Client kill feed/projectile rendering; audio hook.
-  - Bandwidth evidence ≤40 KB/s teamfight.
+- [x] **#41 presentation event channel** (protocol v16):
+  - [x] Bounded, team-filtered events (cast/projectile/hit/death/objective); visibility safe.
+  - [x] `status_bits:u16`; projectiles as extrapolatable events.
+  - [x] Client kill feed/projectile rendering; audio hook ready via `GameEvent`.
+  - [x] Bandwidth evidence: 4.7–6.3 KiB/s down in 10-client soak.
 - [ ] **#13 scripting hook** built on #38; sandbox/threat model ADR; deterministic host calls.
 
 ### W3.2 Modes and policies

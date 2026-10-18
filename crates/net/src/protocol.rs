@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 15;
+pub const PROTOCOL_VERSION: u8 = 16;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -1868,8 +1868,10 @@ pub struct NetEntity {
     pub hero_slot: u8,
     /// Hero definition index or `0xFF`.
     pub hero_pick: u8,
-    /// Flag bit 0: dead hero.
+    /// Legacy u8 flags (dead + standard status tint bits).
     pub flags: u8,
+    /// Status bitset (wide; includes burn/haste and future tags).
+    pub status_bits: u16,
     /// Maximum health.
     pub max_health: u16,
     /// Maximum mana (zero for non-heroes).
@@ -1903,6 +1905,21 @@ pub const ENTITY_FLAG_BURN: u8 = 1 << 5;
 /// A movement haste is active.
 pub const ENTITY_FLAG_HASTE: u8 = 1 << 6;
 
+/// Wide status bit: dead hero.
+pub const STATUS_DEAD: u16 = 1 << 0;
+/// Wide status bit: shielded.
+pub const STATUS_SHIELD: u16 = 1 << 1;
+/// Wide status bit: slowed.
+pub const STATUS_SLOW: u16 = 1 << 2;
+/// Wide status bit: rooted.
+pub const STATUS_ROOT: u16 = 1 << 3;
+/// Wide status bit: silenced.
+pub const STATUS_SILENCE: u16 = 1 << 4;
+/// Wide status bit: burning.
+pub const STATUS_BURN: u16 = 1 << 5;
+/// Wide status bit: hasted.
+pub const STATUS_HASTE: u16 = 1 << 6;
+
 impl NetEntity {
     /// Quantises an observed unit.
     #[must_use]
@@ -1922,7 +1939,16 @@ impl NetEntity {
                     ENTITY_FLAG_SILENCE
                 } else {
                     0
-                }),
+                })
+                | (if unit.burning { ENTITY_FLAG_BURN } else { 0 })
+                | (if unit.hasted { ENTITY_FLAG_HASTE } else { 0 }),
+            status_bits: (if unit.dead { STATUS_DEAD } else { 0 })
+                | (if unit.shielded { STATUS_SHIELD } else { 0 })
+                | (if unit.slowed { STATUS_SLOW } else { 0 })
+                | (if unit.rooted { STATUS_ROOT } else { 0 })
+                | (if unit.silenced { STATUS_SILENCE } else { 0 })
+                | (if unit.burning { STATUS_BURN } else { 0 })
+                | (if unit.hasted { STATUS_HASTE } else { 0 }),
             max_health: clamp_u16(unit.max_health),
             max_mana: clamp_u16(unit.max_mana),
             x,
@@ -1964,6 +1990,7 @@ impl NetEntity {
             health: (self.health != previous.health).then_some(self.health),
             mana: (self.mana != previous.mana).then_some(self.mana),
             flags: (self.flags != previous.flags).then_some(self.flags),
+            status_bits: (self.status_bits != previous.status_bits).then_some(self.status_bits),
             cooldowns: (self.cooldowns != previous.cooldowns).then_some(self.cooldowns),
             progress: (self.progress != previous.progress).then_some(self.progress),
         }
@@ -1983,6 +2010,9 @@ impl NetEntity {
         }
         if let Some(flags) = update.flags {
             self.flags = flags;
+        }
+        if let Some(status_bits) = update.status_bits {
+            self.status_bits = status_bits;
         }
         if let Some(cooldowns) = update.cooldowns {
             self.cooldowns = cooldowns;
@@ -2006,6 +2036,8 @@ pub struct NetUpdate {
     pub mana: Option<u16>,
     /// Flags when changed.
     pub flags: Option<u8>,
+    /// Wide status bitset when changed.
+    pub status_bits: Option<u16>,
     /// Cooldowns when changed.
     pub cooldowns: Option<[u16; 3]>,
     /// Progression/inventory when changed.
@@ -2018,6 +2050,7 @@ const UPDATE_MANA: u8 = 1 << 2;
 const UPDATE_FLAGS: u8 = 1 << 3;
 const UPDATE_COOLDOWNS: u8 = 1 << 4;
 const UPDATE_PROGRESS: u8 = 1 << 5;
+const UPDATE_STATUS_BITS: u8 = 1 << 6;
 
 /// One snapshot, either a full state (`baseline_seq == 0`) or a delta.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2048,13 +2081,69 @@ pub struct SnapshotDelta {
     pub updates: Vec<NetUpdate>,
     /// Entities that left visibility or died.
     pub despawns: Vec<NetId>,
+    /// Presentation events since the previous snapshot.
+    pub events: Vec<NetEvent>,
 }
+
+/// Maximum presentation events per snapshot.
+pub const MAX_SNAPSHOT_EVENTS: usize = 16;
+
+/// One presentation event in a snapshot.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetEvent {
+    /// Event kind (see `EVENT_*` constants).
+    pub kind: u8,
+    /// Primary team (caster/owner/victim depending on kind).
+    pub team: u8,
+    /// Source entity net id (`0xFFFF` none).
+    pub source: u16,
+    /// Target entity net id (`0xFFFF` none).
+    pub target: u16,
+    /// Source hero slot (`0xFF` none).
+    pub source_slot: u8,
+    /// Target hero slot (`0xFF` none).
+    pub target_slot: u8,
+    /// Quantised primary position.
+    pub x: u16,
+    /// Quantised primary position.
+    pub y: u16,
+    /// Quantised secondary/end position.
+    pub x2: u16,
+    /// Quantised secondary/end position.
+    pub y2: u16,
+    /// Kind-specific value (ability id, unit kind, speed).
+    pub value: u16,
+    /// Kind-specific auxiliary value (radius, wave).
+    pub aux: u16,
+    /// Normalised direction X (`i16::MIN..=i16::MAX`).
+    pub dx: i16,
+    /// Normalised direction Y (`i16::MIN..=i16::MAX`).
+    pub dy: i16,
+}
+
+/// Ability cast event.
+pub const EVENT_CAST: u8 = 1;
+/// Projectile spawned event.
+pub const EVENT_PROJECTILE_SPAWN: u8 = 2;
+/// Projectile hit event.
+pub const EVENT_PROJECTILE_HIT: u8 = 3;
+/// Unit died event.
+pub const EVENT_UNIT_DIED: u8 = 4;
+/// Structure destroyed event.
+pub const EVENT_STRUCTURE_DESTROYED: u8 = 5;
+/// Match ended event.
+pub const EVENT_MATCH_ENDED: u8 = 6;
+/// Zone spawned event.
+pub const EVENT_ZONE_SPAWNED: u8 = 7;
 
 impl SnapshotDelta {
     /// Whether the delta carries no state at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.spawns.is_empty() && self.updates.is_empty() && self.despawns.is_empty()
+        self.spawns.is_empty()
+            && self.updates.is_empty()
+            && self.despawns.is_empty()
+            && self.events.is_empty()
     }
 }
 
@@ -2182,6 +2271,7 @@ pub fn build_delta(
             spawns: current.to_vec(),
             updates: Vec::new(),
             despawns: Vec::new(),
+            events: Vec::new(),
         };
     };
     let mut delta = SnapshotDelta {
@@ -2198,6 +2288,7 @@ pub fn build_delta(
         spawns: Vec::new(),
         updates: Vec::new(),
         despawns: Vec::new(),
+        events: Vec::new(),
     };
     let (mut old_index, mut new_index) = (0usize, 0usize);
     while old_index < baseline.len() || new_index < current.len() {
@@ -2208,6 +2299,7 @@ pub fn build_delta(
                     || update.health.is_some()
                     || update.mana.is_some()
                     || update.flags.is_some()
+                    || update.status_bits.is_some()
                     || update.cooldowns.is_some()
                     || update.progress.is_some()
                 {
@@ -2318,6 +2410,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<WireCommand, WireError> {
 ///
 /// # Errors
 /// Returns [`WireError::TooMany`] when a count exceeds `u16::MAX`.
+#[allow(clippy::too_many_lines)] // Field order mirrors the decoder one-for-one.
 pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), WireError> {
     out.clear();
     out.reserve(40 + delta.spawns.len() * 36 + delta.updates.len() * 12 + delta.despawns.len() * 2);
@@ -2341,6 +2434,7 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         out.push(spawn.hero_slot);
         out.push(spawn.hero_pick);
         out.push(spawn.flags);
+        put_u16(out, spawn.status_bits);
         put_u16(out, spawn.max_health);
         put_u16(out, spawn.max_mana);
         put_u16(out, spawn.x);
@@ -2370,6 +2464,9 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         if update.flags.is_some() {
             mask |= UPDATE_FLAGS;
         }
+        if update.status_bits.is_some() {
+            mask |= UPDATE_STATUS_BITS;
+        }
         if update.cooldowns.is_some() {
             mask |= UPDATE_COOLDOWNS;
         }
@@ -2390,6 +2487,9 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         if let Some(flags) = update.flags {
             out.push(flags);
         }
+        if let Some(status_bits) = update.status_bits {
+            put_u16(out, status_bits);
+        }
         if let Some(cooldowns) = update.cooldowns {
             for cooldown in cooldowns {
                 put_u16(out, cooldown);
@@ -2404,6 +2504,23 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
     }
     for net_id in &delta.despawns {
         put_u16(out, *net_id);
+    }
+    out.push(u8::try_from(delta.events.len()).map_err(|_| WireError::TooMany)?);
+    for event in &delta.events {
+        out.push(event.kind);
+        out.push(event.team);
+        put_u16(out, event.source);
+        put_u16(out, event.target);
+        out.push(event.source_slot);
+        out.push(event.target_slot);
+        put_u16(out, event.x);
+        put_u16(out, event.y);
+        put_u16(out, event.x2);
+        put_u16(out, event.y2);
+        put_u16(out, event.value);
+        put_u16(out, event.aux);
+        out.extend_from_slice(&event.dx.to_le_bytes());
+        out.extend_from_slice(&event.dy.to_le_bytes());
     }
     Ok(())
 }
@@ -2440,6 +2557,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             hero_slot: reader.u8()?,
             hero_pick: reader.u8()?,
             flags: reader.u8()?,
+            status_bits: reader.u16()?,
             max_health: reader.u16()?,
             max_mana: reader.u16()?,
             x: reader.u16()?,
@@ -2467,7 +2585,8 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             | UPDATE_MANA
             | UPDATE_FLAGS
             | UPDATE_COOLDOWNS
-            | UPDATE_PROGRESS;
+            | UPDATE_PROGRESS
+            | UPDATE_STATUS_BITS;
         if mask & !known != 0 {
             return Err(WireError::BadValue);
         }
@@ -2484,6 +2603,9 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             .transpose()?;
         let flags = (mask & UPDATE_FLAGS != 0)
             .then(|| reader.u8())
+            .transpose()?;
+        let status_bits = (mask & UPDATE_STATUS_BITS != 0)
+            .then(|| reader.u16())
             .transpose()?;
         let cooldowns = (mask & UPDATE_COOLDOWNS != 0)
             .then(|| Ok::<[u16; 3], WireError>([reader.u16()?, reader.u16()?, reader.u16()?]))
@@ -2507,6 +2629,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
             health,
             mana,
             flags,
+            status_bits,
             cooldowns,
             progress,
         });
@@ -2514,6 +2637,39 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     let mut despawns = Vec::with_capacity(despawn_count);
     for _ in 0..despawn_count {
         despawns.push(reader.u16()?);
+    }
+    let event_count = usize::from(reader.u8()?);
+    if event_count > MAX_SNAPSHOT_EVENTS {
+        return Err(WireError::BadValue);
+    }
+    let mut events = Vec::with_capacity(event_count);
+    for _ in 0..event_count {
+        events.push(NetEvent {
+            kind: reader.u8()?,
+            team: reader.u8()?,
+            source: reader.u16()?,
+            target: reader.u16()?,
+            source_slot: reader.u8()?,
+            target_slot: reader.u8()?,
+            x: reader.u16()?,
+            y: reader.u16()?,
+            x2: reader.u16()?,
+            y2: reader.u16()?,
+            value: reader.u16()?,
+            aux: reader.u16()?,
+            dx: i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            ),
+            dy: i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            ),
+        });
     }
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -2532,6 +2688,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
         spawns,
         updates,
         despawns,
+        events,
     })
 }
 
@@ -2741,6 +2898,7 @@ mod tests {
             spawns: Vec::new(),
             updates: Vec::new(),
             despawns: Vec::new(),
+            events: Vec::new(),
         };
         let mut payload = Vec::new();
         encode_snapshot(&delta, &mut payload).expect("encode");
@@ -2836,6 +2994,7 @@ mod tests {
             hero_slot: 0,
             hero_pick: 0,
             flags: 0,
+            status_bits: 0,
             max_health: 600,
             max_mana: 300,
             x,
@@ -2883,10 +3042,27 @@ mod tests {
         delta.outcome = 2;
         delta.phase = 3;
         delta.countdown = 450;
+        delta.events.push(NetEvent {
+            kind: EVENT_PROJECTILE_SPAWN,
+            team: 0,
+            source: 1,
+            target: 0xFFFF,
+            source_slot: 0,
+            target_slot: 0xFF,
+            x: 10,
+            y: 20,
+            x2: 30,
+            y2: 40,
+            value: 24,
+            aux: 1,
+            dx: 16_383,
+            dy: -16_383,
+        });
         assert_eq!(delta.spawns.len(), 1);
         assert_eq!(delta.updates.len(), 2);
         encode_snapshot(&delta, &mut payload).unwrap();
         let decoded = decode_snapshot(&payload).unwrap();
+        assert_eq!(decoded.events, delta.events);
         let next = state.apply(&decoded, 4).unwrap();
         assert_eq!(next.entities.len(), 3);
         assert_eq!(next.get(1).unwrap().health, 500);
@@ -3008,8 +3184,8 @@ mod tests {
             slowed: false,
             rooted: false,
             silenced: false,
-            burning: false,
-            hasted: false,
+            burning: true,
+            hasted: true,
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);
@@ -3019,5 +3195,10 @@ mod tests {
         assert_eq!(entity.progress.gold, 950);
         assert!(!entity.is_dead());
         assert!(entity.flags & ENTITY_FLAG_SHIELD != 0);
+        assert!(entity.flags & ENTITY_FLAG_BURN != 0);
+        assert!(entity.flags & ENTITY_FLAG_HASTE != 0);
+        assert!(entity.status_bits & STATUS_SHIELD != 0);
+        assert!(entity.status_bits & STATUS_BURN != 0);
+        assert!(entity.status_bits & STATUS_HASTE != 0);
     }
 }

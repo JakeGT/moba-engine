@@ -168,7 +168,8 @@ the server publishes it in `Welcome`, and clients use the received `WireItem`, `
 `WireCatalog`/`WireAbility`/`WireEffect`/`WireModifier` and `WireMap` entries for shop, HUD,
 modifier names, effects, vision, range/radius overlays and minimap rendering. Abilities are
 composed from targeting + fixed-capacity effects; projectiles carry on-hit effects and zones
-run periodic area effects. The wire catalogue is a complete, destructured projection of
+run periodic area effects. Snapshots also carry a bounded, fog-filtered presentation-event
+list (casts, projectile spawn/hit, deaths, objectives) for the client kill feed/VFX and audio. The wire catalogue is a complete, destructured projection of
 `GameContent`; the client reconstructs it and verifies `GameContent::hash`. Ability
 behaviour kinds are code-defined, but their numbers and hero bindings come from the pack; map,
 lane, structure and wall geometry are fully data-driven. Packs hot-reload only in an empty

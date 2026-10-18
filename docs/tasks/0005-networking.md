@@ -81,12 +81,13 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 [Valve lag compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation),
 [RFC 1982 serial arithmetic](https://www.rfc-editor.org/rfc/rfc1982).
 
-## Protocol v13–v15 catalogue contract
+## Protocol v13–v16 catalogue/event contract
 - `Welcome` carries one complete `WireCatalog` (manifest, items, heroes, abilities, map
   structures/walls) built only by `From<&GameContent>`; clients reconstruct it and verify
   `GameContent::hash`.
 - v14 adds content-defined modifier definitions (name/kind) to the catalogue.
 - v15 replaces ability kinds with targeting + effect lists (projectile on-hit, areas, zones).
+- v16 adds a bounded per-snapshot presentation-event list and wide `status_bits`.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 

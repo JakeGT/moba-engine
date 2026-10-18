@@ -29,7 +29,11 @@ use moba_core::{Fix, FixVec2};
 use moba_game::{
     EMPTY_ITEM, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team, xp_to_next,
 };
-use moba_net::protocol::{MatchPhase, WireCommand, dequantize_position, quantize_position};
+use moba_net::protocol::{
+    EVENT_MATCH_ENDED, EVENT_PROJECTILE_SPAWN, EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED,
+    MatchPhase, NetEvent, STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE,
+    STATUS_SLOW, WireCommand, dequantize_position, quantize_position,
+};
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
 use moba_platform::{
     App, Frame, FrameOutcome, InputState, Key, MouseButton, Window, WindowConfig, run,
@@ -39,11 +43,27 @@ use moba_render::{
     VisionCircles,
 };
 use moba_sim::{SimConfig, Simulation, UnitKind};
+use std::collections::VecDeque;
 
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
 const SNAPSHOT_DELAY_TICKS: f32 = 4.0;
 
 #[allow(clippy::struct_excessive_bools)] // Mode flags are independent UI/network state.
+struct KillFeedEntry {
+    life: u32,
+    text: String,
+}
+
+struct ProjectileFx {
+    team: u8,
+    position: FixVec2,
+    direction: FixVec2,
+    speed: f32,
+    radius: f32,
+    remaining: f32,
+}
+
+#[allow(clippy::struct_excessive_bools)] // Independent connection/UI flags.
 struct NetworkView {
     client: NetClient,
     prediction: PredictionState,
@@ -66,6 +86,8 @@ struct NetworkView {
     spectator_pan: Vec3,
     spectator_yaw: f32,
     spectator_zoom: f32,
+    kill_feed: VecDeque<KillFeedEntry>,
+    projectiles: Vec<ProjectileFx>,
 }
 
 struct ClientApp {
@@ -149,6 +171,8 @@ impl ClientApp {
                         spectator_pan: Vec3::ZERO,
                         spectator_yaw: -0.7,
                         spectator_zoom: 240.0,
+                        kill_feed: VecDeque::with_capacity(6),
+                        projectiles: Vec::with_capacity(32),
                     });
                 }
                 Err(error) => app.startup_error = Some(error),
@@ -274,6 +298,7 @@ impl App for ClientApp {
                                 break;
                             }
                             ClientEvent::Connected { slot } => network.own_slot = slot,
+                            ClientEvent::GameEvent(event) => network.handle_game_event(event),
                             ClientEvent::Snapshot { .. } => {}
                         }
                     }
@@ -367,6 +392,7 @@ impl App for ClientApp {
                             frame_ms,
                             fps,
                         );
+                        network.update_effects(frame_ms);
                         let vision = build_vision(network);
                         let scene = Scene::with_vision(camera, units, vision);
                         if let Some(renderer) = renderer.as_mut() {
@@ -615,7 +641,23 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
         } else {
             f32::from(entity.health) / f32::from(entity.max_health)
         };
-        push_unit(units, position, kind, team, fraction, entity.flags);
+        push_unit(units, position, kind, team, fraction, entity.status_bits);
+    }
+    for projectile in &network.projectiles {
+        let color = if projectile.team == 0 {
+            Vec4::new(0.35, 0.72, 1.0, 1.0)
+        } else {
+            Vec4::new(1.0, 0.45, 0.3, 1.0)
+        };
+        units.push(UnitInstance::at(
+            Vec3::new(
+                projectile.position.x.to_f32() - 128.0,
+                1.2,
+                projectile.position.y.to_f32() - 128.0,
+            ),
+            1.2 + projectile.radius * 0.2,
+            color,
+        ));
     }
 }
 
@@ -625,7 +667,7 @@ fn push_unit(
     kind: UnitKind,
     team: Team,
     health_fraction: f32,
-    status: u8,
+    status: u16,
 ) {
     let team_color = match team {
         Team::Blue => Vec4::new(0.20, 0.46, 1.0, 1.0),
@@ -666,22 +708,22 @@ fn push_unit(
     color.x *= brightness;
     color.y *= brightness;
     color.z *= brightness;
-    if status & moba_net::protocol::ENTITY_FLAG_SHIELD != 0 {
+    if status & STATUS_SHIELD != 0 {
         color = color * 0.65 + Vec4::new(0.15, 0.65, 0.95, 1.0) * 0.35;
     }
-    if status & moba_net::protocol::ENTITY_FLAG_SLOW != 0 {
+    if status & STATUS_SLOW != 0 {
         color = color * 0.75 + Vec4::new(0.35, 0.2, 0.75, 1.0) * 0.25;
     }
-    if status & moba_net::protocol::ENTITY_FLAG_ROOT != 0 {
+    if status & STATUS_ROOT != 0 {
         color = color * 0.7 + Vec4::new(0.9, 0.75, 0.18, 1.0) * 0.3;
     }
-    if status & moba_net::protocol::ENTITY_FLAG_SILENCE != 0 {
+    if status & STATUS_SILENCE != 0 {
         color = color * 0.7 + Vec4::new(0.55, 0.55, 0.6, 1.0) * 0.3;
     }
-    if status & moba_net::protocol::ENTITY_FLAG_BURN != 0 {
+    if status & STATUS_BURN != 0 {
         color = color * 0.7 + Vec4::new(1.0, 0.42, 0.1, 1.0) * 0.3;
     }
-    if status & moba_net::protocol::ENTITY_FLAG_HASTE != 0 {
+    if status & STATUS_HASTE != 0 {
         color = color * 0.75 + Vec4::new(0.25, 0.95, 0.4, 1.0) * 0.25;
     }
     let world_position = Vec3::new(
@@ -992,6 +1034,79 @@ fn unit_hud_height(kind: u8) -> f32 {
     }
 }
 
+impl NetworkView {
+    fn handle_game_event(&mut self, event: NetEvent) {
+        match event.kind {
+            EVENT_PROJECTILE_SPAWN => {
+                let direction = FixVec2::new(
+                    Fix::from_f32(f32::from(event.dx) / 32_767.0),
+                    Fix::from_f32(f32::from(event.dy) / 32_767.0),
+                );
+                let position = dequantize_position(event.x, event.y);
+                let end = dequantize_position(event.x2, event.y2);
+                self.projectiles.push(ProjectileFx {
+                    team: event.team,
+                    position,
+                    direction,
+                    speed: f32::from(event.value),
+                    radius: f32::from(event.aux),
+                    remaining: position.distance(end).to_f32(),
+                });
+                if self.projectiles.len() > 32 {
+                    self.projectiles.remove(0);
+                }
+            }
+            EVENT_UNIT_DIED => {
+                let text = if event.target_slot == u8::MAX {
+                    String::from("Unit destroyed")
+                } else {
+                    let team = if event.team == 0 { "Blue" } else { "Red" };
+                    format!(
+                        "{team} hero {} eliminated",
+                        u16::from(event.target_slot) + 1
+                    )
+                };
+                self.kill_feed.push_back(KillFeedEntry { life: 600, text });
+                if self.kill_feed.len() > 6 {
+                    self.kill_feed.pop_front();
+                }
+            }
+            EVENT_STRUCTURE_DESTROYED => {
+                self.kill_feed.push_back(KillFeedEntry {
+                    life: 600,
+                    text: String::from("Structure destroyed"),
+                });
+                if self.kill_feed.len() > 6 {
+                    self.kill_feed.pop_front();
+                }
+            }
+            EVENT_MATCH_ENDED => {
+                let text = if event.team == 0 {
+                    String::from("Blue team wins")
+                } else {
+                    String::from("Red team wins")
+                };
+                self.kill_feed.push_back(KillFeedEntry { life: 600, text });
+            }
+            _ => {}
+        }
+    }
+
+    fn update_effects(&mut self, frame_ms: f32) {
+        let dt = frame_ms.max(0.0) / 1_000.0;
+        for projectile in &mut self.projectiles {
+            projectile.position += projectile.direction * Fix::from_f32(projectile.speed * dt);
+            projectile.remaining -= projectile.speed * dt;
+        }
+        self.projectiles
+            .retain(|projectile| projectile.remaining > 0.0);
+        for entry in &mut self.kill_feed {
+            entry.life = entry.life.saturating_sub(1);
+        }
+        self.kill_feed.retain(|entry| entry.life > 0);
+    }
+}
+
 fn draw_world_circle(
     ui: &mut UiDrawList,
     camera: &Camera,
@@ -1254,6 +1369,15 @@ fn build_network_hud(
     let width_f = width as f32;
     let height_f = height as f32;
     draw_perf(ui, width_f, frame_ms, fps);
+    for (index, entry) in network.kill_feed.iter().enumerate() {
+        ui.text(
+            width_f - 280.0,
+            12.0 + index as f32 * 14.0,
+            1.7,
+            Vec4::new(0.92, 0.84, 0.62, 1.0),
+            &entry.text,
+        );
+    }
 
     draw_health_bars(ui, network, camera, width, height);
     let center = network.prediction.position();

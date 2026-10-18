@@ -112,3 +112,5 @@ This is well inside the 33 ms tick budget and the bandwidth budget for small ded
 servers.
 
 Bot fixed-composition mirror CIs are recorded in [0008-balance.md](0008-balance.md).
+
+Presentation events/status bits and protocol v16 bandwidth are recorded in [0009-presentation-events.md](0009-presentation-events.md).

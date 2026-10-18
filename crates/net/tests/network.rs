@@ -53,6 +53,9 @@ fn client_connects_receives_snapshots_and_moves() {
     let start = Instant::now();
     let mut sent_move = false;
     let mut sent_buy = false;
+    let mut sent_cast = false;
+    let mut saw_game_event = false;
+    let mut saw_projectile = false;
     let mut start_position = None;
     while start.elapsed() < Duration::from_millis(1_500) {
         client.poll().expect("poll");
@@ -60,6 +63,14 @@ fn client_connects_receives_snapshots_and_moves() {
         while let Some(event) = client.next_event() {
             match event {
                 ClientEvent::Connected { .. } => saw_connected = true,
+                ClientEvent::GameEvent(event) => {
+                    if event.kind == moba_net::protocol::EVENT_CAST {
+                        saw_game_event = true;
+                    }
+                    if event.kind == moba_net::protocol::EVENT_PROJECTILE_SPAWN {
+                        saw_projectile = true;
+                    }
+                }
                 ClientEvent::Snapshot { .. } => saw_snapshot = true,
                 ClientEvent::Disconnected => panic!("unexpected disconnect"),
             }
@@ -80,7 +91,12 @@ fn client_connects_receives_snapshots_and_moves() {
                         .expect("shop input");
                     sent_buy = true;
                 }
-                if !sent_move {
+                if sent_buy && !sent_cast {
+                    let (x, y) = quantize_position(position + FixVec2::from_ints(5, 0));
+                    let _ = client.send_command(WireCommand::CastAbility { slot: 2, x, y });
+                    sent_cast = true;
+                }
+                if sent_cast && saw_game_event && !sent_move {
                     let target = FixVec2::from_ints(120, 128);
                     let (x, y) = quantize_position(target);
                     client
@@ -89,6 +105,8 @@ fn client_connects_receives_snapshots_and_moves() {
                     sent_move = true;
                 } else if start_position
                     .is_some_and(|start| start.distance(position) > moba_core::Fix::from_i32(2))
+                    && saw_game_event
+                    && saw_projectile
                 {
                     break;
                 }
@@ -98,6 +116,8 @@ fn client_connects_receives_snapshots_and_moves() {
     }
     assert!(saw_connected, "connected event missing");
     assert!(saw_snapshot, "snapshot missing");
+    assert!(saw_game_event, "cast presentation event missing");
+    assert!(saw_projectile, "projectile presentation event missing");
     let snapshot = client.snapshot().expect("snapshot state");
     assert_eq!(snapshot.phase, MatchPhase::Playing as u8);
     assert!(

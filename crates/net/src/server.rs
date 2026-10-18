@@ -15,9 +15,12 @@ use crate::crypto::{
     verify_hello_tag, welcome_tag,
 };
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, MAX_DATAGRAM, MatchPhase, NetEntity, NetId, PacketKind,
-    SnapshotDelta, SnapshotState, Welcome, WireCatalog, WireCommand, build_delta, decode_hello,
-    decode_input, dequantize_position, encode_snapshot, encode_welcome, sequence_after,
+    EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN,
+    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, FLAG_NEED_FULL, Header,
+    InputMessage, MAX_DATAGRAM, MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, NetEvent, NetId,
+    PacketKind, SnapshotDelta, SnapshotState, Welcome, WireCatalog, WireCommand, build_delta,
+    decode_hello, decode_input, dequantize_position, encode_snapshot, encode_welcome,
+    quantize_position, sequence_after,
 };
 
 use crate::transport::{ReceivedMessage, UdpTransport};
@@ -377,6 +380,209 @@ enum Phase {
     Results(u32),
 }
 
+/// Event retained between ticks and filtered per viewer when snapshots are sent.
+#[derive(Copy, Clone, Debug)]
+struct RawEvent {
+    kind: u8,
+    team: moba_game::Team,
+    source: Option<moba_ecs::Entity>,
+    target: Option<moba_ecs::Entity>,
+    source_slot: u8,
+    target_slot: u8,
+    position: moba_core::FixVec2,
+    end: moba_core::FixVec2,
+    direction: moba_core::FixVec2,
+    value: u16,
+    aux: u16,
+}
+
+impl RawEvent {
+    #[allow(clippy::too_many_lines)] // One exhaustive SimEvent conversion.
+    fn from_sim(event: &moba_sim::SimEvent, simulation: &moba_sim::Simulation) -> Option<Self> {
+        let slot = |entity: moba_ecs::Entity| {
+            simulation
+                .world()
+                .get::<moba_sim::HeroSlot>(entity)
+                .map_or(0xFF, |slot| slot.0)
+        };
+        let raw = match *event {
+            moba_sim::SimEvent::AbilityCast {
+                caster,
+                team,
+                ability,
+                target,
+            } => Self {
+                kind: EVENT_CAST,
+                team,
+                source: Some(caster),
+                target: None,
+                source_slot: slot(caster),
+                target_slot: 0xFF,
+                position: target,
+                end: target,
+                direction: moba_core::FixVec2::ZERO,
+                value: u16::from(ability),
+                aux: 0,
+            },
+            moba_sim::SimEvent::ProjectileSpawned {
+                owner,
+                team,
+                position,
+                direction,
+                speed_per_sec,
+                radius,
+                range,
+            } => Self {
+                kind: EVENT_PROJECTILE_SPAWN,
+                team,
+                source: Some(owner),
+                target: None,
+                source_slot: slot(owner),
+                target_slot: 0xFF,
+                position,
+                end: position + direction * range,
+                direction,
+                value: u16::try_from(speed_per_sec.to_i32().max(0)).unwrap_or(u16::MAX),
+                aux: u16::try_from(radius.to_i32().max(0)).unwrap_or(u16::MAX),
+            },
+            moba_sim::SimEvent::ProjectileHit {
+                owner,
+                team,
+                target,
+                position,
+            } => Self {
+                kind: EVENT_PROJECTILE_HIT,
+                team,
+                source: Some(owner),
+                target: Some(target),
+                source_slot: slot(owner),
+                target_slot: slot(target),
+                position,
+                end: position,
+                direction: moba_core::FixVec2::ZERO,
+                value: 0,
+                aux: 0,
+            },
+            moba_sim::SimEvent::UnitDied {
+                entity,
+                kind,
+                team,
+                position,
+                killer,
+                hero_slot,
+                killer_slot,
+            } => Self {
+                kind: EVENT_UNIT_DIED,
+                team,
+                source: killer,
+                target: Some(entity),
+                source_slot: killer_slot.unwrap_or(0xFF),
+                target_slot: hero_slot.unwrap_or(0xFF),
+                position,
+                end: position,
+                direction: moba_core::FixVec2::ZERO,
+                value: kind as u16,
+                aux: 0,
+            },
+            moba_sim::SimEvent::StructureDestroyed {
+                team,
+                kind,
+                position,
+            } => Self {
+                kind: EVENT_STRUCTURE_DESTROYED,
+                team,
+                source: None,
+                target: None,
+                source_slot: 0xFF,
+                target_slot: 0xFF,
+                position,
+                end: position,
+                direction: moba_core::FixVec2::ZERO,
+                value: kind as u16,
+                aux: 0,
+            },
+            moba_sim::SimEvent::MatchEnded { winner } => Self {
+                kind: EVENT_MATCH_ENDED,
+                team: winner,
+                source: None,
+                target: None,
+                source_slot: 0xFF,
+                target_slot: 0xFF,
+                position: moba_core::FixVec2::ZERO,
+                end: moba_core::FixVec2::ZERO,
+                direction: moba_core::FixVec2::ZERO,
+                value: winner.index() as u16,
+                aux: 0,
+            },
+            moba_sim::SimEvent::ZoneSpawned {
+                owner,
+                team,
+                position,
+                radius,
+                duration_ticks,
+            } => Self {
+                kind: EVENT_ZONE_SPAWNED,
+                team,
+                source: Some(owner),
+                target: None,
+                source_slot: slot(owner),
+                target_slot: 0xFF,
+                position,
+                end: position,
+                direction: moba_core::FixVec2::ZERO,
+                value: u16::try_from(radius.to_i32().max(0)).unwrap_or(u16::MAX),
+                aux: u16::try_from(duration_ticks).unwrap_or(u16::MAX),
+            },
+            moba_sim::SimEvent::WaveSpawned { .. } | moba_sim::SimEvent::HeroRespawned { .. } => {
+                return None;
+            }
+        };
+        Some(raw)
+    }
+
+    fn visible_to(
+        &self,
+        viewer: moba_game::Team,
+        spectator: bool,
+        units: &[moba_sim::ObservedUnit],
+    ) -> bool {
+        if spectator || self.kind == EVENT_MATCH_ENDED || self.team == viewer {
+            return true;
+        }
+        let visible = |entity: moba_ecs::Entity| units.iter().any(|unit| unit.entity == entity);
+        match (self.source, self.target) {
+            (Some(source), _) => visible(source),
+            (None, Some(target)) => visible(target),
+            (None, None) => false,
+        }
+    }
+
+    fn to_net(self, client: &mut ClientConn) -> NetEvent {
+        let (x, y) = quantize_position(self.position);
+        let (x2, y2) = quantize_position(self.end);
+        NetEvent {
+            kind: self.kind,
+            team: self.team.index() as u8,
+            source: self
+                .source
+                .map_or(0xFFFF, |entity| client.net_id_for(entity)),
+            target: self
+                .target
+                .map_or(0xFFFF, |entity| client.net_id_for(entity)),
+            source_slot: self.source_slot,
+            target_slot: self.target_slot,
+            x,
+            y,
+            x2,
+            y2,
+            value: self.value,
+            aux: self.aux,
+            dx: (self.direction.x.to_f32() * 32_767.0).clamp(-32_767.0, 32_767.0) as i16,
+            dy: (self.direction.y.to_f32() * 32_767.0).clamp(-32_767.0, 32_767.0) as i16,
+        }
+    }
+}
+
 /// A running authoritative network server.
 #[derive(Debug)]
 pub struct NetServer {
@@ -404,6 +610,7 @@ pub struct NetServer {
     match_number: u32,
     record_frames: Vec<TickInputs>,
     record_checkpoints: Vec<(u32, u64)>,
+    pending_events: Vec<RawEvent>,
     results_log: Option<PathBuf>,
     results_logged: bool,
     recorded: bool,
@@ -459,6 +666,7 @@ impl NetServer {
             match_number: 0,
             record_frames: Vec::new(),
             record_checkpoints: Vec::new(),
+            pending_events: Vec::with_capacity(MAX_SNAPSHOT_EVENTS * 4),
             results_log: None,
             results_logged: false,
             recorded: false,
@@ -736,6 +944,14 @@ impl NetServer {
         }
         let started = Instant::now();
         self.simulation.tick(&inputs);
+        for event in self.simulation.events() {
+            if let Some(raw) = RawEvent::from_sim(event, &self.simulation) {
+                if self.pending_events.len() >= MAX_SNAPSHOT_EVENTS * 4 {
+                    self.pending_events.remove(0);
+                }
+                self.pending_events.push(raw);
+            }
+        }
         self.simulation.clear_events();
         if self.config.record.is_some()
             && self.record_frames.len() % 150 == 0
@@ -1447,6 +1663,7 @@ impl NetServer {
             .position(|client| client.as_ref().is_some_and(|client| client.addr == addr))
     }
 
+    #[allow(clippy::too_many_lines)] // Snapshot fan-out is one ordered pass.
     fn send_snapshots(&mut self) -> io::Result<()> {
         let mut observed = core::mem::take(&mut self.observed);
         for team in moba_game::Team::ALL {
@@ -1459,6 +1676,7 @@ impl NetServer {
         let (phase_code, countdown) = self.phase();
         let mut current = core::mem::take(&mut self.current);
         let mut payload = core::mem::take(&mut self.payload);
+        let pending_events = core::mem::take(&mut self.pending_events);
         let mut ready_mask = 0u16;
         let mut player_mask = 0u16;
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
@@ -1524,6 +1742,14 @@ impl NetServer {
             delta.countdown = countdown;
             delta.ready_mask = ready_mask;
             delta.player_mask = player_mask;
+            let viewer_team = client.team;
+            let spectator = client.spectator;
+            delta.events = pending_events
+                .iter()
+                .filter(|event| event.visible_to(viewer_team, spectator, units))
+                .take(MAX_SNAPSHOT_EVENTS)
+                .map(|event| (*event).to_net(client))
+                .collect();
             encode_snapshot(&delta, &mut payload)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             client.snapshot_seq = client.snapshot_seq.wrapping_add(1);
@@ -1546,6 +1772,7 @@ impl NetServer {
         self.observed_spectator = observed_spectator;
         self.current = current;
         self.payload = payload;
+        self.pending_events.clear();
         Ok(())
     }
 }
@@ -1644,6 +1871,73 @@ fn replay_path(base: &Path, match_number: u32) -> PathBuf {
 mod tests {
     use super::*;
     use moba_sim::{Health, UnitKind};
+
+    #[test]
+    fn event_visibility_requires_an_observed_source_or_target() {
+        let source = moba_ecs::Entity::from_parts(9, 1);
+        let target = moba_ecs::Entity::from_parts(10, 1);
+        let raw = RawEvent {
+            kind: EVENT_CAST,
+            team: moba_game::Team::Red,
+            source: Some(source),
+            target: None,
+            source_slot: 6,
+            target_slot: 0xFF,
+            position: moba_core::FixVec2::from_ints(100, 100),
+            end: moba_core::FixVec2::ZERO,
+            direction: moba_core::FixVec2::ZERO,
+            value: 1,
+            aux: 0,
+        };
+        let hidden = RawEvent::visible_to(&raw, moba_game::Team::Blue, false, &[]);
+        assert!(!hidden, "hidden enemy cast must not leak");
+        let unit = moba_sim::ObservedUnit {
+            entity: source,
+            kind: UnitKind::Hero,
+            team: moba_game::Team::Red,
+            position: moba_core::FixVec2::from_ints(100, 100),
+            health: 500,
+            max_health: 600,
+            mana: 200,
+            max_mana: 300,
+            dead: false,
+            hero_slot: Some(6),
+            hero_pick: 0,
+            cooldowns: [0; 3],
+            level: 1,
+            xp: 0,
+            gold: 0,
+            items: [0xFF; 6],
+            shielded: false,
+            slowed: false,
+            rooted: false,
+            silenced: false,
+            burning: false,
+            hasted: false,
+        };
+        assert!(RawEvent::visible_to(
+            &raw,
+            moba_game::Team::Blue,
+            false,
+            &[unit]
+        ));
+        assert!(RawEvent::visible_to(&raw, moba_game::Team::Blue, true, &[]));
+        let death = RawEvent {
+            kind: EVENT_UNIT_DIED,
+            team: moba_game::Team::Blue,
+            source: None,
+            target: Some(target),
+            source_slot: 0xFF,
+            target_slot: 0,
+            ..raw
+        };
+        assert!(RawEvent::visible_to(
+            &death,
+            moba_game::Team::Blue,
+            false,
+            &[]
+        ));
+    }
 
     #[test]
     fn match_flow_transitions_and_resets() {

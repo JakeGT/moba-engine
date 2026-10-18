@@ -171,6 +171,14 @@ pub enum SimEvent {
         kind: UnitKind,
         /// Owning team.
         team: Team,
+        /// Death position.
+        position: FixVec2,
+        /// Last hitter, when known.
+        killer: Option<Entity>,
+        /// Victim hero slot, when applicable.
+        hero_slot: Option<u8>,
+        /// Killer hero slot, when applicable.
+        killer_slot: Option<u8>,
     },
     /// A tower or nexus was destroyed.
     StructureDestroyed {
@@ -178,11 +186,65 @@ pub enum SimEvent {
         team: Team,
         /// Structure type.
         kind: UnitKind,
+        /// Structure position.
+        position: FixVec2,
     },
     /// A hero respawned.
     HeroRespawned {
         /// Respawned entity.
         entity: Entity,
+    },
+    /// An ability passed validation and is being resolved.
+    AbilityCast {
+        /// Casting entity.
+        caster: Entity,
+        /// Casting team.
+        team: Team,
+        /// Ability slot (0..=2).
+        ability: u8,
+        /// Resolved target point.
+        target: FixVec2,
+    },
+    /// A projectile was spawned.
+    ProjectileSpawned {
+        /// Owning entity.
+        owner: Entity,
+        /// Owning team.
+        team: Team,
+        /// Spawn position.
+        position: FixVec2,
+        /// Unit direction.
+        direction: FixVec2,
+        /// Travel speed per second.
+        speed_per_sec: Fix,
+        /// Collision radius.
+        radius: Fix,
+        /// Maximum travel distance.
+        range: Fix,
+    },
+    /// A projectile hit an enemy.
+    ProjectileHit {
+        /// Owning entity.
+        owner: Entity,
+        /// Owning team.
+        team: Team,
+        /// Hit entity.
+        target: Entity,
+        /// Impact position.
+        position: FixVec2,
+    },
+    /// A periodic zone was spawned.
+    ZoneSpawned {
+        /// Owning entity.
+        owner: Entity,
+        /// Owning team.
+        team: Team,
+        /// Zone centre.
+        position: FixVec2,
+        /// Zone radius.
+        radius: Fix,
+        /// Lifetime in ticks.
+        duration_ticks: u32,
     },
     /// A nexus fell and the match ended.
     MatchEnded {
@@ -1408,6 +1470,18 @@ impl Simulation {
                 }
             }
         }
+        self.push_event(SimEvent::AbilityCast {
+            caster,
+            team,
+            ability: slot,
+            target,
+        });
+        self.push_event(SimEvent::AbilityCast {
+            caster,
+            team,
+            ability: slot,
+            target,
+        });
         for effect in effects.iter() {
             match effect {
                 Effect::None => {}
@@ -1475,6 +1549,15 @@ impl Simulation {
                         radius: *radius,
                         on_hit: *on_hit,
                     });
+                    self.push_event(SimEvent::ProjectileSpawned {
+                        owner: caster,
+                        team,
+                        position,
+                        direction,
+                        speed_per_sec: *speed_per_sec,
+                        radius: *radius,
+                        range: *range,
+                    });
                 }
                 Effect::Area { radius, effects } => {
                     self.apply_area_effects(caster, team, target, *radius, *effects);
@@ -1495,6 +1578,13 @@ impl Simulation {
                             period_ticks: *period_ticks,
                             cooldown: 0,
                             effects: *effects,
+                        });
+                        self.push_event(SimEvent::ZoneSpawned {
+                            owner: caster,
+                            team,
+                            position: target,
+                            radius: *radius,
+                            duration_ticks: *duration_ticks,
                         });
                     }
                 }
@@ -1785,6 +1875,12 @@ impl Simulation {
                     }
                 });
             if let Some((_, target)) = hit {
+                self.push_event(SimEvent::ProjectileHit {
+                    owner: projectile.owner,
+                    team: projectile.team,
+                    target,
+                    position: projectile.position,
+                });
                 self.apply_area_effects_to(projectile.owner, target, projectile.on_hit);
                 self.projectiles.swap_remove(index);
             } else {
@@ -1823,6 +1919,10 @@ impl Simulation {
                     target.0 = None;
                 }
                 let credit = self.world.get::<LastHitBy>(entity).copied();
+                let hero_slot = self.world.get::<HeroSlot>(entity).map(|slot| slot.0);
+                let killer_slot = credit.and_then(|credit| {
+                    self.world.get::<HeroSlot>(credit.entity).map(|slot| slot.0)
+                });
                 if let Some(credit) = credit {
                     match credit.team {
                         Team::Blue => self.blue_score = self.blue_score.saturating_add(1),
@@ -1830,16 +1930,39 @@ impl Simulation {
                     }
                 }
                 self.award_bounty(team, kind, position, credit.map(|credit| credit.entity));
-                self.push_event(SimEvent::UnitDied { entity, kind, team });
+                self.push_event(SimEvent::UnitDied {
+                    entity,
+                    kind,
+                    team,
+                    position,
+                    killer: credit.map(|credit| credit.entity),
+                    hero_slot,
+                    killer_slot,
+                });
                 continue;
             }
 
             let credit = self.world.get::<LastHitBy>(entity).copied();
+            let hero_slot = self.world.get::<HeroSlot>(entity).map(|slot| slot.0);
+            let killer_slot = credit
+                .and_then(|credit| self.world.get::<HeroSlot>(credit.entity).map(|slot| slot.0));
             self.award_bounty(team, kind, position, credit.map(|credit| credit.entity));
             self.world.despawn(entity);
-            self.push_event(SimEvent::UnitDied { entity, kind, team });
+            self.push_event(SimEvent::UnitDied {
+                entity,
+                kind,
+                team,
+                position,
+                killer: credit.map(|credit| credit.entity),
+                hero_slot,
+                killer_slot,
+            });
             if kind.is_structure() {
-                self.push_event(SimEvent::StructureDestroyed { team, kind });
+                self.push_event(SimEvent::StructureDestroyed {
+                    team,
+                    kind,
+                    position,
+                });
                 if kind == UnitKind::Nexus && self.outcome.is_none() {
                     self.outcome = Some(team.enemy());
                     self.push_event(SimEvent::MatchEnded {
@@ -2518,7 +2641,8 @@ mod tests {
             event,
             SimEvent::StructureDestroyed {
                 team: Team::Blue,
-                kind: UnitKind::Tower
+                kind: UnitKind::Tower,
+                ..
             }
         )));
         assert!(sim.outcome().is_none());

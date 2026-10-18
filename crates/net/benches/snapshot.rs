@@ -22,6 +22,7 @@ fn entity(id: u16, x: u16, y: u16) -> NetEntity {
         hero_slot: if id < 10 { id as u8 } else { 0xFF },
         hero_pick: 0,
         flags: 0,
+        status_bits: 0,
         max_health: 600,
         max_mana: 300,
         x,
