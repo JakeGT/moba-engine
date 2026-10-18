@@ -18,8 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install shader compiler
-        run: choco install glslang -y
+      - name: Install Vulkan SDK and shader compiler
+        run: choco install vulkan-sdk -y --no-progress
       - name: Build probe
         run: cargo build --release --locked -p moba-tools --bin vulkan-probe
       - name: Probe Vulkan devices
