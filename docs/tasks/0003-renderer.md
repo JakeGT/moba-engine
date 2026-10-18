@@ -60,3 +60,11 @@ buffer writes (camera + instances), with no per-frame allocation in `Renderer::r
 `vulkan-probe` + the `macos vulkan probe` workflow exercise instance creation, portability
 extension selection and physical-device enumeration under MoltenVK. See
 [software Vulkan](../dev/software-vulkan.md).
+
+## Real-hardware frame timings
+
+- [x] RTX 5070 Ti / NVIDIA 615.71.09 / 1920×1080: p50 4.181 ms, p95 4.197 ms,
+  p99 4.212 ms, max 4.538 ms with vsync off; zero validation messages.
+- [x] `MOBA_FRAME_LOG`/`MOBA_VSYNC` benchmark path documented in
+  `docs/perf/0007-real-hardware.md`; Windows/macOS commands recorded there (no real GPU in CI).
+- [x] Capture artifact `docs/images/m8-nvidia-teamfight.png`.

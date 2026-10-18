@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- `MOBA_FRAME_LOG`/`MOBA_VSYNC` benchmark path and real NVIDIA 1080p p95/max timings.
 - Built-in map visual themes (`[map] theme`) with protocol v25 wire id, terrain tint/wall colours,
   local `MOBA_CONTENT` preview and a snow ARAM gallery capture.
 - Protocol v24 catalogue updates: connected clients adopt a reloaded pack between matches.

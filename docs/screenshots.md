@@ -6,6 +6,12 @@ preview-quality and will evolve.
 
 ## Renderer and simulation
 
+### Real NVIDIA hardware (1920×1080)
+![Real NVIDIA hardware](images/m8-nvidia-teamfight.png)
+
+Local bot preview after 3,000 warmup ticks on an RTX 5070 Ti with validation required; frame log
+p95 4.197 ms / max 4.538 ms with vsync off.
+
 ### 500 instanced units + terrain
 ![500 instanced units and terrain](images/m3-500-units.png)
 
