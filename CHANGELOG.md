@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 - Rules `team_size`/`bot_fill` (protocol v20), 1v1-mid and ARAM example packs, and
   `match-soak --content` replay verification.
 - `[rules]` content section for hero respawn (base + per-level) and wave cadence; hashed,
