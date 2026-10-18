@@ -125,6 +125,37 @@ impl<T> SpatialGrid<T> {
         }
     }
 
+    /// Returns true when `visit` accepts any item within `radius` of `center`.
+    pub fn any_in_circle(
+        &self,
+        center: FixVec2,
+        radius: Fix,
+        mut visit: impl FnMut(T) -> bool,
+    ) -> bool
+    where
+        T: Copy,
+    {
+        self.ensure_sorted();
+        let sort = self.sort.borrow();
+        let radius_sq = radius * radius;
+        let min = self.cell_of(center - FixVec2::splat(radius));
+        let max = self.cell_of(center + FixVec2::splat(radius));
+        for y in min.1..=max.1 {
+            for x in min.0..=max.0 {
+                let cell = usize::try_from(y * self.cols + x).expect("cell index fits usize");
+                let start = sort.starts[cell] as usize;
+                let end = sort.starts[cell + 1] as usize;
+                for &index in &sort.sorted[start..end] {
+                    let (position, item) = self.items[index as usize];
+                    if position.distance_sq(center) <= radius_sq && visit(item) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn ensure_sorted(&self) {
         if !self.sort.borrow().dirty {
             return;

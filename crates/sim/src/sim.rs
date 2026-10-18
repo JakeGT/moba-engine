@@ -254,6 +254,12 @@ pub enum SimEvent {
 }
 
 #[derive(Copy, Clone, Debug)]
+struct VisionSource {
+    position: FixVec2,
+    range: Fix,
+}
+
+#[derive(Copy, Clone, Debug)]
 struct TargetRef {
     entity: Entity,
     team: Team,
@@ -384,6 +390,7 @@ pub struct Simulation {
     zones: Vec<Zone>,
     events: Vec<SimEvent>,
     grid: SpatialGrid<TargetRef>,
+    vision_grid: Option<SpatialGrid<VisionSource>>,
     hero_views: Vec<HeroView>,
     attackers: Vec<AttackerSnapshot>,
     deaths: Vec<(Entity, Team, UnitKind, FixVec2)>,
@@ -428,6 +435,11 @@ impl Simulation {
                 FixVec2::splat(Fix::from_i32(WORLD_EXTENT)),
                 Fix::from_i32(8),
             ),
+            vision_grid: Some(SpatialGrid::new(
+                FixVec2::ZERO,
+                FixVec2::splat(Fix::from_i32(WORLD_EXTENT)),
+                Fix::from_i32(8),
+            )),
             hero_views: Vec::with_capacity(MAX_PLAYERS),
             attackers: Vec::with_capacity(MAX_UNITS),
             deaths: Vec::with_capacity(MAX_UNITS),
@@ -572,6 +584,7 @@ impl Simulation {
         out.clear();
         let mut sources = [(FixVec2::ZERO, Fix::ZERO); MAX_UNITS];
         let mut source_count = 0usize;
+        let mut max_vision = Fix::ZERO;
         if let Some(viewer) = viewer {
             for (_entity, (team, health, position, vision)) in
                 self.world
@@ -580,6 +593,7 @@ impl Simulation {
                 if *team != viewer || health.current <= 0 {
                     continue;
                 }
+                max_vision = max_vision.max(vision.0);
                 if source_count < MAX_UNITS {
                     sources[source_count] = (position.0, vision.0);
                     source_count += 1;
@@ -587,6 +601,11 @@ impl Simulation {
             }
         }
 
+        let mut vision_grid = self.vision_grid.take().expect("vision grid");
+        vision_grid.clear();
+        for &(position, range) in &sources[..source_count] {
+            vision_grid.insert(position, VisionSource { position, range });
+        }
         self.observed_candidates.clear();
         for (entity, (team, kind, position, health)) in
             self.world.query::<(&Team, &UnitKind, &Position, &Health)>()
@@ -612,7 +631,12 @@ impl Simulation {
                 || allied
                 || kind.is_structure()
                 || (!dead
-                    && unit_in_vision(position, &sources[..source_count], &self.content.map.walls));
+                    && vision_grid.any_in_circle(position, max_vision, |source| {
+                        source.position.distance_sq(position) <= source.range * source.range
+                            && self.content.map.walls.iter().all(|wall| {
+                                !segments_intersect(source.position, position, wall.a, wall.b)
+                            })
+                    }));
             if !visible {
                 continue;
             }
@@ -663,6 +687,7 @@ impl Simulation {
             });
         }
         self.observed_candidates = candidates;
+        self.vision_grid = Some(vision_grid);
     }
 
     /// Events produced since the queue was last cleared.
@@ -2449,19 +2474,6 @@ const fn unit_gold(kind: UnitKind) -> u32 {
         UnitKind::Nexus => 500,
         UnitKind::Hero => 300,
     }
-}
-
-fn unit_in_vision(
-    position: FixVec2,
-    sources: &[(FixVec2, Fix)],
-    walls: &[moba_game::WallSpec],
-) -> bool {
-    sources.iter().any(|&(source, range)| {
-        position.distance_sq(source) <= range * range
-            && walls
-                .iter()
-                .all(|wall| !segments_intersect(source, position, wall.a, wall.b))
-    })
 }
 
 fn cross(a: FixVec2, b: FixVec2) -> Fix {

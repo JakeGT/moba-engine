@@ -63,12 +63,14 @@ per-cell allocations and the per-query scratch clone; steady ticks are fully all
 ## Observe/fog pass
 
 `sim/observe_3_views` (two team views + spectator, warmed past three waves) improved from
-**19.2 µs to 13.2 µs** (~31%) with the new implementation:
+**19.2 µs to 13.1 µs** (~32%) with the new implementation:
 
 - source units are gathered through one tuple query instead of per-entity `TypeId` scans;
 - all visible-candidate required fields are copied from a single tuple query into a reused
   scratch vector, then the fog/wall pass runs without touching archetypes;
-- optional hero/progression/modifier fields are fetched only for visible units.
+- optional hero/progression/modifier fields are fetched only for visible units;
+- line-of-sight sources are inserted into a reusable flat spatial grid and candidates query it
+  with early-exit `any_in_circle`, so distant sources are skipped before wall tests.
 
 Deterministic output is unchanged: the cross-OS golden state hash remains
 `0x1923e3d7f3392604`.
