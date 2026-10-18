@@ -9,6 +9,8 @@ rust-version = "1.85"
 authors = ["MOBA Engine contributors"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/JakeGT/moba-engine"
+homepage = "https://github.com/JakeGT/moba-engine"
 keywords = ["game", "gamedev", "engine", "moba", "vulkan"]
 categories = ["game-engines", "game-development"]
 # Publishing stays opt-in until crate names/ownership and the release policy are settled.
@@ -16,18 +18,18 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates. Layering is enforced by `just layering`.
-moba-core = { path = "crates/core" }
-moba-ecs = { path = "crates/ecs" }
-moba-jobs = { path = "crates/jobs" }
-moba-platform = { path = "crates/platform" }
-moba-shaders = { path = "crates/shaders" }
-moba-render = { path = "crates/render" }
-moba-assets = { path = "crates/assets" }
-moba-nav = { path = "crates/nav" }
-moba-sim = { path = "crates/sim" }
-moba-game = { path = "crates/game" }
-moba-net = { path = "crates/net" }
-moba-netsim = { path = "crates/netsim" }
+moba-core = { path = "crates/core", version = "0.1.0" }
+moba-ecs = { path = "crates/ecs", version = "0.1.0" }
+moba-jobs = { path = "crates/jobs", version = "0.1.0" }
+moba-platform = { path = "crates/platform", version = "0.1.0" }
+moba-shaders = { path = "crates/shaders", version = "0.1.0" }
+moba-render = { path = "crates/render", version = "0.1.0" }
+moba-assets = { path = "crates/assets", version = "0.1.0" }
+moba-nav = { path = "crates/nav", version = "0.1.0" }
+moba-sim = { path = "crates/sim", version = "0.1.0" }
+moba-game = { path = "crates/game", version = "0.1.0" }
+moba-net = { path = "crates/net", version = "0.1.0" }
+moba-netsim = { path = "crates/netsim", version = "0.1.0" }
 
 # Third-party. Versions are resolved once here so every crate agrees.
 ash = "0.38"

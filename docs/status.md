@@ -62,6 +62,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
   validates.
 - Renderer audit: validation-required + sync-validation client capture passes with zero
   messages (Linux/lavapipe); macOS instance creation is fixed but awaiting macOS runtime CI.
+- Release: `v0.1.0` tag workflow builds and attaches Linux/Windows/macOS tool archives; crates.io
+  publication remains opt-in (see `RELEASE.md`).
 - CI: cross-OS golden state hash, release tests/doctests, MSRV 1.85 and nightly fuzz/soak/
   match-soak/bench workflows are configured.
 - GitHub CI is green on Ubuntu, Windows and macOS, plus Miri, cargo-deny and the `tools` job

@@ -27,7 +27,8 @@ tiers make breakage predictable and reviews honest.
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` must pass.
 - CI runs the test suite on Linux, Windows and macOS.
 - `cargo-semver-checks` is **not wired up yet** (#21); running it against the previous tag is a
-  release blocker once a first tag exists.
+  release blocker once a first tag exists. The release workflow currently verifies package
+  file lists and artifacts; registry publication order is documented in `RELEASE.md`.
 - `cargo-public-api` diffs are reviewed when preparing release notes.
 
 ## Publishing

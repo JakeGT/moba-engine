@@ -1,0 +1,128 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  package:
+    name: package metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+      - name: Leaf package verify
+        run: cargo package -p moba-core --locked
+      - name: Inspect every packaged file list
+        run: |
+          cargo package --workspace --locked --no-verify --list | tee package-list.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-list
+          path: package-list.txt
+
+  test:
+    name: release tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+      - run: cargo test --workspace --release --locked
+
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: windows-latest
+            target: windows-x86_64
+          - os: macos-latest
+            target: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+      - name: Install shader compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install glslang
+      - name: Install shader compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $roots = @($env:VULKAN_SDK, 'C:\VulkanSDK', "$env:ProgramFiles\VulkanSDK") |
+            Where-Object { $_ -and (Test-Path $_) }
+          $glslc = Get-ChildItem $roots -Recurse -Filter glslc.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $glslc) { throw "glslc.exe not found under $roots" }
+          "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: cargo build --release --locked -p moba-server -p moba-client -p moba-tools --bins
+      - name: Archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/moba-${{ matrix.target }}
+          cp target/release/moba-server target/release/moba-client dist/moba-${{ matrix.target }}/
+          for bin in content-check fuzz-wire match-soak replay soak state-hash; do
+            cp "target/release/$bin" "dist/moba-${{ matrix.target }}/"
+          done
+          tar -C dist -czf "moba-${{ matrix.target }}.tar.gz" "moba-${{ matrix.target }}"
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/moba-${{ matrix.target }}" | Out-Null
+          Copy-Item target/release/moba-server.exe "dist/moba-${{ matrix.target }}/"
+          Copy-Item target/release/moba-client.exe "dist/moba-${{ matrix.target }}/"
+          foreach ($bin in @('content-check','fuzz-wire','match-soak','replay','soak','state-hash')) {
+            Copy-Item "target/release/$bin.exe" "dist/moba-${{ matrix.target }}/"
+          }
+          Compress-Archive -Path "dist/moba-${{ matrix.target }}" -DestinationPath "moba-${{ matrix.target }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moba-${{ matrix.target }}
+          path: |
+            moba-${{ matrix.target }}.tar.gz
+            moba-${{ matrix.target }}.zip
+          if-no-files-found: ignore
+
+  publish:
+    name: attach release assets
+    needs: [package, test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*
