@@ -441,7 +441,11 @@ impl App for ClientApp {
                 }
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
-                    let yaw = frame.elapsed_secs() as f32 * 0.035;
+                    let yaw = if capture_path.is_some() {
+                        -0.7
+                    } else {
+                        frame.elapsed_secs() as f32 * 0.035
+                    };
                     build_local_hud(ui, simulation, width, height, frame_ms, fps);
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                     let scene = Scene::new(camera, units);
