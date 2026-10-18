@@ -1,6 +1,7 @@
 //! Binary entry point; the application lives in `app` and the HUD in `hud`.
 
 mod app;
+mod audio;
 mod hud;
 mod settings;
 

@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             mesa-vulkan-drivers vulkan-validationlayers libvulkan1 \
-            glslang-tools libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
+            glslang-tools libasound2-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
           ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
           test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"

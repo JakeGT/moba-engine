@@ -28,9 +28,9 @@ use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
 use moba_game::Team;
 use moba_net::protocol::{
-    EVENT_MATCH_ENDED, EVENT_PROJECTILE_SPAWN, EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED,
-    MatchPhase, NetEvent, STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE,
-    STATUS_SLOW, WireCommand, dequantize_position, quantize_position,
+    EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_SPAWN, EVENT_STRUCTURE_DESTROYED,
+    EVENT_UNIT_DIED, MatchPhase, NetEvent, STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD,
+    STATUS_SILENCE, STATUS_SLOW, WireCommand, dequantize_position, quantize_position,
 };
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
 use moba_platform::{
@@ -103,6 +103,7 @@ pub(crate) struct NetworkView {
     pub(crate) spectator_zoom: f32,
     pub(crate) kill_feed: VecDeque<KillFeedEntry>,
     pub(crate) projectiles: Vec<ProjectileFx>,
+    audio: crate::audio::Audio,
 }
 
 struct ClientApp {
@@ -129,6 +130,7 @@ struct ClientApp {
 }
 
 impl ClientApp {
+    #[allow(clippy::too_many_lines)] // Settings/network/bot setup is linear.
     fn new(
         quit_after_frames: u64,
         capture_path: Option<PathBuf>,
@@ -142,6 +144,8 @@ impl ClientApp {
         let (settings, warnings) = crate::settings::Settings::load(&settings_path);
         let camera_zoom = settings.camera_zoom;
         let camera_sensitivity = settings.camera_sensitivity;
+        let audio_volume = settings.audio_volume;
+        let audio_mute = settings.audio_mute;
         for warning in warnings {
             eprintln!("{warning}");
         }
@@ -217,6 +221,7 @@ impl ClientApp {
                         spectator_zoom: camera_zoom,
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
+                        audio: crate::audio::Audio::new(audio_volume, audio_mute),
                     });
                 }
                 Err(error) => app.startup_error = Some(error),
@@ -1160,9 +1165,12 @@ fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<()> {
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
 impl NetworkView {
+    #[allow(clippy::too_many_lines)] // Event-to-HUD/audio mapping is linear.
     fn handle_game_event(&mut self, event: NetEvent) {
         match event.kind {
+            EVENT_CAST => self.audio.play(crate::audio::Sound::Cast),
             EVENT_PROJECTILE_SPAWN => {
+                self.audio.play(crate::audio::Sound::Attack);
                 let direction = FixVec2::new(
                     Fix::from_f32(f32::from(event.dx) / 32_767.0),
                     Fix::from_f32(f32::from(event.dy) / 32_767.0),
@@ -1186,6 +1194,7 @@ impl NetworkView {
                 }
             }
             EVENT_UNIT_DIED => {
+                self.audio.play(crate::audio::Sound::Death);
                 let text = if event.target_slot == u8::MAX {
                     String::from("Unit destroyed")
                 } else {
@@ -1201,6 +1210,7 @@ impl NetworkView {
                 }
             }
             EVENT_STRUCTURE_DESTROYED => {
+                self.audio.play(crate::audio::Sound::Objective);
                 self.kill_feed.push_back(KillFeedEntry {
                     life: 600,
                     text: String::from("Structure destroyed"),
@@ -1210,6 +1220,7 @@ impl NetworkView {
                 }
             }
             EVENT_MATCH_ENDED => {
+                self.audio.play(crate::audio::Sound::Ui);
                 let text = if event.team == 0 {
                     String::from("Blue team wins")
                 } else {
