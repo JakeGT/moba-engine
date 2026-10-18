@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 21;
+pub const PROTOCOL_VERSION: u8 = 22;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -626,9 +626,44 @@ impl WireModifier {
     }
 }
 
+/// Runtime minion stats carried in the handshake.
+#[allow(missing_docs)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireMinionStats {
+    pub max_health: i32,
+    pub attack_damage: i32,
+    pub attack_range_bits: i64,
+    pub attack_interval_ticks: u32,
+    pub move_speed_bits: i64,
+    pub armor: i32,
+    pub magic_resist: i32,
+    pub vision_range_bits: i64,
+}
+
+/// Runtime structure stats carried in the handshake.
+#[allow(missing_docs)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireStructureStats {
+    pub max_health: i32,
+    pub attack_damage: i32,
+    pub attack_range_bits: i64,
+    pub attack_interval_ticks: u32,
+    pub armor: i32,
+    pub magic_resist: i32,
+    pub vision_range_bits: i64,
+}
+
 /// Tunable match rules carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WireRules {
+    /// Melee minion stats.
+    pub melee_minion: WireMinionStats,
+    /// Ranged minion stats.
+    pub ranged_minion: WireMinionStats,
+    /// Tower stats.
+    pub tower: WireStructureStats,
+    /// Nexus stats.
+    pub nexus: WireStructureStats,
     /// Maximum hero level.
     pub level_cap: u8,
     /// Base XP.
@@ -982,7 +1017,30 @@ impl From<&GameContent> for WireCatalog {
             blue_spawn,
             red_spawn,
         } = content_map;
+        let minion = |stats: moba_game::MinionStatsSpec| WireMinionStats {
+            max_health: stats.max_health,
+            attack_damage: stats.attack_damage,
+            attack_range_bits: stats.attack_range.to_bits(),
+            attack_interval_ticks: stats.attack_interval_ticks,
+            move_speed_bits: stats.move_speed_per_sec.to_bits(),
+            armor: stats.armor,
+            magic_resist: stats.magic_resist,
+            vision_range_bits: stats.vision_range.to_bits(),
+        };
+        let structure = |stats: moba_game::StructureStatsSpec| WireStructureStats {
+            max_health: stats.max_health,
+            attack_damage: stats.attack_damage,
+            attack_range_bits: stats.attack_range.to_bits(),
+            attack_interval_ticks: stats.attack_interval_ticks,
+            armor: stats.armor,
+            magic_resist: stats.magic_resist,
+            vision_range_bits: stats.vision_range.to_bits(),
+        };
         catalog.rules = WireRules {
+            melee_minion: minion(content_rules.melee_minion),
+            ranged_minion: minion(content_rules.ranged_minion),
+            tower: structure(content_rules.tower),
+            nexus: structure(content_rules.nexus),
             level_cap: content_rules.level_cap,
             xp_base: content_rules.xp_base,
             xp_per_level: content_rules.xp_per_level,
@@ -1080,6 +1138,31 @@ fn decode_area_effects(wire: &WireEffect) -> Result<AreaEffectList, WireError> {
         };
     }
     Ok(effects)
+}
+
+fn minion_spec(wire: WireMinionStats) -> moba_game::MinionStatsSpec {
+    moba_game::MinionStatsSpec {
+        max_health: wire.max_health,
+        attack_damage: wire.attack_damage,
+        attack_range: Fix::from_bits(wire.attack_range_bits),
+        attack_interval_ticks: wire.attack_interval_ticks,
+        move_speed_per_sec: Fix::from_bits(wire.move_speed_bits),
+        armor: wire.armor,
+        magic_resist: wire.magic_resist,
+        vision_range: Fix::from_bits(wire.vision_range_bits),
+    }
+}
+
+fn structure_spec(wire: WireStructureStats) -> moba_game::StructureStatsSpec {
+    moba_game::StructureStatsSpec {
+        max_health: wire.max_health,
+        attack_damage: wire.attack_damage,
+        attack_range: Fix::from_bits(wire.attack_range_bits),
+        attack_interval_ticks: wire.attack_interval_ticks,
+        armor: wire.armor,
+        magic_resist: wire.magic_resist,
+        vision_range: Fix::from_bits(wire.vision_range_bits),
+    }
 }
 
 fn decode_effect(wire: &WireEffect) -> Result<Effect, WireError> {
@@ -1304,6 +1387,10 @@ impl WireCatalog {
             abilities,
             modifiers,
             rules: moba_game::RulesSpec {
+                melee_minion: minion_spec(self.rules.melee_minion),
+                ranged_minion: minion_spec(self.rules.ranged_minion),
+                tower: structure_spec(self.rules.tower),
+                nexus: structure_spec(self.rules.nexus),
                 level_cap: self.rules.level_cap,
                 xp_base: self.rules.xp_base,
                 xp_per_level: self.rules.xp_per_level,
@@ -1556,6 +1643,25 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.push(modifier.name_len);
         out.push(modifier.kind);
     }
+    for minion in [catalog.rules.melee_minion, catalog.rules.ranged_minion] {
+        out.extend_from_slice(&minion.max_health.to_le_bytes());
+        out.extend_from_slice(&minion.attack_damage.to_le_bytes());
+        out.extend_from_slice(&minion.attack_range_bits.to_le_bytes());
+        out.extend_from_slice(&minion.attack_interval_ticks.to_le_bytes());
+        out.extend_from_slice(&minion.move_speed_bits.to_le_bytes());
+        out.extend_from_slice(&minion.armor.to_le_bytes());
+        out.extend_from_slice(&minion.magic_resist.to_le_bytes());
+        out.extend_from_slice(&minion.vision_range_bits.to_le_bytes());
+    }
+    for structure in [catalog.rules.tower, catalog.rules.nexus] {
+        out.extend_from_slice(&structure.max_health.to_le_bytes());
+        out.extend_from_slice(&structure.attack_damage.to_le_bytes());
+        out.extend_from_slice(&structure.attack_range_bits.to_le_bytes());
+        out.extend_from_slice(&structure.attack_interval_ticks.to_le_bytes());
+        out.extend_from_slice(&structure.armor.to_le_bytes());
+        out.extend_from_slice(&structure.magic_resist.to_le_bytes());
+        out.extend_from_slice(&structure.vision_range_bits.to_le_bytes());
+    }
     out.push(catalog.rules.level_cap);
     for value in [catalog.rules.xp_base, catalog.rules.xp_per_level] {
         out.extend_from_slice(&value.to_le_bytes());
@@ -1710,7 +1816,32 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         modifier.name_len = reader.u8()?;
         modifier.kind = reader.u8()?;
     }
+    let mut stats = [WireMinionStats::default(); 2];
+    for minion in &mut stats {
+        minion.max_health = reader.i32()?;
+        minion.attack_damage = reader.i32()?;
+        minion.attack_range_bits = reader.i64()?;
+        minion.attack_interval_ticks = reader.u32()?;
+        minion.move_speed_bits = reader.i64()?;
+        minion.armor = reader.i32()?;
+        minion.magic_resist = reader.i32()?;
+        minion.vision_range_bits = reader.i64()?;
+    }
+    let mut structures = [WireStructureStats::default(); 2];
+    for structure in &mut structures {
+        structure.max_health = reader.i32()?;
+        structure.attack_damage = reader.i32()?;
+        structure.attack_range_bits = reader.i64()?;
+        structure.attack_interval_ticks = reader.u32()?;
+        structure.armor = reader.i32()?;
+        structure.magic_resist = reader.i32()?;
+        structure.vision_range_bits = reader.i64()?;
+    }
     catalog.rules = WireRules {
+        melee_minion: stats[0],
+        ranged_minion: stats[1],
+        tower: structures[0],
+        nexus: structures[1],
         level_cap: reader.u8()?,
         xp_base: reader.u32()?,
         xp_per_level: reader.u32()?,
@@ -3152,6 +3283,7 @@ mod tests {
         content.map.extent = moba_core::Fix::from_i32(128);
         content.map.blue_spawn = moba_core::FixVec2::from_ints(10, 10);
         content.map.red_spawn = moba_core::FixVec2::from_ints(118, 118);
+        content.rules.melee_minion.max_health = 77;
         content.rules.hero_respawn_ticks = 120;
         content.rules.respawn_per_level = 10;
         content.rules.wave_interval_ticks = 600;
@@ -3159,6 +3291,7 @@ mod tests {
         let wire = WireCatalog::from(&content);
         assert_eq!(wire.map.extent, 128);
         assert_eq!(wire.rules.hero_respawn_ticks, 120);
+        assert_eq!(wire.rules.melee_minion.max_health, 77);
         let decoded = wire.to_content().expect("round trip");
         assert_eq!(decoded.map.extent, content.map.extent);
         assert_eq!(decoded.rules, content.rules);
