@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- `BotPolicy` trait with the built-in lane/farm/fight policy as default and
+  `Simulation::set_bot_policy`.
 - Grid-accelerated line-of-sight source queries with early exit in the observe pass;
   three-view observe benchmark ~13.1 µs.
 - Global-allocator snapshot guard: steady-state build/encode of a 100-entity delta performs
