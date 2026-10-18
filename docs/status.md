@@ -168,3 +168,12 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
   restarted after adding client identity fields/challenge.
 
 - Spectator: free pan/rotate/zoom camera (`m6-spectator-camera.png`), all units visible.
+
+## Release audit (round 57)
+
+- `cargo test --workspace --release`: 176 passed, 0 failed, 3 ignored.
+- Feature matrix: `moba-engine` no-default, `render`, and all-features checks pass.
+- Layering: server/sim/game/nav/net trees contain no renderer/windowing/GPU crates.
+- Local Markdown links: 0 broken across README/security/contributing/docs.
+- Content packs: items, example, map and ability packs validate.
+- cargo-deny and Miri are unavailable locally but remain CI jobs.

@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Release-audit evidence for optimized tests, feature matrix, layering, docs links and packs.
 - `haste` self movement-buff ability kind.
 - Rooted units can no longer bypass control with a dash.
 - Burn state hashing now includes applying entity and damage type.
