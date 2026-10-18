@@ -979,6 +979,36 @@ fn draw_health_bars(
             Vec4::new(0.2, 0.85, 0.38, 1.0),
         );
         ui.outline(x, y, bar_width, bar_height, 1.0, team_color);
+        if entity.kind == 0 {
+            let mut icon_x = x;
+            for (flag, color) in [
+                (
+                    moba_net::protocol::ENTITY_FLAG_SHIELD,
+                    Vec4::new(0.3, 0.75, 1.0, 1.0),
+                ),
+                (
+                    moba_net::protocol::ENTITY_FLAG_SLOW,
+                    Vec4::new(0.6, 0.4, 0.95, 1.0),
+                ),
+                (
+                    moba_net::protocol::ENTITY_FLAG_ROOT,
+                    Vec4::new(0.95, 0.8, 0.25, 1.0),
+                ),
+                (
+                    moba_net::protocol::ENTITY_FLAG_SILENCE,
+                    Vec4::new(0.7, 0.7, 0.75, 1.0),
+                ),
+                (
+                    moba_net::protocol::ENTITY_FLAG_BURN,
+                    Vec4::new(1.0, 0.45, 0.12, 1.0),
+                ),
+            ] {
+                if entity.flags & flag != 0 {
+                    ui.rect(icon_x, y + bar_height + 2.0, 4.0, 3.0, color);
+                    icon_x += 6.0;
+                }
+            }
+        }
         if Some(entity.net_id) == network.own_net_id {
             ui.rect(
                 x + bar_width * 0.5 - 5.0,

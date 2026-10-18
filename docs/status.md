@@ -118,8 +118,9 @@ Last updated: 2026-10-17 (round 17 of the build).
   hero/name (`m8-hero-content.png`); UDP test verifies custom items, heroes and purchases.
 - Map content: map-only pack capture (`m8-map-content.png`) shows the custom one-lane minimap;
   simulation tests verify custom spawns/nexuses and the wire map catalogue.
-- Line-of-sight: wall geometry and shader fog capture (`m6-los-fog.png`); minimap walls and
-  FPS/frame-time diagnostics (`m6-minimap-fps.png`); server test proves a
+- Line-of-sight: wall geometry and shader fog capture (`m6-los-fog.png`); minimap walls,
+  FPS/frame-time diagnostics (`m6-minimap-fps.png`) and health-bar status icons
+  (`m6-status-icons.png`); server test proves a
   wall hides an enemy hero, and walls align with centered world/vision coordinates.
 - Replay manifest: custom-content 555-tick replay verified with `--items` at content
   `0x717e1ddd76abfabe` / state `0xd101300c1c113b98`, pack `Example Pack 1.0.0`, 3 state
