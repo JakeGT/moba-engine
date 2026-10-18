@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Grid-accelerated line-of-sight source queries with early exit in the observe pass;
+  three-view observe benchmark ~13.1 µs.
 - Global-allocator snapshot guard: steady-state build/encode of a 100-entity delta performs
   zero allocations.
 - Soak instrumentation for max simulation tick and whole-frame timing, plus 5-minute profile
