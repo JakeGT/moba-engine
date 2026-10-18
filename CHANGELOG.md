@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Release metadata and a tag-triggered workflow that runs release tests, inspects package file
+  lists and attaches Linux/Windows/macOS server/client/tools archives; publish policy and
+  dependency order documented in `RELEASE.md`.
 - Seed-driven bot play and fair scheduling phase; fixed-composition mirror sweeps now vary per
   seed. Balance harness/results documented in `docs/perf/0008-balance.md`.
 - Protocol v14 modifier catalogue: content-defined `ModifierDef` names/kinds are validated,
