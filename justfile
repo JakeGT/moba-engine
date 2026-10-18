@@ -5,7 +5,7 @@ default:
     @just --list
 
 # Everything CI runs on all three OSes.
-ci-core: fmt-check clippy test layering doc features
+ci-core: fmt-check clippy test layering doc features state-hash-check
 
 # Full local gate (adds supply-chain checks).
 ci: ci-core deny ci-tools
@@ -55,6 +55,20 @@ layering:
       if [ -n "$bad" ]; then echo "layering violation: $krate depends on:"; echo "$bad" | sort -u; fail=1; fi
     done
     exit $fail
+
+state-hash:
+    cargo run -q --release -p moba-tools --bin state-hash
+
+# Cross-platform deterministic hash; must match tests/golden-state-hash.txt.
+state-hash-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    actual=$(cargo run -q --release -p moba-tools --bin state-hash)
+    expected=$(cat tests/golden-state-hash.txt)
+    if [ "$actual" != "$expected" ]; then
+      echo "state hash mismatch: expected $expected, got $actual"
+      exit 1
+    fi
 
 bench:
     cargo bench --workspace

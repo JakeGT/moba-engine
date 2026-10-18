@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- CI: cross-platform golden state hash, release/doctest and MSRV jobs, plus scheduled
+  one-hour fuzz, five-minute soak, 50-match soak and benchmark runs.
 - Strict content schema: unknown fields and enum values are rejected, stats/coordinates are
   bounded, mitigation uses i64 intermediates, and wire/content limits are compile-time checked.
 - Audit remediation W0: panic-safe ECS despawn (deferred Drop + hard bounds checks), shared

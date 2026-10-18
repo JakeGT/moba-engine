@@ -1,0 +1,78 @@
+name: nightly hardening
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  soak:
+    name: 10-client lossy soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo run --release -p moba-tools --bin soak -- --seconds 300 2>&1 | tee soak.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-log
+          path: soak.log
+
+  fuzz:
+    name: one-hour wire fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 3600 2>&1 | tee fuzz.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-log
+          path: fuzz.log
+
+  bench:
+    name: benchmark run (manual gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo bench --workspace -- --noplot 2>&1 | tee bench.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-log
+          path: bench.log
+
+  match-soak:
+    name: 50-match deterministic soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo run --release -p moba-tools --bin match-soak -- --matches 50 --ticks 36000 2>&1 | tee match-soak.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: match-soak-log
+          path: match-soak.log
