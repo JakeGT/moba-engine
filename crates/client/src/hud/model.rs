@@ -8,6 +8,83 @@ use super::{
 };
 use crate::{hud_fmt, hud_static};
 
+/// Frame-level HUD data shared by the network and local-preview modes.
+pub(crate) struct HudModel<'a> {
+    source: HudSource<'a>,
+}
+
+enum HudSource<'a> {
+    Network(&'a NetworkView),
+    Local(&'a Simulation),
+}
+
+impl<'a> HudModel<'a> {
+    pub(crate) fn network(network: &'a NetworkView) -> Self {
+        Self {
+            source: HudSource::Network(network),
+        }
+    }
+
+    pub(crate) fn local(simulation: &'a Simulation) -> Self {
+        Self {
+            source: HudSource::Local(simulation),
+        }
+    }
+
+    pub(crate) fn tick(&self) -> u32 {
+        match self.source {
+            HudSource::Network(network) => network.client.snapshot().map_or(0, |state| state.tick),
+            HudSource::Local(simulation) => simulation.current_tick().get(),
+        }
+    }
+
+    pub(crate) fn phase(&self) -> MatchPhase {
+        match self.source {
+            HudSource::Network(network) => network.phase,
+            HudSource::Local(_) => MatchPhase::Playing,
+        }
+    }
+
+    pub(crate) fn countdown(&self) -> u16 {
+        match self.source {
+            HudSource::Network(network) => network.countdown,
+            HudSource::Local(_) => 0,
+        }
+    }
+
+    pub(crate) fn score(&self) -> (u32, u32) {
+        match self.source {
+            HudSource::Network(network) => network
+                .client
+                .snapshot()
+                .map_or((0, 0), |state| (state.blue_score, state.red_score)),
+            HudSource::Local(_) => (0, 0),
+        }
+    }
+
+    pub(crate) fn wave(&self) -> u32 {
+        match self.source {
+            HudSource::Network(network) => network
+                .client
+                .snapshot()
+                .map_or(0, |state| u32::try_from(state.entities.len()).unwrap_or(0)),
+            HudSource::Local(simulation) => simulation.wave(),
+        }
+    }
+
+    pub(crate) fn unit_count(&self) -> u32 {
+        match self.source {
+            HudSource::Network(network) => network
+                .client
+                .snapshot()
+                .map_or(0, |state| u32::try_from(state.entities.len()).unwrap_or(0)),
+            HudSource::Local(simulation) => {
+                u32::try_from(simulation.unit_count()).unwrap_or(u32::MAX)
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // HUD composition is one pass.
 pub(crate) fn build_network_hud(
     ui: &mut UiDrawList,
@@ -108,11 +185,11 @@ pub(crate) fn build_network_hud(
     };
 
     // Match timer and team score.
-    let tick = snapshot.map_or(0, |state| state.tick);
+    let model = HudModel::network(network);
+    let tick = model.tick();
     let seconds = tick / 30;
     let timer = hud_fmt!("{:02}:{:02}", seconds / 60, seconds % 60);
-    let blue = snapshot.map_or(0, |state| state.blue_score);
-    let red = snapshot.map_or(0, |state| state.red_score);
+    let (blue, red) = model.score();
     let timer_width = 360.0;
     ui.panel(
         (width_f - timer_width) * 0.5,
@@ -498,14 +575,14 @@ pub(crate) fn build_network_hud(
             ),
         );
     }
-    if matches!(network.phase, MatchPhase::Lobby | MatchPhase::Countdown) {
-        let seconds = u32::from(network.countdown).div_ceil(30);
+    if matches!(model.phase(), MatchPhase::Lobby | MatchPhase::Countdown) {
+        let seconds = u32::from(model.countdown()).div_ceil(30);
         let (label, footer) = if network.spectator {
             (
                 hud_fmt!("SPECTATOR — MATCH STARTS IN {seconds}"),
                 hud_static!("ALL VISIBLE   WASD PAN   ARROWS ROTATE   UP/DOWN ZOOM"),
             )
-        } else if network.phase == MatchPhase::Lobby {
+        } else if model.phase() == MatchPhase::Lobby {
             if network.ready {
                 (
                     hud_static!("READY — WAITING FOR PLAYERS"),
@@ -584,8 +661,8 @@ pub(crate) fn build_network_hud(
             color,
             label,
         );
-        let seconds = u32::from(network.countdown).div_ceil(30);
-        let footer = if network.phase == MatchPhase::Results {
+        let seconds = u32::from(model.countdown()).div_ceil(30);
+        let footer = if model.phase() == MatchPhase::Results {
             hud_fmt!("NEXT MATCH IN {seconds}   /   ESC TO EXIT")
         } else {
             hud_static!("PRESS ESC TO EXIT")
@@ -645,6 +722,7 @@ pub(crate) fn build_local_hud(
     frame_ms: f32,
     fps: f32,
 ) {
+    let model = HudModel::local(simulation);
     ui.clear();
     draw_perf(ui, width as f32, frame_ms, fps);
     if width == 0 || height == 0 {
@@ -663,9 +741,9 @@ pub(crate) fn build_local_hud(
         muted,
         &hud_fmt!(
             "TICK {}   WAVE {}   UNITS {}",
-            simulation.current_tick().get(),
-            simulation.wave(),
-            simulation.unit_count()
+            model.tick(),
+            model.wave(),
+            model.unit_count()
         ),
     );
     ui.text(32.0, 88.0, 2.0, muted, "SET MOBA_SERVER TO PLAY ONLINE");
@@ -680,7 +758,7 @@ pub(crate) fn build_local_hud(
 
 #[cfg(test)]
 mod tests {
-    use super::{Simulation, UiDrawList, build_local_hud};
+    use super::{HudModel, MatchPhase, Simulation, UiDrawList, build_local_hud};
     use crate::{hud_fmt, hud_static};
     use moba_sim::SimConfig;
 
@@ -702,6 +780,18 @@ mod tests {
             build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
         });
         assert_eq!(allocations, 0, "steady-state HUD allocation");
+    }
+
+    #[test]
+    fn hud_model_reports_local_frame_state() {
+        let simulation = Simulation::new(SimConfig::default());
+        let model = HudModel::local(&simulation);
+        assert_eq!(model.tick(), simulation.current_tick().get());
+        assert_eq!(model.wave(), simulation.wave());
+        assert_eq!(model.unit_count() as usize, simulation.unit_count());
+        assert_eq!(model.score(), (0, 0));
+        assert_eq!(model.countdown(), 0);
+        assert_eq!(model.phase(), MatchPhase::Playing);
     }
 
     #[test]
