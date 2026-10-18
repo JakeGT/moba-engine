@@ -1332,6 +1332,10 @@ fn draw_minimap(ui: &mut UiDrawList, network: &NetworkView, width: u32, height: 
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn draw_perf(ui: &mut UiDrawList, width: f32, frame_ms: f32, fps: f32) {
+    // Capture/golden images must not depend on wall-clock frame timing.
+    if std::env::var_os("MOBA_CAPTURE").is_some() {
+        return;
+    }
     let label = format!("{fps:.0} FPS   {frame_ms:.1} MS");
     ui.text(
         width - 24.0 - UiDrawList::text_width(&label, 1.8),

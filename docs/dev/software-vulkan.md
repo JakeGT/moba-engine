@@ -50,3 +50,27 @@ MOBA_CAPTURE=frame.ppm MOBA_CAPTURE_FRAME=3 xvfb-run -a cargo run -p moba-client
   capture** (`MOBA_CAPTURE`) to verify pixels. The renderer itself is fully exercised.
 - `MOBA_VULKAN_VALIDATION=off|required` (default `IfAvailable`) controls the layer.
 - `MOBA_SMOKE_FRAMES=<n>` exits the client after `n` frames for CI.
+
+## Golden-image check
+
+The manual/label-triggered `render golden` workflow runs the client under Mesa lavapipe with
+validation **and synchronization validation** required, captures frame 90, and compares a
+64×36 downscaled fingerprint. The capture path fails if Vulkan reports any validation error.
+
+Local command (no `just` required):
+
+```bash
+VK_ICD_FILENAMES=$PWD/.tools/swrast/usr/share/vulkan/icd.d/lvp_icd.json \
+VK_LAYER_PATH=$PWD/.tools/validation/usr/share/vulkan/explicit_layer.d \
+LD_LIBRARY_PATH=$PWD/.tools/swrast/usr/lib:$PWD/.tools/validation/usr/lib:$PWD/.tools/llvm/usr/lib \
+MOBA_VULKAN_VALIDATION=required \
+MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE=/tmp/render.ppm MOBA_CAPTURE_FRAME=90 \
+cargo run --release -p moba-client
+
+cargo run --release -p moba-tools --bin image-check -- /tmp/render.ppm \
+  --expected tests/golden/render-fingerprint.rgb --diff /tmp/render-diff.ppm
+```
+
+Regenerate deliberately with `--write` only for intentional visual changes; upload the actual
+and diff PPM artifacts from CI when reviewing a mismatch. Trigger on a PR by adding the
+`render-golden` label.

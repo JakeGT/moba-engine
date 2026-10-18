@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Golden-image fingerprint tool/check and a manual or `render-golden`-label lavapipe workflow
+  with validation + sync validation required; capture artifacts uploaded on failure.
 - Protocol v16 presentation events (cast/projectile/hit/death/objective/zone) with per-viewer
   fog filtering, projectile extrapolation, client kill feed/projectile rendering and a wide
   `status_bits` field. 30 s 10-client soak measured 4.7–6.3 KiB/s down per client.
