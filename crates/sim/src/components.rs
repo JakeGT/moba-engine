@@ -72,8 +72,6 @@ pub struct Shield {
 /// Temporary movement slow.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Slow {
-    /// Unslowed movement speed per tick.
-    pub base: Fix,
     /// Movement multiplier (0..1).
     pub factor: Fix,
     /// Remaining duration in ticks.
@@ -110,8 +108,6 @@ pub struct Burn {
 /// Temporary movement-speed boost.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Haste {
-    /// Unboosted movement speed per tick.
-    pub base: Fix,
     /// Movement multiplier (>1).
     pub factor: Fix,
     /// Remaining duration in ticks.
@@ -165,9 +161,13 @@ pub struct Resistances {
     pub magic_resist: i32,
 }
 
-/// Movement speed in world units per tick.
+/// Movement speed in world units per tick (effective, after modifiers).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MoveSpeed(pub Fix);
+
+/// Base movement speed from hero stats and items, before temporary modifiers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BaseMoveSpeed(pub Fix);
 
 /// Where a mobile unit is walking.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]

@@ -35,12 +35,11 @@ deterministic playback and server authority.
   with 3 checkpoints over 555 ticks.
 
 - Shield kind: temporary absorption with duration, snapshot flag and cyan client tint.
-- Haste kind: self movement multiplier with expiry/respawn restore and flag.
+- Haste kind: self movement multiplier, stacking with slow and restored on expiry/respawn.
 - Burn kind: radius/duration/per-tick damage with state-hash and client flag.
 - Silence kind: radius/duration blocking ability casts, with expiry/respawn removal and flag.
 - Root kind: radius/duration with move-command and dash blocking, expiry/respawn removal and a flag.
-- Slow kind: radius/factor/duration, movement multiplier with expiry/respawn restore and a
-  snapshot flag.
+- Slow kind: radius/factor/duration, stacking with haste and restored on expiry/respawn.
 - Per-hero level-growth stats in content (health/mana/damage/armour/MR), with defaults.
 - Hot reload: `--reload-content` swaps packs only in an empty lobby; connected clients keep
   their handshake catalogue. Test covers reload with zero clients.

@@ -97,7 +97,8 @@ Common fields: `name`, `cooldown_ticks`, `mana_cost`, `cast_range`, `kind`. Kind
 | `haste` | `factor` (>1), `duration_ticks` | self movement boost |
 
 `damage_type` is `"physical"` or `"magic"` (omitted defaults to physical). Status effects
-restore movement/protection on expiry and respawn; latest speed effect wins. New kinds need a
+restore movement/protection on expiry and respawn. Slow and haste stack multiplicatively and
+  expire independently; base speed + item bonuses are preserved. New kinds need a
 `moba-game` variant, validation, content hash arm, TOML parser and a `moba-sim` execution
 branch with an expiry/state-hash test.
 
