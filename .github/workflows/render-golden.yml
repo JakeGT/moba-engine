@@ -50,9 +50,13 @@ jobs:
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare fingerprint
         run: |
+          set +e
           ./target/release/image-check render-actual.ppm \
             --expected tests/golden/render-fingerprint.rgb \
-            --diff render-diff.ppm | tee fingerprint.log
+            --diff render-diff.ppm > fingerprint.log 2>&1
+          status=$?
+          cat fingerprint.log
+          exit $status
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -412,7 +412,13 @@ impl App for ClientApp {
                     }
                 }
             } else if let Some(simulation) = simulation {
-                for _ in 0..frame.ticks() {
+                // Golden captures must not depend on wall-clock frame pacing.
+                let ticks = if capture_path.is_some() {
+                    1
+                } else {
+                    frame.ticks()
+                };
+                for _ in 0..ticks {
                     simulation.tick_with_bots();
                     simulation.clear_events();
                 }
