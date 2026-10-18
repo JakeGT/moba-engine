@@ -1125,6 +1125,9 @@ pub(crate) mod allocation_probe {
 
     /// Runs `f` while counting allocations made on the calling thread.
     pub(crate) fn probe<R>(f: impl FnOnce() -> R) -> (R, u64) {
+        // Force both TLS slots to initialise before counting: Windows lazily allocates
+        // thread-local storage on first access.
+        ENABLED.with(|_| {});
         ALLOCATIONS.with(|count| count.set(0));
         ENABLED.with(|enabled| enabled.set(true));
         let value = f();
