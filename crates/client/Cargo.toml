@@ -17,6 +17,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+arrayvec.workspace = true
 moba-core.workspace = true
 moba-ecs.workspace = true
 moba-jobs.workspace = true

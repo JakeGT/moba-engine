@@ -1,6 +1,7 @@
 //! The renderer: swapchain lifecycle, frame synchronisation and scene drawing.
 
 use core::ffi::CStr;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ash::{Device, khr, vk};
 use bytemuck::bytes_of;
@@ -22,6 +23,14 @@ use crate::ui::{UiDrawList, UiVertex};
 use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
+static UI_VERTICES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
+static UI_TRUNCATION_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// UI vertices dropped from the most recent submitted frame.
+#[must_use]
+pub fn ui_vertices_truncated() -> u64 {
+    UI_VERTICES_TRUNCATED.load(Ordering::Relaxed)
+}
 const CAMERA_UNIFORM_SIZE: u64 = core::mem::size_of::<CameraUniform>() as u64;
 
 /// Renderer configuration.
@@ -459,9 +468,20 @@ impl Renderer {
                     *destination = GpuInstance::from(*source);
                 }
             }
-            let ui_count = ui.map_or(0, |list| {
-                list.vertices().len().min(self.config.max_ui_vertices)
-            });
+            let ui_total = ui.map_or(0, |list| list.vertices().len());
+            let ui_count = ui_total.min(self.config.max_ui_vertices);
+            let truncated = u64::try_from(ui_total.saturating_sub(ui_count)).unwrap_or(u64::MAX);
+            UI_VERTICES_TRUNCATED.store(truncated, Ordering::Relaxed);
+            if truncated > 0 {
+                if !UI_TRUNCATION_LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[ui] dropped {truncated} UI vertices (max {})",
+                        self.config.max_ui_vertices
+                    );
+                }
+            } else {
+                UI_TRUNCATION_LOGGED.store(false, Ordering::Relaxed);
+            }
             if ui_count > 0 {
                 let source = ui.expect("UI list exists when UI count is non-zero");
                 let mapped = frame

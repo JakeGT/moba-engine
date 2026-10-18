@@ -7,6 +7,11 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- HUD text now formats into fixed 256-byte stack buffers (`hud_fmt!`/`hud_static!`); item
+  summaries, timers, scoreboard and shop labels no longer allocate per frame.
+- Client HUD split into `hud/{theme,geometry,healthbars,minimap,status,model}` with shared
+  palette constants, a UI vertex-truncation counter in the debug overlay, and a local-HUD
+  draw-list test. `main.rs` is an 8-line entry point.
 - Golden-image fingerprint tool/check and a manual or `render-golden`-label lavapipe workflow
   with validation + sync validation required; capture artifacts uploaded on failure.
 - Protocol v16 presentation events (cast/projectile/hit/death/objective/zone) with per-viewer

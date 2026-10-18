@@ -32,6 +32,7 @@ moba-net = { path = "crates/net", version = "0.1.0" }
 moba-netsim = { path = "crates/netsim", version = "0.1.0" }
 
 # Third-party. Versions are resolved once here so every crate agrees.
+arrayvec = "0.7"
 ash = "0.38"
 ash-window = "0.13"
 bytemuck = { version = "1", features = ["derive"] }
