@@ -1,0 +1,34 @@
+name: windows vulkan probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  probe:
+    name: Windows Vulkan probe
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: choco install glslang -y
+      - name: Build probe
+        run: cargo build --release --locked -p moba-tools --bin vulkan-probe
+      - name: Probe Vulkan devices
+        run: ./target/release/vulkan-probe.exe
+      - name: Run client smoke
+        continue-on-error: true
+        run: ./target/release/moba-client.exe
+        env:
+          MOBA_WARMUP_TICKS: "60"
+          MOBA_SMOKE_FRAMES: "300"
+          MOBA_CAPTURE: frame.ppm
+          MOBA_CAPTURE_FRAME: "120"
