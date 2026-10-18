@@ -286,6 +286,16 @@ struct Zone {
 }
 
 #[derive(Copy, Clone, Debug)]
+struct ObservedCandidate {
+    entity: Entity,
+    team: Team,
+    kind: UnitKind,
+    position: FixVec2,
+    health: i32,
+    max_health: i32,
+}
+
+#[derive(Copy, Clone, Debug)]
 struct HeroView {
     slot: u8,
     team: Team,
@@ -381,6 +391,7 @@ pub struct Simulation {
     damage_hits: Vec<Entity>,
     modifier_entities: Vec<Entity>,
     burn_hits: Vec<(Entity, i32, DamageType, Entity)>,
+    observed_candidates: Vec<ObservedCandidate>,
     bot_rng: [Rng; MAX_PLAYERS],
 }
 
@@ -424,6 +435,7 @@ impl Simulation {
             damage_hits: Vec::with_capacity(MAX_UNITS),
             modifier_entities: Vec::with_capacity(MAX_UNITS),
             burn_hits: Vec::with_capacity(MAX_UNITS),
+            observed_candidates: Vec::with_capacity(MAX_UNITS),
             bot_rng: core::array::from_fn(|index| {
                 Rng::from_seed(
                     bot_seed ^ (0xB0B0_0000_0000_0000 | (index % 5).wrapping_mul(0x9E37) as u64),
@@ -546,40 +558,28 @@ impl Simulation {
     /// heroes and minions are visible only while inside the vision radius of a living
     /// teammate. The output vector is cleared first and must be owned by the caller so the
     /// hot path allocates nothing after warm-up.
-    pub fn observed_units(&self, viewer: Team, out: &mut Vec<ObservedUnit>) {
+    pub fn observed_units(&mut self, viewer: Team, out: &mut Vec<ObservedUnit>) {
         self.observe(Some(viewer), out);
     }
 
     /// Builds the complete unit list for a spectator (no fog filtering).
-    pub fn observed_all(&self, out: &mut Vec<ObservedUnit>) {
+    pub fn observed_all(&mut self, out: &mut Vec<ObservedUnit>) {
         self.observe(None, out);
     }
 
     #[allow(clippy::too_many_lines)] // One fog pass keeps the visibility rules together.
-    fn observe(&self, viewer: Option<Team>, out: &mut Vec<ObservedUnit>) {
+    fn observe(&mut self, viewer: Option<Team>, out: &mut Vec<ObservedUnit>) {
         out.clear();
         let mut sources = [(FixVec2::ZERO, Fix::ZERO); MAX_UNITS];
         let mut source_count = 0usize;
         if let Some(viewer) = viewer {
-            for entity in self.world.entities() {
-                let Some(team) = self.world.get::<Team>(entity) else {
-                    continue;
-                };
-                if *team != viewer {
-                    continue;
-                }
-                let Some(health) = self.world.get::<Health>(entity) else {
-                    continue;
-                };
-                if health.current <= 0 {
+            for (_entity, (team, health, position, vision)) in
+                self.world
+                    .query::<(&Team, &Health, &Position, &VisionRange)>()
+            {
+                if *team != viewer || health.current <= 0 {
                     continue;
                 }
-                let Some(position) = self.world.get::<Position>(entity) else {
-                    continue;
-                };
-                let Some(vision) = self.world.get::<VisionRange>(entity) else {
-                    continue;
-                };
                 if source_count < MAX_UNITS {
                     sources[source_count] = (position.0, vision.0);
                     source_count += 1;
@@ -587,30 +587,32 @@ impl Simulation {
             }
         }
 
-        for entity in self.world.entities() {
-            let Some(team) = self.world.get::<Team>(entity) else {
-                continue;
-            };
-            let Some(kind) = self.world.get::<UnitKind>(entity) else {
-                continue;
-            };
-            let Some(position) = self.world.get::<Position>(entity) else {
-                continue;
-            };
-            let Some(health) = self.world.get::<Health>(entity) else {
-                continue;
-            };
-            let dead = health.current <= 0;
-            let allied = viewer.is_some_and(|viewer| *team == viewer);
+        self.observed_candidates.clear();
+        for (entity, (team, kind, position, health)) in
+            self.world.query::<(&Team, &UnitKind, &Position, &Health)>()
+        {
+            self.observed_candidates.push(ObservedCandidate {
+                entity,
+                team: *team,
+                kind: *kind,
+                position: position.0,
+                health: health.current,
+                max_health: health.max,
+            });
+        }
+        let candidates = core::mem::take(&mut self.observed_candidates);
+        for candidate in &candidates {
+            let entity = candidate.entity;
+            let team = candidate.team;
+            let kind = candidate.kind;
+            let position = candidate.position;
+            let dead = candidate.health <= 0;
+            let allied = viewer.is_some_and(|viewer| team == viewer);
             let visible = viewer.is_none()
                 || allied
                 || kind.is_structure()
                 || (!dead
-                    && unit_in_vision(
-                        position.0,
-                        &sources[..source_count],
-                        &self.content.map.walls,
-                    ));
+                    && unit_in_vision(position, &sources[..source_count], &self.content.map.walls));
             if !visible {
                 continue;
             }
@@ -637,11 +639,11 @@ impl Simulation {
                 });
             out.push(ObservedUnit {
                 entity,
-                kind: *kind,
-                team: *team,
-                position: position.0,
-                health: health.current,
-                max_health: health.max,
+                kind,
+                team,
+                position,
+                health: candidate.health,
+                max_health: candidate.max_health,
                 mana: mana.0,
                 max_mana: mana.1,
                 dead: dead && hero_slot.is_some(),
@@ -660,6 +662,7 @@ impl Simulation {
                 hasted: modifiers.is_some_and(|m| m.has(ModifierKind::Haste)),
             });
         }
+        self.observed_candidates = candidates;
     }
 
     /// Events produced since the queue was last cleared.

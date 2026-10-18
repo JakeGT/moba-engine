@@ -59,3 +59,16 @@ paths are expected to be zero (wave spawn may allocate to grow pools). The earli
 The spatial grid is now flat: items/cell indices append into reusable vectors, and a stable
 counting sort rebuilds row-major cell ranges only after inserts. This removed the `Vec<Vec<T>>`
 per-cell allocations and the per-query scratch clone; steady ticks are fully allocation-free.
+
+## Observe/fog pass
+
+`sim/observe_3_views` (two team views + spectator, warmed past three waves) improved from
+**19.2 µs to 13.2 µs** (~31%) with the new implementation:
+
+- source units are gathered through one tuple query instead of per-entity `TypeId` scans;
+- all visible-candidate required fields are copied from a single tuple query into a reused
+  scratch vector, then the fog/wall pass runs without touching archetypes;
+- optional hero/progression/modifier fields are fetched only for visible units.
+
+Deterministic output is unchanged: the cross-OS golden state hash remains
+`0x1923e3d7f3392604`.

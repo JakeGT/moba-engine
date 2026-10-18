@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Single-query observe candidate pass with a reused scratch vector; observe benchmark
+  improves from 19.2 µs to 13.2 µs for three views.
 - Flat deterministic spatial grid with reusable counting-sort buffers; steady/teamfight ticks
   now perform zero heap allocations.
 - Allocation guard matrix for wave spawns, 10-hero teamfights, respawns and shop purchases;
