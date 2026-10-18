@@ -156,7 +156,7 @@ cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 \
 cargo run -p moba-tools --bin replay -- --items content/example-pack.toml /tmp/match.mbr
 ```
 
-Replay format v4 stores the content hash/manifest, resolved inputs, state-hash checkpoints every
+Replay format v5 stores the content hash/manifest, resolved inputs (including purchases), state-hash checkpoints every
 150 ticks and the final hash; the first divergent checkpoint tick is reported.
 
 ## Determinism checklist

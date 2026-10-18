@@ -214,6 +214,10 @@ impl Registry {
     pub(crate) fn len(&self) -> usize {
         self.infos.len()
     }
+
+    pub(crate) fn type_ids(&self) -> Vec<TypeId> {
+        self.infos.iter().map(|info| info.type_id).collect()
+    }
 }
 
 fn create_column<T: Component>() -> Box<dyn AnyColumn> {

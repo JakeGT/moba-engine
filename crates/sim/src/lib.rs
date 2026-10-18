@@ -20,7 +20,7 @@ pub use components::{
     Health, HeroIdentity, HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position,
     Progression, Regen, Resistances, Root, Shield, Silence, Slow, UnitKind, VisionRange,
 };
-pub use replay::{Replay, ReplayError, ReplayResult};
+pub use replay::{Replay, ReplayError, ReplayResult, SIM_LOGIC_VERSION};
 pub use sim::{
     HERO_RESPAWN_TICKS, MAX_EVENTS, MAX_PLAYERS, MAX_PROJECTILES, MAX_UNITS, ObservedUnit,
     PlayerCommand, SimConfig, SimEvent, Simulation, TICK_DURATION, TickInputs, WAVE_DELAY_TICKS,

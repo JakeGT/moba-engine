@@ -22,6 +22,35 @@ use crate::components::{
 pub const MAX_PLAYERS: usize = 10;
 /// Hard cap on live entities. Waves stop when the cap is reached.
 pub const MAX_UNITS: usize = 512;
+const HASH_POSITION: u32 = 1;
+const HASH_HEALTH: u32 = 2;
+const HASH_MANA: u32 = 3;
+const HASH_ATTACK_STATS: u32 = 4;
+const HASH_ATTACK_TARGET: u32 = 5;
+const HASH_MOVE_TARGET: u32 = 6;
+const HASH_COOLDOWNS: u32 = 7;
+const HASH_LANE_WALKER: u32 = 8;
+const HASH_DEAD: u32 = 9;
+const HASH_HERO_IDENTITY: u32 = 10;
+const HASH_HERO_SLOT: u32 = 11;
+const HASH_PROGRESSION: u32 = 12;
+const HASH_BURN: u32 = 13;
+const HASH_HASTE: u32 = 14;
+const HASH_SILENCE: u32 = 15;
+const HASH_ROOT: u32 = 16;
+const HASH_SLOW: u32 = 17;
+const HASH_SHIELD: u32 = 18;
+const HASH_TEAM: u32 = 19;
+const HASH_KIND: u32 = 20;
+const HASH_REGEN: u32 = 21;
+const HASH_RESISTANCES: u32 = 22;
+const HASH_VISION: u32 = 23;
+const HASH_MOVE_SPEED: u32 = 24;
+const HASH_BASE_MOVE_SPEED: u32 = 25;
+const HASH_LAST_HIT_BY: u32 = 26;
+const HASH_ATTACK_DAMAGE_TYPE: u32 = 27;
+const HASH_PROJECTILE: u32 = 28;
+
 /// Hard cap on in-flight projectiles.
 pub const MAX_PROJECTILES: usize = 64;
 /// Hard cap on queued events; events beyond this are dropped, never allocated.
@@ -97,6 +126,9 @@ pub enum PlayerCommand {
 pub struct TickInputs {
     /// Slot-indexed commands; `None` keeps the current order.
     pub players: [Option<PlayerCommand>; MAX_PLAYERS],
+    /// Slot-indexed purchases. Separate from `players` so a move and a buy can happen in
+    /// the same tick and both are recorded in replays.
+    pub purchases: [Option<u8>; MAX_PLAYERS],
 }
 
 impl TickInputs {
@@ -105,6 +137,7 @@ impl TickInputs {
     pub const fn new() -> Self {
         Self {
             players: [None; MAX_PLAYERS],
+            purchases: [None; MAX_PLAYERS],
         }
     }
 
@@ -112,6 +145,13 @@ impl TickInputs {
     pub fn set(&mut self, slot: usize, command: PlayerCommand) {
         if slot < MAX_PLAYERS {
             self.players[slot] = Some(command);
+        }
+    }
+
+    /// Queues a purchase for one player alongside any movement/cast command.
+    pub fn set_purchase(&mut self, slot: usize, item: u8) {
+        if slot < MAX_PLAYERS {
+            self.purchases[slot] = Some(item);
         }
     }
 }
@@ -598,6 +638,11 @@ impl Simulation {
     pub fn state_hash(&self) -> u64 {
         let mut hasher = StableHasher::new();
         hasher.write_u64(self.config.seed);
+        hasher.write_u32(u32::from(self.config.bot_mask));
+        hasher.write_u32(u32::from(self.config.spawn_waves));
+        for pick in self.config.hero_picks {
+            hasher.write_u32(u32::from(pick));
+        }
         hasher.write_u32(self.tick.get());
         hasher.write_u32(self.wave);
         hasher.write_u32(self.next_wave_tick);
@@ -609,12 +654,18 @@ impl Simulation {
         }
 
         for projectile in &self.projectiles {
+            hasher.write_u32(HASH_PROJECTILE);
             hasher.write_u64(projectile.owner.to_bits());
             hasher.write_u32(projectile.team.index() as u32);
             hasher.write_u64(projectile.position.x.to_bits() as u64);
             hasher.write_u64(projectile.position.y.to_bits() as u64);
+            hasher.write_u64(projectile.direction.x.to_bits() as u64);
+            hasher.write_u64(projectile.direction.y.to_bits() as u64);
+            hasher.write_u64(projectile.speed_per_tick.to_bits() as u64);
             hasher.write_u64(projectile.remaining.to_bits() as u64);
+            hasher.write_u64(projectile.radius.to_bits() as u64);
             hasher.write_u32(projectile.damage as u32);
+            hasher.write_u32(projectile.damage_type as u32);
         }
 
         for entity in self.world.entities() {
@@ -622,30 +673,34 @@ impl Simulation {
             hash_team(&self.world, entity, &mut hasher);
             hash_kind(&self.world, entity, &mut hasher);
             if let Some(position) = self.world.get::<Position>(entity) {
-                hasher.write_u32(1);
+                hasher.write_u32(HASH_POSITION);
                 hasher.write_u64(position.0.x.to_bits() as u64);
                 hasher.write_u64(position.0.y.to_bits() as u64);
-            } else {
-                hasher.write_u32(0);
             }
             if let Some(health) = self.world.get::<Health>(entity) {
-                hasher.write_u32(2);
+                hasher.write_u32(HASH_HEALTH);
                 hasher.write_u32(health.current as u32);
+                hasher.write_u32(health.max as u32);
             }
             if let Some(mana) = self.world.get::<Mana>(entity) {
-                hasher.write_u32(3);
+                hasher.write_u32(HASH_MANA);
                 hasher.write_u32(mana.current as u32);
+                hasher.write_u32(mana.max as u32);
             }
             if let Some(stats) = self.world.get::<AttackStats>(entity) {
-                hasher.write_u32(4);
+                hasher.write_u32(HASH_ATTACK_STATS);
+                hasher.write_u32(stats.damage as u32);
+                hasher.write_u64(stats.range.to_bits() as u64);
+                hasher.write_u64(stats.range_sq.to_bits() as u64);
+                hasher.write_u32(stats.interval);
                 hasher.write_u32(stats.cooldown);
             }
             if let Some(target) = self.world.get::<AttackTarget>(entity) {
-                hasher.write_u32(5);
+                hasher.write_u32(HASH_ATTACK_TARGET);
                 hasher.write_u64(target.0.map_or(u64::MAX, Entity::to_bits));
             }
             if let Some(target) = self.world.get::<MoveTarget>(entity) {
-                hasher.write_u32(6);
+                hasher.write_u32(HASH_MOVE_TARGET);
                 match target.0 {
                     Some(position) => {
                         hasher.write_u32(1);
@@ -656,57 +711,30 @@ impl Simulation {
                 }
             }
             if let Some(cooldowns) = self.world.get::<Cooldowns>(entity) {
-                hasher.write_u32(7);
+                hasher.write_u32(HASH_COOLDOWNS);
                 for cooldown in cooldowns.0 {
                     hasher.write_u32(cooldown);
                 }
             }
             if let Some(walker) = self.world.get::<LaneWalker>(entity) {
-                hasher.write_u32(8);
+                hasher.write_u32(HASH_LANE_WALKER);
                 hasher.write_u32(u32::from(walker.lane));
                 hasher.write_u32(u32::from(walker.waypoint));
             }
             if let Some(dead) = self.world.get::<Dead>(entity) {
-                hasher.write_u32(9);
+                hasher.write_u32(HASH_DEAD);
                 hasher.write_u32(dead.respawn_in);
             }
             if let Some(identity) = self.world.get::<HeroIdentity>(entity) {
-                hasher.write_u32(10);
+                hasher.write_u32(HASH_HERO_IDENTITY);
                 hasher.write_u32(u32::from(identity.0.0));
             }
-            if let Some(burn) = self.world.get::<Burn>(entity) {
-                hasher.write_u32(7);
-                hasher.write_u32(burn.source.index());
-                hasher.write_u32(burn.source.generation());
-                hasher.write_u32(burn.damage as u32);
-                hasher.write_u32(burn.damage_type as u32);
-                hasher.write_u32(burn.remaining);
-            }
-            if let Some(haste) = self.world.get::<Haste>(entity) {
-                hasher.write_u32(8);
-                hasher.write_u64(haste.factor.to_bits() as u64);
-                hasher.write_u32(haste.remaining);
-            }
-            if let Some(silence) = self.world.get::<Silence>(entity) {
-                hasher.write_u32(6);
-                hasher.write_u32(silence.remaining);
-            }
-            if let Some(root) = self.world.get::<Root>(entity) {
-                hasher.write_u32(5);
-                hasher.write_u32(root.remaining);
-            }
-            if let Some(slow) = self.world.get::<Slow>(entity) {
-                hasher.write_u32(4);
-                hasher.write_u64(slow.factor.to_bits() as u64);
-                hasher.write_u32(slow.remaining);
-            }
-            if let Some(shield) = self.world.get::<Shield>(entity) {
-                hasher.write_u32(3);
-                hasher.write_u32(shield.amount as u32);
-                hasher.write_u32(shield.remaining);
+            if let Some(slot) = self.world.get::<HeroSlot>(entity) {
+                hasher.write_u32(HASH_HERO_SLOT);
+                hasher.write_u32(u32::from(slot.0));
             }
             if let Some(progress) = self.world.get::<Progression>(entity) {
-                hasher.write_u32(11);
+                hasher.write_u32(HASH_PROGRESSION);
                 hasher.write_u32(u32::from(progress.level));
                 hasher.write_u32(progress.xp);
                 hasher.write_u32(progress.gold);
@@ -714,6 +742,68 @@ impl Simulation {
                 for item in progress.items {
                     hasher.write_u32(u32::from(item));
                 }
+            }
+            if let Some(burn) = self.world.get::<Burn>(entity) {
+                hasher.write_u32(HASH_BURN);
+                hasher.write_u32(burn.source.index());
+                hasher.write_u32(burn.source.generation());
+                hasher.write_u32(burn.damage as u32);
+                hasher.write_u32(burn.damage_type as u32);
+                hasher.write_u32(burn.remaining);
+            }
+            if let Some(haste) = self.world.get::<Haste>(entity) {
+                hasher.write_u32(HASH_HASTE);
+                hasher.write_u64(haste.factor.to_bits() as u64);
+                hasher.write_u32(haste.remaining);
+            }
+            if let Some(silence) = self.world.get::<Silence>(entity) {
+                hasher.write_u32(HASH_SILENCE);
+                hasher.write_u32(silence.remaining);
+            }
+            if let Some(root) = self.world.get::<Root>(entity) {
+                hasher.write_u32(HASH_ROOT);
+                hasher.write_u32(root.remaining);
+            }
+            if let Some(slow) = self.world.get::<Slow>(entity) {
+                hasher.write_u32(HASH_SLOW);
+                hasher.write_u64(slow.factor.to_bits() as u64);
+                hasher.write_u32(slow.remaining);
+            }
+            if let Some(shield) = self.world.get::<Shield>(entity) {
+                hasher.write_u32(HASH_SHIELD);
+                hasher.write_u32(shield.amount as u32);
+                hasher.write_u32(shield.remaining);
+            }
+            if let Some(regen) = self.world.get::<Regen>(entity) {
+                hasher.write_u32(HASH_REGEN);
+                hasher.write_u32(regen.health as u32);
+                hasher.write_u32(regen.mana as u32);
+            }
+            if let Some(resistances) = self.world.get::<Resistances>(entity) {
+                hasher.write_u32(HASH_RESISTANCES);
+                hasher.write_u32(resistances.armor as u32);
+                hasher.write_u32(resistances.magic_resist as u32);
+            }
+            if let Some(vision) = self.world.get::<VisionRange>(entity) {
+                hasher.write_u32(HASH_VISION);
+                hasher.write_u64(vision.0.to_bits() as u64);
+            }
+            if let Some(speed) = self.world.get::<MoveSpeed>(entity) {
+                hasher.write_u32(HASH_MOVE_SPEED);
+                hasher.write_u64(speed.0.to_bits() as u64);
+            }
+            if let Some(speed) = self.world.get::<BaseMoveSpeed>(entity) {
+                hasher.write_u32(HASH_BASE_MOVE_SPEED);
+                hasher.write_u64(speed.0.to_bits() as u64);
+            }
+            if let Some(last_hit) = self.world.get::<LastHitBy>(entity) {
+                hasher.write_u32(HASH_LAST_HIT_BY);
+                hasher.write_u32(last_hit.team.index() as u32);
+                hasher.write_u64(last_hit.entity.to_bits());
+            }
+            if let Some(damage_type) = self.world.get::<AttackDamageType>(entity) {
+                hasher.write_u32(HASH_ATTACK_DAMAGE_TYPE);
+                hasher.write_u32(damage_type.0 as u32);
             }
         }
         hasher.finish64()
@@ -1110,13 +1200,16 @@ impl Simulation {
             core::array::from_fn(|index| MAX_PLAYERS - 1 - index)
         };
         for slot in order {
-            let Some(command) = inputs.players[slot] else {
-                continue;
-            };
             let entity = self.hero_entities[slot];
             if self.world.has::<Dead>(entity) {
                 continue;
             }
+            if let Some(item) = inputs.purchases[slot] {
+                self.buy_item(entity, item);
+            }
+            let Some(command) = inputs.players[slot] else {
+                continue;
+            };
             match command {
                 PlayerCommand::Stop => {
                     if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
@@ -2225,14 +2318,14 @@ fn clamp_position(position: FixVec2) -> FixVec2 {
 
 fn hash_team(world: &World, entity: Entity, hasher: &mut StableHasher) {
     if let Some(team) = world.get::<Team>(entity) {
-        hasher.write_u32(11);
+        hasher.write_u32(HASH_TEAM);
         hasher.write_u32(team.index() as u32);
     }
 }
 
 fn hash_kind(world: &World, entity: Entity, hasher: &mut StableHasher) {
     if let Some(kind) = world.get::<UnitKind>(entity) {
-        hasher.write_u32(12);
+        hasher.write_u32(HASH_KIND);
         hasher.write_u32(*kind as u32);
     }
 }
@@ -2252,6 +2345,7 @@ impl fmt::Debug for Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::TypeId;
 
     fn idle(picks: [u8; MAX_PLAYERS]) -> Simulation {
         Simulation::new(SimConfig {
@@ -2500,6 +2594,177 @@ mod tests {
         sim.grant_xp(blue, 2_000);
         assert!(sim.world.get::<Progression>(blue).expect("progress").level > 1);
         assert_eq!(sim.world.get::<Health>(blue).expect("health").max, health);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Explicitly inserts one value of every component.
+    fn every_registered_component_is_hashed() {
+        let mut sim = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        let entity = sim.world_mut().spawn();
+        let world = sim.world_mut();
+        let _ = world.insert(entity, Position(FixVec2::ZERO));
+        let _ = world.insert(entity, Team::Blue);
+        let _ = world.insert(entity, UnitKind::Hero);
+        let _ = world.insert(entity, Health { current: 1, max: 1 });
+        let _ = world.insert(entity, Mana { current: 1, max: 1 });
+        let _ = world.insert(entity, AttackStats::new(1, Fix::ONE, 30));
+        let _ = world.insert(entity, AttackTarget::default());
+        let _ = world.insert(entity, MoveTarget::default());
+        let _ = world.insert(entity, Cooldowns::default());
+        let _ = world.insert(
+            entity,
+            LaneWalker {
+                lane: 0,
+                waypoint: 0,
+            },
+        );
+        let _ = world.insert(entity, Dead { respawn_in: 1 });
+        let _ = world.insert(entity, HeroSlot(0));
+        let _ = world.insert(
+            entity,
+            Progression {
+                level: 1,
+                xp: 0,
+                gold: 0,
+                items: [EMPTY_ITEM; moba_game::ITEM_SLOTS],
+                item_count: 0,
+            },
+        );
+        let _ = world.insert(
+            entity,
+            Burn {
+                source: entity,
+                damage: 1,
+                damage_type: DamageType::Magic,
+                remaining: 1,
+            },
+        );
+        let _ = world.insert(
+            entity,
+            Haste {
+                factor: Fix::ONE,
+                remaining: 1,
+            },
+        );
+        let _ = world.insert(entity, Silence { remaining: 1 });
+        let _ = world.insert(entity, Root { remaining: 1 });
+        let _ = world.insert(
+            entity,
+            Slow {
+                factor: Fix::ONE,
+                remaining: 1,
+            },
+        );
+        let _ = world.insert(
+            entity,
+            Shield {
+                amount: 1,
+                remaining: 1,
+            },
+        );
+        let _ = world.insert(entity, Regen { health: 0, mana: 0 });
+        let _ = world.insert(
+            entity,
+            Resistances {
+                armor: 0,
+                magic_resist: 0,
+            },
+        );
+        let _ = world.insert(entity, VisionRange(Fix::ONE));
+        let _ = world.insert(entity, MoveSpeed(Fix::ONE));
+        let _ = world.insert(entity, BaseMoveSpeed(Fix::ONE));
+        let _ = world.insert(
+            entity,
+            LastHitBy {
+                team: Team::Blue,
+                entity,
+            },
+        );
+        let _ = world.insert(entity, AttackDamageType(DamageType::Physical));
+
+        let mut actual = sim.world().registered_component_types();
+        actual.sort_unstable();
+        let mut expected = vec![
+            TypeId::of::<Position>(),
+            TypeId::of::<Health>(),
+            TypeId::of::<Mana>(),
+            TypeId::of::<AttackStats>(),
+            TypeId::of::<AttackTarget>(),
+            TypeId::of::<MoveTarget>(),
+            TypeId::of::<Cooldowns>(),
+            TypeId::of::<LaneWalker>(),
+            TypeId::of::<Dead>(),
+            TypeId::of::<HeroIdentity>(),
+            TypeId::of::<HeroSlot>(),
+            TypeId::of::<Progression>(),
+            TypeId::of::<Burn>(),
+            TypeId::of::<Haste>(),
+            TypeId::of::<Silence>(),
+            TypeId::of::<Root>(),
+            TypeId::of::<Slow>(),
+            TypeId::of::<Shield>(),
+            TypeId::of::<Team>(),
+            TypeId::of::<UnitKind>(),
+            TypeId::of::<Regen>(),
+            TypeId::of::<Resistances>(),
+            TypeId::of::<VisionRange>(),
+            TypeId::of::<MoveSpeed>(),
+            TypeId::of::<BaseMoveSpeed>(),
+            TypeId::of::<LastHitBy>(),
+            TypeId::of::<AttackDamageType>(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn state_hash_covers_combat_and_movement_fields() {
+        let mut sim = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        let hero = sim.hero_entities[0];
+        let baseline = sim.state_hash();
+        sim.world.get_mut::<Health>(hero).expect("health").max += 1;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world.get_mut::<Health>(hero).expect("health").max -= 1;
+        sim.world.get_mut::<Mana>(hero).expect("mana").max += 1;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world.get_mut::<Mana>(hero).expect("mana").max -= 1;
+        sim.world
+            .get_mut::<AttackStats>(hero)
+            .expect("attack")
+            .damage += 1;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world
+            .get_mut::<AttackStats>(hero)
+            .expect("attack")
+            .damage -= 1;
+        sim.world
+            .get_mut::<Resistances>(hero)
+            .expect("resistances")
+            .armor += 1;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world
+            .get_mut::<Resistances>(hero)
+            .expect("resistances")
+            .armor -= 1;
+        sim.world.get_mut::<Regen>(hero).expect("regen").health += 1;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world.get_mut::<Regen>(hero).expect("regen").health -= 1;
+        sim.world.get_mut::<VisionRange>(hero).expect("vision").0 += Fix::ONE;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world.get_mut::<VisionRange>(hero).expect("vision").0 -= Fix::ONE;
+        sim.world.get_mut::<MoveSpeed>(hero).expect("speed").0 += Fix::ONE;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world.get_mut::<MoveSpeed>(hero).expect("speed").0 -= Fix::ONE;
+        sim.world
+            .get_mut::<BaseMoveSpeed>(hero)
+            .expect("base speed")
+            .0 += Fix::ONE;
+        assert_ne!(sim.state_hash(), baseline);
+        sim.world
+            .get_mut::<BaseMoveSpeed>(hero)
+            .expect("base speed")
+            .0 -= Fix::ONE;
+        assert_eq!(sim.state_hash(), baseline);
     }
 
     #[test]
