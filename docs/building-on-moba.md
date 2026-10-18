@@ -64,6 +64,9 @@ for (entity, burn) in world.query::<&mut Burn>() {
 Keep systems order-explicit: the simulation's fixed order is part of the replay contract. Add a
 regression test with the same seed and assert `state_hash()`.
 
+`NetServer` has **no custom-system hook yet** (#39). Embed your own `Simulation` loop if you
+need extra systems; a dedicated-server hook is planned, not available today.
+
 ## Content packs
 
 Runtime packs are TOML validated by `moba-game` and carried by `Welcome`:
@@ -93,13 +96,41 @@ deployments should use [server.example.toml](../server.example.toml).
 1. Add a variant to `AbilityKind` in `moba-game`.
 2. Handle it in validation, `content_hash`, and the TOML parser.
 3. Execute it in `Simulation::cast_ability`; add components/tick timers as needed.
-4. If the client needs a visual, use a spare snapshot flag bit rather than changing the
-   snapshot shape.
+4. Add a presentation event/status tag and bump the protocol. Do not assume a spare snapshot
+   flag bit; the current flags bitset is nearly full (#41).
 5. Add a unit test for application, expiry, and state hash; update docs/content-authoring.md.
+6. Add the kind to `AbilityKind` hashing, the content→wire parity conversion and the client
+   catalogue.
+
+## Extension checklists
+
+Use these touch-point lists for changes that cross the content/simulation/wire boundary.
+
+**Add an item stat**
+- `moba-game`: `ItemSpec`, `ItemDef`/default table, `ItemEntry` TOML parser, `validate`,
+  `GameContent::hash`.
+- `moba-net`: `WireItem`, encode/decode, catalogue hash, `GameContent → WireCatalog` parity.
+- `moba-sim`: item purchase/stat application and state hash (plus snapshot progress).
+- Client: shop/tooltip rendering and tests.
+- Docs/tests: content-authoring, API/wire version note if the shape changes, replay fixture.
+
+**Add a status effect**
+- `moba-sim`: component, apply/expiry/recompute path, `state_hash` unique tag, allocation guard.
+- `moba-game`: ability/content definition and validation.
+- `moba-net`: wire status flag/tag, snapshot encode/decode, client tint/icon; bump protocol.
+- Tests: application, independent expiry, replay verification, snapshot round-trip.
+- Docs: content-authoring, status, CHANGELOG.
+
+**Add an ability kind**
+- `moba-game`: `AbilityKind`, parser/validation/hash, defaults and content examples.
+- `moba-sim`: cast/targeting/execution, cooldown/mana/range rejection, events, state hash.
+- `moba-net`: wire kind/display fields, parity test, protocol bump when needed.
+- Client: tooltip/range/visual; add a capture/golden check if visual.
+- Docs/tests: content-authoring, ability checklist, replay/fixture, CHANGELOG.
 
 ## Replays and diagnostics
 
-`Replay` stores content hash/manifest, resolved inputs, periodic state checkpoints (v4) and the
+`Replay` stores content hash/manifest, resolved inputs (including purchases), periodic state checkpoints (v5) and the
 final hash. `moba-tools replay --items pack.toml match.mbr` reports the first divergent
 checkpoint if a replay breaks. Add `--json` to `replay` or `content-check` for machine-readable
 summaries.

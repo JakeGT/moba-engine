@@ -8,7 +8,8 @@ dual-licensed under MIT OR Apache-2.0, matching the project.
 
 ## Setup
 
-- Rust **1.85+** (edition 2024). The repo pins a toolchain in `rust-toolchain.toml`.
+- Rust **1.85+** (edition 2024). `rust-toolchain.toml` requests the floating `stable` channel;
+  CI additionally checks the 1.85 MSRV job.
 - A Vulkan **1.2+** driver for the client; `glslc` (Vulkan SDK) or `glslangValidator` to
   compile shaders. The dedicated server and tests need no GPU.
 - Optional: `just` and `cargo-nextest`, which the `justfile` prefers. All gates also work
@@ -39,8 +40,9 @@ cargo run -p moba-server -- --ticks 1000
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo doc --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 just layering          # or run the cargo tree check described in the justfile
+just state-hash-check  # fixed simulation hash must match tests/golden-state-hash.txt
 ```
 
 Before merging hot-path or netcode changes also run a short soak or benchmark:

@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Documentation truth pass: milestone grading/evidence links, security/contributing/API/perf
+  corrections, runtime-support wording, and contributor checklists for item stats, statuses
+  and ability kinds.
 - Replay format v5 with an explicit simulation-logic version, per-slot purchase inputs and
   rejection of unknown layout/logic versions; human purchases are queued in `Playing` and
   recorded even when a movement command arrives in the same tick.
@@ -110,9 +113,10 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
   team scores, outcome, hero pick and per-hero progression; shop intents are one-shot
   commands applied immediately by the server.
 
-### Known limitations
-- No encryption/authentication yet; trusted networks only.
-- Content is compile-time; runtime content packs are planned for M8.
-- Lobby/rematch/reconnect flow, minimap, floating health bars and line-of-sight fog remain.
+### Known limitations at the 0.1.0 preview tag
+- At this tag there was no encryption/authentication and content was compile-time; the
+  Unreleased section records the later AEAD/identity and runtime-pack additions.
+- Lobby/rematch/reconnect, minimap, floating health bars and line-of-sight fog were not yet
+  present at the tag.
 - Windows/macOS builds are CI-checked but rendering has been validated primarily on Linux
   (lavapipe); min-spec hardware timings are not yet recorded.
