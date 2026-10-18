@@ -8,15 +8,16 @@ use core::fmt;
 
 use moba_core::{Fix, FixVec2};
 use moba_game::{
-    AbilityKind, AbilitySpec, ContentManifest, DamageType, GameContent, HeroSpec, ItemSpec,
-    LaneSpec, MapSpec, ModifierDef, StructureKind, StructureSpec, Team, WallSpec,
+    AbilitySpec, AreaEffect, AreaEffectList, ContentManifest, DamageType, Effect, EffectList,
+    GameContent, HeroSpec, ItemSpec, LaneSpec, MapSpec, ModifierDef, StructureKind, StructureSpec,
+    Targeting, Team, WallSpec,
 };
 use moba_sim::ObservedUnit;
 
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 14;
+pub const PROTOCOL_VERSION: u8 = 15;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -265,6 +266,10 @@ pub const MAX_WIRE_STRUCTURES: usize = 32;
 pub const MAX_WIRE_MODIFIERS: usize = 16;
 /// Fixed modifier-name bytes on the wire.
 pub const WIRE_MODIFIER_NAME: usize = 16;
+/// Maximum top-level ability effects on the wire.
+pub const MAX_WIRE_EFFECTS: usize = 3;
+/// Maximum area/on-hit effects per list on the wire.
+pub const MAX_WIRE_AREA_EFFECTS: usize = 3;
 /// Fixed manifest-field bytes on the wire.
 pub const WIRE_MANIFEST_FIELD: usize = 32;
 
@@ -279,6 +284,8 @@ const _: () = {
     assert!(WIRE_MANIFEST_FIELD == moba_game::MAX_MANIFEST_FIELD);
     assert!(MAX_WIRE_MODIFIERS == moba_game::MAX_CONTENT_MODIFIERS);
     assert!(WIRE_MODIFIER_NAME == moba_game::MAX_ITEM_NAME);
+    assert!(MAX_WIRE_EFFECTS == moba_game::MAX_ABILITY_EFFECTS);
+    assert!(MAX_WIRE_AREA_EFFECTS == moba_game::MAX_AREA_EFFECTS);
     assert!(WIRE_ITEM_NAME == moba_game::MAX_ITEM_NAME);
     assert!(WIRE_HERO_NAME == moba_game::MAX_HERO_NAME);
     assert!(WIRE_ABILITY_NAME == moba_game::MAX_ABILITY_NAME);
@@ -410,6 +417,48 @@ impl WireHero {
     }
 }
 
+/// One area/on-hit effect carried in the handshake.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireAreaEffect {
+    /// 0 none, 1 damage, 2 apply-modifier.
+    pub kind: u8,
+    /// Modifier definition id.
+    pub modifier: u16,
+    /// Duration in ticks.
+    pub duration_ticks: u32,
+    /// Movement factor in raw fixed-point bits.
+    pub factor_bits: i64,
+    /// Shield/burn amount.
+    pub amount: i32,
+    /// Damage type discriminant.
+    pub damage_type: u8,
+}
+
+/// One top-level ability effect carried in the handshake.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireEffect {
+    /// 0 none, 1 damage, 2 heal, 3 modifier, 4 displace, 5 projectile, 6 area, 7 zone.
+    pub kind: u8,
+    /// Damage/heal amount.
+    pub amount: i32,
+    /// Damage type discriminant.
+    pub damage_type: u8,
+    /// Projectile speed in raw fixed-point bits.
+    pub speed_bits: i64,
+    /// Range/radius/displace in raw fixed-point bits.
+    pub range_bits: i64,
+    /// Radius in raw fixed-point bits.
+    pub radius_bits: i64,
+    /// Duration in ticks.
+    pub duration_ticks: u32,
+    /// Period in ticks.
+    pub period_ticks: u32,
+    /// Number of valid `area` entries.
+    pub area_count: u8,
+    /// Area/on-hit effects.
+    pub area: [WireAreaEffect; MAX_WIRE_AREA_EFFECTS],
+}
+
 /// One runtime ability definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireAbility {
@@ -421,26 +470,18 @@ pub struct WireAbility {
     pub cooldown_ticks: u32,
     /// Mana cost.
     pub mana_cost: i32,
-    /// Maximum cast distance in raw fixed-point bits.
+    /// Summary maximum cast distance in raw fixed-point bits.
     pub cast_range_bits: i64,
-    /// Ability kind discriminant.
-    pub kind: u8,
-    /// Effect radius in raw fixed-point bits.
+    /// Summary display radius in raw fixed-point bits.
     pub radius_bits: i64,
-    /// Travel/effect range in raw fixed-point bits.
-    pub range_bits: i64,
-    /// Projectile speed in raw fixed-point bits.
-    pub speed_bits: i64,
-    /// Slow/haste multiplier in raw fixed-point bits.
-    pub factor_bits: i64,
-    /// Heal/shield amount.
-    pub amount: i32,
-    /// Damage amount.
-    pub damage: i32,
-    /// Duration in ticks.
-    pub duration_ticks: u32,
-    /// Damage type discriminant.
-    pub damage_type: u8,
+    /// 0 self, 1 point, 2 direction.
+    pub targeting_kind: u8,
+    /// Targeting range in raw fixed-point bits.
+    pub targeting_range_bits: i64,
+    /// Number of valid `effects` entries.
+    pub effect_count: u8,
+    /// Ordered effects.
+    pub effects: [WireEffect; MAX_WIRE_EFFECTS],
 }
 
 impl Default for WireAbility {
@@ -451,15 +492,11 @@ impl Default for WireAbility {
             cooldown_ticks: 0,
             mana_cost: 0,
             cast_range_bits: 0,
-            kind: 0,
             radius_bits: 0,
-            range_bits: 0,
-            speed_bits: 0,
-            factor_bits: 0,
-            amount: 0,
-            damage: 0,
-            duration_ticks: 0,
-            damage_type: 0,
+            targeting_kind: 0,
+            targeting_range_bits: 0,
+            effect_count: 0,
+            effects: [WireEffect::default(); MAX_WIRE_EFFECTS],
         }
     }
 }
@@ -473,7 +510,7 @@ impl WireAbility {
     }
 }
 
-/// One lane path carried in the handshake map.
+/// One lane path carried in the handshake map./// One lane path carried in the handshake map.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireLane {
     /// Name bytes, padded with zeroes.
@@ -641,6 +678,44 @@ impl Default for WireCatalog {
     }
 }
 
+fn encode_area_effects(effects: &AreaEffectList) -> (u8, [WireAreaEffect; MAX_WIRE_AREA_EFFECTS]) {
+    let mut area = [WireAreaEffect::default(); MAX_WIRE_AREA_EFFECTS];
+    let mut count = 0usize;
+    for effect in effects.iter() {
+        if count >= MAX_WIRE_AREA_EFFECTS {
+            break;
+        }
+        area[count] = match effect {
+            AreaEffect::None => WireAreaEffect::default(),
+            AreaEffect::Damage {
+                amount,
+                damage_type,
+            } => WireAreaEffect {
+                kind: 1,
+                amount: *amount,
+                damage_type: damage_type_code(*damage_type),
+                ..WireAreaEffect::default()
+            },
+            AreaEffect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            } => WireAreaEffect {
+                kind: 2,
+                modifier: *modifier,
+                duration_ticks: *duration_ticks,
+                factor_bits: factor.to_bits(),
+                amount: *amount,
+                damage_type: damage_type_code(*damage_type),
+            },
+        };
+        count += 1;
+    }
+    (u8::try_from(count).unwrap_or(u8::MAX), area)
+}
+
 impl From<&GameContent> for WireCatalog {
     #[allow(clippy::too_many_lines)] // One exhaustive destructured conversion.
     fn from(content: &GameContent) -> Self {
@@ -735,102 +810,111 @@ impl From<&GameContent> for WireCatalog {
                 name,
                 cooldown_ticks,
                 mana_cost,
-                cast_range,
-                kind,
+                targeting,
+                effects,
             } = ability;
             wire.name_len = put_wire_name(&mut wire.name, name);
             wire.cooldown_ticks = *cooldown_ticks;
             wire.mana_cost = *mana_cost;
-            wire.cast_range_bits = cast_range.to_bits();
-            match *kind {
-                AbilityKind::Skillshot {
-                    speed_per_sec,
-                    range,
-                    radius,
-                    damage,
-                    damage_type,
-                } => {
-                    wire.kind = 0;
-                    wire.speed_bits = speed_per_sec.to_bits();
-                    wire.range_bits = range.to_bits();
-                    wire.radius_bits = radius.to_bits();
-                    wire.damage = damage;
-                    wire.damage_type = damage_type_code(damage_type);
+            wire.cast_range_bits = targeting.range().to_bits();
+            wire.radius_bits = ability.display_radius().to_bits();
+            match targeting {
+                Targeting::SelfCast => wire.targeting_kind = 0,
+                Targeting::Point { range } => {
+                    wire.targeting_kind = 1;
+                    wire.targeting_range_bits = range.to_bits();
                 }
-                AbilityKind::Dash { range } => {
-                    wire.kind = 1;
-                    wire.range_bits = range.to_bits();
-                }
-                AbilityKind::Heal { amount, radius } => {
-                    wire.kind = 2;
-                    wire.amount = amount;
-                    wire.radius_bits = radius.to_bits();
-                }
-                AbilityKind::Shield {
-                    amount,
-                    duration_ticks,
-                } => {
-                    wire.kind = 3;
-                    wire.amount = amount;
-                    wire.duration_ticks = duration_ticks;
-                }
-                AbilityKind::Slow {
-                    radius,
-                    factor,
-                    duration_ticks,
-                } => {
-                    wire.kind = 4;
-                    wire.radius_bits = radius.to_bits();
-                    wire.factor_bits = factor.to_bits();
-                    wire.duration_ticks = duration_ticks;
-                }
-                AbilityKind::Root {
-                    radius,
-                    duration_ticks,
-                } => {
-                    wire.kind = 5;
-                    wire.radius_bits = radius.to_bits();
-                    wire.duration_ticks = duration_ticks;
-                }
-                AbilityKind::Silence {
-                    radius,
-                    duration_ticks,
-                } => {
-                    wire.kind = 6;
-                    wire.radius_bits = radius.to_bits();
-                    wire.duration_ticks = duration_ticks;
-                }
-                AbilityKind::Burn {
-                    radius,
-                    duration_ticks,
-                    damage_per_tick,
-                    damage_type,
-                } => {
-                    wire.kind = 7;
-                    wire.radius_bits = radius.to_bits();
-                    wire.duration_ticks = duration_ticks;
-                    wire.damage = damage_per_tick;
-                    wire.damage_type = damage_type_code(damage_type);
-                }
-                AbilityKind::Haste {
-                    factor,
-                    duration_ticks,
-                } => {
-                    wire.kind = 8;
-                    wire.factor_bits = factor.to_bits();
-                    wire.duration_ticks = duration_ticks;
-                }
-                AbilityKind::Burst {
-                    radius,
-                    damage,
-                    damage_type,
-                } => {
-                    wire.kind = 9;
-                    wire.radius_bits = radius.to_bits();
-                    wire.damage = damage;
-                    wire.damage_type = damage_type_code(damage_type);
+                Targeting::Direction { range } => {
+                    wire.targeting_kind = 2;
+                    wire.targeting_range_bits = range.to_bits();
                 }
             }
+            let mut count = 0usize;
+            for effect in effects.iter() {
+                if count >= MAX_WIRE_EFFECTS {
+                    break;
+                }
+                let mut encoded = WireEffect::default();
+                match effect {
+                    Effect::None => continue,
+                    Effect::Damage {
+                        amount,
+                        damage_type,
+                    } => {
+                        encoded.kind = 1;
+                        encoded.amount = *amount;
+                        encoded.damage_type = damage_type_code(*damage_type);
+                    }
+                    Effect::Heal { amount } => {
+                        encoded.kind = 2;
+                        encoded.amount = *amount;
+                    }
+                    Effect::ApplyModifier {
+                        modifier,
+                        duration_ticks,
+                        factor,
+                        amount,
+                        damage_type,
+                    } => {
+                        encoded.kind = 3;
+                        encoded.amount = *amount;
+                        encoded.damage_type = damage_type_code(*damage_type);
+                        encoded.range_bits = factor.to_bits();
+                        encoded.duration_ticks = *duration_ticks;
+                        encoded.area[0] = WireAreaEffect {
+                            kind: 2,
+                            modifier: *modifier,
+                            duration_ticks: *duration_ticks,
+                            factor_bits: factor.to_bits(),
+                            amount: *amount,
+                            damage_type: damage_type_code(*damage_type),
+                        };
+                        encoded.area_count = 1;
+                    }
+                    Effect::Displace { range } => {
+                        encoded.kind = 4;
+                        encoded.range_bits = range.to_bits();
+                    }
+                    Effect::Projectile {
+                        speed_per_sec,
+                        range,
+                        radius,
+                        on_hit,
+                    } => {
+                        encoded.kind = 5;
+                        encoded.speed_bits = speed_per_sec.to_bits();
+                        encoded.range_bits = range.to_bits();
+                        encoded.radius_bits = radius.to_bits();
+                        let (area_count, area) = encode_area_effects(on_hit);
+                        encoded.area_count = area_count;
+                        encoded.area = area;
+                    }
+                    Effect::Area { radius, effects } => {
+                        encoded.kind = 6;
+                        encoded.radius_bits = radius.to_bits();
+                        let (area_count, area) = encode_area_effects(effects);
+                        encoded.area_count = area_count;
+                        encoded.area = area;
+                    }
+                    Effect::Zone {
+                        radius,
+                        duration_ticks,
+                        period_ticks,
+                        effects,
+                    } => {
+                        encoded.kind = 7;
+                        encoded.radius_bits = radius.to_bits();
+                        encoded.duration_ticks = *duration_ticks;
+                        encoded.period_ticks = *period_ticks;
+                        let (area_count, area) = encode_area_effects(effects);
+                        encoded.area_count = area_count;
+                        encoded.area = area;
+                    }
+                }
+                wire.effects[count] = encoded;
+                count += 1;
+            }
+            wire.effect_count = u8::try_from(count).unwrap_or(u8::MAX);
         }
 
         catalog.modifier_count = u8::try_from(content_modifiers.len().min(MAX_WIRE_MODIFIERS))
@@ -913,6 +997,85 @@ impl From<&GameContent> for WireCatalog {
     }
 }
 
+fn decode_area_effects(wire: &WireEffect) -> Result<AreaEffectList, WireError> {
+    let count = usize::from(wire.area_count);
+    if count > MAX_WIRE_AREA_EFFECTS {
+        return Err(WireError::BadValue);
+    }
+    let mut effects = AreaEffectList::EMPTY;
+    for (slot, encoded) in wire.area[..count].iter().enumerate() {
+        effects.effects[slot] = match encoded.kind {
+            0 => AreaEffect::None,
+            1 => AreaEffect::Damage {
+                amount: encoded.amount,
+                damage_type: damage_type_from_code(encoded.damage_type)?,
+            },
+            2 => AreaEffect::ApplyModifier {
+                modifier: encoded.modifier,
+                duration_ticks: encoded.duration_ticks,
+                factor: Fix::from_bits(encoded.factor_bits),
+                amount: encoded.amount,
+                damage_type: damage_type_from_code(encoded.damage_type)?,
+            },
+            _ => return Err(WireError::BadValue),
+        };
+    }
+    Ok(effects)
+}
+
+fn decode_effect(wire: &WireEffect) -> Result<Effect, WireError> {
+    Ok(match wire.kind {
+        0 => Effect::None,
+        1 => Effect::Damage {
+            amount: wire.amount,
+            damage_type: damage_type_from_code(wire.damage_type)?,
+        },
+        2 => Effect::Heal {
+            amount: wire.amount,
+        },
+        3 => {
+            let area = decode_area_effects(wire)?;
+            let Some(AreaEffect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            }) = area.effects.first().copied()
+            else {
+                return Err(WireError::BadValue);
+            };
+            Effect::ApplyModifier {
+                modifier,
+                duration_ticks,
+                factor,
+                amount,
+                damage_type,
+            }
+        }
+        4 => Effect::Displace {
+            range: Fix::from_bits(wire.range_bits),
+        },
+        5 => Effect::Projectile {
+            speed_per_sec: Fix::from_bits(wire.speed_bits),
+            range: Fix::from_bits(wire.range_bits),
+            radius: Fix::from_bits(wire.radius_bits),
+            on_hit: decode_area_effects(wire)?,
+        },
+        6 => Effect::Area {
+            radius: Fix::from_bits(wire.radius_bits),
+            effects: decode_area_effects(wire)?,
+        },
+        7 => Effect::Zone {
+            radius: Fix::from_bits(wire.radius_bits),
+            duration_ticks: wire.duration_ticks,
+            period_ticks: wire.period_ticks,
+            effects: decode_area_effects(wire)?,
+        },
+        _ => return Err(WireError::BadValue),
+    })
+}
+
 impl WireCatalog {
     /// Reconstructs the runtime content represented by this catalogue.
     ///
@@ -972,62 +1135,27 @@ impl WireCatalog {
         let abilities = (0..count!(self.ability_count, MAX_WIRE_ABILITIES))
             .map(|index| {
                 let ability = &self.abilities[index];
-                let radius = Fix::from_bits(ability.radius_bits);
-                let range = Fix::from_bits(ability.range_bits);
-                let damage_type = damage_type_from_code(ability.damage_type)?;
-                let kind = match ability.kind {
-                    0 => AbilityKind::Skillshot {
-                        speed_per_sec: Fix::from_bits(ability.speed_bits),
-                        range,
-                        radius,
-                        damage: ability.damage,
-                        damage_type,
+                let targeting = match ability.targeting_kind {
+                    0 => Targeting::SelfCast,
+                    1 => Targeting::Point {
+                        range: Fix::from_bits(ability.targeting_range_bits),
                     },
-                    1 => AbilityKind::Dash { range },
-                    2 => AbilityKind::Heal {
-                        amount: ability.amount,
-                        radius,
-                    },
-                    3 => AbilityKind::Shield {
-                        amount: ability.amount,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    4 => AbilityKind::Slow {
-                        radius,
-                        factor: Fix::from_bits(ability.factor_bits),
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    5 => AbilityKind::Root {
-                        radius,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    6 => AbilityKind::Silence {
-                        radius,
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    7 => AbilityKind::Burn {
-                        radius,
-                        duration_ticks: ability.duration_ticks,
-                        damage_per_tick: ability.damage,
-                        damage_type,
-                    },
-                    8 => AbilityKind::Haste {
-                        factor: Fix::from_bits(ability.factor_bits),
-                        duration_ticks: ability.duration_ticks,
-                    },
-                    9 => AbilityKind::Burst {
-                        radius,
-                        damage: ability.damage,
-                        damage_type,
+                    2 => Targeting::Direction {
+                        range: Fix::from_bits(ability.targeting_range_bits),
                     },
                     _ => return Err(WireError::BadValue),
                 };
+                let effect_count = count!(ability.effect_count, MAX_WIRE_EFFECTS);
+                let mut effects = EffectList::EMPTY;
+                for (slot, wire) in ability.effects[..effect_count].iter().enumerate() {
+                    effects.effects[slot] = decode_effect(wire)?;
+                }
                 Ok(AbilitySpec {
                     name: read_wire_name(&ability.name, ability.name_len, WIRE_ABILITY_NAME)?,
                     cooldown_ticks: ability.cooldown_ticks,
                     mana_cost: ability.mana_cost,
-                    cast_range: Fix::from_bits(ability.cast_range_bits),
-                    kind,
+                    targeting,
+                    effects,
                 })
             })
             .collect::<Result<Vec<_>, WireError>>()?;
@@ -1317,15 +1445,33 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.extend_from_slice(&ability.cooldown_ticks.to_le_bytes());
         out.extend_from_slice(&ability.mana_cost.to_le_bytes());
         out.extend_from_slice(&ability.cast_range_bits.to_le_bytes());
-        out.push(ability.kind);
         out.extend_from_slice(&ability.radius_bits.to_le_bytes());
-        out.extend_from_slice(&ability.range_bits.to_le_bytes());
-        out.extend_from_slice(&ability.speed_bits.to_le_bytes());
-        out.extend_from_slice(&ability.factor_bits.to_le_bytes());
-        out.extend_from_slice(&ability.amount.to_le_bytes());
-        out.extend_from_slice(&ability.damage.to_le_bytes());
-        out.extend_from_slice(&ability.duration_ticks.to_le_bytes());
-        out.push(ability.damage_type);
+        out.push(ability.targeting_kind);
+        out.extend_from_slice(&ability.targeting_range_bits.to_le_bytes());
+        out.push(ability.effect_count);
+        for effect in ability
+            .effects
+            .iter()
+            .take(usize::from(ability.effect_count))
+        {
+            out.push(effect.kind);
+            out.extend_from_slice(&effect.amount.to_le_bytes());
+            out.push(effect.damage_type);
+            out.extend_from_slice(&effect.speed_bits.to_le_bytes());
+            out.extend_from_slice(&effect.range_bits.to_le_bytes());
+            out.extend_from_slice(&effect.radius_bits.to_le_bytes());
+            out.extend_from_slice(&effect.duration_ticks.to_le_bytes());
+            out.extend_from_slice(&effect.period_ticks.to_le_bytes());
+            out.push(effect.area_count);
+            for area in effect.area.iter().take(usize::from(effect.area_count)) {
+                out.push(area.kind);
+                out.extend_from_slice(&area.modifier.to_le_bytes());
+                out.extend_from_slice(&area.duration_ticks.to_le_bytes());
+                out.extend_from_slice(&area.factor_bits.to_le_bytes());
+                out.extend_from_slice(&area.amount.to_le_bytes());
+                out.push(area.damage_type);
+            }
+        }
     }
     out.push(catalog.modifier_count);
     for modifier in &catalog.modifiers {
@@ -1423,15 +1569,37 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         ability.cooldown_ticks = reader.u32()?;
         ability.mana_cost = reader.i32()?;
         ability.cast_range_bits = reader.i64()?;
-        ability.kind = reader.u8()?;
         ability.radius_bits = reader.i64()?;
-        ability.range_bits = reader.i64()?;
-        ability.speed_bits = reader.i64()?;
-        ability.factor_bits = reader.i64()?;
-        ability.amount = reader.i32()?;
-        ability.damage = reader.i32()?;
-        ability.duration_ticks = reader.u32()?;
-        ability.damage_type = reader.u8()?;
+        ability.targeting_kind = reader.u8()?;
+        ability.targeting_range_bits = reader.i64()?;
+        ability.effect_count = reader.u8()?;
+        if usize::from(ability.effect_count) > MAX_WIRE_EFFECTS {
+            return Err(WireError::BadValue);
+        }
+        for index in 0..usize::from(ability.effect_count) {
+            let effect = &mut ability.effects[index];
+            effect.kind = reader.u8()?;
+            effect.amount = reader.i32()?;
+            effect.damage_type = reader.u8()?;
+            effect.speed_bits = reader.i64()?;
+            effect.range_bits = reader.i64()?;
+            effect.radius_bits = reader.i64()?;
+            effect.duration_ticks = reader.u32()?;
+            effect.period_ticks = reader.u32()?;
+            effect.area_count = reader.u8()?;
+            if usize::from(effect.area_count) > MAX_WIRE_AREA_EFFECTS {
+                return Err(WireError::BadValue);
+            }
+            for area_index in 0..usize::from(effect.area_count) {
+                let area = &mut effect.area[area_index];
+                area.kind = reader.u8()?;
+                area.modifier = reader.u16()?;
+                area.duration_ticks = reader.u32()?;
+                area.factor_bits = reader.i64()?;
+                area.amount = reader.i32()?;
+                area.damage_type = reader.u8()?;
+            }
+        }
     }
     catalog.modifier_count = reader.u8()?;
     for modifier in &mut catalog.modifiers {
@@ -2546,7 +2714,11 @@ mod tests {
             wire.content_hash()
         );
         let mut changed = GameContent::default();
-        changed.abilities[0].cast_range += Fix::ONE;
+        if let moba_game::Targeting::Direction { range } = changed.abilities[0].targeting {
+            changed.abilities[0].targeting = moba_game::Targeting::Direction {
+                range: range + Fix::ONE,
+            };
+        }
         assert_ne!(
             WireCatalog::from(&changed).content_hash(),
             wire.content_hash()

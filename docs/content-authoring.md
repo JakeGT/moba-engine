@@ -95,12 +95,17 @@ name = "Frost"
 kind = "slow"
 ```
 
-Modifier definitions are hashed and carried in the handshake catalogue. Per-application
-magnitude/duration still comes from the ability (phase 2 of #38 will move those to effects).
+Modifier definitions are hashed and carried in the handshake catalogue. Abilities apply a
+modifier through an `ApplyModifier` effect, which carries the per-application duration,
+movement factor, shield/burn amount and damage type.
 
 ## Abilities
 
 Common fields: `name`, `cooldown_ticks`, `mana_cost`, `cast_range`, `kind`.
+
+Abilities are compiled into a `targeting` mode plus a fixed-capacity effect list:
+`damage`, `heal`, `apply-modifier`, `displace`, `projectile { on_hit }`, `area` and
+`zone`. The `kind` strings below are the authoring shorthand for the same data.
 
 `cast_range` is validated for every kind. Skillshots/dashes must target a point within range;
 point-targeted effects (burst/slow/root/silence/burn) accept a target point within range. A
@@ -121,9 +126,45 @@ point-targeted `cast_range = 0` is self-centred and `content-check` prints a war
 
 `damage_type` is `"physical"` or `"magic"` (omitted defaults to physical). Status effects
 restore movement/protection on expiry and respawn. Slow and haste stack multiplicatively and
-  expire independently; base speed + item bonuses are preserved. New kinds need a
-`moba-game` variant, validation, content hash arm, TOML parser and a `moba-sim` execution
-branch with an expiry/state-hash test.
+expire independently; base speed + item bonuses are preserved.
+
+Composition extras:
+
+| Field | Meaning |
+|---|---|
+| `on_hit = "root"` | skillshot also applies that status on hit |
+| `on_hit_duration_ticks` | on-hit status duration (defaults to `duration_ticks`) |
+| `kind = "burn_zone"` | point-targeted periodic zone using `radius`, `duration_ticks`, `period_ticks`, `damage`, `damage_type` |
+
+```toml
+[[abilities]]
+name = "Rooting Shot"
+cooldown_ticks = 240
+mana_cost = 30
+cast_range = 9.0
+kind = "skillshot"
+speed = 24.0
+range = 9.0
+radius = 1.0
+damage = 70
+on_hit = "root"
+on_hit_duration_ticks = 45
+
+[[abilities]]
+name = "Cinder Zone"
+cooldown_ticks = 300
+mana_cost = 40
+cast_range = 6.0
+kind = "burn_zone"
+radius = 100.0
+duration_ticks = 180
+period_ticks = 30
+damage = 12
+damage_type = "magic"
+```
+
+Adding a *new effect primitive* still requires engine code and a protocol bump; combining
+existing primitives and modifiers is data-only.
 
 ## Maps
 

@@ -7,6 +7,10 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Protocol v15 data-driven ability composition: targeting + fixed-capacity effect lists,
+  projectile on-hit effects, periodic zones, all 10 legacy kinds expressed as data, and
+  `AbilityKind` removed. Data-only root-on-hit and burn-zone examples ship in
+  `content/ability-pack.toml`; `SIM_LOGIC_VERSION` is 5.
 - Release metadata and a tag-triggered workflow that runs release tests, inspects package file
   lists and attaches Linux/Windows/macOS server/client/tools archives; publish policy and
   dependency order documented in `RELEASE.md`.

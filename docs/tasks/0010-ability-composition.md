@@ -1,6 +1,6 @@
 # Ability composition (#38 phase 2b)
 
-Status: in progress. Branch `feat/ability-composition`.
+Status: complete (protocol v15 / sim logic v5).
 
 ## Model
 
@@ -15,10 +15,12 @@ Status: in progress. Branch `feat/ability-composition`.
 
 ## Migration checklist
 
-1. [ ] Game data model + default ability table + parser + validation + hash.
-2. [ ] Simulation executor: targeting, effect walk, projectile on-hit, zones, modifiers.
-3. [ ] Protocol v15 wire catalogue + client reconstruction/range summary.
-4. [ ] Replay `SIM_LOGIC_VERSION` bump, golden hash re-record.
-5. [ ] Behavior tests for all 10 legacy kinds vs expected outcomes.
-6. [ ] Data-only root-on-hit projectile and burn-zone content example.
-7. [ ] Remove/deprecate `AbilityKind` (phase 3).
+1. [x] Game data model + default ability table + parser + validation + hash.
+2. [x] Simulation executor: targeting, effect walk, projectile on-hit, zones, modifiers.
+3. [x] Protocol v15 wire catalogue + client reconstruction/range summary.
+4. [x] Replay `SIM_LOGIC_VERSION` bump, golden hash re-record.
+5. [x] Behavior tests for all 10 legacy kinds vs expected outcomes.
+   - [ ] Old-vs-new ObservedUnit stream diff (schema/archetype change makes identical replay impossible).
+6. [x] Data-only root-on-hit projectile and burn-zone content example.
+7. [x] Remove `AbilityKind`.
+8. [ ] Generic ModifierDef stat/flags/on-tick triggers beyond the six built-in kinds (#45).

@@ -41,20 +41,40 @@ fn main() {
             eprintln!("invalid content {path}: {error}");
             std::process::exit(1);
         });
-    let point_kinds = |kind: moba_game::AbilityKind| {
-        matches!(
-            kind,
-            moba_game::AbilityKind::Slow { .. }
-                | moba_game::AbilityKind::Root { .. }
-                | moba_game::AbilityKind::Silence { .. }
-                | moba_game::AbilityKind::Burn { .. }
-                | moba_game::AbilityKind::Burst { .. }
-        )
+    let self_centred_point_effect = |ability: &moba_game::AbilitySpec| {
+        if !matches!(
+            ability.targeting,
+            moba_game::Targeting::Point { range } if range.to_i32() == 0
+        ) {
+            return false;
+        }
+        ability.effects.iter().any(|effect| {
+            let moba_game::Effect::Area { effects, .. } = effect else {
+                return false;
+            };
+            effects.iter().any(|effect| {
+                let moba_game::AreaEffect::ApplyModifier { modifier, .. } = effect else {
+                    return false;
+                };
+                content
+                    .modifiers
+                    .get(usize::from(*modifier))
+                    .is_some_and(|definition| {
+                        matches!(
+                            definition.kind,
+                            moba_game::ModifierKind::Slow
+                                | moba_game::ModifierKind::Root
+                                | moba_game::ModifierKind::Silence
+                                | moba_game::ModifierKind::Burn
+                        )
+                    })
+            })
+        })
     };
     let warnings: Vec<String> = content
         .abilities
         .iter()
-        .filter(|ability| point_kinds(ability.kind) && ability.cast_range.to_i32() == 0)
+        .filter(|ability| self_centred_point_effect(ability))
         .map(|ability| {
             format!(
                 "{} is point-targeted with cast_range=0 (self-centred)",

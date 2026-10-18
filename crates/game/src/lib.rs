@@ -18,7 +18,10 @@ pub mod map;
 pub mod team;
 pub mod units;
 
-pub use ability::{ABILITIES, AbilityDef, AbilityKind};
+pub use ability::{
+    ABILITIES, AbilityDef, AreaEffect, AreaEffectList, Effect, EffectList, MAX_ABILITY_EFFECTS,
+    MAX_AREA_EFFECTS, Targeting,
+};
 pub use combat::{DamageType, mitigate, mitigate_typed};
 pub use content::{
     AbilitySpec, ContentError, ContentLoadError, ContentManifest, GameContent, HeroSpec, ItemSpec,

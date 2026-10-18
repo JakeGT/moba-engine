@@ -165,8 +165,10 @@ datagrams and average/max simulation tick nanoseconds for operators and the soak
 `GameContent` owns the runtime item, hero, ability and map catalogues; the simulation holds
 an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` accepts a validated pack;
 the server publishes it in `Welcome`, and clients use the received `WireItem`, `WireHero`,
-`WireCatalog`/`WireAbility`/`WireModifier` and `WireMap` entries for shop, HUD, modifier
-names, vision, range/radius overlays and minimap rendering. The wire catalogue is a complete, destructured projection of
+`WireCatalog`/`WireAbility`/`WireEffect`/`WireModifier` and `WireMap` entries for shop, HUD,
+modifier names, effects, vision, range/radius overlays and minimap rendering. Abilities are
+composed from targeting + fixed-capacity effects; projectiles carry on-hit effects and zones
+run periodic area effects. The wire catalogue is a complete, destructured projection of
 `GameContent`; the client reconstructs it and verifies `GameContent::hash`. Ability
 behaviour kinds are code-defined, but their numbers and hero bindings come from the pack; map,
 lane, structure and wall geometry are fully data-driven. Packs hot-reload only in an empty

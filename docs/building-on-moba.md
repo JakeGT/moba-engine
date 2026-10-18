@@ -115,7 +115,7 @@ Use these touch-point lists for changes that cross the content/simulation/wire b
 - Docs/tests: content-authoring, API/wire version note if the shape changes, replay fixture.
 
 **Add a status effect**
-- `moba-sim`: component, apply/expiry/recompute path, `state_hash` unique tag, allocation guard.
+- `moba-sim`: effect/modifier data, apply/expiry/recompute path, `state_hash` unique tag, allocation guard.
 - `moba-game`: ability/content definition and validation.
 - `moba-net`: wire status flag/tag, snapshot encode/decode, client tint/icon; bump protocol.
 - Tests: application, independent expiry, replay verification, snapshot round-trip.
