@@ -1,36 +1,28 @@
 name: Feature request
-description: Suggest an engine, gameplay, tooling or documentation improvement.
+description: Propose an engine, content or tooling improvement
 labels: [enhancement]
 body:
   - type: textarea
     id: problem
     attributes:
       label: Problem
-      description: What are you trying to build, and what blocks you?
+      description: What can't you build or play today?
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposal
-      description: Desired behavior/API. Note whether it affects determinism, protocol or content.
+      description: API/wire/content impact and alternatives considered.
     validations:
       required: true
-  - type: textarea
-    id: alternatives
-    attributes:
-      label: Alternatives considered
   - type: dropdown
     id: area
     attributes:
       label: Area
-      options: [Simulation/gameplay, Networking, Rendering/client, Tooling, Content pipeline, Documentation, Other]
-    validations:
-      required: true
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Checks
       options:
-        - label: I searched existing issues/discussions.
-          required: true
+        - simulation/game/content
+        - networking/security
+        - rendering/platform/client
+        - tooling/docs
+        - other

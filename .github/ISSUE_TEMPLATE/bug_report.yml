@@ -1,50 +1,33 @@
 name: Bug report
-description: Something is broken or behaves unexpectedly.
+description: Something is broken or unexpected
 labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: "Thanks for the report. Do not include security vulnerabilities here; see SECURITY.md."
+      value: Thanks for reporting. Please include evidence and how to reproduce.
   - type: textarea
-    id: summary
+    id: what
     attributes:
-      label: Summary
-      description: What happened, and what did you expect?
+      label: What happened?
+      description: Expected vs actual behavior, logs, crash output, screenshots.
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
       label: Reproduction
-      description: Commands, seed, content, inputs, and the shortest sequence that shows the issue.
-      placeholder: |
-        cargo run -p moba-server -- --ticks 1000 --seed 123
+      description: Commands, content pack, seed/replay, OS/driver and hardware.
     validations:
       required: true
   - type: input
     id: version
     attributes:
-      label: Version / commit
-    validations:
-      required: true
-  - type: dropdown
-    id: platform
-    attributes:
-      label: Platform
-      options: [Linux, Windows, macOS, Other/unknown]
-    validations:
-      required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Logs / screenshots / state hash
-      description: Paste relevant output. Use code fences.
+      label: Version/commit
+      placeholder: git commit or tag
   - type: checkboxes
     id: checks
     attributes:
       label: Checks
       options:
-        - label: I searched existing issues.
-          required: true
-        - label: This is not a security issue.
-          required: true
+        - label: I searched existing issues
+        - label: I can reproduce with the current main branch

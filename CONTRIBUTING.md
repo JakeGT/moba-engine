@@ -88,3 +88,9 @@ benchmark. See `CLAUDE.md` for the detailed engineering workflow and milestone g
 ## Reporting security issues
 
 Do **not** open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
+
+## Pull requests
+
+Use the repository PR template and include the commands you ran. Changes that touch the
+simulation, protocol, content schema or replay format must include determinism/replay evidence
+and call out compatibility/migration impact. Keep unrelated refactors out of feature PRs.

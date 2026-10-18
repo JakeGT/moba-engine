@@ -1,24 +1,23 @@
 ## Summary
 
-<!-- What changed and why. Link an issue/spec. -->
+Describe the change and the problem it solves.
+
+## Area
+
+- [ ] core/ECS/jobs
+- [ ] simulation/game/content
+- [ ] networking/security
+- [ ] rendering/platform/client
+- [ ] tooling/docs/CI
 
 ## Verification
 
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] `cargo test --workspace --locked`
-- [ ] `cargo doc --workspace --no-deps`
-- [ ] Layering check (`just layering` or documented equivalent)
-- [ ] Bench/soak/fuzz run for hot-path or netcode changes (attach numbers)
+- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`
+- [ ] determinism/replay/relevant soak evidence attached
 
-## Impact
+## Notes
 
-- [ ] Determinism/state-hash changes (explain and update tests)
-- [ ] Protocol version bump (version: __)
-- [ ] Public API change (note in CHANGELOG)
-- [ ] Content/balance change (note replay impact)
-- [ ] Visual change (screenshot attached)
-
-## Notes for reviewers
-
-<!-- Risks, alternatives considered, follow-ups. -->
+Protocol/content changes must state the version/hash impact and include migration notes.
