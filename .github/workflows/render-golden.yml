@@ -34,6 +34,14 @@ jobs:
           test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          # Ubuntu's validation layer 1.3.275 has a known PRESENT_AFTER_WRITE false positive
+          # (#7479, fixed by VVL #7480). Keep record-time sync validation enabled, but skip
+          # the submit-time presentation check until the runner package is newer.
+          cat > "$GITHUB_WORKSPACE/vk_layer_settings.txt" <<EOF
+          khronos_validation.validate_sync = true
+          khronos_validation.syncval_submit_time_validation = false
+          EOF
+          echo "VK_LAYER_SETTINGS_PATH=$GITHUB_WORKSPACE/vk_layer_settings.txt" >> "$GITHUB_ENV"
           echo "Using $ICD"
       - name: Build client and tools
         run: cargo build --release --locked -p moba-client -p moba-tools
