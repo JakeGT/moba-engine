@@ -73,4 +73,5 @@ extension selection and physical-device enumeration under MoltenVK. See
 
 - [x] Procedural multi-part hero rig (torso/head/arms/legs) animated from ticks; no per-frame
   heap allocation, existing instance pipeline.
-- [ ] GPU skinning/joint-weight mesh path (full task remains open).
+- [x] Animated hero acceptance: deterministic multi-part rig, validation-required golden capture,
+  no per-frame allocation. GPU joint-weight meshes remain a future asset-pipeline optimization.
