@@ -1071,6 +1071,8 @@ dependencies = [
  "moba-platform",
  "moba-render",
  "moba-sim",
+ "serde",
+ "toml",
 ]
 
 [[package]]

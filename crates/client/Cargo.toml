@@ -27,3 +27,5 @@ moba-assets.workspace = true
 moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true
+serde.workspace = true
+toml.workspace = true

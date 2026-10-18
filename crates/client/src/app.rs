@@ -124,6 +124,7 @@ struct ClientApp {
     frame_ms: f32,
     fps: f32,
     ui_scale: f32,
+    bindings: crate::settings::Bindings,
 }
 
 impl ClientApp {
@@ -133,6 +134,20 @@ impl ClientApp {
         capture_frame: u64,
         error: Arc<Mutex<Option<String>>>,
     ) -> Self {
+        let (settings, warnings) =
+            crate::settings::Settings::load(&crate::settings::Settings::path());
+        for warning in warnings {
+            eprintln!("{warning}");
+        }
+        if std::env::var_os("MOBA_SAVE_SETTINGS").is_some() {
+            if let Err(error) = settings.save(&crate::settings::Settings::path()) {
+                eprintln!("settings: save failed: {error}");
+            }
+        }
+        let bindings = settings.bindings().0;
+        let env_scale = std::env::var("MOBA_UI_SCALE")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok());
         let mut app = Self {
             renderer: None,
             simulation: None,
@@ -151,10 +166,10 @@ impl ClientApp {
             last_frame: Instant::now(),
             frame_ms: 0.0,
             fps: 0.0,
-            ui_scale: std::env::var("MOBA_UI_SCALE")
-                .ok()
-                .and_then(|value| value.parse::<f32>().ok())
-                .map_or(1.0, |scale| scale.clamp(0.5, 3.0)),
+            ui_scale: env_scale
+                .unwrap_or(settings.ui_scale)
+                .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
+            bindings,
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -403,8 +418,9 @@ impl App for ClientApp {
                             height,
                             shop_visible,
                             hit_rects,
+                            &self.bindings,
                         );
-                        if frame.input().was_key_pressed(Key::Tab) {
+                        if frame.input().was_key_pressed(self.bindings.scoreboard) {
                             *scoreboard_visible = !*scoreboard_visible;
                         }
                         build_network_hud(
@@ -841,22 +857,26 @@ fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
     Camera::orbit(center, 46.0, -0.7, 0.95, aspect)
 }
 
-fn handle_spectator_input(network: &mut NetworkView, input: &InputState) {
+fn handle_spectator_input(
+    network: &mut NetworkView,
+    input: &InputState,
+    bindings: &crate::settings::Bindings,
+) {
     let pan_speed = if input.is_key_down(Key::Shift) {
         14.0
     } else {
         5.0
     };
-    if input.is_key_down(Key::W) {
+    if input.is_key_down(bindings.move_up) {
         network.spectator_pan.z -= pan_speed;
     }
-    if input.is_key_down(Key::S) {
+    if input.is_key_down(bindings.move_down) {
         network.spectator_pan.z += pan_speed;
     }
-    if input.is_key_down(Key::A) {
+    if input.is_key_down(bindings.move_left) {
         network.spectator_pan.x -= pan_speed;
     }
-    if input.is_key_down(Key::D) {
+    if input.is_key_down(bindings.move_right) {
         network.spectator_pan.x += pan_speed;
     }
     let pan_limit = map_center(network);
@@ -924,7 +944,7 @@ fn handle_shop_input(network: &mut NetworkView, input: &InputState, ui_action: O
     }
 }
 
-#[allow(clippy::too_many_lines)] // One ordered focus/input sequence.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One ordered focus/input sequence.
 fn handle_network_input(
     network: &mut NetworkView,
     input: &InputState,
@@ -934,9 +954,10 @@ fn handle_network_input(
     height: u32,
     shop: &mut bool,
     hits: &HitList,
+    bindings: &crate::settings::Bindings,
 ) {
     if network.spectator {
-        handle_spectator_input(network, input);
+        handle_spectator_input(network, input, bindings);
         return;
     }
     let ui_rect = ui_input
@@ -960,7 +981,7 @@ fn handle_network_input(
         }
         return;
     }
-    if input.was_key_pressed(Key::R) && network.phase == MatchPhase::Lobby {
+    if input.was_key_pressed(bindings.ready) && network.phase == MatchPhase::Lobby {
         let ready = !network.ready;
         if network
             .client
@@ -970,10 +991,10 @@ fn handle_network_input(
             network.ready = ready;
         }
     }
-    if input.was_key_pressed(Key::F5) && network.phase == MatchPhase::Playing {
+    if input.was_key_pressed(bindings.surrender) && network.phase == MatchPhase::Playing {
         let _ = network.client.send_command(WireCommand::Surrender);
     }
-    if input.was_key_pressed(Key::B) {
+    if input.was_key_pressed(bindings.shop) {
         *shop = !*shop;
     }
     match InputFocus::from_shop(*shop) {
@@ -1013,7 +1034,11 @@ fn handle_network_input(
                 .send_command(WireCommand::Attack { net_id: target });
         }
     }
-    for (key, slot) in [(Key::Q, 0u8), (Key::W, 1), (Key::E, 2)] {
+    for (key, slot) in [
+        (bindings.cast_q, 0u8),
+        (bindings.cast_w, 1),
+        (bindings.cast_e, 2),
+    ] {
         if input.was_key_pressed(key) {
             let (x, y) = quantize_position(ground);
             let _ = network
@@ -1021,7 +1046,7 @@ fn handle_network_input(
                 .send_command(WireCommand::CastAbility { slot, x, y });
         }
     }
-    if input.was_key_pressed(Key::Space) {
+    if input.was_key_pressed(bindings.stop) {
         let _ = network.client.send_command(WireCommand::Stop);
         network.prediction.set_target(None);
     }
