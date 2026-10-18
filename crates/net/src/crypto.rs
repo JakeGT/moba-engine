@@ -318,6 +318,65 @@ pub fn verify_server_welcome(
         .is_ok()
 }
 
+fn client_identity_message(
+    protocol: u16,
+    client_nonce: u64,
+    challenge: u64,
+    reconnect: u32,
+    spectate: bool,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(28);
+    message.extend_from_slice(b"moba-client-id-v1");
+    message.extend_from_slice(&protocol.to_le_bytes());
+    message.extend_from_slice(&client_nonce.to_le_bytes());
+    message.extend_from_slice(&challenge.to_le_bytes());
+    message.extend_from_slice(&reconnect.to_le_bytes());
+    message.push(u8::from(spectate));
+    message
+}
+
+/// Signs a server challenge to prove possession of a client identity key.
+#[must_use]
+pub fn sign_client_hello(
+    seed: &[u8; 32],
+    protocol: u16,
+    client_nonce: u64,
+    challenge: u64,
+    reconnect: u32,
+    spectate: bool,
+) -> [u8; 64] {
+    let key = SigningKey::from_bytes(seed);
+    key.sign(&client_identity_message(
+        protocol,
+        client_nonce,
+        challenge,
+        reconnect,
+        spectate,
+    ))
+    .to_bytes()
+}
+
+/// Verifies a client identity response.
+#[must_use]
+pub fn verify_client_hello(
+    public_key: &[u8; 32],
+    protocol: u16,
+    client_nonce: u64,
+    challenge: u64,
+    reconnect: u32,
+    spectate: bool,
+    signature: &[u8; 64],
+) -> bool {
+    let Ok(key) = VerifyingKey::from_bytes(public_key) else {
+        return false;
+    };
+    key.verify(
+        &client_identity_message(protocol, client_nonce, challenge, reconnect, spectate),
+        &Signature::from_bytes(signature),
+    )
+    .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +421,25 @@ mod tests {
         let header = header(1);
         let sealed = server.seal(&header, b"snapshot").unwrap();
         assert_eq!(client.open(&header, &sealed).unwrap(), b"snapshot");
+    }
+
+    #[test]
+    fn client_identity_signature_is_challenge_bound() {
+        let seed = [3u8; 32];
+        let public = identity_public_key(&seed);
+        let signature = sign_client_hello(&seed, 12, 77, 9001, 0, false);
+        assert!(verify_client_hello(
+            &public, 12, 77, 9001, 0, false, &signature
+        ));
+        assert!(!verify_client_hello(
+            &public, 12, 77, 9002, 0, false, &signature
+        ));
+        assert!(!verify_client_hello(
+            &public, 12, 78, 9001, 0, false, &signature
+        ));
+        assert!(!verify_client_hello(
+            &[4; 32], 12, 77, 9001, 0, false, &signature
+        ));
     }
 
     #[test]

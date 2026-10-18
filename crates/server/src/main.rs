@@ -28,6 +28,7 @@ fn main() {
     let mut server_key: Option<std::path::PathBuf> = None;
     let mut reload_content = false;
     let mut client_tokens: Vec<[u8; 32]> = Vec::new();
+    let mut client_identity_keys: Vec<[u8; 32]> = Vec::new();
     let mut results_log: Option<std::path::PathBuf> = None;
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
@@ -84,6 +85,9 @@ fn main() {
         }
         if let Some(tokens) = file.client_tokens {
             client_tokens = tokens.iter().map(|token| parse_secret(token)).collect();
+        }
+        if let Some(keys) = file.client_identity_keys {
+            client_identity_keys = keys.iter().map(|key| parse_secret(key)).collect();
         }
         if let Some(value) = file.max_total_pps {
             max_total_packets_per_second = value;
@@ -144,6 +148,13 @@ fn main() {
             }
             "--items" => items_path = args.next().map(std::path::PathBuf::from),
             "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
+            "--allow-client-key" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--allow-client-key needs 64 hex characters");
+                    std::process::exit(2);
+                };
+                client_identity_keys.push(parse_secret(&value));
+            }
             "--allow-token" => {
                 let Some(value) = args.next() else {
                     eprintln!("--allow-token needs 64 hex characters");
@@ -158,7 +169,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--allow-token HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--allow-token HEX] [--allow-client-key HEX] [--config FILE]"
                 );
                 return;
             }
@@ -217,6 +228,9 @@ fn main() {
                 eprintln!("--reload-content requires --items FILE");
                 std::process::exit(2);
             }
+        }
+        if !client_identity_keys.is_empty() {
+            server.require_client_identity(client_identity_keys.iter().copied());
         }
         if let Some(path) = results_log.clone() {
             server.set_results_log(path);
@@ -411,6 +425,7 @@ struct FileServerConfig {
     max_pps: Option<u32>,
     max_total_pps: Option<u32>,
     client_tokens: Option<Vec<String>>,
+    client_identity_keys: Option<Vec<String>>,
 }
 
 fn load_server_config(path: &std::path::Path) -> FileServerConfig {

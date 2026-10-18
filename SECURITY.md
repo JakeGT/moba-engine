@@ -16,8 +16,9 @@ This protects payload confidentiality/integrity and proves key possession to the
 is **not** a complete public-internet security model:
 
 - optional pinned Ed25519 server identity authenticates the dedicated server;
-- per-client bearer tokens provide allowlisting/rotation/revocation, but are shared secrets,
-  not public-key player identity;
+- per-client bearer tokens provide allowlisting/rotation/revocation, but are shared secrets;
+- optional Ed25519 client identities answer a server challenge and are allowlisted by public
+  key, but there is no account system, reputation or key-transparency service;
 - Hello nonces are replay-bound to the first source address for 60 s; retransmits from that
   address are allowed, cross-address replays are dropped. Spoofed-source denial is still an
   edge-network concern;

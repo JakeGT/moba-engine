@@ -236,6 +236,13 @@ struct HandshakeNonce {
 }
 
 #[derive(Debug)]
+struct ClientChallenge {
+    addr: SocketAddr,
+    nonce: u64,
+    seen: Instant,
+}
+
+#[derive(Debug)]
 struct NonceTracker {
     entries: Vec<HandshakeNonce>,
     window: Duration,
@@ -379,6 +386,9 @@ pub struct NetServer {
     content: Arc<GameContent>,
     identity: Option<ServerIdentity>,
     client_keys: Vec<[u8; 32]>,
+    require_client_identity: bool,
+    allowed_client_keys: Vec<[u8; 32]>,
+    client_challenges: Vec<ClientChallenge>,
     nonces: NonceTracker,
     reload: Option<ContentReload>,
     limiter: RateLimiter,
@@ -432,6 +442,9 @@ impl NetServer {
             content,
             identity: None,
             client_keys: Vec::new(),
+            require_client_identity: false,
+            allowed_client_keys: Vec::new(),
+            client_challenges: Vec::new(),
             nonces: NonceTracker::new(Duration::from_secs(60), 2_048),
             reload: None,
             limiter,
@@ -517,6 +530,56 @@ impl NetServer {
         if !self.client_keys.contains(&key) {
             self.client_keys.push(key);
         }
+    }
+
+    /// Requires every client to prove possession of one of the allowed Ed25519 keys.
+    pub fn require_client_identity(&mut self, keys: impl IntoIterator<Item = [u8; 32]>) {
+        self.allowed_client_keys.clear();
+        self.allowed_client_keys.extend(keys);
+        self.require_client_identity = true;
+    }
+
+    fn issue_challenge(&mut self, addr: SocketAddr) -> io::Result<()> {
+        let now = Instant::now();
+        self.client_challenges.retain(|challenge| {
+            now.saturating_duration_since(challenge.seen) <= Duration::from_secs(10)
+        });
+        let nonce = random_nonce()?;
+        self.client_challenges.push(ClientChallenge {
+            addr,
+            nonce,
+            seen: now,
+        });
+        if self.client_challenges.len() > 1_024 {
+            self.client_challenges.remove(0);
+        }
+        let header = Header {
+            kind: PacketKind::Challenge,
+            flags: 0,
+            session: 0,
+            seq: 0,
+            ack: 0,
+            ack_bits: 0,
+        };
+        self.transport
+            .send_plaintext(addr, &header, &nonce.to_le_bytes())
+    }
+
+    fn take_challenge(&mut self, addr: SocketAddr, nonce: u64) -> bool {
+        if nonce == 0 {
+            return false;
+        }
+        self.client_challenges
+            .retain(|challenge| !(challenge.addr == addr && challenge.nonce == nonce));
+        true
+    }
+
+    fn challenge_is_pending(&self, addr: SocketAddr, nonce: u64) -> bool {
+        self.client_challenges.iter().any(|challenge| {
+            challenge.addr == addr
+                && challenge.nonce == nonce
+                && challenge.seen.elapsed() <= Duration::from_secs(10)
+        })
     }
 
     /// Watches a content pack file and reloads it while the lobby is empty.
@@ -984,6 +1047,30 @@ impl NetServer {
                 };
                 if hello.protocol != u16::from(crate::protocol::PROTOCOL_VERSION) {
                     return Ok(());
+                }
+                if self.require_client_identity {
+                    if !hello.identity || !self.allowed_client_keys.contains(&hello.client_public) {
+                        self.reject_client(message.addr, 0, 5)?;
+                        return Ok(());
+                    }
+                    if !self.challenge_is_pending(message.addr, hello.server_challenge) {
+                        self.issue_challenge(message.addr)?;
+                        return Ok(());
+                    }
+                    if !crate::crypto::verify_client_hello(
+                        &hello.client_public,
+                        hello.protocol,
+                        hello.nonce,
+                        hello.server_challenge,
+                        hello.reconnect,
+                        hello.spectate,
+                        &hello.client_signature,
+                    ) {
+                        let _ = self.take_challenge(message.addr, hello.server_challenge);
+                        self.reject_client(message.addr, 0, 5)?;
+                        return Ok(());
+                    }
+                    let _ = self.take_challenge(message.addr, hello.server_challenge);
                 }
                 let keys_configured =
                     self.config.pre_shared_key.is_some() || !self.client_keys.is_empty();

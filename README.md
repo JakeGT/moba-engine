@@ -18,7 +18,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, Tab scoreboard, shop, controls and read-only spectator |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 168 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 170 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -106,6 +106,11 @@ For per-player access, the server accepts a key ring (`--allow-token HEX`, repea
 `client_tokens` in the TOML config). Each client uses its own token via `MOBA_SECRET`; tokens
 authenticate the Hello, derive that player's encryption key, and can be revoked by removing
 them from the ring and restarting.
+
+Servers can require **client Ed25519 identities** with
+`--allow-client-key <public key>` (repeatable) / `client_identity_keys` in TOML. Clients set
+`MOBA_CLIENT_IDENTITY=<seed hex>` and answer a per-connection server challenge; unlisted or
+missing keys are rejected.
 
 Servers can also present a pinned Ed25519 identity. Generate a seed, start the server, and pin
 the printed public key:

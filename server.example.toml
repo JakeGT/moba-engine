@@ -20,3 +20,5 @@ max_total_pps = 2000
 # server_key = "server.seed"
 # Per-client keys: clients use MOBA_SECRET / --secret with their own token.
 # client_tokens = ["0001...64 hex...", "0002...64 hex..."]
+# Require client Ed25519 identities (public keys); clients set MOBA_CLIENT_IDENTITY=<seed hex>.
+# client_identity_keys = ["<64 hex public key>"]

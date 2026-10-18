@@ -12,7 +12,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 11;
+pub const PROTOCOL_VERSION: u8 = 12;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -46,6 +46,8 @@ pub enum PacketKind {
     Disconnect = 8,
     /// Transport-level fragment of another message.
     Fragment = 9,
+    /// Server -> client identity challenge.
+    Challenge = 10,
 }
 
 impl PacketKind {
@@ -61,6 +63,7 @@ impl PacketKind {
             7 => Self::Pong,
             8 => Self::Disconnect,
             9 => Self::Fragment,
+            10 => Self::Challenge,
             _ => return None,
         })
     }
@@ -215,6 +218,14 @@ pub struct Hello {
     pub auth: [u8; 32],
     /// Request a read-only spectator connection.
     pub spectate: bool,
+    /// Whether a client public key/signature is present.
+    pub identity: bool,
+    /// Client Ed25519 public key.
+    pub client_public: [u8; 32],
+    /// Signature over the server challenge.
+    pub client_signature: [u8; 64],
+    /// Server challenge being answered (`0` on the first attempt).
+    pub server_challenge: u64,
 }
 
 /// Maximum items in a handshake catalogue.
@@ -483,6 +494,10 @@ pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     put_u32(&mut out, hello.reconnect);
     out.extend_from_slice(&hello.auth);
     out.push(u8::from(hello.spectate));
+    out.push(u8::from(hello.identity));
+    out.extend_from_slice(&hello.client_public);
+    out.extend_from_slice(&hello.client_signature);
+    out.extend_from_slice(&hello.server_challenge.to_le_bytes());
     out
 }
 
@@ -503,6 +518,21 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
             .try_into()
             .map_err(|_| WireError::Truncated)?,
         spectate: reader.u8()? != 0,
+        identity: reader.u8()? != 0,
+        client_public: reader
+            .bytes(32)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
+        client_signature: reader
+            .bytes(64)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
+        server_challenge: u64::from_le_bytes(
+            reader
+                .bytes(8)?
+                .try_into()
+                .map_err(|_| WireError::Truncated)?,
+        ),
     };
     if reader.remaining() != 0 {
         return Err(WireError::TrailingBytes);
@@ -1817,6 +1847,10 @@ mod tests {
             reconnect: 0xABCD_1234,
             auth: [3; 32],
             spectate: true,
+            identity: false,
+            client_public: [0; 32],
+            client_signature: [0; 64],
+            server_challenge: 0,
         };
         assert_eq!(decode_hello(&encode_hello(&hello)), Ok(hello));
     }

@@ -175,6 +175,14 @@ Authenticated Hello nonces are tracked for 60 s (bounded to 2,048 entries). A re
 key/nonce from the same source is treated as a retransmit; the same key/nonce from a different
 source is rejected and counted as `replayed_hellos`.
 
+## Client identity
+
+With `require_client_identity`, the server sends a random `Challenge` packet; the client
+replies with its Ed25519 public key and a signature over protocol, client nonce, challenge,
+reconnect token and spectator flag. The challenge is address-bound, expires after 10 s and is
+consumed on success. Public keys are allowlisted; combined token + identity modes are
+supported.
+
 ## Client tokens
 
 `NetServer::add_client_key` keeps a bounded key ring. A Hello HMAC is tried against the global

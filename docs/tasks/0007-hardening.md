@@ -7,6 +7,9 @@ Make the engine safe and operable outside a trusted LAN, and make failures repro
 authenticated transport, reconnect, deterministic replays, load/soak gates and profiling.
 
 ## Landed so far
+- **Ed25519 client identity**: server challenge packet, public-key allowlist
+  (`--allow-client-key`), challenge/signature verification and rejection of missing/unlisted
+  keys.
 - **Per-client token ring**: multiple Hello HMAC keys, per-player session encryption and
   allowlist/rotation (`--allow-token`); wrong/unlisted tokens rejected.
 - **Handshake replay window**: authenticated key/nonce pairs are address-bound for 60 s;
@@ -37,7 +40,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - cargo-deny and Miri jobs.
 
 ## Still open
-- Public-key client identity/challenge replay window and player-count attestation.
+- Account/reputation/key-transparency layer and player-count attestation.
 - One-hour sanitizer-backed fuzzing run (the deterministic fuzzer is available).
 - 50 consecutive matches per box under the soak harness is implemented (`match-soak`) with
   per-match composition rotation: 509,820 ticks, deterministic, unique hashes per seed,

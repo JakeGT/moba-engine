@@ -100,6 +100,10 @@ fn fuzz_once(rng: &mut Rng) {
         reconnect: rng.next_u32(),
         auth: [0; 32],
         spectate: rng.next_bool(),
+        identity: rng.next_bool(),
+        client_public: [0; 32],
+        client_signature: [0; 64],
+        server_challenge: rng.next_u64(),
     });
     mutate(rng, &mut hello);
     let _ = decode_hello(&hello);

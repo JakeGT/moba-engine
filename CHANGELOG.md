@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Optional Ed25519 client identities with address-bound server challenges and public-key
+  allowlists (`--allow-client-key`, `MOBA_CLIENT_IDENTITY`).
 - Graceful SIGINT/SIGTERM shutdown that flushes an in-progress replay.
 - Documented 50-match bot-balance confidence interval.
 - CI tools gate now runs a 30-second wire-decoder fuzz pass.
@@ -73,6 +75,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - ECS, job system, core fixed-point primitives, spatial grid and shader build validation.
 
 ### Protocol
+- Version 12: Ed25519 client identity fields and server `Challenge` packet.
 - Version 11: Ed25519 server identity public key/signature in `Welcome`; pinned clients.
 - Version 10: handshake carries validated runtime item, hero, ability and map catalogues,
   with a catalogue hash bound into the Welcome HMAC.
