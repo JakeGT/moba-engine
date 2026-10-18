@@ -133,3 +133,19 @@ already reused. A protocol test asserts the spawn capacity is stable across rebu
 Snapshot history keeps up to 64 records per client. Popped records return their entity
 vectors to a per-client pool; `record` refills a pooled buffer from the current view instead
 of allocating a fresh clone every snapshot. Rematch/history clears also recycle buffers.
+
+## Snapshot scaling with match age
+
+`net/snapshot_scaling/{1,20,40}min` builds and encodes a snapshot from a simulated match kept
+alive by restoring structure health. Latest criteria medians:
+
+| Match age | Visible entities | Build+encode |
+|---|---:|---:|
+| 1 min | 58 | 215 ns |
+| 20 min | 67 | 250 ns |
+| 40 min | 93 | 332 ns |
+
+That is ~3.7 / 3.7 / 3.6 ns per visible entity — cost tracks the view size, not match age.
+The 40-minute view has more entities because later waves/skirmishes leave more units alive.
+No super-linear growth was observed; the earlier “3 ms max tick” is not attributable to
+snapshot construction in this benchmark.
