@@ -17,10 +17,11 @@ mod renderer;
 mod resources;
 mod scene;
 mod swapchain;
+mod texture;
 mod ui;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
 pub use renderer::{CapturedFrame, RenderConfig, Renderer, ui_vertices_truncated};
 pub use scene::{Camera, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles};
-pub use ui::{UiDrawList, UiVertex};
+pub use ui::{ATLAS_HEIGHT, ATLAS_WIDTH, UiDrawList, UiVertex, build_atlas};
