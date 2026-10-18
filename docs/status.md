@@ -10,11 +10,11 @@ Last updated: 2026-10-17 (round 17 of the build).
 | M1 | Core runtime | ✅ | Workspace test suite green, Miri clean on core/ecs (jobs: tree borrows), benches beat AoS. Loom model still pending. |
 | M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
-| M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 12.9 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
-| M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and spectator mode (protocol v7); 5-minute plaintext soak, 20 s encrypted and 15 s v7 soaks pass; public identity/anti-DoS and one-hour sanitizer fuzzers pending. |
+| M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 13.3 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
+| M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and free-pan spectator mode (protocol v12); per-client tokens, Ed25519 server/client identity, replay window and edge rate limits; one-hour v11 fuzz passed and v12 is running. |
 | M6 | Vertical slice | ✅ | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up/surrender, HUD, levels/XP, gold/items/shop, minimap, health bars, scoreboard, fog-of-war and wall line-of-sight. Linux-verified; audio/settings deferred. |
-| M7 | Hardening | 🟡 | PSK AEAD transport, reconnect, replay manifests, rate limiting/tick telemetry, 50-match harness and Criterion profiling captures landed; public identity/edge anti-DoS, one-hour fuzz and balanced demo bots remain. |
-| M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation and reach clients in the handshake; new ability behaviour kinds, hot reload and richer manifests remain. |
+| M7 | Hardening | 🟡 | PSK AEAD transport, per-client tokens, Ed25519 server/client identity, reconnect, replay checkpoints, per-address/global rate limits, graceful shutdown, 50-match harness and Criterion captures landed; v12 fuzz completion remains. |
+| M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation, reach clients in the handshake and hot-reload in an empty lobby; 10 ability behaviour kinds, per-hero growth and pack manifests landed; per-client content updates remain. |
 
 ## What exists now
 
