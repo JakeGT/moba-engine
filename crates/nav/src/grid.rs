@@ -1,8 +1,10 @@
 //! Deterministic fixed-cell spatial grid.
 //!
-//! Cell storage is `Vec<Vec<T>>`, cleared and refilled each tick. Query order is row-major
-//! cell order followed by insertion order, which is stable for a deterministic simulation
-//! and makes tie-breaking reproducible.
+//! Items are appended in insertion order and counting-sorted by cell on the next query.
+//! Query order is row-major cell order followed by insertion order, matching the historical
+//! `Vec<Vec<T>>` layout without per-cell allocations.
+
+use core::cell::RefCell;
 
 use moba_core::{Fix, FixVec2};
 
@@ -13,7 +15,18 @@ pub struct SpatialGrid<T> {
     inv_cell_size: Fix,
     cols: u32,
     rows: u32,
-    cells: Vec<Vec<(FixVec2, T)>>,
+    items: Vec<(FixVec2, T)>,
+    cell_index: Vec<u32>,
+    sort: RefCell<SortBuffers>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SortBuffers {
+    dirty: bool,
+    sorted: Vec<u32>,
+    starts: Vec<u32>,
+    counts: Vec<u32>,
+    offsets: Vec<u32>,
 }
 
 impl<T> SpatialGrid<T> {
@@ -30,22 +43,34 @@ impl<T> SpatialGrid<T> {
         );
         let cols = cell_count(extent.x, cell_size);
         let rows = cell_count(extent.y, cell_size);
-        let mut cells = Vec::with_capacity((cols * rows) as usize);
-        cells.resize_with((cols * rows) as usize, Vec::new);
+        let cell_total = usize::try_from(cols * rows).expect("grid cells fit usize");
         Self {
             origin,
             inv_cell_size: Fix::ONE / cell_size,
             cols,
             rows,
-            cells,
+            items: Vec::with_capacity(cell_total.min(256)),
+            cell_index: Vec::with_capacity(cell_total.min(256)),
+            sort: RefCell::new(SortBuffers {
+                dirty: false,
+                sorted: Vec::with_capacity(cell_total.min(256)),
+                starts: vec![0; cell_total + 1],
+                counts: vec![0; cell_total],
+                offsets: vec![0; cell_total + 1],
+            }),
         }
     }
 
-    /// Removes all items while keeping the cell allocations.
+    /// Removes all items while keeping the allocations.
     pub fn clear(&mut self) {
-        for cell in &mut self.cells {
-            cell.clear();
-        }
+        self.items.clear();
+        self.cell_index.clear();
+        let sort = self.sort.get_mut();
+        sort.dirty = false;
+        sort.sorted.clear();
+        sort.starts.fill(0);
+        sort.counts.fill(0);
+        sort.offsets.fill(0);
     }
 
     /// Number of cells along each axis.
@@ -68,31 +93,70 @@ impl<T> SpatialGrid<T> {
     /// Inserts an item at a world position.
     pub fn insert(&mut self, position: FixVec2, item: T) {
         let (x, y) = self.cell_of(position);
-        let index = (y * self.cols + x) as usize;
-        self.cells[index].push((position, item));
+        self.items.push((position, item));
+        self.cell_index.push(y * self.cols + x);
+        self.sort.get_mut().dirty = true;
     }
 
     /// Calls `visit` for every item whose centre is within `radius` of `center`.
     ///
-    /// The caller decides how to break ties; visit order is deterministic (row-major cells,
-    /// insertion order inside a cell).
+    /// Visit order is deterministic: row-major cells, insertion order inside a cell.
     pub fn for_each_in_circle(&self, center: FixVec2, radius: Fix, mut visit: impl FnMut(T))
     where
         T: Copy,
     {
+        self.ensure_sorted();
+        let sort = self.sort.borrow();
         let radius_sq = radius * radius;
         let min = self.cell_of(center - FixVec2::splat(radius));
         let max = self.cell_of(center + FixVec2::splat(radius));
         for y in min.1..=max.1 {
             for x in min.0..=max.0 {
-                let index = (y * self.cols + x) as usize;
-                for &(position, item) in &self.cells[index] {
+                let cell = usize::try_from(y * self.cols + x).expect("cell index fits usize");
+                let start = sort.starts[cell] as usize;
+                let end = sort.starts[cell + 1] as usize;
+                for &index in &sort.sorted[start..end] {
+                    let (position, item) = self.items[index as usize];
                     if position.distance_sq(center) <= radius_sq {
                         visit(item);
                     }
                 }
             }
         }
+    }
+
+    fn ensure_sorted(&self) {
+        if !self.sort.borrow().dirty {
+            return;
+        }
+        let mut sort = self.sort.borrow_mut();
+        sort.sorted.clear();
+        sort.counts.fill(0);
+        for &cell in &self.cell_index {
+            sort.counts[cell as usize] += 1;
+        }
+        let mut running = 0u32;
+        for index in 0..sort.counts.len() {
+            let count = sort.counts[index];
+            sort.starts[index] = running;
+            running += count;
+        }
+        let cell_total = sort.starts.len() - 1;
+        sort.starts[cell_total] = running;
+        sort.sorted.resize(usize::try_from(running).unwrap_or(0), 0);
+        // Stable counting sort by cell index preserves insertion order within a cell.
+        {
+            let SortBuffers {
+                offsets, starts, ..
+            } = &mut *sort;
+            offsets.copy_from_slice(starts);
+        }
+        for (item, &cell) in self.cell_index.iter().enumerate() {
+            let slot = sort.offsets[cell as usize] as usize;
+            sort.sorted[slot] = u32::try_from(item).expect("grid item index fits u32");
+            sort.offsets[cell as usize] += 1;
+        }
+        sort.dirty = false;
     }
 }
 
@@ -142,7 +206,7 @@ mod tests {
         grid.for_each_in_circle(FixVec2::from_ints(11, 11), Fix::from_i32(4), |item| {
             found.push(item);
         });
-        assert_eq!(found, Vec::new());
+        assert_eq!(found.len(), 0);
     }
 
     #[test]
