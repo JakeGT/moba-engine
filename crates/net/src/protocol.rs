@@ -801,6 +801,7 @@ impl From<&GameContent> for WireCatalog {
             modifiers: content_modifiers,
             rules: content_rules,
             map: content_map,
+            attestation: _,
         } = content;
         let ContentManifest {
             name,
@@ -1405,6 +1406,7 @@ impl WireCatalog {
                 wave_interval_ticks: self.rules.wave_interval_ticks,
                 first_wave_ticks: self.rules.first_wave_ticks,
             },
+            attestation: None,
             map: MapSpec {
                 extent: Fix::from_i32(i32::from(map.extent)),
                 lanes,

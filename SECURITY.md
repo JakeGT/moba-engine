@@ -55,3 +55,11 @@ denial of service via packets, asset/shader tooling issues, unsafe-code soundnes
 
 Out of scope: cheating in unranked/preview matches, missing public identity/anti-DoS features
 (documented above), issues in third-party drivers or Vulkan validation layers.
+
+## Content pack attestation
+
+Runtime content packs can be signed with Ed25519 (`publisher`/`signature` fields). Servers can
+require a valid attestation and pin the publisher key with `--require-content-attestation` and
+`--content-publisher`. Unverified packs are rejected before bind. The signature covers the pack
+manifest plus content hash; rotating keys requires a server restart, and revocation is an
+out-of-band trust-policy change (no online revocation list).

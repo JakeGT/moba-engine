@@ -268,6 +268,32 @@ fn identity_message(
     message
 }
 
+/// Signs a content pack's canonical message.
+#[must_use]
+pub fn sign_pack(content: &moba_game::GameContent, seed: &[u8; 32]) -> moba_game::PackAttestation {
+    let key = SigningKey::from_bytes(seed);
+    moba_game::PackAttestation {
+        publisher: key.verifying_key().to_bytes(),
+        signature: key.sign(&content.signing_message()).to_bytes(),
+    }
+}
+
+/// Verifies a pack's embedded Ed25519 attestation.
+#[must_use]
+pub fn verify_pack(content: &moba_game::GameContent) -> bool {
+    let Some(attestation) = content.attestation.as_ref() else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&attestation.publisher) else {
+        return false;
+    };
+    key.verify(
+        &content.signing_message(),
+        &Signature::from_bytes(&attestation.signature),
+    )
+    .is_ok()
+}
+
 /// Signs the server identity challenge embedded in `Welcome`.
 #[must_use]
 pub fn sign_server_welcome(
@@ -381,6 +407,18 @@ pub fn verify_client_hello(
 mod tests {
     use super::*;
     use crate::protocol::PacketKind;
+
+    #[test]
+    fn pack_attestation_signs_and_rejects_tampering() {
+        let mut content = moba_game::GameContent::default();
+        let seed = [7u8; 32];
+        content.attestation = Some(sign_pack(&content, &seed));
+        assert!(verify_pack(&content));
+        content.manifest.version.push_str("-tampered");
+        assert!(!verify_pack(&content));
+        content.attestation = None;
+        assert!(!verify_pack(&content));
+    }
 
     fn header(seq: u32) -> Header {
         Header {

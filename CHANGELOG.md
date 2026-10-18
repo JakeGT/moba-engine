@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Optional Ed25519 content-pack attestations with signing/verification CLI and server pinning.
 - Bounded Loom model for the job-scope submit/wake protocol plus a weekly/manual CI job.
 - cargo-fuzz targets (`wire`, `replay`, `content`) with seed corpus and a bounded
   ASan/UBSan nightly/manual workflow.

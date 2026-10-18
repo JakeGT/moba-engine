@@ -196,7 +196,7 @@ Order matters: golden image first, then structural refactors it can protect.
 - [ ] **#18 audio** consuming #41 presentation events.
 - [ ] **#20 map selection** after #40/#10/#39.
 - [ ] **#10 per-client content updates** after #40/#20 (protocol bump documented).
-- [ ] **#11 manifest signing/attestation** (content/security).
+- [x] **#11 manifest signing/attestation** (content/security).
 - [ ] **#9 hardware/min-spec + Windows/macOS renderer validation** after #32.
 
 **W4 exit**
