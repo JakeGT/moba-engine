@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Allocation guard matrix for wave spawns, 10-hero teamfights, respawns and shop purchases;
+  tests are serialised and budgets tightened to ≤8 allocations / ≤1 KiB per window.
 - `NetServer::with_system` deterministic extension hook with ordered `ServerPhase` callbacks
   and an embedding example.
 - Focus-based network input routing: shop focus consumes gameplay input through a dedicated

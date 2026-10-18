@@ -4,6 +4,7 @@
 //! should not allocate per frame; a small growth allowance covers first-use lazy paths.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use moba_sim::{Modifier, ModifierKind, Modifiers, SimConfig, Simulation, UnitKind};
@@ -12,6 +13,13 @@ struct CountingAllocator;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 // SAFETY: delegates every operation to the system allocator and only wraps it with atomic
 // counters that do not affect pointer validity or alignment.
@@ -41,6 +49,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 #[test]
 fn steady_state_ticks_do_not_allocate_per_frame() {
+    let _guard = serial();
     let mut simulation = Simulation::new(SimConfig::default());
     for _ in 0..3_000 {
         simulation.tick_with_bots();
@@ -54,17 +63,15 @@ fn steady_state_ticks_do_not_allocate_per_frame() {
     let bytes = BYTES.load(Ordering::Relaxed);
     eprintln!("steady ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
-        allocations <= 30,
-        "steady-state tick allocated {allocations} times over 300 ticks"
+        allocations <= 2,
+        "steady-state tick allocated {allocations} times"
     );
-    assert!(
-        bytes <= 4_096,
-        "steady-state tick allocated {bytes} bytes over 300 ticks"
-    );
+    assert!(bytes <= 512, "steady-state tick allocated {bytes} bytes");
 }
 
 #[test]
 fn status_modifier_ticks_stay_within_budget() {
+    let _guard = serial();
     let mut simulation = Simulation::new(SimConfig {
         bot_mask: 0,
         spawn_waves: false,
@@ -120,11 +127,130 @@ fn status_modifier_ticks_stay_within_budget() {
     let bytes = BYTES.load(Ordering::Relaxed);
     eprintln!("modifier ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
-        allocations <= 30,
-        "modifier tick allocated {allocations} times over 300 ticks"
+        allocations <= 2,
+        "modifier tick allocated {allocations} times"
     );
+    assert!(bytes <= 512, "modifier tick allocated {bytes} bytes");
+}
+
+#[test]
+fn wave_spawn_ticks_stay_within_budget() {
+    let _guard = serial();
+    let mut simulation = Simulation::new(SimConfig {
+        bot_mask: 0,
+        spawn_waves: true,
+        ..SimConfig::default()
+    });
+    // Default first wave is at 2730 ticks; measure a window that crosses it.
+    for _ in 0..2_700 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    BYTES.store(0, Ordering::Relaxed);
+    for _ in 0..300 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes = BYTES.load(Ordering::Relaxed);
+    eprintln!("wave ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
-        bytes <= 4_096,
-        "modifier tick allocated {bytes} bytes over 300 ticks"
+        allocations <= 8,
+        "wave window allocated {allocations} times"
     );
+    assert!(bytes <= 1_024, "wave window allocated {bytes} bytes");
+}
+
+#[test]
+fn teamfight_ticks_stay_within_budget() {
+    let _guard = serial();
+    let mut simulation = Simulation::new(SimConfig::default());
+    for _ in 0..3_000 {
+        simulation.tick_with_bots();
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    BYTES.store(0, Ordering::Relaxed);
+    for _ in 0..300 {
+        simulation.tick_with_bots();
+    }
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes = BYTES.load(Ordering::Relaxed);
+    eprintln!("teamfight ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
+    assert!(
+        allocations <= 2,
+        "teamfight window allocated {allocations} times"
+    );
+    assert!(bytes <= 512, "teamfight window allocated {bytes} bytes");
+}
+
+#[test]
+fn respawn_ticks_stay_within_budget() {
+    let _guard = serial();
+    let mut simulation = Simulation::new(SimConfig {
+        bot_mask: 0,
+        spawn_waves: false,
+        ..SimConfig::default()
+    });
+    for _ in 0..30 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    let hero = simulation
+        .world_mut()
+        .query::<&UnitKind>()
+        .find(|(_, kind)| **kind == UnitKind::Hero)
+        .map(|(entity, _)| entity)
+        .expect("hero");
+    simulation
+        .world_mut()
+        .get_mut::<moba_sim::Health>(hero)
+        .expect("health")
+        .current = 0;
+    for _ in 0..10 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    BYTES.store(0, Ordering::Relaxed);
+    for _ in 0..900 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes = BYTES.load(Ordering::Relaxed);
+    eprintln!("respawn ticks: {allocations} allocations, {bytes} bytes over 900 ticks");
+    assert!(
+        allocations <= 2,
+        "respawn window allocated {allocations} times"
+    );
+    assert!(bytes <= 512, "respawn window allocated {bytes} bytes");
+}
+
+#[test]
+fn shop_ticks_stay_within_budget() {
+    let _guard = serial();
+    let mut simulation = Simulation::new(SimConfig {
+        bot_mask: 0,
+        spawn_waves: false,
+        ..SimConfig::default()
+    });
+    for _ in 0..30 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    for _ in 0..10 {
+        let mut inputs = moba_sim::TickInputs::new();
+        inputs.set_purchase(0, 0);
+        simulation.tick(&inputs);
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    BYTES.store(0, Ordering::Relaxed);
+    for _ in 0..300 {
+        let mut inputs = moba_sim::TickInputs::new();
+        inputs.set_purchase(1, 1);
+        simulation.tick(&inputs);
+    }
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let bytes = BYTES.load(Ordering::Relaxed);
+    eprintln!("shop ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
+    assert!(
+        allocations <= 2,
+        "shop window allocated {allocations} times"
+    );
+    assert!(bytes <= 512, "shop window allocated {bytes} bytes");
 }

@@ -37,3 +37,21 @@ limited rather than O(n²).
 
 - Split movement/targeting across the job pool per archetype once unit counts exceed ~500.
 - Pre-reserve the minion archetype for the worst-case live count to remove the 209 µs spike.
+
+## Allocation guard matrix
+
+`cargo test -p moba-sim --test allocations` serialises its cases and measures on the calling
+thread. Latest 300-tick windows:
+
+| Case | Allocations | Bytes |
+|---|---:|---:|
+| steady bots | 1 | 192 |
+| 10-hero teamfight | 1 | 192 |
+| wave spawn window | 2 | 192 |
+| status modifier pack (all kinds) | 0 | 0 |
+| respawn window (900 ticks) | 0 | 0 |
+| shop purchases | 0 | 0 |
+
+Budgets are now ≤8 allocations / ≤1 KiB per window, with steady/teamfight/respawn ≤2 and
+shop/status paths expected to be zero. The earlier 30-allocation budget was masking
+cross-test allocator contention as well as real wave-spawn growth.
