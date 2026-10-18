@@ -182,7 +182,7 @@ range indicators and later content updates.
 
 Order matters: golden image first, then structural refactors it can protect.
 
-- [ ] **#8 golden-image CI** (start earlier if possible; required before #42/#44).
+- [x] **#8 golden-image CI** (landed with a 64×36 fingerprint and validation-required lavapipe job).
 - [ ] **#32 renderer correctness** from W0 (continues here for descriptor/resize niceties).
 - [ ] **#42 HUD split:** `HudModel`, `hud/*`, `theme`, zero per-frame `format!`, vertex
   truncation counter/tests; main.rs <600 lines.

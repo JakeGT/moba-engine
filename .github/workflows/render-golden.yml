@@ -1,0 +1,63 @@
+name: render golden
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  MOBA_VULKAN_VALIDATION: required
+  LIBGL_ALWAYS_SOFTWARE: "1"
+
+jobs:
+  golden:
+    name: lavapipe golden capture
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'render-golden'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install software Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan1 \
+            glslang-tools libxkbcommon-dev libwayland-dev xvfb
+          ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
+          test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "Using $ICD"
+      - name: Build client and tools
+        run: cargo build --release --locked -p moba-client -p moba-tools
+      - name: Capture with validation + sync validation
+        run: |
+          timeout 180 xvfb-run -a ./target/release/moba-client \
+            > capture.log 2>&1 || { cat capture.log; exit 1; }
+          test -s render-actual.ppm
+        env:
+          MOBA_SMOKE_FRAMES: "120"
+          MOBA_CAPTURE: render-actual.ppm
+          MOBA_CAPTURE_FRAME: "90"
+      - name: Compare fingerprint
+        run: |
+          ./target/release/image-check render-actual.ppm \
+            --expected tests/golden/render-fingerprint.rgb \
+            --diff render-diff.ppm | tee fingerprint.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: render-golden
+          path: |
+            render-actual.ppm
+            render-diff.ppm
+            capture.log
+            fingerprint.log
+          if-no-files-found: ignore
