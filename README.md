@@ -24,7 +24,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, paginated shop, Tab scoreboard, controls and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 241 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 243 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -54,7 +54,7 @@ rotate/zoom the spectator camera.
 **Settings:** copy `moba-settings.example.toml` to `moba-settings.toml` (or set
 `MOBA_SETTINGS=/path/to/file`). Bindings accept `W/A/S/D/Q/E/R/F/B/M/Space/Tab/Enter/Escape/
 Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_scale` is 0.5–3.0;
-`MOBA_UI_SCALE` overrides it for one run. `camera_sensitivity` (0.25–3.0), `camera_zoom`
+`MOBA_UI_SCALE` overrides it for one run. `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
 (70–420), `attack_button` (`left`/`right`) and spectator camera keys are also configurable.
 `MOBA_SAVE_SETTINGS=1` writes defaults; `MOBA_RESET_SETTINGS=1` resets the file.
 

@@ -13,7 +13,7 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 | M3 | Renderer | 🟡 [evidence](tasks/0003-renderer.md) | Vulkan 1.2 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, bitmap UI and readback; validated on lavapipe. Skinning, golden-image CI, min-spec frame timings and Windows/macOS validation remain. |
 | M4 | Simulation | ✅ [evidence](tasks/0004-simulation.md) | Deterministic 5v5, 3 lanes, towers/nexuses, minions, bots, respawns, XP/gold/items, vision filtering; **13.3 µs/tick** steady benchmark. |
 | M5 | Networking | ✅ [evidence](tasks/0005-networking.md) | UDP, fragmentation, delta snapshots, prediction/interpolation, reconnect, spectators, protocol v22 minion-stats handshake/identity; v12 one-hour fuzz passed and v16 short fuzz smoke: 1,742,000 iterations. |
-| M6 | Vertical slice | 🟡 [evidence](tasks/0006-vertical-slice.md) | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons. Audio/settings deferred; a 10-client playtest on a real network has not been recorded. |
+| M6 | Vertical slice | 🟡 [evidence](tasks/0006-vertical-slice.md) | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio and persistent settings. A 10-client playtest on a real network has not been recorded. |
 | M7 | Hardening | 🟡 [evidence](tasks/0007-hardening.md) | AEAD, per-client tokens, Ed25519 server/client identity, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence. 50 *concurrent* matches per box and independent code-review evidence remain open. |
 | M8 | Content pipeline | 🟡 [evidence](tasks/0008-content.md) | Runtime item/hero/ability/map packs, manifests, hot reload (empty lobby), 10 ability kinds, per-hero growth. Per-client live updates, manifest attestation and asset mapping remain. |
 
@@ -35,8 +35,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **241 passed**, 0 failed, 3 ignored.
-- `cargo test --workspace --release --locked`: **241 passed**, 0 failed.
+- `cargo test --workspace --locked`: **243 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --release --locked`: **243 passed**, 0 failed.
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
@@ -95,8 +95,7 @@ Current themes:
   [map selection](https://github.com/JakeGT/moba-engine/issues/20).
 - Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14), and
   [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
-- Product: [audio](https://github.com/JakeGT/moba-engine/issues/18) and
-  [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).
+- Product: [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).
 - Release: [crates.io publishing/metadata](https://github.com/JakeGT/moba-engine/issues/21).
 
 ## Open-source surface

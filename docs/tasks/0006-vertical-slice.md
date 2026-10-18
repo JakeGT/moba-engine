@@ -78,7 +78,7 @@ levels/items, and a complete match flow.
 ## Closeout
 - Hero levels/XP, gold/items/shop, lobby/rematch, reconnect, spectator, ready/surrender,
   minimap, health bars and line-of-sight walls all landed.
-- Deferred beyond M6: audio, richer targeting affordances. Settings/remapping/UI scale landed in #113 and follow-up settings work.
+- Audio (procedural, headless-safe) landed in #120; deferred beyond M6: richer targeting affordances. Settings/remapping/UI scale landed in #113 and follow-up settings work.
 
 ## Acceptance
 - [x] HUD renders under lavapipe with validation enabled.

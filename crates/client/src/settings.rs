@@ -143,6 +143,8 @@ impl Bindings {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
+    pub(crate) audio_volume: f32,
+    pub(crate) audio_mute: bool,
     pub(crate) camera_sensitivity: f32,
     pub(crate) camera_zoom: f32,
     pub(crate) controls: Controls,
@@ -152,6 +154,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ui_scale: 1.0,
+            audio_volume: 0.7,
+            audio_mute: false,
             camera_sensitivity: 1.0,
             camera_zoom: 240.0,
             controls: Controls::default(),
@@ -292,6 +296,13 @@ impl Settings {
         } else if !(UI_SCALE_MIN..=UI_SCALE_MAX).contains(&self.ui_scale) {
             self.ui_scale = self.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
             warnings.push(String::from("settings: ui_scale clamped"));
+        }
+        if !self.audio_volume.is_finite() {
+            self.audio_volume = 0.7;
+            warnings.push(String::from("settings: audio_volume reset"));
+        } else if !(0.0..=1.0).contains(&self.audio_volume) {
+            self.audio_volume = self.audio_volume.clamp(0.0, 1.0);
+            warnings.push(String::from("settings: audio_volume clamped"));
         }
         if !self.camera_sensitivity.is_finite() {
             self.camera_sensitivity = 1.0;
