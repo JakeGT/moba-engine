@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Map `extent` in content, hash/wire (protocol v18) and simulation bounds; client camera,
+  minimap, fog and healthbars scale from the handshake map.
 - Data-only arcing projectiles: TOML `arc`, hashed fixed-point effect field, protocol v17
   wire/event support and client sinusoidal arc rendering. ADR 0005 selects typed composition
   over embedded scripting.

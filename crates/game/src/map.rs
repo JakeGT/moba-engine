@@ -70,6 +70,9 @@ pub struct StructureDef {
     pub lane: Option<u8>,
 }
 
+/// Default square world extent in world units.
+pub const DEFAULT_MAP_EXTENT: i32 = 256;
+
 /// Static map description.
 #[derive(Copy, Clone, Debug)]
 pub struct MapDef {

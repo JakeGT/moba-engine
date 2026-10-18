@@ -49,6 +49,16 @@ impl<'a> HudUnit<'a> {
     }
 }
 
+/// Square world extent from the handshake map.
+pub(crate) fn map_extent(network: &NetworkView) -> f32 {
+    f32::from(network.client.map().extent)
+}
+
+/// World-to-render centre offset.
+pub(crate) fn map_center(network: &NetworkView) -> f32 {
+    map_extent(network) * 0.5
+}
+
 /// Iterates the current network view as HUD units.
 pub(crate) fn hud_units(network: &NetworkView) -> impl Iterator<Item = HudUnit<'_>> {
     network

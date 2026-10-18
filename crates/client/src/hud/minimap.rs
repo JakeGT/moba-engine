@@ -3,7 +3,8 @@
 use super::theme;
 use super::{
     Fix, FixVec2, HitList, HudAction, MELEE_MINION, NEXUS, NetworkView, RANGED_MINION, TOWER,
-    UiDrawList, Vec2, Vec4, VisionCircles, hud_units, map_lanes, map_walls, register,
+    UiDrawList, Vec2, Vec4, VisionCircles, hud_units, map_center, map_extent, map_lanes, map_walls,
+    register,
 };
 
 pub(crate) fn draw_minimap(
@@ -26,14 +27,15 @@ pub(crate) fn draw_minimap(
         theme::PANEL_CHROME,
     );
     register(hits, HudAction::Minimap, x, y, size, size);
+    let extent = map_extent(network);
     let inner = size - 20.0;
     let left = x + 10.0;
     let top = y + 10.0;
     ui.rect(left, top, inner, inner, Vec4::new(0.04, 0.08, 0.06, 0.9));
     let map = |position: FixVec2| {
         Vec2::new(
-            left + position.x.to_f32() / 256.0 * inner,
-            top + position.y.to_f32() / 256.0 * inner,
+            left + position.x.to_f32() / extent * inner,
+            top + position.y.to_f32() / extent * inner,
         )
     };
     let lane_color = Vec4::new(0.22, 0.38, 0.28, 0.85);
@@ -90,12 +92,13 @@ pub(crate) fn build_vision(network: &NetworkView) -> VisionCircles {
     if network.spectator {
         return vision;
     }
+    let center = map_center(network);
     map_walls(network, |a, b| {
         vision.add_wall(
-            f32::from(a[0]) - 128.0,
-            f32::from(a[1]) - 128.0,
-            f32::from(b[0]) - 128.0,
-            f32::from(b[1]) - 128.0,
+            f32::from(a[0]) - center,
+            f32::from(a[1]) - center,
+            f32::from(b[0]) - center,
+            f32::from(b[1]) - center,
         );
     });
     let own_team = network.client.team().index() as u8;
@@ -106,8 +109,8 @@ pub(crate) fn build_vision(network: &NetworkView) -> VisionCircles {
         let radius = vision_radius(network, unit);
         let position = unit.position();
         vision.add(
-            position.x.to_f32() - 128.0,
-            position.y.to_f32() - 128.0,
+            position.x.to_f32() - center,
+            position.y.to_f32() - center,
             radius,
         );
     };

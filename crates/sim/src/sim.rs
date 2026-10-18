@@ -439,6 +439,7 @@ impl Simulation {
     #[must_use]
     pub fn new_with_content(config: SimConfig, content: Arc<GameContent>) -> Self {
         let bot_seed = config.seed;
+        let extent = content.map.extent;
         let mut simulation = Self {
             world: World::with_capacity(MAX_UNITS),
             tick: Tick::ZERO,
@@ -453,14 +454,10 @@ impl Simulation {
             projectiles: Vec::with_capacity(MAX_PROJECTILES),
             zones: Vec::with_capacity(MAX_ZONES),
             events: Vec::with_capacity(MAX_EVENTS),
-            grid: SpatialGrid::new(
-                FixVec2::ZERO,
-                FixVec2::splat(Fix::from_i32(WORLD_EXTENT)),
-                Fix::from_i32(8),
-            ),
+            grid: SpatialGrid::new(FixVec2::ZERO, FixVec2::splat(extent), Fix::from_i32(8)),
             vision_grid: Some(SpatialGrid::new(
                 FixVec2::ZERO,
-                FixVec2::splat(Fix::from_i32(WORLD_EXTENT)),
+                FixVec2::splat(extent),
                 Fix::from_i32(8),
             )),
             hero_views: Vec::with_capacity(MAX_PLAYERS),
@@ -543,6 +540,10 @@ impl Simulation {
     /// works, and the next tick will iterate whatever archetypes exist.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
+    }
+
+    fn clamp_position(&self, position: FixVec2) -> FixVec2 {
+        clamp_to_extent(position, self.content.map.extent)
     }
 
     /// Simulation configuration.
@@ -1145,14 +1146,14 @@ impl Simulation {
                 let perpendicular = direction.perpendicular();
                 for index in 0..3i32 {
                     let offset = Fix::from_i32(index - 1);
-                    let position = clamp_position(
+                    let position = self.clamp_position(
                         start
                             + perpendicular * offset * Fix::from_i32(2)
                             + direction * Fix::from_i32(-1),
                     );
                     self.spawn_minion(team, lane_index, UnitKind::MeleeMinion, position, 1);
                 }
-                let position = clamp_position(start + perpendicular * Fix::from_i32(6));
+                let position = self.clamp_position(start + perpendicular * Fix::from_i32(6));
                 self.spawn_minion(team, lane_index, UnitKind::RangedMinion, position, 1);
             }
         }
@@ -1413,7 +1414,7 @@ impl Simulation {
                         .get::<Modifiers>(entity)
                         .is_none_or(|m| !m.has(ModifierKind::Root))
                     {
-                        let destination = clamp_position(position);
+                        let destination = self.clamp_position(position);
                         if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
                             target.0 = Some(destination);
                         }
@@ -1576,7 +1577,7 @@ impl Simulation {
                     let distance = delta.length().min(*range);
                     if distance > Fix::ZERO {
                         let destination =
-                            clamp_position(position + delta.normalize_or_zero() * distance);
+                            self.clamp_position(position + delta.normalize_or_zero() * distance);
                         if let Some(current) = self.world.get_mut::<Position>(caster) {
                             current.0 = destination;
                         }
@@ -1824,6 +1825,7 @@ impl Simulation {
     }
 
     fn move_units(&mut self) {
+        let extent = self.content.map.extent;
         for (_, (position, target, speed)) in self
             .world
             .query_filtered::<(&mut Position, &MoveTarget, &MoveSpeed), Without<Dead>>()
@@ -1832,7 +1834,7 @@ impl Simulation {
                 continue;
             };
             let next = position.0.move_towards(destination, speed.0);
-            position.0 = clamp_position(next);
+            position.0 = clamp_to_extent(next, extent);
         }
     }
 
@@ -2538,9 +2540,9 @@ fn segments_intersect(a: FixVec2, b: FixVec2, c: FixVec2, d: FixVec2) -> bool {
     ((d1 > Fix::ZERO) != (d2 > Fix::ZERO)) && ((d3 > Fix::ZERO) != (d4 > Fix::ZERO))
 }
 
-fn clamp_position(position: FixVec2) -> FixVec2 {
+fn clamp_to_extent(position: FixVec2, extent: Fix) -> FixVec2 {
     let min = Fix::from_i32(2);
-    let max = Fix::from_i32(WORLD_EXTENT - 2);
+    let max = extent - Fix::from_i32(2);
     FixVec2::new(position.x.clamp(min, max), position.y.clamp(min, max))
 }
 

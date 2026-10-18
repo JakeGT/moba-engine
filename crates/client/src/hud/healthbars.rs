@@ -2,7 +2,7 @@
 
 use super::theme;
 use super::{
-    Camera, Instant, NetworkView, UiDrawList, Vec3, Vec4, hud_units, project_to_screen,
+    Camera, Instant, NetworkView, UiDrawList, Vec3, Vec4, hud_units, map_center, project_to_screen,
     rendered_entity_position, unit_hud_height,
 };
 
@@ -14,6 +14,7 @@ pub(crate) fn draw_health_bars(
     height: u32,
 ) {
     let render_tick = network.interpolator.render_tick(Instant::now());
+    let center = map_center(network);
     let width_f = width as f32;
     for unit in hud_units(network) {
         if unit.dead() || (unit.kind() != 0 && unit.kind() < 3) {
@@ -21,9 +22,9 @@ pub(crate) fn draw_health_bars(
         }
         let position = rendered_entity_position(network, unit, render_tick);
         let world = Vec3::new(
-            position.x.to_f32() - 128.0,
+            position.x.to_f32() - center,
             unit_hud_height(unit.kind()),
-            position.y.to_f32() - 128.0,
+            position.y.to_f32() - center,
         );
         let Some(screen) = project_to_screen(camera, world, width, height) else {
             continue;
