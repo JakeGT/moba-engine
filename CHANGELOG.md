@@ -6,6 +6,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-18
+
 ### Added
 - `[rules]` content section for hero respawn (base + per-level) and wave cadence; hashed,
   protocol v19 and wired into simulation bounds.

@@ -19,7 +19,7 @@ Current contract versions:
 - wire protocol **v19** (`crates/net/src/protocol.rs::PROTOCOL_VERSION`)
 - replay format **v5** (simulation logic v5; purchases are first-class inputs) (`crates/sim/src/replay.rs::VERSION`)
 - runtime content schema as documented in `docs/content-authoring.md`
-- workspace version **0.1.0**, pre-1.0 preview
+- workspace version **0.2.0**, pre-1.0 preview
 
 Read first:
 

@@ -3,7 +3,7 @@
 The workspace is pre-1.0. Releases are Git tags with prebuilt artifacts; crates.io publishing
 is opt-in until crate names/ownership are settled.
 
-## Publish policy (0.1.0)
+## Publish policy (0.2.0)
 
 - **Intended for crates.io later:** `moba-core`, `moba-ecs`, `moba-jobs`, `moba-nav`,
   `moba-game`, `moba-sim`, `moba-net`, `moba-engine`.
@@ -36,7 +36,7 @@ is opt-in until crate names/ownership are settled.
 
 ## Tagged release evidence
 
-The 0.1.0 preview tag is `v0.1.0`; release notes are generated from commits and the three
+The 0.1.0 preview tag is `v0.1.0`; the 0.2.0 preview tag is `v0.2.0`; release notes are generated from commits and the three
 platform archives are attached by the release workflow.
 
 ## Stability tiers
