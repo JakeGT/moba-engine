@@ -228,6 +228,13 @@ pub struct Hello {
     pub server_challenge: u64,
 }
 
+/// Minimum encoded bytes for one spawn record.
+const MIN_SPAWN_BYTES: usize = 36;
+/// Minimum encoded bytes for one update record (`net_id` + mask).
+const MIN_UPDATE_BYTES: usize = 3;
+/// Minimum encoded bytes for one despawn record.
+const MIN_DESPAWN_BYTES: usize = 2;
+
 /// Maximum items in a handshake catalogue.
 pub const MAX_WIRE_ITEMS: usize = 16;
 /// Fixed item-name bytes on the wire.
@@ -1570,6 +1577,12 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     let spawn_count = usize::from(reader.u16()?);
     let update_count = usize::from(reader.u16()?);
     let despawn_count = usize::from(reader.u16()?);
+    if spawn_count > reader.remaining() / MIN_SPAWN_BYTES
+        || update_count > reader.remaining() / MIN_UPDATE_BYTES
+        || despawn_count > reader.remaining() / MIN_DESPAWN_BYTES
+    {
+        return Err(WireError::BadValue);
+    }
     let mut spawns = Vec::with_capacity(spawn_count);
     for _ in 0..spawn_count {
         spawns.push(NetEntity {
@@ -1805,6 +1818,36 @@ mod tests {
             catalog_hash(&items[..1], &heroes[..1], &[], &WireMap::default()),
             baseline
         );
+    }
+
+    #[test]
+    fn oversized_snapshot_counts_are_rejected() {
+        let delta = SnapshotDelta {
+            tick: 1,
+            acked_input: 0,
+            baseline_seq: 0,
+            blue_score: 0,
+            red_score: 0,
+            outcome: 0,
+            phase: 0,
+            countdown: 0,
+            ready_mask: 0,
+            player_mask: 0,
+            spawns: Vec::new(),
+            updates: Vec::new(),
+            despawns: Vec::new(),
+        };
+        let mut payload = Vec::new();
+        encode_snapshot(&delta, &mut payload).expect("encode");
+        let mut corrupted = payload.clone();
+        corrupted[28..30].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(decode_snapshot(&corrupted), Err(WireError::BadValue));
+        let mut corrupted = payload.clone();
+        corrupted[30..32].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(decode_snapshot(&corrupted), Err(WireError::BadValue));
+        let mut corrupted = payload;
+        corrupted[32..34].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(decode_snapshot(&corrupted), Err(WireError::BadValue));
     }
 
     #[test]

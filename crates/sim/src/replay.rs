@@ -24,6 +24,10 @@ use moba_game::GameContent;
 const MAGIC: &[u8; 8] = b"MOBARPL1";
 /// Current replay format version.
 const VERSION: u8 = 1;
+/// Minimum bytes per frame on the wire (`present` bitmask, no commands).
+const MIN_FRAME_BYTES: usize = 2;
+/// A checkpoint is `tick u32 + state hash u64`.
+const MIN_CHECKPOINT_BYTES: usize = 12;
 
 /// Replay encoding/decoding or verification errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +278,9 @@ impl Replay {
         let has_hash = reader.u8()? != 0;
         let expected = reader.u64()?;
         let frame_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
+        if frame_count > reader.remaining() / MIN_FRAME_BYTES {
+            return Err(ReplayError::BadData);
+        }
         let mut frames = Vec::with_capacity(frame_count);
         for _ in 0..frame_count {
             let present = reader.u16()?;
@@ -289,6 +296,9 @@ impl Replay {
             frames.push(inputs);
         }
         let checkpoint_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
+        if checkpoint_count > reader.remaining() / MIN_CHECKPOINT_BYTES {
+            return Err(ReplayError::BadData);
+        }
         let mut checkpoints = Vec::with_capacity(checkpoint_count);
         for _ in 0..checkpoint_count {
             checkpoints.push((reader.u32()?, reader.u64()?));
@@ -519,6 +529,30 @@ mod tests {
         assert!(matches!(
             corrupt.play(),
             Err(ReplayError::HashMismatch { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_count_fields_are_rejected_without_large_allocations() {
+        let mut encoded = Replay::new(SimConfig::default()).encode();
+        let frame_offset = encoded.len() - 8;
+        let checkpoint_offset = encoded.len() - 4;
+        encoded[frame_offset..frame_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            Replay::decode(&encoded),
+            Err(ReplayError::BadData)
+        ));
+
+        let mut encoded = Replay::new(SimConfig::default()).encode();
+        encoded[checkpoint_offset..checkpoint_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            Replay::decode(&encoded),
+            Err(ReplayError::BadData)
         ));
     }
 }

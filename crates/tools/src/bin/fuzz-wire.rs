@@ -51,6 +51,12 @@ fn fuzz_once(rng: &mut Rng) {
 
     let mut snapshot = valid_snapshot(rng);
     mutate(rng, &mut snapshot);
+    let mut counted = valid_snapshot(rng);
+    let extreme = [u16::MAX, 0x7FFF, 0x00FF, 1, 0][rng.gen_range_u32(5) as usize];
+    counted[28..30].copy_from_slice(&extreme.to_le_bytes());
+    counted[30..32].copy_from_slice(&extreme.to_le_bytes());
+    counted[32..34].copy_from_slice(&extreme.to_le_bytes());
+    let _ = decode_snapshot(&counted);
     let mut packet = Vec::new();
     if encode_packet(&header(PacketKind::Snapshot), &snapshot, &mut packet).is_ok() {
         if let Ok((_, payload)) = decode_packet(&packet) {
