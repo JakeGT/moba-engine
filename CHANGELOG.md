@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- `NetServer::with_system` deterministic extension hook with ordered `ServerPhase` callbacks
+  and an embedding example.
 - Focus-based network input routing: shop focus consumes gameplay input through a dedicated
   handler instead of a modal early-return branch.
 - Ability boxes register hover rects and show name, targeting, range, cooldown, mana and

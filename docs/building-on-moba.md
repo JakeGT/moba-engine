@@ -64,8 +64,9 @@ for (entity, burn) in world.query::<&mut Burn>() {
 Keep systems order-explicit: the simulation's fixed order is part of the replay contract. Add a
 regression test with the same seed and assert `state_hash()`.
 
-`NetServer` has **no custom-system hook yet** (#39). Embed your own `Simulation` loop if you
-need extra systems; a dedicated-server hook is planned, not available today.
+`NetServer::with_system` registers an extension system called after every simulation tick in
+insertion order. Systems receive `&mut Simulation` and `ServerPhase`; keep work deterministic
+and content-hashed because it participates in the same match/replay state.
 
 ## Content packs
 
@@ -81,9 +82,15 @@ See [content-authoring.md](content-authoring.md). Servers can reload an empty lo
 ## Embedding the server
 
 ```rust
-use moba_net::{NetServer, ServerConfig};
+use moba_net::server::{NetServer, ServerConfig, ServerPhase};
 
-let mut server = NetServer::bind(ServerConfig::default())?;
+let mut server = NetServer::bind(ServerConfig::default())?
+    .with_system(|simulation, phase| {
+        // Runs after each tick, in registration order.
+        if phase == ServerPhase::Playing {
+            let _ = simulation.world().entity_count();
+        }
+    });
 server.run_for(std::time::Duration::from_secs(600))?;
 ```
 
@@ -93,14 +100,11 @@ deployments should use [server.example.toml](../server.example.toml).
 
 ## Adding a new ability behaviour
 
-1. Add a variant to `AbilityKind` in `moba-game`.
-2. Handle it in validation, `content_hash`, and the TOML parser.
-3. Execute it in `Simulation::cast_ability`; add components/tick timers as needed.
-4. Add a presentation event/status tag and bump the protocol. Do not assume a spare snapshot
-   flag bit; the current flags bitset is nearly full (#41).
-5. Add a unit test for application, expiry, and state hash; update docs/content-authoring.md.
-6. Add the kind to `AbilityKind` hashing, the content→wire parity conversion and the client
-   catalogue.
+Default abilities are composed from `Targeting` plus `EffectList`/`AreaEffectList` data in
+`moba-game`. Prefer a data-only pack: add targeting, effects (damage/heal/modifier/displace/
+projectile on-hit/area/zone), and a TOML ability entry; validate with `content-check`.
+A genuinely new **effect primitive** still needs a `moba-game` variant, wire field, content
+hash arm, parser mapping and a `moba-sim` executor branch plus tests.
 
 ## Extension checklists
 
@@ -122,7 +126,7 @@ Use these touch-point lists for changes that cross the content/simulation/wire b
 - Docs: content-authoring, status, CHANGELOG.
 
 **Add an ability kind**
-- `moba-game`: `AbilityKind`, parser/validation/hash, defaults and content examples.
+- `moba-game`: targeting/effect composition, parser/validation/hash, defaults and content examples.
 - `moba-sim`: cast/targeting/execution, cooldown/mana/range rejection, events, state hash.
 - `moba-net`: wire kind/display fields, parity test, protocol bump when needed.
 - Client: tooltip/range/visual; add a capture/golden check if visual.

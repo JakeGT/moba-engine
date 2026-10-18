@@ -583,6 +583,30 @@ impl RawEvent {
     }
 }
 
+/// Observable server phase passed to extension systems.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ServerPhase {
+    /// Waiting for players.
+    Lobby,
+    /// Countdown before play.
+    Countdown,
+    /// Simulation is ticking.
+    Playing,
+    /// Post-match results screen.
+    Results,
+}
+
+type ExtensionSystem = Box<dyn FnMut(&mut Simulation, ServerPhase) + Send>;
+
+#[derive(Default)]
+struct Systems(Vec<ExtensionSystem>);
+
+impl core::fmt::Debug for Systems {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Systems").field(&self.0.len()).finish()
+    }
+}
+
 /// A running authoritative network server.
 #[derive(Debug)]
 pub struct NetServer {
@@ -606,6 +630,7 @@ pub struct NetServer {
     session_counter: u32,
     stats: ServerStats,
     phase: Phase,
+    systems: Systems,
     frame: u64,
     match_number: u32,
     record_frames: Vec<TickInputs>,
@@ -662,6 +687,7 @@ impl NetServer {
             session_counter: 1,
             stats: ServerStats::default(),
             phase: Phase::Lobby,
+            systems: Systems::default(),
             frame: 0,
             match_number: 0,
             record_frames: Vec::new(),
@@ -877,6 +903,26 @@ impl NetServer {
     ///
     /// # Errors
     /// Returns OS send errors from snapshot transmission.
+    /// Registers an extension system run after each simulation tick in insertion order.
+    #[must_use]
+    pub fn with_system<F>(mut self, system: F) -> Self
+    where
+        F: FnMut(&mut Simulation, ServerPhase) + Send + 'static,
+    {
+        self.systems.0.push(Box::new(system));
+        self
+    }
+
+    /// Returns the extension systems count.
+    #[must_use]
+    pub fn system_count(&self) -> usize {
+        self.systems.0.len()
+    }
+
+    /// Advances one server frame.
+    ///
+    /// # Errors
+    /// Returns a socket error when snapshots cannot be sent.
     pub fn tick(&mut self) -> io::Result<()> {
         self.frame = self.frame.wrapping_add(1);
         if self.frame % 30 == 0 {
@@ -893,6 +939,9 @@ impl NetServer {
             }
             Phase::Playing => {
                 self.tick_simulation();
+                for system in &mut self.systems.0 {
+                    system(&mut self.simulation, ServerPhase::Playing);
+                }
                 if self.simulation.outcome().is_some() {
                     self.phase = Phase::Results(self.config.results_ticks.max(1));
                     self.write_recording();
@@ -1871,6 +1920,47 @@ fn replay_path(base: &Path, match_number: u32) -> PathBuf {
 mod tests {
     use super::*;
     use moba_sim::{Health, UnitKind};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn extension_systems_run_in_order_after_tick() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 1,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(1),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 0,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first = Arc::clone(&order);
+        let second = Arc::clone(&order);
+        let mut server = NetServer::bind(config)
+            .expect("bind")
+            .with_system(move |simulation, phase| {
+                assert_eq!(phase, ServerPhase::Playing);
+                let _ = simulation.world().entity_count();
+                first.lock().expect("lock").push(1u8);
+            })
+            .with_system(move |_, phase| {
+                second
+                    .lock()
+                    .expect("lock")
+                    .push(if phase == ServerPhase::Playing { 2 } else { 9 });
+            });
+        assert_eq!(server.system_count(), 2);
+        server.phase = Phase::Playing;
+        server.tick().expect("tick");
+        assert_eq!(*order.lock().expect("lock"), vec![1, 2]);
+    }
 
     #[test]
     fn event_visibility_requires_an_observed_source_or_target() {
