@@ -2256,40 +2256,36 @@ pub fn build_delta(
     acked_input: u32,
     baseline_seq: u32,
 ) -> SnapshotDelta {
-    let Some(baseline) = baseline else {
-        return SnapshotDelta {
-            tick,
-            acked_input,
-            baseline_seq: 0,
-            blue_score: 0,
-            red_score: 0,
-            outcome: 0,
-            phase: 0,
-            countdown: 0,
-            ready_mask: 0,
-            player_mask: 0,
-            spawns: current.to_vec(),
-            updates: Vec::new(),
-            despawns: Vec::new(),
-            events: Vec::new(),
-        };
-    };
-    let mut delta = SnapshotDelta {
+    let mut delta = SnapshotDelta::default();
+    build_delta_into(
+        current,
+        baseline,
         tick,
         acked_input,
         baseline_seq,
-        blue_score: 0,
-        red_score: 0,
-        outcome: 0,
-        phase: 0,
-        countdown: 0,
-        ready_mask: 0,
-        player_mask: 0,
-        spawns: Vec::new(),
-        updates: Vec::new(),
-        despawns: Vec::new(),
-        events: Vec::new(),
+        &mut delta,
+    );
+    delta
+}
+
+/// Builds a snapshot into a reused delta, retaining vector capacity.
+pub fn build_delta_into(
+    current: &[NetEntity],
+    baseline: Option<&[NetEntity]>,
+    tick: u32,
+    acked_input: u32,
+    baseline_seq: u32,
+    delta: &mut SnapshotDelta,
+) {
+    delta.clear();
+    delta.tick = tick;
+    delta.acked_input = acked_input;
+    let Some(baseline) = baseline else {
+        delta.baseline_seq = 0;
+        delta.spawns.extend_from_slice(current);
+        return;
     };
+    delta.baseline_seq = baseline_seq;
     let (mut old_index, mut new_index) = (0usize, 0usize);
     while old_index < baseline.len() || new_index < current.len() {
         match (baseline.get(old_index), current.get(new_index)) {
@@ -2323,9 +2319,26 @@ pub fn build_delta(
             (None, None) => break,
         }
     }
-    delta
 }
 
+impl SnapshotDelta {
+    fn clear(&mut self) {
+        self.tick = 0;
+        self.acked_input = 0;
+        self.baseline_seq = 0;
+        self.blue_score = 0;
+        self.red_score = 0;
+        self.outcome = 0;
+        self.phase = 0;
+        self.countdown = 0;
+        self.ready_mask = 0;
+        self.player_mask = 0;
+        self.spawns.clear();
+        self.updates.clear();
+        self.despawns.clear();
+        self.events.clear();
+    }
+}
 /// Encodes an input message payload.
 #[must_use]
 pub fn encode_input(message: &InputMessage) -> Vec<u8> {
@@ -3004,6 +3017,19 @@ mod tests {
             cooldowns: [0, 0, 0],
             progress: NetProgress::default(),
         }
+    }
+
+    #[test]
+    fn delta_builder_reuses_capacity() {
+        let baseline = vec![entity(1, 10, 20, 600), entity(2, 30, 40, 200)];
+        let mut delta = SnapshotDelta::default();
+        build_delta_into(&baseline, None, 1, 0, 0, &mut delta);
+        let spawn_capacity = delta.spawns.capacity();
+        assert_eq!(delta.spawns.len(), 2);
+        build_delta_into(&baseline, None, 2, 0, 0, &mut delta);
+        assert_eq!(delta.spawns.capacity(), spawn_capacity);
+        assert_eq!(delta.spawns.len(), 2);
+        assert_eq!(delta.tick, 2);
     }
 
     #[test]
