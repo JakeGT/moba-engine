@@ -50,6 +50,14 @@ Before merging hot-path or netcode changes also run a short soak or benchmark:
 ```bash
 cargo run --release -p moba-tools --bin soak -- --seconds 30
 cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 30
+
+# Sanitizer fuzzing (nightly + cargo-fuzz):
+cargo install cargo-fuzz --locked
+cargo +nightly fuzz run wire -- -max_total_time=60
+cargo +nightly fuzz run replay -- -max_total_time=60
+cargo +nightly fuzz run content -- -max_total_time=60
+# Crashes land in fuzz/artifacts/<target>/; reproduce with
+# `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>`.
 cargo bench -p moba-sim --bench tick
 ```
 
