@@ -827,6 +827,54 @@ fn handle_spectator_input(network: &mut NetworkView, input: &InputState) {
     }
 }
 
+/// Input focus for the network client.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum InputFocus {
+    Gameplay,
+    Shop,
+}
+
+impl InputFocus {
+    const fn from_shop(shop: bool) -> Self {
+        if shop { Self::Shop } else { Self::Gameplay }
+    }
+}
+
+fn handle_shop_input(network: &mut NetworkView, input: &InputState, ui_action: Option<HudAction>) {
+    let page_count = network.client.items().len().div_ceil(8).max(1);
+    if input.was_key_pressed(Key::ArrowLeft) {
+        network.shop_page = network.shop_page.saturating_sub(1);
+    }
+    if input.was_key_pressed(Key::ArrowRight) {
+        network.shop_page = (network.shop_page + 1).min(page_count - 1);
+    }
+    network.shop_page = network.shop_page.min(page_count - 1);
+    for (key, offset) in [
+        (Key::Digit1, 0u8),
+        (Key::Digit2, 1),
+        (Key::Digit3, 2),
+        (Key::Digit4, 3),
+        (Key::Digit5, 4),
+        (Key::Digit6, 5),
+        (Key::Digit7, 6),
+        (Key::Digit8, 7),
+    ] {
+        if input.was_key_pressed(key) {
+            let item = network.shop_page * 8 + usize::from(offset);
+            if item < network.client.items().len() {
+                let _ = network
+                    .client
+                    .send_command(WireCommand::BuyItem { item: item as u8 });
+            }
+        }
+    }
+    if let Some(HudAction::ShopItem(item)) = ui_action
+        && input.was_mouse_pressed(MouseButton::Left)
+    {
+        let _ = network.client.send_command(WireCommand::BuyItem { item });
+    }
+}
+
 #[allow(clippy::too_many_lines)] // One ordered focus/input sequence.
 fn handle_network_input(
     network: &mut NetworkView,
@@ -845,13 +893,6 @@ fn handle_network_input(
         .cursor()
         .and_then(|cursor| rect_at(hits, cursor.x, cursor.y));
     let ui_action = ui_rect.map(|rect| rect.action);
-    if *shop
-        && input.was_mouse_pressed(MouseButton::Left)
-        && let Some(HudAction::ShopItem(item)) = ui_action
-    {
-        let _ = network.client.send_command(WireCommand::BuyItem { item });
-        return;
-    }
     if let (Some(rect), Some(cursor)) = (ui_rect, input.cursor())
         && rect.action == HudAction::Minimap
         && (input.was_mouse_pressed(MouseButton::Left)
@@ -885,35 +926,12 @@ fn handle_network_input(
     if input.was_key_pressed(Key::B) {
         *shop = !*shop;
     }
-    if *shop {
-        let page_count = network.client.items().len().div_ceil(8).max(1);
-        if input.was_key_pressed(Key::ArrowLeft) {
-            network.shop_page = network.shop_page.saturating_sub(1);
+    match InputFocus::from_shop(*shop) {
+        InputFocus::Shop => {
+            handle_shop_input(network, input, ui_action);
+            return;
         }
-        if input.was_key_pressed(Key::ArrowRight) {
-            network.shop_page = (network.shop_page + 1).min(page_count - 1);
-        }
-        network.shop_page = network.shop_page.min(page_count - 1);
-        for (key, offset) in [
-            (Key::Digit1, 0u8),
-            (Key::Digit2, 1),
-            (Key::Digit3, 2),
-            (Key::Digit4, 3),
-            (Key::Digit5, 4),
-            (Key::Digit6, 5),
-            (Key::Digit7, 6),
-            (Key::Digit8, 7),
-        ] {
-            if input.was_key_pressed(key) {
-                let item = network.shop_page * 8 + usize::from(offset);
-                if item < network.client.items().len() {
-                    let _ = network
-                        .client
-                        .send_command(WireCommand::BuyItem { item: item as u8 });
-                }
-            }
-        }
-        return;
+        InputFocus::Gameplay => {}
     }
     if network.phase != MatchPhase::Playing {
         return;
@@ -1180,8 +1198,15 @@ pub(crate) mod allocation_probe {
 #[cfg(test)]
 mod tests {
     use super::{
-        Camera, Fix, FixVec2, Team, UnitKind, Vec2, Vec3, cursor_ground, kind_from_u8, team_from_u8,
+        Camera, Fix, FixVec2, InputFocus, Team, UnitKind, Vec2, Vec3, cursor_ground, kind_from_u8,
+        team_from_u8,
     };
+
+    #[test]
+    fn shop_focus_routes_to_shop() {
+        assert_eq!(InputFocus::from_shop(true), InputFocus::Shop);
+        assert_eq!(InputFocus::from_shop(false), InputFocus::Gameplay);
+    }
 
     #[test]
     fn centre_cursor_maps_to_camera_target() {

@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Focus-based network input routing: shop focus consumes gameplay input through a dedicated
+  handler instead of a modal early-return branch.
 - Ability boxes register hover rects and show name, targeting, range, cooldown, mana and
   effect summary tooltips from the wire catalogue.
 - Minimap clicks issue a world move; shop rows show a hover tooltip with item stats.
