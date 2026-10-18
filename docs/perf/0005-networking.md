@@ -166,3 +166,10 @@ sustained or isolated >1 ms frame. Snapshot construction was separately measured
 ~3.6–3.7 ns per visible entity (#87), so the old spike is most consistent with an OS/scheduler
 or pre-optimisation transient rather than snapshot growth. The soak output now keeps the
 location (`max_at_tick`, `max_wave`, `max_units`, frame index) for future regressions.
+
+## Snapshot allocation guard
+
+`cargo test -p moba-net --test snapshot_allocations` warms a delta and encode payload, then
+builds/encodes 300 changed 100-entity snapshots through the global allocator. Result:
+**0 allocations / 0 bytes**. Combined with pooled history buffers and the reused server delta,
+the snapshot construction/encode path is allocation-free in steady state.
