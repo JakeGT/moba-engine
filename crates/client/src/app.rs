@@ -56,6 +56,16 @@ pub(crate) struct KillFeedEntry {
     pub(crate) text: String,
 }
 
+impl ProjectileFx {
+    fn arc_height(&self) -> f32 {
+        if self.total <= 0.0 || self.arc <= 0.0 {
+            return 0.0;
+        }
+        let progress = (self.travelled / self.total).clamp(0.0, 1.0);
+        self.arc * (core::f32::consts::PI * progress).sin()
+    }
+}
+
 pub(crate) struct ProjectileFx {
     pub(crate) team: u8,
     pub(crate) position: FixVec2,
@@ -63,6 +73,9 @@ pub(crate) struct ProjectileFx {
     pub(crate) speed: f32,
     pub(crate) radius: f32,
     pub(crate) remaining: f32,
+    pub(crate) arc: f32,
+    pub(crate) total: f32,
+    pub(crate) travelled: f32,
 }
 
 #[allow(clippy::struct_excessive_bools)] // Independent connection/UI flags.
@@ -672,7 +685,7 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
                 1.2,
                 projectile.position.y.to_f32() - 128.0,
             ),
-            1.2 + projectile.radius * 0.2,
+            1.2 + projectile.radius * 0.2 + projectile.arc_height(),
             color,
         ));
     }
@@ -1072,13 +1085,17 @@ impl NetworkView {
                 );
                 let position = dequantize_position(event.x, event.y);
                 let end = dequantize_position(event.x2, event.y2);
+                let total = position.distance(end).to_f32();
                 self.projectiles.push(ProjectileFx {
                     team: event.team,
                     position,
                     direction,
                     speed: f32::from(event.value),
                     radius: f32::from(event.aux),
-                    remaining: position.distance(end).to_f32(),
+                    remaining: total,
+                    arc: f32::from(event.arc) / 16.0,
+                    total,
+                    travelled: 0.0,
                 });
                 if self.projectiles.len() > 32 {
                     self.projectiles.remove(0);
@@ -1125,6 +1142,7 @@ impl NetworkView {
         for projectile in &mut self.projectiles {
             projectile.position += projectile.direction * Fix::from_f32(projectile.speed * dt);
             projectile.remaining -= projectile.speed * dt;
+            projectile.travelled += projectile.speed * dt;
         }
         self.projectiles
             .retain(|projectile| projectile.remaining > 0.0);

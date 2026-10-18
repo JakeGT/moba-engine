@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Data-only arcing projectiles: TOML `arc`, hashed fixed-point effect field, protocol v17
+  wire/event support and client sinusoidal arc rendering. ADR 0005 selects typed composition
+  over embedded scripting.
 - Nightly macOS MoltenVK probe job; green dispatch enumerated 1 device with portability enabled.
 - Headless `vulkan-probe` tool plus a macOS MoltenVK workflow for instance/device enumeration
   coverage (#32).

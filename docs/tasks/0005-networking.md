@@ -88,6 +88,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v14 adds content-defined modifier definitions (name/kind) to the catalogue.
 - v15 replaces ability kinds with targeting + effect lists (projectile on-hit, areas, zones).
 - v16 adds a bounded per-snapshot presentation-event list and wide `status_bits`.
+- v17 adds projectile arc height to wire effects and spawn events.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 

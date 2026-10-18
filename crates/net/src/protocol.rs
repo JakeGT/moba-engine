@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 16;
+pub const PROTOCOL_VERSION: u8 = 17;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -449,6 +449,8 @@ pub struct WireEffect {
     pub range_bits: i64,
     /// Radius in raw fixed-point bits.
     pub radius_bits: i64,
+    /// Visual projectile arc height in raw fixed-point bits.
+    pub arc_bits: i64,
     /// Duration in ticks.
     pub duration_ticks: u32,
     /// Period in ticks.
@@ -879,12 +881,14 @@ impl From<&GameContent> for WireCatalog {
                         speed_per_sec,
                         range,
                         radius,
+                        arc,
                         on_hit,
                     } => {
                         encoded.kind = 5;
                         encoded.speed_bits = speed_per_sec.to_bits();
                         encoded.range_bits = range.to_bits();
                         encoded.radius_bits = radius.to_bits();
+                        encoded.arc_bits = arc.to_bits();
                         let (area_count, area) = encode_area_effects(on_hit);
                         encoded.area_count = area_count;
                         encoded.area = area;
@@ -1060,6 +1064,7 @@ fn decode_effect(wire: &WireEffect) -> Result<Effect, WireError> {
             speed_per_sec: Fix::from_bits(wire.speed_bits),
             range: Fix::from_bits(wire.range_bits),
             radius: Fix::from_bits(wire.radius_bits),
+            arc: Fix::from_bits(wire.arc_bits),
             on_hit: decode_area_effects(wire)?,
         },
         6 => Effect::Area {
@@ -1460,6 +1465,7 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
             out.extend_from_slice(&effect.speed_bits.to_le_bytes());
             out.extend_from_slice(&effect.range_bits.to_le_bytes());
             out.extend_from_slice(&effect.radius_bits.to_le_bytes());
+            out.extend_from_slice(&effect.arc_bits.to_le_bytes());
             out.extend_from_slice(&effect.duration_ticks.to_le_bytes());
             out.extend_from_slice(&effect.period_ticks.to_le_bytes());
             out.push(effect.area_count);
@@ -1584,6 +1590,7 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
             effect.speed_bits = reader.i64()?;
             effect.range_bits = reader.i64()?;
             effect.radius_bits = reader.i64()?;
+            effect.arc_bits = reader.i64()?;
             effect.duration_ticks = reader.u32()?;
             effect.period_ticks = reader.u32()?;
             effect.area_count = reader.u8()?;
@@ -2119,6 +2126,8 @@ pub struct NetEvent {
     pub dx: i16,
     /// Normalised direction Y (`i16::MIN..=i16::MAX`).
     pub dy: i16,
+    /// Visual projectile arc height in 1/16 world units.
+    pub arc: i16,
 }
 
 /// Ability cast event.
@@ -2534,6 +2543,7 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         put_u16(out, event.aux);
         out.extend_from_slice(&event.dx.to_le_bytes());
         out.extend_from_slice(&event.dy.to_le_bytes());
+        out.extend_from_slice(&event.arc.to_le_bytes());
     }
     Ok(())
 }
@@ -2677,6 +2687,12 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
                     .map_err(|_| WireError::Truncated)?,
             ),
             dy: i16::from_le_bytes(
+                reader
+                    .bytes(2)?
+                    .try_into()
+                    .map_err(|_| WireError::Truncated)?,
+            ),
+            arc: i16::from_le_bytes(
                 reader
                     .bytes(2)?
                     .try_into()
@@ -3020,6 +3036,26 @@ mod tests {
     }
 
     #[test]
+    fn wire_catalogue_round_trips_nonzero_projectile_arc() {
+        use moba_game::{Effect, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[2].effects.effects[0] = Effect::Projectile {
+            speed_per_sec: moba_core::Fix::from_i32(26),
+            range: moba_core::Fix::from_i32(11),
+            radius: moba_core::Fix::ONE,
+            arc: moba_core::Fix::from_i32(3),
+            on_hit: moba_game::AreaEffectList::one(moba_game::AreaEffect::Damage {
+                amount: 10,
+                damage_type: moba_game::DamageType::Physical,
+            }),
+        };
+        let wire = WireCatalog::from(&content);
+        assert_eq!(wire.abilities[2].effects[0].arc_bits, 3i64 << 32);
+        let decoded = wire.to_content().expect("round trip");
+        assert_eq!(decoded.hash(), content.hash());
+    }
+
+    #[test]
     fn delta_builder_reuses_capacity() {
         let baseline = vec![entity(1, 10, 20, 600), entity(2, 30, 40, 200)];
         let mut delta = SnapshotDelta::default();
@@ -3083,6 +3119,7 @@ mod tests {
             aux: 1,
             dx: 16_383,
             dy: -16_383,
+            arc: 40,
         });
         assert_eq!(delta.spawns.len(), 1);
         assert_eq!(delta.updates.len(), 2);

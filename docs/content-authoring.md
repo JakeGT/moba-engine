@@ -132,6 +132,7 @@ Composition extras:
 
 | Field | Meaning |
 |---|---|
+| `arc` | visual mid-flight height for a skillshot projectile (world units) |
 | `on_hit = "root"` | skillshot also applies that status on hit |
 | `on_hit_duration_ticks` | on-hit status duration (defaults to `duration_ticks`) |
 | `kind = "burn_zone"` | point-targeted periodic zone using `radius`, `duration_ticks`, `period_ticks`, `damage`, `damage_type` |
@@ -146,6 +147,7 @@ kind = "skillshot"
 speed = 24.0
 range = 9.0
 radius = 1.0
+arc = 2.5
 damage = 70
 on_hit = "root"
 on_hit_duration_ticks = 45

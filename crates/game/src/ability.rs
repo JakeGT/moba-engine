@@ -146,6 +146,8 @@ pub enum Effect {
         range: Fix,
         /// Collision radius.
         radius: Fix,
+        /// Visual arc height at mid-flight (zero for a straight projectile).
+        arc: Fix,
         /// Effects applied to the first enemy hit.
         on_hit: AreaEffectList,
     },
@@ -249,6 +251,7 @@ pub const ABILITIES: &[AbilityDef] = &[
             speed_per_sec: fx(26),
             range: fx(11),
             radius: fx(1),
+            arc: Fix::ZERO,
             on_hit: AreaEffectList::one(AreaEffect::Damage {
                 amount: 110,
                 damage_type: DamageType::Physical,
@@ -265,6 +268,7 @@ pub const ABILITIES: &[AbilityDef] = &[
             speed_per_sec: fx(30),
             range: fx(14),
             radius: fx(1),
+            arc: Fix::ZERO,
             on_hit: AreaEffectList::one(AreaEffect::Damage {
                 amount: 125,
                 damage_type: DamageType::Physical,
@@ -295,6 +299,7 @@ pub const ABILITIES: &[AbilityDef] = &[
             speed_per_sec: fx(24),
             range: fx(13),
             radius: fx(1),
+            arc: Fix::ZERO,
             on_hit: AreaEffectList::one(AreaEffect::Damage {
                 amount: 135,
                 damage_type: DamageType::Magic,
@@ -351,6 +356,7 @@ pub const ABILITIES: &[AbilityDef] = &[
             speed_per_sec: fx(22),
             range: fx(10),
             radius: fx(1),
+            arc: Fix::ZERO,
             on_hit: AreaEffectList::one(AreaEffect::Damage {
                 amount: 95,
                 damage_type: DamageType::Magic,
@@ -381,6 +387,7 @@ pub const ABILITIES: &[AbilityDef] = &[
             speed_per_sec: fx(28),
             range: fx(12),
             radius: fx(1),
+            arc: Fix::ZERO,
             on_hit: AreaEffectList::one(AreaEffect::Damage {
                 amount: 140,
                 damage_type: DamageType::Physical,
@@ -414,11 +421,13 @@ mod tests {
                         speed_per_sec,
                         range,
                         radius,
+                        arc,
                         on_hit,
                     } => {
                         assert!(*speed_per_sec > Fix::ZERO);
                         assert!(*range > Fix::ZERO);
                         assert!(*radius > Fix::ZERO);
+                        assert!(*arc >= Fix::ZERO);
                         assert!(!on_hit.is_empty());
                     }
                     Effect::Area { radius, effects } => {

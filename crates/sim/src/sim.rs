@@ -219,6 +219,8 @@ pub enum SimEvent {
         speed_per_sec: Fix,
         /// Collision radius.
         radius: Fix,
+        /// Visual arc height.
+        arc: Fix,
         /// Maximum travel distance.
         range: Fix,
     },
@@ -276,6 +278,7 @@ struct Projectile {
     speed_per_tick: Fix,
     remaining: Fix,
     radius: Fix,
+    arc: Fix,
     on_hit: AreaEffectList,
 }
 
@@ -797,6 +800,7 @@ impl Simulation {
             hasher.write_u64(projectile.speed_per_tick.to_bits() as u64);
             hasher.write_u64(projectile.remaining.to_bits() as u64);
             hasher.write_u64(projectile.radius.to_bits() as u64);
+            hasher.write_u64(projectile.arc.to_bits() as u64);
             hash_runtime_area_effects(&mut hasher, &projectile.on_hit);
         }
         for zone in &self.zones {
@@ -1582,6 +1586,7 @@ impl Simulation {
                     speed_per_sec,
                     range,
                     radius,
+                    arc,
                     on_hit,
                 } => {
                     let direction = (target - position).normalize_or_zero();
@@ -1596,6 +1601,7 @@ impl Simulation {
                         speed_per_tick: *speed_per_sec * ONE_TICK,
                         remaining: *range,
                         radius: *radius,
+                        arc: *arc,
                         on_hit: *on_hit,
                     });
                     self.push_event(SimEvent::ProjectileSpawned {
@@ -1605,6 +1611,7 @@ impl Simulation {
                         direction,
                         speed_per_sec: *speed_per_sec,
                         radius: *radius,
+                        arc: *arc,
                         range: *range,
                     });
                 }
@@ -2741,6 +2748,51 @@ mod tests {
         }
         let after = sim.world.get::<Health>(red).unwrap().current;
         assert!(after < start, "skillshot should hit ({start} -> {after})");
+    }
+
+    #[test]
+    fn arcing_projectile_event_carries_arc() {
+        let mut content = moba_game::GameContent::default();
+        content.abilities[2].effects.effects[0] = moba_game::Effect::Projectile {
+            speed_per_sec: Fix::from_i32(26),
+            range: Fix::from_i32(11),
+            radius: Fix::ONE,
+            arc: Fix::from_i32(3),
+            on_hit: moba_game::AreaEffectList::one(moba_game::AreaEffect::Damage {
+                amount: 10,
+                damage_type: moba_game::DamageType::Physical,
+            }),
+        };
+        let picks = [0; 10];
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                hero_picks: picks,
+                bot_mask: 0,
+                spawn_waves: false,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        sim.world.get_mut::<Position>(blue).unwrap().0 = FixVec2::from_ints(100, 100);
+        let mut inputs = TickInputs::new();
+        inputs.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 2,
+                target: FixVec2::from_ints(106, 100),
+            },
+        );
+        sim.tick(&inputs);
+        let arc = sim
+            .events()
+            .iter()
+            .find_map(|event| match *event {
+                SimEvent::ProjectileSpawned { arc, .. } => Some(arc),
+                _ => None,
+            })
+            .expect("projectile spawned");
+        assert_eq!(arc, Fix::from_i32(3));
     }
 
     #[test]

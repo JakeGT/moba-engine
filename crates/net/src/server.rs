@@ -465,6 +465,7 @@ struct RawEvent {
     direction: moba_core::FixVec2,
     value: u16,
     aux: u16,
+    arc: moba_core::Fix,
 }
 
 impl RawEvent {
@@ -494,6 +495,7 @@ impl RawEvent {
                 direction: moba_core::FixVec2::ZERO,
                 value: u16::from(ability),
                 aux: 0,
+                arc: moba_core::Fix::ZERO,
             },
             moba_sim::SimEvent::ProjectileSpawned {
                 owner,
@@ -503,6 +505,7 @@ impl RawEvent {
                 speed_per_sec,
                 radius,
                 range,
+                arc,
             } => Self {
                 kind: EVENT_PROJECTILE_SPAWN,
                 team,
@@ -515,6 +518,7 @@ impl RawEvent {
                 direction,
                 value: u16::try_from(speed_per_sec.to_i32().max(0)).unwrap_or(u16::MAX),
                 aux: u16::try_from(radius.to_i32().max(0)).unwrap_or(u16::MAX),
+                arc,
             },
             moba_sim::SimEvent::ProjectileHit {
                 owner,
@@ -533,6 +537,7 @@ impl RawEvent {
                 direction: moba_core::FixVec2::ZERO,
                 value: 0,
                 aux: 0,
+                arc: moba_core::Fix::ZERO,
             },
             moba_sim::SimEvent::UnitDied {
                 entity,
@@ -554,6 +559,7 @@ impl RawEvent {
                 direction: moba_core::FixVec2::ZERO,
                 value: kind as u16,
                 aux: 0,
+                arc: moba_core::Fix::ZERO,
             },
             moba_sim::SimEvent::StructureDestroyed {
                 team,
@@ -571,6 +577,7 @@ impl RawEvent {
                 direction: moba_core::FixVec2::ZERO,
                 value: kind as u16,
                 aux: 0,
+                arc: moba_core::Fix::ZERO,
             },
             moba_sim::SimEvent::MatchEnded { winner } => Self {
                 kind: EVENT_MATCH_ENDED,
@@ -584,6 +591,7 @@ impl RawEvent {
                 direction: moba_core::FixVec2::ZERO,
                 value: winner.index() as u16,
                 aux: 0,
+                arc: moba_core::Fix::ZERO,
             },
             moba_sim::SimEvent::ZoneSpawned {
                 owner,
@@ -603,6 +611,7 @@ impl RawEvent {
                 direction: moba_core::FixVec2::ZERO,
                 value: u16::try_from(radius.to_i32().max(0)).unwrap_or(u16::MAX),
                 aux: u16::try_from(duration_ticks).unwrap_or(u16::MAX),
+                arc: moba_core::Fix::ZERO,
             },
             moba_sim::SimEvent::WaveSpawned { .. } | moba_sim::SimEvent::HeroRespawned { .. } => {
                 return None;
@@ -650,6 +659,7 @@ impl RawEvent {
             aux: self.aux,
             dx: (self.direction.x.to_f32() * 32_767.0).clamp(-32_767.0, 32_767.0) as i16,
             dy: (self.direction.y.to_f32() * 32_767.0).clamp(-32_767.0, 32_767.0) as i16,
+            arc: (self.arc.to_f32() * 16.0).clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16,
         }
     }
 }
@@ -2078,6 +2088,7 @@ mod tests {
             direction: moba_core::FixVec2::ZERO,
             value: 1,
             aux: 0,
+            arc: moba_core::Fix::ZERO,
         };
         let hidden = RawEvent::visible_to(&raw, moba_game::Team::Blue, false, &[]);
         assert!(!hidden, "hidden enemy cast must not leak");

@@ -102,6 +102,7 @@ kind = "skillshot"
 speed = 24.0
 range = 9.0
 radius = 1.0
+arc = 2.5
 damage = 70
 damage_type = "physical"
 on_hit = "root"
