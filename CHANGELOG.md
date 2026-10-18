@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- `build_delta_into` reuses a server-owned snapshot delta and retains vector capacity across
+  snapshots and clients.
 - Dense per-client net-id table indexed by entity slot + generation, removing the snapshot
   hot-path linear scan.
 - Single-query observe candidate pass with a reused scratch vector; observe benchmark

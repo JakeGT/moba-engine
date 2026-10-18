@@ -18,7 +18,7 @@ use crate::protocol::{
     EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN,
     EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, FLAG_NEED_FULL, Header,
     InputMessage, MAX_DATAGRAM, MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, NetEvent, NetId,
-    PacketKind, SnapshotDelta, SnapshotState, Welcome, WireCatalog, WireCommand, build_delta,
+    PacketKind, SnapshotDelta, SnapshotState, Welcome, WireCatalog, WireCommand, build_delta_into,
     decode_hello, decode_input, dequantize_position, encode_snapshot, encode_welcome,
     quantize_position, sequence_after,
 };
@@ -663,6 +663,7 @@ pub struct NetServer {
     observed_spectator: Vec<ObservedUnit>,
     current: Vec<NetEntity>,
     payload: Vec<u8>,
+    delta: SnapshotDelta,
     session_counter: u32,
     stats: ServerStats,
     phase: Phase,
@@ -720,6 +721,7 @@ impl NetServer {
             observed_spectator: Vec::with_capacity(moba_sim::MAX_UNITS),
             current: Vec::with_capacity(moba_sim::MAX_UNITS),
             payload: Vec::with_capacity(MAX_DATAGRAM),
+            delta: SnapshotDelta::default(),
             session_counter: 1,
             stats: ServerStats::default(),
             phase: Phase::Lobby,
@@ -1760,6 +1762,7 @@ impl NetServer {
         let mut current = core::mem::take(&mut self.current);
         let mut payload = core::mem::take(&mut self.payload);
         let pending_events = core::mem::take(&mut self.pending_events);
+        let mut delta = core::mem::take(&mut self.delta);
         let mut ready_mask = 0u16;
         let mut player_mask = 0u16;
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
@@ -1806,12 +1809,13 @@ impl NetServer {
                 client.baseline(client.acked_snapshot)
             };
             let baseline_seq = baseline.as_ref().map_or(0, |_| client.acked_snapshot);
-            let mut delta: SnapshotDelta = build_delta(
+            build_delta_into(
                 &current,
                 baseline,
                 tick,
                 client.last_input_seq,
                 baseline_seq,
+                &mut delta,
             );
             let (blue_score, red_score) = self.simulation.score();
             delta.blue_score = blue_score;
@@ -1855,6 +1859,7 @@ impl NetServer {
         self.observed_spectator = observed_spectator;
         self.current = current;
         self.payload = payload;
+        self.delta = delta;
         self.pending_events.clear();
         Ok(())
     }

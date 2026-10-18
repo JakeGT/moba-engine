@@ -121,3 +121,9 @@ Presentation events/status bits and protocol v16 bandwidth are recorded in [0009
 generation check on lookup instead of a linear scan. Snapshot construction is O(1) per visible
 unit regardless of match length; generation reuse after despawn is covered by a unit test.
 Reverse lookup for rare client input commands still scans the dense table.
+
+## Reused snapshot delta
+
+`build_delta_into` clears and refills a server-owned `SnapshotDelta`, retaining spawn/update/
+despawn/event vector capacity across clients and snapshots. The encode payload buffer was
+already reused. A protocol test asserts the spawn capacity is stable across rebuilds.
