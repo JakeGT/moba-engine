@@ -569,9 +569,10 @@ impl NetServer {
         if nonce == 0 {
             return false;
         }
+        let before = self.client_challenges.len();
         self.client_challenges
             .retain(|challenge| !(challenge.addr == addr && challenge.nonce == nonce));
-        true
+        before != self.client_challenges.len()
     }
 
     fn challenge_is_pending(&self, addr: SocketAddr, nonce: u64) -> bool {
@@ -1859,6 +1860,49 @@ cost = 1
         assert!(limiter.allow_at(other, start));
         assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
         assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn client_challenges_are_address_bound_and_expire() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 4,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let first: SocketAddr = "127.0.0.1:6100".parse().expect("addr");
+        let second: SocketAddr = "127.0.0.1:6101".parse().expect("addr");
+        let nonce = 0x1234_5678;
+        server.client_challenges.push(ClientChallenge {
+            addr: first,
+            nonce,
+            seen: Instant::now(),
+        });
+        assert!(server.challenge_is_pending(first, nonce));
+        assert!(!server.challenge_is_pending(second, nonce));
+        assert!(!server.take_challenge(second, nonce));
+        assert!(server.take_challenge(first, nonce));
+        assert!(!server.challenge_is_pending(first, nonce));
+
+        server.client_challenges.push(ClientChallenge {
+            addr: first,
+            nonce,
+            seen: Instant::now()
+                .checked_sub(Duration::from_secs(11))
+                .expect("test clock"),
+        });
+        assert!(!server.challenge_is_pending(first, nonce));
     }
 
     #[test]
