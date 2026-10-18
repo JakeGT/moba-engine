@@ -58,6 +58,8 @@ Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_sc
 `MOBA_UI_SCALE` overrides it for one run. `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
 (70–420), `attack_button` (`left`/`right`) and spectator camera keys are also configurable.
 `MOBA_SAVE_SETTINGS=1` writes defaults; `MOBA_RESET_SETTINGS=1` resets the file.
+`MOBA_FRAME_LOG=/tmp/frames.log MOBA_VSYNC=0` records raw frame intervals and writes
+p50/p95/p99/max on exit (see `docs/perf/0007-real-hardware.md`).
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can

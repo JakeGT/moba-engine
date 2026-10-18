@@ -127,6 +127,8 @@ struct ClientApp {
     ui_scale: f32,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
+    frame_log: Option<Vec<f32>>,
+    frame_log_path: Option<PathBuf>,
 }
 
 impl ClientApp {
@@ -158,6 +160,8 @@ impl ClientApp {
         let env_scale = std::env::var("MOBA_UI_SCALE")
             .ok()
             .and_then(|value| value.parse::<f32>().ok());
+        let frame_log_path = std::env::var("MOBA_FRAME_LOG").ok().map(PathBuf::from);
+        let frame_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
         let mut app = Self {
             renderer: None,
             simulation: None,
@@ -181,6 +185,8 @@ impl ClientApp {
                 .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
             bindings,
             camera_sensitivity,
+            frame_log,
+            frame_log_path,
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -278,7 +284,7 @@ impl App for ClientApp {
         let config = RenderConfig {
             validation,
             max_instances: 1_024,
-            vsync: true,
+            vsync: std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"),
             ui_scale: self.ui_scale,
             ..RenderConfig::default()
         };
@@ -309,6 +315,11 @@ impl App for ClientApp {
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
         self.last_frame = now;
+        if let Some(samples) = self.frame_log.as_mut() {
+            if samples.len() < 10_000 {
+                samples.push(raw_ms);
+            }
+        }
         self.frame_ms = if self.frame_ms == 0.0 {
             raw_ms
         } else {
@@ -1209,6 +1220,36 @@ fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<()> {
     }
     file.write_all(&rgb)?;
     file.flush()
+}
+
+impl Drop for ClientApp {
+    fn drop(&mut self) {
+        let (Some(mut samples), Some(path)) = (self.frame_log.take(), self.frame_log_path.take())
+        else {
+            return;
+        };
+        let warmup = samples.len().min(60);
+        let mut samples = samples.split_off(warmup);
+        if samples.is_empty() {
+            return;
+        }
+        samples.sort_by(f32::total_cmp);
+        let percentile = |fraction: f32| {
+            let index = ((samples.len() - 1) as f32 * fraction).round() as usize;
+            samples[index]
+        };
+        let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+        let report = format!(
+            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}\n",
+            samples.len(),
+            percentile(0.50),
+            percentile(0.95),
+            percentile(0.99),
+            samples[samples.len() - 1],
+        );
+        let _ = std::fs::write(&path, &report);
+        eprintln!("frame log: {}", report.trim_end());
+    }
 }
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
