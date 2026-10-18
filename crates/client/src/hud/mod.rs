@@ -10,7 +10,7 @@ pub(crate) mod theme;
 
 pub(crate) use geometry::*;
 pub(crate) use healthbars::*;
-pub(crate) use hit::{HitList, HudAction, action_at, register};
+pub(crate) use hit::{HitList, HudAction, minimap_world, rect_at, register};
 pub(crate) use minimap::*;
 pub(crate) use model::*;
 pub(crate) use status::*;

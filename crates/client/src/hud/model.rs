@@ -541,6 +541,7 @@ pub(crate) fn build_network_hud(
             &hud_fmt!("{} GOLD", progress.gold),
         );
         let page = network.shop_page;
+        let mut hovered_item = None;
         for (index, item) in network
             .client
             .items()
@@ -551,14 +552,24 @@ pub(crate) fn build_network_hud(
         {
             let row_y = sy + 62.0 + index as f32 * 36.0;
             let item_index = u8::try_from(page * 8 + index).unwrap_or(u8::MAX);
+            let row_x = sx + 24.0;
+            let row_w = shop_w - 48.0;
             register(
                 hits,
                 HudAction::ShopItem(item_index),
-                sx + 24.0,
+                row_x,
                 row_y - 4.0,
-                shop_w - 48.0,
+                row_w,
                 32.0,
             );
+            if input.cursor().is_some_and(|cursor| {
+                cursor.x >= row_x
+                    && cursor.x <= row_x + row_w
+                    && cursor.y >= row_y - 4.0
+                    && cursor.y <= row_y + 28.0
+            }) {
+                hovered_item = input.cursor().map(|cursor| (cursor.x, cursor.y, item));
+            }
             let affordable = u32::from(progress.gold) >= item.cost;
             let name_color = if affordable {
                 text
@@ -586,13 +597,29 @@ pub(crate) fn build_network_hud(
             );
             ui.text(sx + 390.0, row_y, 1.7, muted, &item_summary(item));
         }
+        if let Some((cursor_x, cursor_y, item)) = hovered_item {
+            let name = item.name_str();
+            let summary = item_summary(item);
+            let tx = (cursor_x + 14.0).min(width_f - 270.0);
+            let ty = (cursor_y + 14.0).min(height_f - 74.0);
+            ui.panel(
+                tx,
+                ty,
+                260.0,
+                60.0,
+                Vec4::new(0.01, 0.02, 0.035, 0.96),
+                theme::GOLD,
+            );
+            ui.text(tx + 10.0, ty + 8.0, 2.0, theme::GOLD, name);
+            ui.text(tx + 10.0, ty + 30.0, 1.8, text, &summary);
+        }
         ui.text(
             sx + 24.0,
             sy + shop_h - 30.0,
             1.8,
             muted,
             &hud_fmt!(
-                "B CLOSE   NUMBER BUY   ARROWS PAGE {}/{}   PURCHASES REQUIRE OWN NEXUS",
+                "B CLOSE   CLICK OR NUMBER BUY   ARROWS PAGE {}/{}   PURCHASES REQUIRE OWN NEXUS",
                 page + 1,
                 network.client.items().len().div_ceil(8).max(1)
             ),

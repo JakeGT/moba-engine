@@ -9,6 +9,8 @@ pub(crate) enum HudAction {
     Block,
     /// Buy this catalogue item index.
     ShopItem(u8),
+    /// Click on the minimap.
+    Minimap,
 }
 
 /// One registered HUD rectangle in screen pixels.
@@ -49,12 +51,17 @@ pub(crate) fn register(
     }
 }
 
-/// Returns the topmost action under the cursor; later registrations win.
-pub(crate) fn action_at(hits: &HitList, x: f32, y: f32) -> Option<HudAction> {
-    hits.iter()
-        .rev()
-        .find(|rect| rect.contains(x, y))
-        .map(|rect| rect.action)
+/// Returns the topmost rectangle under the cursor; later registrations win.
+pub(crate) fn rect_at(hits: &HitList, x: f32, y: f32) -> Option<HitRect> {
+    hits.iter().rev().find(|rect| rect.contains(x, y)).copied()
+}
+
+/// Maps a cursor position inside a minimap rectangle to world coordinates.
+#[must_use]
+pub(crate) fn minimap_world(rect: HitRect, cursor_x: f32, cursor_y: f32) -> (f32, f32) {
+    let fx = ((cursor_x - rect.x) / rect.width).clamp(0.0, 1.0);
+    let fy = ((cursor_y - rect.y) / rect.height).clamp(0.0, 1.0);
+    (fx * 256.0, fy * 256.0)
 }
 
 #[cfg(test)]
@@ -66,8 +73,28 @@ mod tests {
         let mut hits = HitList::new();
         register(&mut hits, HudAction::Block, 0.0, 0.0, 100.0, 100.0);
         register(&mut hits, HudAction::ShopItem(3), 10.0, 10.0, 20.0, 20.0);
-        assert_eq!(action_at(&hits, 15.0, 15.0), Some(HudAction::ShopItem(3)));
-        assert_eq!(action_at(&hits, 90.0, 90.0), Some(HudAction::Block));
-        assert_eq!(action_at(&hits, 200.0, 200.0), None);
+        assert_eq!(
+            rect_at(&hits, 15.0, 15.0).map(|rect| rect.action),
+            Some(HudAction::ShopItem(3))
+        );
+        assert_eq!(
+            rect_at(&hits, 90.0, 90.0).map(|rect| rect.action),
+            Some(HudAction::Block)
+        );
+        assert!(rect_at(&hits, 200.0, 200.0).is_none());
+    }
+
+    #[test]
+    fn minimap_maps_cursor_to_world() {
+        let rect = HitRect {
+            action: HudAction::Minimap,
+            x: 100.0,
+            y: 50.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        assert_eq!(minimap_world(rect, 100.0, 50.0), (0.0, 0.0));
+        assert_eq!(minimap_world(rect, 200.0, 100.0), (128.0, 128.0));
+        assert_eq!(minimap_world(rect, 300.0, 150.0), (256.0, 256.0));
     }
 }

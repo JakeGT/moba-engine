@@ -43,7 +43,7 @@ use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
 
 use crate::hud::{
-    HitList, HudAction, action_at, build_local_hud, build_network_hud, build_vision,
+    HitList, HudAction, build_local_hud, build_network_hud, build_vision, minimap_world, rect_at,
     rendered_entity_position,
 };
 
@@ -841,14 +841,32 @@ fn handle_network_input(
         handle_spectator_input(network, input);
         return;
     }
-    let ui_action = input
+    let ui_rect = input
         .cursor()
-        .and_then(|cursor| action_at(hits, cursor.x, cursor.y));
+        .and_then(|cursor| rect_at(hits, cursor.x, cursor.y));
+    let ui_action = ui_rect.map(|rect| rect.action);
     if *shop
         && input.was_mouse_pressed(MouseButton::Left)
         && let Some(HudAction::ShopItem(item)) = ui_action
     {
         let _ = network.client.send_command(WireCommand::BuyItem { item });
+        return;
+    }
+    if let (Some(rect), Some(cursor)) = (ui_rect, input.cursor())
+        && rect.action == HudAction::Minimap
+        && (input.was_mouse_pressed(MouseButton::Left)
+            || input.was_mouse_pressed(MouseButton::Right))
+    {
+        let (x, y) = minimap_world(rect, cursor.x, cursor.y);
+        let target = FixVec2::new(Fix::from_f32(x), Fix::from_f32(y));
+        let (x, y) = quantize_position(target);
+        if network
+            .client
+            .send_command(WireCommand::MoveTo { x, y })
+            .is_ok()
+        {
+            network.prediction.set_target(Some(target));
+        }
         return;
     }
     if input.was_key_pressed(Key::R) && network.phase == MatchPhase::Lobby {
