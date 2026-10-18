@@ -378,6 +378,7 @@ struct ClientConn {
     acked_snapshot: u32,
     need_full: bool,
     history: VecDeque<SnapshotRecord>,
+    history_pool: Vec<Vec<NetEntity>>,
     welcome_nonce: u64,
     welcome_payload: Vec<u8>,
     bytes_sent: u64,
@@ -399,10 +400,28 @@ impl ClientConn {
             .map(|record| record.entities.as_slice())
     }
 
-    fn record(&mut self, seq: u32, entities: Vec<NetEntity>) {
-        self.history.push_back(SnapshotRecord { seq, entities });
-        if self.history.len() > SNAPSHOT_HISTORY {
-            self.history.pop_front();
+    fn record(&mut self, seq: u32, entities: &[NetEntity]) {
+        let mut buffer = self.history_pool.pop().unwrap_or_default();
+        buffer.clear();
+        buffer.extend_from_slice(entities);
+        self.history.push_back(SnapshotRecord {
+            seq,
+            entities: buffer,
+        });
+        while self.history.len() > SNAPSHOT_HISTORY {
+            if let Some(record) = self.history.pop_front() {
+                let mut entities = record.entities;
+                entities.clear();
+                self.history_pool.push(entities);
+            }
+        }
+    }
+
+    fn clear_history(&mut self) {
+        while let Some(record) = self.history.pop_front() {
+            let mut entities = record.entities;
+            entities.clear();
+            self.history_pool.push(entities);
         }
     }
 }
@@ -1142,7 +1161,7 @@ impl NetServer {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
             };
-            client.history.clear();
+            client.clear_history();
             client.net_ids.clear();
             client.acked_snapshot = 0;
             client.need_full = true;
@@ -1519,6 +1538,7 @@ impl NetServer {
                     acked_snapshot: 0,
                     need_full: true,
                     history: VecDeque::new(),
+                    history_pool: Vec::new(),
                     welcome_nonce: 0,
                     welcome_payload: Vec::new(),
                     bytes_sent: 0,
@@ -1626,7 +1646,7 @@ impl NetServer {
         client.command = None;
         client.acked_snapshot = 0;
         client.need_full = true;
-        client.history.clear();
+        client.clear_history();
         self.refresh_bot_mask();
         self.send_welcome(addr, slot, nonce, session)
     }
@@ -1852,7 +1872,7 @@ impl NetServer {
             self.transport.send(client.addr, &header, &payload)?;
             client.bytes_sent += payload.len() as u64;
             client.need_full = false;
-            client.record(seq, current.clone());
+            client.record(seq, &current);
             self.stats.snapshots_sent += 1;
         }
         self.observed = observed;

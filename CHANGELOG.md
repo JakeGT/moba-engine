@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Snapshot history recycles per-client entity buffers instead of cloning each snapshot.
 - `build_delta_into` reuses a server-owned snapshot delta and retains vector capacity across
   snapshots and clients.
 - Dense per-client net-id table indexed by entity slot + generation, removing the snapshot

@@ -127,3 +127,9 @@ Reverse lookup for rare client input commands still scans the dense table.
 `build_delta_into` clears and refills a server-owned `SnapshotDelta`, retaining spawn/update/
 despawn/event vector capacity across clients and snapshots. The encode payload buffer was
 already reused. A protocol test asserts the spawn capacity is stable across rebuilds.
+
+## Snapshot history reuse
+
+Snapshot history keeps up to 64 records per client. Popped records return their entity
+vectors to a per-client pool; `record` refills a pooled buffer from the current view instead
+of allocating a fresh clone every snapshot. Rematch/history clears also recycle buffers.
