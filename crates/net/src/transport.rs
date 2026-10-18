@@ -20,6 +20,13 @@ pub const MAX_FRAGMENTS: usize = 255;
 /// Largest message the transport will reassemble.
 pub const MAX_MESSAGE: usize = MAX_FRAGMENT_CHUNK * MAX_FRAGMENTS;
 
+fn transient_udp_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionRefused
+    ) || matches!(error.raw_os_error(), Some(10054 | 10061))
+}
+
 /// A complete message received from a peer.
 #[derive(Debug)]
 pub struct ReceivedMessage {
@@ -159,8 +166,9 @@ impl UdpTransport {
             let mut datagram = Vec::with_capacity(HEADER_LEN + payload.len());
             encode_packet(header, payload, &mut datagram)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            self.socket.send_to(&datagram, addr)?;
-            self.bytes_sent += datagram.len() as u64;
+            if self.send_datagram(&datagram, addr)? {
+                self.bytes_sent += datagram.len() as u64;
+            }
             return Ok(());
         }
 
@@ -190,10 +198,19 @@ impl UdpTransport {
             };
             encode_packet(&outer, &fragment, &mut datagram)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            self.socket.send_to(&datagram, addr)?;
-            self.bytes_sent += datagram.len() as u64;
+            if self.send_datagram(&datagram, addr)? {
+                self.bytes_sent += datagram.len() as u64;
+            }
         }
         Ok(())
+    }
+
+    fn send_datagram(&self, datagram: &[u8], addr: SocketAddr) -> io::Result<bool> {
+        match self.socket.send_to(datagram, addr) {
+            Ok(_) => Ok(true),
+            Err(error) if transient_udp_error(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Receives one complete message, or `None` if no complete message is pending.
@@ -215,6 +232,11 @@ impl UdpTransport {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    self.expire_assemblies();
+                    return Ok(None);
+                }
+                Err(error) if transient_udp_error(&error) => {
+                    // Windows reports ICMP port-unreachable as ConnectionReset on UDP.
                     self.expire_assemblies();
                     return Ok(None);
                 }
@@ -375,6 +397,25 @@ impl AckTracker {
 
 /// Small FIFO used for fixed-capacity event queues.
 pub type EventQueue<T> = VecDeque<T>;
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+
+    #[test]
+    fn transient_udp_errors_are_ignored() {
+        assert!(transient_udp_error(&io::Error::from(
+            io::ErrorKind::ConnectionReset
+        )));
+        assert!(transient_udp_error(&io::Error::from(
+            io::ErrorKind::ConnectionRefused
+        )));
+        assert!(transient_udp_error(&io::Error::from_raw_os_error(10054)));
+        assert!(!transient_udp_error(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+    }
+}
 
 #[cfg(test)]
 mod tests {
