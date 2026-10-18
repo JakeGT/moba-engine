@@ -34,7 +34,7 @@ pub struct VulkanProbe {
 /// Used by CI to exercise the macOS/MoltenVK portability path on a runner.
 ///
 /// # Errors
-/// Returns the same instance/extension errors as [`InstanceContext::new`].
+/// Returns the same instance/extension errors as the renderer initialisation path.
 pub fn probe_vulkan() -> RenderResult<VulkanProbe> {
     let context = InstanceContext::new(&[], ValidationMode::Off)?;
     // SAFETY: the instance is live and the entry point belongs to it.
@@ -62,6 +62,7 @@ pub(crate) struct InstanceContext {
 }
 
 impl InstanceContext {
+    #[allow(clippy::too_many_lines)] // Instance setup is one explicit ordered sequence.
     pub(crate) fn new(
         required_extensions: &[&CStr],
         validation: ValidationMode,

@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Headless `vulkan-probe` tool plus a macOS MoltenVK workflow for instance/device enumeration
+  coverage (#32).
 - HUD network-type boundary: `hud/model.rs` is now the only HUD module naming `moba_net`;
   drawing modules use `HudUnit`/map wrappers.
 - `BotPolicy` trait with the built-in lane/farm/fight policy as default and
