@@ -153,8 +153,18 @@ pub(crate) fn create_ui(
         vk::VertexInputAttributeDescription::default()
             .location(1)
             .binding(0)
-            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .format(vk::Format::R32G32_SFLOAT)
             .offset(8),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32_UINT)
+            .offset(16),
+        vk::VertexInputAttributeDescription::default()
+            .location(3)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(20),
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)

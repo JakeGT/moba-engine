@@ -14,15 +14,17 @@ use crate::instance::{InstanceContext, ValidationMode};
 use crate::mesh::{self, GpuMesh};
 use crate::pipeline::{self, PipelineSpec};
 use crate::resources::{
-    CommandPool, DescriptorPool, DescriptorSetLayout, Fence, GpuBuffer, GraphicsPipeline,
+    CommandPool, DescriptorPool, DescriptorSetLayout, Fence, GpuBuffer, GpuImage, GraphicsPipeline,
     PipelineLayout, Semaphore, ShaderModule,
 };
 use crate::scene::{CameraUniform, GpuInstance, Scene};
 use crate::swapchain::Swapchain;
+use crate::texture;
 use crate::ui::{UiDrawList, UiVertex};
 use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
+const UI_ATLAS: &[u8] = include_bytes!("../assets/ui-atlas.rgba");
 static UI_VERTICES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
 static UI_TRUNCATION_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -96,6 +98,10 @@ pub struct Renderer {
     unit_mesh: GpuMesh,
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
+    _ui_layout: DescriptorSetLayout,
+    _ui_atlas: GpuImage,
+    ui_sampler: vk::Sampler,
+    ui_sets: Vec<vk::DescriptorSet>,
     _descriptor_pool: DescriptorPool,
     pipeline_layout: PipelineLayout,
     unit_pipeline: GraphicsPipeline,
@@ -194,6 +200,27 @@ impl Renderer {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX)];
         let instance_layout = DescriptorSetLayout::new(device.device.clone(), &instance_binding)?;
+        let ui_binding = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+        let ui_layout = DescriptorSetLayout::new(device.device.clone(), &ui_binding)?;
+        let ui_atlas = texture::upload_rgba(
+            &device,
+            "ui-atlas",
+            crate::ui::ATLAS_WIDTH,
+            crate::ui::ATLAS_HEIGHT,
+            UI_ATLAS,
+        )?;
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+        // SAFETY: the device is live and the sampler info is fully initialised.
+        let ui_sampler = unsafe { device.device.create_sampler(&sampler_info, None) }?;
 
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
@@ -202,11 +229,14 @@ impl Renderer {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
         ];
         let descriptor_pool = DescriptorPool::new(
             device.device.clone(),
             &pool_sizes,
-            u32::try_from(FRAMES_IN_FLIGHT * 2).expect("set count fits u32"),
+            u32::try_from(FRAMES_IN_FLIGHT * 3).expect("set count fits u32"),
         )?;
 
         let layouts = [camera_layout.handle(), instance_layout.handle()];
@@ -245,8 +275,11 @@ impl Renderer {
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .offset(0)
             .size(8)];
-        let ui_pipeline_layout =
-            PipelineLayout::with_push_constants(device.device.clone(), &[], &ui_push)?;
+        let ui_pipeline_layout = PipelineLayout::with_push_constants(
+            device.device.clone(),
+            &[ui_layout.handle()],
+            &ui_push,
+        )?;
         let ui_pipeline = GraphicsPipeline::from_raw(
             device.device.clone(),
             pipeline::create_ui(
@@ -266,6 +299,25 @@ impl Renderer {
             .flat_map(|_| [camera_layout.handle(), instance_layout.handle()])
             .collect();
         let sets = descriptor_pool.allocate(&device.device, &descriptor_layouts)?;
+        let ui_set_layouts: Vec<vk::DescriptorSetLayout> =
+            (0..FRAMES_IN_FLIGHT).map(|_| ui_layout.handle()).collect();
+        let ui_sets = descriptor_pool.allocate(&device.device, &ui_set_layouts)?;
+        let image_info = [vk::DescriptorImageInfo::default()
+            .sampler(ui_sampler)
+            .image_view(ui_atlas.view())
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let writes: Vec<vk::WriteDescriptorSet<'_>> = ui_sets
+            .iter()
+            .map(|set| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&image_info)
+            })
+            .collect();
+        // SAFETY: the sets, sampler and image view are live and the write describes them.
+        unsafe { device.device.update_descriptor_sets(&writes, &[]) };
         let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
             .expect("instance size fits u64")
             * u64::try_from(config.max_instances).expect("instance count fits u64");
@@ -331,6 +383,10 @@ impl Renderer {
             unit_mesh,
             _camera_layout: camera_layout,
             _instance_layout: instance_layout,
+            _ui_layout: ui_layout,
+            _ui_atlas: ui_atlas,
+            ui_sampler,
+            ui_sets,
             _descriptor_pool: descriptor_pool,
             pipeline_layout,
             unit_pipeline,
@@ -714,6 +770,17 @@ impl Renderer {
                     &[0],
                 );
             }
+            // SAFETY: the UI set was written for this frame index and matches the layout.
+            unsafe {
+                self.device.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.ui_pipeline_layout.handle(),
+                    0,
+                    &[self.ui_sets[frame_index]],
+                    &[],
+                );
+            }
             let viewport_size = [extent.width as f32, extent.height as f32];
             // SAFETY: the UI pipeline layout declares exactly this 8-byte vertex-stage push
             // constant range.
@@ -1029,6 +1096,8 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
+        // SAFETY: the device is idle and this sampler is owned by the renderer.
+        unsafe { self.device.device.destroy_sampler(self.ui_sampler, None) };
     }
 }
 

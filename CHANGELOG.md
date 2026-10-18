@@ -9,6 +9,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Textured UI atlas: one glyph quad per character, baked 128×48 RGBA atlas and
+  `moba-tools bake-ui-atlas`; sampler-backed UI pipeline (no TTF parser).
 - Default bots now respect fog of war for target acquisition; `SIM_LOGIC_VERSION` 6.
 - Runtime minion/tower combat stats in `[rules]` (protocol v22), used for simulated spawns.
 - Rules now carry level cap, XP curve and minion/tower/nexus vision (protocol v21); client HUD
