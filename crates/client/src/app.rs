@@ -125,6 +125,7 @@ struct ClientApp {
     fps: f32,
     ui_scale: f32,
     bindings: crate::settings::Bindings,
+    camera_sensitivity: f32,
 }
 
 impl ClientApp {
@@ -134,8 +135,13 @@ impl ClientApp {
         capture_frame: u64,
         error: Arc<Mutex<Option<String>>>,
     ) -> Self {
-        let (settings, warnings) =
-            crate::settings::Settings::load(&crate::settings::Settings::path());
+        let settings_path = crate::settings::Settings::path();
+        if std::env::var_os("MOBA_RESET_SETTINGS").is_some() {
+            let _ = crate::settings::Settings::default().save(&settings_path);
+        }
+        let (settings, warnings) = crate::settings::Settings::load(&settings_path);
+        let camera_zoom = settings.camera_zoom;
+        let camera_sensitivity = settings.camera_sensitivity;
         for warning in warnings {
             eprintln!("{warning}");
         }
@@ -170,6 +176,7 @@ impl ClientApp {
                 .unwrap_or(settings.ui_scale)
                 .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
             bindings,
+            camera_sensitivity,
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -207,7 +214,7 @@ impl ClientApp {
                         shop_page: 0,
                         spectator_pan: Vec3::ZERO,
                         spectator_yaw: -0.7,
-                        spectator_zoom: 240.0,
+                        spectator_zoom: camera_zoom,
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
                     });
@@ -419,6 +426,7 @@ impl App for ClientApp {
                             shop_visible,
                             hit_rects,
                             &self.bindings,
+                            self.camera_sensitivity,
                         );
                         if frame.input().was_key_pressed(self.bindings.scoreboard) {
                             *scoreboard_visible = !*scoreboard_visible;
@@ -861,6 +869,7 @@ fn handle_spectator_input(
     network: &mut NetworkView,
     input: &InputState,
     bindings: &crate::settings::Bindings,
+    sensitivity: f32,
 ) {
     let pan_speed = if input.is_key_down(Key::Shift) {
         14.0
@@ -882,17 +891,19 @@ fn handle_spectator_input(
     let pan_limit = map_center(network);
     network.spectator_pan.x = network.spectator_pan.x.clamp(-pan_limit, pan_limit);
     network.spectator_pan.z = network.spectator_pan.z.clamp(-pan_limit, pan_limit);
-    if input.is_key_down(Key::ArrowLeft) {
-        network.spectator_yaw -= 0.03;
+    if input.is_key_down(bindings.camera_left) {
+        network.spectator_yaw -= 0.03 * sensitivity;
     }
-    if input.is_key_down(Key::ArrowRight) {
-        network.spectator_yaw += 0.03;
+    if input.is_key_down(bindings.camera_right) {
+        network.spectator_yaw += 0.03 * sensitivity;
     }
-    if input.was_key_pressed(Key::ArrowUp) {
-        network.spectator_zoom = (network.spectator_zoom - 10.0).max(70.0);
+    if input.was_key_pressed(bindings.camera_up) {
+        network.spectator_zoom =
+            (network.spectator_zoom - 10.0 * sensitivity).max(crate::settings::CAMERA_ZOOM_MIN);
     }
-    if input.was_key_pressed(Key::ArrowDown) {
-        network.spectator_zoom = (network.spectator_zoom + 10.0).min(420.0);
+    if input.was_key_pressed(bindings.camera_down) {
+        network.spectator_zoom =
+            (network.spectator_zoom + 10.0 * sensitivity).min(crate::settings::CAMERA_ZOOM_MAX);
     }
 }
 
@@ -955,9 +966,10 @@ fn handle_network_input(
     shop: &mut bool,
     hits: &HitList,
     bindings: &crate::settings::Bindings,
+    sensitivity: f32,
 ) {
     if network.spectator {
-        handle_spectator_input(network, input, bindings);
+        handle_spectator_input(network, input, bindings, sensitivity);
         return;
     }
     let ui_rect = ui_input
@@ -1027,7 +1039,11 @@ fn handle_network_input(
             network.prediction.set_target(Some(ground));
         }
     }
-    if input.was_mouse_pressed(MouseButton::Left) {
+    let attack_button = match bindings.attack_button {
+        crate::settings::MouseBinding::Left => MouseButton::Left,
+        crate::settings::MouseBinding::Right => MouseButton::Right,
+    };
+    if input.was_mouse_pressed(attack_button) {
         if let Some(target) = nearest_enemy(network, ground) {
             let _ = network
                 .client

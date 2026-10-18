@@ -1,4 +1,6 @@
 ui_scale = 1.0
+camera_sensitivity = 1.0
+camera_zoom = 240.0
 
 [controls]
 move_up = "W"
@@ -13,3 +15,8 @@ shop = "B"
 scoreboard = "Tab"
 ready = "R"
 surrender = "F5"
+attack_button = "left"
+camera_left = "Left"
+camera_right = "Right"
+camera_up = "Up"
+camera_down = "Down"
