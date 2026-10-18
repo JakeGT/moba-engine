@@ -59,6 +59,20 @@ pub const MAX_LANE_POINTS: usize = 16;
 pub const MAX_CONTENT_STRUCTURES: usize = 32;
 /// Maximum vision-blocking wall segments.
 pub const MAX_CONTENT_WALLS: usize = 32;
+/// Maximum modifier definitions in a content pack.
+pub const MAX_CONTENT_MODIFIERS: usize = 16;
+/// Default modifier ids (stable content order).
+pub const MODIFIER_SHIELD: u16 = 0;
+/// Default slow modifier id.
+pub const MODIFIER_SLOW: u16 = 1;
+/// Default haste modifier id.
+pub const MODIFIER_HASTE: u16 = 2;
+/// Default root modifier id.
+pub const MODIFIER_ROOT: u16 = 3;
+/// Default silence modifier id.
+pub const MODIFIER_SILENCE: u16 = 4;
+/// Default burn modifier id.
+pub const MODIFIER_BURN: u16 = 5;
 /// Valid map coordinates are `0..=MAX_MAP_COORD` on both axes.
 pub const MAX_MAP_COORD: i32 = 256;
 /// Upper bound for health/damage/gold-like integer stats.
@@ -75,6 +89,33 @@ pub const MAX_RANGE: i32 = 1_000;
 pub const MAX_SPEED_PER_SEC: i32 = 100;
 /// Upper bound for armour/magic resistance.
 pub const MAX_RESIST: i32 = 100_000;
+
+/// Fixed status-modifier behaviour kinds.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ModifierKind {
+    /// Temporary damage absorption.
+    Shield = 0,
+    /// Movement multiplier below one.
+    Slow = 1,
+    /// Movement multiplier above one.
+    Haste = 2,
+    /// Prevents movement orders.
+    Root = 3,
+    /// Prevents ability casts.
+    Silence = 4,
+    /// Damage over time.
+    Burn = 5,
+}
+
+/// An owned modifier definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModifierDef {
+    /// Display name (1..=16 ASCII bytes).
+    pub name: String,
+    /// Behaviour kind.
+    pub kind: ModifierKind,
+}
 
 /// An owned, runtime item definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -346,8 +387,27 @@ pub struct GameContent {
     pub heroes: Vec<HeroSpec>,
     /// Ability catalogue in stable id order.
     pub abilities: Vec<AbilitySpec>,
+    /// Modifier definitions in stable id order.
+    pub modifiers: Vec<ModifierDef>,
     /// Map geometry.
     pub map: MapSpec,
+}
+
+fn default_modifiers() -> Vec<ModifierDef> {
+    [
+        ("Shield", ModifierKind::Shield),
+        ("Slow", ModifierKind::Slow),
+        ("Haste", ModifierKind::Haste),
+        ("Root", ModifierKind::Root),
+        ("Silence", ModifierKind::Silence),
+        ("Burn", ModifierKind::Burn),
+    ]
+    .into_iter()
+    .map(|(name, kind)| ModifierDef {
+        name: String::from(name),
+        kind,
+    })
+    .collect()
 }
 
 impl Default for GameContent {
@@ -357,6 +417,7 @@ impl Default for GameContent {
             items: ITEMS.iter().map(ItemSpec::from).collect(),
             heroes: crate::HEROES.iter().map(HeroSpec::from).collect(),
             abilities: ABILITIES.iter().map(AbilitySpec::from).collect(),
+            modifiers: default_modifiers(),
             map: MapSpec::from(&MAP),
         }
     }
@@ -401,6 +462,8 @@ pub enum ContentError {
     BadAbilityStats,
     /// Ability kind parameters are invalid.
     BadAbilityKind,
+    /// Modifier definitions are invalid.
+    BadModifiers,
     /// Map has no lanes or too many lanes/points/structures.
     BadMap,
     /// Map lane names or structure layout are invalid.
@@ -436,6 +499,7 @@ impl core::fmt::Display for ContentError {
                 f.write_str("ability cooldown must be positive and mana/cast range non-negative")
             }
             Self::BadAbilityKind => f.write_str("ability kind parameters must be positive"),
+            Self::BadModifiers => f.write_str("modifier names/kinds are invalid or duplicated"),
             Self::BadMap => f.write_str("map limits are invalid"),
             Self::BadMapData => f.write_str("map lanes/structures are invalid"),
             Self::BadWalls => f.write_str("map walls are invalid"),
@@ -591,6 +655,32 @@ impl GameContent {
             };
             if !kind_ok {
                 return Err(ContentError::BadAbilityKind);
+            }
+        }
+        if self.modifiers.is_empty() || self.modifiers.len() > MAX_CONTENT_MODIFIERS {
+            return Err(ContentError::BadModifiers);
+        }
+        for (index, modifier) in self.modifiers.iter().enumerate() {
+            if modifier.name.is_empty()
+                || modifier.name.len() > MAX_ITEM_NAME
+                || !modifier.name.is_ascii()
+                || self.modifiers[..index]
+                    .iter()
+                    .any(|other| other.name == modifier.name || other.kind == modifier.kind)
+            {
+                return Err(ContentError::BadModifiers);
+            }
+        }
+        for kind in [
+            ModifierKind::Shield,
+            ModifierKind::Slow,
+            ModifierKind::Haste,
+            ModifierKind::Root,
+            ModifierKind::Silence,
+            ModifierKind::Burn,
+        ] {
+            if !self.modifiers.iter().any(|modifier| modifier.kind == kind) {
+                return Err(ContentError::BadModifiers);
             }
         }
         if self.map.lanes.is_empty()
@@ -895,6 +985,11 @@ impl GameContent {
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
         feed(&self.map.red_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.red_spawn.y.to_bits().to_le_bytes());
+        for modifier in &self.modifiers {
+            feed(modifier.name.as_bytes());
+            feed(&[0]);
+            feed(&[modifier.kind as u8]);
+        }
         for lane in &self.map.lanes {
             feed(lane.name.as_bytes());
             feed(&[0]);
@@ -954,6 +1049,13 @@ impl std::error::Error for ContentLoadError {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ModifierEntry {
+    name: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentFile {
     name: Option<String>,
     version: Option<String>,
@@ -962,6 +1064,7 @@ struct ContentFile {
     items: Vec<ItemEntry>,
     heroes: Option<Vec<HeroEntry>>,
     abilities: Option<Vec<AbilityEntry>>,
+    modifiers: Option<Vec<ModifierEntry>>,
     map: Option<MapEntry>,
 }
 
@@ -1091,6 +1194,18 @@ fn fix_param(value: f32, field: &'static str) -> Result<Fix, ContentLoadError> {
         Ok(Fix::from_f32(value))
     } else {
         Err(invalid_field(field, value.to_string()))
+    }
+}
+
+fn parse_modifier_kind(value: &str) -> Result<ModifierKind, ContentLoadError> {
+    match value {
+        "shield" => Ok(ModifierKind::Shield),
+        "slow" => Ok(ModifierKind::Slow),
+        "haste" => Ok(ModifierKind::Haste),
+        "root" => Ok(ModifierKind::Root),
+        "silence" => Ok(ModifierKind::Silence),
+        "burn" => Ok(ModifierKind::Burn),
+        other => Err(invalid_field("modifiers.kind", other)),
     }
 }
 
@@ -1243,6 +1358,18 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             .collect::<Result<Vec<_>, _>>()?,
         None => GameContent::default().abilities,
     };
+    let modifiers = match file.modifiers {
+        Some(modifiers) => modifiers
+            .into_iter()
+            .map(|modifier| {
+                Ok(ModifierDef {
+                    name: modifier.name,
+                    kind: parse_modifier_kind(&modifier.kind)?,
+                })
+            })
+            .collect::<Result<Vec<_>, ContentLoadError>>()?,
+        None => GameContent::default().modifiers,
+    };
     let map = match file.map {
         Some(map) => {
             let MapEntry {
@@ -1300,6 +1427,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         items,
         heroes,
         abilities,
+        modifiers,
         map,
     };
     content.validate().map_err(ContentLoadError::Invalid)?;
@@ -1500,6 +1628,34 @@ move_speed = nan
             load_toml(non_finite),
             Err(ContentLoadError::InvalidField {
                 field: "items.move_speed",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn modifier_definitions_are_validated_and_hashed() {
+        let mut content = GameContent::default();
+        let baseline = content.hash();
+        content.modifiers[0].name = String::from("Barrier");
+        assert_ne!(content.hash(), baseline);
+        assert_eq!(content.validate(), Ok(()));
+
+        let mut content = GameContent::default();
+        content
+            .modifiers
+            .retain(|modifier| modifier.kind != ModifierKind::Burn);
+        assert_eq!(content.validate(), Err(ContentError::BadModifiers));
+
+        let unknown = r#"
+[[modifiers]]
+name = "Odd"
+kind = "charm"
+"#;
+        assert!(matches!(
+            load_toml(unknown),
+            Err(ContentLoadError::InvalidField {
+                field: "modifiers.kind",
                 ..
             })
         ));

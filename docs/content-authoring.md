@@ -83,6 +83,21 @@ abilities = [0, 1, 2]
 # magic_resist_per_level = 1
 ```
 
+## Modifiers
+
+Status modifiers are content definitions. A pack that supplies `[[modifiers]]` must define
+exactly one entry for each built-in kind (`shield`, `slow`, `haste`, `root`, `silence`,
+`burn`); omitting the table uses the six defaults. Names are 1..=16 ASCII bytes and unique.
+
+```toml
+[[modifiers]]
+name = "Frost"
+kind = "slow"
+```
+
+Modifier definitions are hashed and carried in the handshake catalogue. Per-application
+magnitude/duration still comes from the ability (phase 2 of #38 will move those to effects).
+
 ## Abilities
 
 Common fields: `name`, `cooldown_ticks`, `mana_cost`, `cast_range`, `kind`.

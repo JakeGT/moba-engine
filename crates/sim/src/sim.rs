@@ -7,16 +7,15 @@ use moba_core::{Fix, FixVec2, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
     DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP,
-    LEVEL_GROWTH, MELEE_MINION, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Team,
-    XP_RADIUS, mitigate_typed, xp_to_next,
+    LEVEL_GROWTH, MELEE_MINION, ModifierKind, NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD,
+    TOWER, Team, XP_RADIUS, mitigate_typed, xp_to_next,
 };
 use moba_nav::SpatialGrid;
 
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
-    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier, ModifierKind,
-    Modifiers, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind,
-    VisionRange,
+    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier, Modifiers,
+    MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -745,6 +744,7 @@ impl Simulation {
                 hasher.write_u32(HASH_MODIFIERS);
                 hasher.write_u32(u32::from(modifiers.len));
                 for modifier in modifiers.entries() {
+                    hasher.write_u32(u32::from(modifier.def_id));
                     hasher.write_u32(modifier.kind as u32);
                     hasher.write_u32(modifier.remaining);
                     hasher.write_u64(modifier.factor.to_bits() as u64);
@@ -1037,6 +1037,13 @@ impl Simulation {
         source: Entity,
         damage_type: DamageType,
     ) {
+        let def_id = self
+            .content
+            .modifiers
+            .iter()
+            .position(|definition| definition.kind == kind)
+            .and_then(|index| u16::try_from(index).ok())
+            .unwrap_or(0);
         let Some(modifiers) = self.world.get_mut::<Modifiers>(entity) else {
             return;
         };
@@ -1049,6 +1056,7 @@ impl Simulation {
         }
         if let Some(index) = existing {
             let modifier = &mut modifiers.entries[index];
+            modifier.def_id = def_id;
             modifier.remaining = modifier.remaining.max(remaining);
             match kind {
                 ModifierKind::Shield => {
@@ -1070,6 +1078,7 @@ impl Simulation {
         } else if usize::from(modifiers.len) < MAX_MODIFIERS {
             let index = usize::from(modifiers.len);
             modifiers.entries[index] = Modifier {
+                def_id,
                 kind,
                 remaining,
                 factor,
@@ -2545,6 +2554,7 @@ mod tests {
             }],
             heroes: GameContent::default().heroes,
             abilities: GameContent::default().abilities,
+            modifiers: GameContent::default().modifiers,
             map: GameContent::default().map,
         };
         let mut sim =
@@ -2636,6 +2646,7 @@ mod tests {
         );
         let mut modifiers = Modifiers::default();
         modifiers.entries[0] = Modifier {
+            def_id: moba_game::MODIFIER_SHIELD,
             kind: ModifierKind::Shield,
             remaining: 1,
             factor: Fix::ONE,
@@ -2763,6 +2774,7 @@ mod tests {
         let baseline = sim.state_hash();
         let modifiers = sim.world.get_mut::<Modifiers>(hero).expect("modifiers");
         modifiers.entries[0] = Modifier {
+            def_id: moba_game::MODIFIER_SHIELD,
             kind: ModifierKind::Shield,
             remaining: 5,
             factor: Fix::ONE,
@@ -2800,6 +2812,7 @@ mod tests {
         let red = sim.hero_entities[5];
         let modifiers = sim.world.get_mut::<Modifiers>(red).expect("modifiers");
         modifiers.entries[0] = Modifier {
+            def_id: moba_game::MODIFIER_BURN,
             kind: ModifierKind::Burn,
             remaining: 10,
             factor: Fix::ONE,

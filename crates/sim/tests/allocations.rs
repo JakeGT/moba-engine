@@ -90,6 +90,7 @@ fn status_modifier_ticks_stay_within_budget() {
         ModifierKind::Burn,
     ] {
         assert!(modifiers.push(Modifier {
+            def_id: kind as u16,
             kind,
             remaining: u32::MAX,
             factor: moba_core::Fix::ONE,

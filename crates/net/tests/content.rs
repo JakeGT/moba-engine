@@ -47,6 +47,7 @@ fn custom_content() -> GameContent {
             magic_resist_per_level: 1,
         }],
         abilities: GameContent::default().abilities,
+        modifiers: GameContent::default().modifiers,
         map: GameContent::default().map,
     }
 }

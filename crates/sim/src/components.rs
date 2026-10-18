@@ -6,7 +6,7 @@
 
 use moba_core::{Fix, FixVec2};
 use moba_ecs::Entity;
-use moba_game::{DamageType, HeroId, Team};
+use moba_game::{DamageType, HeroId, ModifierKind, Team};
 
 /// What kind of unit an entity is.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -63,27 +63,11 @@ pub struct Health {
 /// Maximum simultaneous modifiers on one unit.
 pub const MAX_MODIFIERS: usize = 8;
 
-/// Fixed-capacity status modifier kinds.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ModifierKind {
-    /// Temporary damage absorption.
-    Shield = 0,
-    /// Movement multiplier below one.
-    Slow = 1,
-    /// Movement multiplier above one.
-    Haste = 2,
-    /// Prevents movement orders.
-    Root = 3,
-    /// Prevents ability casts.
-    Silence = 4,
-    /// Damage over time.
-    Burn = 5,
-}
-
 /// One active modifier instance.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Modifier {
+    /// Content definition id.
+    pub def_id: u16,
     /// Definition/behaviour kind.
     pub kind: ModifierKind,
     /// Remaining duration in ticks.
@@ -101,6 +85,7 @@ pub struct Modifier {
 impl Default for Modifier {
     fn default() -> Self {
         Self {
+            def_id: 0,
             kind: ModifierKind::Shield,
             remaining: 0,
             factor: Fix::ONE,
