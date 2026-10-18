@@ -92,6 +92,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v18 carries the map world extent in the handshake and derives simulation bounds from it.
 - v19 carries tunable match rules (respawn, wave cadence) in the handshake.
 - v20 adds team size / bot-fill policy to the rules.
+- v21 adds level/XP curve and minion/tower vision to the rules for client-side HUD math.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 

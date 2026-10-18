@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 20;
+pub const PROTOCOL_VERSION: u8 = 21;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -629,6 +629,20 @@ impl WireModifier {
 /// Tunable match rules carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WireRules {
+    /// Maximum hero level.
+    pub level_cap: u8,
+    /// Base XP.
+    pub xp_base: u32,
+    /// XP per level.
+    pub xp_per_level: u32,
+    /// Melee minion vision bits.
+    pub melee_vision_bits: i64,
+    /// Ranged minion vision bits.
+    pub ranged_vision_bits: i64,
+    /// Tower vision bits.
+    pub tower_vision_bits: i64,
+    /// Nexus vision bits.
+    pub nexus_vision_bits: i64,
     /// Heroes per team.
     pub team_size: u8,
     /// Fill empty player slots with bots.
@@ -969,6 +983,13 @@ impl From<&GameContent> for WireCatalog {
             red_spawn,
         } = content_map;
         catalog.rules = WireRules {
+            level_cap: content_rules.level_cap,
+            xp_base: content_rules.xp_base,
+            xp_per_level: content_rules.xp_per_level,
+            melee_vision_bits: content_rules.melee_vision.to_bits(),
+            ranged_vision_bits: content_rules.ranged_vision.to_bits(),
+            tower_vision_bits: content_rules.tower_vision.to_bits(),
+            nexus_vision_bits: content_rules.nexus_vision.to_bits(),
             team_size: content_rules.team_size,
             bot_fill: content_rules.bot_fill,
             hero_respawn_ticks: content_rules.hero_respawn_ticks,
@@ -1283,6 +1304,13 @@ impl WireCatalog {
             abilities,
             modifiers,
             rules: moba_game::RulesSpec {
+                level_cap: self.rules.level_cap,
+                xp_base: self.rules.xp_base,
+                xp_per_level: self.rules.xp_per_level,
+                melee_vision: moba_core::Fix::from_bits(self.rules.melee_vision_bits),
+                ranged_vision: moba_core::Fix::from_bits(self.rules.ranged_vision_bits),
+                tower_vision: moba_core::Fix::from_bits(self.rules.tower_vision_bits),
+                nexus_vision: moba_core::Fix::from_bits(self.rules.nexus_vision_bits),
                 team_size: self.rules.team_size,
                 bot_fill: self.rules.bot_fill,
                 hero_respawn_ticks: self.rules.hero_respawn_ticks,
@@ -1528,6 +1556,18 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.push(modifier.name_len);
         out.push(modifier.kind);
     }
+    out.push(catalog.rules.level_cap);
+    for value in [catalog.rules.xp_base, catalog.rules.xp_per_level] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [
+        catalog.rules.melee_vision_bits,
+        catalog.rules.ranged_vision_bits,
+        catalog.rules.tower_vision_bits,
+        catalog.rules.nexus_vision_bits,
+    ] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
     out.push(catalog.rules.team_size);
     out.push(u8::from(catalog.rules.bot_fill));
     for value in [
@@ -1671,6 +1711,13 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         modifier.kind = reader.u8()?;
     }
     catalog.rules = WireRules {
+        level_cap: reader.u8()?,
+        xp_base: reader.u32()?,
+        xp_per_level: reader.u32()?,
+        melee_vision_bits: reader.i64()?,
+        ranged_vision_bits: reader.i64()?,
+        tower_vision_bits: reader.i64()?,
+        nexus_vision_bits: reader.i64()?,
         team_size: reader.u8()?,
         bot_fill: reader.u8()? != 0,
         hero_respawn_ticks: reader.u32()?,

@@ -51,9 +51,7 @@ macro_rules! hud_static {
 
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
-use moba_game::{
-    EMPTY_ITEM, LEVEL_CAP, MELEE_MINION, NEXUS, RANGED_MINION, TOWER, Team, xp_to_next,
-};
+use moba_game::Team;
 use moba_platform::{InputState, Key};
 use moba_render::{Camera, UiDrawList, VisionCircles};
 use moba_sim::Simulation;

@@ -2,9 +2,8 @@
 
 use super::theme;
 use super::{
-    Fix, FixVec2, HitList, HudAction, MELEE_MINION, NEXUS, NetworkView, RANGED_MINION, TOWER,
-    UiDrawList, Vec2, Vec4, VisionCircles, hud_units, map_center, map_extent, map_lanes, map_walls,
-    register,
+    Fix, FixVec2, HitList, HudAction, NetworkView, UiDrawList, Vec2, Vec4, VisionCircles,
+    hud_units, map_center, map_extent, map_lanes, map_walls, register,
 };
 
 pub(crate) fn draw_minimap(
@@ -137,10 +136,10 @@ pub(crate) fn vision_radius(network: &NetworkView, unit: super::HudUnit<'_>) -> 
             .heroes()
             .get(usize::from(unit.hero_pick()))
             .map_or(35.0, |hero| Fix::from_bits(hero.vision_bits).to_f32()),
-        1 => MELEE_MINION.vision_range.to_f32(),
-        2 => RANGED_MINION.vision_range.to_f32(),
-        3 => TOWER.vision_range.to_f32(),
-        4 => NEXUS.vision_range.to_f32(),
+        1 => Fix::from_bits(network.client.rules().melee_vision_bits).to_f32(),
+        2 => Fix::from_bits(network.client.rules().ranged_vision_bits).to_f32(),
+        3 => Fix::from_bits(network.client.rules().tower_vision_bits).to_f32(),
+        4 => Fix::from_bits(network.client.rules().nexus_vision_bits).to_f32(),
         _ => 0.0,
     }
 }

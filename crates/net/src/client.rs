@@ -125,6 +125,7 @@ pub struct NetClient {
     heroes: Vec<crate::protocol::WireHero>,
     abilities: Vec<crate::protocol::WireAbility>,
     map: crate::protocol::WireMap,
+    rules: crate::protocol::WireRules,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     expected_server: Option<[u8; 32]>,
@@ -234,6 +235,7 @@ impl NetClient {
             heroes: Vec::new(),
             abilities: Vec::new(),
             map: crate::protocol::WireMap::default(),
+            rules: crate::protocol::WireRules::default(),
             nonce,
             pre_shared_key,
             expected_server,
@@ -576,6 +578,7 @@ impl NetClient {
                     self.abilities
                         .extend_from_slice(&catalog.abilities[..ability_count]);
                     self.map = catalog.map;
+                    self.rules = catalog.rules;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -775,6 +778,12 @@ impl NetClient {
     #[must_use]
     pub const fn map(&self) -> &crate::protocol::WireMap {
         &self.map
+    }
+
+    /// Match rules received in the handshake.
+    #[must_use]
+    pub const fn rules(&self) -> &crate::protocol::WireRules {
+        &self.rules
     }
 
     /// Server tick rate.
