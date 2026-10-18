@@ -58,7 +58,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - [x] Sanitizer-backed fuzzing (cargo-fuzz/ASan) in addition to the deterministic fuzzer:
   `fuzz/` targets `wire`, `replay`, `content`; `.github/workflows/fuzz.yml` runs bounded
   nightly/manual sessions and uploads artifacts. Seed corpus lives in `fuzz/corpus/`.
-- Loom model of the job-scope counter.
+- [x] Loom model of the job-scope counter (`crates/jobs/src/loom_tests.rs`, `loom.yml`).
 - Balanced demo bots across fixed compositions (current 50-match sample's CI includes even
   odds; larger sweeps are needed).
 - Windows/macOS renderer validation and min-spec frame timings (renderer task).

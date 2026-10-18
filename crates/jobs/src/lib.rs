@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 //! A scoped work-stealing scheduler for the per-frame job graph.
 //!
 //! Design:
@@ -16,5 +18,8 @@
 //! work.
 
 mod pool;
+
+#[cfg(loom)]
+mod loom_tests;
 
 pub use pool::{JobSystem, Scope};
