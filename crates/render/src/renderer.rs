@@ -48,6 +48,8 @@ pub struct RenderConfig {
     pub clear_color: [f32; 4],
     /// Maximum number of UI vertices per frame.
     pub max_ui_vertices: usize,
+    /// HUD scale factor applied when uploading UI vertices.
+    pub ui_scale: f32,
 }
 
 impl Default for RenderConfig {
@@ -58,6 +60,7 @@ impl Default for RenderConfig {
             vsync: true,
             clear_color: [0.028, 0.035, 0.055, 1.0],
             max_ui_vertices: 65_536,
+            ui_scale: 1.0,
         }
     }
 }
@@ -548,7 +551,12 @@ impl Renderer {
                             "UI vertex buffer is not host visible",
                         ))
                     })?;
-                mapped.copy_from_slice(&source.vertices()[..ui_count]);
+                let scale = self.config.ui_scale;
+                for (target, source) in mapped.iter_mut().zip(&source.vertices()[..ui_count]) {
+                    *target = *source;
+                    target.position[0] *= scale;
+                    target.position[1] *= scale;
+                }
             }
         }
 
