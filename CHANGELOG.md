@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Fixed-capacity always-present `Modifiers` component replaces six ad-hoc status components:
+  no status archetype churn, allocation-free expiry/burn passes, derived status flags, and
+  one hashed modifier list. `SIM_LOGIC_VERSION` is now 2.
 - Protocol v13 complete `WireCatalog` handshake projection: full hero/ability/map/structure
   fields, exact `GameContent::hash` verification on the client, destructured parity conversion,
   and client range/radius overlays from wire data.

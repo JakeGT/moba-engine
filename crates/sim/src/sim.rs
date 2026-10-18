@@ -13,9 +13,10 @@ use moba_game::{
 use moba_nav::SpatialGrid;
 
 use crate::components::{
-    AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Burn, Cooldowns, Dead, Haste,
-    Health, HeroIdentity, HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position,
-    Progression, Regen, Resistances, Root, Shield, Silence, Slow, UnitKind, VisionRange,
+    AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
+    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier, ModifierKind,
+    Modifiers, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind,
+    VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -34,12 +35,7 @@ const HASH_DEAD: u32 = 9;
 const HASH_HERO_IDENTITY: u32 = 10;
 const HASH_HERO_SLOT: u32 = 11;
 const HASH_PROGRESSION: u32 = 12;
-const HASH_BURN: u32 = 13;
-const HASH_HASTE: u32 = 14;
-const HASH_SILENCE: u32 = 15;
-const HASH_ROOT: u32 = 16;
-const HASH_SLOW: u32 = 17;
-const HASH_SHIELD: u32 = 18;
+const HASH_MODIFIERS: u32 = 13;
 const HASH_TEAM: u32 = 19;
 const HASH_KIND: u32 = 20;
 const HASH_REGEN: u32 = 21;
@@ -306,6 +302,8 @@ pub struct Simulation {
     deaths: Vec<(Entity, Team, UnitKind, FixVec2)>,
     respawns: Vec<Entity>,
     damage_hits: Vec<Entity>,
+    modifier_entities: Vec<Entity>,
+    burn_hits: Vec<(Entity, i32, DamageType, Entity)>,
 }
 
 impl Simulation {
@@ -344,6 +342,8 @@ impl Simulation {
             deaths: Vec::with_capacity(MAX_UNITS),
             respawns: Vec::with_capacity(MAX_PLAYERS),
             damage_hits: Vec::with_capacity(MAX_UNITS),
+            modifier_entities: Vec::with_capacity(MAX_UNITS),
+            burn_hits: Vec::with_capacity(MAX_UNITS),
         };
         simulation.spawn_structures();
         for slot in 0..MAX_PLAYERS {
@@ -539,6 +539,7 @@ impl Simulation {
                 .get::<HeroIdentity>(entity)
                 .map_or(0xFF, |identity| identity.0.0);
             let progression = self.world.get::<Progression>(entity).copied();
+            let modifiers = self.world.get::<Modifiers>(entity);
             let cooldowns = self
                 .world
                 .get::<Cooldowns>(entity)
@@ -566,15 +567,12 @@ impl Simulation {
                 xp: progression.map_or(0, |progress| progress.xp),
                 gold: progression.map_or(0, |progress| progress.gold),
                 items: progression.map_or([EMPTY_ITEM; 6], |progress| progress.items),
-                shielded: self
-                    .world
-                    .get::<Shield>(entity)
-                    .is_some_and(|shield| shield.amount > 0),
-                slowed: self.world.get::<Slow>(entity).is_some(),
-                rooted: self.world.get::<Root>(entity).is_some(),
-                silenced: self.world.get::<Silence>(entity).is_some(),
-                burning: self.world.get::<Burn>(entity).is_some(),
-                hasted: self.world.get::<Haste>(entity).is_some(),
+                shielded: modifiers.is_some_and(|m| m.shield_total() > 0),
+                slowed: modifiers.is_some_and(|m| m.has(ModifierKind::Slow)),
+                rooted: modifiers.is_some_and(|m| m.has(ModifierKind::Root)),
+                silenced: modifiers.is_some_and(|m| m.has(ModifierKind::Silence)),
+                burning: modifiers.is_some_and(|m| m.has(ModifierKind::Burn)),
+                hasted: modifiers.is_some_and(|m| m.has(ModifierKind::Haste)),
             });
         }
     }
@@ -743,36 +741,17 @@ impl Simulation {
                     hasher.write_u32(u32::from(item));
                 }
             }
-            if let Some(burn) = self.world.get::<Burn>(entity) {
-                hasher.write_u32(HASH_BURN);
-                hasher.write_u32(burn.source.index());
-                hasher.write_u32(burn.source.generation());
-                hasher.write_u32(burn.damage as u32);
-                hasher.write_u32(burn.damage_type as u32);
-                hasher.write_u32(burn.remaining);
-            }
-            if let Some(haste) = self.world.get::<Haste>(entity) {
-                hasher.write_u32(HASH_HASTE);
-                hasher.write_u64(haste.factor.to_bits() as u64);
-                hasher.write_u32(haste.remaining);
-            }
-            if let Some(silence) = self.world.get::<Silence>(entity) {
-                hasher.write_u32(HASH_SILENCE);
-                hasher.write_u32(silence.remaining);
-            }
-            if let Some(root) = self.world.get::<Root>(entity) {
-                hasher.write_u32(HASH_ROOT);
-                hasher.write_u32(root.remaining);
-            }
-            if let Some(slow) = self.world.get::<Slow>(entity) {
-                hasher.write_u32(HASH_SLOW);
-                hasher.write_u64(slow.factor.to_bits() as u64);
-                hasher.write_u32(slow.remaining);
-            }
-            if let Some(shield) = self.world.get::<Shield>(entity) {
-                hasher.write_u32(HASH_SHIELD);
-                hasher.write_u32(shield.amount as u32);
-                hasher.write_u32(shield.remaining);
+            if let Some(modifiers) = self.world.get::<Modifiers>(entity) {
+                hasher.write_u32(HASH_MODIFIERS);
+                hasher.write_u32(u32::from(modifiers.len));
+                for modifier in modifiers.entries() {
+                    hasher.write_u32(modifier.kind as u32);
+                    hasher.write_u32(modifier.remaining);
+                    hasher.write_u64(modifier.factor.to_bits() as u64);
+                    hasher.write_u32(modifier.amount as u32);
+                    hasher.write_u32(modifier.damage_type as u32);
+                    hasher.write_u64(modifier.source.to_bits());
+                }
             }
             if let Some(regen) = self.world.get::<Regen>(entity) {
                 hasher.write_u32(HASH_REGEN);
@@ -846,6 +825,7 @@ impl Simulation {
             let _ = self
                 .world
                 .insert(entity, AttackDamageType(DamageType::Physical));
+            let _ = self.world.insert(entity, Modifiers::default());
             let _ = self.world.insert(entity, MoveTarget::default());
         }
     }
@@ -926,6 +906,7 @@ impl Simulation {
         let _ = self
             .world
             .insert(entity, AttackDamageType(DamageType::Physical));
+        let _ = self.world.insert(entity, Modifiers::default());
         entity
     }
 
@@ -987,6 +968,7 @@ impl Simulation {
         let _ = self
             .world
             .insert(entity, AttackDamageType(DamageType::Physical));
+        let _ = self.world.insert(entity, Modifiers::default());
         Some(entity)
     }
 
@@ -1035,15 +1017,82 @@ impl Simulation {
         let Some(base) = base else {
             return;
         };
-        let mut factor = Fix::ONE;
-        if let Some(slow) = self.world.get::<Slow>(entity) {
-            factor *= slow.factor;
-        }
-        if let Some(haste) = self.world.get::<Haste>(entity) {
-            factor *= haste.factor;
-        }
+        let factor = self
+            .world
+            .get::<Modifiers>(entity)
+            .map_or(Fix::ONE, Modifiers::move_factor);
         if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
             speed.0 = base * factor;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_modifier(
+        &mut self,
+        entity: Entity,
+        kind: ModifierKind,
+        remaining: u32,
+        factor: Fix,
+        amount: i32,
+        source: Entity,
+        damage_type: DamageType,
+    ) {
+        let Some(modifiers) = self.world.get_mut::<Modifiers>(entity) else {
+            return;
+        };
+        let mut existing = None;
+        for index in 0..usize::from(modifiers.len) {
+            if modifiers.entries[index].kind == kind {
+                existing = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = existing {
+            let modifier = &mut modifiers.entries[index];
+            modifier.remaining = modifier.remaining.max(remaining);
+            match kind {
+                ModifierKind::Shield => {
+                    modifier.amount = modifier.amount.saturating_add(amount);
+                }
+                ModifierKind::Slow => {
+                    modifier.factor = modifier.factor.min(factor);
+                }
+                ModifierKind::Haste => {
+                    modifier.factor = modifier.factor.max(factor);
+                }
+                ModifierKind::Burn => {
+                    modifier.amount = amount;
+                    modifier.damage_type = damage_type;
+                    modifier.source = source;
+                }
+                ModifierKind::Root | ModifierKind::Silence => {}
+            }
+        } else if usize::from(modifiers.len) < MAX_MODIFIERS {
+            let index = usize::from(modifiers.len);
+            modifiers.entries[index] = Modifier {
+                kind,
+                remaining,
+                factor,
+                amount,
+                damage_type,
+                source,
+            };
+            modifiers.len += 1;
+        } else {
+            return;
+        }
+        if matches!(kind, ModifierKind::Slow | ModifierKind::Haste) {
+            self.recompute_move_speed(entity);
+        }
+    }
+
+    fn gather_enemies(&mut self, team: Team, target: FixVec2, radius: Fix) {
+        self.damage_hits.clear();
+        for (entity, (other_position, other_team)) in self.world.query::<(&Position, &Team)>() {
+            if *other_team == team || other_position.0.distance_sq(target) > radius * radius {
+                continue;
+            }
+            self.damage_hits.push(entity);
         }
     }
 
@@ -1069,74 +1118,50 @@ impl Simulation {
             }
         }
 
-        let mut burns = Vec::new();
-        let mut expired_burns = Vec::new();
-        for (entity, burn) in self.world.query::<&mut Burn>() {
-            burn.remaining = burn.remaining.saturating_sub(1);
-            burns.push((entity, *burn));
-            if burn.remaining == 0 {
-                expired_burns.push(entity);
+        self.modifier_entities.clear();
+        for (entity, _) in self.world.query::<&Modifiers>() {
+            self.modifier_entities.push(entity);
+        }
+        let mut burn_hits = core::mem::take(&mut self.burn_hits);
+        burn_hits.clear();
+        for index in 0..self.modifier_entities.len() {
+            let entity = self.modifier_entities[index];
+            let Some(modifiers) = self.world.get_mut::<Modifiers>(entity) else {
+                continue;
+            };
+            let mut position = 0;
+            let mut recompute = false;
+            while position < usize::from(modifiers.len) {
+                let modifier = &mut modifiers.entries[position];
+                modifier.remaining = modifier.remaining.saturating_sub(1);
+                if modifier.kind == ModifierKind::Burn {
+                    burn_hits.push((
+                        entity,
+                        modifier.amount,
+                        modifier.damage_type,
+                        modifier.source,
+                    ));
+                }
+                let expired = modifier.remaining == 0
+                    || (modifier.kind == ModifierKind::Shield && modifier.amount <= 0);
+                if expired {
+                    recompute |= matches!(modifier.kind, ModifierKind::Slow | ModifierKind::Haste);
+                    modifiers
+                        .entries
+                        .swap(position, usize::from(modifiers.len) - 1);
+                    modifiers.len -= 1;
+                } else {
+                    position += 1;
+                }
+            }
+            if recompute {
+                self.recompute_move_speed(entity);
             }
         }
-        for (target, burn) in burns {
-            self.damage(target, burn.damage, burn.damage_type, burn.source);
+        for (target, damage, damage_type, source) in burn_hits.drain(..) {
+            self.damage(target, damage, damage_type, source);
         }
-        for entity in expired_burns {
-            let _ = self.world.remove::<Burn>(entity);
-        }
-        let mut expired_silences = Vec::new();
-        for (entity, silence) in self.world.query::<&mut Silence>() {
-            silence.remaining = silence.remaining.saturating_sub(1);
-            if silence.remaining == 0 {
-                expired_silences.push(entity);
-            }
-        }
-        for entity in expired_silences {
-            let _ = self.world.remove::<Silence>(entity);
-        }
-        let mut expired_hastes = Vec::new();
-        for (entity, haste) in self.world.query::<&mut Haste>() {
-            haste.remaining = haste.remaining.saturating_sub(1);
-            if haste.remaining == 0 {
-                expired_hastes.push(entity);
-            }
-        }
-        for entity in expired_hastes {
-            let _ = self.world.remove::<Haste>(entity);
-            self.recompute_move_speed(entity);
-        }
-        let mut expired_roots = Vec::new();
-        for (entity, root) in self.world.query::<&mut Root>() {
-            root.remaining = root.remaining.saturating_sub(1);
-            if root.remaining == 0 {
-                expired_roots.push(entity);
-            }
-        }
-        for entity in expired_roots {
-            let _ = self.world.remove::<Root>(entity);
-        }
-        let mut expired_slows = Vec::new();
-        for (entity, slow) in self.world.query::<&mut Slow>() {
-            slow.remaining = slow.remaining.saturating_sub(1);
-            if slow.remaining == 0 {
-                expired_slows.push(entity);
-            }
-        }
-        for entity in expired_slows {
-            let _ = self.world.remove::<Slow>(entity);
-            self.recompute_move_speed(entity);
-        }
-        let mut expired_shields = Vec::new();
-        for (entity, shield) in self.world.query::<&mut Shield>() {
-            shield.remaining = shield.remaining.saturating_sub(1);
-            if shield.remaining == 0 || shield.amount <= 0 {
-                expired_shields.push(entity);
-            }
-        }
-        for entity in expired_shields {
-            let _ = self.world.remove::<Shield>(entity);
-        }
-
+        self.burn_hits = burn_hits;
         self.respawns.clear();
         for (entity, dead) in self.world.query::<&mut Dead>() {
             dead.respawn_in = dead.respawn_in.saturating_sub(1);
@@ -1160,13 +1185,10 @@ impl Simulation {
         };
         let _ = self.world.remove::<Dead>(entity);
         let _ = self.world.remove::<LastHitBy>(entity);
-        let _ = self.world.remove::<Shield>(entity);
-        let _ = self.world.remove::<Slow>(entity);
-        let _ = self.world.remove::<Haste>(entity);
+        if let Some(modifiers) = self.world.get_mut::<Modifiers>(entity) {
+            modifiers.clear();
+        }
         self.recompute_move_speed(entity);
-        let _ = self.world.remove::<Root>(entity);
-        let _ = self.world.remove::<Silence>(entity);
-        let _ = self.world.remove::<Burn>(entity);
         if let Some(position) = self.world.get_mut::<Position>(entity) {
             position.0 = self.content.map.hero_spawn(team, slot % 5);
         }
@@ -1220,7 +1242,11 @@ impl Simulation {
                     }
                 }
                 PlayerCommand::MoveTo(position) => {
-                    if self.world.get::<Root>(entity).is_none() {
+                    if self
+                        .world
+                        .get::<Modifiers>(entity)
+                        .is_none_or(|m| !m.has(ModifierKind::Root))
+                    {
                         let destination = clamp_position(position);
                         if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
                             target.0 = Some(destination);
@@ -1273,10 +1299,13 @@ impl Simulation {
             .abilities
             .get(ability_index)
             .and_then(|&id| self.content.abilities.get(usize::from(id)))
-            .cloned()
         else {
             return;
         };
+        let cooldown_ticks = ability.cooldown_ticks;
+        let mana_cost = ability.mana_cost;
+        let cast_range = ability.cast_range;
+        let ability_kind = ability.kind;
         let Some(cooldowns) = self.world.get::<Cooldowns>(caster).copied() else {
             return;
         };
@@ -1286,40 +1315,43 @@ impl Simulation {
         let Some(mana) = self.world.get::<Mana>(caster).copied() else {
             return;
         };
-        if mana.current < ability.mana_cost {
+        if mana.current < mana_cost {
             return;
         }
-        let Some(position) = self
-            .world
-            .get::<Position>(caster)
-            .map(|position| position.0)
-        else {
+        let Some(position) = self.world.get::<Position>(caster).map(|p| p.0) else {
             return;
         };
         let Some(team) = self.world.get::<Team>(caster).copied() else {
             return;
         };
-        if self.world.get::<Silence>(caster).is_some() {
+        if self
+            .world
+            .get::<Modifiers>(caster)
+            .is_some_and(|m| m.has(ModifierKind::Silence))
+        {
             return;
         }
-        if self.world.get::<Root>(caster).is_some()
-            && matches!(ability.kind, moba_game::AbilityKind::Dash { .. })
+        if self
+            .world
+            .get::<Modifiers>(caster)
+            .is_some_and(|m| m.has(ModifierKind::Root))
+            && matches!(ability_kind, moba_game::AbilityKind::Dash { .. })
         {
             return;
         }
 
         let is_directed = matches!(
-            ability.kind,
+            ability_kind,
             moba_game::AbilityKind::Skillshot { .. } | moba_game::AbilityKind::Dash { .. }
         );
         if is_directed {
             let distance = position.distance(target);
-            if distance == Fix::ZERO || distance > ability.cast_range {
+            if distance == Fix::ZERO || distance > cast_range {
                 return;
             }
         }
         let is_point_targeted = matches!(
-            ability.kind,
+            ability_kind,
             moba_game::AbilityKind::Slow { .. }
                 | moba_game::AbilityKind::Root { .. }
                 | moba_game::AbilityKind::Silence { .. }
@@ -1327,15 +1359,14 @@ impl Simulation {
                 | moba_game::AbilityKind::Burst { .. }
         );
         if is_point_targeted {
-            if ability.cast_range == Fix::ZERO {
-                // Zero range means self-centred; commands cannot place the area remotely.
+            if cast_range == Fix::ZERO {
                 target = position;
-            } else if position.distance(target) > ability.cast_range {
+            } else if position.distance(target) > cast_range {
                 return;
             }
         }
 
-        match ability.kind {
+        match ability_kind {
             moba_game::AbilityKind::Skillshot {
                 speed_per_sec,
                 range,
@@ -1344,10 +1375,7 @@ impl Simulation {
                 damage_type,
             } => {
                 let direction = (target - position).normalize_or_zero();
-                if direction == FixVec2::ZERO {
-                    return;
-                }
-                if self.projectiles.len() >= MAX_PROJECTILES {
+                if direction == FixVec2::ZERO || self.projectiles.len() >= MAX_PROJECTILES {
                     return;
                 }
                 self.projectiles.push(Projectile {
@@ -1382,17 +1410,14 @@ impl Simulation {
                 amount,
                 duration_ticks,
             } => {
-                let current = self
-                    .world
-                    .get::<Shield>(caster)
-                    .copied()
-                    .unwrap_or_default();
-                let _ = self.world.insert(
+                self.apply_modifier(
                     caster,
-                    Shield {
-                        amount: current.amount.saturating_add(amount),
-                        remaining: current.remaining.max(duration_ticks),
-                    },
+                    ModifierKind::Shield,
+                    duration_ticks,
+                    Fix::ONE,
+                    amount,
+                    caster,
+                    DamageType::Physical,
                 );
             }
             moba_game::AbilityKind::Burn {
@@ -1401,30 +1426,17 @@ impl Simulation {
                 damage_per_tick,
                 damage_type,
             } => {
-                self.damage_hits.clear();
-                for (entity, (other_position, other_team)) in
-                    self.world.query::<(&Position, &Team)>()
-                {
-                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
-                    {
-                        continue;
-                    }
-                    self.damage_hits.push(entity);
-                }
+                self.gather_enemies(team, target, radius);
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target_entity in hits.drain(..) {
-                    let remaining = self
-                        .world
-                        .get::<Burn>(target_entity)
-                        .map_or(duration_ticks, |burn| burn.remaining.max(duration_ticks));
-                    let _ = self.world.insert(
+                    self.apply_modifier(
                         target_entity,
-                        Burn {
-                            source: caster,
-                            damage: damage_per_tick,
-                            damage_type,
-                            remaining,
-                        },
+                        ModifierKind::Burn,
+                        duration_ticks,
+                        Fix::ONE,
+                        damage_per_tick,
+                        caster,
+                        damage_type,
                     );
                 }
                 self.damage_hits = hits;
@@ -1433,42 +1445,32 @@ impl Simulation {
                 factor,
                 duration_ticks,
             } => {
-                let existing = self.world.get::<Haste>(caster).copied();
-                let applied = existing.map_or(factor, |haste| haste.factor.max(factor));
-                let remaining =
-                    existing.map_or(duration_ticks, |haste| haste.remaining.max(duration_ticks));
-                let _ = self.world.insert(
+                self.apply_modifier(
                     caster,
-                    Haste {
-                        factor: applied,
-                        remaining,
-                    },
+                    ModifierKind::Haste,
+                    duration_ticks,
+                    factor,
+                    0,
+                    caster,
+                    DamageType::Physical,
                 );
-                self.recompute_move_speed(caster);
             }
             moba_game::AbilityKind::Silence {
                 radius,
                 duration_ticks,
             } => {
-                self.damage_hits.clear();
-                for (entity, (other_position, other_team)) in
-                    self.world.query::<(&Position, &Team)>()
-                {
-                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
-                    {
-                        continue;
-                    }
-                    self.damage_hits.push(entity);
-                }
+                self.gather_enemies(team, target, radius);
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target_entity in hits.drain(..) {
-                    let remaining = self
-                        .world
-                        .get::<Silence>(target_entity)
-                        .map_or(duration_ticks, |silence| {
-                            silence.remaining.max(duration_ticks)
-                        });
-                    let _ = self.world.insert(target_entity, Silence { remaining });
+                    self.apply_modifier(
+                        target_entity,
+                        ModifierKind::Silence,
+                        duration_ticks,
+                        Fix::ONE,
+                        0,
+                        caster,
+                        DamageType::Physical,
+                    );
                 }
                 self.damage_hits = hits;
             }
@@ -1476,23 +1478,18 @@ impl Simulation {
                 radius,
                 duration_ticks,
             } => {
-                self.damage_hits.clear();
-                for (entity, (other_position, other_team)) in
-                    self.world.query::<(&Position, &Team)>()
-                {
-                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
-                    {
-                        continue;
-                    }
-                    self.damage_hits.push(entity);
-                }
+                self.gather_enemies(team, target, radius);
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target_entity in hits.drain(..) {
-                    let remaining = self
-                        .world
-                        .get::<Root>(target_entity)
-                        .map_or(duration_ticks, |root| root.remaining.max(duration_ticks));
-                    let _ = self.world.insert(target_entity, Root { remaining });
+                    self.apply_modifier(
+                        target_entity,
+                        ModifierKind::Root,
+                        duration_ticks,
+                        Fix::ONE,
+                        0,
+                        caster,
+                        DamageType::Physical,
+                    );
                     if let Some(move_target) = self.world.get_mut::<MoveTarget>(target_entity) {
                         move_target.0 = None;
                     }
@@ -1504,33 +1501,18 @@ impl Simulation {
                 factor,
                 duration_ticks,
             } => {
-                self.damage_hits.clear();
-                for (entity, (other_position, other_team)) in
-                    self.world.query::<(&Position, &Team)>()
-                {
-                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
-                    {
-                        continue;
-                    }
-                    self.damage_hits.push(entity);
-                }
+                self.gather_enemies(team, target, radius);
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target_entity in hits.drain(..) {
-                    if !self.world.has::<MoveSpeed>(target_entity) {
-                        continue;
-                    }
-                    let existing = self.world.get::<Slow>(target_entity).copied();
-                    let applied = existing.map_or(factor, |slow| slow.factor.min(factor));
-                    let remaining =
-                        existing.map_or(duration_ticks, |slow| slow.remaining.max(duration_ticks));
-                    let _ = self.world.insert(
+                    self.apply_modifier(
                         target_entity,
-                        Slow {
-                            factor: applied,
-                            remaining,
-                        },
+                        ModifierKind::Slow,
+                        duration_ticks,
+                        factor,
+                        0,
+                        caster,
+                        DamageType::Physical,
                     );
-                    self.recompute_move_speed(target_entity);
                 }
                 self.damage_hits = hits;
             }
@@ -1539,16 +1521,7 @@ impl Simulation {
                 damage,
                 damage_type,
             } => {
-                self.damage_hits.clear();
-                for (entity, (other_position, other_team)) in
-                    self.world.query::<(&Position, &Team)>()
-                {
-                    if *other_team == team || other_position.0.distance_sq(target) > radius * radius
-                    {
-                        continue;
-                    }
-                    self.damage_hits.push(entity);
-                }
+                self.gather_enemies(team, target, radius);
                 let mut hits = core::mem::take(&mut self.damage_hits);
                 for target in hits.drain(..) {
                     self.damage(target, damage, damage_type, caster);
@@ -1558,10 +1531,10 @@ impl Simulation {
         }
 
         if let Some(mana) = self.world.get_mut::<Mana>(caster) {
-            mana.current = (mana.current - ability.mana_cost).max(0);
+            mana.current = (mana.current - mana_cost).max(0);
         }
         if let Some(cooldowns) = self.world.get_mut::<Cooldowns>(caster) {
-            cooldowns.0[ability_index] = ability.cooldown_ticks;
+            cooldowns.0[ability_index] = cooldown_ticks;
         }
     }
 
@@ -1863,11 +1836,23 @@ impl Simulation {
             resistances.magic_resist,
         );
         let mut damage = dealt;
-        if let Some(shield) = self.world.get_mut::<Shield>(target) {
-            if shield.amount > 0 {
-                let absorbed = shield.amount.min(damage);
-                shield.amount -= absorbed;
-                damage -= absorbed;
+        if let Some(modifiers) = self.world.get_mut::<Modifiers>(target) {
+            let mut index = 0;
+            while index < usize::from(modifiers.len) {
+                let modifier = &mut modifiers.entries[index];
+                if modifier.kind == ModifierKind::Shield && modifier.amount > 0 {
+                    let absorbed = modifier.amount.min(damage);
+                    modifier.amount -= absorbed;
+                    damage -= absorbed;
+                }
+                if modifier.kind == ModifierKind::Shield && modifier.amount <= 0 {
+                    modifiers
+                        .entries
+                        .swap(index, usize::from(modifiers.len) - 1);
+                    modifiers.len -= 1;
+                } else {
+                    index += 1;
+                }
             }
         }
         let remaining = if let Some(health) = self.world.get_mut::<Health>(target) {
@@ -2004,9 +1989,16 @@ impl Simulation {
 
     #[allow(clippy::too_many_lines)] // Flat stat application is clearer than a trait tower.
     fn buy_item(&mut self, hero: Entity, item_id: u8) -> bool {
-        let Some(item) = self.content.items.get(usize::from(item_id)).cloned() else {
+        let Some(item) = self.content.items.get(usize::from(item_id)) else {
             return false;
         };
+        let cost = item.cost;
+        let item_health = item.health;
+        let item_mana = item.mana;
+        let item_attack_damage = item.attack_damage;
+        let item_armor = item.armor;
+        let item_magic_resist = item.magic_resist;
+        let item_move_speed = item.move_speed_per_sec;
         let Some(team) = self.world.get::<Team>(hero).copied() else {
             return false;
         };
@@ -2019,29 +2011,29 @@ impl Simulation {
         let Some(mut progress) = self.world.get::<Progression>(hero).copied() else {
             return false;
         };
-        if progress.gold < item.cost || usize::from(progress.item_count) >= moba_game::ITEM_SLOTS {
+        if progress.gold < cost || usize::from(progress.item_count) >= moba_game::ITEM_SLOTS {
             return false;
         }
-        progress.gold -= item.cost;
+        progress.gold -= cost;
         progress.items[usize::from(progress.item_count)] = item_id;
         progress.item_count += 1;
         let _ = self.world.insert(hero, progress);
         if let Some(health) = self.world.get_mut::<Health>(hero) {
-            health.max = health.max.saturating_add(item.health);
-            health.current = health.current.saturating_add(item.health);
+            health.max = health.max.saturating_add(item_health);
+            health.current = health.current.saturating_add(item_health);
         }
         if let Some(mana) = self.world.get_mut::<Mana>(hero) {
-            mana.max = mana.max.saturating_add(item.mana);
-            mana.current = mana.current.saturating_add(item.mana);
+            mana.max = mana.max.saturating_add(item_mana);
+            mana.current = mana.current.saturating_add(item_mana);
         }
         if let Some(stats) = self.world.get_mut::<AttackStats>(hero) {
-            stats.damage = stats.damage.saturating_add(item.attack_damage);
+            stats.damage = stats.damage.saturating_add(item_attack_damage);
         }
         if let Some(resistances) = self.world.get_mut::<Resistances>(hero) {
-            resistances.armor = resistances.armor.saturating_add(item.armor);
-            resistances.magic_resist = resistances.magic_resist.saturating_add(item.magic_resist);
+            resistances.armor = resistances.armor.saturating_add(item_armor);
+            resistances.magic_resist = resistances.magic_resist.saturating_add(item_magic_resist);
         }
-        let bonus = item.move_speed_per_sec * ONE_TICK;
+        let bonus = item_move_speed * ONE_TICK;
         if let Some(base) = self.world.get_mut::<BaseMoveSpeed>(hero) {
             base.0 += bonus;
         } else if let Some(speed) = self.world.get_mut::<MoveSpeed>(hero) {
@@ -2356,6 +2348,18 @@ mod tests {
         })
     }
 
+    fn has_modifier(sim: &Simulation, entity: Entity, kind: ModifierKind) -> bool {
+        sim.world
+            .get::<Modifiers>(entity)
+            .is_some_and(|modifiers| modifiers.has(kind))
+    }
+
+    fn shield_total(sim: &Simulation, entity: Entity) -> i32 {
+        sim.world
+            .get::<Modifiers>(entity)
+            .map_or(0, Modifiers::shield_total)
+    }
+
     fn find_unit(sim: &Simulation, kind: UnitKind, team: Team) -> Entity {
         sim.world
             .entities()
@@ -2630,38 +2634,17 @@ mod tests {
                 item_count: 0,
             },
         );
-        let _ = world.insert(
-            entity,
-            Burn {
-                source: entity,
-                damage: 1,
-                damage_type: DamageType::Magic,
-                remaining: 1,
-            },
-        );
-        let _ = world.insert(
-            entity,
-            Haste {
-                factor: Fix::ONE,
-                remaining: 1,
-            },
-        );
-        let _ = world.insert(entity, Silence { remaining: 1 });
-        let _ = world.insert(entity, Root { remaining: 1 });
-        let _ = world.insert(
-            entity,
-            Slow {
-                factor: Fix::ONE,
-                remaining: 1,
-            },
-        );
-        let _ = world.insert(
-            entity,
-            Shield {
-                amount: 1,
-                remaining: 1,
-            },
-        );
+        let mut modifiers = Modifiers::default();
+        modifiers.entries[0] = Modifier {
+            kind: ModifierKind::Shield,
+            remaining: 1,
+            factor: Fix::ONE,
+            amount: 1,
+            damage_type: DamageType::Magic,
+            source: entity,
+        };
+        modifiers.len = 1;
+        let _ = world.insert(entity, modifiers);
         let _ = world.insert(entity, Regen { health: 0, mana: 0 });
         let _ = world.insert(
             entity,
@@ -2697,12 +2680,7 @@ mod tests {
             TypeId::of::<HeroIdentity>(),
             TypeId::of::<HeroSlot>(),
             TypeId::of::<Progression>(),
-            TypeId::of::<Burn>(),
-            TypeId::of::<Haste>(),
-            TypeId::of::<Silence>(),
-            TypeId::of::<Root>(),
-            TypeId::of::<Slow>(),
-            TypeId::of::<Shield>(),
+            TypeId::of::<Modifiers>(),
             TypeId::of::<Team>(),
             TypeId::of::<UnitKind>(),
             TypeId::of::<Regen>(),
@@ -2768,50 +2746,44 @@ mod tests {
     }
 
     #[test]
-    fn state_hash_covers_status_components() {
-        use moba_game::GameContent;
-        let mut sim = Simulation::new_with_content(
-            SimConfig {
-                bot_mask: 0,
-                ..SimConfig::default()
-            },
-            std::sync::Arc::new(GameContent::default()),
-        );
+    fn every_unit_has_an_always_present_modifier_list() {
+        let sim = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        for entity in sim.world().entities() {
+            assert!(
+                sim.world().get::<Modifiers>(entity).is_some(),
+                "every spawned unit must own Modifiers"
+            );
+        }
+    }
+
+    #[test]
+    fn state_hash_covers_modifiers() {
+        let mut sim = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
         let hero = sim.hero_entities[0];
         let baseline = sim.state_hash();
-        let _ = sim.world.insert(
-            hero,
-            Shield {
-                amount: 10,
-                remaining: 5,
-            },
-        );
+        let modifiers = sim.world.get_mut::<Modifiers>(hero).expect("modifiers");
+        modifiers.entries[0] = Modifier {
+            kind: ModifierKind::Shield,
+            remaining: 5,
+            factor: Fix::ONE,
+            amount: 10,
+            damage_type: DamageType::Physical,
+            source: hero,
+        };
+        modifiers.len = 1;
         assert_ne!(sim.state_hash(), baseline);
-        let _ = sim.world.remove::<Shield>(hero);
-        let _ = sim.world.insert(
-            hero,
-            Slow {
-                factor: moba_core::Fix::from_f32(0.5),
-                remaining: 5,
-            },
-        );
+        let modifiers = sim.world.get_mut::<Modifiers>(hero).expect("modifiers");
+        modifiers.entries[0].kind = ModifierKind::Slow;
+        modifiers.entries[0].factor = moba_core::Fix::from_f32(0.5);
         assert_ne!(sim.state_hash(), baseline);
-        let _ = sim.world.remove::<Slow>(hero);
-        let _ = sim.world.insert(hero, Root { remaining: 5 });
+        let modifiers = sim.world.get_mut::<Modifiers>(hero).expect("modifiers");
+        modifiers.entries[0].kind = ModifierKind::Root;
         assert_ne!(sim.state_hash(), baseline);
-        let _ = sim.world.remove::<Root>(hero);
-        let _ = sim.world.insert(hero, Silence { remaining: 5 });
-        assert_ne!(sim.state_hash(), baseline);
-        let _ = sim.world.remove::<Silence>(hero);
-        let _ = sim.world.insert(
-            hero,
-            Haste {
-                factor: moba_core::Fix::from_f32(1.5),
-                remaining: 5,
-            },
-        );
-        assert_ne!(sim.state_hash(), baseline);
-        let _ = sim.world.remove::<Haste>(hero);
+        sim.world
+            .get_mut::<Modifiers>(hero)
+            .expect("modifiers")
+            .clear();
+        assert_eq!(sim.state_hash(), baseline);
     }
 
     #[test]
@@ -2826,26 +2798,21 @@ mod tests {
         );
         let blue = sim.hero_entities[0];
         let red = sim.hero_entities[5];
-        let _ = sim.world.insert(
-            red,
-            Burn {
-                source: blue,
-                damage: 20,
-                damage_type: DamageType::Magic,
-                remaining: 10,
-            },
-        );
+        let modifiers = sim.world.get_mut::<Modifiers>(red).expect("modifiers");
+        modifiers.entries[0] = Modifier {
+            kind: ModifierKind::Burn,
+            remaining: 10,
+            factor: Fix::ONE,
+            amount: 20,
+            damage_type: DamageType::Magic,
+            source: blue,
+        };
+        modifiers.len = 1;
         let magic = sim.state_hash();
-        let _ = sim.world.insert(
-            red,
-            Burn {
-                source: blue,
-                damage: 20,
-                damage_type: DamageType::Physical,
-                remaining: 10,
-            },
-        );
-        assert_ne!(sim.state_hash(), magic);
+        let modifiers = sim.world.get_mut::<Modifiers>(red).expect("modifiers");
+        modifiers.entries[0].damage_type = DamageType::Physical;
+        let physical = sim.state_hash();
+        assert_ne!(magic, physical);
     }
 
     #[test]
@@ -2877,11 +2844,11 @@ mod tests {
         let target = sim.world.get::<Position>(red).expect("position").0;
         cast.set(0, PlayerCommand::CastAbility { slot: 0, target });
         sim.tick(&cast);
-        assert!(sim.world.get::<Burn>(red).is_some());
+        assert!(has_modifier(&sim, red, ModifierKind::Burn));
         for _ in 0..10 {
             sim.tick(&TickInputs::new());
         }
-        assert!(sim.world.get::<Burn>(red).is_none());
+        assert!(!has_modifier(&sim, red, ModifierKind::Burn));
         assert!(
             sim.world.get::<Health>(red).expect("health").current < before - 100,
             "burn ticks damage over its duration"
@@ -2921,7 +2888,7 @@ mod tests {
             },
         );
         sim.tick(&cast);
-        assert!(sim.world.get::<Silence>(red).is_some());
+        assert!(has_modifier(&sim, red, ModifierKind::Silence));
         let mana_before = sim.world.get::<Mana>(red).expect("mana").current;
         let blue_position = sim.world.get::<Position>(blue).expect("position").0;
         let mut red_cast = TickInputs::new();
@@ -2941,7 +2908,7 @@ mod tests {
         for _ in 0..61 {
             sim.tick(&TickInputs::new());
         }
-        assert!(sim.world.get::<Silence>(red).is_none());
+        assert!(!has_modifier(&sim, red, ModifierKind::Silence));
         sim.tick(&red_cast);
         assert!(
             sim.world.get::<Mana>(red).expect("mana").current < mana_before,
@@ -3048,7 +3015,7 @@ mod tests {
             },
         );
         sim.tick(&cast);
-        assert!(sim.world.get::<Root>(red).is_some());
+        assert!(has_modifier(&sim, red, ModifierKind::Root));
         assert!(
             sim.world
                 .get::<MoveTarget>(red)
@@ -3069,7 +3036,7 @@ mod tests {
         for _ in 0..61 {
             sim.tick(&TickInputs::new());
         }
-        assert!(sim.world.get::<Root>(red).is_none());
+        assert!(!has_modifier(&sim, red, ModifierKind::Root));
         sim.tick(&move_red);
         assert!(
             sim.world
@@ -3226,12 +3193,12 @@ mod tests {
             },
         );
         sim.tick(&cast);
-        assert!(sim.world.get::<Haste>(blue).is_some());
+        assert!(has_modifier(&sim, blue, ModifierKind::Haste));
         assert!(sim.world.get::<MoveSpeed>(blue).expect("speed").0 > before);
         for _ in 0..62 {
             sim.tick(&TickInputs::new());
         }
-        assert!(sim.world.get::<Haste>(blue).is_none());
+        assert!(!has_modifier(&sim, blue, ModifierKind::Haste));
         assert_eq!(sim.world.get::<MoveSpeed>(blue).expect("speed").0, before);
     }
 
@@ -3266,11 +3233,11 @@ mod tests {
         sim.tick(&inputs);
         let slowed = sim.world.get::<MoveSpeed>(red).expect("speed").0;
         assert!(slowed < before, "slow reduces movement speed");
-        assert!(sim.world.get::<Slow>(red).is_some());
+        assert!(has_modifier(&sim, red, ModifierKind::Slow));
         for _ in 0..62 {
             sim.tick(&TickInputs::new());
         }
-        assert!(sim.world.get::<Slow>(red).is_none());
+        assert!(!has_modifier(&sim, red, ModifierKind::Slow));
         assert_eq!(sim.world.get::<MoveSpeed>(red).expect("speed").0, before);
     }
 
@@ -3301,7 +3268,7 @@ mod tests {
             },
         );
         sim.tick(&inputs);
-        assert_eq!(sim.world.get::<Shield>(blue).expect("shield").amount, 100);
+        assert_eq!(shield_total(&sim, blue), 100);
         let before = sim.world.get::<Health>(blue).expect("health").current;
         sim.damage(blue, 10, DamageType::Physical, red);
         assert_eq!(
@@ -3309,11 +3276,11 @@ mod tests {
             before,
             "shield absorbs the hit"
         );
-        assert!(sim.world.get::<Shield>(blue).expect("shield").amount < 100);
+        assert!(shield_total(&sim, blue) < 100);
         for _ in 0..62 {
             sim.tick(&TickInputs::new());
         }
-        assert!(sim.world.get::<Shield>(blue).is_none());
+        assert!(!has_modifier(&sim, blue, ModifierKind::Shield));
     }
 
     #[test]
@@ -3417,10 +3384,12 @@ mod tests {
 
     fn matches_no_status(sim: &Simulation, entity: Entity, kind: moba_game::AbilityKind) -> bool {
         match kind {
-            moba_game::AbilityKind::Slow { .. } => sim.world.get::<Slow>(entity).is_none(),
-            moba_game::AbilityKind::Root { .. } => sim.world.get::<Root>(entity).is_none(),
-            moba_game::AbilityKind::Silence { .. } => sim.world.get::<Silence>(entity).is_none(),
-            moba_game::AbilityKind::Burn { .. } => sim.world.get::<Burn>(entity).is_none(),
+            moba_game::AbilityKind::Slow { .. } => !has_modifier(sim, entity, ModifierKind::Slow),
+            moba_game::AbilityKind::Root { .. } => !has_modifier(sim, entity, ModifierKind::Root),
+            moba_game::AbilityKind::Silence { .. } => {
+                !has_modifier(sim, entity, ModifierKind::Silence)
+            }
+            moba_game::AbilityKind::Burn { .. } => !has_modifier(sim, entity, ModifierKind::Burn),
             _ => true,
         }
     }

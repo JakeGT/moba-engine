@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: 2026-10-18. Protocol **v13**; replay format **v5** (sim logic v1); content packs are runtime
+Last updated: 2026-10-18. Protocol **v13**; replay format **v5** (sim logic v2); content packs are runtime
 TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Milestones
@@ -35,8 +35,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **195 passed**, 0 failed, 3 ignored.
-- `cargo test --workspace --release --locked`: **195 passed**, 0 failed.
+- `cargo test --workspace --locked`: **197 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --release --locked`: **197 passed**, 0 failed.
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
@@ -52,11 +52,11 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
   odds, so this sample does not establish a side bias.
 - Benchmarks: sim **11.0 µs/tick** full, **13.3 µs** steady, **1.43 µs** idle; snapshot full
   encode/decode **207/253 ns**, delta encode/decode/apply **36/93/84 ns**.
-- Allocation guard: **12 allocations / 490 bytes per 300 steady ticks**.
+- Allocation guard: **5 allocations / 960 bytes per 300 steady ticks**; with all six modifiers active **2 allocations / 384 bytes**.
 - Auth smoke: pinned server + client identity + per-client token produced a verified
   314-tick replay. Missing/wrong identity/token/pin paths are covered by tests.
 - Replay v5: round-trip, checkpoint, human-purchase and unsupported-version tests pass;
-  cross-OS golden state hash `0xb852fe4bba4e7c28`. The old custom-pack state hash is
+  cross-OS golden state hash `0x1923e3d7f3392604`. The old custom-pack state hash is
   intentionally retired by the #26/#27 hash/format change.
 - Release audit: 0 broken local Markdown links; every example/map/ability content pack
   validates.
