@@ -123,6 +123,7 @@ struct ClientApp {
     last_frame: Instant,
     frame_ms: f32,
     fps: f32,
+    ui_scale: f32,
 }
 
 impl ClientApp {
@@ -150,6 +151,10 @@ impl ClientApp {
             last_frame: Instant::now(),
             frame_ms: 0.0,
             fps: 0.0,
+            ui_scale: std::env::var("MOBA_UI_SCALE")
+                .ok()
+                .and_then(|value| value.parse::<f32>().ok())
+                .map_or(1.0, |scale| scale.clamp(0.5, 3.0)),
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -230,6 +235,7 @@ impl App for ClientApp {
             validation,
             max_instances: 1_024,
             vsync: true,
+            ui_scale: self.ui_scale,
             ..RenderConfig::default()
         };
         match Renderer::new(window, config) {
@@ -387,9 +393,11 @@ impl App for ClientApp {
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
+                        let ui_input = frame.input().scaled_cursor(self.ui_scale);
                         handle_network_input(
                             network,
                             frame.input(),
+                            &ui_input,
                             &camera,
                             width,
                             height,
@@ -404,10 +412,10 @@ impl App for ClientApp {
                             network,
                             *scoreboard_visible,
                             *shop_visible,
-                            frame.input(),
+                            &ui_input,
                             &camera,
-                            width,
-                            height,
+                            (width as f32 / self.ui_scale) as u32,
+                            (height as f32 / self.ui_scale) as u32,
                             frame_ms,
                             fps,
                             hit_rects,
@@ -474,7 +482,15 @@ impl App for ClientApp {
                     } else {
                         frame.elapsed_secs() as f32 * 0.035
                     };
-                    build_local_hud(ui, simulation, width, height, frame_ms, fps, hit_rects);
+                    build_local_hud(
+                        ui,
+                        simulation,
+                        (width as f32 / self.ui_scale) as u32,
+                        (height as f32 / self.ui_scale) as u32,
+                        frame_ms,
+                        fps,
+                        hit_rects,
+                    );
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                     let scene = Scene::new(camera, units);
                     if let Some(renderer) = renderer.as_mut() {
@@ -912,6 +928,7 @@ fn handle_shop_input(network: &mut NetworkView, input: &InputState, ui_action: O
 fn handle_network_input(
     network: &mut NetworkView,
     input: &InputState,
+    ui_input: &InputState,
     camera: &Camera,
     width: u32,
     height: u32,
@@ -922,11 +939,11 @@ fn handle_network_input(
         handle_spectator_input(network, input);
         return;
     }
-    let ui_rect = input
+    let ui_rect = ui_input
         .cursor()
         .and_then(|cursor| rect_at(hits, cursor.x, cursor.y));
     let ui_action = ui_rect.map(|rect| rect.action);
-    if let (Some(rect), Some(cursor)) = (ui_rect, input.cursor())
+    if let (Some(rect), Some(cursor)) = (ui_rect, ui_input.cursor())
         && rect.action == HudAction::Minimap
         && (input.was_mouse_pressed(MouseButton::Left)
             || input.was_mouse_pressed(MouseButton::Right))

@@ -256,6 +256,18 @@ impl InputState {
         self.cursor
     }
 
+    /// Returns a copy with the cursor divided by `scale` for logical UI hit-testing.
+    #[must_use]
+    pub fn scaled_cursor(&self, scale: f32) -> Self {
+        let mut scaled = self.clone();
+        if scale > 0.0 {
+            scaled.cursor = scaled
+                .cursor
+                .map(|cursor| Vec2::new(cursor.x / scale, cursor.y / scale));
+        }
+        scaled
+    }
+
     /// Accumulated vertical wheel delta for this frame.
     ///
     /// Positive is scroll up. Line-based platforms report 120 units per notch.
@@ -364,6 +376,18 @@ mod tests {
         assert_eq!(map_key(KeyCode::Digit4), Some(Key::Digit4));
         assert_eq!(map_key(KeyCode::KeyZ), None);
         assert!(Key::COUNT as u32 > Key::F5.index());
+    }
+
+    #[test]
+    fn scaled_cursor_maps_physical_to_logical_coordinates() {
+        let input = InputState {
+            cursor: Some(Vec2::new(400.0, 300.0)),
+            ..InputState::new()
+        };
+        let scaled = input.scaled_cursor(2.0);
+        assert_eq!(scaled.cursor(), Some(Vec2::new(200.0, 150.0)));
+        assert_eq!(input.cursor(), Some(Vec2::new(400.0, 300.0)));
+        assert_eq!(input.scaled_cursor(0.0).cursor(), input.cursor());
     }
 
     #[test]
