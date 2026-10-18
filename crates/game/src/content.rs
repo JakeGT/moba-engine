@@ -192,9 +192,44 @@ pub struct WallSpec {
     pub b: FixVec2,
 }
 
+/// Runtime minion stats.
+#[allow(missing_docs)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MinionStatsSpec {
+    pub max_health: i32,
+    pub attack_damage: i32,
+    pub attack_range: Fix,
+    pub attack_interval_ticks: u32,
+    pub move_speed_per_sec: Fix,
+    pub armor: i32,
+    pub magic_resist: i32,
+    pub vision_range: Fix,
+}
+
+/// Runtime tower/nexus stats.
+#[allow(missing_docs)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct StructureStatsSpec {
+    pub max_health: i32,
+    pub attack_damage: i32,
+    pub attack_range: Fix,
+    pub attack_interval_ticks: u32,
+    pub armor: i32,
+    pub magic_resist: i32,
+    pub vision_range: Fix,
+}
+
 /// Tunable match rules shared by simulation and server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RulesSpec {
+    /// Melee minion stats.
+    pub melee_minion: MinionStatsSpec,
+    /// Ranged minion stats.
+    pub ranged_minion: MinionStatsSpec,
+    /// Tower stats.
+    pub tower: StructureStatsSpec,
+    /// Nexus stats.
+    pub nexus: StructureStatsSpec,
     /// Maximum hero level.
     pub level_cap: u8,
     /// Base XP for the next level.
@@ -226,6 +261,44 @@ pub struct RulesSpec {
 impl Default for RulesSpec {
     fn default() -> Self {
         Self {
+            melee_minion: MinionStatsSpec {
+                max_health: 320,
+                attack_damage: 14,
+                attack_range: Fix::from_i32(2),
+                attack_interval_ticks: 30,
+                move_speed_per_sec: Fix::from_i32(4),
+                armor: 10,
+                magic_resist: 5,
+                vision_range: Fix::from_i32(9),
+            },
+            ranged_minion: MinionStatsSpec {
+                max_health: 220,
+                attack_damage: 20,
+                attack_range: Fix::from_i32(7),
+                attack_interval_ticks: 32,
+                move_speed_per_sec: Fix::from_i32(4),
+                armor: 5,
+                magic_resist: 5,
+                vision_range: Fix::from_i32(10),
+            },
+            tower: StructureStatsSpec {
+                max_health: 2200,
+                attack_damage: 105,
+                attack_range: Fix::from_i32(10),
+                attack_interval_ticks: 30,
+                armor: 40,
+                magic_resist: 40,
+                vision_range: Fix::from_i32(13),
+            },
+            nexus: StructureStatsSpec {
+                max_health: 4800,
+                attack_damage: 85,
+                attack_range: Fix::from_i32(9),
+                attack_interval_ticks: 30,
+                armor: 30,
+                magic_resist: 30,
+                vision_range: Fix::from_i32(14),
+            },
             level_cap: 15,
             xp_base: 180,
             xp_per_level: 100,
@@ -925,6 +998,14 @@ impl GameContent {
         }
         if !(1..=5).contains(&self.rules.team_size)
             || !(1..=99).contains(&self.rules.level_cap)
+            || self.rules.melee_minion.max_health <= 0
+            || self.rules.ranged_minion.max_health <= 0
+            || self.rules.tower.max_health <= 0
+            || self.rules.nexus.max_health <= 0
+            || self.rules.melee_minion.attack_interval_ticks == 0
+            || self.rules.ranged_minion.attack_interval_ticks == 0
+            || self.rules.tower.attack_interval_ticks == 0
+            || self.rules.nexus.attack_interval_ticks == 0
             || self.rules.xp_base == 0
             || self.rules.xp_per_level == 0
             || self.rules.hero_respawn_ticks == 0
@@ -1139,6 +1220,23 @@ impl GameContent {
         ] {
             feed(&value.to_bits().to_le_bytes());
         }
+        for minion in [self.rules.melee_minion, self.rules.ranged_minion] {
+            feed(&minion.max_health.to_le_bytes());
+            feed(&minion.attack_damage.to_le_bytes());
+            feed(&minion.attack_range.to_bits().to_le_bytes());
+            feed(&minion.attack_interval_ticks.to_le_bytes());
+            feed(&minion.move_speed_per_sec.to_bits().to_le_bytes());
+            feed(&minion.armor.to_le_bytes());
+            feed(&minion.magic_resist.to_le_bytes());
+        }
+        for structure in [self.rules.tower, self.rules.nexus] {
+            feed(&structure.max_health.to_le_bytes());
+            feed(&structure.attack_damage.to_le_bytes());
+            feed(&structure.attack_range.to_bits().to_le_bytes());
+            feed(&structure.attack_interval_ticks.to_le_bytes());
+            feed(&structure.armor.to_le_bytes());
+            feed(&structure.magic_resist.to_le_bytes());
+        }
         for value in [
             self.rules.hero_respawn_ticks,
             self.rules.respawn_per_level,
@@ -1238,7 +1336,67 @@ struct ContentFile {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
+struct MinionStatsEntry {
+    max_health: i32,
+    attack_damage: i32,
+    attack_range: f32,
+    attack_interval_ticks: u32,
+    move_speed_per_sec: f32,
+    armor: i32,
+    magic_resist: i32,
+    vision_range: f32,
+}
+
+impl Default for MinionStatsEntry {
+    fn default() -> Self {
+        let stats = RulesSpec::default().melee_minion;
+        Self {
+            max_health: stats.max_health,
+            attack_damage: stats.attack_damage,
+            attack_range: stats.attack_range.to_f32(),
+            attack_interval_ticks: stats.attack_interval_ticks,
+            move_speed_per_sec: stats.move_speed_per_sec.to_f32(),
+            armor: stats.armor,
+            magic_resist: stats.magic_resist,
+            vision_range: stats.vision_range.to_f32(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct StructureStatsEntry {
+    max_health: i32,
+    attack_damage: i32,
+    attack_range: f32,
+    attack_interval_ticks: u32,
+    armor: i32,
+    magic_resist: i32,
+    vision_range: f32,
+}
+
+impl Default for StructureStatsEntry {
+    fn default() -> Self {
+        let stats = RulesSpec::default().tower;
+        Self {
+            max_health: stats.max_health,
+            attack_damage: stats.attack_damage,
+            attack_range: stats.attack_range.to_f32(),
+            attack_interval_ticks: stats.attack_interval_ticks,
+            armor: stats.armor,
+            magic_resist: stats.magic_resist,
+            vision_range: stats.vision_range.to_f32(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
 struct RulesEntry {
+    melee_minion: MinionStatsEntry,
+    ranged_minion: MinionStatsEntry,
+    tower: StructureStatsEntry,
+    nexus: StructureStatsEntry,
     level_cap: u8,
     xp_base: u32,
     xp_per_level: u32,
@@ -1258,6 +1416,33 @@ impl Default for RulesEntry {
     fn default() -> Self {
         let rules = RulesSpec::default();
         Self {
+            melee_minion: MinionStatsEntry::default(),
+            ranged_minion: {
+                let stats = RulesSpec::default().ranged_minion;
+                MinionStatsEntry {
+                    max_health: stats.max_health,
+                    attack_damage: stats.attack_damage,
+                    attack_range: stats.attack_range.to_f32(),
+                    attack_interval_ticks: stats.attack_interval_ticks,
+                    move_speed_per_sec: stats.move_speed_per_sec.to_f32(),
+                    armor: stats.armor,
+                    magic_resist: stats.magic_resist,
+                    vision_range: stats.vision_range.to_f32(),
+                }
+            },
+            tower: StructureStatsEntry::default(),
+            nexus: {
+                let stats = RulesSpec::default().nexus;
+                StructureStatsEntry {
+                    max_health: stats.max_health,
+                    attack_damage: stats.attack_damage,
+                    attack_range: stats.attack_range.to_f32(),
+                    attack_interval_ticks: stats.attack_interval_ticks,
+                    armor: stats.armor,
+                    magic_resist: stats.magic_resist,
+                    vision_range: stats.vision_range.to_f32(),
+                }
+            },
             level_cap: rules.level_cap,
             xp_base: rules.xp_base,
             xp_per_level: rules.xp_per_level,
@@ -1753,6 +1938,44 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
     let rules = file
         .rules
         .map_or_else(RulesSpec::default, |rules| RulesSpec {
+            melee_minion: MinionStatsSpec {
+                max_health: rules.melee_minion.max_health,
+                attack_damage: rules.melee_minion.attack_damage,
+                attack_range: Fix::from_f32(rules.melee_minion.attack_range),
+                attack_interval_ticks: rules.melee_minion.attack_interval_ticks,
+                move_speed_per_sec: Fix::from_f32(rules.melee_minion.move_speed_per_sec),
+                armor: rules.melee_minion.armor,
+                magic_resist: rules.melee_minion.magic_resist,
+                vision_range: Fix::from_f32(rules.melee_minion.vision_range),
+            },
+            ranged_minion: MinionStatsSpec {
+                max_health: rules.ranged_minion.max_health,
+                attack_damage: rules.ranged_minion.attack_damage,
+                attack_range: Fix::from_f32(rules.ranged_minion.attack_range),
+                attack_interval_ticks: rules.ranged_minion.attack_interval_ticks,
+                move_speed_per_sec: Fix::from_f32(rules.ranged_minion.move_speed_per_sec),
+                armor: rules.ranged_minion.armor,
+                magic_resist: rules.ranged_minion.magic_resist,
+                vision_range: Fix::from_f32(rules.ranged_minion.vision_range),
+            },
+            tower: StructureStatsSpec {
+                max_health: rules.tower.max_health,
+                attack_damage: rules.tower.attack_damage,
+                attack_range: Fix::from_f32(rules.tower.attack_range),
+                attack_interval_ticks: rules.tower.attack_interval_ticks,
+                armor: rules.tower.armor,
+                magic_resist: rules.tower.magic_resist,
+                vision_range: Fix::from_f32(rules.tower.vision_range),
+            },
+            nexus: StructureStatsSpec {
+                max_health: rules.nexus.max_health,
+                attack_damage: rules.nexus.attack_damage,
+                attack_range: Fix::from_f32(rules.nexus.attack_range),
+                attack_interval_ticks: rules.nexus.attack_interval_ticks,
+                armor: rules.nexus.armor,
+                magic_resist: rules.nexus.magic_resist,
+                vision_range: Fix::from_f32(rules.nexus.vision_range),
+            },
             level_cap: rules.level_cap,
             xp_base: rules.xp_base,
             xp_per_level: rules.xp_per_level,

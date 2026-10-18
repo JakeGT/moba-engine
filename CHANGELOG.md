@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Runtime minion/tower combat stats in `[rules]` (protocol v22), used for simulated spawns.
 - Rules now carry level cap, XP curve and minion/tower/nexus vision (protocol v21); client HUD
   no longer imports `LEVEL_CAP`, `xp_to_next` or minion/tower vision constants.
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).

@@ -7,8 +7,8 @@ use moba_core::{Fix, FixVec2, Rng, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
     AreaEffect, AreaEffectList, DamageType, EMPTY_ITEM, Effect, GOLD_PER_INTERVAL,
-    GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_GROWTH, MELEE_MINION, ModifierKind, NEXUS,
-    RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Targeting, Team, XP_RADIUS, mitigate_typed,
+    GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_GROWTH, ModifierKind, SHOP_RADIUS,
+    STARTING_GOLD, Targeting, Team, XP_RADIUS, mitigate_typed,
 };
 use moba_nav::SpatialGrid;
 
@@ -947,8 +947,8 @@ impl Simulation {
         for structure in self.content.map.structures.clone() {
             let entity = self.world.spawn();
             let (stats, kind) = match structure.kind {
-                moba_game::StructureKind::Tower => (&TOWER, UnitKind::Tower),
-                moba_game::StructureKind::Nexus => (&NEXUS, UnitKind::Nexus),
+                moba_game::StructureKind::Tower => (&self.content.rules.tower, UnitKind::Tower),
+                moba_game::StructureKind::Nexus => (&self.content.rules.nexus, UnitKind::Nexus),
             };
             let _ = self.world.insert(entity, Position(structure.position));
             let _ = self.world.insert(entity, structure.team);
@@ -1082,9 +1082,9 @@ impl Simulation {
             return None;
         }
         let def = if kind == UnitKind::MeleeMinion {
-            &MELEE_MINION
+            &self.content.rules.melee_minion
         } else {
-            &RANGED_MINION
+            &self.content.rules.ranged_minion
         };
         let entity = self.world.spawn();
         let _ = self.world.insert(entity, Position(position));
@@ -2771,6 +2771,30 @@ mod tests {
         }
         let after = sim.world.get::<Health>(red).unwrap().current;
         assert!(after < start, "skillshot should hit ({start} -> {after})");
+    }
+
+    #[test]
+    fn custom_minion_stats_affect_spawned_minions() {
+        let mut content = moba_game::GameContent::default();
+        content.rules.melee_minion.max_health = 77;
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                spawn_waves: true,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        for _ in 0..32 {
+            sim.tick(&TickInputs::new());
+        }
+        let health = sim
+            .world
+            .entities()
+            .find(|entity| sim.world.get::<UnitKind>(*entity) == Some(&UnitKind::MeleeMinion))
+            .and_then(|entity| sim.world.get::<Health>(entity))
+            .expect("melee minion spawned");
+        assert_eq!(health.max, 77);
     }
 
     #[test]

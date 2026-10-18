@@ -179,6 +179,16 @@ melee_vision = 9.0
 ranged_vision = 10.0
 tower_vision = 13.0
 nexus_vision = 14.0
+
+[rules.melee_minion]
+max_health = 320
+attack_damage = 14
+attack_range = 2.0
+attack_interval_ticks = 30
+move_speed_per_sec = 4.0
+armor = 10
+magic_resist = 5
+vision_range = 9.0
 team_size = 5
 bot_fill = true
 hero_respawn_ticks = 300
