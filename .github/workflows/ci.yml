@@ -39,9 +39,11 @@ jobs:
         shell: pwsh
         run: |
           choco install vulkan-sdk -y --no-progress
-          $glslc = Get-ChildItem "$env:ProgramFiles\VulkanSDK" -Recurse -Filter glslc.exe |
+          $roots = @($env:VULKAN_SDK, 'C:\VulkanSDK', "$env:ProgramFiles\VulkanSDK") |
+            Where-Object { $_ -and (Test-Path $_) }
+          $glslc = Get-ChildItem $roots -Recurse -Filter glslc.exe -ErrorAction SilentlyContinue |
             Select-Object -First 1
-          if (-not $glslc) { throw "glslc.exe not found in the Vulkan SDK" }
+          if (-not $glslc) { throw "glslc.exe not found under $roots" }
           "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Using $($glslc.FullName)"
       # Server/sim tests need no GPU; renderer tests use lavapipe in a later stage.
