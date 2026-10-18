@@ -457,7 +457,7 @@ impl<'w, Q: QueryData, F: QueryFilter> Iterator for QueryIter<'w, Q, F> {
                 let fetch = unsafe {
                     Q::init_fetch(archetype, &self.ids[..self.component_count], self.tick)
                 };
-                debug_assert_eq!(Q::len(&fetch), archetype.len());
+                assert_eq!(Q::len(&fetch), archetype.len());
                 self.current = Some((archetype, fetch));
                 self.row = 0;
             }
@@ -520,7 +520,7 @@ impl<'w, Q: QueryData, F: QueryFilter> Iterator for QueryChunks<'w, Q, F> {
             // exclusively borrowed for `'w`, so resolving its columns cannot alias.
             let fetch =
                 unsafe { Q::init_fetch(archetype, &self.ids[..self.component_count], self.tick) };
-            debug_assert_eq!(Q::len(&fetch), archetype.len());
+            assert_eq!(Q::len(&fetch), archetype.len());
             return Some((&archetype.entities, fetch));
         }
     }

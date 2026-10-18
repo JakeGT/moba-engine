@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use moba_core::{Rng, Tick};
 use moba_ecs::{Entity, With, Without, World};
@@ -472,4 +472,53 @@ fn chunk_queries_respect_filters() {
         .flat_map(|(entities, _)| entities.iter().copied())
         .collect();
     assert_eq!(filtered, vec![a]);
+}
+
+#[derive(Debug)]
+struct PanicOnDrop {
+    armed: Arc<AtomicBool>,
+}
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        let armed = self.armed.swap(false, Ordering::SeqCst);
+        assert!(!armed, "intentional component drop panic");
+    }
+}
+
+#[test]
+fn despawn_survives_a_panicking_component_drop() {
+    let mut world = World::new();
+    let bad = world.spawn();
+    let armed = Arc::new(AtomicBool::new(true));
+    world.insert(
+        bad,
+        PanicOnDrop {
+            armed: Arc::clone(&armed),
+        },
+    );
+    world.insert(bad, Tag(7));
+    let healthy = spawn_with(
+        &mut world,
+        Some(Position { x: 3, y: 4 }),
+        Some(Velocity { x: 0, y: 0 }),
+    );
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.despawn(bad);
+    }));
+    assert!(result.is_err(), "drop panic is propagated");
+    assert!(!armed.load(Ordering::SeqCst));
+    assert!(!world.is_alive(bad));
+    assert_eq!(world.entity_count(), 1);
+
+    // A panic may not leave short columns or stale entity rows behind. Querying must be
+    // safe and see exactly the surviving entity.
+    assert_eq!(world.query::<&PanicOnDrop>().count(), 0);
+    assert_eq!(world.query::<&Tag>().count(), 0);
+    let positions: Vec<(Entity, Position)> = world
+        .query::<(&Position, &Velocity)>()
+        .map(|(entity, (position, _))| (entity, *position))
+        .collect();
+    assert_eq!(positions, vec![(healthy, Position { x: 3, y: 4 })]);
 }
