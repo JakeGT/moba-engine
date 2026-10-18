@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Strict content schema: unknown fields and enum values are rejected, stats/coordinates are
+  bounded, mitigation uses i64 intermediates, and wire/content limits are compile-time checked.
 - Audit remediation W0: panic-safe ECS despawn (deferred Drop + hard bounds checks), shared
   base/effective move-speed model, point-ability cast-range validation, bounded decoder
   counts, renderer GPU/unsafe correctness fixes, and deterministic CI example/UDP tests.

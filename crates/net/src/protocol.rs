@@ -256,6 +256,18 @@ pub const WIRE_LANE_NAME: usize = 16;
 /// Maximum vision-wall segments in a handshake map.
 pub const MAX_WIRE_WALLS: usize = 32;
 
+const _: () = {
+    assert!(MAX_WIRE_ITEMS == moba_game::MAX_CONTENT_ITEMS);
+    assert!(MAX_WIRE_HEROES == moba_game::MAX_CONTENT_HEROES);
+    assert!(MAX_WIRE_ABILITIES == moba_game::MAX_CONTENT_ABILITIES);
+    assert!(MAX_WIRE_LANES == moba_game::MAX_CONTENT_LANES);
+    assert!(MAX_WIRE_LANE_POINTS == moba_game::MAX_LANE_POINTS);
+    assert!(MAX_WIRE_WALLS == moba_game::MAX_CONTENT_WALLS);
+    assert!(WIRE_ITEM_NAME == moba_game::MAX_ITEM_NAME);
+    assert!(WIRE_HERO_NAME == moba_game::MAX_HERO_NAME);
+    assert!(WIRE_ABILITY_NAME == moba_game::MAX_ABILITY_NAME);
+};
+
 /// One runtime item definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireItem {
