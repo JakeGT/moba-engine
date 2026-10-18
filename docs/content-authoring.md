@@ -172,6 +172,12 @@ existing primitives and modifiers is data-only.
 
 ```toml
 [rules]
+team_size = 5
+bot_fill = true
+hero_respawn_ticks = 300
+respawn_per_level = 0
+wave_interval_ticks = 900
+first_wave_ticks = 30
 level_cap = 15
 xp_base = 180
 xp_per_level = 100
@@ -189,12 +195,34 @@ move_speed_per_sec = 4.0
 armor = 10
 magic_resist = 5
 vision_range = 9.0
-team_size = 5
-bot_fill = true
-hero_respawn_ticks = 300
-respawn_per_level = 0
-wave_interval_ticks = 900
-first_wave_ticks = 30
+
+[rules.ranged_minion]
+max_health = 220
+attack_damage = 20
+attack_range = 7.0
+attack_interval_ticks = 32
+move_speed_per_sec = 4.0
+armor = 5
+magic_resist = 5
+vision_range = 10.0
+
+[rules.tower]
+max_health = 2200
+attack_damage = 105
+attack_range = 10.0
+attack_interval_ticks = 30
+armor = 40
+magic_resist = 40
+vision_range = 13.0
+
+[rules.nexus]
+max_health = 4800
+attack_damage = 85
+attack_range = 9.0
+attack_interval_ticks = 30
+armor = 30
+magic_resist = 30
+vision_range = 14.0
 ```
 
 All rules are optional (defaults shown), validated and hashed/carried in the handshake.
