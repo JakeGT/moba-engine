@@ -3,7 +3,7 @@
 use core::fmt;
 use std::sync::Arc;
 
-use moba_core::{Fix, FixVec2, StableHasher, Tick};
+use moba_core::{Fix, FixVec2, Rng, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
     DamageType, EMPTY_ITEM, GOLD_PER_INTERVAL, GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP,
@@ -303,6 +303,7 @@ pub struct Simulation {
     damage_hits: Vec<Entity>,
     modifier_entities: Vec<Entity>,
     burn_hits: Vec<(Entity, i32, DamageType, Entity)>,
+    bot_rng: [Rng; MAX_PLAYERS],
 }
 
 impl Simulation {
@@ -318,6 +319,7 @@ impl Simulation {
     /// content before creating the match.
     #[must_use]
     pub fn new_with_content(config: SimConfig, content: Arc<GameContent>) -> Self {
+        let bot_seed = config.seed;
         let mut simulation = Self {
             world: World::with_capacity(MAX_UNITS),
             tick: Tick::ZERO,
@@ -343,6 +345,11 @@ impl Simulation {
             damage_hits: Vec::with_capacity(MAX_UNITS),
             modifier_entities: Vec::with_capacity(MAX_UNITS),
             burn_hits: Vec::with_capacity(MAX_UNITS),
+            bot_rng: core::array::from_fn(|index| {
+                Rng::from_seed(
+                    bot_seed ^ (0xB0B0_0000_0000_0000 | (index % 5).wrapping_mul(0x9E37) as u64),
+                )
+            }),
         };
         simulation.spawn_structures();
         for slot in 0..MAX_PLAYERS {
@@ -1222,10 +1229,15 @@ impl Simulation {
         self.push_event(SimEvent::HeroRespawned { entity });
     }
 
+    /// Deterministic scheduling phase: half the seeds resolve blue first, half red first.
+    fn blue_first(&self) -> bool {
+        (self.tick.get().wrapping_add((self.config.seed & 1) as u32)) % 2 == 0
+    }
+
     fn apply_inputs(&mut self, inputs: &TickInputs) {
         // Alternate command resolution order so neither team systematically resolves casts,
         // purchases or attack orders first.
-        let order: [usize; MAX_PLAYERS] = if self.tick.get() % 2 == 0 {
+        let order: [usize; MAX_PLAYERS] = if self.blue_first() {
             core::array::from_fn(|index| index)
         } else {
             core::array::from_fn(|index| MAX_PLAYERS - 1 - index)
@@ -1678,7 +1690,13 @@ impl Simulation {
             });
         }
         let attackers = core::mem::take(&mut self.attackers);
-        for snapshot in attackers.iter().copied() {
+        let alternate = !self.blue_first();
+        for index in 0..attackers.len() {
+            let snapshot = if alternate {
+                attackers[attackers.len() - 1 - index]
+            } else {
+                attackers[index]
+            };
             if self.world.has::<Dead>(snapshot.attacker) {
                 continue;
             }
@@ -2148,6 +2166,15 @@ impl Simulation {
         for index in 0..view_count {
             let view = self.hero_views[index];
             let slot = usize::from(view.slot);
+            let (cast_roll, jitter_x, jitter_y, buy_roll) = {
+                let rng = &mut self.bot_rng[slot % MAX_PLAYERS];
+                (
+                    rng.gen_range_u32(100),
+                    i32::try_from(rng.gen_range_u32(5)).unwrap_or(0) - 2,
+                    i32::try_from(rng.gen_range_u32(5)).unwrap_or(0) - 2,
+                    rng.gen_range_u32(100),
+                )
+            };
             if self.config.bot_mask & (1 << slot) == 0 {
                 continue;
             }
@@ -2161,17 +2188,18 @@ impl Simulation {
                 if near_shop {
                     if let Some(progress) = self.world.get::<Progression>(hero) {
                         if usize::from(progress.item_count) < moba_game::ITEM_SLOTS {
-                            if let Some(item) = self
+                            let affordable: Vec<u8> = self
                                 .content
                                 .items
                                 .iter()
                                 .enumerate()
-                                .find(|(_, item)| item.cost <= progress.gold)
-                            {
-                                inputs.set(
-                                    slot,
-                                    PlayerCommand::BuyItem(u8::try_from(item.0).unwrap_or(0)),
-                                );
+                                .filter(|(_, item)| item.cost <= progress.gold)
+                                .map(|(id, _)| u8::try_from(id).unwrap_or(0))
+                                .collect();
+                            if !affordable.is_empty() {
+                                let pick =
+                                    usize::try_from(buy_roll).unwrap_or(0) % affordable.len();
+                                inputs.set(slot, PlayerCommand::BuyItem(affordable[pick]));
                                 continue;
                             }
                         }
@@ -2196,7 +2224,7 @@ impl Simulation {
             let command = if let Some(target) = target {
                 let distance_sq = view.position.distance_sq(target.position);
                 let defensive = i64::from(view.health) * 100 <= i64::from(view.max_health) * 45;
-                if defensive && view.cooldowns.0[1] == 0 {
+                if defensive && view.cooldowns.0[1] == 0 && cast_roll < 80 {
                     if view.mana >= view.ability_mana[1] {
                         Some(PlayerCommand::CastAbility {
                             slot: 1,
@@ -2208,20 +2236,24 @@ impl Simulation {
                 } else if view.cooldowns.0[0] == 0
                     && view.mana >= view.ability_mana[0]
                     && distance_sq <= view.ability_range[0] * view.ability_range[0]
+                    && cast_roll < 85
                 {
                     Some(PlayerCommand::CastAbility {
                         slot: 0,
-                        target: target.position,
+                        target: target.position
+                            + FixVec2::new(Fix::from_i32(jitter_x), Fix::from_i32(jitter_y)),
                     })
                 } else if distance_sq > view.attack_range_sq
                     && distance_sq <= Fix::from_i32(12) * Fix::from_i32(12)
                     && view.cooldowns.0[2] == 0
                     && view.mana >= view.ability_mana[2]
                     && distance_sq <= view.ability_range[2] * view.ability_range[2]
+                    && cast_roll < 75
                 {
                     Some(PlayerCommand::CastAbility {
                         slot: 2,
-                        target: target.position,
+                        target: target.position
+                            + FixVec2::new(Fix::from_i32(jitter_x), Fix::from_i32(jitter_y)),
                     })
                 } else if distance_sq <= view.attack_range_sq {
                     Some(PlayerCommand::Attack(target.entity))
@@ -2754,6 +2786,30 @@ mod tests {
             .expect("base speed")
             .0 -= Fix::ONE;
         assert_eq!(sim.state_hash(), baseline);
+    }
+
+    #[test]
+    fn seed_drives_bot_variation_and_scheduling_phase() {
+        let run = |seed: u64| {
+            let mut sim = Simulation::new(SimConfig {
+                seed,
+                spawn_waves: false,
+                ..SimConfig::default()
+            });
+            let phase = sim.blue_first();
+            let commands = format!("{:?}", sim.bot_inputs());
+            (phase, commands)
+        };
+        let (even_phase, even_commands) = run(0);
+        let (odd_phase, odd_commands) = run(1);
+        assert!(even_phase, "even seed starts blue-first");
+        assert!(!odd_phase, "odd seed starts red-first");
+        assert_ne!(even_commands, odd_commands, "seeded bot streams differ");
+        assert_eq!(
+            run(0),
+            (even_phase, even_commands),
+            "same seed is deterministic"
+        );
     }
 
     #[test]

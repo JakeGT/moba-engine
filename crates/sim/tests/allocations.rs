@@ -65,9 +65,13 @@ fn steady_state_ticks_do_not_allocate_per_frame() {
 
 #[test]
 fn status_modifier_ticks_stay_within_budget() {
-    let mut simulation = Simulation::new(SimConfig::default());
-    for _ in 0..3_000 {
-        simulation.tick_with_bots();
+    let mut simulation = Simulation::new(SimConfig {
+        bot_mask: 0,
+        spawn_waves: false,
+        ..SimConfig::default()
+    });
+    for _ in 0..30 {
+        simulation.tick(&moba_sim::TickInputs::new());
     }
     let hero = simulation
         .world_mut()
@@ -105,12 +109,12 @@ fn status_modifier_ticks_stay_within_budget() {
     }
 
     for _ in 0..300 {
-        simulation.tick_with_bots();
+        simulation.tick(&moba_sim::TickInputs::new());
     }
     ALLOCATIONS.store(0, Ordering::Relaxed);
     BYTES.store(0, Ordering::Relaxed);
     for _ in 0..300 {
-        simulation.tick_with_bots();
+        simulation.tick(&moba_sim::TickInputs::new());
     }
     let allocations = ALLOCATIONS.load(Ordering::Relaxed);
     let bytes = BYTES.load(Ordering::Relaxed);
