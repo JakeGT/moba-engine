@@ -46,11 +46,11 @@ deterministic playback and server authority.
   their handshake catalogue. Test covers reload with zero clients.
 
 ## Next
-- Move map/lane/structure definitions into validated content.
-- Add more ability behaviour kinds (projectile arcs, buffs, summons) and scripting hooks.
-- Per-client content-update packets; manifest signing/attestation.
-- Hot-reload for development and a `moba-tools content check` command.
+- Per-client content-update packets (connected clients currently keep their handshake pack).
+- Manifest signing/attestation for third-party pack distribution.
 - Asset/model mappings and per-map rendering.
+- Scripting hooks and more code-driven behaviours (projectile arcs, summons, auras).
+- Larger content-pack compatibility/fuzz fixtures.
 
 ## References
 - [Data-driven RPG architecture](https://codesmith.hashnode.dev/architecting-a-data-driven-rpg-in-c)

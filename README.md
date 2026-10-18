@@ -10,6 +10,9 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 
 ![Minimap and floating health bars](docs/images/m6-minimap-healthbars.png)
 
+[See the full screenshot gallery](docs/screenshots.md) for the renderer, HUD, fog-of-war,
+spectator camera, status effects and runtime-content examples.
+
 ## What is in the box
 
 | Area | Capability |
@@ -209,19 +212,22 @@ moba-engine = { version = "0.1", default-features = false, features = ["sim", "n
 ```
 
 or take individual crates (`moba-sim`, `moba-net`, …) for a narrower dependency graph.
-Runnable examples live in `crates/tools/examples`:
+Runnable examples live in `crates/engine/examples`:
 
 ```bash
-cargo run -p moba-tools --example headless_match -- --ticks 3000
-cargo run -p moba-tools --example scripted_orders
-cargo run -p moba-tools --example custom_component
+cargo run -p moba-engine --example headless_match
+cargo run -p moba-engine --example custom_content
 ```
+
+More embedding patterns (custom ECS systems, content, server hosting, replays) are in
+[docs/building-on-moba.md](docs/building-on-moba.md).
 
 ## Extending
 
-- **Content:** heroes, abilities, items, level growth and economy live in `moba-game` tables.
-  Today content is compile-time; [docs/content-authoring.md](docs/content-authoring.md) walks
-  through adding an item/hero and the planned runtime content packs (M8).
+- **Content:** runtime TOML packs define items, heroes, abilities, growth, lanes, structures
+  and vision walls; validated packs are hashed and exchanged in the handshake. See
+  [docs/content-authoring.md](docs/content-authoring.md) and the example packs in
+  [`content/`](content/).
 - **Rules/simulation:** depend on `moba-sim` and drive it from a custom server or tool. The
   simulation consumes intent only and never reads a clock or a hash map. `world()`/`world_mut()`
   expose the ECS for custom components, inspectors and alternate modes.
@@ -242,7 +248,7 @@ just fuzz-wire     # one-hour deterministic wire fuzzing
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow, layering rules and review
-expectations.
+expectations. Agent-facing development instructions are in [AGENTS.md](AGENTS.md).
 
 ## Security
 

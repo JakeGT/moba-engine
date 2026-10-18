@@ -34,9 +34,10 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
 - Server rewind compensation is not needed for the current kit: every aimed ability is a
   traveling projectile and basic attacks are server-targeted, so aim is not resolved
   against a stale snapshot. Revisit if hitscan abilities are added.
-- HUD (health/mana/cooldowns), fog of war, scoreboard and the wider match flow belong to M6.
-- Encryption/authentication: sessions are 32-bit tokens, not cryptographic; M7 hardening.
-- Sanitizer-backed fuzzing runtime (M7); the deterministic wire fuzzer is available now.
+- Sanitizer-backed fuzzing (e.g. cargo-fuzz/ASan) remains open; the deterministic one-hour
+  wire fuzzer is the current gate.
+- HUD/fog/scoreboard and the wider match flow landed in M6; per-client content updates remain
+  an M8 item.
 
 ## Acceptance tests
 - [x] Protocol round-trips, bounds checks and 5k-byte fragmented datagrams.
@@ -47,11 +48,12 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
 - [x] Downstream 4.4–4.7 KB/s per client (budget 20 typical / 40 teamfight); upstream
       ~1.1 KB/s (budget 4).
 - [x] Five-minute soak (`moba-tools soak --seconds 300`): all 10 clients stay connected,
-      ~8,500 snapshots each, 4.1–4.5 KB/s down, ~1.17 KB/s up, 177–209 ms RTT.
+      ~8,500 snapshots each, ~5.0 KB/s down, ~1.17 KB/s up, 169–201 ms RTT.
 - [x] Prediction/reconciliation tests and interpolation tests.
 - [x] Networked client renders server snapshots and predicts the local hero; readback
       capture with validation enabled.
-- [x] Wire fuzzer: 73M decoder iterations in 60 s clean (one-hour gate available).
+- [x] Wire fuzzer: final v12 one-hour run, 2,384,035,000 decoder iterations clean (plus a
+      clean v11 one-hour run).
 - [~] Lag compensation: N/A for traveling projectiles/server-targeted attacks; documented.
 
 ## Netcode decisions (checked against prior art)

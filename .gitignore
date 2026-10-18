@@ -3,3 +3,4 @@
 *.tracy
 .claude/settings.local.json
 .claude/worktrees/
+agents.local.md

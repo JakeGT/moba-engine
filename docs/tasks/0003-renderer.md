@@ -22,6 +22,11 @@ without a GPU.
 - GPU readback capture (`Renderer::capture_frame`) and a `MOBA_CAPTURE` client mode that
   writes a PPM.
 
+## Status
+
+Core rendering, fog/LOS, HUD and readback are landed. The open items below are tracked as
+GitHub issues; this task is not exit-complete until they close.
+
 ## Non-goals / still open
 - Skeletal skinning and animation (currently instanced cubes; M6 art pass).
 - Golden-image comparison tolerances and CI wiring for lavapipe.

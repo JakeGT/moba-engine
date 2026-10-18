@@ -115,19 +115,18 @@ the authoritative tick (which is single-threaded for determinism).
 
 | Goal | Where |
 |---|---|
-| Add/tune items | `moba-game/src/item.rs` (`ITEMS`, costs, level growth, economy) |
-| Add/tune heroes/abilities | `moba-game/src/hero.rs`, `ability.rs`; simulation spawn/bot logic picks them up |
-| Change map/lanes/structures | `moba-game/src/map.rs` |
+| Add/tune items | `content/*.toml` runtime packs; `moba-game/src/item.rs` holds defaults/economy |
+| Add/tune heroes/abilities | runtime packs; `moba-game/src/hero.rs`/`ability.rs` define defaults and code-driven kinds |
+| Change map/lanes/structures | `content/*.toml` `[map]`; `moba-game/src/map.rs` holds defaults |
 | Replace rendering | `moba-render` boundary; client uses `Renderer`, `Scene`, `UiDrawList` |
 | Replace transport | `moba-net::transport`; protocol/snapshot modules are separate |
 | Embed simulation | depend on `moba-sim`, call `tick(&TickInputs)` and read events/state hash |
-| Add custom components/systems | `Simulation::world()`/`world_mut()`; see `crates/tools/examples/custom_component.rs` |
+| Add custom components/systems | `Simulation::world()`/`world_mut()`; see `docs/building-on-moba.md` |
 | Add server tooling | `moba-tools` binaries or a custom crate depending on `moba-sim`/`moba-net` |
 
-**Current limit:** content is compile-time static data. Runtime content packs, hot reload and
-asset definitions are M8. Until then, extending content means editing the tables and rebuilding;
-the table layout is intentionally simple so a loader can replace it without changing the
-simulation loop.
+**Extension limit:** content packs cover items, heroes, ability numbers/kinds, growth, maps,
+lanes, structures and vision walls. Asset/model mappings, scripting hooks and live per-client
+content updates are still open (tracked in GitHub Issues).
 
 ## Threading model
 
@@ -143,8 +142,8 @@ simulation loop.
 Each map can carry vision-blocking wall segments. The server intersects the source→unit
 segment against walls before revealing an enemy; allied units and structures stay visible.
 The terrain shader receives the same segments and rejects a vision-circle contribution when
-a wall crosses the circle-center→fragment ray. Wall geometry rendering is intentionally not
-part of this slice; the blockers are authored data and minimap-independent.
+a wall crosses the circle-center→fragment ray. The client renders wall geometry in the world
+and as segments on the minimap.
 
 The server binary accepts a TOML deployment file (`--config`); CLI flags override file
 values, and secrets can reference paths or 64-hex strings.
@@ -166,8 +165,10 @@ datagrams and average/max simulation tick nanoseconds for operators and the soak
 `GameContent` owns the runtime item, hero, ability and map catalogues; the simulation holds
 an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` accepts a validated pack;
 the server publishes it in `Welcome`, and clients use the received `WireItem`, `WireHero`,
-`WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability behaviour and
-map/lane definitions remain compile-time; the content crate is designed to grow into them.
+`WireAbility` and `WireMap` entries for shop, HUD, vision and minimap rendering. Ability
+behaviour kinds are code-defined, but their numbers and hero bindings come from the pack; map,
+lane, structure and wall geometry are fully data-driven. Packs hot-reload only in an empty
+lobby so connected clients keep a consistent handshake catalogue.
 
 ## Handshake replay window
 
