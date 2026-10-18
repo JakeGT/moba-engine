@@ -2,11 +2,82 @@
 
 use super::theme;
 use super::{
-    Camera, EMPTY_ITEM, Fix, HitList, HudAction, HudString, InputState, Key, LEVEL_CAP, MatchPhase,
+    Camera, EMPTY_ITEM, Fix, HitList, HudAction, HudString, InputState, Key, LEVEL_CAP,
     NetworkView, Simulation, Team, UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf,
     draw_world_circle, register, xp_to_next,
 };
 use crate::{hud_fmt, hud_static};
+use moba_core::FixVec2;
+use moba_net::protocol::MatchPhase;
+
+/// Borrowed view of one network unit for HUD drawing.
+#[derive(Copy, Clone)]
+pub(crate) struct HudUnit<'a>(&'a moba_net::NetEntity);
+
+impl<'a> HudUnit<'a> {
+    pub(crate) fn new(entity: &'a moba_net::NetEntity) -> Self {
+        Self(entity)
+    }
+
+    pub(crate) fn net_id(self) -> u16 {
+        self.0.net_id
+    }
+    pub(crate) fn kind(self) -> u8 {
+        self.0.kind
+    }
+    pub(crate) fn team(self) -> u8 {
+        self.0.team
+    }
+    pub(crate) fn position(self) -> FixVec2 {
+        self.0.position()
+    }
+    pub(crate) fn health(self) -> i32 {
+        i32::from(self.0.health)
+    }
+    pub(crate) fn max_health(self) -> i32 {
+        i32::from(self.0.max_health)
+    }
+    pub(crate) fn dead(self) -> bool {
+        self.0.is_dead()
+    }
+
+    pub(crate) fn hero_pick(self) -> u8 {
+        self.0.hero_pick
+    }
+    pub(crate) fn status_bits(self) -> u16 {
+        self.0.status_bits
+    }
+}
+
+/// Iterates the current network view as HUD units.
+pub(crate) fn hud_units(network: &NetworkView) -> impl Iterator<Item = HudUnit<'_>> {
+    network
+        .client
+        .snapshot()
+        .into_iter()
+        .flat_map(|state| state.entities.iter().map(HudUnit))
+}
+
+/// Visits each lane's valid minimap points.
+pub(crate) fn map_lanes(network: &NetworkView, mut visit: impl FnMut(&[[i16; 2]])) {
+    let map = network.client.map();
+    for lane in map.lanes.iter().take(usize::from(map.lane_count)) {
+        let count = usize::from(lane.point_count).min(lane.points.len());
+        visit(&lane.points[..count]);
+    }
+}
+
+/// Visits each minimap wall endpoint pair.
+pub(crate) fn map_walls(network: &NetworkView, mut visit: impl FnMut([i16; 2], [i16; 2])) {
+    let map = network.client.map();
+    for wall in map.walls.iter().take(usize::from(map.wall_count)) {
+        visit(wall.a, wall.b);
+    }
+}
+
+pub(crate) use moba_net::protocol::{
+    STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE, STATUS_SLOW,
+};
 
 /// Frame-level HUD data shared by the network and local-preview modes.
 pub(crate) struct HudModel<'a> {

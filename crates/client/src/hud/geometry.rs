@@ -1,19 +1,19 @@
 //! HUD geometry.
 
-use super::{Camera, FixVec2, NetworkView, Vec2, Vec3, Vec4, dequantize_position};
+use super::{Camera, FixVec2, HudUnit, NetworkView, Vec2, Vec3, Vec4};
 
 pub(crate) fn rendered_entity_position(
     network: &NetworkView,
-    entity: &moba_net::NetEntity,
+    unit: HudUnit<'_>,
     render_tick: f32,
 ) -> FixVec2 {
-    if Some(entity.net_id) == network.own_net_id {
+    if Some(unit.net_id()) == network.own_net_id {
         network.prediction.position()
     } else {
         network
             .interpolator
-            .position(entity.net_id, render_tick)
-            .unwrap_or_else(|| dequantize_position(entity.x, entity.y))
+            .position(unit.net_id(), render_tick)
+            .unwrap_or_else(|| unit.position())
     }
 }
 

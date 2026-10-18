@@ -43,8 +43,8 @@ use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
 
 use crate::hud::{
-    HitList, HudAction, build_local_hud, build_network_hud, build_vision, minimap_world, rect_at,
-    rendered_entity_position,
+    HitList, HudAction, HudUnit, build_local_hud, build_network_hud, build_vision, minimap_world,
+    rect_at, rendered_entity_position,
 };
 
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
@@ -652,7 +652,7 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
         let Some(team) = team_from_u8(entity.team) else {
             continue;
         };
-        let position = rendered_entity_position(network, entity, render_tick);
+        let position = rendered_entity_position(network, HudUnit::new(entity), render_tick);
         let fraction = if entity.max_health == 0 {
             1.0
         } else {
