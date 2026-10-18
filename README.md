@@ -47,7 +47,7 @@ MOBA_SERVER=local cargo run -p moba-client
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
-R ready up in the lobby, F5 surrender vote, B shop (click/1–8 buy, hover tooltip, Left/Right page), click minimap to move, Tab scoreboard,
+R ready up in the lobby, F5 surrender vote, B shop (click/1–8 buy, hover tooltip, Left/Right page), hover Q/W/E for details, click minimap to move, Tab scoreboard,
 Escape quit. `MOBA_SPECTATE=1` joins read-only with full-map visibility; WASD pans, arrows
 rotate/zoom the spectator camera.
 

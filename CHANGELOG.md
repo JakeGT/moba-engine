@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Ability boxes register hover rects and show name, targeting, range, cooldown, mana and
+  effect summary tooltips from the wire catalogue.
 - Minimap clicks issue a world move; shop rows show a hover tooltip with item stats.
 - HUD hit rectangles are registered each frame; mouse clicks on panels no longer issue
   `MoveTo`, and shop items can be bought by clicking a row (keyboard 1–8 still works).
