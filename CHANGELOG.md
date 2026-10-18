@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- HUD hit rectangles are registered each frame; mouse clicks on panels no longer issue
+  `MoveTo`, and shop items can be bought by clicking a row (keyboard 1–8 still works).
 - Shared `HudModel` frame state used by both network and local-preview HUDs.
 - A test-only allocation counter proves a warmed local-HUD frame performs **zero heap
   allocations** on the calling thread (`forbid(unsafe_code)` remains in non-test builds).

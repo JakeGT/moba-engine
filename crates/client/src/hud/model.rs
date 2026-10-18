@@ -2,9 +2,9 @@
 
 use super::theme;
 use super::{
-    Camera, EMPTY_ITEM, Fix, HudString, InputState, Key, LEVEL_CAP, MatchPhase, NetworkView,
-    Simulation, Team, UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf,
-    draw_world_circle, xp_to_next,
+    Camera, EMPTY_ITEM, Fix, HitList, HudAction, HudString, InputState, Key, LEVEL_CAP, MatchPhase,
+    NetworkView, Simulation, Team, UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf,
+    draw_world_circle, register, xp_to_next,
 };
 use crate::{hud_fmt, hud_static};
 
@@ -97,7 +97,9 @@ pub(crate) fn build_network_hud(
     height: u32,
     frame_ms: f32,
     fps: f32,
+    hits: &mut HitList,
 ) {
+    hits.clear();
     ui.clear();
     if width == 0 || height == 0 {
         return;
@@ -199,6 +201,14 @@ pub(crate) fn build_network_hud(
         bg,
         border,
     );
+    register(
+        hits,
+        HudAction::Block,
+        (width_f - timer_width) * 0.5,
+        14.0,
+        timer_width,
+        72.0,
+    );
     ui.text_shadowed(
         (width_f - UiDrawList::text_width(&timer, 3.5)) * 0.5,
         20.0,
@@ -223,6 +233,7 @@ pub(crate) fn build_network_hud(
 
     // Connection/status block.
     ui.panel(18.0, 18.0, 250.0, 82.0, bg, border);
+    register(hits, HudAction::Block, 18.0, 18.0, 250.0, 82.0);
     ui.text(
         30.0,
         28.0,
@@ -286,6 +297,7 @@ pub(crate) fn build_network_hud(
         let x = 24.0;
         let y = height_f - panel_h - 24.0;
         ui.panel(x, y, panel_w, panel_h, bg, border);
+        register(hits, HudAction::Block, x, y, panel_w, panel_h);
         let level = progress.level.max(1);
         let xp_needed = if level >= LEVEL_CAP {
             0
@@ -428,7 +440,7 @@ pub(crate) fn build_network_hud(
             }
         }
     }
-    draw_minimap(ui, network, width, height);
+    draw_minimap(ui, network, width, height, hits);
     if scoreboard {
         let panel_width = 620.0;
         let panel_height = 330.0;
@@ -442,6 +454,7 @@ pub(crate) fn build_network_hud(
             Vec4::new(0.01, 0.02, 0.035, 0.9),
             border,
         );
+        register(hits, HudAction::Block, sx, sy, panel_width, panel_height);
         ui.text_shadowed(sx + 24.0, sy + 18.0, 3.5, text, "SCOREBOARD");
         ui.text(
             sx + panel_width - 200.0,
@@ -518,6 +531,7 @@ pub(crate) fn build_network_hud(
             Vec4::new(0.01, 0.02, 0.035, 0.94),
             border,
         );
+        register(hits, HudAction::Block, sx, sy, shop_w, shop_h);
         ui.text_shadowed(sx + 24.0, sy + 18.0, 3.5, text, "SHOP");
         ui.text(
             sx + shop_w - 180.0,
@@ -536,6 +550,15 @@ pub(crate) fn build_network_hud(
             .enumerate()
         {
             let row_y = sy + 62.0 + index as f32 * 36.0;
+            let item_index = u8::try_from(page * 8 + index).unwrap_or(u8::MAX);
+            register(
+                hits,
+                HudAction::ShopItem(item_index),
+                sx + 24.0,
+                row_y - 4.0,
+                shop_w - 48.0,
+                32.0,
+            );
             let affordable = u32::from(progress.gold) >= item.cost;
             let name_color = if affordable {
                 text
@@ -721,7 +744,9 @@ pub(crate) fn build_local_hud(
     height: u32,
     frame_ms: f32,
     fps: f32,
+    hits: &mut HitList,
 ) {
+    hits.clear();
     let model = HudModel::local(simulation);
     ui.clear();
     draw_perf(ui, width as f32, frame_ms, fps);
@@ -733,6 +758,7 @@ pub(crate) fn build_local_hud(
     let text = theme::TEXT;
     let muted = theme::MUTED;
     ui.panel(18.0, 18.0, 330.0, 112.0, bg, border);
+    register(hits, HudAction::Block, 18.0, 18.0, 330.0, 112.0);
     ui.text_shadowed(32.0, 30.0, 3.0, text, "LOCAL BOT PREVIEW");
     ui.text(
         32.0,
@@ -758,7 +784,7 @@ pub(crate) fn build_local_hud(
 
 #[cfg(test)]
 mod tests {
-    use super::{HudModel, MatchPhase, Simulation, UiDrawList, build_local_hud};
+    use super::{HitList, HudModel, MatchPhase, Simulation, UiDrawList, build_local_hud};
     use crate::{hud_fmt, hud_static};
     use moba_sim::SimConfig;
 
@@ -766,18 +792,21 @@ mod tests {
     fn local_hud_builds_a_draw_list() {
         let simulation = Simulation::new(SimConfig::default());
         let mut ui = UiDrawList::new();
-        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
+        let mut hits = HitList::new();
+        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
         assert_ne!(ui.vertices().len(), 0);
+        assert!(!hits.is_empty());
     }
 
     #[test]
     fn local_hud_has_zero_steady_state_allocations() {
         let simulation = Simulation::new(SimConfig::default());
         let mut ui = UiDrawList::new();
+        let mut hits = HitList::new();
         // Warm retained draw-list capacity before measuring.
-        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
+        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
         let ((), allocations) = crate::app::allocation_probe::probe(|| {
-            build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
+            build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
         });
         assert_eq!(allocations, 0, "steady-state HUD allocation");
     }

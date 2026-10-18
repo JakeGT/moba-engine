@@ -42,7 +42,10 @@ use moba_render::{
 use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
 
-use crate::hud::{build_local_hud, build_network_hud, build_vision, rendered_entity_position};
+use crate::hud::{
+    HitList, HudAction, action_at, build_local_hud, build_network_hud, build_vision,
+    rendered_entity_position,
+};
 
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
 const SNAPSHOT_DELAY_TICKS: f32 = 4.0;
@@ -97,6 +100,7 @@ struct ClientApp {
     ui: UiDrawList,
     scoreboard_visible: bool,
     shop_visible: bool,
+    hit_rects: HitList,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -123,6 +127,7 @@ impl ClientApp {
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
+            hit_rects: HitList::new(),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -274,6 +279,7 @@ impl App for ClientApp {
                 ui,
                 scoreboard_visible,
                 shop_visible,
+                hit_rects,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -375,6 +381,7 @@ impl App for ClientApp {
                             width,
                             height,
                             shop_visible,
+                            hit_rects,
                         );
                         if frame.input().was_key_pressed(Key::Tab) {
                             *scoreboard_visible = !*scoreboard_visible;
@@ -390,6 +397,7 @@ impl App for ClientApp {
                             height,
                             frame_ms,
                             fps,
+                            hit_rects,
                         );
                         network.update_effects(frame_ms);
                         let vision = build_vision(network);
@@ -445,7 +453,7 @@ impl App for ClientApp {
                     } else {
                         frame.elapsed_secs() as f32 * 0.035
                     };
-                    build_local_hud(ui, simulation, width, height, frame_ms, fps);
+                    build_local_hud(ui, simulation, width, height, frame_ms, fps, hit_rects);
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                     let scene = Scene::new(camera, units);
                     if let Some(renderer) = renderer.as_mut() {
@@ -819,6 +827,7 @@ fn handle_spectator_input(network: &mut NetworkView, input: &InputState) {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One ordered focus/input sequence.
 fn handle_network_input(
     network: &mut NetworkView,
     input: &InputState,
@@ -826,9 +835,20 @@ fn handle_network_input(
     width: u32,
     height: u32,
     shop: &mut bool,
+    hits: &HitList,
 ) {
     if network.spectator {
         handle_spectator_input(network, input);
+        return;
+    }
+    let ui_action = input
+        .cursor()
+        .and_then(|cursor| action_at(hits, cursor.x, cursor.y));
+    if *shop
+        && input.was_mouse_pressed(MouseButton::Left)
+        && let Some(HudAction::ShopItem(item)) = ui_action
+    {
+        let _ = network.client.send_command(WireCommand::BuyItem { item });
         return;
     }
     if input.was_key_pressed(Key::R) && network.phase == MatchPhase::Lobby {
@@ -883,6 +903,9 @@ fn handle_network_input(
     let Some(cursor) = input.cursor() else {
         return;
     };
+    if ui_action.is_some() {
+        return;
+    }
     let Some(ground) = cursor_ground(camera, cursor, width, height) else {
         return;
     };
