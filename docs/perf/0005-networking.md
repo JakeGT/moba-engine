@@ -110,3 +110,5 @@ One-hour release runs of `fuzz-wire` completed with no panic or decoder hang:
 
 This is well inside the 33 ms tick budget and the bandwidth budget for small dedicated
 servers.
+
+Bot fixed-composition mirror CIs are recorded in [0008-balance.md](0008-balance.md).

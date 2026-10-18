@@ -1,6 +1,9 @@
 //! Run many deterministic bot matches headlessly and verify replayability.
 //!
 //! Usage: `cargo run --release -p moba-tools --bin match-soak -- [--matches N] [--ticks N]`
+//!
+//! Fixed mirrors: `--matches 300 --pick 2 --fixed-picks`. The seed now drives per-slot bot
+//! RNG streams and the initial scheduling phase, so each seed is an independent match.
 #![allow(clippy::print_stdout)]
 
 use std::time::Instant;

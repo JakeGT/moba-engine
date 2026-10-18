@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Seed-driven bot play and fair scheduling phase; fixed-composition mirror sweeps now vary per
+  seed. Balance harness/results documented in `docs/perf/0008-balance.md`.
 - Protocol v14 modifier catalogue: content-defined `ModifierDef` names/kinds are validated,
   hashed, shipped in `WireCatalog`, and recorded on every modifier instance. `SIM_LOGIC_VERSION`
   is now 3.
