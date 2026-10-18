@@ -37,6 +37,69 @@ fn spawn_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
     (addr, public, handle)
 }
 
+fn spawn_combined_server() -> (SocketAddr, std::thread::JoinHandle<()>) {
+    let token = [0x55; 32];
+    let mut server = NetServer::bind(ServerConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        sim: SimConfig::default(),
+        snapshot_interval: 1,
+        max_clients: 10,
+        countdown_ticks: 0,
+        results_ticks: 0,
+        client_timeout: Duration::from_secs(2),
+        reconnect_grace: Duration::from_secs(2),
+        pre_shared_key: None,
+        record: None,
+        max_spectators: 4,
+        max_packets_per_second: 120,
+        max_total_packets_per_second: 2_000,
+        require_ready: false,
+    })
+    .expect("bind");
+    server.add_client_key(token);
+    server.require_client_identity([identity_public_key(&SEED)]);
+    let addr = server.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        server.run_for(Duration::from_secs(4)).expect("server");
+    });
+    (addr, handle)
+}
+
+#[test]
+fn identity_and_token_modes_compose() {
+    let (addr, server) = spawn_combined_server();
+    let token = [0x55; 32];
+    let both = NetClient::connect_with_auth(
+        addr,
+        Duration::from_secs(2),
+        ClientAuth {
+            pre_shared_key: Some(token),
+            identity_seed: Some(SEED),
+            ..ClientAuth::default()
+        },
+    );
+    assert!(both.is_ok(), "identity plus token connects");
+    let identity_only = NetClient::connect_with_auth(
+        addr,
+        Duration::from_millis(500),
+        ClientAuth {
+            identity_seed: Some(SEED),
+            ..ClientAuth::default()
+        },
+    );
+    assert!(identity_only.is_err(), "configured token is still required");
+    let token_only = NetClient::connect_with_auth(
+        addr,
+        Duration::from_millis(500),
+        ClientAuth {
+            pre_shared_key: Some(token),
+            ..ClientAuth::default()
+        },
+    );
+    assert!(token_only.is_err(), "required identity is still required");
+    server.join().expect("server thread");
+}
+
 #[test]
 fn client_identity_challenge_accepts_allowlisted_key() {
     let (addr, public, server) = spawn_server();
