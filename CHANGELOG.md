@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Dense per-client net-id table indexed by entity slot + generation, removing the snapshot
+  hot-path linear scan.
 - Single-query observe candidate pass with a reused scratch vector; observe benchmark
   improves from 19.2 µs to 13.2 µs for three views.
 - Flat deterministic spatial grid with reusable counting-sort buffers; steady/teamfight ticks

@@ -114,3 +114,10 @@ servers.
 Bot fixed-composition mirror CIs are recorded in [0008-balance.md](0008-balance.md).
 
 Presentation events/status bits and protocol v16 bandwidth are recorded in [0009-presentation-events.md](0009-presentation-events.md).
+
+## Dense per-client entity IDs
+
+`ClientConn` now maps entities through a dense table indexed by `Entity::index`, with a
+generation check on lookup instead of a linear scan. Snapshot construction is O(1) per visible
+unit regardless of match length; generation reuse after despawn is covered by a unit test.
+Reverse lookup for rare client input commands still scans the dense table.
