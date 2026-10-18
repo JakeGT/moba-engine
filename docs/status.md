@@ -11,9 +11,9 @@ Last updated: 2026-10-17 (round 17 of the build).
 | M2 | Platform | ✅ (Linux run; Win/macOS CI pending) | winit window, input, 30 Hz fixed step, 60-frame smoke run exits 0. |
 | M3 | Renderer | 🟡 | Device/swapchain/dynamic rendering + 500 instanced units and terrain validated on lavapipe (zero validation messages); skinning, perf and golden CI pending. |
 | M4 | Simulation | ✅ (Linux-verified) | 5v5 + 3 lanes + towers/nexus + 15 abilities + bots; 13.3 µs/tick; 10k-tick determinism. Server-side vision filtering (M5), fog rendering and levels/items (M6) landed. |
-| M5 | Networking | 🟡 | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and free-pan spectator mode (protocol v12); per-client tokens, Ed25519 server/client identity, replay window and edge rate limits; one-hour v11 fuzz passed and v12 is running. |
+| M5 | Networking | ✅ (Linux-verified) | UDP transport, optional PSK AEAD encryption, reconnect, visibility/delta snapshots, prediction/interpolation, playable client and free-pan spectator mode (protocol v12); per-client tokens, Ed25519 server/client identity, replay window and edge rate limits; one-hour v11 fuzz passed and v12 is running. |
 | M6 | Vertical slice | ✅ | Playable networked/local match with lobby/countdown/results/rematch, reconnect grace, read-only spectator mode, ready-up/surrender, HUD, levels/XP, gold/items/shop, minimap, health bars, scoreboard, fog-of-war and wall line-of-sight. Linux-verified; audio/settings deferred. |
-| M7 | Hardening | 🟡 | PSK AEAD transport, per-client tokens, Ed25519 server/client identity, reconnect, replay checkpoints, per-address/global rate limits, graceful shutdown, 50-match harness and Criterion captures landed; v12 fuzz completion remains. |
+| M7 | Hardening | ✅ (Linux-verified) | PSK AEAD transport, per-client tokens, Ed25519 server/client identity, reconnect, replay checkpoints, per-address/global rate limits, graceful shutdown, 50-match harness and Criterion captures landed; final v12 one-hour fuzz passed clean. |
 | M8 | Content pipeline | 🟡 | Runtime item/hero/ability/map packs load from TOML, validate, drive simulation, reach clients in the handshake and hot-reload in an empty lobby; 10 ability behaviour kinds, per-hero growth and pack manifests landed; per-client content updates remain. |
 
 ## What exists now
@@ -166,8 +166,8 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 
 - Client identity: Ed25519 challenge/allowlist flow verified end-to-end with a 314-tick match.
 
-- Fuzz: one-hour wire-decoder run completed 2,476,647,000 iterations clean on v11; v12 fuzz
-  restarted after adding client identity fields/challenge.
+- Fuzz: one-hour wire-decoder runs completed 2,476,647,000 iterations clean on v11 and
+  2,384,035,000 clean on the final v12 shape.
 
 - Spectator: free pan/rotate/zoom camera (`m6-spectator-camera.png`), all units visible.
 

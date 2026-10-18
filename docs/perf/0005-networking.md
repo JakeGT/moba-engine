@@ -92,9 +92,11 @@ and fixed-composition sweeps should be used before changing balance.
 
 ## Wire-decoder fuzz gate
 
-A one-hour release run of `fuzz-wire` completed **2,476,647,000 iterations clean** with no
-panic or decoder hang (protocol v11 shape). Protocol v12 adds client-identity fields and the
-`Challenge` packet, so a new one-hour run is required and was started after the change.
+One-hour release runs of `fuzz-wire` completed with no panic or decoder hang:
+
+- protocol v11 shape: **2,476,647,000 iterations clean**
+- final protocol v12 shape (client-identity fields + `Challenge`): **2,384,035,000 iterations
+  clean**
 
 ## Final 10-client lossy soak (round 58)
 
