@@ -312,6 +312,52 @@ struct SnapshotRecord {
 }
 
 #[derive(Debug)]
+struct NetIdTable {
+    entries: Vec<Option<(moba_ecs::Entity, NetId)>>,
+    next: NetId,
+}
+
+impl Default for NetIdTable {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            next: 1,
+        }
+    }
+}
+
+impl NetIdTable {
+    fn get_or_insert(&mut self, entity: moba_ecs::Entity) -> NetId {
+        let index = entity.index() as usize;
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+        if let Some((known, id)) = self.entries[index]
+            && known == entity
+        {
+            return id;
+        }
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.entries[index] = Some((entity, id));
+        id
+    }
+
+    fn entity_for(&self, net_id: NetId) -> Option<moba_ecs::Entity> {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|(_, id)| *id == net_id)
+            .map(|(entity, _)| *entity)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.next = 1;
+    }
+}
+
+#[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)] // Connection flags are independent state.
 struct ClientConn {
     addr: SocketAddr,
@@ -327,8 +373,7 @@ struct ClientConn {
     last_input_seq: u32,
     command: Option<WireCommand>,
     pending_purchase: Option<u8>,
-    net_ids: Vec<(moba_ecs::Entity, NetId)>,
-    next_net_id: NetId,
+    net_ids: NetIdTable,
     snapshot_seq: u32,
     acked_snapshot: u32,
     need_full: bool,
@@ -340,20 +385,11 @@ struct ClientConn {
 
 impl ClientConn {
     fn net_id_for(&mut self, entity: moba_ecs::Entity) -> NetId {
-        if let Some((_, id)) = self.net_ids.iter().find(|(known, _)| *known == entity) {
-            return *id;
-        }
-        let id = self.next_net_id;
-        self.next_net_id = self.next_net_id.wrapping_add(1);
-        self.net_ids.push((entity, id));
-        id
+        self.net_ids.get_or_insert(entity)
     }
 
     fn entity_for(&self, net_id: NetId) -> Option<moba_ecs::Entity> {
-        self.net_ids
-            .iter()
-            .find(|(_, id)| *id == net_id)
-            .map(|(entity, _)| *entity)
+        self.net_ids.entity_for(net_id)
     }
 
     fn baseline(&self, seq: u32) -> Option<&[NetEntity]> {
@@ -1106,7 +1142,6 @@ impl NetServer {
             };
             client.history.clear();
             client.net_ids.clear();
-            client.next_net_id = 1;
             client.acked_snapshot = 0;
             client.need_full = true;
             client.command = None;
@@ -1477,8 +1512,7 @@ impl NetServer {
                     last_input_seq: 0,
                     command: None,
                     pending_purchase: None,
-                    net_ids: Vec::new(),
-                    next_net_id: 1,
+                    net_ids: NetIdTable::default(),
                     snapshot_seq: 0,
                     acked_snapshot: 0,
                     need_full: true,
@@ -1921,6 +1955,22 @@ mod tests {
     use super::*;
     use moba_sim::{Health, UnitKind};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn dense_net_ids_handle_generation_reuse() {
+        let mut table = NetIdTable::default();
+        let first = moba_ecs::Entity::from_parts(5, 1);
+        let id = table.get_or_insert(first);
+        assert_eq!(table.get_or_insert(first), id);
+        assert_eq!(table.entity_for(id), Some(first));
+        let reused = moba_ecs::Entity::from_parts(5, 2);
+        let new_id = table.get_or_insert(reused);
+        assert_ne!(id, new_id);
+        assert_eq!(table.entity_for(new_id), Some(reused));
+        table.clear();
+        assert_eq!(table.entity_for(new_id), None);
+        assert_eq!(table.get_or_insert(reused), 1);
+    }
 
     #[test]
     fn extension_systems_run_in_order_after_tick() {
