@@ -83,3 +83,10 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   lockstep/replay verification across platforms.
 - [AstraWeave deterministic architecture](https://github.com/lazyxeon/AstraWeave/blob/main/docs/src/architecture/deterministic.md)
   for deterministic simulation/testing practices.
+
+## Identity trust (ADR 0006)
+
+- [x] Local allowlist key rotation/revocation (`--rotate-client-key`, `--revoke-client-key`).
+- [x] Trust-boundary ADR covering accounts, transparency/revocation feeds and optional
+  player-count attestation.
+- [x] SECURITY threat-model update; plaintext/token-only modes unchanged.

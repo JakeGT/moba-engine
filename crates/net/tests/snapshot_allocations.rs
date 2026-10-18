@@ -68,13 +68,13 @@ fn steady_state_snapshot_build_and_encode_allocate_nothing() {
     }
     let mut delta = SnapshotDelta::default();
     let mut payload = Vec::with_capacity(16 * 1024);
-    // Warm capacities in the delta and encode buffers.
-    build_delta_into(&current, Some(&baseline), 1, 0, 1, &mut delta);
+    // Warm capacities in the delta and encode buffers, including the first tick value.
+    build_delta_into(&current, Some(&baseline), 0, 0, 1, &mut delta);
     encode_snapshot(&delta, &mut payload).expect("encode");
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
     BYTES.store(0, Ordering::Relaxed);
-    for tick in 0..300 {
+    for tick in 1..=300 {
         build_delta_into(&current, Some(&baseline), tick, 0, 1, &mut delta);
         encode_snapshot(&delta, &mut payload).expect("encode");
     }

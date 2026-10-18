@@ -857,6 +857,44 @@ impl NetServer {
         self.require_client_identity = true;
     }
 
+    /// Removes a client identity key from the allowlist.
+    ///
+    /// Returns whether the key was present. Revoking the last key keeps the allowlist
+    /// enforcing (all clients are then rejected) instead of silently disabling identity checks.
+    pub fn revoke_client_key(&mut self, key: [u8; 32]) -> bool {
+        let before = self.allowed_client_keys.len();
+        self.allowed_client_keys.retain(|allowed| *allowed != key);
+        before != self.allowed_client_keys.len()
+    }
+
+    /// Replaces a client identity key in the allowlist.
+    ///
+    /// Returns whether `old` was present. If `new` is already listed the old entry is simply
+    /// removed.
+    pub fn rotate_client_key(&mut self, old: [u8; 32], new: [u8; 32]) -> bool {
+        let Some(index) = self.allowed_client_keys.iter().position(|key| *key == old) else {
+            return false;
+        };
+        if self.allowed_client_keys.contains(&new) {
+            self.allowed_client_keys.remove(index);
+        } else {
+            self.allowed_client_keys[index] = new;
+        }
+        true
+    }
+
+    /// Whether a key is currently allowed; intended for operator checks and tests.
+    #[must_use]
+    pub fn client_key_allowed(&self, key: [u8; 32]) -> bool {
+        !self.require_client_identity || self.allowed_client_keys.contains(&key)
+    }
+
+    /// Number of allowed client identity keys.
+    #[must_use]
+    pub fn allowed_client_key_count(&self) -> usize {
+        self.allowed_client_keys.len()
+    }
+
     fn issue_challenge(&mut self, addr: SocketAddr) -> io::Result<()> {
         let now = Instant::now();
         self.client_challenges.retain(|challenge| {
@@ -2110,6 +2148,40 @@ mod tests {
         server.phase = Phase::Playing;
         server.tick().expect("tick");
         assert_eq!(*order.lock().expect("lock"), vec![1, 2]);
+    }
+
+    #[test]
+    fn client_identity_keys_rotate_and_revoke() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 1,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(1),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 0,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let old = [3u8; 32];
+        let new = [4u8; 32];
+        server.require_client_identity([old]);
+        assert!(server.client_key_allowed(old));
+        assert!(!server.client_key_allowed(new));
+        assert!(server.rotate_client_key(old, new));
+        assert!(!server.client_key_allowed(old));
+        assert!(server.client_key_allowed(new));
+        assert!(!server.rotate_client_key(old, new));
+        assert!(server.revoke_client_key(new));
+        assert!(!server.client_key_allowed(new));
+        assert_eq!(server.allowed_client_key_count(), 0);
+        assert!(!server.revoke_client_key(new));
     }
 
     #[test]

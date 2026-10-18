@@ -24,7 +24,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, paginated shop, Tab scoreboard, controls and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 244 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 245 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -77,7 +77,8 @@ content hash. The client shop/HUD, cooldowns, range/radius overlays, vision and 
 
 `--reload-content` watches the pack and reloads it when the lobby has no connected clients.
 Servers with repeated `--items FILE` rotate maps between empty-lobby matches and announce the
-selected map. Signed packs can be required with `--require-content-attestation --content-publisher HEX`
+selected map. Client identity keys can be rotated/revoked with `--rotate-client-key OLD:NEW` and
+`--revoke-client-key KEY`. Signed packs can be required with `--require-content-attestation --content-publisher HEX`
 (see `docs/content-authoring.md`).
 (connected clients keep their handshake catalogue until they reconnect).
 Names are 1–16 ASCII bytes, costs must be positive, packs hold at most 16 items, 8 heroes, 24 abilities, 4 lanes and 32 structures, and hero ability slots reference
