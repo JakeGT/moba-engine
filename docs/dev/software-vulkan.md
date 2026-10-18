@@ -84,3 +84,10 @@ semaphore; upstream fixed this in [VVL #7480](https://github.com/KhronosGroup/Vu
 golden workflow sets `MOBA_IGNORE_KNOWN_PRESENT_HAZARD=1`, which suppresses **only** that exact
 message from the error count/log. Every other validation error still fails the capture.
 Remove the variable when the runner ships a newer layer.
+
+## macOS MoltenVK probe
+
+`cargo run --release -p moba-tools --bin vulkan-probe` creates an instance (without a surface)
+and enumerates physical devices. It reports whether `VK_KHR_portability_enumeration` was
+available, exercising the macOS path. The `macos vulkan probe` workflow installs MoltenVK via
+Homebrew and runs it on `macos-latest`; trigger manually or label a PR `macos-vulkan`.

@@ -54,3 +54,9 @@ buffer writes (camera + instances), with no per-frame allocation in `Renderer::r
 ## Review log
 | Reviewer | Finding | Verdict | Resolution |
 |---|---|---|---|
+
+## macOS runtime probe
+
+`vulkan-probe` + the `macos vulkan probe` workflow exercise instance creation, portability
+extension selection and physical-device enumeration under MoltenVK. See
+[software Vulkan](../dev/software-vulkan.md).

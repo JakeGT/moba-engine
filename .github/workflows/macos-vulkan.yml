@@ -1,0 +1,38 @@
+name: macos vulkan probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  moltenvk:
+    name: MoltenVK instance/device probe
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'macos-vulkan'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install MoltenVK
+        run: |
+          brew install molten-vk
+          PREFIX=$(brew --prefix molten-vk)
+          ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
+          test -n "$ICD" || { echo "MoltenVK ICD json not found"; find "$PREFIX" -name '*icd*.json'; exit 1; }
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "Using $ICD"
+      - name: Build probe
+        run: cargo build --release --locked -p moba-tools --bin vulkan-probe
+      - name: Probe instance and devices
+        run: ./target/release/vulkan-probe

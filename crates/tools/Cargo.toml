@@ -22,3 +22,4 @@ moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true
 moba-netsim.workspace = true
+moba-render.workspace = true

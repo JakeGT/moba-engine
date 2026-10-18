@@ -1214,6 +1214,7 @@ dependencies = [
  "moba-game",
  "moba-net",
  "moba-netsim",
+ "moba-render",
  "moba-sim",
 ]
 
