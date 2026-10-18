@@ -9,6 +9,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Default bots now respect fog of war for target acquisition; `SIM_LOGIC_VERSION` 6.
 - Runtime minion/tower combat stats in `[rules]` (protocol v22), used for simulated spawns.
 - Rules now carry level cap, XP curve and minion/tower/nexus vision (protocol v21); client HUD
   no longer imports `LEVEL_CAP`, `xp_to_next` or minion/tower vision constants.
