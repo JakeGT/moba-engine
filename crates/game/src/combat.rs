@@ -32,9 +32,15 @@ pub const fn mitigate(damage: i32, resist: i32) -> i32 {
     if damage <= 0 {
         return 0;
     }
-    let resist = if resist < 0 { 0 } else { resist };
-    let mitigated = damage * 100 / (100 + resist);
-    if mitigated < 1 { 1 } else { mitigated }
+    let resist = if resist < 0 { 0 } else { resist } as i64;
+    let mitigated = damage as i64 * 100 / (100 + resist);
+    if mitigated > i32::MAX as i64 {
+        i32::MAX
+    } else if mitigated < 1 {
+        1
+    } else {
+        mitigated as i32
+    }
 }
 
 /// Damage after applying the defender's relevant resistance.

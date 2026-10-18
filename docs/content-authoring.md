@@ -35,7 +35,11 @@ mismatched or missing pack is rejected.
 | Abilities | 24 |
 | Lanes | 4, 2..=16 waypoints each |
 | Structures/walls | 32 total |
-| Map | one blue and one red nexus |
+| Map | one blue and one red nexus; coordinates 0..=256 |
+| Stats | health/damage/gold ≤10,000,000; item bonuses ≤1,000,000; speed ≤100 u/s; ranges ≤1,000; resist ≤100,000 |
+
+Unknown fields and unknown enum values are **rejected** (no silent fallbacks). Use
+`content-check` to catch schema errors before starting a server.
 
 Hero `abilities = [q, w, e]` are ability ids. Slot count is currently three.
 

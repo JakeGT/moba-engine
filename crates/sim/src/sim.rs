@@ -2101,7 +2101,7 @@ impl Simulation {
 
             let command = if let Some(target) = target {
                 let distance_sq = view.position.distance_sq(target.position);
-                let defensive = view.health * 100 <= view.max_health * 45;
+                let defensive = i64::from(view.health) * 100 <= i64::from(view.max_health) * 45;
                 if defensive && view.cooldowns.0[1] == 0 {
                     if view.mana >= view.ability_mana[1] {
                         Some(PlayerCommand::CastAbility {

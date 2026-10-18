@@ -59,6 +59,22 @@ pub const MAX_LANE_POINTS: usize = 16;
 pub const MAX_CONTENT_STRUCTURES: usize = 32;
 /// Maximum vision-blocking wall segments.
 pub const MAX_CONTENT_WALLS: usize = 32;
+/// Valid map coordinates are `0..=MAX_MAP_COORD` on both axes.
+pub const MAX_MAP_COORD: i32 = 256;
+/// Upper bound for health/damage/gold-like integer stats.
+pub const MAX_STAT: i32 = 10_000_000;
+/// Upper bound for item bonus stats.
+pub const MAX_ITEM_STAT: i32 = 1_000_000;
+/// Upper bound for cooldowns and attack intervals.
+pub const MAX_COOLDOWN_TICKS: u32 = 1_000_000;
+/// Upper bound for status durations.
+pub const MAX_DURATION_TICKS: u32 = 1_000_000;
+/// Upper bound for ability ranges/radii/speeds in world units.
+pub const MAX_RANGE: i32 = 1_000;
+/// Upper bound for movement speed in world units per second.
+pub const MAX_SPEED_PER_SEC: i32 = 100;
+/// Upper bound for armour/magic resistance.
+pub const MAX_RESIST: i32 = 100_000;
 
 /// An owned, runtime item definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +375,8 @@ pub enum ContentError {
     DuplicateName,
     /// An item costs zero gold.
     FreeItem,
+    /// An item has an out-of-range stat.
+    BadItemStats,
     /// No heroes were supplied.
     NoHeroes,
     /// Too many heroes for the wire catalogue.
@@ -401,6 +419,7 @@ impl core::fmt::Display for ContentError {
             Self::BadName => f.write_str("item names must be 1..=16 ASCII bytes"),
             Self::DuplicateName => f.write_str("item names must be unique"),
             Self::FreeItem => f.write_str("item costs must be greater than zero"),
+            Self::BadItemStats => f.write_str("item stats are out of range"),
             Self::NoHeroes => f.write_str("content must define at least one hero"),
             Self::TooManyHeroes => write!(f, "content has more than {MAX_CONTENT_HEROES} heroes"),
             Self::BadHeroName => f.write_str("hero names must be 1..=16 ASCII bytes"),
@@ -453,8 +472,24 @@ impl GameContent {
             if item.name.is_empty() || item.name.len() > MAX_ITEM_NAME || !item.name.is_ascii() {
                 return Err(ContentError::BadName);
             }
-            if item.cost == 0 {
+            if item.cost == 0 || item.cost > MAX_STAT as u32 {
                 return Err(ContentError::FreeItem);
+            }
+            for value in [
+                item.health,
+                item.mana,
+                item.attack_damage,
+                item.armor,
+                item.magic_resist,
+            ] {
+                if value.unsigned_abs() > MAX_ITEM_STAT as u32 {
+                    return Err(ContentError::BadItemStats);
+                }
+            }
+            if item.move_speed_per_sec < Fix::ZERO
+                || item.move_speed_per_sec > Fix::from_i32(MAX_SPEED_PER_SEC)
+            {
+                return Err(ContentError::BadItemStats);
             }
             if self.items[..index]
                 .iter()
@@ -483,11 +518,15 @@ impl GameContent {
                 return Err(ContentError::DuplicateAbilityName);
             }
             if ability.cooldown_ticks == 0
+                || ability.cooldown_ticks > MAX_COOLDOWN_TICKS
                 || ability.mana_cost < 0
+                || ability.mana_cost > MAX_STAT
                 || ability.cast_range < Fix::ZERO
+                || ability.cast_range > Fix::from_i32(MAX_RANGE)
             {
                 return Err(ContentError::BadAbilityStats);
             }
+            let in_range = |value: Fix| value > Fix::ZERO && value <= Fix::from_i32(MAX_RANGE);
             let kind_ok = match ability.kind {
                 AbilityKind::Skillshot {
                     speed_per_sec,
@@ -496,25 +535,28 @@ impl GameContent {
                     damage,
                     ..
                 } => {
-                    speed_per_sec > Fix::ZERO
-                        && range > Fix::ZERO
-                        && radius > Fix::ZERO
-                        && damage >= 0
+                    in_range(speed_per_sec)
+                        && in_range(range)
+                        && in_range(radius)
+                        && (0..=MAX_STAT).contains(&damage)
                 }
-                AbilityKind::Dash { range } => range > Fix::ZERO,
+                AbilityKind::Dash { range } => in_range(range),
                 AbilityKind::Shield {
                     amount,
                     duration_ticks,
-                } => amount > 0 && duration_ticks > 0,
+                } => {
+                    (0..=MAX_STAT).contains(&amount)
+                        && (1..=MAX_DURATION_TICKS).contains(&duration_ticks)
+                }
                 AbilityKind::Slow {
                     radius,
                     factor,
                     duration_ticks,
                 } => {
-                    radius > Fix::ZERO
+                    in_range(radius)
                         && factor > Fix::ZERO
                         && factor < Fix::ONE
-                        && duration_ticks > 0
+                        && (1..=MAX_DURATION_TICKS).contains(&duration_ticks)
                 }
                 AbilityKind::Root {
                     radius,
@@ -523,19 +565,29 @@ impl GameContent {
                 | AbilityKind::Silence {
                     radius,
                     duration_ticks,
-                } => radius > Fix::ZERO && duration_ticks > 0,
+                } => in_range(radius) && (1..=MAX_DURATION_TICKS).contains(&duration_ticks),
                 AbilityKind::Burn {
                     radius,
                     duration_ticks,
                     damage_per_tick,
                     ..
-                } => radius > Fix::ZERO && duration_ticks > 0 && damage_per_tick > 0,
+                } => {
+                    in_range(radius)
+                        && (1..=MAX_DURATION_TICKS).contains(&duration_ticks)
+                        && (1..=MAX_STAT).contains(&damage_per_tick)
+                }
                 AbilityKind::Haste {
                     factor,
                     duration_ticks,
-                } => factor > Fix::ONE && duration_ticks > 0,
-                AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
-                AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
+                } => factor > Fix::ONE && (1..=MAX_DURATION_TICKS).contains(&duration_ticks),
+                AbilityKind::Heal { amount, radius } => {
+                    (0..=MAX_STAT).contains(&amount)
+                        && radius >= Fix::ZERO
+                        && radius <= Fix::from_i32(MAX_RANGE)
+                }
+                AbilityKind::Burst { radius, damage, .. } => {
+                    in_range(radius) && (0..=MAX_STAT).contains(&damage)
+                }
             };
             if !kind_ok {
                 return Err(ContentError::BadAbilityKind);
@@ -573,8 +625,33 @@ impl GameContent {
                 return Err(ContentError::BadMapData);
             }
         }
+        let in_world = |point: FixVec2| {
+            point.x >= Fix::ZERO
+                && point.x <= Fix::from_i32(MAX_MAP_COORD)
+                && point.y >= Fix::ZERO
+                && point.y <= Fix::from_i32(MAX_MAP_COORD)
+        };
+        if !in_world(self.map.blue_spawn)
+            || !in_world(self.map.red_spawn)
+            || self
+                .map
+                .lanes
+                .iter()
+                .any(|lane| lane.path.iter().any(|point| !in_world(*point)))
+            || self
+                .map
+                .structures
+                .iter()
+                .any(|structure| !in_world(structure.position))
+        {
+            return Err(ContentError::BadMapData);
+        }
         if self.map.walls.len() > MAX_CONTENT_WALLS
-            || self.map.walls.iter().any(|wall| wall.a == wall.b)
+            || self
+                .map
+                .walls
+                .iter()
+                .any(|wall| wall.a == wall.b || !in_world(wall.a) || !in_world(wall.b))
         {
             return Err(ContentError::BadWalls);
         }
@@ -617,13 +694,35 @@ impl GameContent {
                 return Err(ContentError::BadHeroStats);
             }
             if hero.max_health <= 0
+                || hero.max_health > MAX_STAT
                 || hero.max_mana < 0
+                || hero.max_mana > MAX_STAT
+                || hero.health_regen_per_tick.unsigned_abs() > MAX_ITEM_STAT as u32
+                || hero.mana_regen_per_tick.unsigned_abs() > MAX_ITEM_STAT as u32
+                || hero.attack_damage.unsigned_abs() > MAX_ITEM_STAT as u32
+                || hero.armor.unsigned_abs() > MAX_RESIST as u32
+                || hero.magic_resist.unsigned_abs() > MAX_RESIST as u32
                 || hero.attack_interval_ticks == 0
+                || hero.attack_interval_ticks > MAX_COOLDOWN_TICKS
                 || hero.attack_range < Fix::ZERO
+                || hero.attack_range > Fix::from_i32(MAX_RANGE)
                 || hero.move_speed_per_sec <= Fix::ZERO
+                || hero.move_speed_per_sec > Fix::from_i32(MAX_SPEED_PER_SEC)
                 || hero.vision_range <= Fix::ZERO
+                || hero.vision_range > Fix::from_i32(MAX_RANGE)
             {
                 return Err(ContentError::BadHeroStats);
+            }
+            for growth in [
+                hero.health_per_level,
+                hero.mana_per_level,
+                hero.attack_damage_per_level,
+                hero.armor_per_level,
+                hero.magic_resist_per_level,
+            ] {
+                if growth.unsigned_abs() > MAX_ITEM_STAT as u32 {
+                    return Err(ContentError::BadHeroStats);
+                }
             }
         }
         Ok(())
@@ -829,6 +928,13 @@ pub enum ContentLoadError {
     Toml(toml::de::Error),
     /// Content failed semantic validation.
     Invalid(ContentError),
+    /// A field has an unsupported value.
+    InvalidField {
+        /// Dotted field name.
+        field: &'static str,
+        /// Rejected value.
+        value: String,
+    },
 }
 
 impl core::fmt::Display for ContentLoadError {
@@ -837,6 +943,9 @@ impl core::fmt::Display for ContentLoadError {
             Self::Io(error) => write!(f, "cannot read content: {error}"),
             Self::Toml(error) => write!(f, "invalid TOML: {error}"),
             Self::Invalid(error) => write!(f, "invalid content: {error}"),
+            Self::InvalidField { field, value } => {
+                write!(f, "invalid value {value:?} for {field}")
+            }
         }
     }
 }
@@ -844,6 +953,7 @@ impl core::fmt::Display for ContentLoadError {
 impl std::error::Error for ContentLoadError {}
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentFile {
     name: Option<String>,
     version: Option<String>,
@@ -856,6 +966,7 @@ struct ContentFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MapEntry {
     blue_spawn: [i32; 2],
     red_spawn: [i32; 2],
@@ -867,18 +978,21 @@ struct MapEntry {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WallEntry {
     a: [i32; 2],
     b: [i32; 2],
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LaneEntry {
     name: String,
     path: Vec<[i32; 2]>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StructureEntry {
     team: String,
     kind: String,
@@ -888,6 +1002,7 @@ struct StructureEntry {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ItemEntry {
     name: String,
     cost: u32,
@@ -906,6 +1021,7 @@ struct ItemEntry {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AbilityEntry {
     name: String,
     cooldown_ticks: u32,
@@ -937,6 +1053,7 @@ fn default_damage_type() -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HeroEntry {
     name: String,
     max_health: i32,
@@ -962,6 +1079,45 @@ struct HeroEntry {
     magic_resist_per_level: Option<i32>,
 }
 
+fn invalid_field(field: &'static str, value: impl Into<String>) -> ContentLoadError {
+    ContentLoadError::InvalidField {
+        field,
+        value: value.into(),
+    }
+}
+
+fn fix_param(value: f32, field: &'static str) -> Result<Fix, ContentLoadError> {
+    if value.is_finite() {
+        Ok(Fix::from_f32(value))
+    } else {
+        Err(invalid_field(field, value.to_string()))
+    }
+}
+
+fn parse_damage_type(value: &str) -> Result<DamageType, ContentLoadError> {
+    match value {
+        "physical" => Ok(DamageType::Physical),
+        "magic" => Ok(DamageType::Magic),
+        other => Err(invalid_field("abilities.damage_type", other)),
+    }
+}
+
+fn parse_team(value: &str) -> Result<Team, ContentLoadError> {
+    match value {
+        "blue" => Ok(Team::Blue),
+        "red" => Ok(Team::Red),
+        other => Err(invalid_field("map.structures.team", other)),
+    }
+}
+
+fn parse_structure_kind(value: &str) -> Result<StructureKind, ContentLoadError> {
+    match value {
+        "nexus" => Ok(StructureKind::Nexus),
+        "tower" => Ok(StructureKind::Tower),
+        other => Err(invalid_field("map.structures.kind", other)),
+    }
+}
+
 /// Parses and validates a content pack from TOML.
 ///
 /// # Errors
@@ -969,44 +1125,44 @@ struct HeroEntry {
 #[allow(clippy::too_many_lines)] // One declarative conversion for every content table.
 pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
     let file: ContentFile = toml::from_str(text).map_err(ContentLoadError::Toml)?;
-    let defaults = GameContent::default();
     let items = file
         .items
         .into_iter()
-        .map(|item| ItemSpec {
-            name: item.name,
-            cost: item.cost,
-            health: item.health,
-            mana: item.mana,
-            attack_damage: item.attack_damage,
-            armor: item.armor,
-            magic_resist: item.magic_resist,
-            move_speed_per_sec: Fix::from_f32(item.move_speed),
+        .map(|item| {
+            Ok::<ItemSpec, ContentLoadError>(ItemSpec {
+                name: item.name,
+                cost: item.cost,
+                health: item.health,
+                mana: item.mana,
+                attack_damage: item.attack_damage,
+                armor: item.armor,
+                magic_resist: item.magic_resist,
+                move_speed_per_sec: fix_param(item.move_speed, "items.move_speed")?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let items = if items.is_empty() {
-        defaults.items
+        GameContent::default().items
     } else {
         items
     };
-    let heroes = file.heroes.map_or_else(
-        || GameContent::default().heroes,
-        |heroes| {
-            heroes
-                .into_iter()
-                .map(|hero| HeroSpec {
+    let heroes = match file.heroes {
+        Some(heroes) => heroes
+            .into_iter()
+            .map(|hero| {
+                Ok::<HeroSpec, ContentLoadError>(HeroSpec {
                     name: hero.name,
                     max_health: hero.max_health,
                     max_mana: hero.max_mana,
                     health_regen_per_tick: hero.health_regen_per_tick,
                     mana_regen_per_tick: hero.mana_regen_per_tick,
                     attack_damage: hero.attack_damage,
-                    attack_range: Fix::from_f32(hero.attack_range),
+                    attack_range: fix_param(hero.attack_range, "heroes.attack_range")?,
                     attack_interval_ticks: hero.attack_interval_ticks,
-                    move_speed_per_sec: Fix::from_f32(hero.move_speed),
+                    move_speed_per_sec: fix_param(hero.move_speed, "heroes.move_speed")?,
                     armor: hero.armor,
                     magic_resist: hero.magic_resist,
-                    vision_range: Fix::from_f32(hero.vision_range),
+                    vision_range: fix_param(hero.vision_range, "heroes.vision_range")?,
                     abilities: hero.abilities,
                     health_per_level: hero.health_per_level.unwrap_or(crate::LEVEL_GROWTH.health),
                     mana_per_level: hero.mana_per_level.unwrap_or(crate::LEVEL_GROWTH.mana),
@@ -1018,133 +1174,126 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         .magic_resist_per_level
                         .unwrap_or(crate::LEVEL_GROWTH.magic_resist),
                 })
-                .collect()
-        },
-    );
-    let abilities = file.abilities.map_or_else(
-        || GameContent::default().abilities,
-        |abilities| {
-            abilities
-                .into_iter()
-                .map(|ability| {
-                    let damage_type = match ability.damage_type.as_str() {
-                        "magic" => DamageType::Magic,
-
-                        _ => DamageType::Physical,
-                    };
-                    let kind = match ability.kind.as_str() {
-                        "dash" => AbilityKind::Dash {
-                            range: Fix::from_f32(ability.range),
-                        },
-                        "heal" => AbilityKind::Heal {
-                            amount: ability.amount,
-                            radius: Fix::from_f32(ability.radius),
-                        },
-                        "haste" => AbilityKind::Haste {
-                            factor: Fix::from_f32(ability.factor),
-                            duration_ticks: ability.duration_ticks,
-                        },
-                        "burn" => AbilityKind::Burn {
-                            radius: Fix::from_f32(ability.radius),
-                            duration_ticks: ability.duration_ticks,
-                            damage_per_tick: ability.damage,
-                            damage_type: if ability.damage_type == "magic" {
-                                DamageType::Magic
-                            } else {
-                                DamageType::Physical
-                            },
-                        },
-                        "silence" => AbilityKind::Silence {
-                            radius: Fix::from_f32(ability.radius),
-                            duration_ticks: ability.duration_ticks,
-                        },
-                        "root" => AbilityKind::Root {
-                            radius: Fix::from_f32(ability.radius),
-                            duration_ticks: ability.duration_ticks,
-                        },
-                        "slow" => AbilityKind::Slow {
-                            radius: Fix::from_f32(ability.radius),
-                            factor: Fix::from_f32(ability.factor),
-                            duration_ticks: ability.duration_ticks,
-                        },
-                        "shield" => AbilityKind::Shield {
-                            amount: ability.amount,
-                            duration_ticks: ability.duration_ticks,
-                        },
-                        "burst" => AbilityKind::Burst {
-                            radius: Fix::from_f32(ability.radius),
-                            damage: ability.damage,
-                            damage_type,
-                        },
-                        _ => AbilityKind::Skillshot {
-                            speed_per_sec: Fix::from_f32(ability.speed),
-                            range: Fix::from_f32(ability.range),
-                            radius: Fix::from_f32(ability.radius),
-                            damage: ability.damage,
-                            damage_type,
-                        },
-                    };
-                    AbilitySpec {
-                        name: ability.name,
-                        cooldown_ticks: ability.cooldown_ticks,
-                        mana_cost: ability.mana_cost,
-                        cast_range: Fix::from_f32(ability.cast_range),
-                        kind,
-                    }
-                })
-                .collect()
-        },
-    );
-    let map = file.map.map_or_else(
-        || GameContent::default().map,
-        |map| MapSpec {
-            blue_spawn: FixVec2::from_ints(map.blue_spawn[0], map.blue_spawn[1]),
-            red_spawn: FixVec2::from_ints(map.red_spawn[0], map.red_spawn[1]),
-            lanes: map
-                .lanes
-                .into_iter()
-                .map(|lane| LaneSpec {
-                    name: lane.name,
-                    path: lane
-                        .path
-                        .into_iter()
-                        .map(|point| FixVec2::from_ints(point[0], point[1]))
-                        .collect(),
-                })
-                .collect(),
-            structures: map
-                .structures
-                .into_iter()
-                .map(|structure| StructureSpec {
-                    team: if structure.team == "red" {
-                        Team::Red
-                    } else {
-                        Team::Blue
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => GameContent::default().heroes,
+    };
+    let abilities = match file.abilities {
+        Some(abilities) => abilities
+            .into_iter()
+            .map(|ability| {
+                let damage_type = parse_damage_type(&ability.damage_type)?;
+                let kind = match ability.kind.as_str() {
+                    "skillshot" => AbilityKind::Skillshot {
+                        speed_per_sec: fix_param(ability.speed, "abilities.speed")?,
+                        range: fix_param(ability.range, "abilities.range")?,
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                        damage: ability.damage,
+                        damage_type,
                     },
-                    position: FixVec2::from_ints(structure.position[0], structure.position[1]),
-                    kind: if structure.kind == "nexus" {
-                        StructureKind::Nexus
-                    } else {
-                        StructureKind::Tower
+                    "dash" => AbilityKind::Dash {
+                        range: fix_param(ability.range, "abilities.range")?,
                     },
-                    lane: structure.lane,
+                    "heal" => AbilityKind::Heal {
+                        amount: ability.amount,
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                    },
+                    "haste" => AbilityKind::Haste {
+                        factor: fix_param(ability.factor, "abilities.factor")?,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    "burn" => AbilityKind::Burn {
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                        duration_ticks: ability.duration_ticks,
+                        damage_per_tick: ability.damage,
+                        damage_type,
+                    },
+                    "silence" => AbilityKind::Silence {
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    "root" => AbilityKind::Root {
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    "slow" => AbilityKind::Slow {
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                        factor: fix_param(ability.factor, "abilities.factor")?,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    "shield" => AbilityKind::Shield {
+                        amount: ability.amount,
+                        duration_ticks: ability.duration_ticks,
+                    },
+                    "burst" => AbilityKind::Burst {
+                        radius: fix_param(ability.radius, "abilities.radius")?,
+                        damage: ability.damage,
+                        damage_type,
+                    },
+                    other => return Err(invalid_field("abilities.kind", other)),
+                };
+                Ok::<AbilitySpec, ContentLoadError>(AbilitySpec {
+                    name: ability.name,
+                    cooldown_ticks: ability.cooldown_ticks,
+                    mana_cost: ability.mana_cost,
+                    cast_range: fix_param(ability.cast_range, "abilities.cast_range")?,
+                    kind,
                 })
-                .collect(),
-            walls: map
-                .walls
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => GameContent::default().abilities,
+    };
+    let map = match file.map {
+        Some(map) => {
+            let MapEntry {
+                blue_spawn,
+                red_spawn,
+                lanes,
+                structures,
+                walls,
+            } = map;
+            let structures = structures
                 .into_iter()
-                .map(|wall| WallSpec {
-                    a: FixVec2::from_ints(wall.a[0], wall.a[1]),
-                    b: FixVec2::from_ints(wall.b[0], wall.b[1]),
+                .map(|structure| {
+                    Ok::<StructureSpec, ContentLoadError>(StructureSpec {
+                        team: parse_team(&structure.team)?,
+                        position: FixVec2::from_ints(structure.position[0], structure.position[1]),
+                        kind: parse_structure_kind(&structure.kind)?,
+                        lane: structure.lane,
+                    })
                 })
-                .collect(),
-        },
-    );
-    let defaults = GameContent::default();
+                .collect::<Result<Vec<_>, _>>()?;
+            MapSpec {
+                blue_spawn: FixVec2::from_ints(blue_spawn[0], blue_spawn[1]),
+                red_spawn: FixVec2::from_ints(red_spawn[0], red_spawn[1]),
+                lanes: lanes
+                    .into_iter()
+                    .map(|lane| LaneSpec {
+                        name: lane.name,
+                        path: lane
+                            .path
+                            .into_iter()
+                            .map(|point| FixVec2::from_ints(point[0], point[1]))
+                            .collect(),
+                    })
+                    .collect(),
+                structures,
+                walls: walls
+                    .into_iter()
+                    .map(|wall| WallSpec {
+                        a: FixVec2::from_ints(wall.a[0], wall.a[1]),
+                        b: FixVec2::from_ints(wall.b[0], wall.b[1]),
+                    })
+                    .collect(),
+            }
+        }
+        None => GameContent::default().map,
+    };
+    let defaults = ContentManifest::default();
     let manifest = ContentManifest {
-        name: file.name.unwrap_or(defaults.manifest.name),
-        version: file.version.unwrap_or(defaults.manifest.version),
-        author: file.author.unwrap_or(defaults.manifest.author),
+        name: file.name.unwrap_or(defaults.name),
+        version: file.version.unwrap_or(defaults.version),
+        author: file.author.unwrap_or(defaults.author),
     };
     let content = GameContent {
         manifest,
@@ -1273,6 +1422,103 @@ abilities = [0, 0, 0]
         let mut content = GameContent::default();
         content.heroes[0].max_health = 0;
         assert_eq!(content.validate(), Err(ContentError::BadHeroStats));
+    }
+
+    #[test]
+    fn strict_schema_rejects_unknown_fields_and_enums() {
+        assert!(matches!(
+            load_toml("bogus = 1"),
+            Err(ContentLoadError::Toml(_))
+        ));
+        assert!(matches!(
+            load_toml("[[items]]\nname = \"X\"\ncost = 1\nextra = 2\n"),
+            Err(ContentLoadError::Toml(_))
+        ));
+        let bad_kind = r#"
+[[abilities]]
+name = "Bad"
+cooldown_ticks = 1
+kind = "teleport"
+"#;
+        assert!(matches!(
+            load_toml(bad_kind),
+            Err(ContentLoadError::InvalidField {
+                field: "abilities.kind",
+                ..
+            })
+        ));
+        let bad_damage = r#"
+[[abilities]]
+name = "Bad"
+cooldown_ticks = 1
+kind = "burst"
+radius = 1.0
+damage = 1
+damage_type = "holy"
+"#;
+        assert!(matches!(
+            load_toml(bad_damage),
+            Err(ContentLoadError::InvalidField {
+                field: "abilities.damage_type",
+                ..
+            })
+        ));
+        let bad_team = r#"
+[map]
+blue_spawn = [32, 128]
+red_spawn = [224, 128]
+[[map.lanes]]
+name = "Mid"
+path = [[32, 128], [224, 128]]
+[[map.structures]]
+team = "green"
+kind = "nexus"
+position = [20, 128]
+"#;
+        assert!(matches!(
+            load_toml(bad_team),
+            Err(ContentLoadError::InvalidField {
+                field: "map.structures.team",
+                ..
+            })
+        ));
+        let bad_structure = bad_team.replace("green", "blue").replace("nexus", "spire");
+        assert!(matches!(
+            load_toml(&bad_structure),
+            Err(ContentLoadError::InvalidField {
+                field: "map.structures.kind",
+                ..
+            })
+        ));
+        let non_finite = r#"
+[[items]]
+name = "X"
+cost = 1
+move_speed = nan
+"#;
+        assert!(matches!(
+            load_toml(non_finite),
+            Err(ContentLoadError::InvalidField {
+                field: "items.move_speed",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_out_of_range_stats_and_map_coordinates() {
+        let mut content = GameContent::default();
+        content.items[0].health = MAX_ITEM_STAT + 1;
+        assert_eq!(content.validate(), Err(ContentError::BadItemStats));
+        let mut content = GameContent::default();
+        content.heroes[0].max_health = MAX_STAT + 1;
+        assert_eq!(content.validate(), Err(ContentError::BadHeroStats));
+        let mut content = GameContent::default();
+        content.map.blue_spawn = FixVec2::from_ints(-1, 128);
+        assert_eq!(content.validate(), Err(ContentError::BadMapData));
+        let mut content = GameContent::default();
+        content.abilities[0].cooldown_ticks = MAX_COOLDOWN_TICKS + 1;
+        assert_eq!(content.validate(), Err(ContentError::BadAbilityStats));
     }
 
     #[test]
