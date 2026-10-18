@@ -4,7 +4,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 
 > **Status: preview (0.1).** The engine is playable end-to-end — dedicated server, UDP
 > netcode, deterministic simulation, Vulkan client with HUD and fog of war — but the public
-> API is pre-1.0 and content is compile-time. See [API stability](docs/API-STABILITY.md).
+> API is pre-1.0 and content packs are validated runtime TOML. See [API stability](docs/API-STABILITY.md).
 
 ![MOBA engine HUD and fog of war](docs/images/m6-hud-fog.png)
 
@@ -41,8 +41,9 @@ MOBA_SERVER=local cargo run -p moba-client
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
-R ready up in the lobby, F5 surrender vote, B shop (1–8 buy), Tab scoreboard, Escape quit. Set `MOBA_SPECTATE=1` to join as a read-only
-spectator with full-map visibility and a free overview camera.
+R ready up in the lobby, F5 surrender vote, B shop (1–8 buy, Left/Right page), Tab scoreboard,
+Escape quit. `MOBA_SPECTATE=1` joins read-only with full-map visibility; WASD pans, arrows
+rotate/zoom the spectator camera.
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can
