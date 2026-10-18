@@ -16,7 +16,7 @@ A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 |---|---|
 | Simulation | Deterministic 30 Hz 5v5 MOBA, three lanes, towers/nexus, 5 heroes × 3 abilities, minions, bots, respawns, levels/XP, gold, items and a shop |
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
-| Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, Tab scoreboard, shop, controls and read-only spectator |
+| Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, paginated shop, Tab scoreboard, controls and read-only spectator |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
 | Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 170 tests, wire fuzzing and a 5-minute 10-client soak |
 

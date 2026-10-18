@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Shop pagination (arrows) so packs with more than eight items are purchasable.
 - Health-bar icons for shield/slow/root/silence/burn statuses.
 - One-hour wire fuzz completed 2,476,647,000 iterations clean (protocol v11).
 - Optional Ed25519 client identities with address-bound server challenges and public-key

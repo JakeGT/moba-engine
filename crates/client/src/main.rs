@@ -62,6 +62,7 @@ struct NetworkView {
     demo_sent: bool,
     demo_buy: Option<u8>,
     demo_bought: bool,
+    shop_page: usize,
 }
 
 struct ClientApp {
@@ -141,6 +142,7 @@ impl ClientApp {
                             .ok()
                             .and_then(|value| value.parse().ok()),
                         demo_bought: false,
+                        shop_page: 0,
                     });
                 }
                 Err(error) => app.startup_error = Some(error),
@@ -743,7 +745,15 @@ fn handle_network_input(
         *shop = !*shop;
     }
     if *shop {
-        for (key, item) in [
+        let page_count = network.client.items().len().div_ceil(8).max(1);
+        if input.was_key_pressed(Key::ArrowLeft) {
+            network.shop_page = network.shop_page.saturating_sub(1);
+        }
+        if input.was_key_pressed(Key::ArrowRight) {
+            network.shop_page = (network.shop_page + 1).min(page_count - 1);
+        }
+        network.shop_page = network.shop_page.min(page_count - 1);
+        for (key, offset) in [
             (Key::Digit1, 0u8),
             (Key::Digit2, 1),
             (Key::Digit3, 2),
@@ -754,7 +764,12 @@ fn handle_network_input(
             (Key::Digit8, 7),
         ] {
             if input.was_key_pressed(key) {
-                let _ = network.client.send_command(WireCommand::BuyItem { item });
+                let item = network.shop_page * 8 + usize::from(offset);
+                if item < network.client.items().len() {
+                    let _ = network
+                        .client
+                        .send_command(WireCommand::BuyItem { item: item as u8 });
+                }
             }
         }
         return;
@@ -1511,7 +1526,15 @@ fn build_network_hud(
             Vec4::new(0.95, 0.78, 0.3, 1.0),
             &format!("{} GOLD", progress.gold),
         );
-        for (index, item) in network.client.items().iter().take(8).enumerate() {
+        let page = network.shop_page;
+        for (index, item) in network
+            .client
+            .items()
+            .iter()
+            .skip(page * 8)
+            .take(8)
+            .enumerate()
+        {
             let row_y = sy + 62.0 + index as f32 * 36.0;
             let affordable = u32::from(progress.gold) >= item.cost;
             let name_color = if affordable {
@@ -1519,7 +1542,13 @@ fn build_network_hud(
             } else {
                 Vec4::new(0.45, 0.5, 0.58, 1.0)
             };
-            ui.text(sx + 24.0, row_y, 2.0, muted, &format!("[{}]", index + 1));
+            ui.text(
+                sx + 24.0,
+                row_y,
+                2.0,
+                muted,
+                &format!("[{}]", page * 8 + index + 1),
+            );
             ui.text(sx + 70.0, row_y, 2.0, name_color, item.name_str());
             ui.text(
                 sx + 300.0,
@@ -1539,7 +1568,11 @@ fn build_network_hud(
             sy + shop_h - 30.0,
             1.8,
             muted,
-            "B CLOSE   NUMBER BUY   PURCHASES REQUIRE OWN NEXUS",
+            &format!(
+                "B CLOSE   NUMBER BUY   ARROWS PAGE {}/{}   PURCHASES REQUIRE OWN NEXUS",
+                page + 1,
+                network.client.items().len().div_ceil(8).max(1)
+            ),
         );
     }
     if matches!(network.phase, MatchPhase::Lobby | MatchPhase::Countdown) {
