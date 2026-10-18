@@ -89,6 +89,12 @@ benchmark. See `CLAUDE.md` for the detailed engineering workflow and milestone g
 
 Do **not** open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 
+## Issues
+
+Check the [issue tracker](https://github.com/JakeGT/moba-engine/issues) before starting
+non-trivial work. Claim or open an issue that describes the acceptance criteria; PRs should link
+it. Renderer/content/security work has component labels and milestone groups.
+
 ## Pull requests
 
 Use the repository PR template and include the commands you ran. Changes that touch the

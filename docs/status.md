@@ -75,14 +75,21 @@ local runs, not a final-round rerun.
 Open work is tracked in [GitHub Issues](https://github.com/JakeGT/moba-engine/issues).
 Current themes:
 
-- Renderer: skeletal skinning/animation, golden-image CI, min-spec frame timings,
-  Windows/macOS hardware validation, asset pipeline/bindless textures.
-- Content: per-client content-update packets, manifest signing/attestation, asset/model
-  mappings, scripting hooks and more ability behaviours.
-- Hardening: sanitizer-backed fuzzing, Loom job-scope model, account/reputation/key
-  transparency and player-count attestation.
-- Product: audio, settings/key remapping and public matchmaking.
-- Release: crates.io metadata/ownership and an opt-in publishing workflow.
+- Renderer: [skinning/animation](https://github.com/JakeGT/moba-engine/issues/7),
+  [golden-image CI](https://github.com/JakeGT/moba-engine/issues/8),
+  [min-spec/Windows/macOS validation](https://github.com/JakeGT/moba-engine/issues/9), and
+  [asset pipeline/per-map rendering](https://github.com/JakeGT/moba-engine/issues/12).
+- Content: [per-client updates](https://github.com/JakeGT/moba-engine/issues/10),
+  [manifest attestation](https://github.com/JakeGT/moba-engine/issues/11),
+  [scripting/advanced behaviours](https://github.com/JakeGT/moba-engine/issues/13), and
+  [map selection](https://github.com/JakeGT/moba-engine/issues/20).
+- Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14),
+  [sanitizer fuzzing](https://github.com/JakeGT/moba-engine/issues/15),
+  [Loom job model](https://github.com/JakeGT/moba-engine/issues/16), and
+  [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
+- Product: [audio](https://github.com/JakeGT/moba-engine/issues/18) and
+  [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).
+- Release: [crates.io publishing/metadata](https://github.com/JakeGT/moba-engine/issues/21).
 
 ## Open-source surface
 

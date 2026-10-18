@@ -248,7 +248,8 @@ just fuzz-wire     # one-hour deterministic wire fuzzing
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow, layering rules and review
-expectations. Agent-facing development instructions are in [AGENTS.md](AGENTS.md).
+expectations. Agent-facing development instructions are in [AGENTS.md](AGENTS.md); unfinished
+work is tracked in [GitHub Issues](https://github.com/JakeGT/moba-engine/issues).
 
 ## Security
 
