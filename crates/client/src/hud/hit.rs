@@ -11,6 +11,8 @@ pub(crate) enum HudAction {
     ShopItem(u8),
     /// Click on the minimap.
     Minimap,
+    /// Hover/cast ability slot.
+    Ability(u8),
 }
 
 /// One registered HUD rectangle in screen pixels.
