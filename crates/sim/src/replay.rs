@@ -5,12 +5,13 @@
 //! must reproduce the recorded state hash. Replays are intentionally small (the server
 //! records post-bot-resolution inputs; snapshots are not stored).
 //!
-//! Format (little-endian, version 1):
-//! `"MOBARPL1" | version u8 | seed u64 | hero_picks[10] | bot_mask u16 | spawn_waves u8 |
+//! Format (little-endian, version 5):
+//! `"MOBARPL1" | version u8 | sim_logic u8 | seed u64 | hero_picks[10] | bot_mask u16 | spawn_waves u8 |
 //!  content_hash u64 | name_len u8+name | version_len u8+version | has_hash u8 |
 //!  expected_hash u64 | frame_count u32 | frames...`
 //!
-//! Each frame is a `present u16` bitmask followed by one command per present slot.
+//! Each frame is a `present u16` command mask, one command per present slot, a `purchases
+//! u16` mask and one item id per present purchase.
 
 use std::sync::Arc;
 
@@ -23,9 +24,12 @@ use moba_game::GameContent;
 /// Replay magic/version tag.
 const MAGIC: &[u8; 8] = b"MOBARPL1";
 /// Current replay format version.
-const VERSION: u8 = 1;
+const VERSION: u8 = 5;
+/// Simulation logic contract. Bump when tick behaviour changes enough that old inputs no
+/// longer reproduce the recorded state.
+pub const SIM_LOGIC_VERSION: u8 = 1;
 /// Minimum bytes per frame on the wire (`present` bitmask, no commands).
-const MIN_FRAME_BYTES: usize = 2;
+const MIN_FRAME_BYTES: usize = 4;
 /// A checkpoint is `tick u32 + state hash u64`.
 const MIN_CHECKPOINT_BYTES: usize = 12;
 
@@ -36,6 +40,20 @@ pub enum ReplayError {
     Truncated,
     /// Wrong magic/version.
     BadHeader,
+    /// Replay layout version is not supported by this build.
+    UnsupportedVersion {
+        /// Version found in the file.
+        found: u8,
+        /// Version supported by this build.
+        supported: u8,
+    },
+    /// Replay was recorded with incompatible simulation logic.
+    UnsupportedLogicVersion {
+        /// Logic version found in the file.
+        found: u8,
+        /// Logic version supported by this build.
+        supported: u8,
+    },
     /// Frame or command data is invalid.
     BadData,
     /// The content pack hash does not match the recording.
@@ -68,6 +86,16 @@ impl core::fmt::Display for ReplayError {
         match self {
             Self::Truncated => f.write_str("truncated replay"),
             Self::BadHeader => f.write_str("bad replay header/version"),
+            Self::UnsupportedVersion { found, supported } => {
+                write!(
+                    f,
+                    "unsupported replay version {found} (supported {supported})"
+                )
+            }
+            Self::UnsupportedLogicVersion { found, supported } => write!(
+                f,
+                "unsupported simulation logic version {found} (supported {supported})"
+            ),
             Self::BadData => f.write_str("invalid replay data"),
             Self::ContentMismatch { expected, actual } => {
                 write!(
@@ -102,6 +130,8 @@ pub struct Replay {
     pub config: SimConfig,
     /// One input frame per simulation tick.
     pub frames: Vec<TickInputs>,
+    /// Simulation logic contract used when recording.
+    pub sim_logic_version: u8,
     /// State hash recorded at the end of the match, when known.
     pub expected_hash: Option<u64>,
     /// Content pack hash used by the match.
@@ -132,6 +162,7 @@ impl Replay {
         Self {
             config,
             frames: Vec::new(),
+            sim_logic_version: SIM_LOGIC_VERSION,
             expected_hash: None,
             content_hash: GameContent::default().hash(),
             content_name: GameContent::default().manifest.name,
@@ -211,6 +242,7 @@ impl Replay {
         let mut out = Vec::with_capacity(64 + self.frames.len() * 16);
         out.extend_from_slice(MAGIC);
         out.push(VERSION);
+        out.push(self.sim_logic_version);
         out.extend_from_slice(&self.config.seed.to_le_bytes());
         out.extend_from_slice(&self.config.hero_picks);
         out.extend_from_slice(&self.config.bot_mask.to_le_bytes());
@@ -238,6 +270,14 @@ impl Replay {
             for command in frame.players.iter().flatten() {
                 encode_command(command, &mut out);
             }
+            let mut purchases = 0u16;
+            for (slot, item) in frame.purchases.iter().enumerate() {
+                purchases |= u16::from(item.is_some()) << slot;
+            }
+            out.extend_from_slice(&purchases.to_le_bytes());
+            for item in frame.purchases.iter().flatten() {
+                out.push(*item);
+            }
         }
         out.extend_from_slice(
             &u32::try_from(self.checkpoints.len())
@@ -260,8 +300,19 @@ impl Replay {
         if reader.bytes(8)? != MAGIC {
             return Err(ReplayError::BadHeader);
         }
-        if reader.u8()? != VERSION {
-            return Err(ReplayError::BadHeader);
+        let version = reader.u8()?;
+        if version != VERSION {
+            return Err(ReplayError::UnsupportedVersion {
+                found: version,
+                supported: VERSION,
+            });
+        }
+        let sim_logic_version = reader.u8()?;
+        if sim_logic_version != SIM_LOGIC_VERSION {
+            return Err(ReplayError::UnsupportedLogicVersion {
+                found: sim_logic_version,
+                supported: SIM_LOGIC_VERSION,
+            });
         }
         let seed = reader.u64()?;
         let mut hero_picks = [0u8; MAX_PLAYERS];
@@ -293,6 +344,15 @@ impl Replay {
                     inputs.players[slot] = Some(decode_command(&mut reader)?);
                 }
             }
+            let purchases = reader.u16()?;
+            if purchases & !0x03FF != 0 {
+                return Err(ReplayError::BadData);
+            }
+            for slot in 0..MAX_PLAYERS {
+                if purchases & (1 << slot) != 0 {
+                    inputs.purchases[slot] = Some(reader.u8()?);
+                }
+            }
             frames.push(inputs);
         }
         let checkpoint_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
@@ -317,6 +377,7 @@ impl Replay {
                 spawn_waves,
             },
             frames,
+            sim_logic_version,
             expected_hash: has_hash.then_some(expected),
             content_hash,
             content_name,
@@ -457,6 +518,62 @@ mod tests {
         assert!(matches!(
             Replay::decode(&replay.encode()).expect("decode").play(),
             Err(ReplayError::CheckpointMismatch { tick: 20, .. })
+        ));
+    }
+
+    #[test]
+    fn replay_records_purchases_alongside_movement() {
+        let config = SimConfig {
+            bot_mask: 0,
+            spawn_waves: false,
+            ..SimConfig::default()
+        };
+        let mut sim = Simulation::new(config);
+        let mut replay = Replay::new(config);
+        let mut frame = TickInputs::new();
+        frame.set(0, PlayerCommand::MoveTo(FixVec2::from_ints(30, 128)));
+        for _ in 0..240 {
+            replay.push(frame);
+            sim.tick(&frame);
+            sim.clear_events();
+        }
+        let mut buy = frame;
+        buy.set_purchase(0, 0);
+        replay.push(buy);
+        sim.tick(&buy);
+        sim.clear_events();
+        for _ in 0..5 {
+            replay.push(TickInputs::new());
+            sim.tick(&TickInputs::new());
+            sim.clear_events();
+        }
+        assert!(sim.hero_position(0).is_some(), "human hero survives setup");
+        replay.expected_hash = Some(sim.state_hash());
+        let encoded = replay.encode();
+        let decoded = Replay::decode(&encoded).expect("decode");
+        assert!(
+            decoded
+                .frames
+                .iter()
+                .any(|frame| frame.purchases[0] == Some(0))
+        );
+        let result = decoded.play().expect("replay verifies");
+        assert_eq!(result.state_hash, sim.state_hash());
+    }
+
+    #[test]
+    fn replay_rejects_unknown_layout_or_logic_versions() {
+        let mut encoded = Replay::new(SimConfig::default()).encode();
+        encoded[8] = VERSION + 1;
+        assert!(matches!(
+            Replay::decode(&encoded),
+            Err(ReplayError::UnsupportedVersion { .. })
+        ));
+        let mut encoded = Replay::new(SimConfig::default()).encode();
+        encoded[9] = SIM_LOGIC_VERSION + 1;
+        assert!(matches!(
+            Replay::decode(&encoded),
+            Err(ReplayError::UnsupportedLogicVersion { .. })
         ));
     }
 

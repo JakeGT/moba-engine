@@ -7,6 +7,11 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Replay format v5 with an explicit simulation-logic version, per-slot purchase inputs and
+  rejection of unknown layout/logic versions; human purchases are queued in `Playing` and
+  recorded even when a movement command arrives in the same tick.
+- State hash now covers every registered component/field with unique tags, config fields and
+  full projectile data; a coverage test fails when a new component is not hashed.
 - CI: cross-platform golden state hash, release/doctest and MSRV jobs, plus scheduled
   one-hour fuzz, five-minute soak, 50-match soak and benchmark runs.
 - Strict content schema: unknown fields and enum values are rejected, stats/coordinates are

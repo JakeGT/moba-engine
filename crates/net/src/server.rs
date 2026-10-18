@@ -325,6 +325,7 @@ struct ClientConn {
     disconnected_at: Option<Instant>,
     last_input_seq: u32,
     command: Option<WireCommand>,
+    pending_purchase: Option<u8>,
     net_ids: Vec<(moba_ecs::Entity, NetId)>,
     next_net_id: NetId,
     snapshot_seq: u32,
@@ -407,7 +408,6 @@ pub struct NetServer {
     record_checkpoints: Vec<(u32, u64)>,
     results_log: Option<PathBuf>,
     results_logged: bool,
-    record_config: SimConfig,
     recorded: bool,
     surrender_votes: [u16; 2],
     pending_surrender: Option<moba_game::Team>,
@@ -463,7 +463,6 @@ impl NetServer {
             record_checkpoints: Vec::new(),
             results_log: None,
             results_logged: false,
-            record_config: config_sim,
             recorded: false,
             surrender_votes: [0; 2],
             pending_surrender: None,
@@ -618,7 +617,6 @@ impl NetServer {
                 self.simulation =
                     Simulation::new_with_content(self.config.sim, Arc::clone(&content));
                 self.content = content;
-                self.record_config = self.config.sim;
                 self.record_frames.clear();
                 self.recorded = false;
                 eprintln!(
@@ -716,11 +714,13 @@ impl NetServer {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
             };
-            let Some(wire) = client.command.take() else {
-                continue;
-            };
-            if let Some(command) = wire_to_command(client, wire) {
-                inputs.set(slot, command);
+            if let Some(wire) = client.command.take() {
+                if let Some(command) = wire_to_command(client, wire) {
+                    inputs.set(slot, command);
+                }
+            }
+            if let Some(item) = client.pending_purchase.take() {
+                inputs.set_purchase(slot, item);
             }
         }
         if let Some(team) = self.pending_surrender.take() {
@@ -837,7 +837,6 @@ impl NetServer {
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
         self.simulation = Simulation::new_with_content(config, Arc::clone(&self.content));
-        self.record_config = config;
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
@@ -848,6 +847,7 @@ impl NetServer {
             client.acked_snapshot = 0;
             client.need_full = true;
             client.command = None;
+            client.pending_purchase = None;
             client.last_input_seq = 0;
         }
         self.refresh_bot_mask();
@@ -929,8 +929,9 @@ impl NetServer {
         };
         let state_hash = self.simulation.state_hash();
         let replay = Replay {
-            config: self.record_config,
+            config: self.simulation.config(),
             frames: std::mem::take(&mut self.record_frames),
+            sim_logic_version: moba_sim::SIM_LOGIC_VERSION,
             expected_hash: Some(state_hash),
             content_hash: self.content.hash(),
             content_name: self.content.manifest.name.clone(),
@@ -1210,6 +1211,7 @@ impl NetServer {
                     disconnected_at: None,
                     last_input_seq: 0,
                     command: None,
+                    pending_purchase: None,
                     net_ids: Vec::new(),
                     next_net_id: 1,
                     snapshot_seq: 0,
@@ -1237,20 +1239,20 @@ impl NetServer {
                     return Ok(());
                 };
                 client.last_seen = Instant::now();
-                let mut purchase = None;
                 let mut ready_change = None;
                 let mut surrender = false;
                 if sequence_after(input.input_seq, client.last_input_seq) {
                     client.last_input_seq = input.input_seq;
                     match input.command {
-                        WireCommand::BuyItem { item } => purchase = Some(item),
+                        WireCommand::BuyItem { item } => {
+                            if self.phase == Phase::Playing {
+                                client.pending_purchase = Some(item);
+                            }
+                        }
                         WireCommand::Ready { ready } => ready_change = Some(ready),
                         WireCommand::Surrender => surrender = true,
                         command => client.command = Some(command),
                     }
-                }
-                if let Some(item) = purchase {
-                    self.simulation.purchase(index, item);
                 }
                 if let Some(ready) = ready_change {
                     self.set_ready(index, ready);

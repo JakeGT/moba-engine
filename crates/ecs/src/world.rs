@@ -1,5 +1,6 @@
 //! The world: entity allocation, archetype storage and component access.
 
+use core::any::TypeId;
 use core::fmt;
 use core::mem::{self, MaybeUninit};
 
@@ -492,6 +493,14 @@ impl World {
     #[must_use]
     pub fn registered_component_count(&self) -> usize {
         self.registry.len()
+    }
+
+    /// Type ids of every component registered in this world.
+    ///
+    /// Used by tests that enforce complete state-hash coverage.
+    #[must_use]
+    pub fn registered_component_types(&self) -> Vec<TypeId> {
+        self.registry.type_ids()
     }
 }
 
