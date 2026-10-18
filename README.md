@@ -24,7 +24,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
 | Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, paginated shop, Tab scoreboard, controls and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 209 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 210 tests, wire fuzzing and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -47,7 +47,7 @@ MOBA_SERVER=local cargo run -p moba-client
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
-R ready up in the lobby, F5 surrender vote, B shop (click or 1–8 buy, Left/Right page), Tab scoreboard,
+R ready up in the lobby, F5 surrender vote, B shop (click/1–8 buy, hover tooltip, Left/Right page), click minimap to move, Tab scoreboard,
 Escape quit. `MOBA_SPECTATE=1` joins read-only with full-map visibility; WASD pans, arrows
 rotate/zoom the spectator camera.
 

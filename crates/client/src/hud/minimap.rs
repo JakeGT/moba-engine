@@ -28,7 +28,7 @@ pub(crate) fn draw_minimap(
         Vec4::new(0.01, 0.02, 0.035, 0.82),
         theme::PANEL_CHROME,
     );
-    register(hits, HudAction::Block, x, y, size, size);
+    register(hits, HudAction::Minimap, x, y, size, size);
     let inner = size - 20.0;
     let left = x + 10.0;
     let top = y + 10.0;
