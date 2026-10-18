@@ -23,9 +23,14 @@ Validation-required capture at the same scene produced zero validation messages;
 
 - Windows dedicated GPU results are not available in this environment. CI Windows runners have
   no Vulkan-capable GPU; the cross-OS `gates` job still compiles/tests the renderer.
-- macOS: `macos-vulkan.yml` runs the MoltenVK probe and, when the runner allows window creation,
-  the client smoke/frame-log steps. Apple-GPU timings from that job are attached as workflow
-  artifacts rather than claimed here.
+- macOS: `macos-frame.yml` ran on GitHub's Apple runner (MoltenVK) and recorded
+  `frames=240 mean_ms=11.650 p50_ms=9.169 p95_ms=16.945 p99_ms=33.187 max_ms=68.039`
+  with vsync off. That exceeds the 6.9 ms p95 target on the hosted/virtualised runner; the
+  artifact and command are retained, and the gap is tracked as follow-up #127 rather than
+  claimed as a passing min-spec result.
+- Windows: `windows-probe.yml` could not install `glslang` from Chocolatey on the hosted runner,
+  so no Windows frame result exists; the gate workflow still compiles/tests Windows. Follow-up
+  #127 covers obtaining a Windows GPU/toolchain run.
 - Commands are the same as above with the platform's `VK_ICD_FILENAMES`/MoltenVK ICD path.
 
 ## Headless/low-end path

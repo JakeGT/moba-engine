@@ -97,8 +97,8 @@ Current themes:
   remain external integrations.
   [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
 - Product: [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).
-- Renderer: real-hardware frame timings recorded for Linux/NVIDIA; Windows/macOS commands
-  documented (no discrete GPU in CI).
+- Renderer: Linux/NVIDIA p95 4.197 ms recorded; macOS hosted-runner p95 16.945 ms and missing
+  Windows GPU/tooling tracked in #127.
 - Release: [crates.io publishing/metadata](https://github.com/JakeGT/moba-engine/issues/21).
 
 ## Open-source surface
