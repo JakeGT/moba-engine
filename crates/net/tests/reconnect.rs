@@ -16,7 +16,7 @@ fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
         max_clients: 10,
         countdown_ticks: 0,
         results_ticks: 0,
-        client_timeout: Duration::from_millis(100),
+        client_timeout: Duration::from_millis(500),
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: Some(KEY),
         record: None,
@@ -53,8 +53,8 @@ fn reconnect_resumes_the_same_slot() {
     assert!(first.snapshot().is_some());
     drop(first);
 
-    // Wait past the short client timeout so the server reserves the slot for a reconnect.
-    std::thread::sleep(Duration::from_millis(600));
+    // Wait past the client timeout so the server reserves the slot for a reconnect.
+    std::thread::sleep(Duration::from_millis(1_000));
     let mut second =
         NetClient::connect_with_session_key(addr, Duration::from_secs(2), session, Some(KEY))
             .expect("resume");

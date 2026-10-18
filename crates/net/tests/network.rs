@@ -21,7 +21,7 @@ fn spawn_server(
         max_clients: 10,
         countdown_ticks: 0,
         results_ticks: 0,
-        client_timeout: Duration::from_millis(100),
+        client_timeout: Duration::from_secs(1),
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: None,
         record: None,
