@@ -1,6 +1,6 @@
 # Audit remediation plan — 2026-10-18
 
-Status: **executing** (W0/W1/W2 complete; W3 next)  
+Status: **executing** (W0–W3 complete; W4/W5 partial)  
 Tracking issue: [#46](https://github.com/JakeGT/moba-engine/issues/46)  
 Scope: all open GitHub issues as of 2026-10-18, especially the audit findings #23–#45.
 
@@ -158,10 +158,10 @@ range indicators and later content updates.
   - [x] `status_bits:u16`; projectiles as extrapolatable events.
   - [x] Client kill feed/projectile rendering; audio hook ready via `GameEvent`.
   - [x] Bandwidth evidence: 4.7–6.3 KiB/s down in 10-client soak.
-- [ ] **#13 scripting hook** built on #38; sandbox/threat model ADR; deterministic host calls.
+- [x] **#13 scripting hook** built on #38; sandbox/threat model ADR; deterministic host calls.
 
 ### W3.2 Modes and policies
-- [ ] **#39 `GameRules` / `BotPolicy` seams.**
+- [x] **#39 `GameRules` / `BotPolicy` seams** (acceptance met; #106 follows up stat blocks/vision bots).
   - Data-driven teams/economy/respawn/waves/minion/tower stats; map extent end-to-end.
   - `BotPolicy` trait + vision-respecting default; `NetServer` system hook with deterministic
     ordering.
@@ -170,11 +170,11 @@ range indicators and later content updates.
 - [x] **#17 balanced bots** seeded sweep landed early; re-run after #39.
 
 **W3 exit**
-- [ ] All 10 existing kinds expressed as data; old-vs-new per-tick stream comparison matches.
-- [ ] Protocol v16 status/events documented and re-recorded; composition v15 is landed.
-- [ ] No hot-path status-effect allocation; allocation guard uses an all-kinds pack.
-- [ ] 1v1/ARAM packs + custom system embedding example.
-- [ ] Event/status bandwidth measured.
+- [x] All 10 existing kinds expressed as data; old-vs-new per-tick stream comparison matches.
+- [x] Protocol v16 status/events documented and re-recorded; composition v15 is landed.
+- [x] No hot-path status-effect allocation; allocation guard uses an all-kinds pack.
+- [x] 1v1/ARAM packs + custom system embedding example.
+- [x] Event/status bandwidth measured.
 
 ---
 
@@ -183,10 +183,10 @@ range indicators and later content updates.
 Order matters: golden image first, then structural refactors it can protect.
 
 - [x] **#8 golden-image CI** (landed with a 64×36 fingerprint and validation-required lavapipe job).
-- [ ] **#32 renderer correctness** from W0 (continues here for descriptor/resize niceties).
-- [ ] **#42 HUD split:** `HudModel`, `hud/*`, `theme`, zero per-frame `format!`, vertex
+- [x] **#32 renderer correctness** from W0 (continues here for descriptor/resize niceties).
+- [x] **#42 HUD split:** `HudModel`, `hud/*`, `theme`, zero per-frame `format!`, vertex
   truncation counter/tests; main.rs <600 lines.
-- [ ] **#43 UI hit-testing:** widget rect registry, focus-based input, mouse shop/minimap/
+- [x] **#43 UI hit-testing:** widget rect registry, focus-based input, mouse shop/minimap/
   tooltips, no HUD click becomes `MoveTo`.
 - [ ] **#44 textured UI:** UV/texture atlas, offline glyph/icon bake, no client ttf-parser,
   golden image and validation evidence.
@@ -200,9 +200,9 @@ Order matters: golden image first, then structural refactors it can protect.
 - [ ] **#9 hardware/min-spec + Windows/macOS renderer validation** after #32.
 
 **W4 exit**
-- [ ] Golden image stays unchanged through HUD refactors (or changes deliberately).
-- [ ] Zero validation/sync messages; HUD allocation test green.
-- [ ] UI clicks never leak to world commands.
+- [x] Golden image stays unchanged through HUD refactors (or changes deliberately).
+- [x] Zero validation/sync messages; HUD allocation test green.
+- [x] UI clicks never leak to world commands.
 - [ ] Screenshot gallery updated with new UI/visuals.
 
 ---
@@ -210,35 +210,35 @@ Order matters: golden image first, then structural refactors it can protect.
 ## W5 — Hardening, performance and release
 
 ### Performance (can start after W0 tests)
-- [ ] **#29 allocation guard coverage:** status pack, wave window, 10-hero teamfight, respawn,
+- [x] **#29 allocation guard coverage:** status pack, wave window, 10-hero teamfight, respawn,
   shop, NetServer snapshot path; scratch vectors; copy specs after cooldown/mana checks;
   fixed-capacity modifiers; flat nav grid; record before/after.
   *Status-effect archetype churn is superseded by #38; land the low-risk fixes now.*
-- [ ] **#30 snapshot scaling:** dense net-id table, ring/pre-sized buffers, single-pass
+- [x] **#30 snapshot scaling:** dense net-id table, ring/pre-sized buffers, single-pass
   observe/grid vision, 1/20/40-minute bench, explain/fix 3 ms max tick, zero steady-state
   snapshot allocations.
 
 ### Hardening / security
-- [ ] **#28 decoder bounds** (W0) + **#15 sanitizer-backed cargo-fuzz/ASan** covering replay/
+- [x] **#28 decoder bounds** (W0) + **#15 sanitizer-backed cargo-fuzz/ASan** covering replay/
   wire/snapshot/content decoders.
 - [ ] **#16 Loom** job-scope model, bounded for CI/nightly.
 - [ ] **#14 account/reputation/key transparency/player-count attestation** with ADR and
   rotation/revocation tests.
 - [ ] **#22 replace unmaintained ttf-parser** (winit/ab_glyph upgrade or alternative).
-- [ ] **#37 docs truth** re-check after every wave; close only when ✅ evidence links hold.
+- [x] **#37 docs truth** re-check after every wave; close only when ✅ evidence links hold.
 
 ### Repo/release
-- [ ] **#36 branch protection:** require PRs, `gates` (3 OS), `deny`, `miri`, `tools`; linear
+- [x] **#36 branch protection:** require PRs, `gates` (3 OS), `deny`, `miri`, `tools`; linear
   history; enable Dependabot security/groups; triage #1–#6 (rebase/hold per issue).
 - [ ] **#21 crates.io packaging/API metadata/semver checks/first tag**; attach artifacts.
-- [ ] **#35 nightly/manual gates** (fuzz/soak/release/bench) with artifacts.
+- [x] **#35 nightly/manual gates** (fuzz/soak/release/bench) with artifacts.
 - [ ] **#45 extensibility roadmap** kept as a map, not a work item; update when waves land.
 
 **W5 exit**
-- [ ] Branch protection rejects direct pushes/red PRs.
-- [ ] 1h fuzz + 5m soak + release tests run automatically (nightly) with artifacts.
-- [ ] Snapshot cost flat over 40 minutes; allocations at budget.
-- [ ] First tagged release with checksums/artifacts and full docs.
+- [x] Branch protection rejects direct pushes/red PRs.
+- [x] 1h fuzz + 5m soak + release tests run automatically (nightly) with artifacts.
+- [x] Snapshot cost flat over 40 minutes; allocations at budget.
+- [x] First tagged release with checksums/artifacts and full docs (v0.2.0).
 
 ---
 
