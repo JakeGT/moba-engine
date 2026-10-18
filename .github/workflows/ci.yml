@@ -36,7 +36,14 @@ jobs:
         run: brew install glslang
       - name: Install shader compiler (Windows)
         if: runner.os == 'Windows'
-        run: choco install vulkan-sdk -y --no-progress
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $glslc = Get-ChildItem "$env:ProgramFiles\VulkanSDK" -Recurse -Filter glslc.exe |
+            Select-Object -First 1
+          if (-not $glslc) { throw "glslc.exe not found in the Vulkan SDK" }
+          "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Using $($glslc.FullName)"
       # Server/sim tests need no GPU; renderer tests use lavapipe in a later stage.
       - run: just ci-core
 
