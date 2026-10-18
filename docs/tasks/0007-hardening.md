@@ -55,7 +55,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 
 ## Still open
 - Account/reputation/key-transparency layer and player-count attestation.
-- Sanitizer-backed fuzzing (cargo-fuzz/ASan) in addition to the deterministic fuzzer.
+- [x] Sanitizer-backed fuzzing (cargo-fuzz/ASan) in addition to the deterministic fuzzer:
+  `fuzz/` targets `wire`, `replay`, `content`; `.github/workflows/fuzz.yml` runs bounded
+  nightly/manual sessions and uploads artifacts. Seed corpus lives in `fuzz/corpus/`.
 - Loom model of the job-scope counter.
 - Balanced demo bots across fixed compositions (current 50-match sample's CI includes even
   odds; larger sweeps are needed).

@@ -94,7 +94,6 @@ Current themes:
   [scripting/advanced behaviours](https://github.com/JakeGT/moba-engine/issues/13), and
   [map selection](https://github.com/JakeGT/moba-engine/issues/20).
 - Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14),
-  [sanitizer fuzzing](https://github.com/JakeGT/moba-engine/issues/15),
   [Loom job model](https://github.com/JakeGT/moba-engine/issues/16), and
   [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
 - Product: [audio](https://github.com/JakeGT/moba-engine/issues/18) and
