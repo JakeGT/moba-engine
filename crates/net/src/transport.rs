@@ -236,9 +236,9 @@ impl UdpTransport {
                     return Ok(None);
                 }
                 Err(error) if transient_udp_error(&error) => {
-                    // Windows reports ICMP port-unreachable as ConnectionReset on UDP.
+                    // Windows reports ICMP port-unreachable as ConnectionReset on UDP. It is
+                    // harmless: keep draining other datagrams until the deadline.
                     self.expire_assemblies();
-                    return Ok(None);
                 }
                 Err(error) => return Err(error),
             }

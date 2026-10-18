@@ -1,7 +1,7 @@
 //! Embed the authoritative simulation in a tool or custom server.
 //!
 //! Run with:
-//! `cargo run -p moba-tools --example headless_match -- --ticks 3000`
+//! `cargo run -p moba-tools --example tool_headless_match -- --ticks 3000`
 #![allow(clippy::print_stdout)]
 
 use moba_sim::{SimConfig, Simulation};
