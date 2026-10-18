@@ -2,9 +2,8 @@
 
 use super::theme;
 use super::{
-    Camera, EMPTY_ITEM, Fix, HitList, HudAction, HudString, InputState, Key, LEVEL_CAP,
-    NetworkView, Simulation, Team, UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf,
-    draw_world_circle, register, xp_to_next,
+    Camera, Fix, HitList, HudAction, HudString, InputState, Key, NetworkView, Simulation, Team,
+    UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf, draw_world_circle, register,
 };
 use crate::{hud_fmt, hud_static};
 use moba_core::FixVec2;
@@ -380,10 +379,13 @@ pub(crate) fn build_network_hud(
         ui.panel(x, y, panel_w, panel_h, bg, border);
         register(hits, HudAction::Block, x, y, panel_w, panel_h);
         let level = progress.level.max(1);
-        let xp_needed = if level >= LEVEL_CAP {
+        let rules = network.client.rules();
+        let xp_needed = if level >= rules.level_cap {
             0
         } else {
-            xp_to_next(level)
+            rules
+                .xp_base
+                .saturating_add(rules.xp_per_level.saturating_mul(u32::from(level)))
         };
         ui.text_shadowed(x + 14.0, y + 12.0, 3.0, text, hero_name);
         ui.text(
@@ -588,7 +590,7 @@ pub(crate) fn build_network_hud(
             ui.rect(bx, by, 34.0, 26.0, track);
             ui.outline(bx, by, 34.0, 26.0, 1.0, border);
             let item = progress.items[slot];
-            if item != EMPTY_ITEM {
+            if item != 0xFF {
                 if let Some(definition) = network.client.items().get(usize::from(item)) {
                     let name = definition.name_str();
                     let short = name.get(..5).unwrap_or(name);

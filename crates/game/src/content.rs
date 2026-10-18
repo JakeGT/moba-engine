@@ -195,6 +195,20 @@ pub struct WallSpec {
 /// Tunable match rules shared by simulation and server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RulesSpec {
+    /// Maximum hero level.
+    pub level_cap: u8,
+    /// Base XP for the next level.
+    pub xp_base: u32,
+    /// Additional XP per level.
+    pub xp_per_level: u32,
+    /// Vision radius for melee minions.
+    pub melee_vision: Fix,
+    /// Vision radius for ranged minions.
+    pub ranged_vision: Fix,
+    /// Vision radius for towers.
+    pub tower_vision: Fix,
+    /// Vision radius for nexuses.
+    pub nexus_vision: Fix,
     /// Heroes per team (1..=5).
     pub team_size: u8,
     /// Fill empty player slots with bots.
@@ -212,6 +226,13 @@ pub struct RulesSpec {
 impl Default for RulesSpec {
     fn default() -> Self {
         Self {
+            level_cap: 15,
+            xp_base: 180,
+            xp_per_level: 100,
+            melee_vision: Fix::from_i32(9),
+            ranged_vision: Fix::from_i32(10),
+            tower_vision: Fix::from_i32(13),
+            nexus_vision: Fix::from_i32(14),
             team_size: 5,
             bot_fill: true,
             hero_respawn_ticks: 300,
@@ -903,6 +924,9 @@ impl GameContent {
             }
         }
         if !(1..=5).contains(&self.rules.team_size)
+            || !(1..=99).contains(&self.rules.level_cap)
+            || self.rules.xp_base == 0
+            || self.rules.xp_per_level == 0
             || self.rules.hero_respawn_ticks == 0
             || self.rules.wave_interval_ticks == 0
             || self.rules.first_wave_ticks == 0
@@ -1099,7 +1123,22 @@ impl GameContent {
                 feed(&value.to_le_bytes());
             }
         }
-        feed(&[self.rules.team_size, u8::from(self.rules.bot_fill)]);
+        feed(&[
+            self.rules.team_size,
+            u8::from(self.rules.bot_fill),
+            self.rules.level_cap,
+        ]);
+        for value in [self.rules.xp_base, self.rules.xp_per_level] {
+            feed(&value.to_le_bytes());
+        }
+        for value in [
+            self.rules.melee_vision,
+            self.rules.ranged_vision,
+            self.rules.tower_vision,
+            self.rules.nexus_vision,
+        ] {
+            feed(&value.to_bits().to_le_bytes());
+        }
         for value in [
             self.rules.hero_respawn_ticks,
             self.rules.respawn_per_level,
@@ -1200,6 +1239,13 @@ struct ContentFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct RulesEntry {
+    level_cap: u8,
+    xp_base: u32,
+    xp_per_level: u32,
+    melee_vision: f32,
+    ranged_vision: f32,
+    tower_vision: f32,
+    nexus_vision: f32,
     team_size: u8,
     bot_fill: bool,
     hero_respawn_ticks: u32,
@@ -1212,6 +1258,13 @@ impl Default for RulesEntry {
     fn default() -> Self {
         let rules = RulesSpec::default();
         Self {
+            level_cap: rules.level_cap,
+            xp_base: rules.xp_base,
+            xp_per_level: rules.xp_per_level,
+            melee_vision: rules.melee_vision.to_f32(),
+            ranged_vision: rules.ranged_vision.to_f32(),
+            tower_vision: rules.tower_vision.to_f32(),
+            nexus_vision: rules.nexus_vision.to_f32(),
             team_size: rules.team_size,
             bot_fill: rules.bot_fill,
             hero_respawn_ticks: rules.hero_respawn_ticks,
@@ -1700,6 +1753,13 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
     let rules = file
         .rules
         .map_or_else(RulesSpec::default, |rules| RulesSpec {
+            level_cap: rules.level_cap,
+            xp_base: rules.xp_base,
+            xp_per_level: rules.xp_per_level,
+            melee_vision: Fix::from_f32(rules.melee_vision),
+            ranged_vision: Fix::from_f32(rules.ranged_vision),
+            tower_vision: Fix::from_f32(rules.tower_vision),
+            nexus_vision: Fix::from_f32(rules.nexus_vision),
             team_size: rules.team_size,
             bot_fill: rules.bot_fill,
             hero_respawn_ticks: rules.hero_respawn_ticks,

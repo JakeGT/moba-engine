@@ -7,9 +7,8 @@ use moba_core::{Fix, FixVec2, Rng, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
     AreaEffect, AreaEffectList, DamageType, EMPTY_ITEM, Effect, GOLD_PER_INTERVAL,
-    GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_CAP, LEVEL_GROWTH, MELEE_MINION, ModifierKind,
-    NEXUS, RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Targeting, Team, XP_RADIUS,
-    mitigate_typed, xp_to_next,
+    GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_GROWTH, MELEE_MINION, ModifierKind, NEXUS,
+    RANGED_MINION, SHOP_RADIUS, STARTING_GOLD, TOWER, Targeting, Team, XP_RADIUS, mitigate_typed,
 };
 use moba_nav::SpatialGrid;
 
@@ -2161,14 +2160,19 @@ impl Simulation {
         let Some(mut progress) = self.world.get::<Progression>(hero).copied() else {
             return;
         };
-        if progress.level >= LEVEL_CAP {
+        let cap = self.content.rules.level_cap;
+        let xp_base = self.content.rules.xp_base;
+        let xp_per_level = self.content.rules.xp_per_level;
+        let xp_needed =
+            |level: u8| xp_base.saturating_add(xp_per_level.saturating_mul(u32::from(level)));
+        if progress.level >= cap {
             progress.xp = 0;
             let _ = self.world.insert(hero, progress);
             return;
         }
         progress.xp = progress.xp.saturating_add(amount);
-        while progress.level < LEVEL_CAP {
-            let needed = xp_to_next(progress.level);
+        while progress.level < cap {
+            let needed = xp_needed(progress.level);
             if progress.xp < needed {
                 break;
             }
@@ -2176,7 +2180,7 @@ impl Simulation {
             progress.level += 1;
             self.level_up(hero);
         }
-        if progress.level >= LEVEL_CAP {
+        if progress.level >= cap {
             progress.xp = 0;
         }
         let _ = self.world.insert(hero, progress);

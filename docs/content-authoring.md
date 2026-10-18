@@ -172,6 +172,13 @@ existing primitives and modifiers is data-only.
 
 ```toml
 [rules]
+level_cap = 15
+xp_base = 180
+xp_per_level = 100
+melee_vision = 9.0
+ranged_vision = 10.0
+tower_vision = 13.0
+nexus_vision = 14.0
 team_size = 5
 bot_fill = true
 hero_respawn_ticks = 300
