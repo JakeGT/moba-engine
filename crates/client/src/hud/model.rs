@@ -2,9 +2,11 @@
 
 use super::theme;
 use super::{
-    Camera, EMPTY_ITEM, Fix, InputState, Key, LEVEL_CAP, MatchPhase, NetworkView, Simulation, Team,
-    UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf, draw_world_circle, xp_to_next,
+    Camera, EMPTY_ITEM, Fix, HudString, InputState, Key, LEVEL_CAP, MatchPhase, NetworkView,
+    Simulation, Team, UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf,
+    draw_world_circle, xp_to_next,
 };
+use crate::{hud_fmt, hud_static};
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // HUD composition is one pass.
 pub(crate) fn build_network_hud(
@@ -108,7 +110,7 @@ pub(crate) fn build_network_hud(
     // Match timer and team score.
     let tick = snapshot.map_or(0, |state| state.tick);
     let seconds = tick / 30;
-    let timer = format!("{:02}:{:02}", seconds / 60, seconds % 60);
+    let timer = hud_fmt!("{:02}:{:02}", seconds / 60, seconds % 60);
     let blue = snapshot.map_or(0, |state| state.blue_score);
     let red = snapshot.map_or(0, |state| state.red_score);
     let timer_width = 360.0;
@@ -132,14 +134,14 @@ pub(crate) fn build_network_hud(
         52.0,
         2.0,
         Vec4::new(0.4, 0.65, 1.0, 1.0),
-        &format!("BLUE {blue}"),
+        &hud_fmt!("BLUE {blue}"),
     );
     ui.text(
-        width_f.midpoint(timer_width) - 18.0 - UiDrawList::text_width(&format!("RED {red}"), 2.0),
+        width_f.midpoint(timer_width) - 18.0 - UiDrawList::text_width(&hud_fmt!("RED {red}"), 2.0),
         52.0,
         2.0,
         theme::RED_ACCENT,
-        &format!("RED {red}"),
+        &hud_fmt!("RED {red}"),
     );
 
     // Connection/status block.
@@ -162,12 +164,12 @@ pub(crate) fn build_network_hud(
         54.0,
         2.0,
         muted,
-        &format!(
+        &hud_fmt!(
             "SLOT {}   PING {} MS",
             if network.spectator {
-                String::from("--")
+                hud_static!("--")
             } else {
-                network.own_slot.to_string()
+                hud_fmt!("{}", network.own_slot)
             },
             ping
         ),
@@ -177,7 +179,7 @@ pub(crate) fn build_network_hud(
         74.0,
         2.0,
         muted,
-        &format!("TICK {}   {} SNAPSHOTS", tick, stats.snapshots),
+        &hud_fmt!("TICK {}   {} SNAPSHOTS", tick, stats.snapshots),
     );
 
     if !network.spectator {
@@ -219,14 +221,14 @@ pub(crate) fn build_network_hud(
             y + 16.0,
             2.0,
             theme::GOLD,
-            &format!("LV {level}"),
+            &hud_fmt!("LV {level}"),
         );
         ui.text(
             x + 250.0,
             y + 16.0,
             2.0,
             muted,
-            &format!(
+            &hud_fmt!(
                 "TEAM {}   {}G",
                 if network.client.team() == Team::Blue {
                     "BLUE"
@@ -245,7 +247,13 @@ pub(crate) fn build_network_hud(
                 i32::from(entity.max_mana).max(1),
             )
         });
-        ui.text(x + 14.0, y + 42.0, 2.0, muted, &format!("HP {hp}/{max_hp}"));
+        ui.text(
+            x + 14.0,
+            y + 42.0,
+            2.0,
+            muted,
+            &hud_fmt!("HP {hp}/{max_hp}"),
+        );
         ui.bar(
             x + 14.0,
             y + 58.0,
@@ -256,7 +264,13 @@ pub(crate) fn build_network_hud(
             track,
             border,
         );
-        ui.text(x + 14.0, y + 78.0, 2.0, muted, &format!("MP {mp}/{max_mp}"));
+        ui.text(
+            x + 14.0,
+            y + 78.0,
+            2.0,
+            muted,
+            &hud_fmt!("MP {mp}/{max_mp}"),
+        );
         ui.bar(
             x + 14.0,
             y + 94.0,
@@ -273,9 +287,9 @@ pub(crate) fn build_network_hud(
             f32::from(progress.xp) / f32::from(u16::try_from(xp_needed).unwrap_or(u16::MAX))
         };
         let xp_label = if xp_needed == 0 {
-            String::from("XP MAX")
+            hud_static!("XP MAX")
         } else {
-            format!("XP {}/{}", progress.xp, xp_needed)
+            hud_fmt!("XP {}/{}", progress.xp, xp_needed)
         };
         ui.text(x + 14.0, y + 112.0, 1.8, muted, &xp_label);
         ui.bar(
@@ -317,7 +331,7 @@ pub(crate) fn build_network_hud(
                     Vec4::new(0.0, 0.0, 0.0, 0.62),
                 );
                 let seconds = f32::from(remaining) / 30.0;
-                ui.text(bx + 4.0, by + 24.0, 1.8, text, &format!("{seconds:.1}"));
+                ui.text(bx + 4.0, by + 24.0, 1.8, text, &hud_fmt!("{seconds:.1}"));
             }
         }
         // Inventory.
@@ -402,9 +416,9 @@ pub(crate) fn build_network_hud(
                 y,
                 2.0,
                 color,
-                &format!("SLOT {slot}  {name}  LV {level}"),
+                &hud_fmt!("SLOT {slot}  {name}  LV {level}"),
             );
-            ui.text(sx + 400.0, y, 2.0, muted, &format!("{hp}/{max_hp} HP"));
+            ui.text(sx + 400.0, y, 2.0, muted, &hud_fmt!("{hp}/{max_hp} HP"));
         }
         ui.text(
             sx + 32.0,
@@ -433,7 +447,7 @@ pub(crate) fn build_network_hud(
             sy + 26.0,
             2.0,
             theme::GOLD,
-            &format!("{} GOLD", progress.gold),
+            &hud_fmt!("{} GOLD", progress.gold),
         );
         let page = network.shop_page;
         for (index, item) in network
@@ -456,7 +470,7 @@ pub(crate) fn build_network_hud(
                 row_y,
                 2.0,
                 muted,
-                &format!("[{}]", page * 8 + index + 1),
+                &hud_fmt!("[{}]", page * 8 + index + 1),
             );
             ui.text(sx + 70.0, row_y, 2.0, name_color, item.name_str());
             ui.text(
@@ -468,7 +482,7 @@ pub(crate) fn build_network_hud(
                 } else {
                     Vec4::new(0.55, 0.4, 0.3, 1.0)
                 },
-                &format!("{}G", item.cost),
+                &hud_fmt!("{}G", item.cost),
             );
             ui.text(sx + 390.0, row_y, 1.7, muted, &item_summary(item));
         }
@@ -477,7 +491,7 @@ pub(crate) fn build_network_hud(
             sy + shop_h - 30.0,
             1.8,
             muted,
-            &format!(
+            &hud_fmt!(
                 "B CLOSE   NUMBER BUY   ARROWS PAGE {}/{}   PURCHASES REQUIRE OWN NEXUS",
                 page + 1,
                 network.client.items().len().div_ceil(8).max(1)
@@ -488,31 +502,33 @@ pub(crate) fn build_network_hud(
         let seconds = u32::from(network.countdown).div_ceil(30);
         let (label, footer) = if network.spectator {
             (
-                format!("SPECTATOR — MATCH STARTS IN {seconds}"),
-                String::from("ALL VISIBLE   WASD PAN   ARROWS ROTATE   UP/DOWN ZOOM"),
+                hud_fmt!("SPECTATOR — MATCH STARTS IN {seconds}"),
+                hud_static!("ALL VISIBLE   WASD PAN   ARROWS ROTATE   UP/DOWN ZOOM"),
             )
         } else if network.phase == MatchPhase::Lobby {
             if network.ready {
                 (
-                    String::from("READY — WAITING FOR PLAYERS"),
-                    format!(
+                    hud_static!("READY — WAITING FOR PLAYERS"),
+                    hud_fmt!(
                         "{}/{} PLAYERS READY",
-                        network.ready_count, network.player_count
+                        network.ready_count,
+                        network.player_count
                     ),
                 )
             } else {
                 (
-                    String::from("PRESS R TO READY"),
-                    format!(
+                    hud_static!("PRESS R TO READY"),
+                    hud_fmt!(
                         "{}/{} PLAYERS READY",
-                        network.ready_count, network.player_count
+                        network.ready_count,
+                        network.player_count
                     ),
                 )
             }
         } else {
             (
-                format!("MATCH STARTS IN {seconds}"),
-                String::from("BOTS FILL EMPTY SLOTS"),
+                hud_fmt!("MATCH STARTS IN {seconds}"),
+                hud_static!("BOTS FILL EMPTY SLOTS"),
             )
         };
         let panel_w = 560.0;
@@ -570,9 +586,9 @@ pub(crate) fn build_network_hud(
         );
         let seconds = u32::from(network.countdown).div_ceil(30);
         let footer = if network.phase == MatchPhase::Results {
-            format!("NEXT MATCH IN {seconds}   /   ESC TO EXIT")
+            hud_fmt!("NEXT MATCH IN {seconds}   /   ESC TO EXIT")
         } else {
-            String::from("PRESS ESC TO EXIT")
+            hud_static!("PRESS ESC TO EXIT")
         };
         ui.text(
             (width_f - UiDrawList::text_width(&footer, 2.0)) * 0.5,
@@ -593,28 +609,32 @@ pub(crate) fn build_network_hud(
     }
 }
 
-pub(crate) fn item_summary(item: &moba_net::protocol::WireItem) -> String {
-    let mut parts = Vec::new();
-    if item.health != 0 {
-        parts.push(format!("+{} HP", item.health));
+pub(crate) fn item_summary(item: &moba_net::protocol::WireItem) -> HudString {
+    use std::fmt::Write as _;
+
+    let mut out = HudString::new();
+    let mut first = true;
+    let mut push = |label: &str, value: i32| {
+        if value != 0 {
+            if !first {
+                out.push_str("  ");
+            }
+            let _ = write!(out, "+{value} {label}");
+            first = false;
+        }
+    };
+    push("HP", item.health);
+    push("MP", item.mana);
+    push("DMG", item.attack_damage);
+    push("ARMOR", item.armor);
+    push("MR", item.magic_resist);
+    if item.move_speed_bits != 0 {
+        if !first {
+            out.push_str("  ");
+        }
+        let _ = write!(out, "+{} MS", Fix::from_bits(item.move_speed_bits).to_f32());
     }
-    if item.mana != 0 {
-        parts.push(format!("+{} MP", item.mana));
-    }
-    if item.attack_damage != 0 {
-        parts.push(format!("+{} DMG", item.attack_damage));
-    }
-    if item.armor != 0 {
-        parts.push(format!("+{} ARMOR", item.armor));
-    }
-    if item.magic_resist != 0 {
-        parts.push(format!("+{} MR", item.magic_resist));
-    }
-    let move_speed = Fix::from_bits(item.move_speed_bits);
-    if move_speed != Fix::ZERO {
-        parts.push(format!("+{} MS", move_speed.to_f32()));
-    }
-    parts.join("  ")
+    out
 }
 
 pub(crate) fn build_local_hud(
@@ -641,7 +661,7 @@ pub(crate) fn build_local_hud(
         64.0,
         2.0,
         muted,
-        &format!(
+        &hud_fmt!(
             "TICK {}   WAVE {}   UNITS {}",
             simulation.current_tick().get(),
             simulation.wave(),
@@ -661,6 +681,7 @@ pub(crate) fn build_local_hud(
 #[cfg(test)]
 mod tests {
     use super::{Simulation, UiDrawList, build_local_hud};
+    use crate::{hud_fmt, hud_static};
     use moba_sim::SimConfig;
 
     #[test]
@@ -669,5 +690,14 @@ mod tests {
         let mut ui = UiDrawList::new();
         build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0);
         assert_ne!(ui.vertices().len(), 0);
+    }
+
+    #[test]
+    fn hud_text_is_stack_bounded() {
+        let text = hud_fmt!("{}", "x".repeat(400));
+        assert_eq!(text.capacity(), 256);
+        assert!(text.len() <= 256);
+        let long = hud_static!("a short fixed label");
+        assert_eq!(long.capacity(), 256);
     }
 }

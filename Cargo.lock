@@ -1061,6 +1061,7 @@ dependencies = [
 name = "moba-client"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "moba-assets",
  "moba-core",
  "moba-ecs",

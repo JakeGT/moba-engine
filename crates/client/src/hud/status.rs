@@ -1,6 +1,7 @@
 //! HUD status.
 
 use super::{Camera, FixVec2, UiDrawList, Vec2, Vec3, Vec4, project_to_screen};
+use crate::hud_fmt;
 
 pub(crate) fn draw_world_circle(
     ui: &mut UiDrawList,
@@ -35,9 +36,9 @@ pub(crate) fn draw_perf(ui: &mut UiDrawList, width: f32, frame_ms: f32, fps: f32
     }
     let truncated = moba_render::ui_vertices_truncated();
     let label = if truncated == 0 {
-        format!("{fps:.0} FPS   {frame_ms:.1} MS")
+        hud_fmt!("{fps:.0} FPS   {frame_ms:.1} MS")
     } else {
-        format!("{fps:.0} FPS   {frame_ms:.1} MS   UI TRUNC {truncated}")
+        hud_fmt!("{fps:.0} FPS   {frame_ms:.1} MS   UI TRUNC {truncated}")
     };
     ui.text(
         width - 24.0 - UiDrawList::text_width(&label, 1.8),

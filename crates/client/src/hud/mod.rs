@@ -13,7 +13,39 @@ pub(crate) use minimap::*;
 pub(crate) use model::*;
 pub(crate) use status::*;
 
+use std::fmt::{self, Write as _};
 use std::time::Instant;
+
+use arrayvec::ArrayString;
+
+/// Stack-formatted HUD text; no heap allocation.
+pub(crate) type HudString = ArrayString<256>;
+
+/// Formats HUD text into a fixed stack buffer, truncating past 256 bytes.
+pub(crate) fn format_hud(args: fmt::Arguments<'_>) -> HudString {
+    let mut buffer = HudString::new();
+    let _ = buffer.write_fmt(args);
+    buffer
+}
+
+/// Static HUD text in the same stack type.
+pub(crate) fn static_hud(value: &str) -> HudString {
+    HudString::from(value).unwrap_or_default()
+}
+
+/// Formats into the fixed 256-byte HUD stack buffer.
+#[macro_export]
+macro_rules! hud_fmt {
+    ($($arg:tt)*) => {{
+        $crate::hud::format_hud(format_args!($($arg)*))
+    }};
+}
+
+/// Wraps a static string in the fixed HUD stack buffer.
+#[macro_export]
+macro_rules! hud_static {
+    ($value:literal) => {{ $crate::hud::static_hud($value) }};
+}
 
 use moba_core::math::{Vec2, Vec3, Vec4};
 use moba_core::{Fix, FixVec2};
