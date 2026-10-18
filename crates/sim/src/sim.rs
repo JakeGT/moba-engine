@@ -420,6 +420,7 @@ pub struct Simulation {
     modifier_entities: Vec<Entity>,
     burn_hits: Vec<(Entity, i32, DamageType, Entity)>,
     observed_candidates: Vec<ObservedCandidate>,
+    bot_observed: [Vec<ObservedUnit>; 2],
     bot_policy: Option<Box<dyn BotPolicy>>,
     bot_rng: [Rng; MAX_PLAYERS],
 }
@@ -468,6 +469,7 @@ impl Simulation {
             modifier_entities: Vec::with_capacity(MAX_UNITS),
             burn_hits: Vec::with_capacity(MAX_UNITS),
             observed_candidates: Vec::with_capacity(MAX_UNITS),
+            bot_observed: [Vec::with_capacity(MAX_UNITS), Vec::with_capacity(MAX_UNITS)],
             bot_policy: None,
             bot_rng: core::array::from_fn(|index| {
                 Rng::from_seed(
@@ -2337,6 +2339,7 @@ impl Simulation {
     #[allow(clippy::too_many_lines)] // Explicit priority ladder is easier to audit.
     fn default_bot_inputs(&mut self) -> TickInputs {
         self.refresh_spatial();
+        let visibility = self.bot_visibility_masks();
         self.hero_views.clear();
         for (_entity, (slot, team, position, health, mana, cooldowns, identity, stats)) in
             self.world.query_filtered::<(
@@ -2438,18 +2441,27 @@ impl Simulation {
                 }
             }
             let enemy_nexus = self.content.map.nexus_position(view.team.enemy());
-            let hero_target =
-                self.nearest_enemy(view.position, view.team, Fix::from_i32(13), |kind| {
-                    kind.is_hero()
-                });
-            let minion_target =
-                self.nearest_enemy(view.position, view.team, Fix::from_i32(10), |kind| {
-                    kind.is_minion()
-                });
-            let structure_target =
-                self.nearest_enemy(view.position, view.team, Fix::from_i32(200), |kind| {
-                    kind.is_structure()
-                });
+            let hero_target = self.nearest_enemy(
+                view.position,
+                view.team,
+                Fix::from_i32(13),
+                &visibility,
+                UnitKind::is_hero,
+            );
+            let minion_target = self.nearest_enemy(
+                view.position,
+                view.team,
+                Fix::from_i32(10),
+                &visibility,
+                UnitKind::is_minion,
+            );
+            let structure_target = self.nearest_enemy(
+                view.position,
+                view.team,
+                Fix::from_i32(200),
+                &visibility,
+                UnitKind::is_structure,
+            );
             let target = hero_target.or(minion_target).or(structure_target);
 
             let command = if let Some(target) = target {
@@ -2499,16 +2511,45 @@ impl Simulation {
         inputs
     }
 
+    fn bot_visibility_masks(&mut self) -> [u64; 16] {
+        let mut observed = [
+            core::mem::take(&mut self.bot_observed[0]),
+            core::mem::take(&mut self.bot_observed[1]),
+        ];
+        self.observed_units(Team::Blue, &mut observed[0]);
+        self.observed_units(Team::Red, &mut observed[1]);
+        let mut team_masks = [0u64; 16];
+        for (team_index, units) in observed.iter().enumerate() {
+            for unit in units {
+                let slot = unit.entity.index() as usize;
+                if slot < 1024 {
+                    team_masks[team_index * 8 + slot / 64] |= 1 << (slot % 64);
+                }
+            }
+        }
+        self.bot_observed = observed;
+        team_masks
+    }
+
+    fn visible_to(masks: &[u64; 16], team: Team, entity: Entity) -> bool {
+        let slot = entity.index() as usize;
+        slot < 1024 && masks[team.index() * 8 + slot / 64] & (1 << (slot % 64)) != 0
+    }
+
     fn nearest_enemy(
         &self,
         position: FixVec2,
         team: Team,
         radius: Fix,
+        masks: &[u64; 16],
         filter: impl Fn(UnitKind) -> bool,
     ) -> Option<TargetRef> {
         let mut best: Option<(Fix, TargetRef)> = None;
         self.grid.for_each_in_circle(position, radius, |candidate| {
-            if candidate.team == team || !filter(candidate.kind) {
+            if candidate.team == team
+                || !filter(candidate.kind)
+                || !Self::visible_to(masks, team, candidate.entity)
+            {
                 return;
             }
             let distance = candidate.position.distance_sq(position);
@@ -2771,6 +2812,20 @@ mod tests {
         }
         let after = sim.world.get::<Health>(red).unwrap().current;
         assert!(after < start, "skillshot should hit ({start} -> {after})");
+    }
+
+    #[test]
+    fn bot_visibility_masks_hide_distant_enemies() {
+        let mut sim = idle([0; MAX_PLAYERS]);
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        sim.world.get_mut::<Position>(blue).unwrap().0 = FixVec2::from_ints(10, 10);
+        sim.world.get_mut::<Position>(red).unwrap().0 = FixVec2::from_ints(250, 250);
+        let masks = sim.bot_visibility_masks();
+        assert!(!Simulation::visible_to(&masks, Team::Blue, red));
+        sim.world.get_mut::<Position>(red).unwrap().0 = FixVec2::from_ints(12, 10);
+        let masks = sim.bot_visibility_masks();
+        assert!(Simulation::visible_to(&masks, Team::Blue, red));
     }
 
     #[test]

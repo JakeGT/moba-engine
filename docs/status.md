@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: 2026-10-18. Protocol **v22**; replay format **v5** (sim logic v5); content packs are runtime
+Last updated: 2026-10-18. Protocol **v22**; replay format **v5** (sim logic v6); content packs are runtime
 TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Milestones
@@ -35,8 +35,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **231 passed**, 0 failed, 3 ignored.
-- `cargo test --workspace --release --locked`: **231 passed**, 0 failed.
+- `cargo test --workspace --locked`: **232 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --release --locked`: **232 passed**, 0 failed.
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
