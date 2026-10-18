@@ -19,8 +19,8 @@ use crate::protocol::{
     EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, FLAG_NEED_FULL, Header,
     InputMessage, MAX_DATAGRAM, MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, NetEvent, NetId,
     PacketKind, SnapshotDelta, SnapshotState, Welcome, WireCatalog, WireCommand, build_delta_into,
-    decode_hello, decode_input, dequantize_position, encode_snapshot, encode_welcome,
-    quantize_position, sequence_after,
+    decode_hello, decode_input, dequantize_position, encode_content_update, encode_snapshot,
+    encode_welcome, quantize_position, sequence_after,
 };
 
 use crate::transport::{ReceivedMessage, UdpTransport};
@@ -982,9 +982,7 @@ impl NetServer {
         let Some(reload) = self.reload.as_mut() else {
             return;
         };
-        if self.phase != Phase::Lobby
-            || self.clients.iter().flatten().any(|client| client.connected)
-        {
+        if !matches!(self.phase, Phase::Lobby | Phase::Results(_)) {
             return;
         }
         let Ok(modified) = std::fs::metadata(&reload.path).and_then(|metadata| metadata.modified())
@@ -1004,8 +1002,40 @@ impl NetServer {
                 self.content = content;
                 self.record_frames.clear();
                 self.recorded = false;
+                let catalog = WireCatalog::from(&*self.content);
+                let mut payload = Vec::new();
+                encode_content_update(&catalog, hash, &mut payload);
+                let targets: Vec<(SocketAddr, u32)> = self
+                    .clients
+                    .iter()
+                    .flatten()
+                    .filter(|client| client.connected)
+                    .map(|client| (client.addr, client.session))
+                    .collect();
+                for client in self.clients.iter_mut().flatten() {
+                    client.clear_history();
+                    client.net_ids.clear();
+                    client.acked_snapshot = 0;
+                    client.need_full = true;
+                    client.command = None;
+                    client.pending_purchase = None;
+                    client.last_input_seq = 0;
+                }
+                for (addr, session) in targets {
+                    let header = Header {
+                        kind: PacketKind::ContentUpdate,
+                        flags: 0,
+                        session,
+                        seq: 0,
+                        ack: 0,
+                        ack_bits: 0,
+                    };
+                    if let Err(error) = self.transport.send(addr, &header, &payload) {
+                        eprintln!("content update send failed for {addr}: {error}");
+                    }
+                }
                 eprintln!(
-                    "content reloaded {} items, hash {hash:#018x}",
+                    "content reloaded and broadcast: {} items, hash {hash:#018x}",
                     self.content.items.len()
                 );
             }
@@ -2388,6 +2418,45 @@ cost = 1
             server.simulation().content().hash(),
             moba_game::load_content_file(&path).expect("load").hash()
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn content_reload_is_deferred_while_playing() {
+        let path = std::env::temp_dir().join(format!(
+            "moba-reload-playing-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        std::fs::write(&path, "[[items]]\nname = \"Live\"\ncost = 1\n").expect("seed");
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 4,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let content = moba_game::load_content_file(&path).expect("load seeded content");
+        let mut server = NetServer::bind_with_content(config, Arc::new(content)).expect("bind");
+        server.watch_content(path.clone());
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&path, "[[items]]\nname = \"Deferred\"\ncost = 1\n").expect("rewrite");
+        server.phase = Phase::Playing;
+        for _ in 0..3 {
+            server.tick().expect("tick");
+        }
+        assert_eq!(server.simulation().content().items[0].name, "Live");
         let _ = std::fs::remove_file(&path);
     }
 

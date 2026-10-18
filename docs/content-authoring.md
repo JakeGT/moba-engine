@@ -287,9 +287,9 @@ cargo run -p moba-server -- \
   --items content/example-pack.toml --reload-content
 ```
 
-The pack is re-read at most once per second **only when the lobby has no connected clients**;
-the new catalogue is used by the next handshake. Connected clients are never hot-swapped
-mid-match.
+The pack is re-read at most once per second in Lobby/Results. Connected clients receive a
+`ContentUpdate` packet with the full validated catalogue and replace catalogue-dependent state
+atomically; a live `Playing` match is never hot-swapped.
 
 ## Replays
 

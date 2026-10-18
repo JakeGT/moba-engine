@@ -63,6 +63,7 @@ fn client_connects_receives_snapshots_and_moves() {
         while let Some(event) = client.next_event() {
             match event {
                 ClientEvent::Connected { .. } => saw_connected = true,
+                ClientEvent::ContentUpdated { .. } => {}
                 ClientEvent::GameEvent(event) => {
                     if event.kind == moba_net::protocol::EVENT_CAST {
                         saw_game_event = true;

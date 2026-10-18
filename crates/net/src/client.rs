@@ -52,6 +52,11 @@ pub enum ClientEvent {
     },
     /// A presentation event from a snapshot.
     GameEvent(crate::protocol::NetEvent),
+    /// The catalogue was atomically replaced between matches.
+    ContentUpdated {
+        /// New content hash.
+        hash: u64,
+    },
     /// The connection ended.
     Disconnected,
 }
@@ -126,6 +131,7 @@ pub struct NetClient {
     abilities: Vec<crate::protocol::WireAbility>,
     map: crate::protocol::WireMap,
     rules: crate::protocol::WireRules,
+    content_hash: u64,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     expected_server: Option<[u8; 32]>,
@@ -236,6 +242,7 @@ impl NetClient {
             abilities: Vec::new(),
             map: crate::protocol::WireMap::default(),
             rules: crate::protocol::WireRules::default(),
+            content_hash: 0,
             nonce,
             pre_shared_key,
             expected_server,
@@ -561,7 +568,8 @@ impl NetClient {
                     self.session = message.header.session;
                     self.slot = welcome.slot;
                     self.spectator = welcome.spectator;
-                    self.team = if welcome.slot < 5 {
+                    let team_size = usize::from(catalog.rules.team_size);
+                    self.team = if usize::from(welcome.slot) < team_size {
                         Team::Blue
                     } else {
                         Team::Red
@@ -579,9 +587,42 @@ impl NetClient {
                         .extend_from_slice(&catalog.abilities[..ability_count]);
                     self.map = catalog.map;
                     self.rules = catalog.rules;
+                    self.content_hash = content_hash;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
+                }
+                PacketKind::ContentUpdate => {
+                    if self.state != ClientState::Connected
+                        || message.header.session != self.session
+                    {
+                        continue;
+                    }
+                    let Ok((catalog, hash)) =
+                        crate::protocol::decode_content_update(&message.payload)
+                    else {
+                        continue;
+                    };
+                    let item_count =
+                        usize::from(catalog.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
+                    let hero_count =
+                        usize::from(catalog.hero_count).min(crate::protocol::MAX_WIRE_HEROES);
+                    let ability_count =
+                        usize::from(catalog.ability_count).min(crate::protocol::MAX_WIRE_ABILITIES);
+                    self.items.clear();
+                    self.items.extend_from_slice(&catalog.items[..item_count]);
+                    self.heroes.clear();
+                    self.heroes.extend_from_slice(&catalog.heroes[..hero_count]);
+                    self.abilities.clear();
+                    self.abilities
+                        .extend_from_slice(&catalog.abilities[..ability_count]);
+                    self.map = catalog.map;
+                    self.rules = catalog.rules;
+                    self.content_hash = hash;
+                    self.latest = None;
+                    self.history.clear();
+                    self.last_acked_snapshot = 0;
+                    self.push_event(ClientEvent::ContentUpdated { hash });
                 }
                 PacketKind::Snapshot => {
                     if self.state != ClientState::Connected
@@ -780,10 +821,16 @@ impl NetClient {
         &self.map
     }
 
-    /// Match rules received in the handshake.
+    /// Match rules received in the handshake or latest content update.
     #[must_use]
     pub const fn rules(&self) -> &crate::protocol::WireRules {
         &self.rules
+    }
+
+    /// Current content hash.
+    #[must_use]
+    pub const fn content_hash(&self) -> u64 {
+        self.content_hash
     }
 
     /// Server tick rate.
