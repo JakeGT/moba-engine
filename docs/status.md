@@ -89,7 +89,8 @@ Current themes:
   [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
 - Product: [audio](https://github.com/JakeGT/moba-engine/issues/18) and
   [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).
-- Release: [crates.io publishing/metadata](https://github.com/JakeGT/moba-engine/issues/21).
+- Release: [crates.io publishing/metadata](https://github.com/JakeGT/moba-engine/issues/21) and
+  [replace unmaintained ttf-parser](https://github.com/JakeGT/moba-engine/issues/22).
 
 ## Open-source surface
 

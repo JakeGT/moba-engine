@@ -9,8 +9,8 @@
 The engine is ready to be published as an open-source project that others can embed, extend
 and build games or tools on. That requires more than code: licensing, a documented public
 surface, optional dependency boundaries, examples and a release/stability policy. The
-workspace is still pre-1.0 and content is compile-time, so the distribution surface must not
-pretend to be a frozen 1.0 API.
+workspace is still pre-1.0 (and content was compile-time when this decision was written), so
+the distribution surface must not pretend to be a frozen 1.0 API.
 
 ## Decision
 
@@ -23,8 +23,8 @@ pretend to be a frozen 1.0 API.
    - `net` (default): UDP/protocol/prediction (implies `sim`);
    - `render`: Vulkan renderer + winit platform, off by default for headless consumers.
    Individual crates stay public for narrower boundaries.
-4. **Content remains compile-time for 0.1.** `moba-game` tables are the extension path; a
-   versioned runtime content pack is M8. Documentation states this limit explicitly.
+4. ~~**Content remains compile-time for 0.1.**~~ **Superseded:** runtime TOML content packs
+   landed in M8; `moba-game` tables remain the default pack. See `docs/content-authoring.md`.
 5. **Stability tiers** (foundation / engine / applications) with a pre-1.0 breakage policy,
    changelog discipline and wire-protocol version bumps. `cargo-semver-checks` is the intended
    release gate once crate names/ownership are settled.

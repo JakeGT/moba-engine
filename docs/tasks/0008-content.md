@@ -1,6 +1,6 @@
 # 0008: Content pipeline (M8)
 
-**Milestone:** M8   **Crates:** game, sim, net, server, client   **Status:** in progress
+**Milestone:** M8   **Crates:** game, sim, net, server, client   **Status:** in progress (core pipeline landed; see Next)
 
 ## Goal
 Let creators add and tune game content without forking simulation code, while keeping
