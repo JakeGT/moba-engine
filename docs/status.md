@@ -8,7 +8,7 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 | # | Milestone | State | Notes |
 |---|---|---|---|
 | M0 | Bootstrap | ✅ [evidence](../README.md) | Workspace, lints, CI, justfile, agent instructions. |
-| M1 | Core runtime | 🟡 [evidence](tasks/0001-core-runtime.md) | Fixed-point core, SoA ECS, work stealing, arenas/bitsets; Miri is green in CI. The Loom model of the job-scope counter is still open (#16), so the milestone is not complete. |
+| M1 | Core runtime | ✅ [evidence](tasks/0001-core-runtime.md) | Fixed-point core, SoA ECS, work stealing, arenas/bitsets; Miri and the Loom job-scope model are green in CI. |
 | M2 | Platform | 🟡 [evidence](tasks/0002-platform.md) | Linux runtime verified; Windows/macOS are compile/CI checked but not runtime-validated. winit/input, 30 Hz step and headless modes are present. |
 | M3 | Renderer | 🟡 [evidence](tasks/0003-renderer.md) | Vulkan 1.2 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, bitmap UI and readback; validated on lavapipe. Skinning, golden-image CI, min-spec frame timings and Windows/macOS validation remain. |
 | M4 | Simulation | ✅ [evidence](tasks/0004-simulation.md) | Deterministic 5v5, 3 lanes, towers/nexuses, minions, bots, respawns, XP/gold/items, vision filtering; **13.3 µs/tick** steady benchmark. |
@@ -93,8 +93,7 @@ Current themes:
   [manifest attestation](https://github.com/JakeGT/moba-engine/issues/11),
   [scripting/advanced behaviours](https://github.com/JakeGT/moba-engine/issues/13), and
   [map selection](https://github.com/JakeGT/moba-engine/issues/20).
-- Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14),
-  [Loom job model](https://github.com/JakeGT/moba-engine/issues/16), and
+- Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14) and
   [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
 - Product: [audio](https://github.com/JakeGT/moba-engine/issues/18) and
   [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).

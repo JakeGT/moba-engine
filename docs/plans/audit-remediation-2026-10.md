@@ -221,7 +221,7 @@ Order matters: golden image first, then structural refactors it can protect.
 ### Hardening / security
 - [x] **#28 decoder bounds** (W0) + **#15 sanitizer-backed cargo-fuzz/ASan** covering replay/
   wire/snapshot/content decoders.
-- [ ] **#16 Loom** job-scope model, bounded for CI/nightly.
+- [x] **#16 Loom** job-scope model, bounded for CI/nightly.
 - [ ] **#14 account/reputation/key transparency/player-count attestation** with ADR and
   rotation/revocation tests.
 - [x] **#22 replace unmaintained ttf-parser** (winit/ab_glyph upgrade or alternative).
