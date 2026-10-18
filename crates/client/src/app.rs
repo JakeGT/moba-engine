@@ -16,7 +16,7 @@
 //! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -1073,6 +1073,66 @@ impl NetworkView {
             entry.life = entry.life.saturating_sub(1);
         }
         self.kill_feed.retain(|entry| entry.life > 0);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod allocation_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    struct CountingAllocator;
+
+    // SAFETY: every method forwards exactly to the system allocator with unchanged arguments.
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record();
+            // SAFETY: forwarding the same layout to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record();
+            // SAFETY: forwarding the same layout to the system allocator.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            record();
+            // SAFETY: `ptr`/`layout` came from this allocator; forwarding unchanged.
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr`/`layout` came from this allocator; forwarding unchanged.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    fn record() {
+        if ENABLED.try_with(Cell::get).unwrap_or(false) {
+            ALLOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    /// Runs `f` while counting allocations made on the calling thread.
+    pub(crate) fn probe<R>(f: impl FnOnce() -> R) -> (R, u64) {
+        // Force both TLS slots to initialise before counting: Windows lazily allocates
+        // thread-local storage on first access.
+        ENABLED.with(|_| {});
+        ALLOCATIONS.with(|count| count.set(0));
+        ENABLED.with(|enabled| enabled.set(true));
+        let value = f();
+        ENABLED.with(|enabled| enabled.set(false));
+        (value, ALLOCATIONS.with(Cell::get))
     }
 }
 
