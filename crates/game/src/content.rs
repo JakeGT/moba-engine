@@ -594,11 +594,14 @@ fn effect_valid(effect: &Effect, modifiers: &[ModifierDef]) -> bool {
             speed_per_sec,
             range,
             radius,
+            arc,
             on_hit,
         } => {
             in_range(*speed_per_sec)
                 && in_range(*range)
                 && in_range(*radius)
+                && *arc >= Fix::ZERO
+                && *arc <= Fix::from_i32(MAX_RANGE)
                 && area_effects_valid(on_hit, modifiers)
         }
         Effect::Area { radius, effects } => {
@@ -688,12 +691,14 @@ fn hash_effects(feed: &mut dyn FnMut(&[u8]), effects: &EffectList) {
                 speed_per_sec,
                 range,
                 radius,
+                arc,
                 on_hit,
             } => {
                 feed(&[4]);
                 feed(&speed_per_sec.to_bits().to_le_bytes());
                 feed(&range.to_bits().to_le_bytes());
                 feed(&radius.to_bits().to_le_bytes());
+                feed(&arc.to_bits().to_le_bytes());
                 hash_area_effects(feed, on_hit);
             }
             Effect::Area { radius, effects } => {
@@ -1207,6 +1212,9 @@ struct AbilityEntry {
     range: f32,
     #[serde(default)]
     radius: f32,
+    /// Visual projectile arc height at mid-flight.
+    #[serde(default)]
+    arc: f32,
     #[serde(default)]
     damage: i32,
     #[serde(default)]
@@ -1433,6 +1441,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                                 speed_per_sec: fix_param(ability.speed, "abilities.speed")?,
                                 range: fix_param(ability.range, "abilities.range")?,
                                 radius,
+                                arc: fix_param(ability.arc, "abilities.arc")?,
                                 on_hit,
                             }),
                         )
