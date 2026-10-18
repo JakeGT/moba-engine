@@ -61,6 +61,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
   validates.
 - Renderer audit: validation-required + sync-validation client capture passes with zero
   messages (Linux/lavapipe); macOS instance creation is fixed but awaiting macOS runtime CI.
+- CI: cross-OS golden state hash, release tests/doctests, MSRV 1.85 and nightly fuzz/soak/
+  match-soak/bench workflows are configured.
 - GitHub CI is green on Ubuntu, Windows and macOS, plus the Miri, cargo-deny and tools/soak
   jobs (`ci` run 39115696239).
 

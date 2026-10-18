@@ -107,3 +107,9 @@ repository ruleset in the same PR.
 Use the repository PR template and include the commands you ran. Changes that touch the
 simulation, protocol, content schema or replay format must include determinism/replay evidence
 and call out compatibility/migration impact. Keep unrelated refactors out of feature PRs.
+
+## Cross-platform determinism
+
+`just state-hash-check` runs a fixed scripted simulation and compares the state hash to
+`tests/golden-state-hash.txt`; CI requires the match on Linux, Windows and macOS. Update the
+golden value deliberately with simulation/replay changes.

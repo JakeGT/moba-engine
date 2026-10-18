@@ -37,10 +37,13 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   v11 shape and **2,384,035,000 iterations clean** on the final v12 shape.
 
 ## CI gates
-- Cross-platform fmt/clippy/tests/docs/features/layering.
+- Cross-platform fmt/clippy/tests/docs/features/layering and a checked golden state hash.
+- Release tests/doctests and MSRV 1.85 jobs.
 - `ci-tools`: content-check fixtures, 10-match deterministic soak, 30-second wire fuzz and
   bench compilation.
-- cargo-deny and Miri jobs.
+- Nightly/manual: one-hour fuzz, five-minute 10-client soak, 50-match soak and benchmark log;
+  cargo-deny and Miri jobs on every CI run.
+- Benchmark thresholds are a documented manual gate because hosted-runner timing is noisy.
 
 ## Landed evidence
 - 50-match deterministic harness (509,820 ticks, rotated compositions) and per-address/global

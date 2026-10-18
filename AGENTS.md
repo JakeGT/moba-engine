@@ -84,6 +84,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --release --locked
+cargo run -q --release -p moba-tools --bin state-hash   # must match tests/golden-state-hash.txt
 ```
 
 Feature/layering checks:
