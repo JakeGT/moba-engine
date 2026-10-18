@@ -544,15 +544,20 @@ impl App for ClientApp {
                         continue;
                     }
                     let fraction = health.current as f32 / health.max as f32;
-                    push_unit(
-                        units,
-                        position.0,
-                        *kind,
-                        *team,
-                        fraction,
-                        0,
-                        simulation.content().map.extent.to_f32() * 0.5,
-                    );
+                    let center = simulation.content().map.extent.to_f32() * 0.5;
+                    if *kind == UnitKind::Hero {
+                        push_hero_rig(
+                            units,
+                            position.0,
+                            *team,
+                            fraction,
+                            center,
+                            simulation.current_tick().get() as f32 / 30.0,
+                            entity.index() as f32,
+                        );
+                    } else {
+                        push_unit(units, position.0, *kind, *team, fraction, 0, center);
+                    }
                 }
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
@@ -810,6 +815,80 @@ fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
             color,
         ));
     }
+}
+
+#[allow(clippy::too_many_arguments)] // Rig pose inputs are explicit.
+fn push_hero_rig(
+    units: &mut Vec<UnitInstance>,
+    position: FixVec2,
+    team: Team,
+    health_fraction: f32,
+    center: f32,
+    time: f32,
+    phase_offset: f32,
+) {
+    let color = match team {
+        Team::Blue => Vec4::new(0.28, 0.55, 1.0, 1.0),
+        Team::Red => Vec4::new(1.0, 0.34, 0.28, 1.0),
+    };
+    let brightness = 0.55 + 0.45 * health_fraction.clamp(0.0, 1.0);
+    let color = Vec4::new(
+        color.x * brightness,
+        color.y * brightness,
+        color.z * brightness,
+        1.0,
+    );
+    let base = Vec3::new(
+        position.x.to_f32() - center,
+        0.0,
+        position.y.to_f32() - center,
+    );
+    let phase = (time * 6.0 + phase_offset).sin();
+    let swing = (time * 9.0 + phase_offset).sin() * 0.35;
+    let part = |offset: Vec3, scale: Vec3, rotation: f32| {
+        Mat4::from_scale_rotation_translation(scale, Quat::from_rotation_z(rotation), base + offset)
+    };
+    // Torso, head, swinging arms and counter-swinging legs form a readable low-poly rig.
+    units.push(UnitInstance::new(
+        part(Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.9, 1.4, 0.6), 0.0),
+        color,
+    ));
+    units.push(UnitInstance::new(
+        part(Vec3::new(0.0, 3.15, 0.0), Vec3::splat(0.7), 0.0),
+        color,
+    ));
+    units.push(UnitInstance::new(
+        part(
+            Vec3::new(-0.72, 2.0 + phase * 0.08, 0.0),
+            Vec3::new(0.3, 1.2, 0.3),
+            swing,
+        ),
+        color,
+    ));
+    units.push(UnitInstance::new(
+        part(
+            Vec3::new(0.72, 2.0 - phase * 0.08, 0.0),
+            Vec3::new(0.3, 1.2, 0.3),
+            -swing,
+        ),
+        color,
+    ));
+    units.push(UnitInstance::new(
+        part(
+            Vec3::new(-0.28, 0.65, 0.0),
+            Vec3::new(0.32, 1.3, 0.34),
+            -swing,
+        ),
+        color,
+    ));
+    units.push(UnitInstance::new(
+        part(
+            Vec3::new(0.28, 0.65, 0.0),
+            Vec3::new(0.32, 1.3, 0.34),
+            swing,
+        ),
+        color,
+    ));
 }
 
 fn push_unit(
