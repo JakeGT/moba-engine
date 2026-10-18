@@ -18,6 +18,34 @@ pub enum ValidationMode {
     Required,
 }
 
+/// Result of a headless Vulkan instance/device probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanProbe {
+    /// Loader/instance API version.
+    pub api_version: u32,
+    /// Number of physical devices enumerated.
+    pub devices: u32,
+    /// Whether `VK_KHR_portability_enumeration` was advertised and enabled.
+    pub portability: bool,
+}
+
+/// Creates an instance and enumerates physical devices without a surface.
+///
+/// Used by CI to exercise the macOS/MoltenVK portability path on a runner.
+///
+/// # Errors
+/// Returns the same instance/extension errors as [`InstanceContext::new`].
+pub fn probe_vulkan() -> RenderResult<VulkanProbe> {
+    let context = InstanceContext::new(&[], ValidationMode::Off)?;
+    // SAFETY: the instance is live and the entry point belongs to it.
+    let devices = unsafe { context.instance.enumerate_physical_devices() }?;
+    Ok(VulkanProbe {
+        api_version: context.instance_version,
+        devices: u32::try_from(devices.len()).unwrap_or(u32::MAX),
+        portability: context.portability,
+    })
+}
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const PORTABILITY_ENUMERATION: &CStr = c"VK_KHR_portability_enumeration";
 static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);
@@ -29,6 +57,7 @@ pub(crate) struct InstanceContext {
     pub(crate) entry: Entry,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     validation_enabled: bool,
+    portability: bool,
     instance_version: u32,
 }
 
@@ -66,7 +95,8 @@ impl InstanceContext {
             .map(|name| name.as_ptr())
             .collect();
         let mut create_flags = vk::InstanceCreateFlags::empty();
-        if extension_supported(&available_extensions, PORTABILITY_ENUMERATION) {
+        let portability = extension_supported(&available_extensions, PORTABILITY_ENUMERATION);
+        if portability {
             create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
             if !required_extensions.contains(&PORTABILITY_ENUMERATION) {
                 extensions.push(PORTABILITY_ENUMERATION.as_ptr());
@@ -154,6 +184,7 @@ impl InstanceContext {
             entry,
             debug_messenger,
             validation_enabled,
+            portability,
             instance_version,
         })
     }
