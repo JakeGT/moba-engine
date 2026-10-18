@@ -680,6 +680,9 @@ fn push_unit(
     if status & moba_net::protocol::ENTITY_FLAG_BURN != 0 {
         color = color * 0.7 + Vec4::new(1.0, 0.42, 0.1, 1.0) * 0.3;
     }
+    if status & moba_net::protocol::ENTITY_FLAG_HASTE != 0 {
+        color = color * 0.75 + Vec4::new(0.25, 0.95, 0.4, 1.0) * 0.25;
+    }
     let world_position = Vec3::new(
         position.x.to_f32() - 128.0,
         0.0,
@@ -1064,6 +1067,10 @@ fn draw_health_bars(
                 (
                     moba_net::protocol::ENTITY_FLAG_BURN,
                     Vec4::new(1.0, 0.45, 0.12, 1.0),
+                ),
+                (
+                    moba_net::protocol::ENTITY_FLAG_HASTE,
+                    Vec4::new(0.3, 0.95, 0.4, 1.0),
                 ),
             ] {
                 if entity.flags & flag != 0 {

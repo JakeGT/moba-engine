@@ -67,6 +67,15 @@ duration_ticks = 75
 damage = 14
 damage_type = "magic"
 
+[[abilities]]
+name = "Wind Rush"
+cooldown_ticks = 180
+mana_cost = 18
+cast_range = 0.0
+kind = "haste"
+factor = 1.55
+duration_ticks = 90
+
 [[heroes]]
 name = "Nova Mage"
 max_health = 520
@@ -80,4 +89,4 @@ move_speed = 6.0
 armor = 14
 magic_resist = 24
 vision_range = 14.0
-abilities = [5, 2, 1]
+abilities = [6, 2, 1]

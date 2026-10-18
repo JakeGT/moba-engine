@@ -126,10 +126,10 @@ damage_type = "magic"   # physical | magic
 Kinds take: `skillshot` (`speed`, `range`, `radius`, `damage`, `damage_type`), `dash`
 (`range`), `heal` (`amount`, `radius`), `shield` (`amount`, `duration_ticks`), `slow` (`radius`,
 `factor`, `duration_ticks`), `root` (`radius`, `duration_ticks`), `silence` (`radius`,
-`duration_ticks`), `burn` (`radius`, `duration_ticks`, `damage`, `damage_type`) or `burst`
+`duration_ticks`), `haste` (`factor`, `duration_ticks`), `burn` (`radius`, `duration_ticks`, `damage`, `damage_type`) or `burst`
 (`radius`, `damage`, `damage_type`). Slow multiplies movement speed (0<factor<1) and restores it on
-expiry/respawn; slowed units get a purple tint. Root blocks new move commands and dashes until expiry and tints units yellow; silence blocks ability casts and tints units grey; burn applies
-per-tick damage and tints units orange. Shields absorb damage before health and show as a cyan
+expiry/respawn; slowed units get a purple tint. Root blocks new move commands and dashes until expiry and tints units yellow; silence blocks ability casts and tints units grey; haste multiplies movement
+speed (>1) and tints units green; burn applies per-tick damage and tints units orange. Shields absorb damage before health and show as a cyan
 tint on the unit.
 Hero names must be 1–16 ASCII bytes and unique; ability ids must exist.
 

@@ -59,6 +59,13 @@ pub enum AbilityKind {
         /// Duration in simulation ticks.
         duration_ticks: u32,
     },
+    /// Grants the caster a temporary movement-speed boost.
+    Haste {
+        /// Movement multiplier (>1).
+        factor: Fix,
+        /// Duration in simulation ticks.
+        duration_ticks: u32,
+    },
     /// Silences enemies around the target point, preventing ability casts.
     Silence {
         /// Effect radius.
@@ -323,6 +330,13 @@ mod tests {
                     assert!(radius > Fix::ZERO);
                     assert!(duration_ticks > 0);
                     assert!(damage_per_tick > 0);
+                }
+                AbilityKind::Haste {
+                    factor,
+                    duration_ticks,
+                } => {
+                    assert!(factor > Fix::ONE);
+                    assert!(duration_ticks > 0);
                 }
             }
         }

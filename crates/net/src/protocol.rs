@@ -1045,6 +1045,8 @@ pub const ENTITY_FLAG_ROOT: u8 = 1 << 3;
 pub const ENTITY_FLAG_SILENCE: u8 = 1 << 4;
 /// The unit is burning.
 pub const ENTITY_FLAG_BURN: u8 = 1 << 5;
+/// A movement haste is active.
+pub const ENTITY_FLAG_HASTE: u8 = 1 << 6;
 
 impl NetEntity {
     /// Quantises an observed unit.
@@ -2059,6 +2061,7 @@ mod tests {
             rooted: false,
             silenced: false,
             burning: false,
+            hasted: false,
         };
         let entity = NetEntity::from_observed(4, &unit);
         assert_eq!(entity.net_id, 4);

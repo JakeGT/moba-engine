@@ -35,6 +35,7 @@ deterministic playback and server authority.
   with 3 checkpoints over 555 ticks.
 
 - Shield kind: temporary absorption with duration, snapshot flag and cyan client tint.
+- Haste kind: self movement multiplier with expiry/respawn restore and flag.
 - Burn kind: radius/duration/per-tick damage with state-hash and client flag.
 - Silence kind: radius/duration blocking ability casts, with expiry/respawn removal and flag.
 - Root kind: radius/duration with move-command and dash blocking, expiry/respawn removal and a flag.

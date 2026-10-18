@@ -530,6 +530,10 @@ impl GameContent {
                     damage_per_tick,
                     ..
                 } => radius > Fix::ZERO && duration_ticks > 0 && damage_per_tick > 0,
+                AbilityKind::Haste {
+                    factor,
+                    duration_ticks,
+                } => factor > Fix::ONE && duration_ticks > 0,
                 AbilityKind::Heal { amount, radius } => amount >= 0 && radius >= Fix::ZERO,
                 AbilityKind::Burst { radius, damage, .. } => radius > Fix::ZERO && damage >= 0,
             };
@@ -688,6 +692,14 @@ impl GameContent {
                     feed(&[2]);
                     feed(&(amount as u32).to_le_bytes());
                     feed(&radius.to_bits().to_le_bytes());
+                }
+                AbilityKind::Haste {
+                    factor,
+                    duration_ticks,
+                } => {
+                    feed(&[9]);
+                    feed(&factor.to_bits().to_le_bytes());
+                    feed(&duration_ticks.to_le_bytes());
                 }
                 AbilityKind::Burn {
                     radius,
@@ -1027,6 +1039,10 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         "heal" => AbilityKind::Heal {
                             amount: ability.amount,
                             radius: Fix::from_f32(ability.radius),
+                        },
+                        "haste" => AbilityKind::Haste {
+                            factor: Fix::from_f32(ability.factor),
+                            duration_ticks: ability.duration_ticks,
                         },
                         "burn" => AbilityKind::Burn {
                             radius: Fix::from_f32(ability.radius),

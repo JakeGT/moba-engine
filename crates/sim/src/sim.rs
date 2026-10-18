@@ -13,9 +13,9 @@ use moba_game::{
 use moba_nav::SpatialGrid;
 
 use crate::components::{
-    AttackDamageType, AttackStats, AttackTarget, Burn, Cooldowns, Dead, Health, HeroIdentity,
-    HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position, Progression, Regen,
-    Resistances, Root, Shield, Silence, Slow, UnitKind, VisionRange,
+    AttackDamageType, AttackStats, AttackTarget, Burn, Cooldowns, Dead, Haste, Health,
+    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, Mana, MoveSpeed, MoveTarget, Position,
+    Progression, Regen, Resistances, Root, Shield, Silence, Slow, UnitKind, VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -242,6 +242,8 @@ pub struct ObservedUnit {
     pub silenced: bool,
     /// Whether the unit is burning.
     pub burning: bool,
+    /// Whether a movement haste is active.
+    pub hasted: bool,
 }
 
 /// The authoritative MOBA simulation.
@@ -532,6 +534,7 @@ impl Simulation {
                 rooted: self.world.get::<Root>(entity).is_some(),
                 silenced: self.world.get::<Silence>(entity).is_some(),
                 burning: self.world.get::<Burn>(entity).is_some(),
+                hasted: self.world.get::<Haste>(entity).is_some(),
             });
         }
     }
@@ -678,6 +681,12 @@ impl Simulation {
                 hasher.write_u32(burn.damage as u32);
                 hasher.write_u32(burn.damage_type as u32);
                 hasher.write_u32(burn.remaining);
+            }
+            if let Some(haste) = self.world.get::<Haste>(entity) {
+                hasher.write_u32(8);
+                hasher.write_u64(haste.base.to_bits() as u64);
+                hasher.write_u64(haste.factor.to_bits() as u64);
+                hasher.write_u32(haste.remaining);
             }
             if let Some(silence) = self.world.get::<Silence>(entity) {
                 hasher.write_u32(6);
@@ -929,6 +938,7 @@ impl Simulation {
         self.push_event(SimEvent::WaveSpawned { wave: self.wave });
     }
 
+    #[allow(clippy::too_many_lines)] // One ordered status/timer pass.
     fn tick_timers(&mut self) {
         for (_, cooldowns) in self.world.query::<&mut Cooldowns>() {
             for cooldown in &mut cooldowns.0 {
@@ -974,6 +984,21 @@ impl Simulation {
         }
         for entity in expired_silences {
             let _ = self.world.remove::<Silence>(entity);
+        }
+        let mut expired_hastes = Vec::new();
+        for (entity, haste) in self.world.query::<&mut Haste>() {
+            haste.remaining = haste.remaining.saturating_sub(1);
+            if haste.remaining == 0 {
+                expired_hastes.push(entity);
+            }
+        }
+        for entity in expired_hastes {
+            if let Some(haste) = self.world.get::<Haste>(entity).copied() {
+                if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
+                    speed.0 = haste.base;
+                }
+            }
+            let _ = self.world.remove::<Haste>(entity);
         }
         let mut expired_roots = Vec::new();
         for (entity, root) in self.world.query::<&mut Root>() {
@@ -1040,7 +1065,13 @@ impl Simulation {
                 speed.0 = slow.base;
             }
         }
+        if let Some(haste) = self.world.get::<Haste>(entity).copied() {
+            if let Some(speed) = self.world.get_mut::<MoveSpeed>(entity) {
+                speed.0 = haste.base;
+            }
+        }
         let _ = self.world.remove::<Slow>(entity);
+        let _ = self.world.remove::<Haste>(entity);
         let _ = self.world.remove::<Root>(entity);
         let _ = self.world.remove::<Silence>(entity);
         let _ = self.world.remove::<Burn>(entity);
@@ -1286,6 +1317,34 @@ impl Simulation {
                     );
                 }
                 self.damage_hits = hits;
+            }
+            moba_game::AbilityKind::Haste {
+                factor,
+                duration_ticks,
+            } => {
+                let current = self.world.get::<MoveSpeed>(caster).map(|speed| speed.0);
+                let Some(current) = current else {
+                    return;
+                };
+                let base = self
+                    .world
+                    .get::<Slow>(caster)
+                    .map(|slow| slow.base)
+                    .or_else(|| self.world.get::<Haste>(caster).map(|haste| haste.base))
+                    .unwrap_or(current);
+                let _ = self.world.remove::<Slow>(caster);
+                let _ = self.world.remove::<Haste>(caster);
+                if let Some(speed) = self.world.get_mut::<MoveSpeed>(caster) {
+                    speed.0 = base * factor;
+                }
+                let _ = self.world.insert(
+                    caster,
+                    Haste {
+                        base,
+                        factor,
+                        remaining: duration_ticks,
+                    },
+                );
             }
             moba_game::AbilityKind::Silence {
                 radius,
@@ -1892,17 +1951,21 @@ impl Simulation {
             resistances.magic_resist = resistances.magic_resist.saturating_add(item.magic_resist);
         }
         let bonus = item.move_speed_per_sec * ONE_TICK;
-        let slow = self.world.get::<Slow>(hero).copied();
+        let factor = self
+            .world
+            .get::<Slow>(hero)
+            .map(|slow| slow.factor)
+            .or_else(|| self.world.get::<Haste>(hero).map(|haste| haste.factor));
         if let Some(speed) = self.world.get_mut::<MoveSpeed>(hero) {
-            speed.0 += if let Some(slow) = slow {
-                bonus * slow.factor
-            } else {
-                bonus
-            };
+            speed.0 += factor.map_or(bonus, |factor| bonus * factor);
         }
-        if let Some(mut slow) = slow {
+        if let Some(mut slow) = self.world.get::<Slow>(hero).copied() {
             slow.base += bonus;
             let _ = self.world.insert(hero, slow);
+        }
+        if let Some(mut haste) = self.world.get::<Haste>(hero).copied() {
+            haste.base += bonus;
+            let _ = self.world.insert(hero, haste);
         }
         true
     }
@@ -2488,6 +2551,16 @@ mod tests {
         let _ = sim.world.insert(hero, Silence { remaining: 5 });
         assert_ne!(sim.state_hash(), baseline);
         let _ = sim.world.remove::<Silence>(hero);
+        let _ = sim.world.insert(
+            hero,
+            Haste {
+                base: moba_core::Fix::from_i32(4),
+                factor: moba_core::Fix::from_f32(1.5),
+                remaining: 5,
+            },
+        );
+        assert_ne!(sim.state_hash(), baseline);
+        let _ = sim.world.remove::<Haste>(hero);
     }
 
     #[test]
@@ -2754,6 +2827,47 @@ mod tests {
                 .0
                 .is_some()
         );
+    }
+
+    #[test]
+    fn haste_ability_boosts_speed_and_expires() {
+        use moba_game::{AbilityKind, AbilitySpec, GameContent};
+        let mut content = GameContent::default();
+        content.abilities[0] = AbilitySpec {
+            name: String::from("Test Haste"),
+            cooldown_ticks: 120,
+            mana_cost: 5,
+            cast_range: 0.into(),
+            kind: AbilityKind::Haste {
+                factor: moba_core::Fix::from_f32(1.5),
+                duration_ticks: 60,
+            },
+        };
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        let before = sim.world.get::<MoveSpeed>(blue).expect("speed").0;
+        let mut cast = TickInputs::new();
+        cast.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 0,
+                target: FixVec2::ZERO,
+            },
+        );
+        sim.tick(&cast);
+        assert!(sim.world.get::<Haste>(blue).is_some());
+        assert!(sim.world.get::<MoveSpeed>(blue).expect("speed").0 > before);
+        for _ in 0..62 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(sim.world.get::<Haste>(blue).is_none());
+        assert_eq!(sim.world.get::<MoveSpeed>(blue).expect("speed").0, before);
     }
 
     #[test]

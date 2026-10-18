@@ -107,6 +107,17 @@ pub struct Burn {
     pub remaining: u32,
 }
 
+/// Temporary movement-speed boost.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Haste {
+    /// Unboosted movement speed per tick.
+    pub base: Fix,
+    /// Movement multiplier (>1).
+    pub factor: Fix,
+    /// Remaining duration in ticks.
+    pub remaining: u32,
+}
+
 /// Mana.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Mana {
