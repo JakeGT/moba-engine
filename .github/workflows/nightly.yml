@@ -61,6 +61,27 @@ jobs:
           name: bench-log
           path: bench.log
 
+
+  macos-vulkan:
+    name: macOS MoltenVK probe
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install MoltenVK + loader
+        run: |
+          brew install molten-vk vulkan-loader glslang
+          PREFIX=$(brew --prefix molten-vk)
+          LOADER=$(brew --prefix vulkan-loader)
+          ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
+          test -n "$ICD" || { echo "MoltenVK ICD json not found"; exit 1; }
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - run: cargo run --release --locked -p moba-tools --bin vulkan-probe
+
   match-soak:
     name: 50-match deterministic soak
     runs-on: ubuntu-latest
