@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Final 300 s / 10-client lossy soak evidence (all connected, avg tick 15 us).
 - Release-audit evidence for optimized tests, feature matrix, layering, docs links and packs.
 - `haste` self movement-buff ability kind.
 - Rooted units can no longer bypass control with a dash.

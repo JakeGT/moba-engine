@@ -161,6 +161,8 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
   includes even odds, so no side bias is established at this sample size.
 
 - Shutdown: SIGINT during a live custom match flushed a 119-tick replay before exit.
+- Final soak: 300 s with 10 clients at 150 ms RTT/5% loss; all connected, avg tick 15 us,
+  max 304 us, ~5.0 KiB/s down and 1.17 KiB/s up per client, rate_limited 0.
 
 - Client identity: Ed25519 challenge/allowlist flow verified end-to-end with a 314-tick match.
 

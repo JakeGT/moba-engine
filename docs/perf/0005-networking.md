@@ -95,3 +95,16 @@ and fixed-composition sweeps should be used before changing balance.
 A one-hour release run of `fuzz-wire` completed **2,476,647,000 iterations clean** with no
 panic or decoder hang (protocol v11 shape). Protocol v12 adds client-identity fields and the
 `Challenge` packet, so a new one-hour run is required and was started after the change.
+
+## Final 10-client lossy soak (round 58)
+
+300 s run with 10 clients, 150 ms RTT, 5% loss and 30 ms jitter:
+
+- all 10 clients `Connected` at the end; 8,523–8,639 snapshots each
+- server 9,117 ticks / 90,426 snapshots, 15,972 KiB sent / 3,327 KiB received
+- about **5.0 KiB/s down** and **1.17 KiB/s up** per client
+- avg tick **15 us**, max **304 us**, rate_limited 0, replayed_hellos 0
+- final state hash `0xf8b000d9924baf3`
+
+This is well inside the 33 ms tick budget and the bandwidth budget for small dedicated
+servers.
