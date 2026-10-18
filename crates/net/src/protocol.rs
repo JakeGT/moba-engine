@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 24;
+pub const PROTOCOL_VERSION: u8 = 25;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -564,6 +564,8 @@ pub struct WireMap {
     pub name: [u8; WIRE_MANIFEST_FIELD],
     /// Used name bytes.
     pub name_len: u8,
+    /// Visual theme id.
+    pub theme: u8,
     /// Square world extent in world units.
     pub extent: u16,
     /// Number of valid lanes.
@@ -611,6 +613,7 @@ impl Default for WireMap {
         Self {
             name: [0; WIRE_MANIFEST_FIELD],
             name_len: 0,
+            theme: 0,
             extent: 256,
             lane_count: 0,
             lanes: [WireLane::default(); MAX_WIRE_LANES],
@@ -1030,6 +1033,7 @@ impl From<&GameContent> for WireCatalog {
 
         let MapSpec {
             name: content_name,
+            theme: content_theme,
             extent,
             lanes: content_lanes,
             structures: content_structures,
@@ -1077,6 +1081,7 @@ impl From<&GameContent> for WireCatalog {
         };
         let map = &mut catalog.map;
         map.name_len = put_wire_name(&mut map.name, content_name);
+        map.theme = content_theme.id();
         map.lane_count = u8::try_from(content_lanes.len().min(MAX_WIRE_LANES))
             .unwrap_or(u8::try_from(MAX_WIRE_LANES).unwrap_or(u8::MAX));
         for (wire, lane) in map.lanes.iter_mut().zip(content_lanes) {
@@ -1429,6 +1434,7 @@ impl WireCatalog {
             attestation: None,
             map: MapSpec {
                 name: map.name_str().to_string(),
+                theme: moba_game::MapTheme::from_id(map.theme).ok_or(WireError::BadValue)?,
                 extent: Fix::from_i32(i32::from(map.extent)),
                 lanes,
                 structures,
@@ -1731,6 +1737,7 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
     let map = &catalog.map;
     out.extend_from_slice(&map.name);
     out.push(map.name_len);
+    out.push(map.theme);
     out.extend_from_slice(&map.extent.to_le_bytes());
     out.push(map.lane_count);
     for lane in &map.lanes {
@@ -1905,6 +1912,7 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
     let map = &mut catalog.map;
     map.name.copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);
     map.name_len = reader.u8()?;
+    map.theme = reader.u8()?;
     map.extent = reader.u16()?;
     map.lane_count = reader.u8()?;
     for lane in &mut map.lanes {
@@ -3350,6 +3358,7 @@ mod tests {
         let mut content = GameContent::default();
         content.map.extent = moba_core::Fix::from_i32(128);
         content.map.name = String::from("Test Map");
+        content.map.theme = moba_game::MapTheme::Snow;
         content.map.blue_spawn = moba_core::FixVec2::from_ints(10, 10);
         content.map.red_spawn = moba_core::FixVec2::from_ints(118, 118);
         content.rules.melee_minion.max_health = 77;
@@ -3360,11 +3369,13 @@ mod tests {
         let wire = WireCatalog::from(&content);
         assert_eq!(wire.map.extent, 128);
         assert_eq!(wire.map.name_str(), "Test Map");
+        assert_eq!(wire.map.theme, 2);
         assert_eq!(wire.rules.hero_respawn_ticks, 120);
         assert_eq!(wire.rules.melee_minion.max_health, 77);
         let decoded = wire.to_content().expect("round trip");
         assert_eq!(decoded.map.extent, content.map.extent);
         assert_eq!(decoded.map.name, "Test Map");
+        assert_eq!(decoded.map.theme, moba_game::MapTheme::Snow);
         assert_eq!(decoded.rules, content.rules);
         assert_eq!(decoded.hash(), content.hash());
     }

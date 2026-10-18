@@ -9,6 +9,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [0.2.0] — 2026-10-18
 
 ### Added
+- Built-in map visual themes (`[map] theme`) with protocol v25 wire id, terrain tint/wall colours,
+  local `MOBA_CONTENT` preview and a snow ARAM gallery capture.
 - Protocol v24 catalogue updates: connected clients adopt a reloaded pack between matches.
 - Client identity allowlist rotation/revocation and ADR 0006 trust-boundary/threat-model docs.
 - Map names and empty-lobby server map rotation (protocol v23).

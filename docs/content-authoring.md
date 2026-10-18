@@ -249,7 +249,7 @@ magic_resist = 30
 vision_range = 14.0
 ```
 
-All rules are optional (defaults shown), validated and hashed/carried in the handshake.
+`[map] theme` selects a built-in visual palette; unknown themes fail validation. All rules are optional (defaults shown), validated and hashed/carried in the handshake.
 `team_size` is 1..=5; `bot_fill = false` leaves empty player slots empty. Example packs:
 `content/1v1-mid.toml`, `content/aram.toml`. Servers rotate packs when repeated `--items`
 paths are supplied (empty-lobby rotation); both are exercised by

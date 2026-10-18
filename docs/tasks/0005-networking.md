@@ -96,6 +96,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v22 carries runtime minion/tower combat stats.
 - v23 carries the map display name for selection/rotation.
 - v24 adds a full catalogue ContentUpdate packet for between-match hot reload.
+- v25 carries the built-in map visual theme id.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 

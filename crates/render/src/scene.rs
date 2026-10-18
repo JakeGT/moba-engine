@@ -101,6 +101,8 @@ pub struct Scene<'a> {
     pub units: &'a [UnitInstance],
     /// Allied vision circles; an empty set disables fog darkening.
     pub vision: VisionCircles,
+    /// Terrain tint (RGB, `1.0` = default grass palette).
+    pub terrain_tint: [f32; 4],
 }
 
 /// Up to 16 allied vision circles used to darken unseen terrain.
@@ -165,6 +167,7 @@ impl<'a> Scene<'a> {
                 walls: [Vec4::ZERO; VISION_WALLS],
                 wall_count: 0,
             },
+            terrain_tint: [0.10, 0.16, 0.11, 1.0],
         }
     }
 
@@ -179,7 +182,15 @@ impl<'a> Scene<'a> {
             camera,
             units,
             vision,
+            terrain_tint: [0.10, 0.16, 0.11, 1.0],
         }
+    }
+
+    /// Sets the terrain tint.
+    #[must_use]
+    pub const fn with_terrain_tint(mut self, tint: [f32; 4]) -> Self {
+        self.terrain_tint = tint;
+        self
     }
 
     /// Creates an empty scene with a camera (used for clear-only frames and tests).
@@ -197,6 +208,7 @@ pub(crate) struct CameraUniform {
     camera_pos: [f32; 4],
     light_direction: [f32; 4],
     ambient: [f32; 4],
+    terrain: [f32; 4],
     vision_circles: [[f32; 4]; VISION_CIRCLES],
     vision_count: [u32; 4],
     vision_walls: [[f32; 4]; VISION_WALLS],
@@ -204,7 +216,7 @@ pub(crate) struct CameraUniform {
 }
 
 impl CameraUniform {
-    pub(crate) fn new(camera: Camera, vision: &VisionCircles) -> Self {
+    pub(crate) fn new(camera: Camera, vision: &VisionCircles, terrain: [f32; 4]) -> Self {
         let mut circles = [[0.0; 4]; VISION_CIRCLES];
         for (destination, source) in circles.iter_mut().zip(vision.circles) {
             *destination = source.to_array();
@@ -219,6 +231,7 @@ impl CameraUniform {
                 camera.light_intensity,
             ],
             ambient: [camera.ambient.x, camera.ambient.y, camera.ambient.z, 0.0],
+            terrain,
             vision_circles: circles,
             vision_count: [vision.count, 0, 0, 0],
             vision_walls: vision.walls.map(|wall| wall.to_array()),

@@ -5,6 +5,7 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 camera_pos;
     vec4 light_direction;
     vec4 ambient;
+    vec4 terrain;
     vec4 vision_circles[16];
     uvec4 vision_count;
     vec4 vision_walls[32];
@@ -26,8 +27,8 @@ float grid_line(vec2 position, float spacing, float thickness) {
 void main() {
     float grid = max(grid_line(in_world_pos.xz, 4.0, 1.0), grid_line(in_world_pos.xz, 16.0, 1.4) * 0.6);
 
-    vec3 grass = vec3(0.10, 0.16, 0.11);
-    vec3 line = vec3(0.20, 0.30, 0.22);
+    vec3 grass = camera.terrain.rgb;
+    vec3 line = camera.terrain.rgb * 2.0;
     vec3 base = mix(grass, line, grid);
 
     float diffuse = max(dot(normalize(in_normal), normalize(camera.light_direction.xyz)), 0.0)

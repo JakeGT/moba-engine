@@ -512,7 +512,7 @@ impl Renderer {
         let unit_count = scene.units.len().min(self.config.max_instances);
         {
             let frame = &mut self.frames[frame_index];
-            let uniform = CameraUniform::new(scene.camera, &scene.vision);
+            let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint);
             frame.camera_buffer.write_bytes(0, bytes_of(&uniform));
             if unit_count > 0 {
                 let mapped = frame

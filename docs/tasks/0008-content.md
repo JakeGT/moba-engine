@@ -69,3 +69,12 @@ deterministic playback and server authority.
   matches; servers log/announce the selected map and content hash.
 - [x] Map display name is hashed and carried in protocol v23; client HUD shows it.
 - [x] Replays already record content hash/name/version.
+
+## Map visual themes
+
+- [x] `[map] theme` selects a built-in terrain/wall palette (`grass`, `stone`, `snow`, `desert`,
+  `arcane`) without recompiling the client; ids are validated and hashed.
+- [x] Protocol v25 carries the theme id; renderer uploads a terrain tint and app uses it for
+  walls/terrain.
+- [x] `MOBA_CONTENT=<pack>` previews a pack in the local client; screenshot gallery includes
+  the snow ARAM theme.

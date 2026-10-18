@@ -61,6 +61,12 @@ XP, gold, level and purchased item state after combat.
 
 Ready-up gating before the countdown starts.
 
+### Custom map theme (snow ARAM)
+![Snow ARAM theme](images/m7-aram-snow.png)
+
+The ARAM pack sets `[map] theme = "snow"`; the client selects the built-in snow terrain/wall
+palette without recompiling. Captured with `MOBA_CONTENT=content/aram.toml` on lavapipe.
+
 ## Vision, status and spectator
 
 ### Wall line-of-sight fog

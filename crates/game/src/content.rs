@@ -39,6 +39,62 @@ impl Default for ContentManifest {
     }
 }
 
+/// Built-in visual themes a pack may reference.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum MapTheme {
+    /// Temperate green.
+    #[default]
+    Grass,
+    /// Grey stone.
+    Stone,
+    /// Cold snow.
+    Snow,
+    /// Warm desert.
+    Desert,
+    /// Arcane violet.
+    Arcane,
+}
+
+impl MapTheme {
+    /// Parses a theme id.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "grass" => Self::Grass,
+            "stone" => Self::Stone,
+            "snow" => Self::Snow,
+            "desert" => Self::Desert,
+            "arcane" => Self::Arcane,
+            _ => return None,
+        })
+    }
+
+    /// Stable id used on the wire/hash.
+    #[must_use]
+    pub const fn id(self) -> u8 {
+        match self {
+            Self::Grass => 0,
+            Self::Stone => 1,
+            Self::Snow => 2,
+            Self::Desert => 3,
+            Self::Arcane => 4,
+        }
+    }
+
+    /// Decodes a wire id.
+    #[must_use]
+    pub const fn from_id(id: u8) -> Option<Self> {
+        Some(match id {
+            0 => Self::Grass,
+            1 => Self::Stone,
+            2 => Self::Snow,
+            3 => Self::Desert,
+            4 => Self::Arcane,
+            _ => return None,
+        })
+    }
+}
+
 /// Optional Ed25519 attestation of a pack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackAttestation {
@@ -330,6 +386,8 @@ impl Default for RulesSpec {
 pub struct MapSpec {
     /// Display name.
     pub name: String,
+    /// Visual theme id.
+    pub theme: MapTheme,
     /// Square world extent in world units.
     pub extent: Fix,
     /// Lanes in stable order.
@@ -348,6 +406,7 @@ impl From<&MapDef> for MapSpec {
     fn from(map: &MapDef) -> Self {
         Self {
             name: String::from("Map"),
+            theme: MapTheme::Grass,
             extent: Fix::from_i32(DEFAULT_MAP_EXTENT),
             lanes: map
                 .lanes
@@ -1285,6 +1344,7 @@ impl GameContent {
         }
         feed(self.map.name.as_bytes());
         feed(&[0]);
+        feed(&[self.map.theme.id()]);
         feed(&self.map.extent.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
@@ -1507,6 +1567,8 @@ impl Default for RulesEntry {
 struct MapEntry {
     #[serde(default = "default_map_name")]
     name: String,
+    #[serde(default = "default_map_theme")]
+    theme: String,
     #[serde(default = "default_map_extent")]
     extent: i32,
     blue_spawn: [i32; 2],
@@ -1603,6 +1665,10 @@ struct AbilityEntry {
 
 fn default_map_name() -> String {
     String::from("Map")
+}
+
+fn default_map_theme() -> String {
+    String::from("grass")
 }
 
 const fn default_map_extent() -> i32 {
@@ -1950,6 +2016,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         Some(map) => {
             let MapEntry {
                 name,
+                theme,
                 blue_spawn,
                 red_spawn,
                 lanes,
@@ -1970,6 +2037,8 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 .collect::<Result<Vec<_>, _>>()?;
             MapSpec {
                 name,
+                theme: MapTheme::from_name(&theme)
+                    .ok_or_else(|| invalid_field("map.theme", &theme))?,
                 extent: Fix::from_i32(extent),
                 blue_spawn: FixVec2::from_ints(blue_spawn[0], blue_spawn[1]),
                 red_spawn: FixVec2::from_ints(red_spawn[0], red_spawn[1]),
@@ -2148,6 +2217,15 @@ b = [80, 160]
             let content = load_toml(text).expect("parse mode pack");
             content.validate().expect("valid mode pack");
         }
+    }
+
+    #[test]
+    fn map_theme_parses_and_rejects_unknown_names() {
+        let text = include_str!("../../../content/aram.toml");
+        let content = load_toml(text).expect("theme pack");
+        assert_eq!(content.map.theme, MapTheme::Snow);
+        let bad = text.replace("theme = \"snow\"", "theme = \"lava\"");
+        assert!(load_toml(&bad).is_err());
     }
 
     #[test]
