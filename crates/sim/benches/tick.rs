@@ -47,6 +47,22 @@ fn steady_state_tick(c: &mut Criterion) {
     });
 }
 
+fn observe_views(c: &mut Criterion) {
+    let mut simulation = Simulation::new(SimConfig::default());
+    for _ in 0..2_700 {
+        simulation.tick_with_bots();
+    }
+    let mut outputs = [Vec::new(), Vec::new(), Vec::new()];
+    c.bench_function("sim/observe_3_views", |b| {
+        b.iter(|| {
+            simulation.observed_units(moba_game::Team::Blue, &mut outputs[0]);
+            simulation.observed_units(moba_game::Team::Red, &mut outputs[1]);
+            simulation.observed_all(&mut outputs[2]);
+            black_box((outputs[0].len(), outputs[1].len(), outputs[2].len()));
+        });
+    });
+}
+
 fn no_wave_tick(c: &mut Criterion) {
     let config = SimConfig {
         bot_mask: 0,
@@ -67,5 +83,11 @@ fn no_wave_tick(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, full_match_tick, steady_state_tick, no_wave_tick);
+criterion_group!(
+    benches,
+    full_match_tick,
+    steady_state_tick,
+    no_wave_tick,
+    observe_views
+);
 criterion_main!(benches);
