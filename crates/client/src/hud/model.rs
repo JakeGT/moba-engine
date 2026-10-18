@@ -194,6 +194,13 @@ pub(crate) fn build_network_hud(
     let width_f = width as f32;
     let height_f = height as f32;
     draw_perf(ui, width_f, frame_ms, fps);
+    ui.text_shadowed(
+        12.0,
+        12.0,
+        1.8,
+        theme::TEXT,
+        &hud_fmt!("MAP {}", network.client.map().name_str()),
+    );
     for (index, entry) in network.kill_feed.iter().enumerate() {
         ui.text(
             width_f - 280.0,

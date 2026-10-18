@@ -24,7 +24,7 @@ fn main() {
         .ok()
         .map(|value| parse_secret(&value));
     let mut record: Option<std::path::PathBuf> = None;
-    let mut items_path: Option<std::path::PathBuf> = None;
+    let mut items_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut server_key: Option<std::path::PathBuf> = None;
     let mut reload_content = false;
     let mut require_attestation = false;
@@ -71,7 +71,10 @@ fn main() {
             results_log = Some(value);
         }
         if let Some(value) = file.items {
-            items_path = Some(value);
+            items_paths.push(value);
+        }
+        if let Some(values) = file.items_rotation {
+            items_paths.extend(values);
         }
         if let Some(value) = file.server_key {
             server_key = Some(value);
@@ -154,7 +157,11 @@ fn main() {
                     max_total_packets_per_second = value;
                 }
             }
-            "--items" => items_path = args.next().map(std::path::PathBuf::from),
+            "--items" => {
+                if let Some(value) = args.next() {
+                    items_paths.push(std::path::PathBuf::from(value));
+                }
+            }
             "--server-key" => server_key = args.next().map(std::path::PathBuf::from),
             "--allow-client-key" => {
                 let Some(value) = args.next() else {
@@ -185,7 +192,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--config FILE]"
                 );
                 return;
             }
@@ -204,7 +211,7 @@ fn main() {
             eprintln!("invalid --listen address {listen}: {error}");
             std::process::exit(2);
         });
-        let content = items_path.as_ref().map(|path| load_content(path));
+        let content = items_paths.first().map(|path| load_content(path));
         if require_attestation {
             let Some(content) = content.as_ref() else {
                 eprintln!("--require-content-attestation requires --items FILE");
@@ -258,12 +265,15 @@ fn main() {
             std::process::exit(2);
         });
         if reload_content {
-            if let Some(path) = items_path.clone() {
+            if let Some(path) = items_paths.first().cloned() {
                 server.watch_content(path);
             } else {
                 eprintln!("--reload-content requires --items FILE");
                 std::process::exit(2);
             }
+        }
+        if items_paths.len() > 1 {
+            server.watch_rotation(items_paths.clone());
         }
         if !client_identity_keys.is_empty() {
             server.require_client_identity(client_identity_keys.iter().copied());
@@ -455,6 +465,7 @@ struct FileServerConfig {
     record: Option<std::path::PathBuf>,
     results_log: Option<std::path::PathBuf>,
     items: Option<std::path::PathBuf>,
+    items_rotation: Option<Vec<std::path::PathBuf>>,
     server_key: Option<std::path::PathBuf>,
     reload_content: Option<bool>,
     require_attestation: Option<bool>,

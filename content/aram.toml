@@ -10,6 +10,7 @@ wave_interval_ticks = 600
 first_wave_ticks = 30
 
 [map]
+name = "ARAM"
 extent = 200
 blue_spawn = [20, 100]
 red_spawn = [180, 100]

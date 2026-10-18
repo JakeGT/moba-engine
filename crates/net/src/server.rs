@@ -701,6 +701,8 @@ pub struct NetServer {
     client_challenges: Vec<ClientChallenge>,
     nonces: NonceTracker,
     reload: Option<ContentReload>,
+    rotation: Vec<PathBuf>,
+    rotation_index: usize,
     limiter: RateLimiter,
     config: ServerConfig,
     clients: Vec<Option<ClientConn>>,
@@ -759,6 +761,8 @@ impl NetServer {
             client_challenges: Vec::new(),
             nonces: NonceTracker::new(Duration::from_secs(60), 2_048),
             reload: None,
+            rotation: Vec::new(),
+            rotation_index: 0,
             limiter,
             config,
             clients: (0..total_slots).map(|_| None).collect(),
@@ -906,6 +910,34 @@ impl NetServer {
             .and_then(|metadata| metadata.modified())
             .ok();
         self.reload = Some(ContentReload { path, modified });
+    }
+
+    /// Rotates through content packs between empty-lobby matches.
+    pub fn watch_rotation(&mut self, paths: Vec<PathBuf>) {
+        self.rotation = paths;
+        self.rotation_index = 0;
+    }
+
+    fn rotate_content(&mut self) {
+        if self.rotation.len() < 2 || self.clients.iter().flatten().any(|client| client.connected) {
+            return;
+        }
+        let next = (self.rotation_index + 1) % self.rotation.len();
+        let path = self.rotation[next].clone();
+        match moba_game::load_content_file(&path) {
+            Ok(content) => {
+                let hash = content.hash();
+                let name = content.map.name.clone();
+                let content = Arc::new(content);
+                self.content = content;
+                self.rotation_index = next;
+                eprintln!(
+                    "map rotation: selected {} ({name}, hash {hash:#018x})",
+                    path.display()
+                );
+            }
+            Err(error) => eprintln!("map rotation failed for {}: {error}", path.display()),
+        }
     }
 
     fn poll_content_reload(&mut self) {
@@ -1191,6 +1223,7 @@ impl NetServer {
         let mut config = self.config.sim;
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
+        self.rotate_content();
         self.simulation = Simulation::new_with_content(config, Arc::clone(&self.content));
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
@@ -2077,6 +2110,34 @@ mod tests {
         server.phase = Phase::Playing;
         server.tick().expect("tick");
         assert_eq!(*order.lock().expect("lock"), vec![1, 2]);
+    }
+
+    #[test]
+    fn rotation_selects_the_next_pack_when_the_lobby_is_empty() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 1,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(1),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 0,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        let mut server = NetServer::bind(config).expect("bind");
+        server.watch_rotation(vec![root.join("aram.toml"), root.join("1v1-mid.toml")]);
+        server.phase = Phase::Lobby;
+        server.reset_match();
+        assert_eq!(server.content.map.name, "1v1 Mid");
+        server.reset_match();
+        assert_eq!(server.content.map.name, "ARAM");
     }
 
     #[test]
