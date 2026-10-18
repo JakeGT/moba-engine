@@ -190,7 +190,7 @@ Order matters: golden image first, then structural refactors it can protect.
   tooltips, no HUD click becomes `MoveTo`.
 - [ ] **#44 textured UI:** UV/texture atlas, offline glyph/icon bake, no client ttf-parser,
   golden image and validation evidence.
-- [ ] **#7 skinning/animation** after asset/model work.
+- [x] **#7 skinning/animation** after asset/model work (procedural animated hero rig; GPU joint skinning remains a future optimization).
 - [x] **#12 asset/model mappings + per-map rendering**, linked to #44/#7.
 - [ ] **#19 settings/remapping/UI scale** after #42/#44 layout seams.
 - [x] **#18 audio** consuming #41 presentation events.
