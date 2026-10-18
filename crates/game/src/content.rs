@@ -195,6 +195,10 @@ pub struct WallSpec {
 /// Tunable match rules shared by simulation and server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RulesSpec {
+    /// Heroes per team (1..=5).
+    pub team_size: u8,
+    /// Fill empty player slots with bots.
+    pub bot_fill: bool,
     /// Hero respawn delay at level 1, in ticks.
     pub hero_respawn_ticks: u32,
     /// Extra respawn ticks per hero level.
@@ -208,6 +212,8 @@ pub struct RulesSpec {
 impl Default for RulesSpec {
     fn default() -> Self {
         Self {
+            team_size: 5,
+            bot_fill: true,
             hero_respawn_ticks: 300,
             respawn_per_level: 0,
             wave_interval_ticks: 900,
@@ -896,7 +902,8 @@ impl GameContent {
                 return Err(ContentError::BadMapData);
             }
         }
-        if self.rules.hero_respawn_ticks == 0
+        if !(1..=5).contains(&self.rules.team_size)
+            || self.rules.hero_respawn_ticks == 0
             || self.rules.wave_interval_ticks == 0
             || self.rules.first_wave_ticks == 0
             || self.rules.respawn_per_level > 1_000
@@ -1092,6 +1099,7 @@ impl GameContent {
                 feed(&value.to_le_bytes());
             }
         }
+        feed(&[self.rules.team_size, u8::from(self.rules.bot_fill)]);
         for value in [
             self.rules.hero_respawn_ticks,
             self.rules.respawn_per_level,
@@ -1192,6 +1200,8 @@ struct ContentFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct RulesEntry {
+    team_size: u8,
+    bot_fill: bool,
     hero_respawn_ticks: u32,
     respawn_per_level: u32,
     wave_interval_ticks: u32,
@@ -1202,6 +1212,8 @@ impl Default for RulesEntry {
     fn default() -> Self {
         let rules = RulesSpec::default();
         Self {
+            team_size: rules.team_size,
+            bot_fill: rules.bot_fill,
             hero_respawn_ticks: rules.hero_respawn_ticks,
             respawn_per_level: rules.respawn_per_level,
             wave_interval_ticks: rules.wave_interval_ticks,
@@ -1688,6 +1700,8 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
     let rules = file
         .rules
         .map_or_else(RulesSpec::default, |rules| RulesSpec {
+            team_size: rules.team_size,
+            bot_fill: rules.bot_fill,
             hero_respawn_ticks: rules.hero_respawn_ticks,
             respawn_per_level: rules.respawn_per_level,
             wave_interval_ticks: rules.wave_interval_ticks,
@@ -1766,9 +1780,22 @@ b = [80, 160]
     }
 
     #[test]
+    fn example_mode_packs_validate() {
+        for text in [
+            include_str!("../../../content/1v1-mid.toml"),
+            include_str!("../../../content/aram.toml"),
+        ] {
+            let content = load_toml(text).expect("parse mode pack");
+            content.validate().expect("valid mode pack");
+        }
+    }
+
+    #[test]
     fn map_extent_parses_and_scales_positions() {
         let text = r#"
 [rules]
+team_size = 1
+bot_fill = false
 hero_respawn_ticks = 120
 respawn_per_level = 10
 wave_interval_ticks = 600
@@ -1795,6 +1822,8 @@ position = [118, 118]
 "#;
         let content = load_toml(text).expect("parse");
         assert_eq!(content.map.extent, Fix::from_i32(128));
+        assert_eq!(content.rules.team_size, 1);
+        assert!(!content.rules.bot_fill);
         assert_eq!(content.rules.hero_respawn_ticks, 120);
         assert_eq!(content.rules.respawn_per_level, 10);
         assert_eq!(content.rules.wave_interval_ticks, 600);

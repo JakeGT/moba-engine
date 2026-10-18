@@ -8,6 +8,9 @@
 
 use std::time::Instant;
 
+use std::sync::Arc;
+
+use moba_game::GameContent;
 use moba_sim::{SimConfig, Simulation, TickInputs};
 
 struct MatchResult {
@@ -24,6 +27,7 @@ fn run_match(
     bot_mask: u16,
     spawn_waves: bool,
     hero_picks: [u8; moba_sim::MAX_PLAYERS],
+    content: Option<&Arc<GameContent>>,
 ) -> MatchResult {
     let config = SimConfig {
         seed,
@@ -31,7 +35,10 @@ fn run_match(
         spawn_waves,
         hero_picks,
     };
-    let mut simulation = Simulation::new(config);
+    let mut simulation = content.map_or_else(
+        || Simulation::new(config),
+        |content| Simulation::new_with_content(config, Arc::clone(content)),
+    );
     let mut tick_nanos = 0u64;
     let mut max_tick_nanos = 0u64;
     let mut ticks = 0u32;
@@ -67,12 +74,26 @@ fn main() {
     let mut spawn_waves = true;
     let mut pick: Option<u8> = None;
     let mut vary_picks = true;
+    let mut content: Option<Arc<GameContent>> = None;
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--matches" => {
                 if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
                     matches = value;
+                }
+            }
+            "--content" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--content needs a TOML path");
+                    std::process::exit(2);
+                };
+                match moba_game::load_content_file(std::path::Path::new(&path)) {
+                    Ok(loaded) => content = Some(Arc::new(loaded)),
+                    Err(error) => {
+                        eprintln!("cannot load content: {error}");
+                        std::process::exit(2);
+                    }
                 }
             }
             "--ticks" => {
@@ -136,9 +157,23 @@ fn main() {
             },
             |pick| [pick; moba_sim::MAX_PLAYERS],
         );
-        let first = run_match(match_seed, max_ticks, bot_mask, spawn_waves, picks);
+        let first = run_match(
+            match_seed,
+            max_ticks,
+            bot_mask,
+            spawn_waves,
+            picks,
+            content.as_ref(),
+        );
         if verify {
-            let second = run_match(match_seed, max_ticks, bot_mask, spawn_waves, picks);
+            let second = run_match(
+                match_seed,
+                max_ticks,
+                bot_mask,
+                spawn_waves,
+                picks,
+                content.as_ref(),
+            );
             if first.hash != second.hash
                 || first.outcome != second.outcome
                 || first.ticks != second.ticks

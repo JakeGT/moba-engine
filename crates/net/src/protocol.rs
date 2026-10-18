@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 19;
+pub const PROTOCOL_VERSION: u8 = 20;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -629,6 +629,10 @@ impl WireModifier {
 /// Tunable match rules carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WireRules {
+    /// Heroes per team.
+    pub team_size: u8,
+    /// Fill empty player slots with bots.
+    pub bot_fill: bool,
     /// Base hero respawn ticks.
     pub hero_respawn_ticks: u32,
     /// Extra respawn ticks per level.
@@ -965,6 +969,8 @@ impl From<&GameContent> for WireCatalog {
             red_spawn,
         } = content_map;
         catalog.rules = WireRules {
+            team_size: content_rules.team_size,
+            bot_fill: content_rules.bot_fill,
             hero_respawn_ticks: content_rules.hero_respawn_ticks,
             respawn_per_level: content_rules.respawn_per_level,
             wave_interval_ticks: content_rules.wave_interval_ticks,
@@ -1277,6 +1283,8 @@ impl WireCatalog {
             abilities,
             modifiers,
             rules: moba_game::RulesSpec {
+                team_size: self.rules.team_size,
+                bot_fill: self.rules.bot_fill,
                 hero_respawn_ticks: self.rules.hero_respawn_ticks,
                 respawn_per_level: self.rules.respawn_per_level,
                 wave_interval_ticks: self.rules.wave_interval_ticks,
@@ -1520,6 +1528,8 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.push(modifier.name_len);
         out.push(modifier.kind);
     }
+    out.push(catalog.rules.team_size);
+    out.push(u8::from(catalog.rules.bot_fill));
     for value in [
         catalog.rules.hero_respawn_ticks,
         catalog.rules.respawn_per_level,
@@ -1661,6 +1671,8 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         modifier.kind = reader.u8()?;
     }
     catalog.rules = WireRules {
+        team_size: reader.u8()?,
+        bot_fill: reader.u8()? != 0,
         hero_respawn_ticks: reader.u32()?,
         respawn_per_level: reader.u32()?,
         wave_interval_ticks: reader.u32()?,

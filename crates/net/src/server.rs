@@ -1381,8 +1381,13 @@ impl NetServer {
     }
 
     fn refresh_bot_mask(&mut self) {
-        let mut mask = 0x03FFu16;
-        for slot in 0..self.config.max_clients.min(self.clients.len()) {
+        let active = usize::from(self.content.rules.team_size) * 2;
+        let mut mask = if self.content.rules.bot_fill && active <= 16 {
+            ((1u32 << active) - 1) as u16
+        } else {
+            0
+        };
+        for slot in 0..self.config.max_clients.min(self.clients.len()).min(active) {
             if self.clients[slot]
                 .as_ref()
                 .is_some_and(|client| client.connected)
@@ -1545,7 +1550,8 @@ impl NetServer {
                 };
                 let session = 0xA5A5_0000 | (self.session_counter & 0xFFFF);
                 self.session_counter = self.session_counter.wrapping_add(1);
-                let team = if hello.spectate || slot < 5 {
+                let team_size = usize::from(self.content.rules.team_size);
+                let team = if hello.spectate || slot < team_size {
                     moba_game::Team::Blue
                 } else {
                     moba_game::Team::Red
@@ -1788,7 +1794,8 @@ impl NetServer {
     }
 
     fn free_slot(&self) -> Option<usize> {
-        (0..self.config.max_clients.min(self.clients.len()))
+        let active = usize::from(self.content.rules.team_size) * 2;
+        (0..self.config.max_clients.min(self.clients.len()).min(active))
             .find(|slot| self.clients[*slot].is_none())
     }
 

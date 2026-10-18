@@ -172,14 +172,17 @@ existing primitives and modifiers is data-only.
 
 ```toml
 [rules]
+team_size = 5
+bot_fill = true
 hero_respawn_ticks = 300
 respawn_per_level = 0
 wave_interval_ticks = 900
 first_wave_ticks = 30
 ```
 
-All rules are optional (defaults shown), must be positive, and are hashed/carried in the
-handshake. Team-size/bot-fill/minion-stat rules are not yet exposed.
+All rules are optional (defaults shown), validated and hashed/carried in the handshake.
+`team_size` is 1..=5; `bot_fill = false` leaves empty player slots empty. Example packs:
+`content/1v1-mid.toml`, `content/aram.toml`. Minion/tower stat blocks are not yet exposed.
 
 ## Maps
 
