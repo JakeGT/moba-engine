@@ -192,6 +192,30 @@ pub struct WallSpec {
     pub b: FixVec2,
 }
 
+/// Tunable match rules shared by simulation and server.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RulesSpec {
+    /// Hero respawn delay at level 1, in ticks.
+    pub hero_respawn_ticks: u32,
+    /// Extra respawn ticks per hero level.
+    pub respawn_per_level: u32,
+    /// Ticks between minion waves.
+    pub wave_interval_ticks: u32,
+    /// Delay before the first wave, in ticks.
+    pub first_wave_ticks: u32,
+}
+
+impl Default for RulesSpec {
+    fn default() -> Self {
+        Self {
+            hero_respawn_ticks: 300,
+            respawn_per_level: 0,
+            wave_interval_ticks: 900,
+            first_wave_ticks: 30,
+        }
+    }
+}
+
 /// An owned runtime map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapSpec {
@@ -418,6 +442,8 @@ pub struct GameContent {
     pub abilities: Vec<AbilitySpec>,
     /// Modifier definitions in stable id order.
     pub modifiers: Vec<ModifierDef>,
+    /// Tunable match rules.
+    pub rules: RulesSpec,
     /// Map geometry.
     pub map: MapSpec,
 }
@@ -447,6 +473,7 @@ impl Default for GameContent {
             heroes: crate::HEROES.iter().map(HeroSpec::from).collect(),
             abilities: ABILITIES.iter().map(AbilitySpec::from).collect(),
             modifiers: default_modifiers(),
+            rules: RulesSpec::default(),
             map: MapSpec::from(&MAP),
         }
     }
@@ -869,6 +896,13 @@ impl GameContent {
                 return Err(ContentError::BadMapData);
             }
         }
+        if self.rules.hero_respawn_ticks == 0
+            || self.rules.wave_interval_ticks == 0
+            || self.rules.first_wave_ticks == 0
+            || self.rules.respawn_per_level > 1_000
+        {
+            return Err(ContentError::BadMap);
+        }
         if self.map.extent <= Fix::ZERO || self.map.extent > Fix::from_i32(MAX_MAP_COORD) {
             return Err(ContentError::BadMap);
         }
@@ -1058,6 +1092,14 @@ impl GameContent {
                 feed(&value.to_le_bytes());
             }
         }
+        for value in [
+            self.rules.hero_respawn_ticks,
+            self.rules.respawn_per_level,
+            self.rules.wave_interval_ticks,
+            self.rules.first_wave_ticks,
+        ] {
+            feed(&value.to_le_bytes());
+        }
         feed(&self.map.extent.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
@@ -1143,7 +1185,29 @@ struct ContentFile {
     heroes: Option<Vec<HeroEntry>>,
     abilities: Option<Vec<AbilityEntry>>,
     modifiers: Option<Vec<ModifierEntry>>,
+    rules: Option<RulesEntry>,
     map: Option<MapEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RulesEntry {
+    hero_respawn_ticks: u32,
+    respawn_per_level: u32,
+    wave_interval_ticks: u32,
+    first_wave_ticks: u32,
+}
+
+impl Default for RulesEntry {
+    fn default() -> Self {
+        let rules = RulesSpec::default();
+        Self {
+            hero_respawn_ticks: rules.hero_respawn_ticks,
+            respawn_per_level: rules.respawn_per_level,
+            wave_interval_ticks: rules.wave_interval_ticks,
+            first_wave_ticks: rules.first_wave_ticks,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1621,6 +1685,14 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         }
         None => GameContent::default().map,
     };
+    let rules = file
+        .rules
+        .map_or_else(RulesSpec::default, |rules| RulesSpec {
+            hero_respawn_ticks: rules.hero_respawn_ticks,
+            respawn_per_level: rules.respawn_per_level,
+            wave_interval_ticks: rules.wave_interval_ticks,
+            first_wave_ticks: rules.first_wave_ticks,
+        });
     let defaults = ContentManifest::default();
     let manifest = ContentManifest {
         name: file.name.unwrap_or(defaults.name),
@@ -1633,6 +1705,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         heroes,
         abilities,
         modifiers,
+        rules,
         map,
     };
     content.validate().map_err(ContentLoadError::Invalid)?;
@@ -1695,6 +1768,12 @@ b = [80, 160]
     #[test]
     fn map_extent_parses_and_scales_positions() {
         let text = r#"
+[rules]
+hero_respawn_ticks = 120
+respawn_per_level = 10
+wave_interval_ticks = 600
+first_wave_ticks = 60
+
 [map]
 extent = 128
 blue_spawn = [10, 10]
@@ -1716,6 +1795,10 @@ position = [118, 118]
 "#;
         let content = load_toml(text).expect("parse");
         assert_eq!(content.map.extent, Fix::from_i32(128));
+        assert_eq!(content.rules.hero_respawn_ticks, 120);
+        assert_eq!(content.rules.respawn_per_level, 10);
+        assert_eq!(content.rules.wave_interval_ticks, 600);
+        assert_eq!(content.rules.first_wave_ticks, 60);
         content.validate().expect("valid 128 map");
     }
 

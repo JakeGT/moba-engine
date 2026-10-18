@@ -440,6 +440,7 @@ impl Simulation {
     pub fn new_with_content(config: SimConfig, content: Arc<GameContent>) -> Self {
         let bot_seed = config.seed;
         let extent = content.map.extent;
+        let rules = content.rules;
         let mut simulation = Self {
             world: World::with_capacity(MAX_UNITS),
             tick: Tick::ZERO,
@@ -447,7 +448,7 @@ impl Simulation {
             content,
             hero_entities: [Entity::PLACEHOLDER; MAX_PLAYERS],
             wave: 0,
-            next_wave_tick: WAVE_DELAY_TICKS,
+            next_wave_tick: rules.first_wave_ticks,
             outcome: None,
             blue_score: 0,
             red_score: 0,
@@ -755,7 +756,9 @@ impl Simulation {
         self.resolve_deaths();
         if self.tick.get() >= self.next_wave_tick && self.config.spawn_waves {
             self.spawn_wave();
-            self.next_wave_tick = self.next_wave_tick.saturating_add(WAVE_INTERVAL_TICKS);
+            self.next_wave_tick = self
+                .next_wave_tick
+                .saturating_add(self.content.rules.wave_interval_ticks);
         }
         self.tick = self.tick.wrapping_add(1);
     }
@@ -1964,12 +1967,17 @@ impl Simulation {
                 if self.world.has::<Dead>(entity) {
                     continue;
                 }
-                let _ = self.world.insert(
-                    entity,
-                    Dead {
-                        respawn_in: HERO_RESPAWN_TICKS,
-                    },
+                let level = self
+                    .world
+                    .get::<Progression>(entity)
+                    .map_or(1, |progress| progress.level);
+                let respawn_in = self.content.rules.hero_respawn_ticks.saturating_add(
+                    self.content
+                        .rules
+                        .respawn_per_level
+                        .saturating_mul(u32::from(level.saturating_sub(1))),
                 );
+                let _ = self.world.insert(entity, Dead { respawn_in });
                 if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
                     target.0 = None;
                 }
@@ -2753,6 +2761,30 @@ mod tests {
     }
 
     #[test]
+    fn custom_respawn_rule_controls_death_timer() {
+        let mut content = moba_game::GameContent::default();
+        content.rules.hero_respawn_ticks = 5;
+        content.rules.respawn_per_level = 0;
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                bot_mask: 0,
+                spawn_waves: false,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let hero = sim.hero_entities[0];
+        sim.world.get_mut::<Health>(hero).unwrap().current = 0;
+        sim.tick(&TickInputs::new());
+        assert!(sim.world.has::<Dead>(hero));
+        for _ in 0..6 {
+            sim.tick(&TickInputs::new());
+        }
+        assert!(!sim.world.has::<Dead>(hero));
+        assert!(sim.world.get::<Health>(hero).unwrap().current > 0);
+    }
+
+    #[test]
     fn arcing_projectile_event_carries_arc() {
         let mut content = moba_game::GameContent::default();
         content.abilities[2].effects.effects[0] = moba_game::Effect::Projectile {
@@ -2888,6 +2920,7 @@ mod tests {
     fn custom_content_purchase_updates_observation() {
         use moba_game::GameContent;
         let content = GameContent {
+            rules: moba_game::RulesSpec::default(),
             manifest: GameContent::default().manifest,
             items: vec![moba_game::ItemSpec {
                 name: String::from("Test Blade"),

@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 18;
+pub const PROTOCOL_VERSION: u8 = 19;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -626,7 +626,20 @@ impl WireModifier {
     }
 }
 
-/// Complete runtime catalogue carried in the handshake.
+/// Tunable match rules carried in the handshake.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireRules {
+    /// Base hero respawn ticks.
+    pub hero_respawn_ticks: u32,
+    /// Extra respawn ticks per level.
+    pub respawn_per_level: u32,
+    /// Ticks between waves.
+    pub wave_interval_ticks: u32,
+    /// First-wave delay ticks.
+    pub first_wave_ticks: u32,
+}
+
+/// Complete runtime content catalogue.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireCatalog {
     /// Manifest name bytes.
@@ -657,6 +670,8 @@ pub struct WireCatalog {
     pub modifier_count: u8,
     /// Modifier definitions.
     pub modifiers: [WireModifier; MAX_WIRE_MODIFIERS],
+    /// Tunable match rules.
+    pub rules: WireRules,
     /// Map geometry.
     pub map: WireMap,
 }
@@ -678,6 +693,7 @@ impl Default for WireCatalog {
             abilities: [WireAbility::default(); MAX_WIRE_ABILITIES],
             modifier_count: 0,
             modifiers: [WireModifier::default(); MAX_WIRE_MODIFIERS],
+            rules: WireRules::default(),
             map: WireMap::default(),
         }
     }
@@ -730,6 +746,7 @@ impl From<&GameContent> for WireCatalog {
             heroes: content_heroes,
             abilities: content_abilities,
             modifiers: content_modifiers,
+            rules: content_rules,
             map: content_map,
         } = content;
         let ContentManifest {
@@ -947,6 +964,12 @@ impl From<&GameContent> for WireCatalog {
             blue_spawn,
             red_spawn,
         } = content_map;
+        catalog.rules = WireRules {
+            hero_respawn_ticks: content_rules.hero_respawn_ticks,
+            respawn_per_level: content_rules.respawn_per_level,
+            wave_interval_ticks: content_rules.wave_interval_ticks,
+            first_wave_ticks: content_rules.first_wave_ticks,
+        };
         let map = &mut catalog.map;
         map.lane_count = u8::try_from(content_lanes.len().min(MAX_WIRE_LANES))
             .unwrap_or(u8::try_from(MAX_WIRE_LANES).unwrap_or(u8::MAX));
@@ -1253,6 +1276,12 @@ impl WireCatalog {
             heroes,
             abilities,
             modifiers,
+            rules: moba_game::RulesSpec {
+                hero_respawn_ticks: self.rules.hero_respawn_ticks,
+                respawn_per_level: self.rules.respawn_per_level,
+                wave_interval_ticks: self.rules.wave_interval_ticks,
+                first_wave_ticks: self.rules.first_wave_ticks,
+            },
             map: MapSpec {
                 extent: Fix::from_i32(i32::from(map.extent)),
                 lanes,
@@ -1491,6 +1520,14 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.push(modifier.name_len);
         out.push(modifier.kind);
     }
+    for value in [
+        catalog.rules.hero_respawn_ticks,
+        catalog.rules.respawn_per_level,
+        catalog.rules.wave_interval_ticks,
+        catalog.rules.first_wave_ticks,
+    ] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
     let map = &catalog.map;
     out.extend_from_slice(&map.extent.to_le_bytes());
     out.push(map.lane_count);
@@ -1623,6 +1660,12 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         modifier.name_len = reader.u8()?;
         modifier.kind = reader.u8()?;
     }
+    catalog.rules = WireRules {
+        hero_respawn_ticks: reader.u32()?,
+        respawn_per_level: reader.u32()?,
+        wave_interval_ticks: reader.u32()?,
+        first_wave_ticks: reader.u32()?,
+    };
     let map = &mut catalog.map;
     map.extent = reader.u16()?;
     map.lane_count = reader.u8()?;
@@ -3050,10 +3093,16 @@ mod tests {
         content.map.extent = moba_core::Fix::from_i32(128);
         content.map.blue_spawn = moba_core::FixVec2::from_ints(10, 10);
         content.map.red_spawn = moba_core::FixVec2::from_ints(118, 118);
+        content.rules.hero_respawn_ticks = 120;
+        content.rules.respawn_per_level = 10;
+        content.rules.wave_interval_ticks = 600;
+        content.rules.first_wave_ticks = 60;
         let wire = WireCatalog::from(&content);
         assert_eq!(wire.map.extent, 128);
+        assert_eq!(wire.rules.hero_respawn_ticks, 120);
         let decoded = wire.to_content().expect("round trip");
         assert_eq!(decoded.map.extent, content.map.extent);
+        assert_eq!(decoded.rules, content.rules);
         assert_eq!(decoded.hash(), content.hash());
     }
 

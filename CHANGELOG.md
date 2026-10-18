@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- `[rules]` content section for hero respawn (base + per-level) and wave cadence; hashed,
+  protocol v19 and wired into simulation bounds.
 - Map `extent` in content, hash/wire (protocol v18) and simulation bounds; client camera,
   minimap, fog and healthbars scale from the handshake map.
 - Data-only arcing projectiles: TOML `arc`, hashed fixed-point effect field, protocol v17
