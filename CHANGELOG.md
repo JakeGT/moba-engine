@@ -7,6 +7,8 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- 1/20/40-minute snapshot scaling benchmark; build+encode stays ~3.6–3.7 ns per visible
+  entity, i.e. cost tracks view size rather than match age.
 - Snapshot history recycles per-client entity buffers instead of cloning each snapshot.
 - `build_delta_into` reuses a server-owned snapshot delta and retains vector capacity across
   snapshots and clients.
