@@ -1,5 +1,8 @@
 # MOBA Engine
 
+[![CI](https://github.com/JakeGT/moba-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/JakeGT/moba-engine/actions/workflows/ci.yml)
+[![Issues](https://img.shields.io/github/issues/JakeGT/moba-engine)](https://github.com/JakeGT/moba-engine/issues)
+
 A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
 
 > **Status: preview (0.1).** The engine is playable end-to-end — dedicated server, UDP

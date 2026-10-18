@@ -59,6 +59,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
   state `0xd101300c1c113b98`, 3 checkpoints.
 - Release audit: 0 broken local Markdown links; every example/map/ability content pack
   validates.
+- GitHub CI is green on Ubuntu, Windows and macOS, plus the Miri, cargo-deny and tools/soak
+  jobs (`ci` run 39115696239).
 
 Screenshots are in [the gallery](screenshots.md). Renderer/network captures use lavapipe and
 headless readback; see [software Vulkan](dev/software-vulkan.md).

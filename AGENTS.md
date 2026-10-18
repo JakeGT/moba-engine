@@ -173,7 +173,7 @@ it to the gallery. Keep images reasonably sized (PNG) and describe what the scre
 ## Issue labels
 
 Use the tracker’s labels: `bug`, `enhancement`, `documentation`, `renderer`, `simulation`,
-`networking`, `content`, `infrastructure`. Link related issues/PRs instead of duplicating work.
+`networking`, `security`, `content`, `product`, `infrastructure`, `release`. Link related issues/PRs instead of duplicating work.
 
 ## Definition of done
 
