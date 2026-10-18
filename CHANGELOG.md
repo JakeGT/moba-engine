@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Audit remediation W0: panic-safe ECS despawn (deferred Drop + hard bounds checks), shared
+  base/effective move-speed model, point-ability cast-range validation, bounded decoder
+  counts, renderer GPU/unsafe correctness fixes, and deterministic CI example/UDP tests.
 - Final 300 s / 10-client lossy soak evidence (all connected, avg tick 15 us).
 - Release-audit evidence for optimized tests, feature matrix, layering, docs links and packs.
 - `haste` self movement-buff ability kind.
