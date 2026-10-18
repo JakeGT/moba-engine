@@ -63,6 +63,9 @@ struct NetworkView {
     demo_buy: Option<u8>,
     demo_bought: bool,
     shop_page: usize,
+    spectator_pan: Vec3,
+    spectator_yaw: f32,
+    spectator_zoom: f32,
 }
 
 struct ClientApp {
@@ -143,6 +146,9 @@ impl ClientApp {
                             .and_then(|value| value.parse().ok()),
                         demo_bought: false,
                         shop_page: 0,
+                        spectator_pan: Vec3::ZERO,
+                        spectator_yaw: -0.7,
+                        spectator_zoom: 240.0,
                     });
                 }
                 Err(error) => app.startup_error = Some(error),
@@ -703,7 +709,14 @@ fn team_from_u8(value: u8) -> Option<Team> {
 
 fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
     if network.spectator {
-        return Camera::orbit(Vec3::ZERO, 240.0, -0.7 + elapsed * 0.015, 0.92, aspect);
+        let idle_yaw = network.spectator_yaw + (elapsed * 0.002).sin() * 0.02;
+        return Camera::orbit(
+            network.spectator_pan,
+            network.spectator_zoom,
+            idle_yaw,
+            0.92,
+            aspect,
+        );
     }
     if std::env::var("MOBA_CAMERA").is_ok_and(|value| value == "overview") {
         return Camera::orbit(Vec3::ZERO, 240.0, -0.7, 0.92, aspect);
@@ -717,6 +730,40 @@ fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
     Camera::orbit(center, 46.0, -0.7, 0.95, aspect)
 }
 
+fn handle_spectator_input(network: &mut NetworkView, input: &InputState) {
+    let pan_speed = if input.is_key_down(Key::Shift) {
+        14.0
+    } else {
+        5.0
+    };
+    if input.is_key_down(Key::W) {
+        network.spectator_pan.z -= pan_speed;
+    }
+    if input.is_key_down(Key::S) {
+        network.spectator_pan.z += pan_speed;
+    }
+    if input.is_key_down(Key::A) {
+        network.spectator_pan.x -= pan_speed;
+    }
+    if input.is_key_down(Key::D) {
+        network.spectator_pan.x += pan_speed;
+    }
+    network.spectator_pan.x = network.spectator_pan.x.clamp(-128.0, 128.0);
+    network.spectator_pan.z = network.spectator_pan.z.clamp(-128.0, 128.0);
+    if input.is_key_down(Key::ArrowLeft) {
+        network.spectator_yaw -= 0.03;
+    }
+    if input.is_key_down(Key::ArrowRight) {
+        network.spectator_yaw += 0.03;
+    }
+    if input.was_key_pressed(Key::ArrowUp) {
+        network.spectator_zoom = (network.spectator_zoom - 10.0).max(70.0);
+    }
+    if input.was_key_pressed(Key::ArrowDown) {
+        network.spectator_zoom = (network.spectator_zoom + 10.0).min(420.0);
+    }
+}
+
 fn handle_network_input(
     network: &mut NetworkView,
     input: &InputState,
@@ -726,6 +773,7 @@ fn handle_network_input(
     shop: &mut bool,
 ) {
     if network.spectator {
+        handle_spectator_input(network, input);
         return;
     }
     if input.was_key_pressed(Key::R) && network.phase == MatchPhase::Lobby {
@@ -1580,7 +1628,7 @@ fn build_network_hud(
         let (label, footer) = if network.spectator {
             (
                 format!("SPECTATOR — MATCH STARTS IN {seconds}"),
-                String::from("ALL UNITS VISIBLE"),
+                String::from("ALL VISIBLE   WASD PAN   ARROWS ROTATE   UP/DOWN ZOOM"),
             )
         } else if network.phase == MatchPhase::Lobby {
             if network.ready {

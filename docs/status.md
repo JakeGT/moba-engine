@@ -166,3 +166,5 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 
 - Fuzz: one-hour wire-decoder run completed 2,476,647,000 iterations clean on v11; v12 fuzz
   restarted after adding client identity fields/challenge.
+
+- Spectator: free pan/rotate/zoom camera (`m6-spectator-camera.png`), all units visible.
