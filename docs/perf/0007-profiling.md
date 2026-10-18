@@ -46,3 +46,24 @@ replacing it with a fixed stack array reduced the measured window from **312 all
 - Delta snapshots reduce encode cost from ~206 ns full to ~35 ns steady; decode ~92 ns.
 - The batch match harness (50 matches, 509,820 ticks, two passes) remains the end-to-end
   determinism/tick-cost gate.
+
+## Round 51 refresh
+
+Re-ran `cargo bench -p moba-sim --bench tick` and `cargo bench -p moba-net --bench snapshot`
+after the allocation fix and status-effect additions (16-core host; the v12 fuzz was pinned to
+a separate core).
+
+| Bench | Time | Per tick |
+|---|---:|---:|
+| sim full 5v5, 300 ticks | 3.298 ms | 11.0 us |
+| sim steady 5v5, 300 ticks | 3.977 ms | 13.3 us |
+| sim idle, 300 ticks | 0.428 ms | 1.43 us |
+| snapshot full encode | 207 ns | |
+| snapshot full decode | 253 ns | |
+| snapshot delta encode | 35.8 ns | |
+| snapshot delta decode | 93.1 ns | |
+| snapshot delta apply | 84.2 ns | |
+
+Tick-time changes were +1-3% versus the prior capture, within expected run-to-run variance
+and consistent with the extra status components; the 33 ms server tick budget remains far
+from saturated.
