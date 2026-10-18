@@ -41,9 +41,33 @@ fn main() {
             eprintln!("invalid content {path}: {error}");
             std::process::exit(1);
         });
+    let point_kinds = |kind: moba_game::AbilityKind| {
+        matches!(
+            kind,
+            moba_game::AbilityKind::Slow { .. }
+                | moba_game::AbilityKind::Root { .. }
+                | moba_game::AbilityKind::Silence { .. }
+                | moba_game::AbilityKind::Burn { .. }
+                | moba_game::AbilityKind::Burst { .. }
+        )
+    };
+    let warnings: Vec<String> = content
+        .abilities
+        .iter()
+        .filter(|ability| point_kinds(ability.kind) && ability.cast_range.to_i32() == 0)
+        .map(|ability| {
+            format!(
+                "{} is point-targeted with cast_range=0 (self-centred)",
+                ability.name
+            )
+        })
+        .collect();
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
     if json {
         println!(
-            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"hash\":\"{:#018x}\",\"valid\":true}}",
+            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"hash\":\"{:#018x}\",\"valid\":true,\"warnings\":{}}}",
             json_string(&path),
             json_string(&content.manifest.name),
             json_string(&content.manifest.version),
@@ -53,7 +77,8 @@ fn main() {
             content.abilities.len(),
             content.map.lanes.len(),
             content.map.structures.len(),
-            content.hash()
+            content.hash(),
+            warnings.len()
         );
         return;
     }

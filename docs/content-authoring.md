@@ -81,7 +81,11 @@ abilities = [0, 1, 2]
 
 ## Abilities
 
-Common fields: `name`, `cooldown_ticks`, `mana_cost`, `cast_range`, `kind`. Kinds:
+Common fields: `name`, `cooldown_ticks`, `mana_cost`, `cast_range`, `kind`.
+
+`cast_range` is validated for every kind. Skillshots/dashes must target a point within range;
+point-targeted effects (burst/slow/root/silence/burn) accept a target point within range. A
+point-targeted `cast_range = 0` is self-centred and `content-check` prints a warning. Kinds:
 
 | Kind | Fields | Behaviour |
 |---|---|---|
