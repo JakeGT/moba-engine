@@ -3039,6 +3039,7 @@ mod tests {
     fn custom_content_purchase_updates_observation() {
         use moba_game::GameContent;
         let content = GameContent {
+            attestation: None,
             rules: moba_game::RulesSpec::default(),
             manifest: GameContent::default().manifest,
             items: vec![moba_game::ItemSpec {

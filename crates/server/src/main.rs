@@ -27,6 +27,8 @@ fn main() {
     let mut items_path: Option<std::path::PathBuf> = None;
     let mut server_key: Option<std::path::PathBuf> = None;
     let mut reload_content = false;
+    let mut require_attestation = false;
+    let mut content_publisher: Option<[u8; 32]> = None;
     let mut client_tokens: Vec<[u8; 32]> = Vec::new();
     let mut client_identity_keys: Vec<[u8; 32]> = Vec::new();
     let mut results_log: Option<std::path::PathBuf> = None;
@@ -76,6 +78,12 @@ fn main() {
         }
         if let Some(value) = file.reload_content {
             reload_content = value;
+        }
+        if let Some(value) = file.require_attestation {
+            require_attestation = value;
+        }
+        if let Some(value) = file.content_publisher.as_deref() {
+            content_publisher = Some(parse_secret(value));
         }
         if let Some(value) = file.ready {
             require_ready = value;
@@ -163,13 +171,21 @@ fn main() {
                 client_tokens.push(parse_secret(&value));
             }
             "--reload-content" => reload_content = true,
+            "--require-content-attestation" => require_attestation = true,
+            "--content-publisher" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--content-publisher needs 64 hex characters");
+                    std::process::exit(2);
+                };
+                content_publisher = Some(parse_secret(&value));
+            }
             "--config" => {
                 let _ = args.next();
             }
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--allow-token HEX] [--allow-client-key HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE] [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--config FILE]"
                 );
                 return;
             }
@@ -189,6 +205,26 @@ fn main() {
             std::process::exit(2);
         });
         let content = items_path.as_ref().map(|path| load_content(path));
+        if require_attestation {
+            let Some(content) = content.as_ref() else {
+                eprintln!("--require-content-attestation requires --items FILE");
+                std::process::exit(2);
+            };
+            if !moba_net::crypto::verify_pack(content) {
+                eprintln!("content attestation is missing or invalid");
+                std::process::exit(1);
+            }
+            if let Some(expected) = content_publisher
+                && content
+                    .attestation
+                    .as_ref()
+                    .map(|attestation| attestation.publisher)
+                    != Some(expected)
+            {
+                eprintln!("content publisher does not match the trusted key");
+                std::process::exit(1);
+            }
+        }
         let server_config = ServerConfig {
             bind,
             sim: config,
@@ -421,6 +457,8 @@ struct FileServerConfig {
     items: Option<std::path::PathBuf>,
     server_key: Option<std::path::PathBuf>,
     reload_content: Option<bool>,
+    require_attestation: Option<bool>,
+    content_publisher: Option<String>,
     ready: Option<bool>,
     max_pps: Option<u32>,
     max_total_pps: Option<u32>,

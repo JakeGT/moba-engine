@@ -15,14 +15,28 @@ fn json_string(value: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_lines)] // CLI validation/report is linear.
 fn main() {
     let mut path: Option<String> = None;
     let mut json = false;
-    for argument in std::env::args().skip(1) {
+    let mut require_attestation = false;
+    let mut publisher: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(argument) = args.next() {
         match argument.as_str() {
             "--json" => json = true,
+            "--require-attestation" => require_attestation = true,
+            "--publisher" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--publisher needs a 64-hex key");
+                    std::process::exit(2);
+                };
+                publisher = Some(value);
+            }
             "--help" => {
-                eprintln!("usage: content-check [--json] <pack.toml>");
+                eprintln!(
+                    "usage: content-check [--json] [--require-attestation] [--publisher HEX] <pack.toml>"
+                );
                 return;
             }
             other if path.is_none() => path = Some(other.to_string()),
@@ -41,6 +55,21 @@ fn main() {
             eprintln!("invalid content {path}: {error}");
             std::process::exit(1);
         });
+    let attested = moba_net::crypto::verify_pack(&content);
+    let publisher_hex = content
+        .attestation
+        .as_ref()
+        .map(|attestation| hex(&attestation.publisher));
+    if require_attestation && !attested {
+        eprintln!("content is not validly attested");
+        std::process::exit(1);
+    }
+    if let Some(expected) = publisher.as_deref()
+        && publisher_hex.as_deref() != Some(expected)
+    {
+        eprintln!("publisher key does not match trusted key");
+        std::process::exit(1);
+    }
     let self_centred_point_effect = |ability: &moba_game::AbilitySpec| {
         if !matches!(
             ability.targeting,
@@ -87,7 +116,7 @@ fn main() {
     }
     if json {
         println!(
-            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"hash\":\"{:#018x}\",\"valid\":true,\"warnings\":{}}}",
+            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":true,\"warnings\":{}}}",
             json_string(&path),
             json_string(&content.manifest.name),
             json_string(&content.manifest.version),
@@ -98,6 +127,8 @@ fn main() {
             content.map.lanes.len(),
             content.map.structures.len(),
             content.hash(),
+            attested,
+            json_string(publisher_hex.as_deref().unwrap_or("")),
             warnings.len()
         );
         return;
@@ -115,4 +146,13 @@ fn main() {
     println!("structures {}", content.map.structures.len());
     println!("hash       {:#018x}", content.hash());
     println!("valid      true");
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }

@@ -39,6 +39,15 @@ impl Default for ContentManifest {
     }
 }
 
+/// Optional Ed25519 attestation of a pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackAttestation {
+    /// Publisher Ed25519 public key.
+    pub publisher: [u8; 32],
+    /// Signature over [`GameContent::signing_message`].
+    pub signature: [u8; 64],
+}
+
 /// Maximum number of items in a content pack (matches the wire catalogue).
 pub const MAX_CONTENT_ITEMS: usize = 16;
 /// Maximum item display-name length in bytes.
@@ -546,6 +555,8 @@ pub struct GameContent {
     pub rules: RulesSpec,
     /// Map geometry.
     pub map: MapSpec,
+    /// Optional publisher attestation (not part of the content hash).
+    pub attestation: Option<PackAttestation>,
 }
 
 fn default_modifiers() -> Vec<ModifierDef> {
@@ -575,6 +586,7 @@ impl Default for GameContent {
             modifiers: default_modifiers(),
             rules: RulesSpec::default(),
             map: MapSpec::from(&MAP),
+            attestation: None,
         }
     }
 }
@@ -1119,6 +1131,23 @@ impl GameContent {
         Ok(())
     }
 
+    /// Stable bytes signed by a publisher attestation.
+    #[must_use]
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut message = Vec::with_capacity(96);
+        message.extend_from_slice(b"moba-pack-v1\n");
+        for field in [
+            &self.manifest.name,
+            &self.manifest.version,
+            &self.manifest.author,
+        ] {
+            message.extend_from_slice(field.as_bytes());
+            message.push(b'\n');
+        }
+        message.extend_from_slice(&self.hash().to_le_bytes());
+        message
+    }
+
     /// Stable FNV-1a hash of the catalogue, used for diagnostics and mismatch checks.
     #[must_use]
     #[allow(clippy::too_many_lines)] // Canonical field feed mirrors the content schema.
@@ -1323,6 +1352,8 @@ struct ModifierEntry {
 #[serde(deny_unknown_fields)]
 struct ContentFile {
     name: Option<String>,
+    publisher: Option<String>,
+    signature: Option<String>,
     version: Option<String>,
     author: Option<String>,
     #[serde(default)]
@@ -1617,6 +1648,17 @@ fn parse_modifier_kind(value: &str) -> Result<ModifierKind, ContentLoadError> {
         "burn" => Ok(ModifierKind::Burn),
         other => Err(invalid_field("modifiers.kind", other)),
     }
+}
+
+fn parse_hex_array<const N: usize>(value: &str) -> Result<[u8; N], ()> {
+    if value.len() != N * 2 {
+        return Err(());
+    }
+    let mut output = [0u8; N];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| ())?;
+    }
+    Ok(output)
 }
 
 fn parse_damage_type(value: &str) -> Result<DamageType, ContentLoadError> {
@@ -1990,6 +2032,21 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             wave_interval_ticks: rules.wave_interval_ticks,
             first_wave_ticks: rules.first_wave_ticks,
         });
+    let attestation = match (file.publisher.as_deref(), file.signature.as_deref()) {
+        (None, None) => None,
+        (Some(publisher), Some(signature)) => Some(PackAttestation {
+            publisher: parse_hex_array(publisher)
+                .map_err(|()| invalid_field("publisher", publisher))?,
+            signature: parse_hex_array(signature)
+                .map_err(|()| invalid_field("signature", signature))?,
+        }),
+        _ => {
+            return Err(invalid_field(
+                "attestation",
+                "publisher and signature are both required",
+            ));
+        }
+    };
     let defaults = ContentManifest::default();
     let manifest = ContentManifest {
         name: file.name.unwrap_or(defaults.name),
@@ -2004,6 +2061,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         modifiers,
         rules,
         map,
+        attestation,
     };
     content.validate().map_err(ContentLoadError::Invalid)?;
     Ok(content)
@@ -2071,6 +2129,22 @@ b = [80, 160]
             let content = load_toml(text).expect("parse mode pack");
             content.validate().expect("valid mode pack");
         }
+    }
+
+    #[test]
+    fn attestation_fields_parse_without_changing_the_hash() {
+        let plain = "name = \"Pack\"\nversion = \"1\"\nauthor = \"a\"\n";
+        let signed = format!(
+            "{plain}publisher = \"{}\"\nsignature = \"{}\"\n",
+            "11".repeat(32),
+            "22".repeat(64)
+        );
+        let unsigned = load_toml(plain).expect("plain");
+        let signed = load_toml(&signed).expect("signed");
+        let attestation = signed.attestation.as_ref().expect("attestation");
+        assert_eq!(attestation.publisher, [0x11; 32]);
+        assert_eq!(attestation.signature, [0x22; 64]);
+        assert_eq!(signed.hash(), unsigned.hash());
     }
 
     #[test]

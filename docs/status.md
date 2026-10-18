@@ -35,8 +35,8 @@ TOML. The engine is a playable preview (`0.1`), not a finished commercial title.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **239 passed**, 0 failed, 3 ignored.
-- `cargo test --workspace --release --locked`: **239 passed**, 0 failed.
+- `cargo test --workspace --locked`: **241 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --release --locked`: **241 passed**, 0 failed.
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
@@ -93,7 +93,7 @@ Current themes:
   [manifest attestation](https://github.com/JakeGT/moba-engine/issues/11),
   [scripting/advanced behaviours](https://github.com/JakeGT/moba-engine/issues/13), and
   [map selection](https://github.com/JakeGT/moba-engine/issues/20).
-- Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14) and
+- Hardening: [account/key-transparency/player-count](https://github.com/JakeGT/moba-engine/issues/14), and
   [larger balance sweeps](https://github.com/JakeGT/moba-engine/issues/17).
 - Product: [audio](https://github.com/JakeGT/moba-engine/issues/18) and
   [settings/remapping/UI scale](https://github.com/JakeGT/moba-engine/issues/19).

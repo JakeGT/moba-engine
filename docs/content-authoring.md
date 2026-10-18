@@ -168,6 +168,30 @@ damage_type = "magic"
 Adding a *new effect primitive* still requires engine code and a protocol bump; combining
 existing primitives and modifiers is data-only.
 
+## Publisher attestation
+
+Packs may carry an optional top-level Ed25519 attestation:
+
+```toml
+publisher = "<64 hex chars>"
+signature = "<128 hex chars>"
+```
+
+Sign with `MOBA_SIGNING_SEED=<64 hex> cargo run -p moba-tools --bin content-sign -- pack.toml`
+and paste the printed fields **before any TOML table**. Verify with:
+
+```bash
+cargo run -p moba-tools --bin content-check -- --require-attestation --publisher <pubkey-hex> pack.toml
+cargo run -p moba-server -- --listen 127.0.0.1:7777 --items pack.toml \
+  --require-content-attestation --content-publisher <pubkey-hex>
+```
+
+The signature covers name/version/author plus the content hash (attestation fields are not
+hashed, so signing does not change the catalogue hash). Unsigned packs still load for local
+development unless `--require-content-attestation` is set. Trust is pinned per server key;
+rotate by restarting with the new key. Revocation is out of band (remove the key from the
+server config); there is no online revocation list.
+
 ## Rules
 
 ```toml

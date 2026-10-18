@@ -54,3 +54,10 @@ deterministic playback and server authority.
 ## References
 - [Data-driven RPG architecture](https://codesmith.hashnode.dev/architecting-a-data-driven-rpg-in-c)
 - [Cocos Creator asset hot-update guide](https://docs.cocos.com/creator/3.8/manual/en/advanced-topics/hot-update.html)
+
+## Publisher attestation
+
+- [x] Optional top-level `publisher`/`signature` Ed25519 fields, `content-sign` tool,
+  `content-check --require-attestation/--publisher`, server `--require-content-attestation`
+  and pinned `--content-publisher`.
+- [x] Attestation covers manifest + content hash and does not alter the catalogue hash.
