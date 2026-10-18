@@ -89,3 +89,9 @@ max 3,021 µs, outcomes blue 30 / red 20.
 with worst tick 289 us and determinism ok. The 95% Wilson interval for blue's win rate is
 46.2%–72.4%, which includes 50%; this sample does not establish a side bias. Larger samples
 and fixed-composition sweeps should be used before changing balance.
+
+## Wire-decoder fuzz gate
+
+A one-hour release run of `fuzz-wire` completed **2,476,647,000 iterations clean** with no
+panic or decoder hang (protocol v11 shape). Protocol v12 adds client-identity fields and the
+`Challenge` packet, so a new one-hour run is required and was started after the change.

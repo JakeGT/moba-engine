@@ -7,6 +7,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- One-hour wire fuzz completed 2,476,647,000 iterations clean (protocol v11).
 - Optional Ed25519 client identities with address-bound server challenges and public-key
   allowlists (`--allow-client-key`, `MOBA_CLIENT_IDENTITY`).
 - Graceful SIGINT/SIGTERM shutdown that flushes an in-progress replay.

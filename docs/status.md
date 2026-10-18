@@ -162,3 +162,6 @@ repository URL are decided; see `docs/API-STABILITY.md` and `RELEASE.md`.
 - Shutdown: SIGINT during a live custom match flushed a 119-tick replay before exit.
 
 - Client identity: Ed25519 challenge/allowlist flow verified end-to-end with a 314-tick match.
+
+- Fuzz: one-hour wire-decoder run completed 2,476,647,000 iterations clean on v11; v12 fuzz
+  restarted after adding client identity fields/challenge.

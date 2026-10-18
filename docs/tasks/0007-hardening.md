@@ -33,6 +33,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - **Match results log**: optional JSONL append with seed/ticks/score/content/state/replay for
   operators and analytics.
 
+- **Fuzzing**: a one-hour wire-decoder run completed **2,476,647,000 iterations clean** on the
+  protocol v11 shape; a fresh v12 run is tracked after the client-identity change.
+
 ## CI gates
 - Cross-platform fmt/clippy/tests/docs/features/layering.
 - `ci-tools`: content-check fixtures, 10-match deterministic soak, 30-second wire fuzz and
