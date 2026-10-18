@@ -20,6 +20,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Vulkan SDK and shader compiler
         run: choco install vulkan-sdk -y --no-progress
+      - name: Add Vulkan SDK to PATH
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Vulkan SDK directory not found' }
+          "$($sdk.FullName)\Bin" >> $env:GITHUB_PATH
+          "GLSLC=$($sdk.FullName)\Bin\glslc.exe" >> $env:GITHUB_ENV
       - name: Build probe
         run: cargo build --release --locked -p moba-tools --bin vulkan-probe
       - name: Probe Vulkan devices
