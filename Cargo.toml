@@ -35,7 +35,7 @@ ash-window = "0.13"
 bytemuck = { version = "1", features = ["derive"] }
 crossbeam-deque = "0.8"
 chacha20poly1305 = "0.10"
-getrandom = "0.2"
+getrandom = "0.4"
 ctrlc = { version = "3", features = ["termination"] }
 hkdf = "0.12"
 hmac = "0.12"
