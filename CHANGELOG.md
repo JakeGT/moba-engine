@@ -7,6 +7,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 ## [Unreleased]
 
 ### Added
+- Protocol v14 modifier catalogue: content-defined `ModifierDef` names/kinds are validated,
+  hashed, shipped in `WireCatalog`, and recorded on every modifier instance. `SIM_LOGIC_VERSION`
+  is now 3.
 - Fixed-capacity always-present `Modifiers` component replaces six ad-hoc status components:
   no status archetype churn, allocation-free expiry/burn passes, derived status flags, and
   one hashed modifier list. `SIM_LOGIC_VERSION` is now 2.

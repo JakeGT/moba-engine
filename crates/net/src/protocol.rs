@@ -9,14 +9,14 @@ use core::fmt;
 use moba_core::{Fix, FixVec2};
 use moba_game::{
     AbilityKind, AbilitySpec, ContentManifest, DamageType, GameContent, HeroSpec, ItemSpec,
-    LaneSpec, MapSpec, StructureKind, StructureSpec, Team, WallSpec,
+    LaneSpec, MapSpec, ModifierDef, StructureKind, StructureSpec, Team, WallSpec,
 };
 use moba_sim::ObservedUnit;
 
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 13;
+pub const PROTOCOL_VERSION: u8 = 14;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -261,6 +261,10 @@ pub const WIRE_LANE_NAME: usize = 16;
 pub const MAX_WIRE_WALLS: usize = 32;
 /// Maximum structures in a handshake map.
 pub const MAX_WIRE_STRUCTURES: usize = 32;
+/// Maximum modifier definitions in a handshake catalogue.
+pub const MAX_WIRE_MODIFIERS: usize = 16;
+/// Fixed modifier-name bytes on the wire.
+pub const WIRE_MODIFIER_NAME: usize = 16;
 /// Fixed manifest-field bytes on the wire.
 pub const WIRE_MANIFEST_FIELD: usize = 32;
 
@@ -273,6 +277,8 @@ const _: () = {
     assert!(MAX_WIRE_WALLS == moba_game::MAX_CONTENT_WALLS);
     assert!(MAX_WIRE_STRUCTURES == moba_game::MAX_CONTENT_STRUCTURES);
     assert!(WIRE_MANIFEST_FIELD == moba_game::MAX_MANIFEST_FIELD);
+    assert!(MAX_WIRE_MODIFIERS == moba_game::MAX_CONTENT_MODIFIERS);
+    assert!(WIRE_MODIFIER_NAME == moba_game::MAX_ITEM_NAME);
     assert!(WIRE_ITEM_NAME == moba_game::MAX_ITEM_NAME);
     assert!(WIRE_HERO_NAME == moba_game::MAX_HERO_NAME);
     assert!(WIRE_ABILITY_NAME == moba_game::MAX_ABILITY_NAME);
@@ -558,6 +564,26 @@ impl Default for WireMap {
     }
 }
 
+/// One modifier definition carried in the handshake.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireModifier {
+    /// Name bytes, padded with zeroes.
+    pub name: [u8; WIRE_MODIFIER_NAME],
+    /// Used bytes in `name`.
+    pub name_len: u8,
+    /// Behaviour kind.
+    pub kind: u8,
+}
+
+impl WireModifier {
+    /// Decodes the name as UTF-8, falling back to an empty string.
+    #[must_use]
+    pub fn name_str(&self) -> &str {
+        let end = usize::from(self.name_len).min(WIRE_MODIFIER_NAME);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
+
 /// Complete runtime catalogue carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WireCatalog {
@@ -585,6 +611,10 @@ pub struct WireCatalog {
     pub ability_count: u8,
     /// Ability catalogue.
     pub abilities: [WireAbility; MAX_WIRE_ABILITIES],
+    /// Number of valid modifiers.
+    pub modifier_count: u8,
+    /// Modifier definitions.
+    pub modifiers: [WireModifier; MAX_WIRE_MODIFIERS],
     /// Map geometry.
     pub map: WireMap,
 }
@@ -604,6 +634,8 @@ impl Default for WireCatalog {
             heroes: [WireHero::default(); MAX_WIRE_HEROES],
             ability_count: 0,
             abilities: [WireAbility::default(); MAX_WIRE_ABILITIES],
+            modifier_count: 0,
+            modifiers: [WireModifier::default(); MAX_WIRE_MODIFIERS],
             map: WireMap::default(),
         }
     }
@@ -617,6 +649,7 @@ impl From<&GameContent> for WireCatalog {
             items: content_items,
             heroes: content_heroes,
             abilities: content_abilities,
+            modifiers: content_modifiers,
             map: content_map,
         } = content;
         let ContentManifest {
@@ -798,6 +831,21 @@ impl From<&GameContent> for WireCatalog {
                     wire.damage_type = damage_type_code(damage_type);
                 }
             }
+        }
+
+        catalog.modifier_count = u8::try_from(content_modifiers.len().min(MAX_WIRE_MODIFIERS))
+            .unwrap_or(u8::try_from(MAX_WIRE_MODIFIERS).unwrap_or(u8::MAX));
+        for (wire, modifier) in catalog.modifiers.iter_mut().zip(content_modifiers) {
+            let ModifierDef { name, kind } = modifier;
+            wire.name_len = put_wire_name(&mut wire.name, name);
+            wire.kind = match kind {
+                moba_game::ModifierKind::Shield => 0,
+                moba_game::ModifierKind::Slow => 1,
+                moba_game::ModifierKind::Haste => 2,
+                moba_game::ModifierKind::Root => 3,
+                moba_game::ModifierKind::Silence => 4,
+                moba_game::ModifierKind::Burn => 5,
+            };
         }
 
         let MapSpec {
@@ -983,6 +1031,23 @@ impl WireCatalog {
                 })
             })
             .collect::<Result<Vec<_>, WireError>>()?;
+        let modifiers = (0..count!(self.modifier_count, MAX_WIRE_MODIFIERS))
+            .map(|index| {
+                let modifier = &self.modifiers[index];
+                Ok(ModifierDef {
+                    name: read_wire_name(&modifier.name, modifier.name_len, WIRE_MODIFIER_NAME)?,
+                    kind: match modifier.kind {
+                        0 => moba_game::ModifierKind::Shield,
+                        1 => moba_game::ModifierKind::Slow,
+                        2 => moba_game::ModifierKind::Haste,
+                        3 => moba_game::ModifierKind::Root,
+                        4 => moba_game::ModifierKind::Silence,
+                        5 => moba_game::ModifierKind::Burn,
+                        _ => return Err(WireError::BadValue),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
         let map = &self.map;
         let lanes = (0..count!(map.lane_count, MAX_WIRE_LANES))
             .map(|index| {
@@ -1049,6 +1114,7 @@ impl WireCatalog {
             items,
             heroes,
             abilities,
+            modifiers,
             map: MapSpec {
                 lanes,
                 structures,
@@ -1194,6 +1260,7 @@ pub fn decode_hello(data: &[u8]) -> Result<Hello, WireError> {
     Ok(hello)
 }
 
+#[allow(clippy::too_many_lines)] // Wire field order mirrors `decode_catalog`.
 fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
     out.extend_from_slice(&catalog.manifest_name);
     out.push(catalog.manifest_name_len);
@@ -1259,6 +1326,12 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.extend_from_slice(&ability.damage.to_le_bytes());
         out.extend_from_slice(&ability.duration_ticks.to_le_bytes());
         out.push(ability.damage_type);
+    }
+    out.push(catalog.modifier_count);
+    for modifier in &catalog.modifiers {
+        out.extend_from_slice(&modifier.name);
+        out.push(modifier.name_len);
+        out.push(modifier.kind);
     }
     let map = &catalog.map;
     out.push(map.lane_count);
@@ -1359,6 +1432,14 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         ability.damage = reader.i32()?;
         ability.duration_ticks = reader.u32()?;
         ability.damage_type = reader.u8()?;
+    }
+    catalog.modifier_count = reader.u8()?;
+    for modifier in &mut catalog.modifiers {
+        modifier
+            .name
+            .copy_from_slice(reader.bytes(WIRE_MODIFIER_NAME)?);
+        modifier.name_len = reader.u8()?;
+        modifier.kind = reader.u8()?;
     }
     let map = &mut catalog.map;
     map.lane_count = reader.u8()?;
