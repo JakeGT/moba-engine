@@ -60,7 +60,7 @@ fn main() {
         .attestation
         .as_ref()
         .map(|attestation| hex(&attestation.publisher));
-    if require_attestation && !attested {
+    if (require_attestation || publisher.is_some()) && !attested {
         eprintln!("content is not validly attested");
         std::process::exit(1);
     }

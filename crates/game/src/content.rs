@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use moba_core::{Fix, FixVec2};
 use serde::Deserialize;
 
@@ -987,12 +989,12 @@ fn hash_effects(feed: &mut dyn FnMut(&[u8]), effects: &EffectList) {
                 feed(&range.to_bits().to_le_bytes());
                 feed(&radius.to_bits().to_le_bytes());
                 feed(&arc.to_bits().to_le_bytes());
-                hash_area_effects(feed, on_hit);
+                hash_area_effects(&mut *feed, on_hit);
             }
             Effect::Area { radius, effects } => {
                 feed(&[5]);
                 feed(&radius.to_bits().to_le_bytes());
-                hash_area_effects(feed, effects);
+                hash_area_effects(&mut *feed, effects);
             }
             Effect::Zone {
                 radius,
@@ -1004,7 +1006,7 @@ fn hash_effects(feed: &mut dyn FnMut(&[u8]), effects: &EffectList) {
                 feed(&radius.to_bits().to_le_bytes());
                 feed(&duration_ticks.to_le_bytes());
                 feed(&period_ticks.to_le_bytes());
-                hash_area_effects(feed, effects);
+                hash_area_effects(&mut *feed, effects);
             }
         }
     }
@@ -1268,10 +1270,16 @@ impl GameContent {
     }
 
     /// Stable bytes signed by a publisher attestation.
+    ///
+    /// Version 2 signs a SHA-256 digest of the canonical catalogue feed rather than the
+    /// diagnostic 64-bit FNV hash.
     #[must_use]
     pub fn signing_message(&self) -> Vec<u8> {
-        let mut message = Vec::with_capacity(96);
-        message.extend_from_slice(b"moba-pack-v1\n");
+        let mut canonical = Vec::new();
+        self.feed_catalogue(&mut |bytes| canonical.extend_from_slice(bytes));
+        let digest = Sha256::digest(&canonical);
+        let mut message = Vec::with_capacity(128);
+        message.extend_from_slice(b"moba-pack-v2\n");
         for field in [
             &self.manifest.name,
             &self.manifest.version,
@@ -1280,32 +1288,31 @@ impl GameContent {
             message.extend_from_slice(field.as_bytes());
             message.push(b'\n');
         }
-        message.extend_from_slice(&self.hash().to_le_bytes());
+        message.extend_from_slice(&digest);
         message
     }
 
-    /// Stable FNV-1a hash of the catalogue, used for diagnostics and mismatch checks.
-    #[must_use]
+    /// Canonical, unambiguous catalogue feed used by the diagnostic hash and signatures.
     #[allow(clippy::too_many_lines)] // Canonical field feed mirrors the content schema.
-    pub fn hash(&self) -> u64 {
-        let mut hash = 0xCBF2_9CE4_8422_2325u64;
-        let mut feed = |bytes: &[u8]| {
-            for byte in bytes {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-            }
-        };
+    fn feed_catalogue(&self, feed: &mut dyn FnMut(&[u8])) {
+        fn len(feed: &mut dyn FnMut(&[u8]), value: usize) {
+            feed(&u32::try_from(value).unwrap_or(u32::MAX).to_le_bytes());
+        }
+        fn string(feed: &mut dyn FnMut(&[u8]), value: &str) {
+            len(feed, value.len());
+            feed(value.as_bytes());
+        }
+        len(feed, 3);
         for field in [
             &self.manifest.name,
             &self.manifest.version,
             &self.manifest.author,
         ] {
-            feed(field.as_bytes());
-            feed(&[0]);
+            string(feed, field);
         }
+        len(feed, self.items.len());
         for item in &self.items {
-            feed(item.name.as_bytes());
-            feed(&[0]);
+            string(feed, &item.name);
             for value in [
                 item.cost,
                 item.health as u32,
@@ -1318,9 +1325,9 @@ impl GameContent {
             }
             feed(&item.move_speed_per_sec.to_bits().to_le_bytes());
         }
+        len(feed, self.abilities.len());
         for ability in &self.abilities {
-            feed(ability.name.as_bytes());
-            feed(&[0]);
+            string(feed, &ability.name);
             feed(&ability.cooldown_ticks.to_le_bytes());
             feed(&(ability.mana_cost as u32).to_le_bytes());
             match ability.targeting {
@@ -1334,11 +1341,11 @@ impl GameContent {
                     feed(&range.to_bits().to_le_bytes());
                 }
             }
-            hash_effects(&mut feed, &ability.effects);
+            hash_effects(&mut *feed, &ability.effects);
         }
+        len(feed, self.heroes.len());
         for hero in &self.heroes {
-            feed(hero.name.as_bytes());
-            feed(&[0]);
+            string(feed, &hero.name);
             for value in [
                 hero.max_health as u32,
                 hero.max_mana as u32,
@@ -1412,39 +1419,54 @@ impl GameContent {
         ] {
             feed(&value.to_le_bytes());
         }
-        feed(self.map.name.as_bytes());
-        feed(&[0]);
+        string(feed, &self.map.name);
         feed(&[self.map.theme.id()]);
         feed(&self.map.extent.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.blue_spawn.y.to_bits().to_le_bytes());
         feed(&self.map.red_spawn.x.to_bits().to_le_bytes());
         feed(&self.map.red_spawn.y.to_bits().to_le_bytes());
+        len(feed, self.modifiers.len());
         for modifier in &self.modifiers {
-            feed(modifier.name.as_bytes());
-            feed(&[0]);
+            string(feed, &modifier.name);
             feed(&[modifier.kind as u8]);
         }
+        len(feed, self.map.lanes.len());
         for lane in &self.map.lanes {
-            feed(lane.name.as_bytes());
-            feed(&[0]);
+            string(feed, &lane.name);
+            len(feed, lane.path.len());
             for point in &lane.path {
                 feed(&point.x.to_bits().to_le_bytes());
                 feed(&point.y.to_bits().to_le_bytes());
             }
         }
+        len(feed, self.map.structures.len());
         for structure in &self.map.structures {
             feed(&[structure.team.index() as u8, structure.kind as u8]);
             feed(&structure.position.x.to_bits().to_le_bytes());
             feed(&structure.position.y.to_bits().to_le_bytes());
             feed(&[structure.lane.unwrap_or(0xFF)]);
         }
+        len(feed, self.map.walls.len());
         for wall in &self.map.walls {
             for point in [wall.a, wall.b] {
                 feed(&point.x.to_bits().to_le_bytes());
                 feed(&point.y.to_bits().to_le_bytes());
             }
         }
+    }
+
+    /// Stable FNV-1a hash of the catalogue, used for diagnostics and mismatch checks.
+    #[must_use]
+    pub fn hash(&self) -> u64 {
+        let mut hash = 0xCBF2_9CE4_8422_2325u64;
+        let mut feed = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        };
+        self.feed_catalogue(&mut feed);
         hash
     }
 }
@@ -1847,12 +1869,14 @@ fn parse_modifier_kind(value: &str) -> Result<ModifierKind, ContentLoadError> {
 }
 
 fn parse_hex_array<const N: usize>(value: &str) -> Result<[u8; N], ()> {
-    if value.len() != N * 2 {
+    let bytes = value.as_bytes();
+    if bytes.len() != N * 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
         return Err(());
     }
     let mut output = [0u8; N];
     for (index, byte) in output.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| ())?;
+        let text = std::str::from_utf8(&bytes[index * 2..index * 2 + 2]).map_err(|_| ())?;
+        *byte = u8::from_str_radix(text, 16).map_err(|_| ())?;
     }
     Ok(output)
 }

@@ -27,12 +27,14 @@ fn main() {
         std::process::exit(2);
     };
     let Some(seed) = std::env::var("MOBA_SIGNING_SEED").ok().and_then(|value| {
-        if value.len() != 64 {
+        let bytes = value.as_bytes();
+        if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {
             return None;
         }
         let mut seed = [0u8; 32];
         for (index, byte) in seed.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+            let text = std::str::from_utf8(&bytes[index * 2..index * 2 + 2]).ok()?;
+            *byte = u8::from_str_radix(text, 16).ok()?;
         }
         Some(seed)
     }) else {

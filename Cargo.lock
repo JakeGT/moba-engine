@@ -1231,14 +1231,14 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "moba-assets"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
 ]
 
 [[package]]
 name = "moba-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrayvec",
  "cpal",
@@ -1257,14 +1257,14 @@ dependencies = [
 
 [[package]]
 name = "moba-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
 ]
 
 [[package]]
 name = "moba-ecs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "moba-core",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "moba-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
@@ -1286,17 +1286,18 @@ dependencies = [
 
 [[package]]
 name = "moba-game"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
  "serde",
+ "sha2",
  "toml",
 ]
 
 [[package]]
 name = "moba-jobs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-deque",
  "loom",
@@ -1305,14 +1306,14 @@ dependencies = [
 
 [[package]]
 name = "moba-nav"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
 ]
 
 [[package]]
 name = "moba-net"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chacha20poly1305",
  "criterion",
@@ -1330,14 +1331,14 @@ dependencies = [
 
 [[package]]
 name = "moba-netsim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
 ]
 
 [[package]]
 name = "moba-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
  "raw-window-handle",
@@ -1346,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "moba-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ash",
  "ash-window",
@@ -1360,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "moba-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ctrlc",
  "moba-core",
@@ -1375,11 +1376,11 @@ dependencies = [
 
 [[package]]
 name = "moba-shaders"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "moba-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "moba-core",
@@ -1391,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "moba-tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
  "moba-game",

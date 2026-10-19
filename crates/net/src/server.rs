@@ -695,6 +695,7 @@ impl core::fmt::Debug for Systems {
 
 /// A running authoritative network server.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent protocol/capability flags.
 pub struct NetServer {
     transport: UdpTransport,
     simulation: Simulation,
@@ -702,6 +703,10 @@ pub struct NetServer {
     identity: Option<ServerIdentity>,
     client_keys: Vec<[u8; 32]>,
     require_client_identity: bool,
+    require_content_attestation: bool,
+    content_update_retry: Option<(Vec<u8>, u32, u8, u32)>,
+    content_generation: u32,
+    trusted_publisher: Option<[u8; 32]>,
     allowed_client_keys: Vec<[u8; 32]>,
     client_challenges: Vec<ClientChallenge>,
     nonces: NonceTracker,
@@ -762,6 +767,10 @@ impl NetServer {
             identity: None,
             client_keys: Vec::new(),
             require_client_identity: false,
+            require_content_attestation: false,
+            content_update_retry: None,
+            content_generation: 0,
+            trusted_publisher: None,
             allowed_client_keys: Vec::new(),
             client_challenges: Vec::new(),
             nonces: NonceTracker::new(Duration::from_secs(60), 2_048),
@@ -961,13 +970,39 @@ impl NetServer {
         self.rotation_index = 0;
     }
 
+    /// Configures the trust policy used for startup/rotation/reload packs.
+    pub fn set_content_trust(&mut self, require_attestation: bool, publisher: Option<[u8; 32]>) {
+        self.require_content_attestation = require_attestation;
+        self.trusted_publisher = publisher;
+    }
+
+    fn content_trusted(&self, content: &GameContent) -> bool {
+        if !self.require_content_attestation {
+            return true;
+        }
+        let Some(attestation) = content.attestation.as_ref() else {
+            return false;
+        };
+        if self
+            .trusted_publisher
+            .is_some_and(|publisher| publisher != attestation.publisher)
+        {
+            return false;
+        }
+        crate::crypto::verify_pack(content)
+    }
+
     fn rotate_content(&mut self) {
+        self.content_update_retry = None;
         if self.rotation.len() < 2 || self.clients.iter().flatten().any(|client| client.connected) {
             return;
         }
         let next = (self.rotation_index + 1) % self.rotation.len();
         let path = self.rotation[next].clone();
         match moba_game::load_content_file(&path) {
+            Ok(content) if !self.content_trusted(&content) => {
+                eprintln!("map rotation rejected: pack trust policy failed");
+            }
             Ok(content) => {
                 let hash = content.hash();
                 let name = content.map.name.clone();
@@ -999,6 +1034,9 @@ impl NetServer {
         }
         reload.modified = Some(modified);
         match moba_game::load_content_file(&reload.path) {
+            Ok(content) if !self.content_trusted(&content) => {
+                eprintln!("content reload rejected: pack trust policy failed");
+            }
             Ok(content) => {
                 let active = usize::from(content.rules.team_size) * 2;
                 if self.clients.iter().enumerate().any(|(slot, client)| {
@@ -1013,6 +1051,14 @@ impl NetServer {
                     return;
                 }
                 let hash = content.hash();
+                self.content_generation = self.content_generation.wrapping_add(1);
+                if let Phase::Results(remaining) = self.phase
+                    && remaining < 180
+                {
+                    // Leave enough time for the update/retries to reach every client.
+                    self.phase = Phase::Results(180);
+                }
+                let generation = self.content_generation;
                 let content = Arc::new(content);
                 self.simulation =
                     Simulation::new_with_content(self.config.sim, Arc::clone(&content));
@@ -1044,7 +1090,7 @@ impl NetServer {
                         kind: PacketKind::ContentUpdate,
                         flags: 0,
                         session,
-                        seq: 0,
+                        seq: generation,
                         ack: 0,
                         ack_bits: 0,
                     };
@@ -1052,6 +1098,8 @@ impl NetServer {
                         eprintln!("content update send failed for {addr}: {error}");
                     }
                 }
+                // One send plus three retries at 1.5 s intervals; clients drop duplicate hashes.
+                self.content_update_retry = Some((payload, 30, 3, generation));
                 eprintln!(
                     "content reloaded and broadcast: {} items, hash {hash:#018x}",
                     self.content.items.len()
@@ -1228,6 +1276,8 @@ impl NetServer {
     }
 
     fn start_countdown(&mut self) {
+        // The next match uses the catalogue already negotiated; stop retransmitting.
+        self.content_update_retry = None;
         self.phase = if self.config.countdown_ticks == 0 {
             Phase::Playing
         } else {
@@ -1301,6 +1351,7 @@ impl NetServer {
     }
 
     fn reset_match(&mut self) {
+        self.content_update_retry = None;
         self.match_number = self.match_number.wrapping_add(1);
         self.record_frames.clear();
         self.record_checkpoints.clear();
@@ -2078,6 +2129,34 @@ impl NetServer {
         self.delta = delta;
         self.pending_events = pending_events;
         self.pending_events.clear();
+        if let Some((payload, wait, remaining, generation)) = self.content_update_retry.take() {
+            let (wait, remaining) = if wait == 0 {
+                let targets: Vec<(SocketAddr, u32)> = self
+                    .clients
+                    .iter()
+                    .flatten()
+                    .filter(|client| client.connected)
+                    .map(|client| (client.addr, client.session))
+                    .collect();
+                for (addr, session) in targets {
+                    let header = Header {
+                        kind: PacketKind::ContentUpdate,
+                        flags: 0,
+                        session,
+                        seq: generation,
+                        ack: 0,
+                        ack_bits: 0,
+                    };
+                    let _ = self.transport.send(addr, &header, &payload);
+                }
+                (45, remaining.saturating_sub(1))
+            } else {
+                (wait - 1, remaining)
+            };
+            if remaining > 0 {
+                self.content_update_retry = Some((payload, wait, remaining, generation));
+            }
+        }
         Ok(())
     }
 }

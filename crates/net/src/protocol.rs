@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 25;
+pub const PROTOCOL_VERSION: u8 = 26;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.

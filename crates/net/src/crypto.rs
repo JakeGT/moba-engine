@@ -3,12 +3,17 @@
 //! Handshake: the client proves knowledge of a 32-byte pre-shared key with an HMAC over a
 //! random nonce; the server replies with its own nonce plus an HMAC. Both sides derive a
 //! per-session ChaCha20-Poly1305 key with HKDF-SHA256. Application packets are AEAD-sealed
-//! with a nonce made from session id, direction and packet sequence, and the packet header
-//! fields are authenticated as associated data.
+//! with a nonce made from session id, direction and a strictly increasing per-session
+//! counter carried in the sealed payload prefix; packet header fields are authenticated as
+//! associated data. The counter is independent of protocol sequence numbers, so retries and
+//! replies can never reuse a nonce.
 //!
 //! This is an explicit pre-shared-key mode for private/dedicated servers, not a public
 //! matchmaking identity system. It protects confidentiality and integrity from passive and
 //! off-path attackers that do not know the key; it does not hide packet metadata.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
@@ -55,6 +60,7 @@ pub struct SessionCrypto {
     key: [u8; KEY_LEN],
     session: u32,
     send_direction: u8,
+    send_counter: Arc<AtomicU64>,
 }
 
 impl core::fmt::Debug for SessionCrypto {
@@ -69,18 +75,19 @@ impl core::fmt::Debug for SessionCrypto {
 impl SessionCrypto {
     /// Creates a session cipher. `direction` is 0 for client→server and 1 for server→client.
     #[must_use]
-    pub const fn new(key: [u8; KEY_LEN], session: u32, send_direction: u8) -> Self {
+    pub fn new(key: [u8; KEY_LEN], session: u32, send_direction: u8) -> Self {
         Self {
             key,
             session,
             send_direction,
+            send_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    fn nonce(&self, direction: u8, sequence: u32) -> [u8; 12] {
+    fn nonce(&self, direction: u8, counter: u32) -> [u8; 12] {
         let mut nonce = [0u8; 12];
         nonce[..4].copy_from_slice(&self.session.to_le_bytes());
-        nonce[4..8].copy_from_slice(&sequence.to_le_bytes());
+        nonce[4..8].copy_from_slice(&counter.to_le_bytes());
         nonce[8] = direction;
         nonce
     }
@@ -92,15 +99,23 @@ impl SessionCrypto {
     pub fn seal(&self, header: &Header, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let cipher = ChaCha20Poly1305::new((&self.key).into());
         let aad = associated_data(header);
-        cipher
+        // A 32-bit counter still gives 4 billion packets per session; refuse wraparound
+        // rather than ever reuse a nonce.
+        let counter = u32::try_from(self.send_counter.fetch_add(1, Ordering::Relaxed))
+            .map_err(|_| CryptoError::Encrypt)?;
+        let sealed = cipher
             .encrypt(
-                (&self.nonce(self.send_direction, header.seq)).into(),
+                (&self.nonce(self.send_direction, counter)).into(),
                 Payload {
                     msg: plaintext,
                     aad: &aad,
                 },
             )
-            .map_err(|_| CryptoError::Encrypt)
+            .map_err(|_| CryptoError::Encrypt)?;
+        let mut out = Vec::with_capacity(4 + sealed.len());
+        out.extend_from_slice(&counter.to_le_bytes());
+        out.extend_from_slice(&sealed);
+        Ok(out)
     }
 
     /// Verifies and decrypts one application message.
@@ -108,13 +123,16 @@ impl SessionCrypto {
     /// # Errors
     /// Returns [`CryptoError::Decrypt`] for a bad tag, wrong key or tampered header.
     pub fn open(&self, header: &Header, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let (counter, sealed) = ciphertext
+            .split_first_chunk::<4>()
+            .ok_or(CryptoError::Decrypt)?;
         let cipher = ChaCha20Poly1305::new((&self.key).into());
         let aad = associated_data(header);
         cipher
             .decrypt(
-                (&self.nonce(self.send_direction ^ 1, header.seq)).into(),
+                (&self.nonce(self.send_direction ^ 1, u32::from_le_bytes(*counter))).into(),
                 Payload {
-                    msg: ciphertext,
+                    msg: sealed,
                     aad: &aad,
                 },
             )
@@ -287,7 +305,7 @@ pub fn verify_pack(content: &moba_game::GameContent) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(&attestation.publisher) else {
         return false;
     };
-    key.verify(
+    key.verify_strict(
         &content.signing_message(),
         &Signature::from_bytes(&attestation.signature),
     )
@@ -449,6 +467,19 @@ mod tests {
             receiver.open(&wrong_header, &sealed),
             Err(CryptoError::Decrypt)
         );
+    }
+
+    #[test]
+    fn repeated_seals_use_distinct_counters_and_nonces() {
+        let key = derive_session_key(&[5; 32], 1, 2);
+        let sender = SessionCrypto::new(key, 7, 0);
+        let receiver = SessionCrypto::new(key, 7, 1);
+        let header = header(6);
+        let first = sender.seal(&header, b"one").unwrap();
+        let second = sender.seal(&header, b"two").unwrap();
+        assert_ne!(first[..4], second[..4]);
+        assert_eq!(receiver.open(&header, &first).unwrap(), b"one");
+        assert_eq!(receiver.open(&header, &second).unwrap(), b"two");
     }
 
     #[test]

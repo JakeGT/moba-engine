@@ -114,6 +114,11 @@ impl core::fmt::Debug for ClientAuth {
     }
 }
 
+/// Content generations start at one and must strictly increase.
+fn accepts_content_generation(current: u32, incoming: u32) -> bool {
+    incoming != 0 && incoming > current
+}
+
 /// A connected game client.
 pub struct NetClient {
     transport: UdpTransport,
@@ -132,6 +137,7 @@ pub struct NetClient {
     map: crate::protocol::WireMap,
     rules: crate::protocol::WireRules,
     content_hash: u64,
+    content_generation: u32,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     expected_server: Option<[u8; 32]>,
@@ -243,6 +249,7 @@ impl NetClient {
             map: crate::protocol::WireMap::default(),
             rules: crate::protocol::WireRules::default(),
             content_hash: 0,
+            content_generation: 0,
             nonce,
             pre_shared_key,
             expected_server,
@@ -588,6 +595,7 @@ impl NetClient {
                     self.map = catalog.map;
                     self.rules = catalog.rules;
                     self.content_hash = content_hash;
+                    self.content_generation = 0;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -595,6 +603,7 @@ impl NetClient {
                 PacketKind::ContentUpdate => {
                     if self.state != ClientState::Connected
                         || message.header.session != self.session
+                        || !accepts_content_generation(self.content_generation, message.header.seq)
                     {
                         continue;
                     }
@@ -605,6 +614,12 @@ impl NetClient {
                     };
                     if hash == self.content_hash {
                         continue; // duplicate/replayed catalogue; keep prediction state
+                    }
+                    if self.latest.as_ref().is_some_and(|snapshot| {
+                        crate::protocol::MatchPhase::from_u8(snapshot.phase)
+                            == Some(crate::protocol::MatchPhase::Playing)
+                    }) {
+                        continue; // catalogue swaps are only valid between matches
                     }
                     let Ok(content) = catalog.to_content() else {
                         continue;
@@ -628,6 +643,7 @@ impl NetClient {
                     self.map = catalog.map;
                     self.rules = catalog.rules;
                     self.content_hash = hash;
+                    self.content_generation = message.header.seq;
                     self.latest = None;
                     self.history.clear();
                     self.last_acked_snapshot = 0;
@@ -1077,4 +1093,18 @@ pub fn decode_snapshot_payload(
     payload: &[u8],
 ) -> Result<SnapshotDelta, crate::protocol::WireError> {
     decode_snapshot(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accepts_content_generation;
+
+    #[test]
+    fn content_generations_are_strictly_increasing_and_nonzero() {
+        assert!(!accepts_content_generation(0, 0));
+        assert!(accepts_content_generation(0, 1));
+        assert!(!accepts_content_generation(1, 1));
+        assert!(!accepts_content_generation(2, 1));
+        assert!(accepts_content_generation(2, 3));
+    }
 }

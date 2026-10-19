@@ -52,6 +52,19 @@ struct Assembly {
     started: Instant,
 }
 
+/// Whether a packet kind may be plaintext before a session key is installed.
+fn plaintext_handshake(kind: PacketKind) -> bool {
+    matches!(
+        kind,
+        PacketKind::Hello | PacketKind::Welcome | PacketKind::Challenge
+    )
+}
+
+/// Application packets are plaintext only for peers without a session key.
+fn plaintext_allowed(has_key: bool, kind: PacketKind, flags: u16) -> bool {
+    !has_key || plaintext_handshake(kind) || flags & FLAG_ENCRYPTED != 0
+}
+
 /// Non-blocking UDP endpoint.
 #[derive(Debug)]
 pub struct UdpTransport {
@@ -249,8 +262,15 @@ impl UdpTransport {
         }
     }
 
+    fn peer_has_key(&self, addr: SocketAddr) -> bool {
+        self.peers.iter().any(|(peer, _)| *peer == addr)
+    }
+
     fn handle_datagram(&mut self, addr: SocketAddr, length: usize) -> Option<ReceivedMessage> {
         let (header, payload) = decode_packet(&self.buffer[..length]).ok()?;
+        if !plaintext_allowed(self.peer_has_key(addr), header.kind, header.flags) {
+            return None;
+        }
         if header.kind != PacketKind::Fragment {
             let payload = if header.flags & FLAG_ENCRYPTED != 0 {
                 self.decrypt(addr, &header, payload)?
@@ -324,6 +344,9 @@ impl UdpTransport {
             ack: header.ack,
             ack_bits: header.ack_bits,
         };
+        if !plaintext_allowed(self.peer_has_key(addr), reassembled.kind, reassembled.flags) {
+            return None;
+        }
         let payload = if reassembled.flags & FLAG_ENCRYPTED != 0 {
             self.decrypt(addr, &reassembled, &payload)?
         } else {
@@ -509,5 +532,20 @@ mod tests {
         assert_eq!(message.header.kind, PacketKind::Snapshot);
         assert_eq!(message.header.seq, 9);
         assert_eq!(message.payload, payload);
+    }
+
+    #[test]
+    fn keyed_peers_reject_plaintext_application_packets() {
+        assert!(plaintext_allowed(false, PacketKind::Snapshot, 0));
+        assert!(plaintext_allowed(true, PacketKind::Hello, 0));
+        assert!(plaintext_allowed(true, PacketKind::Welcome, 0));
+        assert!(plaintext_allowed(true, PacketKind::Challenge, 0));
+        assert!(!plaintext_allowed(true, PacketKind::Input, 0));
+        assert!(!plaintext_allowed(true, PacketKind::Snapshot, 0));
+        assert!(plaintext_allowed(
+            true,
+            PacketKind::Snapshot,
+            FLAG_ENCRYPTED
+        ));
     }
 }
