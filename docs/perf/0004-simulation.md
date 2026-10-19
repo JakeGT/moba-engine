@@ -73,4 +73,4 @@ per-cell allocations and the per-query scratch clone; steady ticks are fully all
   with early-exit `any_in_circle`, so distant sources are skipped before wall tests.
 
 Deterministic output is unchanged: the cross-OS golden state hash remains
-`0x1923e3d7f3392604`.
+`0x1923e3d7f3392604` (historical; current golden is in `tests/golden-state-hash.txt`).

@@ -1,7 +1,7 @@
 # Engine status
 
 Last updated: **2026-10-19**. Workspace **0.2.0** preview; protocol **v25**; replay format **v5**;
-simulation logic **v6**; content packs are validated runtime TOML.
+simulation logic **v7**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
 Two external-resource items remain open: real Windows/macOS GPU frame results (#9/#127) and
@@ -42,13 +42,13 @@ crates.io publication enablement (#21). Everything else in the audit plan has la
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **253 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **254 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
   pass. `scripts/agent-verify.sh --full` runs these plus Loom/bench compile/soak/fuzz.
-- Deterministic cross-OS golden state hash: `0x1923e3d7f3392604`.
+- Deterministic cross-OS golden state hash: `0x7327fdf242be1814`.
 - Golden render workflow: 64×36 fingerprint on lavapipe with validation + sync validation;
   latest rebaseline after the animated hero rig is green.
 - Deterministic wire fuzzer historical evidence: v11 **2,476,647,000** iterations clean and

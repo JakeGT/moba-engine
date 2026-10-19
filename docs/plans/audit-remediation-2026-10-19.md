@@ -1,8 +1,8 @@
 # Second-audit remediation plan — 2026-10-19
 
 Status: **draft plan, ready for execution**  
-Baseline: `main` at `64951a0`, protocol **v25**, replay **v5**, simulation logic **v6**,
-**253 tests**.
+Baseline: `main` at `64951a0`, protocol **v25**, replay **v5**, simulation logic **v7**,
+**254 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -195,6 +195,10 @@ the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089
 ### C-5. #135/#151 integration checks
 - Keep the content-hash/validation and hash-coverage work from S-2 as the single source of
   truth; no separate ad-hoc fix.
+
+Status (2026-10-19): #137 removes `bot_mask` from the state hash, bumps `SIM_LOGIC_VERSION`
+to 7, updates the golden hash and adds a mask-independence test (#172). A real-UDP
+disconnect/reconnect checkpoint test remains open.
 
 Status (2026-10-19): #138 hidden event endpoints, unseen attack orders, stale teams after
 reload and reload/occupied-slot rejection landed in #171. A reload team-size integration test
