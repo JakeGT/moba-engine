@@ -110,16 +110,18 @@ replays verify; a stale or mid-match update cannot change the catalogue.
 ### S-4. Job-scope lifetime and real Loom model
 **#143/#16**, follow-up to the closed but not delivered #16.
 
-- Make `ScopeShared` owned per job (`Arc<ScopeData>`, as `std::thread::scope` does) or prove a
-  raw-pointer protocol that never creates `&AtomicUsize` after the final decrement.
-- Under `cfg(loom)`, drive the real `JobSystem::scope`/`pool.rs` with loom atomics, mutex and
-  condvar; remove `wait_timeout` so lost wake-ups can fail the model; add an injected
+- [x] Make `ScopeShared` owned per job (`Arc<ScopeData>`, as `std::thread::scope` does); no
+  raw scope pointer remains in `JobRef`, `PendingGuard` or `Scope`.
+- [ ] Under `cfg(loom)`, drive the real `JobSystem::scope`/`pool.rs` with loom atomics, mutex
+  and condvar; remove `wait_timeout` so lost wake-ups can fail the model; add an injected
   decrement-before-body bug and show the model fails.
 - Simplify `parallel_for` with `chunks_mut()` and remove unsafe blocks.
 - Correct M1 status (do not call it green until the model drives the real code).
 
 **Acceptance:** Loom drives `pool.rs`, the injected bug fails, and no reference to the
 scope counter can outlive the scope.
+
+Status (2026-10-19): Arc ownership landed in #158; the real-pool Loom upgrade remains open.
 
 ### S-5. Fog-of-war/visibility leaks
 **#138** (security-adjacent information leak).

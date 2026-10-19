@@ -62,6 +62,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   `fuzz/` targets `wire`, `replay`, `content`; `.github/workflows/fuzz.yml` runs bounded
   nightly/manual sessions and uploads artifacts. Seed corpus lives in `fuzz/corpus/`.
 - [x] Loom model of the job-scope counter (`crates/jobs/src/loom_tests.rs`, `loom.yml`).
+- [x] Job-scope state is `Arc`-owned; no raw `ScopeShared` pointer survives the scope frame.
+- [ ] Loom model drives the real pool and catches an injected early-decrement bug (#143).
 - Balanced demo bots across fixed compositions (current 50-match sample's CI includes even
   odds; larger sweeps are needed).
 - Windows/macOS renderer validation and min-spec frame timings (renderer task #9/#127).
