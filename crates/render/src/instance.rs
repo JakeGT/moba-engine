@@ -248,17 +248,9 @@ unsafe extern "system" fn debug_callback(
             .to_str()
             .unwrap_or("<non-utf8 message>")
     };
-    // Validation Layers 1.3.275 (Ubuntu runner package) has a known PRESENT_AFTER_WRITE
-    // false positive for swapchain layout transitions, fixed upstream in VVL #7480.
-    let known_false_positive = std::env::var_os("MOBA_IGNORE_KNOWN_PRESENT_HAZARD").is_some()
-        && message.contains("SYNC-HAZARD-PRESENT-AFTER-WRITE");
-    if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) && !known_false_positive {
+    if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
     }
-    if known_false_positive {
-        eprintln!("[vulkan known-false-positive] {message}");
-    } else {
-        eprintln!("[vulkan {severity:?} {message_type:?}] {message}");
-    }
+    eprintln!("[vulkan {severity:?} {message_type:?}] {message}");
     vk::FALSE
 }
