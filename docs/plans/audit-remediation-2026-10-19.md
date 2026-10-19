@@ -86,7 +86,7 @@ Private advisory: content-pack attestation bypass; **#135**, **#151**.
   allocation with the counting allocator.
 
 Status (2026-10-19): #139 client-side catalogue validation and duplicate-hash suppression
-landed in #180; generation numbers/ack/retransmit and connected-player rotation remain open.
+landed in #180; generation numbers/retry delivery and connected-player rotation landed in #188; explicit ack and advisory regression tests remain open.
 
 Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
 queue eviction (#169) and high-priority event selection (#175) landed. An encoded event-overhead guard now covers the 16-event cap; the NetServer-level
