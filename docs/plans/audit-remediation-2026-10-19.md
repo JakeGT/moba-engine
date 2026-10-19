@@ -135,18 +135,22 @@ scope counter can outlive the scope.
 ### S-6. CI trust gate for the security release
 **#142** is a prerequisite, not an afterthought.
 
-- Fix `nightly.yml` shell/pipefail and dispatch it; add failure notification.
-- Make allocation tests thread-local/serialized and run release allocation tests repeatedly.
-- Add `release tests + doctests` and `MSRV (1.85)` to required checks; document in
-  `CONTRIBUTING.md`/`AGENTS.md`.
-- Run golden/macOS probe automatically for renderer paths, with a required no-op gate when
-  unaffected.
-- Raise remaining net test timeouts to ≥3×; stop Dependabot from rewriting the toolchain pin;
-  remove `continue-on-error` from the Windows probe once its GPU limitation is explicit.
+- [x] Fix `nightly.yml` shell/pipefail; add failure notification (dispatch 39235240360).
+- [x] Make allocation tests per-thread/serialized; 20 consecutive local release runs passed.
+- [x] Add `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` to the required
+  ruleset; docs updated.
+- [x] Run `renderer-gate` on every PR with a no-op path filter; run macOS MoltenVK
+  automatically for renderer paths.
+- [x] Raise net test client timeouts to ≥3 s; ignore the toolchain pin in Dependabot; remove
+  Windows-probe smoke suppression.
 
 **Acceptance:** one green scheduled nightly with artifacts and a deliberately broken step
 turns red; 20 consecutive green release-allocation runs; a renderer PR cannot merge without
 golden; required-check list matches docs.
+
+Status (2026-10-19): implementation in #156; 20 allocation runs and all PR gates are green.
+The post-change nightly is dispatched (`39235240360`) but a full 1-hour run/notification test
+is still pending, so #142 stays open until that evidence lands.
 
 ## Wave C — correctness and replay truth (P1)
 
