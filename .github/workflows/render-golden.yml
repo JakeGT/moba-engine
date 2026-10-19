@@ -13,8 +13,6 @@ env:
   RUSTFLAGS: -D warnings
   MOBA_VULKAN_VALIDATION: required
   LIBGL_ALWAYS_SOFTWARE: "1"
-  # VVL 1.3.275 false positive; remove when the runner ships VVL >= #7480.
-  MOBA_IGNORE_KNOWN_PRESENT_HAZARD: "1"
 
 jobs:
   renderer-gate:
