@@ -13,6 +13,7 @@ void main() {
         out_color = in_color;
         return;
     }
-    float alpha = texture(ui_atlas, in_uv).a;
+    // Explicit LOD avoids undefined derivatives after the divergent branch.
+    float alpha = textureLod(ui_atlas, in_uv, 0.0).a;
     out_color = vec4(in_color.rgb, in_color.a * alpha);
 }
