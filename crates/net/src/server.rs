@@ -702,6 +702,8 @@ pub struct NetServer {
     identity: Option<ServerIdentity>,
     client_keys: Vec<[u8; 32]>,
     require_client_identity: bool,
+    require_content_attestation: bool,
+    trusted_publisher: Option<[u8; 32]>,
     allowed_client_keys: Vec<[u8; 32]>,
     client_challenges: Vec<ClientChallenge>,
     nonces: NonceTracker,
@@ -762,6 +764,8 @@ impl NetServer {
             identity: None,
             client_keys: Vec::new(),
             require_client_identity: false,
+            require_content_attestation: false,
+            trusted_publisher: None,
             allowed_client_keys: Vec::new(),
             client_challenges: Vec::new(),
             nonces: NonceTracker::new(Duration::from_secs(60), 2_048),
@@ -961,6 +965,28 @@ impl NetServer {
         self.rotation_index = 0;
     }
 
+    /// Configures the trust policy used for startup/rotation/reload packs.
+    pub fn set_content_trust(&mut self, require_attestation: bool, publisher: Option<[u8; 32]>) {
+        self.require_content_attestation = require_attestation;
+        self.trusted_publisher = publisher;
+    }
+
+    fn content_trusted(&self, content: &GameContent) -> bool {
+        if !self.require_content_attestation {
+            return true;
+        }
+        let Some(attestation) = content.attestation.as_ref() else {
+            return false;
+        };
+        if self
+            .trusted_publisher
+            .is_some_and(|publisher| publisher != attestation.publisher)
+        {
+            return false;
+        }
+        crate::crypto::verify_pack(content)
+    }
+
     fn rotate_content(&mut self) {
         if self.rotation.len() < 2 || self.clients.iter().flatten().any(|client| client.connected) {
             return;
@@ -968,6 +994,9 @@ impl NetServer {
         let next = (self.rotation_index + 1) % self.rotation.len();
         let path = self.rotation[next].clone();
         match moba_game::load_content_file(&path) {
+            Ok(content) if !self.content_trusted(&content) => {
+                eprintln!("map rotation rejected: pack trust policy failed");
+            }
             Ok(content) => {
                 let hash = content.hash();
                 let name = content.map.name.clone();
@@ -999,6 +1028,9 @@ impl NetServer {
         }
         reload.modified = Some(modified);
         match moba_game::load_content_file(&reload.path) {
+            Ok(content) if !self.content_trusted(&content) => {
+                eprintln!("content reload rejected: pack trust policy failed");
+            }
             Ok(content) => {
                 let active = usize::from(content.rules.team_size) * 2;
                 if self.clients.iter().enumerate().any(|(slot, client)| {

@@ -286,6 +286,7 @@ fn main() {
             eprintln!("cannot bind {bind}: {error}");
             std::process::exit(2);
         });
+        server.set_content_trust(require_attestation, content_publisher);
         if reload_content {
             if let Some(path) = items_paths.first().cloned() {
                 server.watch_content(path);
