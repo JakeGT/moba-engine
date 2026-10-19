@@ -703,6 +703,7 @@ pub struct NetServer {
     client_keys: Vec<[u8; 32]>,
     require_client_identity: bool,
     require_content_attestation: bool,
+    content_update_retry: Option<(Vec<u8>, u16)>,
     trusted_publisher: Option<[u8; 32]>,
     allowed_client_keys: Vec<[u8; 32]>,
     client_challenges: Vec<ClientChallenge>,
@@ -765,6 +766,7 @@ impl NetServer {
             client_keys: Vec::new(),
             require_client_identity: false,
             require_content_attestation: false,
+            content_update_retry: None,
             trusted_publisher: None,
             allowed_client_keys: Vec::new(),
             client_challenges: Vec::new(),
@@ -1084,6 +1086,8 @@ impl NetServer {
                         eprintln!("content update send failed for {addr}: {error}");
                     }
                 }
+                // Repeat for two seconds of snapshots; clients drop duplicate hashes.
+                self.content_update_retry = Some((payload, 60));
                 eprintln!(
                     "content reloaded and broadcast: {} items, hash {hash:#018x}",
                     self.content.items.len()
@@ -2110,6 +2114,29 @@ impl NetServer {
         self.delta = delta;
         self.pending_events = pending_events;
         self.pending_events.clear();
+        if let Some((payload, remaining)) = self.content_update_retry.take() {
+            if remaining > 0 {
+                let targets: Vec<(SocketAddr, u32)> = self
+                    .clients
+                    .iter()
+                    .flatten()
+                    .filter(|client| client.connected)
+                    .map(|client| (client.addr, client.session))
+                    .collect();
+                for (addr, session) in targets {
+                    let header = Header {
+                        kind: PacketKind::ContentUpdate,
+                        flags: 0,
+                        session,
+                        seq: 0,
+                        ack: 0,
+                        ack_bits: 0,
+                    };
+                    let _ = self.transport.send(addr, &header, &payload);
+                }
+                self.content_update_retry = Some((payload, remaining - 1));
+            }
+        }
         Ok(())
     }
 }
