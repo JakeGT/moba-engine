@@ -132,7 +132,7 @@ replays verify; a stale or mid-match update cannot change the catalogue.
 **Acceptance:** Loom drives `pool.rs`, the injected bug fails, and no reference to the
 scope counter can outlive the scope.
 
-Status (2026-10-19): Arc ownership landed in #161; workers/Loom now use blocking `wait` instead of a masking timeout (#179). The real-pool Loom harness and injected decrement bug remain open.
+Status (2026-10-19): Arc ownership (#161), blocking wait (#179) and a Loom model driving the real `ScopeShared`/`PendingGuard` types (#182) landed. An injected-decrement failure test remains open.
 
 ### S-5. Fog-of-war/visibility leaks
 **#138** (security-adjacent information leak).

@@ -3,8 +3,16 @@
 use core::any::Any;
 use core::fmt;
 use core::marker::PhantomData;
+#[cfg(loom)]
+use loom::sync::Mutex as ScopeMutex;
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicUsize, Ordering as ScopeOrdering};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(not(loom))]
+use std::sync::Mutex as ScopeMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(loom))]
+use std::sync::atomic::{AtomicUsize, Ordering as ScopeOrdering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
@@ -33,14 +41,14 @@ unsafe impl Send for JobRef {}
 /// Shared state between a scope and its jobs, kept alive by `Arc`.
 struct ScopeShared {
     pending: AtomicUsize,
-    panic: Mutex<Option<Box<dyn Any + Send>>>,
+    panic: ScopeMutex<Option<Box<dyn Any + Send>>>,
 }
 
 impl ScopeShared {
     fn new() -> Self {
         Self {
             pending: AtomicUsize::new(0),
-            panic: Mutex::new(None),
+            panic: ScopeMutex::new(None),
         }
     }
 }
@@ -49,7 +57,7 @@ struct PendingGuard(Arc<ScopeShared>);
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.0.pending.fetch_sub(1, Ordering::AcqRel);
+        self.0.pending.fetch_sub(1, ScopeOrdering::AcqRel);
     }
 }
 
@@ -343,7 +351,7 @@ impl<'scope> Scope<'scope> {
         // `Arc` keeps the scope counter and panic slot alive even if a future refactor
         // lets the scope frame return early. The scope still waits for every job before
         // returning, so the erased closure's borrows remain valid.
-        self.shared.pending.fetch_add(1, Ordering::Relaxed);
+        self.shared.pending.fetch_add(1, ScopeOrdering::Relaxed);
         self.system.submit(JobRef {
             invoke: invoke_boxed::<F>,
             data,
@@ -355,5 +363,23 @@ impl<'scope> Scope<'scope> {
 impl fmt::Debug for Scope<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Scope").finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_pool_tests {
+    use super::*;
+
+    #[test]
+    fn scope_state_guard_is_arc_owned() {
+        loom::model(|| {
+            let shared = Arc::new(ScopeShared::new());
+            shared.pending.fetch_add(1, ScopeOrdering::Relaxed);
+            let guard = PendingGuard(Arc::clone(&shared));
+            loom::thread::spawn(move || drop(guard))
+                .join()
+                .expect("job");
+            assert_eq!(shared.pending.load(ScopeOrdering::Acquire), 0);
+        });
     }
 }
