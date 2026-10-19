@@ -719,7 +719,7 @@ pub struct NetServer {
     match_number: u32,
     record_frames: Vec<TickInputs>,
     record_checkpoints: Vec<(u32, u64)>,
-    pending_events: Vec<RawEvent>,
+    pending_events: VecDeque<RawEvent>,
     results_log: Option<PathBuf>,
     results_logged: bool,
     recorded: bool,
@@ -779,7 +779,7 @@ impl NetServer {
             match_number: 0,
             record_frames: Vec::new(),
             record_checkpoints: Vec::new(),
-            pending_events: Vec::with_capacity(MAX_SNAPSHOT_EVENTS * 4),
+            pending_events: VecDeque::with_capacity(MAX_SNAPSHOT_EVENTS * 4),
             results_log: None,
             results_logged: false,
             recorded: false,
@@ -1188,9 +1188,9 @@ impl NetServer {
         for event in self.simulation.events() {
             if let Some(raw) = RawEvent::from_sim(event, &self.simulation) {
                 if self.pending_events.len() >= MAX_SNAPSHOT_EVENTS * 4 {
-                    self.pending_events.remove(0);
+                    self.pending_events.pop_front();
                 }
-                self.pending_events.push(raw);
+                self.pending_events.push_back(raw);
             }
         }
         self.simulation.clear_events();
@@ -1994,12 +1994,14 @@ impl NetServer {
             delta.player_mask = player_mask;
             let viewer_team = client.team;
             let spectator = client.spectator;
-            delta.events = pending_events
+            delta.events.clear();
+            for event in pending_events
                 .iter()
                 .filter(|event| event.visible_to(viewer_team, spectator, units))
                 .take(MAX_SNAPSHOT_EVENTS)
-                .map(|event| (*event).to_net(client))
-                .collect();
+            {
+                delta.events.push(event.to_net(client));
+            }
             encode_snapshot(&delta, &mut payload)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             client.snapshot_seq = client.snapshot_seq.wrapping_add(1);
@@ -2023,6 +2025,7 @@ impl NetServer {
         self.current = current;
         self.payload = payload;
         self.delta = delta;
+        self.pending_events = pending_events;
         self.pending_events.clear();
         Ok(())
     }
