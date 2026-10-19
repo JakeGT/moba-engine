@@ -1,6 +1,6 @@
 # Performance log — M4 simulation
 
-Measured 2026-10-17, release profile, 16-logical-core Linux, criterion 0.7. Historical capture; re-run the benches before quoting current absolute numbers. Each criterion
+Measured 2026-10-17, release profile, 16-logical-core Linux, criterion 0.7. Historical capture; current 2026-10-19 re-run: `tick_full_5v5` 5.566 ms/300 (18.6 µs/tick), `tick_steady_5v5` 7.876 ms/300 (26.3 µs/tick), both ~15% faster than their immediately preceding baselines after bot-mask single-pass work. Each criterion
 sample simulates **300 ticks**; per-tick numbers divide by 300.
 
 | Bench | 300 ticks | Per tick |

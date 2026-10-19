@@ -181,7 +181,7 @@ cargo run -p moba-engine --example custom_content
 
 | Budget | Target/evidence |
 |---|---|
-| Server tick (one 5v5) | ≤2 ms; measured ~13 µs/tick steady (historical benchmark) |
+| Server tick (one 5v5) | ≤2 ms; measured **~26.3 µs/tick steady** (7.876 ms/300 ticks, 2026-10-19) |
 | Downstream/client | ≤20 KB/s typical, ≤40 KB/s teamfight; soak ~5.0 KiB/s |
 | Upstream/client | ≤4 KB/s; soak ~1.17 KiB/s |
 | Network condition | 150 ms RTT, 5% loss, 30 ms jitter playable |
