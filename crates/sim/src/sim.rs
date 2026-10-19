@@ -602,6 +602,15 @@ impl Simulation {
         self.observe(Some(viewer), out);
     }
 
+    /// Whether `entity` is currently visible to `viewer` under the fog rules.
+    pub fn is_visible_to(&mut self, viewer: Team, entity: Entity) -> bool {
+        let mut observed = core::mem::take(&mut self.bot_observed[viewer.index()]);
+        self.observe(Some(viewer), &mut observed);
+        let visible = observed.iter().any(|unit| unit.entity == entity);
+        self.bot_observed[viewer.index()] = observed;
+        visible
+    }
+
     /// Builds the complete unit list for a spectator (no fog filtering).
     pub fn observed_all(&mut self, out: &mut Vec<ObservedUnit>) {
         self.observe(None, out);
@@ -2981,6 +2990,17 @@ mod tests {
             .filter(|event| matches!(event, SimEvent::AbilityCast { .. }))
             .count();
         assert_eq!(casts, 1);
+    }
+
+    #[test]
+    fn visibility_query_rejects_hidden_enemy_targets() {
+        let mut sim = idle(SimConfig::default().hero_picks);
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        assert!(!sim.is_visible_to(Team::Blue, red));
+        sim.world.get_mut::<Position>(red).unwrap().0 =
+            sim.world.get::<Position>(blue).unwrap().0 + FixVec2::from_ints(2, 0);
+        assert!(sim.is_visible_to(Team::Blue, red));
     }
 
     #[test]

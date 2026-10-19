@@ -630,11 +630,9 @@ impl RawEvent {
             return true;
         }
         let visible = |entity: moba_ecs::Entity| units.iter().any(|unit| unit.entity == entity);
-        match (self.source, self.target) {
-            (Some(source), _) => visible(source),
-            (None, Some(target)) => visible(target),
-            (None, None) => false,
-        }
+        // Never leak a hidden endpoint of an event. Dropping the event is safer than
+        // encoding a hidden target id/position for the client.
+        self.source.is_none_or(visible) && self.target.is_none_or(visible)
     }
 
     fn to_net(self, client: &mut ClientConn) -> NetEvent {
@@ -995,11 +993,24 @@ impl NetServer {
         reload.modified = Some(modified);
         match moba_game::load_content_file(&reload.path) {
             Ok(content) => {
+                let active = usize::from(content.rules.team_size) * 2;
+                if self.clients.iter().enumerate().any(|(slot, client)| {
+                    client
+                        .as_ref()
+                        .is_some_and(|client| !client.spectator && slot >= active)
+                }) {
+                    eprintln!(
+                        "content reload rejected: team_size {} cannot serve occupied slots",
+                        content.rules.team_size
+                    );
+                    return;
+                }
                 let hash = content.hash();
                 let content = Arc::new(content);
                 self.simulation =
                     Simulation::new_with_content(self.config.sim, Arc::clone(&content));
                 self.content = content;
+                self.reassign_teams();
                 self.record_frames.clear();
                 self.recorded = false;
                 let catalog = WireCatalog::from(&*self.content);
@@ -1162,7 +1173,7 @@ impl NetServer {
                 continue;
             };
             if let Some(wire) = client.command.take() {
-                if let Some(command) = wire_to_command(client, wire) {
+                if let Some(command) = wire_to_command(client, wire, &mut self.simulation) {
                     inputs.set(slot, command);
                 }
             }
@@ -1292,6 +1303,7 @@ impl NetServer {
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
         self.rotate_content();
+        self.reassign_teams();
         self.simulation = Simulation::new_with_content(config, Arc::clone(&self.content));
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
@@ -1479,6 +1491,29 @@ impl NetServer {
             }
         }
         self.refresh_bot_mask();
+    }
+
+    fn reassign_teams(&mut self) {
+        let team_size = usize::from(self.content.rules.team_size);
+        for slot in 0..self.config.max_clients.min(self.clients.len()) {
+            let Some(client) = self.clients[slot].as_mut() else {
+                continue;
+            };
+            if client.spectator {
+                continue;
+            }
+            let team = if slot < team_size {
+                moba_game::Team::Blue
+            } else {
+                moba_game::Team::Red
+            };
+            if client.team != team {
+                client.team = team;
+                client.need_full = true;
+                client.clear_history();
+                client.net_ids.clear();
+            }
+        }
     }
 
     fn refresh_bot_mask(&mut self) {
@@ -2031,11 +2066,21 @@ impl NetServer {
     }
 }
 
-fn wire_to_command(client: &ClientConn, command: WireCommand) -> Option<PlayerCommand> {
+fn wire_to_command(
+    client: &ClientConn,
+    command: WireCommand,
+    simulation: &mut Simulation,
+) -> Option<PlayerCommand> {
     Some(match command {
         WireCommand::Stop => PlayerCommand::Stop,
         WireCommand::MoveTo { x, y } => PlayerCommand::MoveTo(dequantize_position(x, y)),
-        WireCommand::Attack { net_id } => PlayerCommand::Attack(client.entity_for(net_id)?),
+        WireCommand::Attack { net_id } => {
+            let target = client.entity_for(net_id)?;
+            if !simulation.is_visible_to(client.team, target) {
+                return None;
+            }
+            PlayerCommand::Attack(target)
+        }
         WireCommand::CastAbility { slot, x, y } => PlayerCommand::CastAbility {
             slot,
             target: dequantize_position(x, y),
