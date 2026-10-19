@@ -606,6 +606,12 @@ impl NetClient {
                     if hash == self.content_hash {
                         continue; // duplicate/replayed catalogue; keep prediction state
                     }
+                    if self.latest.as_ref().is_some_and(|snapshot| {
+                        crate::protocol::MatchPhase::from_u8(snapshot.phase)
+                            == Some(crate::protocol::MatchPhase::Playing)
+                    }) {
+                        continue; // catalogue swaps are only valid between matches
+                    }
                     let Ok(content) = catalog.to_content() else {
                         continue;
                     };
