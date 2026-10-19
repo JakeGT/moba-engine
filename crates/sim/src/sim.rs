@@ -421,6 +421,7 @@ pub struct Simulation {
     burn_hits: Vec<(Entity, i32, DamageType, Entity)>,
     observed_candidates: Vec<ObservedCandidate>,
     bot_observed: [Vec<ObservedUnit>; 2],
+    bot_sources: Vec<(FixVec2, Fix)>,
     bot_policy: Option<Box<dyn BotPolicy>>,
     bot_rng: [Rng; MAX_PLAYERS],
 }
@@ -470,6 +471,7 @@ impl Simulation {
             burn_hits: Vec::with_capacity(MAX_UNITS),
             observed_candidates: Vec::with_capacity(MAX_UNITS),
             bot_observed: [Vec::with_capacity(MAX_UNITS), Vec::with_capacity(MAX_UNITS)],
+            bot_sources: Vec::with_capacity(MAX_UNITS * 2),
             bot_policy: None,
             bot_rng: core::array::from_fn(|index| {
                 Rng::from_seed(
@@ -2517,22 +2519,57 @@ impl Simulation {
     }
 
     fn bot_visibility_masks(&mut self) -> [u64; 16] {
-        let mut observed = [
-            core::mem::take(&mut self.bot_observed[0]),
-            core::mem::take(&mut self.bot_observed[1]),
-        ];
-        self.observed_units(Team::Blue, &mut observed[0]);
-        self.observed_units(Team::Red, &mut observed[1]);
+        let mut sources = core::mem::take(&mut self.bot_sources);
+        sources.clear();
+        sources.resize(MAX_UNITS * 2, (FixVec2::ZERO, Fix::ZERO));
+        let mut source_count = [0usize; 2];
+        for (_entity, (team, health, position, vision)) in
+            self.world
+                .query::<(&Team, &Health, &Position, &VisionRange)>()
+        {
+            if health.current <= 0 {
+                continue;
+            }
+            let index = team.index();
+            // Store both teams in one fixed array, offset by team, so both fog masks are
+            // built from a single world query and candidate pass.
+            if source_count[index] < MAX_UNITS {
+                let slot = index * MAX_UNITS + source_count[index];
+                sources[slot] = (position.0, vision.0);
+                source_count[index] += 1;
+            }
+        }
         let mut team_masks = [0u64; 16];
-        for (team_index, units) in observed.iter().enumerate() {
-            for unit in units {
-                let slot = unit.entity.index() as usize;
-                if slot < 1024 {
-                    team_masks[team_index * 8 + slot / 64] |= 1 << (slot % 64);
+        for (entity, (team, kind, position, health)) in
+            self.world.query::<(&Team, &UnitKind, &Position, &Health)>()
+        {
+            let slot = entity.index() as usize;
+            if slot >= 1024 {
+                continue;
+            }
+            let index = team.index();
+            let allied = |viewer: usize| viewer == index;
+            let visible_from =
+                |viewer: usize| {
+                    let start = viewer * MAX_UNITS;
+                    let count = source_count[viewer];
+                    sources[start..start + count]
+                        .iter()
+                        .any(|&(source, range)| {
+                            source.distance_sq(position.0) <= range * range
+                                && self.content.map.walls.iter().all(|wall| {
+                                    !segments_intersect(source, position.0, wall.a, wall.b)
+                                })
+                        })
+                };
+            let dead = health.current <= 0;
+            for viewer in 0..2 {
+                if allied(viewer) || kind.is_structure() || (!dead && visible_from(viewer)) {
+                    team_masks[viewer * 8 + slot / 64] |= 1 << (slot % 64);
                 }
             }
         }
-        self.bot_observed = observed;
+        self.bot_sources = sources;
         team_masks
     }
 
@@ -3006,6 +3043,20 @@ mod tests {
         let before = sim.state_hash();
         sim.set_bot_mask(0x3FF);
         assert_eq!(sim.state_hash(), before);
+    }
+
+    #[test]
+    fn bot_masks_match_fog_visibility() {
+        let mut sim = idle(SimConfig::default().hero_picks);
+        let masks = sim.bot_visibility_masks();
+        let blue = sim.hero_entities[0];
+        let red = sim.hero_entities[5];
+        assert!(Simulation::visible_to(&masks, Team::Blue, blue));
+        assert!(!Simulation::visible_to(&masks, Team::Blue, red));
+        sim.world.get_mut::<Position>(red).unwrap().0 =
+            sim.world.get::<Position>(blue).unwrap().0 + FixVec2::from_ints(2, 0);
+        let masks = sim.bot_visibility_masks();
+        assert!(Simulation::visible_to(&masks, Team::Blue, red));
     }
 
     #[test]
