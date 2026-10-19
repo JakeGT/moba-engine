@@ -202,7 +202,7 @@ the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089
 
 Status (2026-10-19): #140 single-pass bot fog masks landed in #173; `tick_full_5v5`
 measured 5.566 ms, −14.3% vs the prior baseline. Ability-pack allocation guard added in #176.
-Bot-shop/wave guard additions, grid/dead-unit checks and teammate-targeting privacy remain.
+Bot-shop/wave guard additions and teammate-targeting privacy remain; dead units are now excluded from area gathering (#189).
 
 Status (2026-10-19): #137 removes `bot_mask` from the state hash, bumps `SIM_LOGIC_VERSION`
 to 7, updates the golden hash and adds a mask-independence test (#172). A real-UDP
