@@ -37,6 +37,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 
 ### Fixed
+- Client ignores duplicate ContentUpdate hashes and rejects decoded catalogues that fail validation before swapping state (#139).
 - Job workers wait indefinitely on the generation condvar instead of polling with a timeout; the Loom model uses the same blocking wait so lost wake-ups fail the model (#143).
 - Snapshot allocation guard uses per-thread counters, eliminating the release-test flake from unrelated harness threads (#142).
 - Own-team events no longer bypass endpoint visibility; hidden hit/death endpoints are filtered and covered by a NetServer unit test (#138).
