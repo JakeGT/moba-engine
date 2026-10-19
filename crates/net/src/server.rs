@@ -2522,6 +2522,50 @@ mod tests {
     }
 
     #[test]
+    fn event_buffers_reuse_capacity_between_snapshots() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        server.phase = Phase::Playing;
+        let addr = server.local_addr().expect("addr");
+        server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
+        let event = RawEvent {
+            kind: EVENT_CAST,
+            team: moba_game::Team::Blue,
+            source: None,
+            target: None,
+            source_slot: 0,
+            target_slot: 0xFF,
+            position: moba_core::FixVec2::ZERO,
+            end: moba_core::FixVec2::ZERO,
+            direction: moba_core::FixVec2::ZERO,
+            value: 0,
+            aux: 0,
+            arc: moba_core::Fix::ZERO,
+        };
+        server.pending_events.push_back(event);
+        server.send_snapshots().expect("snapshot");
+        let events_capacity = server.delta.events.capacity();
+        server.pending_events.push_back(event);
+        server.send_snapshots().expect("snapshot");
+        assert_eq!(server.delta.events.capacity(), events_capacity);
+    }
+
+    #[test]
     fn match_flow_transitions_and_resets() {
         let config = ServerConfig {
             bind: "127.0.0.1:0".parse().expect("address"),
