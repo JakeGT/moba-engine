@@ -4,7 +4,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use moba_net::protocol::{
-    NetEntity, NetProgress, SnapshotDelta, build_delta_into, encode_snapshot,
+    EVENT_CAST, MAX_SNAPSHOT_EVENTS, NetEntity, NetEvent, NetProgress, SnapshotDelta,
+    build_delta_into, encode_snapshot,
 };
 
 struct CountingAllocator;
@@ -95,4 +96,28 @@ fn steady_state_snapshot_build_and_encode_allocate_nothing() {
     eprintln!("snapshot path: {allocations} allocations, {bytes} bytes over 300 builds");
     assert_eq!(allocations, 0);
     assert_eq!(bytes, 0);
+}
+
+#[test]
+fn event_overhead_stays_within_snapshot_budget() {
+    let baseline: Vec<_> = (1..=100).map(entity).collect();
+    let current = baseline.clone();
+    let mut delta = SnapshotDelta::default();
+    let mut without = Vec::with_capacity(16 * 1024);
+    build_delta_into(&current, Some(&baseline), 1, 0, 1, &mut delta);
+    encode_snapshot(&delta, &mut without).expect("encode");
+    delta.events = vec![
+        NetEvent {
+            kind: EVENT_CAST,
+            ..NetEvent::default()
+        };
+        MAX_SNAPSHOT_EVENTS
+    ];
+    let mut with = Vec::with_capacity(16 * 1024);
+    encode_snapshot(&delta, &mut with).expect("encode");
+    let overhead = with.len().saturating_sub(without.len());
+    assert!(
+        overhead <= MAX_SNAPSHOT_EVENTS * 28 + 8,
+        "event overhead {overhead} bytes exceeds 16-event budget"
+    );
 }
