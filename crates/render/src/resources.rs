@@ -46,13 +46,20 @@ impl GpuBuffer {
 
         let allocation = {
             let mut allocator = allocator.lock().unwrap_or_else(PoisonError::into_inner);
-            allocator.allocate(&AllocationCreateDesc {
+            match allocator.allocate(&AllocationCreateDesc {
                 name,
                 requirements,
                 location,
                 linear: true,
                 allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })?
+            }) {
+                Ok(allocation) => allocation,
+                Err(error) => {
+                    // SAFETY: the buffer is unbound and destroyed exactly once.
+                    unsafe { device.destroy_buffer(buffer, None) };
+                    return Err(error.into());
+                }
+            }
         };
         let mapped = allocation.mapped_ptr().map(NonNull::cast::<u8>);
         if mapped.is_some()
@@ -199,13 +206,20 @@ impl GpuImage {
 
         let allocation = {
             let mut allocator = allocator.lock().unwrap_or_else(PoisonError::into_inner);
-            allocator.allocate(&AllocationCreateDesc {
+            match allocator.allocate(&AllocationCreateDesc {
                 name,
                 requirements,
                 location: MemoryLocation::GpuOnly,
                 linear: false,
                 allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })?
+            }) {
+                Ok(allocation) => allocation,
+                Err(error) => {
+                    // SAFETY: the image has no views and is destroyed exactly once.
+                    unsafe { device.destroy_image(image, None) };
+                    return Err(error.into());
+                }
+            }
         };
         // SAFETY: the allocation is live and owns a valid `VkDeviceMemory`.
         let memory = unsafe { allocation.memory() };
