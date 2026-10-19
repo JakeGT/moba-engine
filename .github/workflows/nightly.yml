@@ -4,6 +4,16 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: Wire-fuzz duration in seconds
+        default: "3600"
+      soak_seconds:
+        description: Network soak duration in seconds
+        default: "300"
+      match_count:
+        description: Deterministic matches
+        default: "50"
 
 permissions:
   contents: read
@@ -22,8 +32,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
       - run: |
-          cargo run --release --locked -p moba-tools --bin soak -- --seconds 300 2>&1 | tee soak.log
+          cargo run --release --locked -p moba-tools --bin soak -- --seconds ${{ inputs.soak_seconds || '300' }} 2>&1 | tee soak.log
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
@@ -39,8 +51,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
       - run: |
-          cargo run --release --locked -p moba-tools --bin fuzz-wire -- --seconds 3600 2>&1 | tee fuzz.log
+          cargo run --release --locked -p moba-tools --bin fuzz-wire -- --seconds ${{ inputs.fuzz_seconds || '3600' }} 2>&1 | tee fuzz.log
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
@@ -56,6 +70,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
       - run: |
           cargo bench --workspace --locked -- --noplot 2>&1 | tee bench.log
         shell: bash
@@ -94,8 +110,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
       - run: |
-          cargo run --release --locked -p moba-tools --bin match-soak -- --matches 50 --ticks 36000 2>&1 | tee match-soak.log
+          cargo run --release --locked -p moba-tools --bin match-soak -- --matches ${{ inputs.match_count || '50' }} --ticks 36000 2>&1 | tee match-soak.log
         shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
