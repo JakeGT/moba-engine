@@ -24,7 +24,7 @@ done: ticks=20000 wall=0.25s avg=12.6us max=209.6us peak_units=106
 - **Determinism cost:** the state hash is only invoked by tests/tools, not by the tick.
 - **Allocations:** the grid, event queue, projectile list and per-system scratch vectors are
   pre-sized. Structural spawning grows ECS columns; no per-tick heap allocation has been
-  observed in steady state. A dedicated allocation-counting test is future work.
+  observed in steady state. Allocation-counting guards now cover steady, teamfight, shop, respawn, status, wave, ability-pack and bot-shop windows (`crates/sim/tests/allocations.rs`).
 
 ## How the tick is spent
 

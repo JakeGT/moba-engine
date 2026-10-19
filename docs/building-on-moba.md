@@ -108,7 +108,7 @@ A minimal `NetServer` + extension-system example lives at
 Wire positions are quantised at 1/16 world unit into `u16`, so validated map extents are capped at `MAX_MAP_COORD = 256`; larger maps need a protocol coordinate change.
 
 See [content-authoring.md](content-authoring.md). Servers can reload between matches with
-`--reload-content`; connected clients receive a protocol-v24 `ContentUpdate` and adopt the
+`--reload-content`; connected clients receive a protocol-v26 `ContentUpdate` and adopt the
 new catalogue atomically. Live `Playing` matches are never hot-swapped.
 
 ## Embedding the server
