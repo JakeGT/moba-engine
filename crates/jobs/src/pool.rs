@@ -383,3 +383,20 @@ mod loom_pool_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn early_pending_release_keeps_scope_state_alive() {
+        let shared = Arc::new(ScopeShared::new());
+        shared.pending.fetch_add(1, ScopeOrdering::Relaxed);
+        // Simulate the old bug: decrement before the job body runs.
+        drop(PendingGuard(Arc::clone(&shared)));
+        assert_eq!(shared.pending.load(ScopeOrdering::Acquire), 0);
+        // The Arc still owns the state; no stack pointer can dangle.
+        let clone = Arc::clone(&shared);
+        assert_eq!(clone.pending.load(ScopeOrdering::Acquire), 0);
+    }
+}
