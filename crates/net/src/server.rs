@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use moba_game::GameContent;
-use moba_sim::{ObservedUnit, PlayerCommand, Replay, SimConfig, Simulation, TickInputs};
+use moba_sim::{BotPolicy, ObservedUnit, PlayerCommand, Replay, SimConfig, Simulation, TickInputs};
 
 use crate::crypto::{
     SessionCrypto, derive_session_key, identity_public_key, random_nonce, sign_server_welcome,
@@ -683,6 +683,7 @@ pub enum ServerPhase {
 }
 
 type ExtensionSystem = Box<dyn FnMut(&mut Simulation, ServerPhase) + Send>;
+type BotPolicyFactory = Arc<dyn Fn() -> Box<dyn BotPolicy> + Send + Sync>;
 
 #[derive(Default)]
 struct Systems(Vec<ExtensionSystem>);
@@ -694,7 +695,6 @@ impl core::fmt::Debug for Systems {
 }
 
 /// A running authoritative network server.
-#[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent protocol/capability flags.
 pub struct NetServer {
     transport: UdpTransport,
@@ -705,6 +705,7 @@ pub struct NetServer {
     require_client_identity: bool,
     require_content_attestation: bool,
     content_update_retry: Option<(Vec<u8>, u32, u8, u32)>,
+    bot_policy_factory: Option<BotPolicyFactory>,
     content_generation: u32,
     trusted_publisher: Option<[u8; 32]>,
     allowed_client_keys: Vec<[u8; 32]>,
@@ -735,6 +736,15 @@ pub struct NetServer {
     recorded: bool,
     surrender_votes: [u16; 2],
     pending_surrender: Option<moba_game::Team>,
+}
+
+impl core::fmt::Debug for NetServer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NetServer")
+            .field("phase", &self.phase)
+            .field("clients", &self.clients.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl NetServer {
@@ -769,6 +779,7 @@ impl NetServer {
             require_client_identity: false,
             require_content_attestation: false,
             content_update_retry: None,
+            bot_policy_factory: None,
             content_generation: 0,
             trusted_publisher: None,
             allowed_client_keys: Vec::new(),
@@ -1171,6 +1182,17 @@ impl NetServer {
         self
     }
 
+    /// Installs a bot-policy factory that is reapplied after every rematch.
+    #[must_use]
+    pub fn with_bot_policy<F>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> Box<dyn BotPolicy> + Send + Sync + 'static,
+    {
+        self.simulation.set_bot_policy(Some(factory()));
+        self.bot_policy_factory = Some(Arc::new(factory));
+        self
+    }
+
     /// Returns the extension systems count.
     #[must_use]
     pub fn system_count(&self) -> usize {
@@ -1380,6 +1402,9 @@ impl NetServer {
         let rotated = self.rotate_content();
         self.reassign_teams();
         self.simulation = Simulation::new_with_content(config, Arc::clone(&self.content));
+        if let Some(factory) = &self.bot_policy_factory {
+            self.simulation.set_bot_policy(Some(factory()));
+        }
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
@@ -3122,5 +3147,47 @@ cost = 1
         assert_eq!(client.last_input_seq, 0);
         assert!(server.content_update_retry.is_some());
         assert_eq!(server.content_generation, 1);
+    }
+
+    struct CountingPolicy(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl moba_sim::BotPolicy for CountingPolicy {
+        fn inputs(&mut self, _simulation: &mut Simulation) -> TickInputs {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TickInputs::new()
+        }
+    }
+
+    #[test]
+    fn bot_policy_is_reapplied_after_rematch() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let policy_calls = Arc::clone(&calls);
+        let mut server = NetServer::bind(config)
+            .expect("bind")
+            .with_bot_policy(move || Box::new(CountingPolicy(Arc::clone(&policy_calls))));
+        server.phase = Phase::Playing;
+        server.tick().expect("tick");
+        let before = calls.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(before > 0);
+        server.reset_match();
+        server.phase = Phase::Playing;
+        server.tick().expect("tick");
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > before);
     }
 }
