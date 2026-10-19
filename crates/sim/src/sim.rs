@@ -1273,8 +1273,13 @@ impl Simulation {
 
     fn gather_enemies(&mut self, team: Team, target: FixVec2, radius: Fix) {
         self.damage_hits.clear();
-        for (entity, (other_position, other_team)) in self.world.query::<(&Position, &Team)>() {
-            if *other_team == team || other_position.0.distance_sq(target) > radius * radius {
+        for (entity, (other_position, other_team, health)) in
+            self.world.query::<(&Position, &Team, &Health)>()
+        {
+            if *other_team == team
+                || other_position.0.distance_sq(target) > radius * radius
+                || health.current <= 0
+            {
                 continue;
             }
             self.damage_hits.push(entity);
