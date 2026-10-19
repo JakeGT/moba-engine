@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**262 tests**.
+**263 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -209,8 +209,8 @@ to 7, updates the golden hash and adds a mask-independence test (#172). A real-U
 disconnect/reconnect checkpoint test remains open.
 
 Status (2026-10-19): #138 hidden event endpoints (including own-team events), unseen attack
-orders, stale teams after reload and reload/occupied-slot rejection landed in #171/#177. A
-reload team-size integration test remains open.
+orders, stale teams after reload and reload/occupied-slot rejection landed in #171/#177. Slot/team mapping is now covered for every mode size; a reload
+team-size integration test remains open.
 
 Status (2026-10-19): client snapshot sequencing (clone only on a new seq), map-extent minimap
 clicks, removal of the unwired ability hit region and UI-scale finiteness landed in #170.

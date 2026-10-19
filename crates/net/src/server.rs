@@ -1560,11 +1560,7 @@ impl NetServer {
             if client.spectator {
                 continue;
             }
-            let team = if slot < team_size {
-                moba_game::Team::Blue
-            } else {
-                moba_game::Team::Red
-            };
+            let team = slot_team(slot, team_size);
             if client.team != team {
                 client.team = team;
                 client.need_full = true;
@@ -1745,10 +1741,10 @@ impl NetServer {
                 let session = 0xA5A5_0000 | (self.session_counter & 0xFFFF);
                 self.session_counter = self.session_counter.wrapping_add(1);
                 let team_size = usize::from(self.content.rules.team_size);
-                let team = if hello.spectate || slot < team_size {
+                let team = if hello.spectate {
                     moba_game::Team::Blue
                 } else {
-                    moba_game::Team::Red
+                    slot_team(slot, team_size)
                 };
                 self.clients[slot] = Some(ClientConn {
                     addr: message.addr,
@@ -2158,6 +2154,15 @@ impl NetServer {
             }
         }
         Ok(())
+    }
+}
+
+/// Deterministic team for an active player slot.
+fn slot_team(slot: usize, team_size: usize) -> moba_game::Team {
+    if slot < team_size {
+        moba_game::Team::Blue
+    } else {
+        moba_game::Team::Red
     }
 }
 
@@ -2866,5 +2871,19 @@ cost = 1
         ];
         assert!(event.visible_to(moba_game::Team::Blue, false, &both));
         assert!(event.visible_to(moba_game::Team::Blue, true, &blue));
+    }
+
+    #[test]
+    fn slots_map_to_teams_for_every_mode_size() {
+        for team_size in 1..=5 {
+            for slot in 0..10 {
+                let expected = if slot < team_size {
+                    moba_game::Team::Blue
+                } else {
+                    moba_game::Team::Red
+                };
+                assert_eq!(slot_team(slot, team_size), expected);
+            }
+        }
     }
 }
