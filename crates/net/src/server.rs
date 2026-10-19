@@ -1494,6 +1494,11 @@ impl NetServer {
         if self.recorded || self.record_frames.is_empty() {
             return;
         }
+        if !self.systems.0.is_empty() {
+            eprintln!("replay not written: extension systems are not part of replay state");
+            self.recorded = true;
+            return;
+        }
         let Some(path) = self.config.record.clone() else {
             return;
         };
