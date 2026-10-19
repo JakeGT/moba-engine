@@ -757,8 +757,9 @@ impl Simulation {
             }
         }
         self.tick_timers();
-        self.apply_inputs(inputs);
+        // Refresh before casts so area queries see the current unit positions.
         self.refresh_spatial();
+        self.apply_inputs(inputs);
         self.update_minion_targets();
         self.update_structure_targets();
         self.move_units();
@@ -1273,17 +1274,18 @@ impl Simulation {
 
     fn gather_enemies(&mut self, team: Team, target: FixVec2, radius: Fix) {
         self.damage_hits.clear();
-        for (entity, (other_position, other_team, health)) in
-            self.world.query::<(&Position, &Team, &Health)>()
-        {
-            if *other_team == team
-                || other_position.0.distance_sq(target) > radius * radius
-                || health.current <= 0
-            {
-                continue;
+        self.grid.for_each_in_circle(target, radius, |candidate| {
+            if candidate.team == team {
+                return;
             }
-            self.damage_hits.push(entity);
-        }
+            if self
+                .world
+                .get::<Health>(candidate.entity)
+                .is_some_and(|health| health.current > 0)
+            {
+                self.damage_hits.push(candidate.entity);
+            }
+        });
     }
 
     #[allow(clippy::too_many_lines)] // One ordered status/timer pass.
