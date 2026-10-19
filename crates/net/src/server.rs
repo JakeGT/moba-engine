@@ -2469,6 +2469,59 @@ mod tests {
     }
 
     #[test]
+    fn reload_team_size_reassigns_connected_slots() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let mut content = GameContent::default();
+        content.rules.team_size = 1;
+        server.content = Arc::new(content);
+        let addr = server.local_addr().expect("addr");
+        for slot in 0..4 {
+            server.clients[slot] = Some(test_client(
+                addr,
+                slot as u8,
+                if slot < 2 {
+                    moba_game::Team::Blue
+                } else {
+                    moba_game::Team::Red
+                },
+            ));
+        }
+        server.reassign_teams();
+        assert_eq!(
+            server.clients[0].as_ref().unwrap().team,
+            moba_game::Team::Blue
+        );
+        assert_eq!(
+            server.clients[1].as_ref().unwrap().team,
+            moba_game::Team::Red
+        );
+        assert_eq!(
+            server.clients[2].as_ref().unwrap().team,
+            moba_game::Team::Red
+        );
+        assert_eq!(
+            server.clients[3].as_ref().unwrap().team,
+            moba_game::Team::Red
+        );
+    }
+
+    #[test]
     fn match_flow_transitions_and_resets() {
         let config = ServerConfig {
             bind: "127.0.0.1:0".parse().expect("address"),
@@ -2924,6 +2977,33 @@ cost = 1
         assert_eq!(server.content_generation, generation);
     }
 
+    fn test_client(addr: SocketAddr, slot: u8, team: moba_game::Team) -> ClientConn {
+        ClientConn {
+            addr,
+            session: 7,
+            slot,
+            key: None,
+            spectator: false,
+            team,
+            connected: true,
+            ready: false,
+            last_seen: Instant::now(),
+            disconnected_at: None,
+            last_input_seq: 4,
+            command: None,
+            pending_purchase: None,
+            net_ids: NetIdTable::default(),
+            snapshot_seq: 3,
+            acked_snapshot: 2,
+            need_full: false,
+            history: VecDeque::new(),
+            history_pool: Vec::new(),
+            welcome_nonce: 0,
+            welcome_payload: Vec::new(),
+            bytes_sent: 0,
+        }
+    }
+
     #[test]
     fn broadcast_resets_and_retries_for_a_connected_client() {
         let config = ServerConfig {
@@ -2944,30 +3024,7 @@ cost = 1
         };
         let mut server = NetServer::bind(config).expect("bind");
         let addr = server.local_addr().expect("addr");
-        server.clients[0] = Some(ClientConn {
-            addr,
-            session: 7,
-            slot: 0,
-            key: None,
-            spectator: false,
-            team: moba_game::Team::Blue,
-            connected: true,
-            ready: false,
-            last_seen: Instant::now(),
-            disconnected_at: None,
-            last_input_seq: 4,
-            command: None,
-            pending_purchase: None,
-            net_ids: NetIdTable::default(),
-            snapshot_seq: 3,
-            acked_snapshot: 2,
-            need_full: false,
-            history: VecDeque::new(),
-            history_pool: Vec::new(),
-            welcome_nonce: 0,
-            welcome_payload: Vec::new(),
-            bytes_sent: 0,
-        });
+        server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
         server.broadcast_content_update();
         let client = server.clients[0].as_ref().expect("client");
         assert!(client.need_full);
