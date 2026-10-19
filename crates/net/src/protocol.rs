@@ -3381,6 +3381,30 @@ mod tests {
     }
 
     #[test]
+    fn wire_catalogue_round_trips_fully_nondefault_content() {
+        let mut content =
+            moba_game::load_content_toml(include_str!("../../../content/ability-pack.toml"))
+                .expect("ability pack");
+        content.manifest.name = String::from("Parity");
+        content.manifest.version = String::from("9");
+        content.manifest.author = String::from("qa");
+        content.rules.team_size = 3;
+        content.rules.wave_interval_ticks = 777;
+        content.rules.first_wave_ticks = 11;
+        content.rules.melee_minion.vision_range = moba_core::Fix::from_i32(12);
+        content.items[0].cost += 1;
+        content.items[0].health += 1;
+        content.heroes[0].vision_range = moba_core::Fix::from_i32(15);
+        content.map.name = String::from("Parity Map");
+        content.map.theme = moba_game::MapTheme::Arcane;
+        content.map.extent = moba_core::Fix::from_i32(200);
+        let wire = WireCatalog::from(&content);
+        let decoded = wire.to_content().expect("round trip");
+        assert_eq!(decoded, content);
+        assert_eq!(decoded.hash(), content.hash());
+    }
+
+    #[test]
     fn wire_catalogue_round_trips_nonzero_projectile_arc() {
         use moba_game::{Effect, GameContent};
         let mut content = GameContent::default();
