@@ -789,7 +789,9 @@ impl Simulation {
     pub fn state_hash(&self) -> u64 {
         let mut hasher = StableHasher::new();
         hasher.write_u64(self.config.seed);
-        hasher.write_u32(u32::from(self.config.bot_mask));
+        // `bot_mask` is a server-side input source, not simulation state. Recording it
+        // only at the end of a replay made mid-match disconnects diverge; generated inputs
+        // are already resolved and recorded per tick.
         hasher.write_u32(u32::from(self.config.spawn_waves));
         for pick in self.config.hero_picks {
             hasher.write_u32(u32::from(pick));
@@ -2990,6 +2992,20 @@ mod tests {
             .filter(|event| matches!(event, SimEvent::AbilityCast { .. }))
             .count();
         assert_eq!(casts, 1);
+    }
+
+    #[test]
+    fn bot_mask_is_not_part_of_the_state_hash() {
+        let config = SimConfig {
+            hero_picks: [0; 10],
+            bot_mask: 0,
+            spawn_waves: false,
+            ..SimConfig::default()
+        };
+        let mut sim = Simulation::new(config);
+        let before = sim.state_hash();
+        sim.set_bot_mask(0x3FF);
+        assert_eq!(sim.state_hash(), before);
     }
 
     #[test]

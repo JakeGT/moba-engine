@@ -27,7 +27,7 @@ const MAGIC: &[u8; 8] = b"MOBARPL1";
 const VERSION: u8 = 5;
 /// Simulation logic contract. Bump when tick behaviour changes enough that old inputs no
 /// longer reproduce the recorded state.
-pub const SIM_LOGIC_VERSION: u8 = 6;
+pub const SIM_LOGIC_VERSION: u8 = 7;
 /// Minimum bytes per frame on the wire (`present` bitmask, no commands).
 const MIN_FRAME_BYTES: usize = 4;
 /// A checkpoint is `tick u32 + state hash u64`.
