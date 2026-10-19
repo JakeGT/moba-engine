@@ -97,6 +97,10 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   player-count attestation.
 - [x] SECURITY threat-model update; plaintext/token-only modes unchanged.
 
+## Perf closure (#140)
+
+Bot masks, allocation guards, grid gathering and slow-tick tracing landed; #140 closed.
+
 ## CI trust (#142)
 
 - [x] Nightly uses `shell: bash` (pipefail) and a failure job opens an issue with the run link
