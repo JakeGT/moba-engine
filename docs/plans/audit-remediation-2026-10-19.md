@@ -89,9 +89,9 @@ Status (2026-10-19): #136 duplicate cast events, per-snapshot event capacity and
 queue removal landed in #169; the NetServer-level allocation guard and teamfight bandwidth
 measurement remain open.
 
-Status (2026-10-19): #135 rules hash/validation/per-kind defaults, finite parsing and
-client/sim vision agreement landed in #168. Haste is bounded to 3×. The modifier-id fallback
-and `ability-pack.toml` radius review remain before #135 closes.
+Status (2026-10-19): #135 is complete — rules hash/validation/per-kind defaults, finite
+parsing, client/sim vision agreement (#168), explicit modifier validation instead of the
+silent fallback, and reviewed example radii (#174).
 
 **Acceptance:** tampered/unsigned/untrusted packs fail at startup, rotation and reload;
 two packs differing in a stat never share a signing digest; an unhashed new field fails
