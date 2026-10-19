@@ -93,3 +93,13 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - [x] Trust-boundary ADR covering accounts, transparency/revocation feeds and optional
   player-count attestation.
 - [x] SECURITY threat-model update; plaintext/token-only modes unchanged.
+
+## CI trust (#142)
+
+- [x] Nightly uses `shell: bash` (pipefail) and a failure job opens an issue with the run link.
+- [x] Allocation tests use per-thread counters and release runs are serialized; 20 local
+  release repeats passed.
+- [x] `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` are required checks.
+- [x] `renderer-gate` runs on every PR (no-op for non-renderer paths) and fully on renderer
+  changes/dispatch; macOS MoltenVK probe runs automatically for renderer paths.
+- [x] Network test client timeouts raised to at least 3 s; Dependabot ignores the toolchain pin.

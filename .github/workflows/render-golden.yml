@@ -3,10 +3,10 @@ name: render golden
 on:
   workflow_dispatch:
   pull_request:
-    types: [labeled]
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,16 +17,30 @@ env:
   MOBA_IGNORE_KNOWN_PRESENT_HAZARD: "1"
 
 jobs:
-  golden:
-    name: lavapipe golden capture
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'render-golden'
+  renderer-gate:
+    name: renderer-gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            renderer:
+              - 'crates/render/**'
+              - 'crates/shaders/**'
+              - 'crates/platform/**'
+              - 'crates/client/**'
+              - 'tests/golden/**'
+              - '.github/workflows/render-golden.yml'
       - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - name: Install software Vulkan
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -38,8 +52,10 @@ jobs:
           echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "Using $ICD"
       - name: Build client and tools
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
       - name: Capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
           timeout 180 xvfb-run -a ./target/release/moba-client \
             > capture.log 2>&1 || { cat capture.log; exit 1; }
@@ -49,6 +65,7 @@ jobs:
           MOBA_CAPTURE: render-actual.ppm
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
           set +e
           ./target/release/image-check render-actual.ppm \

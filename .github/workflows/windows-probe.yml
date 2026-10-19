@@ -32,7 +32,6 @@ jobs:
       - name: Probe Vulkan devices
         run: ./target/release/vulkan-probe.exe
       - name: Run client smoke
-        continue-on-error: true
         run: ./target/release/moba-client.exe
         env:
           MOBA_WARMUP_TICKS: "60"
