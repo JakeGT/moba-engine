@@ -706,6 +706,7 @@ pub struct NetServer {
     require_content_attestation: bool,
     content_update_retry: Option<(Vec<u8>, u32, u8, u32)>,
     bot_policy_factory: Option<BotPolicyFactory>,
+    bot_policy_registry: Vec<(&'static str, BotPolicyFactory)>,
     content_generation: u32,
     trusted_publisher: Option<[u8; 32]>,
     allowed_client_keys: Vec<[u8; 32]>,
@@ -780,6 +781,7 @@ impl NetServer {
             require_content_attestation: false,
             content_update_retry: None,
             bot_policy_factory: None,
+            bot_policy_registry: Vec::new(),
             content_generation: 0,
             trusted_publisher: None,
             allowed_client_keys: Vec::new(),
@@ -1188,9 +1190,38 @@ impl NetServer {
     where
         F: Fn() -> Box<dyn BotPolicy> + Send + Sync + 'static,
     {
+        let factory: BotPolicyFactory = Arc::new(factory);
         self.simulation.set_bot_policy(Some(factory()));
-        self.bot_policy_factory = Some(Arc::new(factory));
+        self.bot_policy_factory = Some(Arc::clone(&factory));
+        self.bot_policy_registry.push(("default", factory));
         self
+    }
+
+    /// Registers a named bot-policy factory; returns `false` for a duplicate id.
+    pub fn register_bot_policy<F>(&mut self, id: &'static str, factory: F) -> bool
+    where
+        F: Fn() -> Box<dyn BotPolicy> + Send + Sync + 'static,
+    {
+        if self.bot_policy_registry.iter().any(|(name, _)| *name == id) {
+            return false;
+        }
+        self.bot_policy_registry.push((id, Arc::new(factory)));
+        true
+    }
+
+    /// Selects and immediately installs a registered bot policy.
+    pub fn select_bot_policy(&mut self, id: &'static str) -> bool {
+        let Some((_, factory)) = self
+            .bot_policy_registry
+            .iter()
+            .find(|(name, _)| *name == id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.simulation.set_bot_policy(Some(factory()));
+        self.bot_policy_factory = Some(factory);
+        true
     }
 
     /// Returns the extension systems count.
@@ -3194,5 +3225,41 @@ cost = 1
         server.phase = Phase::Playing;
         server.tick().expect("tick");
         assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    #[test]
+    fn named_bot_policies_can_be_registered_and_selected() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let policy_calls = Arc::clone(&calls);
+        let mut server = NetServer::bind(config).expect("bind");
+        assert!(server.register_bot_policy("count", move || {
+            Box::new(CountingPolicy(Arc::clone(&policy_calls)))
+        }));
+        assert!(!server.register_bot_policy("count", || {
+            Box::new(CountingPolicy(Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            )))
+        }));
+        assert!(server.select_bot_policy("count"));
+        assert!(!server.select_bot_policy("missing"));
+        server.phase = Phase::Playing;
+        server.tick().expect("tick");
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
     }
 }
