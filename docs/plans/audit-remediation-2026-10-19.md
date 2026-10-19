@@ -121,7 +121,7 @@ replays verify; a stale or mid-match update cannot change the catalogue.
 **Acceptance:** Loom drives `pool.rs`, the injected bug fails, and no reference to the
 scope counter can outlive the scope.
 
-Status (2026-10-19): Arc ownership landed in #158; the real-pool Loom upgrade remains open.
+Status (2026-10-19): Arc ownership landed in #161; the real-pool Loom upgrade remains open.
 
 ### S-5. Fog-of-war/visibility leaks
 **#138** (security-adjacent information leak).
@@ -150,9 +150,10 @@ Status (2026-10-19): Arc ownership landed in #158; the real-pool Loom upgrade re
 turns red; 20 consecutive green release-allocation runs; a renderer PR cannot merge without
 golden; required-check list matches docs.
 
-Status (2026-10-19): implementation in #156; 20 allocation runs and all PR gates are green.
-The post-change nightly is dispatched (`39235240360`) but a full 1-hour run/notification test
-is still pending, so #142 stays open until that evidence lands.
+Status (2026-10-19): #156/#162/#164/#166 implemented. Failure notification was exercised by
+the pre-fix shader/ALSA/criterion failures and created #160 (closed). 20 allocation runs passed;
+the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089 is green**;
+#142 remains open only for the next full scheduled nightly.
 
 ## Wave C — correctness and replay truth (P1)
 

@@ -98,7 +98,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 
 ## CI trust (#142)
 
-- [x] Nightly uses `shell: bash` (pipefail) and a failure job opens an issue with the run link.
+- [x] Nightly uses `shell: bash` (pipefail) and a failure job opens an issue with the run link
+  (exercised by #160; short green run 39239367089).
 - [x] Allocation tests use per-thread counters and release runs are serialized; 20 local
   release repeats passed.
 - [x] `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` are required checks.
