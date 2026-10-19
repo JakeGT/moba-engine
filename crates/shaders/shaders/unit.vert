@@ -32,9 +32,8 @@ void main() {
     vec4 world = instance.model * vec4(in_position, 1.0);
     gl_Position = camera.view_proj * world;
 
-    // Unit scale is uniform in this renderer, so the model matrix's upper 3x3 is a valid
-    // normal transform (no inverse-transpose needed yet).
-    out_world_normal = normalize(mat3(instance.model) * in_normal);
+    // Rig parts and instanced units may be non-uniformly scaled.
+    out_world_normal = normalize(mat3(transpose(inverse(instance.model))) * in_normal);
     out_color = instance.color.rgb;
     out_world_pos = world.xyz;
 }
