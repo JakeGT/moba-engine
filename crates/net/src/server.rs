@@ -2923,4 +2923,58 @@ cost = 1
         assert!(server.content_update_retry.is_none());
         assert_eq!(server.content_generation, generation);
     }
+
+    #[test]
+    fn broadcast_resets_and_retries_for_a_connected_client() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let addr = server.local_addr().expect("addr");
+        server.clients[0] = Some(ClientConn {
+            addr,
+            session: 7,
+            slot: 0,
+            key: None,
+            spectator: false,
+            team: moba_game::Team::Blue,
+            connected: true,
+            ready: false,
+            last_seen: Instant::now(),
+            disconnected_at: None,
+            last_input_seq: 4,
+            command: None,
+            pending_purchase: None,
+            net_ids: NetIdTable::default(),
+            snapshot_seq: 3,
+            acked_snapshot: 2,
+            need_full: false,
+            history: VecDeque::new(),
+            history_pool: Vec::new(),
+            welcome_nonce: 0,
+            welcome_payload: Vec::new(),
+            bytes_sent: 0,
+        });
+        server.broadcast_content_update();
+        let client = server.clients[0].as_ref().expect("client");
+        assert!(client.need_full);
+        assert_eq!(client.snapshot_seq, 3);
+        assert_eq!(client.acked_snapshot, 0);
+        assert_eq!(client.last_input_seq, 0);
+        assert!(server.content_update_retry.is_some());
+        assert_eq!(server.content_generation, 1);
+    }
 }
