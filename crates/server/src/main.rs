@@ -228,6 +228,10 @@ fn main() {
         ..SimConfig::default()
     };
 
+    if content_publisher.is_some() {
+        // A pinned publisher only has meaning with attestation enforcement.
+        require_attestation = true;
+    }
     if let Some(listen) = listen {
         let bind = listen.parse().unwrap_or_else(|error| {
             eprintln!("invalid --listen address {listen}: {error}");

@@ -305,7 +305,7 @@ pub fn verify_pack(content: &moba_game::GameContent) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(&attestation.publisher) else {
         return false;
     };
-    key.verify(
+    key.verify_strict(
         &content.signing_message(),
         &Signature::from_bytes(&attestation.signature),
     )

@@ -1052,6 +1052,12 @@ impl NetServer {
                 }
                 let hash = content.hash();
                 self.content_generation = self.content_generation.wrapping_add(1);
+                if let Phase::Results(remaining) = self.phase
+                    && remaining < 180
+                {
+                    // Leave enough time for the update/retries to reach every client.
+                    self.phase = Phase::Results(180);
+                }
                 let generation = self.content_generation;
                 let content = Arc::new(content);
                 self.simulation =
@@ -1092,7 +1098,7 @@ impl NetServer {
                         eprintln!("content update send failed for {addr}: {error}");
                     }
                 }
-                // Repeat for two seconds of snapshots; clients drop duplicate hashes.
+                // One send plus three retries at 1.5 s intervals; clients drop duplicate hashes.
                 self.content_update_retry = Some((payload, 30, 3, generation));
                 eprintln!(
                     "content reloaded and broadcast: {} items, hash {hash:#018x}",

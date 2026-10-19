@@ -114,6 +114,11 @@ impl core::fmt::Debug for ClientAuth {
     }
 }
 
+/// Content generations start at one and must strictly increase.
+fn accepts_content_generation(current: u32, incoming: u32) -> bool {
+    incoming != 0 && incoming > current
+}
+
 /// A connected game client.
 pub struct NetClient {
     transport: UdpTransport,
@@ -598,8 +603,7 @@ impl NetClient {
                 PacketKind::ContentUpdate => {
                     if self.state != ClientState::Connected
                         || message.header.session != self.session
-                        || (message.header.seq != 0
-                            && message.header.seq <= self.content_generation)
+                        || !accepts_content_generation(self.content_generation, message.header.seq)
                     {
                         continue;
                     }
@@ -1089,4 +1093,18 @@ pub fn decode_snapshot_payload(
     payload: &[u8],
 ) -> Result<SnapshotDelta, crate::protocol::WireError> {
     decode_snapshot(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accepts_content_generation;
+
+    #[test]
+    fn content_generations_are_strictly_increasing_and_nonzero() {
+        assert!(!accepts_content_generation(0, 0));
+        assert!(accepts_content_generation(0, 1));
+        assert!(!accepts_content_generation(1, 1));
+        assert!(!accepts_content_generation(2, 1));
+        assert!(accepts_content_generation(2, 3));
+    }
 }
