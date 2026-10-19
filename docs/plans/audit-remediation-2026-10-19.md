@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**268 tests**.
+**269 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -214,7 +214,7 @@ team-size integration test remains open.
 
 Status (2026-10-19): client snapshot sequencing (clone only on a new seq), map-extent minimap
 clicks, removal of the unwired ability hit region and UI-scale finiteness landed in #170.
-The steady network-frame allocation guard remains open.
+Snapshot sequence gating is covered by a unit test; a steady network-frame allocation guard remains open.
 
 ## Wave D — completion and hardening (P2)
 
