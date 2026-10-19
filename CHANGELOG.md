@@ -37,6 +37,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 
 ### Fixed
+- Snapshot allocation guard uses per-thread counters, eliminating the release-test flake from unrelated harness threads (#142).
 - Own-team events no longer bypass endpoint visibility; hidden hit/death endpoints are filtered and covered by a NetServer unit test (#138).
 - Added an allocation guard for ability-pack zone/on-hit ticks (no steady-state allocations) (#140).
 - Snapshot events prioritise deaths, structure kills and match end when the 16-event cap is hit (#136).
