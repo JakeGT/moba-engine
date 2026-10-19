@@ -100,8 +100,8 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 
 - [x] Nightly uses `shell: bash` (pipefail) and a failure job opens an issue with the run link
   (exercised by #160; short green run 39239367089).
-- [x] Allocation tests use per-thread counters and release runs are serialized; 20 local
-  release repeats passed.
+- [x] Sim and snapshot allocation tests use per-thread counters; 20 consecutive release
+  repeats of each pass.
 - [x] `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` are required checks.
 - [x] `renderer-gate` runs on every PR (no-op for non-renderer paths) and fully on renderer
   changes/dispatch; macOS MoltenVK probe runs automatically for renderer paths.

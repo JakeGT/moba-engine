@@ -1,7 +1,7 @@
 //! Allocation guard for steady-state snapshot build/encode.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use moba_net::protocol::{
     NetEntity, NetProgress, SnapshotDelta, build_delta_into, encode_snapshot,
@@ -9,15 +9,30 @@ use moba_net::protocol::{
 
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count(bytes: usize) {
+    let _ = ALLOCATIONS.try_with(|counter| counter.set(counter.get().saturating_add(1)));
+    let _ = BYTES.try_with(|counter| counter.set(counter.get().saturating_add(bytes)));
+}
+
+fn reset_counters() {
+    let _ = ALLOCATIONS.try_with(|counter| counter.set(0));
+    let _ = BYTES.try_with(|counter| counter.set(0));
+}
+
+fn counters() -> (usize, usize) {
+    (ALLOCATIONS.with(Cell::get), BYTES.with(Cell::get))
+}
 
 // SAFETY: forwards every operation to the system allocator unchanged and only wraps it with
-// atomic counters that do not affect pointer validity, alignment or lifetime.
+// thread-local counters that do not affect pointer validity, alignment or lifetime.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        count(layout.size());
         // SAFETY: layout came from the global allocator caller and is forwarded as-is.
         unsafe { System.alloc(layout) }
     }
@@ -28,8 +43,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
+        count(new_size.saturating_sub(layout.size()));
         // SAFETY: pointer/layout are the pair supplied by the allocator caller.
         unsafe { System.realloc(pointer, layout, new_size) }
     }
@@ -72,14 +86,12 @@ fn steady_state_snapshot_build_and_encode_allocate_nothing() {
     build_delta_into(&current, Some(&baseline), 0, 0, 1, &mut delta);
     encode_snapshot(&delta, &mut payload).expect("encode");
 
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for tick in 1..=300 {
         build_delta_into(&current, Some(&baseline), tick, 0, 1, &mut delta);
         encode_snapshot(&delta, &mut payload).expect("encode");
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("snapshot path: {allocations} allocations, {bytes} bytes over 300 builds");
     assert_eq!(allocations, 0);
     assert_eq!(bytes, 0);
