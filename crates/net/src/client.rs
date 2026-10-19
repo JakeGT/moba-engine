@@ -603,6 +603,15 @@ impl NetClient {
                     else {
                         continue;
                     };
+                    if hash == self.content_hash {
+                        continue; // duplicate/replayed catalogue; keep prediction state
+                    }
+                    let Ok(content) = catalog.to_content() else {
+                        continue;
+                    };
+                    if content.validate().is_err() {
+                        continue;
+                    }
                     let item_count =
                         usize::from(catalog.item_count).min(crate::protocol::MAX_WIRE_ITEMS);
                     let hero_count =

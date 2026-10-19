@@ -85,6 +85,9 @@ Private advisory: content-pack attestation bypass; **#135**, **#151**.
   add a v5 replay fixture, run parity on fully non-default content, and cap replay decode
   allocation with the counting allocator.
 
+Status (2026-10-19): #139 client-side catalogue validation and duplicate-hash suppression
+landed in #180; generation numbers/ack/retransmit and connected-player rotation remain open.
+
 Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
 queue eviction (#169) and high-priority event selection (#175) landed. The NetServer-level
 allocation guard and teamfight bandwidth measurement remain open.
