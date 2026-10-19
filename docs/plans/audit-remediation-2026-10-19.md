@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**273 tests**.
+**274 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -259,6 +259,8 @@ pool/lock-free queue. Acceptance: `app.rs` <800 lines, HUD tests exist, offline 
 device recovery work.
 
 ### D-8. #151 remaining hash/replay enforcement
+
+Status: checked-in v7 fixture verifies in tests; compile-time hash coverage, non-default parity and decode-allocation cap remain.
 If not fully landed in S-2: compile-time hash coverage, checked-in replay fixture, fully
 non-default parity pack, decode amplification cap/allocation assertion.
 
