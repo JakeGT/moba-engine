@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use moba_core::{Fix, FixVec2};
 use serde::Deserialize;
 
@@ -987,12 +989,12 @@ fn hash_effects(feed: &mut dyn FnMut(&[u8]), effects: &EffectList) {
                 feed(&range.to_bits().to_le_bytes());
                 feed(&radius.to_bits().to_le_bytes());
                 feed(&arc.to_bits().to_le_bytes());
-                hash_area_effects(feed, on_hit);
+                hash_area_effects(&mut *feed, on_hit);
             }
             Effect::Area { radius, effects } => {
                 feed(&[5]);
                 feed(&radius.to_bits().to_le_bytes());
-                hash_area_effects(feed, effects);
+                hash_area_effects(&mut *feed, effects);
             }
             Effect::Zone {
                 radius,
@@ -1004,7 +1006,7 @@ fn hash_effects(feed: &mut dyn FnMut(&[u8]), effects: &EffectList) {
                 feed(&radius.to_bits().to_le_bytes());
                 feed(&duration_ticks.to_le_bytes());
                 feed(&period_ticks.to_le_bytes());
-                hash_area_effects(feed, effects);
+                hash_area_effects(&mut *feed, effects);
             }
         }
     }
@@ -1268,10 +1270,16 @@ impl GameContent {
     }
 
     /// Stable bytes signed by a publisher attestation.
+    ///
+    /// Version 2 signs a SHA-256 digest of the canonical catalogue feed rather than the
+    /// diagnostic 64-bit FNV hash.
     #[must_use]
     pub fn signing_message(&self) -> Vec<u8> {
-        let mut message = Vec::with_capacity(96);
-        message.extend_from_slice(b"moba-pack-v1\n");
+        let mut canonical = Vec::new();
+        self.feed_catalogue(&mut |bytes| canonical.extend_from_slice(bytes));
+        let digest = Sha256::digest(&canonical);
+        let mut message = Vec::with_capacity(128);
+        message.extend_from_slice(b"moba-pack-v2\n");
         for field in [
             &self.manifest.name,
             &self.manifest.version,
@@ -1280,21 +1288,14 @@ impl GameContent {
             message.extend_from_slice(field.as_bytes());
             message.push(b'\n');
         }
-        message.extend_from_slice(&self.hash().to_le_bytes());
+        message.extend_from_slice(&digest);
         message
     }
 
     /// Stable FNV-1a hash of the catalogue, used for diagnostics and mismatch checks.
     #[must_use]
     #[allow(clippy::too_many_lines)] // Canonical field feed mirrors the content schema.
-    pub fn hash(&self) -> u64 {
-        let mut hash = 0xCBF2_9CE4_8422_2325u64;
-        let mut feed = |bytes: &[u8]| {
-            for byte in bytes {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-            }
-        };
+    fn feed_catalogue(&self, feed: &mut dyn FnMut(&[u8])) {
         for field in [
             &self.manifest.name,
             &self.manifest.version,
@@ -1334,7 +1335,7 @@ impl GameContent {
                     feed(&range.to_bits().to_le_bytes());
                 }
             }
-            hash_effects(&mut feed, &ability.effects);
+            hash_effects(&mut *feed, &ability.effects);
         }
         for hero in &self.heroes {
             feed(hero.name.as_bytes());
@@ -1445,6 +1446,19 @@ impl GameContent {
                 feed(&point.y.to_bits().to_le_bytes());
             }
         }
+    }
+
+    /// Stable FNV-1a hash of the catalogue, used for diagnostics and mismatch checks.
+    #[must_use]
+    pub fn hash(&self) -> u64 {
+        let mut hash = 0xCBF2_9CE4_8422_2325u64;
+        let mut feed = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        };
+        self.feed_catalogue(&mut feed);
         hash
     }
 }

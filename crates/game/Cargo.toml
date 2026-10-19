@@ -21,3 +21,4 @@ moba-core.workspace = true
 serde.workspace = true
 toml.workspace = true
 moba-ecs.workspace = true
+sha2.workspace = true
