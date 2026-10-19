@@ -37,6 +37,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 
 ### Fixed
+- Snapshot events prioritise deaths, structure kills and match end when the 16-event cap is hit (#136).
 - Content parsing rejects missing modifier kinds and on-hit kinds before ability construction; `modifier_id` no longer silently falls back to id 0. Example ability-pack areas were reduced from near-map-wide radii to tactical radii (#135).
 - Bot fog masks are built in one world/candidate pass (benchmark −14.3% on `tick_full_5v5`), with a mask/visibility equivalence test (#140).
 - Replays no longer diverge when a mid-match disconnect changes `bot_mask`; the mask is an input source, not state, and `SIM_LOGIC_VERSION` is 7 (#137).

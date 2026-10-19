@@ -85,9 +85,9 @@ Private advisory: content-pack attestation bypass; **#135**, **#151**.
   add a v5 replay fixture, run parity on fully non-default content, and cap replay decode
   allocation with the counting allocator.
 
-Status (2026-10-19): #136 duplicate cast events, per-snapshot event capacity and O(n) pending
-queue removal landed in #169; the NetServer-level allocation guard and teamfight bandwidth
-measurement remain open.
+Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
+queue eviction (#169) and high-priority event selection (#175) landed. The NetServer-level
+allocation guard and teamfight bandwidth measurement remain open.
 
 Status (2026-10-19): #135 is complete — rules hash/validation/per-kind defaults, finite
 parsing, client/sim vision agreement (#168), explicit modifier validation instead of the
