@@ -115,6 +115,8 @@ pub struct Renderer {
     capture_buffer: Option<GpuBuffer>,
     capture_pending: bool,
     capture_ready: bool,
+    capture_extent: Option<vk::Extent2D>,
+    capture_format: Option<vk::Format>,
     images_in_flight: Vec<Option<usize>>,
     frame_index: usize,
     device: DeviceContext,
@@ -400,6 +402,8 @@ impl Renderer {
             capture_buffer: None,
             capture_pending: false,
             capture_ready: false,
+            capture_extent: None,
+            capture_format: None,
             images_in_flight,
             frame_index: 0,
             device,
@@ -480,6 +484,8 @@ impl Renderer {
                 )));
             }
             self.ensure_capture_buffer()?;
+            self.capture_extent = Some(self.swapchain.extent);
+            self.capture_format = Some(self.swapchain.format);
         }
 
         let frame_index = self.frame_index;
@@ -1026,7 +1032,8 @@ impl Renderer {
         }
         // SAFETY: waiting for idle guarantees the copy-to-buffer finished before mapping.
         unsafe { self.device.device.device_wait_idle() }?;
-        let extent = self.swapchain.extent;
+        let extent = self.capture_extent.take().unwrap_or(self.swapchain.extent);
+        let format = self.capture_format.take().unwrap_or(self.swapchain.format);
         let count = usize::try_from(u64::from(extent.width) * u64::from(extent.height) * 4)
             .expect("frame size fits usize");
         let buffer = self
@@ -1040,7 +1047,7 @@ impl Renderer {
             })?
             .to_vec();
         // Expose conventional tightly packed RGBA to callers.
-        match self.swapchain.format {
+        match format {
             vk::Format::B8G8R8A8_SRGB | vk::Format::B8G8R8A8_UNORM => {
                 for pixel in rgba.chunks_exact_mut(4) {
                     pixel.swap(0, 2);
