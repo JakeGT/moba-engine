@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**264 tests**.
+**265 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -202,7 +202,7 @@ the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089
 
 Status (2026-10-19): #140 single-pass bot fog masks landed in #173; `tick_full_5v5`
 measured 5.566 ms, −14.3% vs the prior baseline. Ability-pack allocation guard added in #176.
-Bot fog masks are bounded by `MAX_UNITS` (#190). Bot-shop/wave guard additions and teammate-targeting privacy remain; dead units are excluded from area gathering (#189).
+Bot fog masks are bounded by `MAX_UNITS` (#190). Bot-shopping has an allocation guard; teammate-targeting privacy remains; dead units are excluded from area gathering (#189).
 
 Status (2026-10-19): #137 removes `bot_mask` from the state hash, bumps `SIM_LOGIC_VERSION`
 to 7, updates the golden hash and adds a mask-independence test (#172). A real-UDP
