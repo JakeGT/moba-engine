@@ -19,6 +19,7 @@ struct MatchResult {
     ticks: u32,
     tick_nanos: u64,
     max_tick_nanos: u64,
+    max_tick_at: u32,
 }
 
 fn run_match(
@@ -41,6 +42,7 @@ fn run_match(
     );
     let mut tick_nanos = 0u64;
     let mut max_tick_nanos = 0u64;
+    let mut max_tick_at = 0u32;
     let mut ticks = 0u32;
     for _ in 0..max_ticks {
         let inputs: TickInputs = simulation.bot_inputs();
@@ -49,7 +51,10 @@ fn run_match(
         simulation.clear_events();
         let elapsed = u64::try_from(tick_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
         tick_nanos = tick_nanos.saturating_add(elapsed);
-        max_tick_nanos = max_tick_nanos.max(elapsed);
+        if elapsed > max_tick_nanos {
+            max_tick_nanos = elapsed;
+            max_tick_at = ticks;
+        }
         ticks += 1;
         if simulation.outcome().is_some() {
             break;
@@ -61,6 +66,7 @@ fn run_match(
         ticks,
         tick_nanos,
         max_tick_nanos,
+        max_tick_at,
     }
 }
 
@@ -138,6 +144,7 @@ fn main() {
     let mut total_ticks = 0u64;
     let mut total_tick_nanos = 0u64;
     let mut max_tick_nanos = 0u64;
+    let mut max_tick_at = 0u32;
     let mut mismatches = 0u32;
     for index in 0..matches {
         let match_seed = seed.wrapping_add(u64::from(index));
@@ -194,7 +201,10 @@ fn main() {
         hashes.push(first.hash);
         total_ticks += u64::from(first.ticks);
         total_tick_nanos = total_tick_nanos.saturating_add(first.tick_nanos);
-        max_tick_nanos = max_tick_nanos.max(first.max_tick_nanos);
+        if first.max_tick_nanos > max_tick_nanos {
+            max_tick_nanos = first.max_tick_nanos;
+            max_tick_at = first.max_tick_at;
+        }
         if (index + 1) % 10 == 0 {
             eprintln!(
                 "  {}/{} matches, {} ticks, worst tick {} us",
@@ -208,7 +218,7 @@ fn main() {
     hashes.sort_unstable();
     let unique = hashes.windows(2).filter(|pair| pair[0] != pair[1]).count() + 1;
     println!(
-        "matches={} ticks={} avg_tick_us={} max_tick_us={} wall_s={:.2} unique_hashes={} outcome_none={} blue={} red={} determinism={}",
+        "matches={} ticks={} avg_tick_us={} max_tick_us={} max_tick_at={} wall_s={:.2} unique_hashes={} outcome_none={} blue={} red={} determinism={}",
         matches,
         total_ticks,
         total_tick_nanos
@@ -216,6 +226,7 @@ fn main() {
             .unwrap_or(0)
             / 1_000,
         max_tick_nanos / 1_000,
+        max_tick_at,
         start.elapsed().as_secs_f64(),
         unique,
         outcomes[0],
