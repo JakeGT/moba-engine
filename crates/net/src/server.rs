@@ -703,7 +703,7 @@ pub struct NetServer {
     client_keys: Vec<[u8; 32]>,
     require_client_identity: bool,
     require_content_attestation: bool,
-    content_update_retry: Option<(Vec<u8>, u16)>,
+    content_update_retry: Option<Vec<u8>>,
     trusted_publisher: Option<[u8; 32]>,
     allowed_client_keys: Vec<[u8; 32]>,
     client_challenges: Vec<ClientChallenge>,
@@ -1087,7 +1087,7 @@ impl NetServer {
                     }
                 }
                 // Repeat for two seconds of snapshots; clients drop duplicate hashes.
-                self.content_update_retry = Some((payload, 60));
+                self.content_update_retry = Some(payload);
                 eprintln!(
                     "content reloaded and broadcast: {} items, hash {hash:#018x}",
                     self.content.items.len()
@@ -1264,6 +1264,8 @@ impl NetServer {
     }
 
     fn start_countdown(&mut self) {
+        // The next match uses the catalogue already negotiated; stop retransmitting.
+        self.content_update_retry = None;
         self.phase = if self.config.countdown_ticks == 0 {
             Phase::Playing
         } else {
@@ -2114,28 +2116,26 @@ impl NetServer {
         self.delta = delta;
         self.pending_events = pending_events;
         self.pending_events.clear();
-        if let Some((payload, remaining)) = self.content_update_retry.take() {
-            if remaining > 0 {
-                let targets: Vec<(SocketAddr, u32)> = self
-                    .clients
-                    .iter()
-                    .flatten()
-                    .filter(|client| client.connected)
-                    .map(|client| (client.addr, client.session))
-                    .collect();
-                for (addr, session) in targets {
-                    let header = Header {
-                        kind: PacketKind::ContentUpdate,
-                        flags: 0,
-                        session,
-                        seq: 0,
-                        ack: 0,
-                        ack_bits: 0,
-                    };
-                    let _ = self.transport.send(addr, &header, &payload);
-                }
-                self.content_update_retry = Some((payload, remaining - 1));
+        if let Some(payload) = self.content_update_retry.take() {
+            let targets: Vec<(SocketAddr, u32)> = self
+                .clients
+                .iter()
+                .flatten()
+                .filter(|client| client.connected)
+                .map(|client| (client.addr, client.session))
+                .collect();
+            for (addr, session) in targets {
+                let header = Header {
+                    kind: PacketKind::ContentUpdate,
+                    flags: 0,
+                    session,
+                    seq: 0,
+                    ack: 0,
+                    ack_bits: 0,
+                };
+                let _ = self.transport.send(addr, &header, &payload);
             }
+            self.content_update_retry = Some(payload);
         }
         Ok(())
     }
