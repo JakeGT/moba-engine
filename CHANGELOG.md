@@ -37,6 +37,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 
 ### Changed
+- Added the second-audit remediation plan (security-first #135–#153 + private advisories).
 - Documentation/agentic-coding refresh: current contract versions, status/plan/task evidence, README, perf logs, release/contributing guidance and an operational `docs/agents.md` runbook with `scripts/agent-verify.sh`.
 
 ## [0.2.0] — 2026-10-18

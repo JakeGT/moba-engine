@@ -32,11 +32,13 @@ Re-run the commands before quoting these values; update this table when a contra
 ## Read first
 
 1. [`README.md`](README.md) — quick start and feature overview.
-2. [`docs/architecture.md`](docs/architecture.md) — layers, data flow, determinism, netcode.
-3. [`docs/status.md`](docs/status.md) — what is done, measured and still open.
-4. [`docs/agents.md`](docs/agents.md) — agent workflow and verification matrix.
-5. [`docs/building-on-moba.md`](docs/building-on-moba.md) — embedding and extension patterns.
-6. [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/API-STABILITY.md`](docs/API-STABILITY.md) and
+2. [`docs/plans/audit-remediation-2026-10-19.md`](docs/plans/audit-remediation-2026-10-19.md) —
+   active security-first remediation plan; security details stay in the private advisories.
+3. [`docs/architecture.md`](docs/architecture.md) — layers, data flow, determinism, netcode.
+4. [`docs/status.md`](docs/status.md) — what is done, measured and still open.
+5. [`docs/agents.md`](docs/agents.md) — agent workflow and verification matrix.
+6. [`docs/building-on-moba.md`](docs/building-on-moba.md) — embedding and extension patterns.
+7. [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/API-STABILITY.md`](docs/API-STABILITY.md) and
    [`SECURITY.md`](SECURITY.md).
 
 ## Repository map
