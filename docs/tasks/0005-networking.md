@@ -81,7 +81,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 [Valve lag compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation),
 [RFC 1982 serial arithmetic](https://www.rfc-editor.org/rfc/rfc1982).
 
-## Protocol catalogue/event contract (v13–v25)
+## Protocol catalogue/event contract (v13–v26)
 - `Welcome` carries one complete `WireCatalog` (manifest, items, heroes, abilities, map
   structures/walls) built only by `From<&GameContent>`; clients reconstruct it and verify
   `GameContent::hash`.
@@ -96,7 +96,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v22 carries runtime minion/tower combat stats.
 - v23 carries the map display name for selection/rotation.
 - v24 adds a full catalogue ContentUpdate packet for between-match hot reload.
-- v25 carries the built-in map visual theme id.
+- v26 carries the built-in map visual theme id.
 - v24 catalogue updates replace the full catalogue in Lobby/Results; clients verify the hash,
   reset catalogue-dependent state and reconnect prediction.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.

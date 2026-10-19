@@ -11,7 +11,7 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 | Item | Value | Source of truth |
 |---|---|---|
 | Workspace version | `0.2.0` pre-1.0 | `Cargo.toml` |
-| Wire protocol | **v25** | `crates/net/src/protocol.rs` |
+| Wire protocol | **v26** | `crates/net/src/protocol.rs` |
 | Replay format | **v5**, simulation logic **v7** | `crates/sim/src/replay.rs` |
 | Content | runtime TOML, hashed; signed packs optional | `crates/game/src/content.rs` |
 | Tests | **248 passed**, 3 ignored | `cargo test --workspace --locked` |

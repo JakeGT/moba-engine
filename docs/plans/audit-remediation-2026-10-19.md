@@ -1,7 +1,7 @@
 # Second-audit remediation plan — 2026-10-19
 
 Status: **draft plan, ready for execution**  
-Baseline: `main` at `64951a0`, protocol **v25**, replay **v5**, simulation logic **v7**,
+Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
 **257 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).

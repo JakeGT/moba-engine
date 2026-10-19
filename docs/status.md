@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: **2026-10-19**. Workspace **0.2.0** preview; protocol **v25**; replay format **v5**;
+Last updated: **2026-10-19**. Workspace **0.2.0** preview; protocol **v26**; replay format **v5**;
 simulation logic **v7**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
@@ -16,7 +16,7 @@ crates.io publication enablement (#21). Everything else in the audit plan has la
 | M2 | Platform | 🟡 | Linux runtime verified; Windows/macOS compile and CI-checked, runtime GPU validation still open (#9). winit/input, 30 Hz step, settings and headless modes present. |
 | M3 | Renderer | 🟡 | Vulkan 1.2 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, textured UI atlas, animated hero rig, map themes, golden-image CI and NVIDIA timings. Windows/macOS real-GPU timing remains open (#127). |
 | M4 | Simulation | ✅ | Deterministic 5v5, 3 lanes, towers/nexuses, minions, vision-respecting bots, respawns, XP/gold/items, modes/rules; measured ~13 µs/tick steady benchmark. |
-| M5 | Networking | ✅ | UDP, fragmentation, delta snapshots, prediction/interpolation, reconnect, spectators, protocol v25, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
+| M5 | Networking | ✅ | UDP, fragmentation, delta snapshots, prediction/interpolation, reconnect, spectators, protocol v26, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
 | M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
 | M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model. 50 *concurrent* matches per box and independent review remain open. |
 | M8 | Content pipeline | ✅ | Runtime item/hero/ability/map packs, manifests, per-client catalogue updates (v24), manifest attestation, map names/rotation, visual themes and modes. Asset meshes/skinning assets remain future rendering work. |
