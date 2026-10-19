@@ -44,7 +44,7 @@ use std::collections::VecDeque;
 
 use crate::hud::{
     HitList, HudAction, HudUnit, build_local_hud, build_network_hud, build_vision, map_center,
-    minimap_world, rect_at, rendered_entity_position,
+    map_extent, minimap_world, rect_at, rendered_entity_position,
 };
 
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
@@ -403,9 +403,12 @@ impl App for ClientApp {
                     }
                 }
                 if failure.is_none() {
-                    let snapshot = network.client.snapshot().cloned();
-                    if let Some(snapshot) = snapshot {
-                        if snapshot.seq != network.last_snapshot_seq {
+                    let new_snapshot = network
+                        .client
+                        .snapshot()
+                        .is_some_and(|snapshot| snapshot.seq != network.last_snapshot_seq);
+                    if new_snapshot {
+                        if let Some(snapshot) = network.client.snapshot().cloned() {
                             network.last_snapshot_seq = snapshot.seq;
                             network.phase =
                                 MatchPhase::from_u8(snapshot.phase).unwrap_or(MatchPhase::Lobby);
@@ -1124,7 +1127,7 @@ fn handle_network_input(
         && (input.was_mouse_pressed(MouseButton::Left)
             || input.was_mouse_pressed(MouseButton::Right))
     {
-        let (x, y) = minimap_world(rect, cursor.x, cursor.y);
+        let (x, y) = minimap_world(rect, cursor.x, cursor.y, map_extent(network));
         let target = FixVec2::new(Fix::from_f32(x), Fix::from_f32(y));
         let (x, y) = quantize_position(target);
         if network

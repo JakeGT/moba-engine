@@ -494,14 +494,6 @@ pub(crate) fn build_network_hud(
             let icon = [0u32, 1, 6][slot];
             ui.icon(bx + 9.0, by + 5.0, 20.0, icon, text);
             ui.text(bx + 3.0, by + 27.0, 1.6, muted, key);
-            register(
-                hits,
-                HudAction::Ability(u8::try_from(slot).unwrap_or(0)),
-                bx,
-                by,
-                box_size,
-                box_size,
-            );
             if input.cursor().is_some_and(|cursor| {
                 cursor.x >= bx
                     && cursor.x <= bx + box_size

@@ -11,8 +11,6 @@ pub(crate) enum HudAction {
     ShopItem(u8),
     /// Click on the minimap.
     Minimap,
-    /// Hover/cast ability slot.
-    Ability(u8),
 }
 
 /// One registered HUD rectangle in screen pixels.
@@ -60,10 +58,15 @@ pub(crate) fn rect_at(hits: &HitList, x: f32, y: f32) -> Option<HitRect> {
 
 /// Maps a cursor position inside a minimap rectangle to world coordinates.
 #[must_use]
-pub(crate) fn minimap_world(rect: HitRect, cursor_x: f32, cursor_y: f32) -> (f32, f32) {
+pub(crate) fn minimap_world(
+    rect: HitRect,
+    cursor_x: f32,
+    cursor_y: f32,
+    extent: f32,
+) -> (f32, f32) {
     let fx = ((cursor_x - rect.x) / rect.width).clamp(0.0, 1.0);
     let fy = ((cursor_y - rect.y) / rect.height).clamp(0.0, 1.0);
-    (fx * 256.0, fy * 256.0)
+    (fx * extent, fy * extent)
 }
 
 #[cfg(test)]
@@ -95,8 +98,9 @@ mod tests {
             width: 200.0,
             height: 100.0,
         };
-        assert_eq!(minimap_world(rect, 100.0, 50.0), (0.0, 0.0));
-        assert_eq!(minimap_world(rect, 200.0, 100.0), (128.0, 128.0));
-        assert_eq!(minimap_world(rect, 300.0, 150.0), (256.0, 256.0));
+        assert_eq!(minimap_world(rect, 100.0, 50.0, 256.0), (0.0, 0.0));
+        assert_eq!(minimap_world(rect, 200.0, 100.0, 256.0), (128.0, 128.0));
+        assert_eq!(minimap_world(rect, 300.0, 150.0, 256.0), (256.0, 256.0));
+        assert_eq!(minimap_world(rect, 200.0, 100.0, 128.0), (64.0, 64.0));
     }
 }
