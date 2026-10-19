@@ -86,6 +86,7 @@ evidence.
 ## Known gaps and tracked work
 
 Open issues: <https://github.com/JakeGT/moba-engine/issues>
+Second-audit plan: [`docs/plans/audit-remediation-2026-10-19.md`](plans/audit-remediation-2026-10-19.md)
 
 - **#9 / #127** — real Windows/macOS GPU frame results and min-spec validation. Linux/NVIDIA
   evidence is complete; the hosted macOS result misses the frame target and Windows hosted

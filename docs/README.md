@@ -7,9 +7,11 @@
 - [Content authoring](content-authoring.md) — runtime TOML packs for items, heroes, abilities,
   maps, vision walls and the determinism checklist.
 - [API stability](API-STABILITY.md) — pre-1.0 tiers, breakage rules and publishing policy.
-- [Audit remediation plan](plans/audit-remediation-2026-10.md) — dependency-ordered plan for all open audit issues.
-- [Status](status.md) — milestone table, what exists, verification evidence and the two
-  external-resource blockers (#9/#127, #21).
+- [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — security-first plan for
+  #49/#135–#153, reopened #12/#16 and four private advisories.
+- [First audit remediation plan](plans/audit-remediation-2026-10.md) — the W0–W5 train that
+  produced the 0.2 preview.
+- [Status](status.md) — milestone table, verification evidence and the external blockers.
 - [Content pipeline task](tasks/0008-content.md), [Hardening task](tasks/0007-hardening.md), [Task specs](tasks/) — per-milestone scope, acceptance tests and review logs.
 - [Performance logs](perf/) — measured tick/frame/network numbers and budgets, including
   [snapshot/simulation profiling](perf/0007-profiling.md).
