@@ -635,6 +635,13 @@ impl RawEvent {
         self.source.is_none_or(visible) && self.target.is_none_or(visible)
     }
 
+    const fn high_priority(self) -> bool {
+        matches!(
+            self.kind,
+            EVENT_UNIT_DIED | EVENT_STRUCTURE_DESTROYED | EVENT_MATCH_ENDED
+        )
+    }
+
     fn to_net(self, client: &mut ClientConn) -> NetEvent {
         let (x, y) = quantize_position(self.position);
         let (x2, y2) = quantize_position(self.end);
@@ -2033,7 +2040,16 @@ impl NetServer {
             for event in pending_events
                 .iter()
                 .filter(|event| event.visible_to(viewer_team, spectator, units))
+                .filter(|event| event.high_priority())
                 .take(MAX_SNAPSHOT_EVENTS)
+            {
+                delta.events.push(event.to_net(client));
+            }
+            for event in pending_events
+                .iter()
+                .filter(|event| event.visible_to(viewer_team, spectator, units))
+                .filter(|event| !event.high_priority())
+                .take(MAX_SNAPSHOT_EVENTS.saturating_sub(delta.events.len()))
             {
                 delta.events.push(event.to_net(client));
             }
