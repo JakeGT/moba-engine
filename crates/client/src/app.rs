@@ -106,6 +106,11 @@ pub(crate) struct NetworkView {
     audio: crate::audio::Audio,
 }
 
+/// Snapshot processing only needs a clone when the sequence advances.
+fn snapshot_is_new(last_seq: u32, incoming_seq: u32) -> bool {
+    incoming_seq != last_seq
+}
+
 struct ClientApp {
     renderer: Option<Renderer>,
     simulation: Option<Simulation>,
@@ -403,10 +408,9 @@ impl App for ClientApp {
                     }
                 }
                 if failure.is_none() {
-                    let new_snapshot = network
-                        .client
-                        .snapshot()
-                        .is_some_and(|snapshot| snapshot.seq != network.last_snapshot_seq);
+                    let new_snapshot = network.client.snapshot().is_some_and(|snapshot| {
+                        snapshot_is_new(network.last_snapshot_seq, snapshot.seq)
+                    });
                     if new_snapshot {
                         if let Some(snapshot) = network.client.snapshot().cloned() {
                             network.last_snapshot_seq = snapshot.seq;
@@ -1518,5 +1522,12 @@ mod tests {
         assert_eq!(team_from_u8(0), Some(Team::Blue));
         assert_eq!(team_from_u8(1), Some(Team::Red));
         assert_eq!(team_from_u8(2), None);
+    }
+
+    #[test]
+    fn snapshots_clone_only_when_the_sequence_advances() {
+        assert!(!super::snapshot_is_new(7, 7));
+        assert!(super::snapshot_is_new(7, 8));
+        assert!(super::snapshot_is_new(8, 7));
     }
 }
