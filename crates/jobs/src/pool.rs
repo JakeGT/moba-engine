@@ -7,7 +7,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
@@ -141,10 +140,11 @@ fn worker_loop(index: usize, worker: Worker<JobRef>, shared: Arc<Shared>) {
             drop(state);
             continue;
         }
-        let result = shared.wake.wait_timeout(state, Duration::from_millis(2));
-        if let Ok((state, _)) = result {
-            last_generation = state.generation;
-        }
+        let state = shared
+            .wake
+            .wait(state)
+            .unwrap_or_else(PoisonError::into_inner);
+        last_generation = state.generation;
     }
 }
 

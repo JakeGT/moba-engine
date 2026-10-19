@@ -7,8 +7,6 @@
 //! handshake with Loom primitives; run with:
 //! `RUSTFLAGS="--cfg loom" cargo test -p moba-jobs --lib loom -- --test-threads=1`.
 
-use std::time::Duration;
-
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::{Arc, Condvar, Mutex};
 use loom::thread;
@@ -44,10 +42,11 @@ fn submit_between_check_and_wait_is_not_lost() {
                         drop(generation);
                         continue;
                     }
-                    let _ = shared
+                    let generation = shared
                         .wake
-                        .wait_timeout(generation, Duration::from_millis(1))
+                        .wait(generation)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    seen = *generation;
                 }
             })
         };
@@ -92,10 +91,11 @@ fn completion_wakes_the_scope_wait_loop() {
                         drop(generation);
                         continue;
                     }
-                    let _ = shared
+                    let generation = shared
                         .wake
-                        .wait_timeout(generation, Duration::from_millis(1))
+                        .wait(generation)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    seen = *generation;
                 }
             })
         };
