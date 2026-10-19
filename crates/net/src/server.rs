@@ -2896,4 +2896,31 @@ cost = 1
             }
         }
     }
+
+    #[test]
+    fn content_update_retry_clears_on_match_reset() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        server.broadcast_content_update();
+        assert!(server.content_update_retry.is_some());
+        let generation = server.content_generation;
+        server.reset_match();
+        assert!(server.content_update_retry.is_none());
+        assert_eq!(server.content_generation, generation);
+    }
 }
