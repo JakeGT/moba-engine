@@ -901,7 +901,7 @@ impl Renderer {
                 vk::ImageLayout::PRESENT_SRC_KHR,
                 vk::PipelineStageFlags2::TRANSFER,
                 vk::AccessFlags2::TRANSFER_READ,
-                vk::PipelineStageFlags2::NONE,
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
                 vk::AccessFlags2::NONE,
             );
         } else {
