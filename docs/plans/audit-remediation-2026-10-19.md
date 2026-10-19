@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**272 tests**.
+**273 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -247,7 +247,7 @@ into validated rules; add `UseItem`, item cooldowns, on-hit/on-damaged hooks (D-
 and one passive data item; HUD/keybind/bot support; protocol/replay/SIM_LOGIC bumps.
 
 ### D-6. #149 NetServer extension contract
-Status (2026-10-19): every ServerPhase value is delivered to systems (#201); Replay contract: servers with extension systems no longer write replays; bot-policy factory survives rematches and a CI-compiled embedding example exists. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;
+Status (2026-10-19): every ServerPhase value is delivered to systems (#201); **#149 closed** — every phase delivered, replay contract documented, bot-policy factory + id registry survive rematches, CI embedding example and 256 cap documented. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;
 deliver all `ServerPhase` values or trim; add `with_bot_policy` surviving rematches and an
 id registry; CI-built embedding example; `WORLD_EXTENT` removed and the 256 map cap documented.
 
