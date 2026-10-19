@@ -249,7 +249,7 @@ and one passive data item; HUD/keybind/bot support; protocol/replay/SIM_LOGIC bu
 ### D-6. #149 NetServer extension contract
 Status (2026-10-19): every ServerPhase value is delivered to systems (#201); replayability contract remains; bot-policy factory survives rematches and a CI-compiled embedding example exists. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;
 deliver all `ServerPhase` values or trim; add `with_bot_policy` surviving rematches and an
-id registry; add a CI-built embedding example; remove/document `WORLD_EXTENT` 256 cap.
+id registry; CI-built embedding example; `WORLD_EXTENT` removed and the 256 map cap documented.
 
 ### D-7. #150 HUD/audio completion
 Split `shop`/`scoreboard`/`abilities` out of `build_network_hud`; move colors to `theme`;

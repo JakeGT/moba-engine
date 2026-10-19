@@ -9,7 +9,7 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
 
 ## Scope (landed)
 - **Wire protocol** (`moba-net::protocol`): 26-byte packet header, versioning, packet kinds,
-  handshake codecs, quantised commands (1/16 unit), per-client network ids, full/delta
+  handshake codecs, quantised commands (1/16 unit, map extent capped at 256), per-client network ids, full/delta
   snapshots with field masks, bounded decoders and a malformed-input fuzz test.
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.

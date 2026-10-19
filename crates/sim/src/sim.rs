@@ -59,8 +59,6 @@ pub const WAVE_INTERVAL_TICKS: u32 = 900;
 pub const WAVE_DELAY_TICKS: u32 = 30;
 /// Hero respawn delay (10 seconds).
 pub const HERO_RESPAWN_TICKS: u32 = 300;
-/// Map extent in world units.
-pub const WORLD_EXTENT: i32 = 256;
 
 /// Fixed-point duration of one tick (`1/30` second).
 pub const TICK_DURATION: Fix = Fix::from_bits(143_165_576);
