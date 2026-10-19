@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content.rs` |
 | Golden state hash | `0x7327fdf242be1814` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprint, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **255 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **256 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 

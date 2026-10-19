@@ -5,6 +5,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use moba_sim::{Modifier, ModifierKind, Modifiers, SimConfig, Simulation, UnitKind};
@@ -262,4 +263,43 @@ fn shop_ticks_stay_within_budget() {
         "shop window allocated {allocations} times"
     );
     assert!(bytes <= 512, "shop window allocated {bytes} bytes");
+}
+#[test]
+fn ability_pack_ticks_stay_within_budget() {
+    let _guard = serial();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/ability-pack.toml");
+    let content = moba_game::load_content_file(&path).expect("ability pack");
+    let mut simulation = Simulation::new_with_content(
+        SimConfig {
+            hero_picks: [0; 10],
+            bot_mask: 0,
+            spawn_waves: false,
+            ..SimConfig::default()
+        },
+        std::sync::Arc::new(content),
+    );
+    for _ in 0..30 {
+        simulation.tick(&moba_sim::TickInputs::new());
+    }
+    reset_counters();
+    for tick in 0..300 {
+        let mut inputs = moba_sim::TickInputs::new();
+        if tick % 30 == 0 {
+            inputs.set(
+                0,
+                moba_sim::PlayerCommand::CastAbility {
+                    slot: 0,
+                    target: moba_core::FixVec2::from_ints(64, 64),
+                },
+            );
+        }
+        simulation.tick(&inputs);
+    }
+    let (allocations, bytes) = counters();
+    eprintln!("ability-pack ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
+    assert!(
+        allocations <= 2,
+        "ability-pack window allocated {allocations} times"
+    );
+    assert!(bytes <= 512, "ability-pack window allocated {bytes} bytes");
 }
