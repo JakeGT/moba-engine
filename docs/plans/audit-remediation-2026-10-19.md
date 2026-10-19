@@ -196,6 +196,10 @@ the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089
 - Keep the content-hash/validation and hash-coverage work from S-2 as the single source of
   truth; no separate ad-hoc fix.
 
+Status (2026-10-19): client snapshot sequencing (clone only on a new seq), map-extent minimap
+clicks, removal of the unwired ability hit region and UI-scale finiteness landed in #170.
+The steady network-frame allocation guard remains open.
+
 ## Wave D — completion and hardening (P2)
 
 ### D-1. #144 renderer hardening
