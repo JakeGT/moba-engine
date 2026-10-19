@@ -36,6 +36,10 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
   no longer imports `LEVEL_CAP`, `xp_to_next` or minion/tower vision constants.
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 
+### Fixed
+- Job scope state is reference-counted; `JobRef`/`PendingGuard`/`Scope` no longer hold a
+  stack `ScopeShared` pointer (#143).
+
 ### Changed
 - Added the second-audit remediation plan (security-first #135–#153 + private advisories).
 - Documentation/agentic-coding refresh: current contract versions, status/plan/task evidence, README, perf logs, release/contributing guidance and an operational `docs/agents.md` runbook with `scripts/agent-verify.sh`.

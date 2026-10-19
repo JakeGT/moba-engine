@@ -16,20 +16,22 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 /// # Safety invariant
 /// `data` is a `Box<F>` created by [`Scope::spawn`] where `F: FnOnce() + Send + 'scope`.
 /// The scope's pending counter is incremented before the job is published and decremented
-/// only after the closure has run, and [`JobSystem::scope`] waits for the counter to reach
-/// zero before its stack-allocated scope state goes away. Therefore every job is invoked
-/// while `F`'s borrows are still valid.
+/// only after the closure has run. The scope state is reference-counted (`Arc`), so even a
+/// late/incorrect decrement can never dereference a dead stack frame; the scope still waits
+/// for the counter before returning so every job sees valid borrows.
 struct JobRef {
     invoke: unsafe fn(*const ()),
     data: *const (),
-    shared: *const ScopeShared,
+    shared: Arc<ScopeShared>,
 }
 
 // SAFETY: `JobRef` is only sent to workers as part of `scope`, which requires the erased
-// closure to be `Send`. The raw pointers are never dereferenced outside the guarded scope.
+// closure to be `Send`. The `data` pointer is only dereferenced by the job's `invoke`
+// function, and the scope keeps all borrowed data alive until its pending counter reaches
+// zero. `Arc` keeps the counter/panic slot memory safe independently of the scope frame.
 unsafe impl Send for JobRef {}
 
-/// Shared state between a scope and its jobs. Lives on the caller's stack.
+/// Shared state between a scope and its jobs, kept alive by `Arc`.
 struct ScopeShared {
     pending: AtomicUsize,
     panic: Mutex<Option<Box<dyn Any + Send>>>,
@@ -44,14 +46,11 @@ impl ScopeShared {
     }
 }
 
-struct PendingGuard(*const ScopeShared);
+struct PendingGuard(Arc<ScopeShared>);
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        // SAFETY: the guard is dropped after the job body, and the scope cannot return
-        // (freeing `ScopeShared`) until the pending count reaches zero, which this drop
-        // performs. The worker only accesses the counter, never the scope's stack frame.
-        unsafe { (*self.0).pending.fetch_sub(1, Ordering::AcqRel) };
+        self.0.pending.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -65,16 +64,18 @@ unsafe fn invoke_boxed<F: FnOnce()>(data: *const ()) {
 /// Runs a job and records a panic for the scope to re-raise.
 #[allow(clippy::needless_pass_by_value)] // Owning the JobRef mirrors the job being consumed.
 fn execute(job: JobRef) {
-    let _pending = PendingGuard(job.shared);
+    let _pending = PendingGuard(Arc::clone(&job.shared));
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the function pointer and data pointer form a valid `Box<F>` for the
         // duration of this call, as guaranteed by `JobRef`'s invariant.
         unsafe { (job.invoke)(job.data) };
     }));
     if let Err(payload) = result {
-        // SAFETY: `ScopeShared` outlives all jobs; see the `JobRef` invariant.
-        let shared = unsafe { &*job.shared };
-        let mut slot = shared.panic.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut slot = job
+            .shared
+            .panic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
             *slot = Some(payload);
         }
@@ -209,13 +210,10 @@ impl JobSystem {
     where
         F: FnOnce(&Scope<'scope>) + 'scope,
     {
-        let shared = ScopeShared::new();
-        // SAFETY: `Scope` only exposes `spawn`, which keeps the `JobRef` invariant, and
-        // the wait loop below runs until every job has dropped its `PendingGuard`. The
-        // scope (and therefore `shared`) cannot go out of scope before that point.
+        let shared = Arc::new(ScopeShared::new());
         let scope = Scope {
             system: self,
-            shared: core::ptr::from_ref(&shared),
+            shared: Arc::clone(&shared),
             marker: PhantomData,
         };
         let outcome = catch_unwind(AssertUnwindSafe(|| f(&scope)));
@@ -328,7 +326,7 @@ impl fmt::Debug for JobSystem {
 /// Jobs spawned through a scope are guaranteed to finish before `scope` returns.
 pub struct Scope<'scope> {
     system: &'scope JobSystem,
-    shared: *const ScopeShared,
+    shared: Arc<ScopeShared>,
     marker: PhantomData<&'scope mut &'scope ()>,
 }
 
@@ -342,15 +340,14 @@ impl<'scope> Scope<'scope> {
         F: FnOnce() + Send + 'scope,
     {
         let data = Box::into_raw(Box::new(job)).cast::<()>();
-        // SAFETY: `shared` belongs to the active `JobSystem::scope` frame. The scope waits
-        // for the pending counter to reach zero, so this pointer stays valid for the whole
-        // job. See the `JobRef` invariant.
-        let shared = unsafe { &*self.shared };
-        shared.pending.fetch_add(1, Ordering::Relaxed);
+        // `Arc` keeps the scope counter and panic slot alive even if a future refactor
+        // lets the scope frame return early. The scope still waits for every job before
+        // returning, so the erased closure's borrows remain valid.
+        self.shared.pending.fetch_add(1, Ordering::Relaxed);
         self.system.submit(JobRef {
             invoke: invoke_boxed::<F>,
             data,
-            shared: self.shared,
+            shared: Arc::clone(&self.shared),
         });
     }
 }
