@@ -42,7 +42,7 @@ crates.io publication enablement (#21). Everything else in the audit plan has la
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **257 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **260 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
