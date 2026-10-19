@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**269 tests**.
+**270 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -89,8 +89,7 @@ Status (2026-10-19): #139 client-side catalogue validation and duplicate-hash su
 landed in #180; generation numbers/retry delivery and connected-player rotation landed in #188; explicit ack and advisory regression tests remain open.
 
 Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
-queue eviction (#169) and high-priority event selection (#175) landed. An encoded event-overhead guard now covers the 16-event cap; the NetServer-level
-allocation guard remains open.
+queue eviction (#169) and high-priority event selection (#175) landed. Event-buffer capacity reuse and encoded overhead are now covered; a full allocation-counter guard remains open.
 
 Status (2026-10-19): #135 is complete — rules hash/validation/per-kind defaults, finite
 parsing, client/sim vision agreement (#168), explicit modifier validation instead of the
