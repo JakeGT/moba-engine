@@ -7,7 +7,7 @@ A server-authoritative UDP stack: handshake, intent input, visibility-filtered a
 delta-compressed snapshots, a reproducible lossy-link test harness, and measured bandwidth
 inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
 
-## Scope (landed in this round)
+## Scope (landed)
 - **Wire protocol** (`moba-net::protocol`): 26-byte packet header, versioning, packet kinds,
   handshake codecs, quantised commands (1/16 unit), per-client network ids, full/delta
   snapshots with field masks, bounded decoders and a malformed-input fuzz test.
@@ -30,14 +30,14 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   reordering; optional one-way/round-trip shaping.
 - **tools**: `soak` binary (10 clients, 150 ms RTT, 5% loss, 30 ms jitter, default 5 min).
 
-## Non-goals / still open
+## Non-goals / historical limits
 - Server rewind compensation is not needed for the current kit: every aimed ability is a
   traveling projectile and basic attacks are server-targeted, so aim is not resolved
   against a stale snapshot. Revisit if hitscan abilities are added.
-- Sanitizer-backed fuzzing (e.g. cargo-fuzz/ASan) remains open; the deterministic one-hour
-  wire fuzzer is the current gate.
-- HUD/fog/scoreboard and the wider match flow landed in M6; per-client content updates remain
-  an M8 item.
+- Sanitizer-backed fuzzing landed in #117 (`fuzz/` + `fuzz.yml`); the deterministic fuzzer
+  remains the fast local gate.
+- HUD/fog/scoreboard and the wider match flow landed in M6; per-client content updates landed
+  as the protocol-v24 `ContentUpdate` packet.
 
 ## Acceptance tests
 - [x] Protocol round-trips, bounds checks and 5k-byte fragmented datagrams.
@@ -52,8 +52,8 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
 - [x] Prediction/reconciliation tests and interpolation tests.
 - [x] Networked client renders server snapshots and predicts the local hero; readback
       capture with validation enabled.
-- [x] Wire fuzzer: final v12 one-hour run, 2,384,035,000 decoder iterations clean (plus a
-      clean v11 one-hour run).
+- [x] Wire fuzzer: final v12 one-hour run, 2,384,035,000 decoder iterations clean (historical),
+      plus current cargo-fuzz `wire`/`replay`/`content` targets and workflow.
 - [~] Lag compensation: N/A for traveling projectiles/server-targeted attacks; documented.
 
 ## Netcode decisions (checked against prior art)
@@ -81,7 +81,7 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 [Valve lag compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation),
 [RFC 1982 serial arithmetic](https://www.rfc-editor.org/rfc/rfc1982).
 
-## Protocol v13–v16 catalogue/event contract
+## Protocol catalogue/event contract (v13–v25)
 - `Welcome` carries one complete `WireCatalog` (manifest, items, heroes, abilities, map
   structures/walls) built only by `From<&GameContent>`; clients reconstruct it and verify
   `GameContent::hash`.
@@ -97,6 +97,8 @@ References: [snapshot interpolation](https://www.gafferongames.com/post/snapshot
 - v23 carries the map display name for selection/rotation.
 - v24 adds a full catalogue ContentUpdate packet for between-match hot reload.
 - v25 carries the built-in map visual theme id.
+- v24 catalogue updates replace the full catalogue in Lobby/Results; clients verify the hash,
+  reset catalogue-dependent state and reconnect prediction.
 - Abilities carry kind/cast range/radius/duration for HUD range and radius overlays.
 - Stale protocol clients receive an explicit `Disconnect` reason instead of a silent drop.
 

@@ -1,12 +1,32 @@
 # Audit remediation plan — 2026-10-18
 
-Status: **executing** (W0–W3 complete; W4/W5 partial)  
+Status: **actionable waves complete; blocked on external resources** (2026-10-19)
 Tracking issue: [#46](https://github.com/JakeGT/moba-engine/issues/46)  
-Scope: all open GitHub issues as of 2026-10-18, especially the audit findings #23–#45.
+Scope: all audit findings #23–#45 from 2026-10-18.
+
+## Execution result (2026-10-19)
+
+W0–W3 and all actionable W4/W5 work landed and shipped in `v0.2.0`:
+#7, #8, #10–#20, #22–#44 (excluding external-resource items) are closed with tests/evidence.
+Current contract: protocol **v25**, replay **v5**, simulation logic **v6**, **248 tests**, golden
+state hash `0x1923e3d7f3392604`, golden render workflow green.
+
+Two exit items remain and are deferred rather than claimed:
+
+- **#9 / #127 — real Windows/macOS GPU results.** Linux/NVIDIA is complete (RTX 5070 Ti,
+  p95 4.197 ms, max 4.538 ms, validation clean). The hosted macOS runner records p95
+  **16.945 ms** (misses the 6.9 ms target) and the hosted Windows runner has no Vulkan device
+  (`VK_ERROR_INCOMPATIBLE_DRIVER`). This needs real platform hardware or a revised acceptance
+  decision; see `docs/perf/0007-real-hardware.md`.
+- **#21 — crates.io publication.** Metadata, package inspection, branch protection and tagged
+  GitHub release artifacts are complete. `publish = false` is intentional and no registry
+  token/ownership exists in this environment. Publication order/policy is in `RELEASE.md`.
+
+Do not treat this plan as fully exit-complete until those two items are resolved.
 
 This plan fixes the reported correctness, security, performance, compatibility and
 extensibility problems in an order that avoids accumulating incompatible replay/protocol
-changes. It does **not** treat the engine as 0.1-complete until the exit gates below are met.
+changes. It does **not** treat the engine as complete until the exit gates below are met.
 
 ## Principles
 
@@ -188,22 +208,23 @@ Order matters: golden image first, then structural refactors it can protect.
   truncation counter/tests; main.rs <600 lines.
 - [x] **#43 UI hit-testing:** widget rect registry, focus-based input, mouse shop/minimap/
   tooltips, no HUD click becomes `MoveTo`.
-- [ ] **#44 textured UI:** UV/texture atlas, offline glyph/icon bake, no client ttf-parser,
+- [x] **#44 textured UI:** UV/texture atlas, offline glyph/icon bake, no client ttf-parser,
   golden image and validation evidence.
 - [x] **#7 skinning/animation** after asset/model work (procedural animated hero rig; GPU joint skinning remains a future optimization).
 - [x] **#12 asset/model mappings + per-map rendering**, linked to #44/#7.
-- [ ] **#19 settings/remapping/UI scale** after #42/#44 layout seams.
+- [x] **#19 settings/remapping/UI scale** after #42/#44 layout seams.
 - [x] **#18 audio** consuming #41 presentation events.
 - [x] **#20 map selection** after #40/#10/#39.
 - [x] **#10 per-client content updates** after #40/#20 (protocol bump documented).
 - [x] **#11 manifest signing/attestation** (content/security).
-- [ ] **#9 hardware/min-spec + Windows/macOS renderer validation** after #32.
+- [ ] **#9 hardware/min-spec + Windows/macOS renderer validation** after #32 — deferred to
+  #127/platform hardware; Linux/NVIDIA evidence complete.
 
 **W4 exit**
 - [x] Golden image stays unchanged through HUD refactors (or changes deliberately).
 - [x] Zero validation/sync messages; HUD allocation test green.
 - [x] UI clicks never leak to world commands.
-- [ ] Screenshot gallery updated with new UI/visuals.
+- [x] Screenshot gallery updated with new UI/visuals.
 
 ---
 
@@ -230,9 +251,10 @@ Order matters: golden image first, then structural refactors it can protect.
 ### Repo/release
 - [x] **#36 branch protection:** require PRs, `gates` (3 OS), `deny`, `miri`, `tools`; linear
   history; enable Dependabot security/groups; triage #1–#6 (rebase/hold per issue).
-- [ ] **#21 crates.io packaging/API metadata/semver checks/first tag**; attach artifacts.
+- [ ] **#21 crates.io packaging/API metadata/semver checks/first tag**; artifacts shipped
+  (`v0.2.0`), registry publication deferred on credentials/ownership.
 - [x] **#35 nightly/manual gates** (fuzz/soak/release/bench) with artifacts.
-- [ ] **#45 extensibility roadmap** kept as a map, not a work item; update when waves land.
+- [x] **#45 extensibility roadmap** kept as a map, not a work item; updated as waves land.
 
 **W5 exit**
 - [x] Branch protection rejects direct pushes/red PRs.
@@ -271,22 +293,22 @@ Order matters: golden image first, then structural refactors it can protect.
 
 | Issue | Wave | Depends on / notes |
 |---|---|---|
-| #7 skinning | W4 | #12 assets, #44 renderer |
+| #7 skinning | W4 ✅ | animated rig landed; GPU joint-weight meshes future |
 | #8 golden-image CI | W4 (start W1) | #32; protects #42/#44 |
-| #9 hardware/OS renderer | W4 | #32 |
+| #9 hardware/OS renderer | W4 (deferred) | #127; needs Windows/macOS GPU hardware |
 | #10 per-client content updates | W4 | #40, #20 |
 | #11 manifest signing | W5 | #31 content schema |
-| #12 assets/per-map rendering | W4 | #44, #7 |
+| #12 assets/per-map rendering | W4 ✅ | themes landed; real meshes future |
 | #13 scripting hooks | W3 | #38 |
 | #14 account/key transparency | W5 | parallel after W1 |
 | #15 sanitizer fuzzing | W5 | #28, #27 |
 | #16 Loom | W5 | parallel after W1 |
 | #17 bot balance | W3/W5 | #39 |
 | #18 audio | W4/W5 | #41 |
-| #19 settings/remapping | W4 | #42/#44 |
+| #19 settings/remapping | W4 ✅ | #113/#114/#115 |
 | #20 map selection | W4 | #40, #10/#39 |
-| #21 publishing | W5 | #36, #35, #37 |
-| #22 ttf-parser | W5 | #44 may remove client path; winit chain remains |
+| #21 publishing | W5 (deferred) | artifacts ready; needs registry credentials/ownership |
+| #22 ttf-parser | W5 ✅ | removed via winit no-title CSD feature |
 | **#23 shop replay** | **W0/W1** | replay v5; #27 |
 | **#24 haste/slow** | **W0** | regression tests |
 | **#25 cast range** | **W0** | behavior/docs/content-check |
@@ -326,8 +348,8 @@ Order matters: golden image first, then structural refactors it can protect.
    bump; do not merge #40 and #38 simultaneously.
 5. **W5 branch protection:** require the five checks above; allow admin bypass only for
    documented emergencies.
-6. **Release scope:** treat 0.1 as the current preview and cut **0.2** after W2/W5 rather than
-   blocking the audit fixes on the full W3/W4 roadmap.
+6. **Release scope:** `0.2.0` was cut after the audit work landed; the next release should wait
+   for the #9/#21 decisions rather than reopening closed behavior.
 
 ## Per-wave quality gates
 

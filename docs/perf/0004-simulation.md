@@ -1,6 +1,6 @@
 # Performance log — M4 simulation
 
-Measured 2026-10-17, release profile, 16-logical-core Linux, criterion 0.7. Each criterion
+Measured 2026-10-17, release profile, 16-logical-core Linux, criterion 0.7. Historical capture; re-run the benches before quoting current absolute numbers. Each criterion
 sample simulates **300 ticks**; per-tick numbers divide by 300.
 
 | Bench | 300 ticks | Per tick |

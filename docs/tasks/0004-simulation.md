@@ -9,7 +9,8 @@ running far inside the 2 ms/tick budget.
 
 ## Scope (landed)
 - **game**: data tables for 5 heroes, 15 abilities, minion/tower/nexus stats, a symmetric
-  three-lane 256×256 map, and integer damage mitigation.
+  three-lane default 256×256 map (runtime packs may change extent/theme/rules), and integer
+  damage mitigation.
 - **nav**: deterministic fixed-cell spatial grid (returns exact-radius candidates) used for
   target acquisition; lane waypoints live with the map.
 - **sim**: archetype ECS state; integer/fixed-point maths; commands (`MoveTo`, `Attack`,

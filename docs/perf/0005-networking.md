@@ -1,6 +1,8 @@
 # Performance log — M5 networking
 
-Measured 2026-10-17 on loopback with the `moba-net` soak test and `moba-tools` soak binary.
+Historical benchmark measured 2026-10-17 on protocol v12. Current protocol is v25; the extra
+catalogue/rules/map/theme fields are small or handshake-only, but re-run the soak before
+quoting absolute numbers for a current release.
 Each client traverses an independent `moba-netsim` UDP proxy adding 75 ms one-way latency,
 30 ms uniform jitter and 5% independent packet loss (≈150 ms RTT).
 
@@ -95,7 +97,7 @@ and fixed-composition sweeps should be used before changing balance.
 One-hour release runs of `fuzz-wire` completed with no panic or decoder hang:
 
 - protocol v11 shape: **2,476,647,000 iterations clean**
-- final protocol v12 shape (client-identity fields + `Challenge`): **2,384,035,000 iterations
+- historical protocol v12 shape (client-identity fields + `Challenge`): **2,384,035,000 iterations
   clean**
 
 ## Final 10-client lossy soak (round 58)

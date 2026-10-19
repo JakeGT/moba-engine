@@ -5,10 +5,17 @@ default:
     @just --list
 
 # Everything CI runs on all three OSes.
-ci-core: fmt-check clippy test layering doc features state-hash-check
+ci-core: docs-check fmt-check clippy test layering doc features state-hash-check
 
 # Full local gate (adds supply-chain checks).
 ci: ci-core deny ci-tools
+
+docs-check:
+    ./scripts/check-docs.sh
+
+# Portable one-shot agent gate (works without just/nextest).
+agent-check:
+    ./scripts/agent-verify.sh
 
 fmt-check:
     cargo fmt --all --check
@@ -83,6 +90,16 @@ bench-compare:
 # Five-minute ten-client network soak (150 ms RTT, 5% loss, 30 ms jitter).
 soak:
     cargo run --release -p moba-tools --bin soak -- --seconds 300
+
+# Sanitizer-backed cargo-fuzz targets (nightly + cargo-fuzz required).
+fuzz:
+    cargo +nightly fuzz run wire -- -max_total_time=60
+    cargo +nightly fuzz run replay -- -max_total_time=60
+    cargo +nightly fuzz run content -- -max_total_time=60
+
+# Bounded job-scope Loom model.
+loom:
+    RUSTFLAGS="--cfg loom" cargo test -p moba-jobs --lib loom -- --test-threads=1
 
 # Deterministic wire-decoder fuzzing (default one hour; pass seconds for CI).
 fuzz-wire:

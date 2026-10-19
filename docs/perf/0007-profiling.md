@@ -33,11 +33,12 @@ Reproduce: `cargo bench -p moba-sim --bench tick`
 
 ## Allocation hot-path guard
 
-`cargo test -p moba-sim --test allocations` counts global allocator calls across 300 warm
-steady-state ticks. It exposed a per-tick heap `Vec` used only to alternate command order;
-replacing it with a fixed stack array reduced the measured window from **312 allocations /
-24,490 bytes** to **1 allocation / 192 bytes** (and **10 / 1,920** on the isolated all-modifier path). The test now enforces <=30 allocations and
-<=4 KiB.
+`cargo test -p moba-sim --test allocations` counts global allocator calls across warm, serialized
+300-tick windows (steady/teamfight/respawn/shop/status/wave). The tests enforce per-scenario
+budgets; all six pass on the current tree. A per-tick heap `Vec` used only to alternate command
+order was replaced by a fixed stack array (historical capture: 312 allocations / 24,490 bytes
+reduced to 1 / 192 on the steady path). `crates/net/tests/snapshot_allocations.rs` separately
+requires **zero** allocations for 300 steady build+encode iterations.
 
 ## Interpretation
 

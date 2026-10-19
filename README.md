@@ -3,9 +3,10 @@
 [![CI](https://github.com/JakeGT/moba-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/JakeGT/moba-engine/actions/workflows/ci.yml)
 [![Issues](https://img.shields.io/github/issues/JakeGT/moba-engine)](https://github.com/JakeGT/moba-engine/issues)
 
-A server-authoritative multiplayer MOBA engine written in Rust and Vulkan.
+A server-authoritative multiplayer MOBA engine written in Rust and Vulkan. Current contract:
+wire protocol **v25**, replay format **v5** (simulation logic **v6**), workspace **0.2.0**.
 
-> **Status: preview (0.1).** The engine is playable end-to-end — dedicated server, UDP
+> **Status: preview (0.2.0).** The engine is playable end-to-end — dedicated server, UDP
 > netcode, deterministic simulation, Vulkan client with HUD and fog of war — but the public
 > API is pre-1.0 and content packs are validated runtime TOML. See [API stability](docs/API-STABILITY.md).
 
@@ -20,11 +21,11 @@ spectator camera, status effects and runtime-content examples.
 
 | Area | Capability |
 |---|---|
-| Simulation | Deterministic 30 Hz 5v5 MOBA, three lanes, towers/nexus, 5 heroes × 3 abilities, minions, bots, respawns, levels/XP, gold, items and a shop |
-| Networking | Custom UDP protocol: handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, local-hero prediction, remote interpolation and a lossy-link conditioner |
-| Client | Vulkan 1.2 renderer with instanced units, wall LOS/fog, bitmap HUD with FPS/frame timing, paginated shop, Tab scoreboard, controls and free-pan spectator camera |
+| Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, rules, levels/XP, gold, items and shop |
+| Networking | Custom UDP protocol (v25): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
+| Client | Vulkan 1.2 renderer with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri, layered architecture, 245 tests, wire fuzzing and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 248 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -84,10 +85,14 @@ Servers with repeated `--items FILE` rotate maps between empty-lobby matches and
 selected map. Client identity keys can be rotated/revoked with `--rotate-client-key OLD:NEW` and
 `--revoke-client-key KEY`. Signed packs can be required with `--require-content-attestation --content-publisher HEX`
 (see `docs/content-authoring.md`).
-(connected clients keep their handshake catalogue until they reconnect).
 Names are 1–16 ASCII bytes, costs must be positive, packs hold at most 16 items, 8 heroes, 24 abilities, 4 lanes and 32 structures, and hero ability slots reference
-catalogue ids. See
-[content/example-pack.toml](content/example-pack.toml) and [content/ability-pack.toml](content/ability-pack.toml) and [content/map-pack.toml](content/map-pack.toml) and
+catalogue ids. Packs can select a built-in map theme, carry an Ed25519 publisher
+attestation and rotate between empty-lobby matches. See
+[content/example-pack.toml](content/example-pack.toml),
+[content/ability-pack.toml](content/ability-pack.toml),
+[content/map-pack.toml](content/map-pack.toml),
+[content/1v1-mid.toml](content/1v1-mid.toml),
+[content/aram.toml](content/aram.toml) and
 [content authoring](docs/content-authoring.md).
 
 ### Server configuration
@@ -226,7 +231,7 @@ the extension points.
 Add the umbrella crate for a headless tool/server:
 
 ```toml
-moba-engine = { version = "0.1", default-features = false, features = ["sim", "net"] }
+moba-engine = { version = "0.2", default-features = false, features = ["sim", "net"] }
 ```
 
 or take individual crates (`moba-sim`, `moba-net`, …) for a narrower dependency graph.
@@ -260,14 +265,16 @@ More embedding patterns (custom ECS systems, content, server hosting, replays) a
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo doc --workspace --no-deps
-just soak          # five-minute 10-client lossy soak
-just fuzz-wire     # one-hour deterministic wire fuzzing
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+scripts/agent-verify.sh          # portable fast gate
+scripts/agent-verify.sh --full   # release/features/Loom/soak/fuzz
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow, layering rules and review
-expectations. Agent-facing development instructions are in [AGENTS.md](AGENTS.md); unfinished
-work is tracked in [GitHub Issues](https://github.com/JakeGT/moba-engine/issues).
+expectations. Agent-facing instructions are in [AGENTS.md](AGENTS.md) and the operational
+runbook [docs/agents.md](docs/agents.md). Current status and known blockers are in
+[docs/status.md](docs/status.md); unfinished work is tracked in
+[GitHub Issues](https://github.com/JakeGT/moba-engine/issues).
 
 ## Security
 

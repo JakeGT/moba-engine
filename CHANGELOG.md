@@ -6,9 +6,9 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-10-18
-
 ### Added
+- Rules `team_size`/`bot_fill` (protocol v20), 1v1-mid and ARAM example packs, and
+  `match-soak --content` replay verification.
 - Procedural animated hero rig (multi-part cubes; deterministic tick pose, cube fallback for
   minions/structures) and updated golden fingerprint/gallery capture.
 - `MOBA_FRAME_LOG`/`MOBA_VSYNC` benchmark path and real NVIDIA 1080p p95/max timings.
@@ -35,8 +35,13 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - Rules now carry level cap, XP curve and minion/tower/nexus vision (protocol v21); client HUD
   no longer imports `LEVEL_CAP`, `xp_to_next` or minion/tower vision constants.
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
-- Rules `team_size`/`bot_fill` (protocol v20), 1v1-mid and ARAM example packs, and
-  `match-soak --content` replay verification.
+
+### Changed
+- Documentation/agentic-coding refresh: current contract versions, status/plan/task evidence, README, perf logs, release/contributing guidance and an operational `docs/agents.md` runbook with `scripts/agent-verify.sh`.
+
+## [0.2.0] — 2026-10-18
+
+### Added
 - `[rules]` content section for hero respawn (base + per-level) and wave cadence; hashed,
   protocol v19 and wired into simulation bounds.
 - Map `extent` in content, hash/wire (protocol v18) and simulation bounds; client camera,

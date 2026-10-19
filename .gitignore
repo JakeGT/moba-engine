@@ -4,3 +4,13 @@
 .claude/settings.local.json
 .claude/worktrees/
 agents.local.md
+
+# Fuzz build output and crash corpora
+/fuzz/target
+/fuzz/artifacts
+
+# Local run artifacts
+/frame.log
+/frame.ppm
+/match.mbr
+/match.jsonl

@@ -251,14 +251,18 @@ vision_range = 14.0
 
 `[map] theme` selects a built-in visual palette; unknown themes fail validation. All rules are optional (defaults shown), validated and hashed/carried in the handshake.
 `team_size` is 1..=5; `bot_fill = false` leaves empty player slots empty. Example packs:
-`content/1v1-mid.toml`, `content/aram.toml`. Servers rotate packs when repeated `--items`
-paths are supplied (empty-lobby rotation); both are exercised by
-`cargo test -p moba-sim --test mode_packs`. Minion/tower stat blocks are not yet exposed.
+`content/1v1-mid.toml`, `content/aram.toml`; both are exercised by
+`cargo test -p moba-sim --test mode_packs`. Servers rotate packs when repeated `--items`
+paths are supplied (empty-lobby rotation). Minion/tower combat stat blocks are exposed under
+`[rules.melee_minion]`, `[rules.ranged_minion]`, `[rules.tower]` and `[rules.nexus]`.
 
 ## Maps
 
 ```toml
 [map]
+name = "1v1 Mid"
+theme = "stone"        # grass | stone | snow | desert | arcane
+extent = 128
 blue_spawn = [16, 64]
 red_spawn = [112, 64]
 

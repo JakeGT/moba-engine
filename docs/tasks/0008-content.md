@@ -1,6 +1,6 @@
 # 0008: Content pipeline (M8)
 
-**Milestone:** M8   **Crates:** game, sim, net, server, client   **Status:** in progress (core pipeline landed; see Next)
+**Milestone:** M8   **Crates:** game, sim, net, server, client   **Status:** complete (runtime content, updates, attestation, themes)
 
 ## Goal
 Let creators add and tune game content without forking simulation code, while keeping
@@ -43,14 +43,22 @@ deterministic playback and server authority.
 - Per-hero level-growth stats in content (health/mana/damage/armour/MR), with defaults.
 - Hot reload: `--reload-content` broadcasts a protocol-v24 catalogue update in Lobby/Results;
   connected clients atomically replace items/heroes/abilities/map/vision state and reconnect
-  prediction. Live `Playing` matches are never hot-swapped. Test covers reload with zero clients.
+  prediction. Live `Playing` matches are never hot-swapped. Tests cover empty-lobby reload,
+  mid-match deferral, update round-trip and tamper rejection.
 
-## Next
-- Per-client content-update packets (connected clients currently keep their handshake pack).
-- Manifest signing/attestation for third-party pack distribution.
-- Asset/model mappings and per-map rendering.
-- Scripting hooks and more code-driven behaviours (projectile arcs, summons, auras).
-- Larger content-pack compatibility/fuzz fixtures.
+## Completed after the initial pipeline
+- Per-client catalogue updates (`ContentUpdate`, protocol v24) in Lobby/Results; no live
+  simulation hot-swap.
+- Manifest signing/attestation (`content-sign`, `content-check --require-attestation`, server
+  pinned-publisher enforcement).
+- Per-map visual themes, map names and empty-lobby rotation.
+- 1v1/ARAM/mode rules, team size/bot fill, minion/tower stats, vision/XP rules.
+- Content-fuzz target and deterministic mode-pack replay tests.
+
+## Future work (not blocking M8)
+- Real asset meshes/materials and GPU skinning assets.
+- Scripting hooks and more code-driven behaviours (summons, auras, complex triggers).
+- Larger content-pack compatibility/version-migration fixtures.
 
 ## References
 - [Data-driven RPG architecture](https://codesmith.hashnode.dev/architecting-a-data-driven-rpg-in-c)
