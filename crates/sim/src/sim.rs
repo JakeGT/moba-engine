@@ -2549,7 +2549,7 @@ impl Simulation {
             self.world.query::<(&Team, &UnitKind, &Position, &Health)>()
         {
             let slot = entity.index() as usize;
-            if slot >= 1024 {
+            if slot >= MAX_UNITS {
                 continue;
             }
             let index = team.index();
@@ -2580,7 +2580,7 @@ impl Simulation {
 
     fn visible_to(masks: &[u64; 16], team: Team, entity: Entity) -> bool {
         let slot = entity.index() as usize;
-        slot < 1024 && masks[team.index() * 8 + slot / 64] & (1 << (slot % 64)) != 0
+        slot < MAX_UNITS && masks[team.index() * 8 + slot / 64] & (1 << (slot % 64)) != 0
     }
 
     fn nearest_enemy(
@@ -3048,6 +3048,21 @@ mod tests {
         let before = sim.state_hash();
         sim.set_bot_mask(0x3FF);
         assert_eq!(sim.state_hash(), before);
+    }
+
+    #[test]
+    fn visibility_masks_reject_out_of_range_entity_indices() {
+        let masks = [u64::MAX; 16];
+        assert!(!Simulation::visible_to(
+            &masks,
+            Team::Blue,
+            Entity::from_parts(MAX_UNITS as u32, 1),
+        ));
+        assert!(Simulation::visible_to(
+            &masks,
+            Team::Red,
+            Entity::from_parts((MAX_UNITS - 1) as u32, 1),
+        ));
     }
 
     #[test]
