@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v25**, replay **v5**, simulation logic **v6**,
-**252 tests**.
+**253 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -195,6 +195,10 @@ the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089
 ### C-5. #135/#151 integration checks
 - Keep the content-hash/validation and hash-coverage work from S-2 as the single source of
   truth; no separate ad-hoc fix.
+
+Status (2026-10-19): #138 hidden event endpoints, unseen attack orders, stale teams after
+reload and reload/occupied-slot rejection landed in #171. A reload team-size integration test
+remains open.
 
 Status (2026-10-19): client snapshot sequencing (clone only on a new seq), map-extent minimap
 clicks, removal of the unwired ability hit region and UI-scale finiteness landed in #170.
