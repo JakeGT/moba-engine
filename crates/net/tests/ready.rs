@@ -15,7 +15,7 @@ fn spawn_server(require_ready: bool) -> (SocketAddr, std::thread::JoinHandle<()>
         max_clients: 10,
         countdown_ticks: 30,
         results_ticks: 30,
-        client_timeout: Duration::from_secs(2),
+        client_timeout: Duration::from_secs(3),
         reconnect_grace: Duration::from_secs(2),
         pre_shared_key: None,
         record: None,

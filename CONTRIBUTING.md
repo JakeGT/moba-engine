@@ -115,7 +115,7 @@ it. Renderer/content/security work has component labels and milestone groups.
 `main` is protected: direct pushes, force-pushes and deletion are blocked, history must be
 linear, and every change lands through a pull request (squash or rebase merge) once the
 required CI checks pass: `gates` on Linux, Windows and macOS, `tools + deterministic soak`,
-`deny` and `miri`. Branches must be up to date with `main` before merging. Release tags
+`release tests + doctests`, `MSRV (1.85)`, `renderer-gate`, `deny` and `miri`. Branches must be up to date with `main` before merging. Release tags
 (`v*`) cannot be moved or deleted. If you rename a CI job, update the required checks in the
 repository ruleset in the same PR.
 

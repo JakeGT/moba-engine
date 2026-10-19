@@ -26,6 +26,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The toolchain pin is deliberately floating; release/MSRV jobs own the version gate.
+      - dependency-name: "dtolnay/rust-toolchain"
     groups:
       actions:
         patterns:

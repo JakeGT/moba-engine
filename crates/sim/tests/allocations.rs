@@ -4,16 +4,39 @@
 //! should not allocate per frame; a small growth allowance covers first-use lazy paths.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use moba_sim::{Modifier, ModifierKind, Modifiers, SimConfig, Simulation, UnitKind};
 
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
+// Per-thread counters: parallel integration tests, test harness threads and the job pool
+// cannot pollute the measured window. `try_with` is used because the allocator may run after
+// a thread's TLS has been destroyed.
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static BYTES: Cell<usize> = const { Cell::new(0) };
+}
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn count(allocation: bool, bytes: usize) {
+    let _ = ALLOCATIONS.try_with(|counter| {
+        if allocation {
+            counter.set(counter.get().saturating_add(1));
+        }
+    });
+    let _ = BYTES.try_with(|counter| counter.set(counter.get().saturating_add(bytes)));
+}
+
+fn reset_counters() {
+    let _ = ALLOCATIONS.try_with(|counter| counter.set(0));
+    let _ = BYTES.try_with(|counter| counter.set(0));
+}
+
+fn counters() -> (usize, usize) {
+    (ALLOCATIONS.with(Cell::get), BYTES.with(Cell::get))
+}
 
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     TEST_LOCK
@@ -21,12 +44,11 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-// SAFETY: delegates every operation to the system allocator and only wraps it with atomic
-// counters that do not affect pointer validity or alignment.
+// SAFETY: delegates every operation to the system allocator and only wraps it with
+// thread-local counters that do not affect pointer validity or alignment.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        count(true, layout.size());
         // SAFETY: layout came from the caller of the global allocator and is forwarded as-is.
         unsafe { System.alloc(layout) }
     }
@@ -37,8 +59,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
+        count(true, new_size.saturating_sub(layout.size()));
         // SAFETY: pointer/layout are the pair supplied by the allocator caller.
         unsafe { System.realloc(pointer, layout, new_size) }
     }
@@ -54,13 +75,11 @@ fn steady_state_ticks_do_not_allocate_per_frame() {
     for _ in 0..3_000 {
         simulation.tick_with_bots();
     }
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for _ in 0..300 {
         simulation.tick_with_bots();
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("steady ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
         allocations <= 2,
@@ -118,13 +137,11 @@ fn status_modifier_ticks_stay_within_budget() {
     for _ in 0..300 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for _ in 0..300 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("modifier ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
         allocations <= 2,
@@ -145,13 +162,11 @@ fn wave_spawn_ticks_stay_within_budget() {
     for _ in 0..2_700 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for _ in 0..300 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("wave ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
         allocations <= 8,
@@ -167,13 +182,11 @@ fn teamfight_ticks_stay_within_budget() {
     for _ in 0..3_000 {
         simulation.tick_with_bots();
     }
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for _ in 0..300 {
         simulation.tick_with_bots();
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("teamfight ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
         allocations <= 2,
@@ -207,13 +220,11 @@ fn respawn_ticks_stay_within_budget() {
     for _ in 0..10 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for _ in 0..900 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("respawn ticks: {allocations} allocations, {bytes} bytes over 900 ticks");
     assert!(
         allocations <= 2,
@@ -238,15 +249,13 @@ fn shop_ticks_stay_within_budget() {
         inputs.set_purchase(0, 0);
         simulation.tick(&inputs);
     }
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
+    reset_counters();
     for _ in 0..300 {
         let mut inputs = moba_sim::TickInputs::new();
         inputs.set_purchase(1, 1);
         simulation.tick(&inputs);
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    let bytes = BYTES.load(Ordering::Relaxed);
+    let (allocations, bytes) = counters();
     eprintln!("shop ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
     assert!(
         allocations <= 2,

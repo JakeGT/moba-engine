@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +23,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo run --release -p moba-tools --bin soak -- --seconds 300 2>&1 | tee soak.log
+          cargo run --release --locked -p moba-tools --bin soak -- --seconds 300 2>&1 | tee soak.log
+        shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -38,7 +40,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 3600 2>&1 | tee fuzz.log
+          cargo run --release --locked -p moba-tools --bin fuzz-wire -- --seconds 3600 2>&1 | tee fuzz.log
+        shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -54,7 +57,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo bench --workspace -- --noplot 2>&1 | tee bench.log
+          cargo bench --workspace --locked -- --noplot 2>&1 | tee bench.log
+        shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -91,9 +95,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo run --release -p moba-tools --bin match-soak -- --matches 50 --ticks 36000 2>&1 | tee match-soak.log
+          cargo run --release --locked -p moba-tools --bin match-soak -- --matches 50 --ticks 36000 2>&1 | tee match-soak.log
+        shell: bash
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: match-soak-log
           path: match-soak.log
+
+  notify-failure:
+    name: open/refresh nightly failure issue
+    needs: [soak, fuzz, bench, macos-vulkan, match-soak]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly hardening failed (${context.runId})`,
+              body: `Nightly workflow failed.\n\nRun: ${url}\n\nCheck the soak/fuzz/bench/macOS/match-soak artifacts before rerunning.`,
+              labels: ['infrastructure', 'p1'],
+            });

@@ -203,7 +203,8 @@ than asserting a win. Do not copy stale numbers from old docs without re-running
 6. Commit with conventional messages (`feat(area): ...`, `fix(area): ...`, `docs: ...`).
 7. Open a PR using `.github/PULL_REQUEST_TEMPLATE.md`; include commands and evidence.
    `main` is protected (no direct/force pushes; required checks `gates` ×3 OS,
-   `tools + deterministic soak`, `deny`, `miri`; linear history). Use a body file for Markdown
+   `tools + deterministic soak`, `release tests + doctests`, `MSRV (1.85)`, `renderer-gate`,
+   `deny`, `miri`; linear history). Use a body file for Markdown
    with backticks. Renaming a CI job requires updating the ruleset's required checks.
 8. Watch checks, squash-merge, delete the branch, then `fetch` + `reset --hard origin/main`.
 9. Do not mark an issue complete while any acceptance criterion lacks linked evidence.
@@ -211,7 +212,7 @@ than asserting a win. Do not copy stale numbers from old docs without re-running
 Manual workflows:
 
 ```bash
-gh workflow run render-golden.yml --repo JakeGT/moba-engine --ref main
+gh workflow run render-golden.yml --repo JakeGT/moba-engine --ref main  # manual full renderer gate
 gh workflow run macos-frame.yml --repo JakeGT/moba-engine --ref main
 gh workflow run macos-vulkan.yml --repo JakeGT/moba-engine --ref main
 gh workflow run windows-probe.yml --repo JakeGT/moba-engine --ref main

@@ -70,8 +70,9 @@ crates.io publication enablement (#21). Everything else in the audit plan has la
   macOS hosted runner recorded p95 16.945 ms; Windows hosted runner has no Vulkan GPU.
 - Release: `v0.1.0` and `v0.2.0` tag workflows build Linux/Windows/macOS archives; crates.io
   publication remains opt-in (`publish = false`, #21).
-- CI: Linux/Windows/macOS gates, Miri, cargo-deny, release tests/doctests, docs link/contract
-  check, golden/fuzz/Loom/platform workflows. Hosted-runner capability limits are documented, not treated as passes.
+- CI: Linux/Windows/macOS gates, Miri, cargo-deny, release tests/doctests, MSRV, no-op/real
+  `renderer-gate`, docs link/contract check, golden/fuzz/Loom/platform workflows. Nightly
+  failures open an issue automatically. Hosted-runner capability limits are documented, not treated as passes.
 
 Screenshots are in [the gallery](screenshots.md). Renderer/network captures use lavapipe and
 headless readback; real-GPU evidence is in [perf/0007](perf/0007-real-hardware.md).
