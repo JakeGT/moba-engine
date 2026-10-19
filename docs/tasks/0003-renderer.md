@@ -24,18 +24,19 @@ without a GPU.
 
 ## Status
 
-Core rendering, fog/LOS, HUD and readback are landed. The 2026-10 audit fixes (portable
-instance enumeration, acquire ordering, capture safety, validation counting) landed in #32;
-golden-image CI, skinning and hardware timing remain open. The open items below are tracked as
-GitHub issues; this task is not exit-complete until they close.
+Core rendering, fog/LOS, textured HUD, map themes, animated hero rig, golden-image CI and
+readback are landed. The 2026-10 audit fixes (portable instance enumeration, acquire ordering,
+capture safety, validation counting) landed in #32; real Windows/macOS GPU timing remains open
+(#9/#127). Linux/NVIDIA timing is recorded below; the task remains partially open only for
+those platform results.
 
 ## Non-goals / still open
-- Skeletal skinning and animation (currently instanced cubes; M6 art pass).
-- Golden-image comparison tolerances and CI wiring for lavapipe.
-- 6.9 ms frame budget measurement on min-spec hardware (software rasteriser numbers are not
-  representative).
-- Bindless texture array (descriptor-indexing features are enabled; textures arrive with
-  the asset pipeline).
+- GPU joint-weight/skeletal meshes and real asset imports (current hero animation uses a
+  deterministic multi-part instance rig; minions/structures remain instanced cubes).
+- 6.9 ms frame-budget validation on real Windows/macOS GPUs (Linux/NVIDIA is measured;
+  hosted macOS misses the target and Windows hosted runners have no Vulkan device).
+- Bindless texture array (one UI atlas is sampled today; descriptor-indexing features remain
+  enabled for a future asset pipeline).
 
 ## Acceptance tests
 - [x] `moba-shaders::modules_are_well_formed_spirv` and build-time `spirv-val`.
@@ -43,13 +44,15 @@ GitHub issues; this task is not exit-complete until they close.
       `MOBA_VULKAN_VALIDATION=required` and emits **zero** validation messages.
 - [x] GPU readback contains the expected scene (2464 distinct colours; terrain, clear
       colour and all three team colours present). See `docs/images/m3-500-units.png`.
-- [ ] Golden-image diff in CI.
-- [ ] Skinned units and frame-time capture.
+- [x] Golden-image diff in CI (`render-golden.yml`, 64×36 fingerprint, validation + sync).
+- [x] Animated hero path, textured UI atlas/icons, map themes and real-GPU frame capture.
 
 ## Budgets touched
-Renderer submission is designed for ≤ 6.9 ms on min-spec GPUs; not yet measured on real
-hardware. Per frame there are two draw calls, two descriptor sets and two host-visible
-buffer writes (camera + instances), with no per-frame allocation in `Renderer::render`.
+Renderer submission targets ≤ 6.9 ms p95. Linux/NVIDIA RTX 5070 Ti at 1920×1080 measured
+p95 **4.197 ms**, max **4.538 ms** with vsync off and zero validation messages. Per frame there
+are terrain/unit/UI draw batches, pre-sized descriptor sets and host-visible buffer writes,
+with no per-frame heap allocation in `Renderer::render`. Windows/macOS real-GPU runs remain
+open (#127).
 
 ## Review log
 | Reviewer | Finding | Verdict | Resolution |

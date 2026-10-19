@@ -33,8 +33,9 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - **Match results log**: optional JSONL append with seed/ticks/score/content/state/replay for
   operators and analytics.
 
-- **Fuzzing**: one-hour wire-decoder runs completed **2,476,647,000 iterations clean** on the
-  v11 shape and **2,384,035,000 iterations clean** on the final v12 shape.
+- **Fuzzing**: historical one-hour wire-decoder runs completed **2,476,647,000 iterations
+  clean** on v11 and **2,384,035,000 iterations clean** on v12. Current protocol v25 uses the
+  deterministic fuzzer plus cargo-fuzz `wire`/`replay`/`content` targets.
 
 ## CI gates
 - Cross-platform fmt/clippy/tests/docs/features/layering and a checked golden state hash.
@@ -54,14 +55,16 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - Final one-hour v12 fuzz and 10-client lossy soak.
 
 ## Still open
-- Account/reputation/key-transparency layer and player-count attestation.
+- 50 concurrent matches per box and independent external review.
+- Account/reputation/key-transparency services remain external integrations (ADR 0006);
+  player-count attestation is designed, not implemented.
 - [x] Sanitizer-backed fuzzing (cargo-fuzz/ASan) in addition to the deterministic fuzzer:
   `fuzz/` targets `wire`, `replay`, `content`; `.github/workflows/fuzz.yml` runs bounded
   nightly/manual sessions and uploads artifacts. Seed corpus lives in `fuzz/corpus/`.
 - [x] Loom model of the job-scope counter (`crates/jobs/src/loom_tests.rs`, `loom.yml`).
 - Balanced demo bots across fixed compositions (current 50-match sample's CI includes even
   odds; larger sweeps are needed).
-- Windows/macOS renderer validation and min-spec frame timings (renderer task).
+- Windows/macOS renderer validation and min-spec frame timings (renderer task #9/#127).
 
 ## Acceptance
 - [x] Wrong-key encrypted handshake is rejected; encrypted reconnect works.
@@ -71,7 +74,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   telemetry.
 - [x] Profiling captures: Criterion snapshot codec + simulation benches recorded in
   `docs/perf/0007-profiling.md`.
-- [x] One-hour wire fuzz on the final v12 shape.
+- [x] One-hour wire fuzz on the historical final v12 shape; current cargo-fuzz targets are in `fuzz/`.
 - [ ] Balanced demo bots across larger fixed-composition sweeps.
 
 ## Security references

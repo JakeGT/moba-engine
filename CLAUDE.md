@@ -1,12 +1,15 @@
 # MOBA Engine — Claude Code entry point
 
-The authoritative agent guide is **[AGENTS.md](AGENTS.md)** (layering, determinism, commands,
-workflow, issue tracker). Machine-specific setup is in `agents.local.md` (gitignored; template
-at `agents.local.example.md`).
+The authoritative agent guide is **[AGENTS.md](AGENTS.md)** (invariants, contract versions,
+commands, workflow, blockers). The operational runbook is **[docs/agents.md](docs/agents.md)**
+(work selection, PR lifecycle, verification matrix, handoff template). Machine-specific setup
+is in `agents.local.md` (gitignored; template at `agents.local.example.md`).
+
+Current contract: workspace **0.2.0**, wire protocol **v25**, replay **v5**, simulation logic
+**v6**, **248 tests**. Use `scripts/agent-verify.sh` (add `--full` for release/features/Loom/
+soak/fuzz) as the default gate; `just` may not be installed.
 
 Claude-specific hooks and reviewer definitions live in `.claude/`:
 `perf-reviewer`, `gpu-safety-reviewer`, `netcode-reviewer` and the rustfmt/cargo-check hook.
-They remain available, but project rules in `AGENTS.md` take precedence if they disagree.
-
-Quick gates: `cargo fmt --all --check`, clippy `-D warnings`, `cargo test --workspace`,
-rustdoc `-D warnings`, plus the content/replay/soak checks relevant to the change.
+Project rules in `AGENTS.md` take precedence if they disagree. Known external blockers:
+#9/#127 (real Windows/macOS GPU results) and #21 (crates.io credentials/ownership).

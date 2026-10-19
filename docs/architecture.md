@@ -94,10 +94,11 @@ No key material is logged. This is a private-server mode, not public identity; s
 `moba-render` owns a Vulkan 1.2 device with dynamic rendering and synchronization2. One
 frame:
 
-- terrain (single procedural grid mesh) and instanced cubes for units;
+- terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes
+  use a deterministic multi-part animated rig, minions/structures use instanced cubes;
 - up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
   darkens unseen ground;
-- a screen-space UI batch (solid quads + built-in 5x7 bitmap font) drawn in the same pass;
+- a screen-space UI batch (solid quads + textured glyph/icon atlas) drawn in the same pass;
 - optional GPU readback capture for deterministic screenshots.
 
 No renderer types leak into simulation or networking. A different renderer only needs
@@ -124,9 +125,10 @@ the authoritative tick (which is single-threaded for determinism).
 | Add custom components/systems | `Simulation::world()`/`world_mut()`; see `docs/building-on-moba.md` |
 | Add server tooling | `moba-tools` binaries or a custom crate depending on `moba-sim`/`moba-net` |
 
-**Extension limit:** content packs cover items, heroes, ability numbers/kinds, growth, maps,
-lanes, structures and vision walls. Asset/model mappings, scripting hooks and live per-client
-content updates are still open (tracked in GitHub Issues).
+**Extension limit:** content packs cover items, heroes, ability numbers/kinds, growth, rules,
+maps, lanes, structures, vision walls, themes, attestations and map rotation. Live per-client
+catalogue updates landed in protocol v24. Real asset meshes/skeletal assets and scripting hooks
+remain future work (tracked in GitHub Issues).
 
 ## Threading model
 
@@ -172,8 +174,11 @@ run periodic area effects. Snapshots also carry a bounded, fog-filtered presenta
 list (casts, projectile spawn/hit, deaths, objectives) for the client kill feed/VFX and audio. The wire catalogue is a complete, destructured projection of
 `GameContent`; the client reconstructs it and verifies `GameContent::hash`. Ability
 behaviour kinds are code-defined, but their numbers and hero bindings come from the pack; map,
-lane, structure and wall geometry are fully data-driven. Packs hot-reload only between matches
-(Lobby/Results), never during a live simulation so connected clients keep a consistent handshake catalogue.
+lane, structure and wall geometry, rules, themes and mode sizes are fully data-driven. Packs
+hot-reload only between matches (Lobby/Results), never during a live simulation; connected
+clients receive a full `ContentUpdate` and atomically replace catalogue-dependent state.
+Optional Ed25519 attestations cover the manifest + content hash, and servers can pin the
+publisher key. Servers may rotate packs between empty-lobby matches.
 
 ## Handshake replay window
 

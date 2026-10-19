@@ -28,9 +28,10 @@ Validation-required capture at the same scene produced zero validation messages;
   with vsync off. That exceeds the 6.9 ms p95 target on the hosted/virtualised runner; the
   artifact and command are retained, and the gap is tracked as follow-up #127 rather than
   claimed as a passing min-spec result.
-- Windows: `windows-probe.yml` could not install `glslang` from Chocolatey on the hosted runner,
-  so no Windows frame result exists; the gate workflow still compiles/tests Windows. Follow-up
-  #127 covers obtaining a Windows GPU/toolchain run.
+- Windows: `#129/#130` fixed the Vulkan SDK/GLSLC PATH and the probe now builds. Run
+  `39174113378` then fails at device creation with `VK_ERROR_INCOMPATIBLE_DRIVER`: the hosted
+  runner has no Vulkan-capable GPU. No Windows frame result exists; follow-up #127 covers a
+  real Windows GPU run.
 - Commands are the same as above with the platform's `VK_ICD_FILENAMES`/MoltenVK ICD path.
 
 ## Headless/low-end path

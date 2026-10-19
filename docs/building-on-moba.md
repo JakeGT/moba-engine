@@ -97,8 +97,9 @@ Runtime packs are TOML validated by `moba-game` and carried by `Welcome`:
 cargo run -p moba-tools --bin content-check -- content/example-pack.toml
 ```
 
-See [content-authoring.md](content-authoring.md). Servers can reload an empty lobby with
-`--reload-content`; connected clients keep their original handshake catalogue.
+See [content-authoring.md](content-authoring.md). Servers can reload between matches with
+`--reload-content`; connected clients receive a protocol-v24 `ContentUpdate` and adopt the
+new catalogue atomically. Live `Playing` matches are never hot-swapped.
 
 ## Embedding the server
 

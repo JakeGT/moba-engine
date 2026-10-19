@@ -7,9 +7,9 @@ A playable 5v5 match from connection to nexus end: legible HUD, fog of war, scor
 levels/items, and a complete match flow.
 
 ## Landed in round 5
-- **UI renderer** (`moba-render::ui`): screen-space batched quads, alpha blending, a built-in
-  5x7 bitmap font (Adafruit-GFX, BSD), no texture/sampler/descriptors, 65,536-vertex budget,
-  drawn in the same dynamic-rendering pass after the 3D scene.
+- **UI renderer** (`moba-render::ui`): screen-space batched quads, alpha blending, then a
+  textured glyph/icon atlas (UV/sampler) with one quad per glyph (Adafruit-GFX-derived 5x7
+  font baked offline), 65,536-vertex budget, drawn after the 3D scene.
 - **HUD**: hero name, health and mana bars, Q/W/E cooldown boxes with remaining seconds,
   match timer, team kill score, slot/ping/snapshot telemetry, control legend, dead-hero
   respawn banner, and a local-preview HUD.
@@ -78,14 +78,16 @@ levels/items, and a complete match flow.
 ## Closeout
 - Hero levels/XP, gold/items/shop, lobby/rematch, reconnect, spectator, ready/surrender,
   minimap, health bars and line-of-sight walls all landed.
-- Audio (procedural, headless-safe) landed in #120; deferred beyond M6: richer targeting affordances. Settings/remapping/UI scale landed in #113 and follow-up settings work.
+- Audio (procedural, headless-safe), settings/remapping/UI scale and the textured HUD landed
+  in #113/#114/#115/#120/#111/#112. M6 remains 🟡 only for a recorded real-network 10-client
+  playtest; richer targeting affordances are future work.
 
 ## Acceptance
 - [x] HUD renders under lavapipe with validation enabled.
 - [x] Fog circles align with server visibility; unseen units are absent and unseen terrain is dark.
 - [x] Tab scoreboard lists allied heroes and hides unseen enemies.
 - [x] Kill credit increments the correct team; outcome travels in snapshots.
-- [x] 239 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
+- [x] 248 workspace tests; protocol/delta tests cover scores, outcome, phase, hero pick,
       progression and reconnect handshake; UDP tests cover shop purchase and slot resumption.
 - [x] Levels/XP, gold/items/shop and lobby-to-rematch flow.
 - [x] Ready-up/surrender, spectator mode and reconnect grace.
@@ -93,7 +95,7 @@ levels/items, and a complete match flow.
       shader, with geometry rendered in the same centered world space.
 
 ## Research notes
-- Small pixel text: a bitmap font is cheaper and crisper than SDF at fixed HUD scales
+- Small pixel text: a 5x7 bitmap font baked into a texture atlas is cheaper and crisper than SDF at fixed HUD scales
   ([Sascha Willems' Vulkan text sample](https://github.com/SaschaWillems/vulkan_slim)); SDF
   becomes worthwhile for arbitrary scale/localisation.
 - Dota-style fog is a visibility mask over the terrain derived from team vision

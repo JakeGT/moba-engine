@@ -23,8 +23,9 @@ is opt-in until crate names/ownership are settled.
    and a short soak/fuzz for affected areas.
 4. **Metadata** — set `repository`, `homepage`/`documentation` and per-crate `readme` when the
    public URL is known; confirm `license`, `keywords`, `categories` and `rust-version`.
-5. **Package dry run** — `cargo package -p <crate> --allow-dirty` for every library crate;
-   inspect the file list and license inclusion. Binaries are not published.
+5. **Package dry run** — `cargo package -p <crate> --allow-dirty` for every library crate
+   (bottom-up; dependent crates cannot package until their internal dependencies are on the
+   registry). Inspect the file list and license inclusion. Binaries are not published.
 6. **Version** — bump `[workspace.package].version`; tag `vX.Y.Z`. Protocol and content changes
    must be called out in the tag notes.
 7. **Artifacts** — push a `vX.Y.Z` tag. `.github/workflows/release.yml` runs release tests,
@@ -36,8 +37,15 @@ is opt-in until crate names/ownership are settled.
 
 ## Tagged release evidence
 
-The 0.1.0 preview tag is `v0.1.0`; the 0.2.0 preview tag is `v0.2.0`; release notes are generated from commits and the three
-platform archives are attached by the release workflow.
+- `v0.1.0`: first preview tag, workflow-built Linux/Windows/macOS archives.
+- `v0.2.0`: current preview (2026-10-18). Release workflow run `39156546938` passed; attached
+  `moba-linux-x86_64.tar.gz`, `moba-macos-aarch64.tar.gz`, `moba-windows-x86_64.zip` and
+  `package-list.txt`. Package-list inspection and release tests passed.
+- Current contract at `v0.2.0` plus follow-ups: workspace 0.2.0, protocol **v25**, replay
+  **v5**, simulation logic **v6**, **248 tests**.
+- Remaining release blocker: **#21** registry publication (ownership + `CARGO_REGISTRY_TOKEN`);
+  `publish = false` is intentional until that is approved. Real Windows/macOS GPU validation
+  is tracked separately in **#9/#127**.
 
 ## Stability tiers
 

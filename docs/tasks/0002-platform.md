@@ -27,7 +27,8 @@ links `winit`; simulation crates stay free of windowing and wall clocks.
 - [x] `input::tests::focus_loss_releases_held_input`: no stuck movement after alt-tab.
 - [x] `input::tests::mouse_and_wheel_accumulate`: mouse state and per-frame wheel delta.
 - [x] Client smoke run (`MOBA_SMOKE_FRAMES=60`) exits 0 after 60 frames on Linux/X11.
-- [ ] Windows and macOS smoke runs (CI matrix; needs the renderer milestone for full value).
+- [~] Windows/macOS client smoke: macOS `macos-frame.yml` runs the client and records a frame
+  log; the hosted Windows runner has no Vulkan device. Real platform GPU validation is #9/#127.
 
 ## Budgets touched
 Input handling is event-driven and allocation-free per event. The loop caps at 240 FPS by

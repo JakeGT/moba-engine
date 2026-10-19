@@ -9,7 +9,8 @@ dual-licensed under MIT OR Apache-2.0, matching the project.
 ## Setup
 
 - Rust **1.85+** (edition 2024). `rust-toolchain.toml` requests the floating `stable` channel;
-  CI additionally checks the 1.85 MSRV job.
+  CI additionally checks the 1.85 MSRV job. Use `scripts/agent-verify.sh` for a portable gate
+  if `just`/`cargo-nextest` are unavailable.
 - A Vulkan **1.2+** driver for the client; `glslc` (Vulkan SDK) or `glslangValidator` to
   compile shaders. The dedicated server and tests need no GPU.
 - Optional: `just` and `cargo-nextest`, which the `justfile` prefers. All gates also work
@@ -37,11 +38,14 @@ cargo run -p moba-server -- --ticks 1000
 ## Gates
 
 ```bash
+scripts/check-docs.sh     # links and contract/test-count consistency
+scripts/agent-verify.sh   # fmt, clippy, tests, docs, layering, state hash, content, fuzz check
+# or explicitly:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-just layering          # or run the cargo tree check described in the justfile
+just layering          # or scripts/agent-verify.sh
 just state-hash-check  # fixed simulation hash must match tests/golden-state-hash.txt
 ```
 
@@ -93,7 +97,8 @@ The PR template mirrors this checklist.
 
 Expect review for correctness, determinism, allocation costs, unsafe proofs, wire
 compatibility and public API. "It works" is not sufficient for hot paths; show the budget or
-benchmark. See `CLAUDE.md` for the detailed engineering workflow and milestone gates.
+benchmark. See [AGENTS.md](AGENTS.md), [docs/agents.md](docs/agents.md) and the reviewer
+prompts in [`.claude/agents/`](.claude/agents) for the detailed workflow and milestone gates.
 
 ## Reporting security issues
 
