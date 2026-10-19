@@ -33,7 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
       - run: |
           cargo run --release --locked -p moba-tools --bin soak -- --seconds ${{ inputs.soak_seconds || '300' }} 2>&1 | tee soak.log
         shell: bash
@@ -52,7 +52,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
       - run: |
           cargo run --release --locked -p moba-tools --bin fuzz-wire -- --seconds ${{ inputs.fuzz_seconds || '3600' }} 2>&1 | tee fuzz.log
         shell: bash
@@ -71,7 +71,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
       - run: |
           cargo bench --workspace --locked -- --noplot 2>&1 | tee bench.log
         shell: bash
@@ -111,7 +111,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
       - run: |
           cargo run --release --locked -p moba-tools --bin match-soak -- --matches ${{ inputs.match_count || '50' }} --ticks 36000 2>&1 | tee match-soak.log
         shell: bash
