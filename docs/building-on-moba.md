@@ -97,6 +97,10 @@ Runtime packs are TOML validated by `moba-game` and carried by `Welcome`:
 cargo run -p moba-tools --bin content-check -- content/example-pack.toml
 ```
 
+Extension systems are not recorded in replays; a server with systems does not write a
+replay file. Keep deterministic mutations in the simulation or resolve them into inputs if
+you need replayability.
+
 A minimal `NetServer` + extension-system example lives at
 [`crates/net/examples/embedding.rs`](../crates/net/examples/embedding.rs) and is compiled by
 `cargo check -p moba-net --examples` / clippy `--all-targets`.
