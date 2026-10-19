@@ -104,6 +104,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - [x] Sim and snapshot allocation tests use per-thread counters; 20 consecutive release
   repeats of each pass.
 - [x] `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` are required checks.
+- [x] Full nightly **39295169028** green with logs; #142 closed.
 - [x] `renderer-gate` runs on every PR (no-op for non-renderer paths) and fully on renderer
   changes/dispatch; macOS MoltenVK probe runs automatically for renderer paths.
 - [x] Network test client timeouts raised to at least 3 s; Dependabot ignores the toolchain pin.
