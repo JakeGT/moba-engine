@@ -622,11 +622,11 @@ impl RawEvent {
 
     fn visible_to(
         &self,
-        viewer: moba_game::Team,
+        __viewer: moba_game::Team,
         spectator: bool,
         units: &[moba_sim::ObservedUnit],
     ) -> bool {
-        if spectator || self.kind == EVENT_MATCH_ENDED || self.team == viewer {
+        if spectator || self.kind == EVENT_MATCH_ENDED {
             return true;
         }
         let visible = |entity: moba_ecs::Entity| units.iter().any(|unit| unit.entity == entity);
@@ -2366,7 +2366,7 @@ mod tests {
             target_slot: 0,
             ..raw
         };
-        assert!(RawEvent::visible_to(
+        assert!(!RawEvent::visible_to(
             &death,
             moba_game::Team::Blue,
             false,
@@ -2732,5 +2732,60 @@ cost = 1
         assert_eq!(result.ticks, 60);
         assert_eq!(result.state_hash, server.simulation().state_hash());
         let _ = std::fs::remove_file(&replay_path);
+    }
+
+    fn observed(entity: moba_ecs::Entity, team: moba_game::Team) -> moba_sim::ObservedUnit {
+        moba_sim::ObservedUnit {
+            entity,
+            kind: UnitKind::Hero,
+            team,
+            position: moba_core::FixVec2::ZERO,
+            health: 100,
+            max_health: 100,
+            mana: 0,
+            max_mana: 0,
+            dead: false,
+            hero_slot: None,
+            hero_pick: 0,
+            cooldowns: [0; 3],
+            level: 1,
+            xp: 0,
+            gold: 0,
+            items: [0xFF; 6],
+            shielded: false,
+            slowed: false,
+            rooted: false,
+            silenced: false,
+            burning: false,
+            hasted: false,
+        }
+    }
+
+    #[test]
+    fn events_with_hidden_endpoints_are_filtered() {
+        let source = moba_ecs::Entity::from_parts(9, 1);
+        let target = moba_ecs::Entity::from_parts(10, 1);
+        let event = RawEvent {
+            kind: EVENT_PROJECTILE_HIT,
+            team: moba_game::Team::Blue,
+            source: Some(source),
+            target: Some(target),
+            source_slot: 0,
+            target_slot: 0,
+            position: moba_core::FixVec2::ZERO,
+            end: moba_core::FixVec2::ZERO,
+            direction: moba_core::FixVec2::ZERO,
+            value: 0,
+            aux: 0,
+            arc: moba_core::Fix::ZERO,
+        };
+        let blue = [observed(source, moba_game::Team::Blue)];
+        assert!(!event.visible_to(moba_game::Team::Blue, false, &blue));
+        let both = [
+            observed(source, moba_game::Team::Blue),
+            observed(target, moba_game::Team::Red),
+        ];
+        assert!(event.visible_to(moba_game::Team::Blue, false, &both));
+        assert!(event.visible_to(moba_game::Team::Blue, true, &blue));
     }
 }
