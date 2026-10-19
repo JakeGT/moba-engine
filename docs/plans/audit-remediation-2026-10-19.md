@@ -132,7 +132,7 @@ replays verify; a stale or mid-match update cannot change the catalogue.
 **Acceptance:** Loom drives `pool.rs`, the injected bug fails, and no reference to the
 scope counter can outlive the scope.
 
-Status (2026-10-19): Arc ownership (#161), blocking wait (#179) and a Loom model driving the real `ScopeShared`/`PendingGuard` types (#182) landed. An early-decrement regression test now covers the original bug shape.
+Status (2026-10-19): **#143 closed** — Arc ownership (#161), blocking wait (#179), real-type Loom (#182) and early-decrement regression (#183) all landed.
 
 ### S-5. Fog-of-war/visibility leaks
 **#138** (security-adjacent information leak).
