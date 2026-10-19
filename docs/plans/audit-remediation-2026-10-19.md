@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v25**, replay **v5**, simulation logic **v6**,
-**251 tests**.
+**252 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -84,6 +84,10 @@ Private advisory: content-pack attestation bypass; **#135**, **#151**.
 - **#151:** destructure every hashed component/content struct (or add a hash trait/derive),
   add a v5 replay fixture, run parity on fully non-default content, and cap replay decode
   allocation with the counting allocator.
+
+Status (2026-10-19): #136 duplicate cast events, per-snapshot event capacity and O(n) pending
+queue removal landed in #169; the NetServer-level allocation guard and teamfight bandwidth
+measurement remain open.
 
 Status (2026-10-19): #135 rules hash/validation/per-kind defaults, finite parsing and
 client/sim vision agreement landed in #168. Haste is bounded to 3×. The modifier-id fallback

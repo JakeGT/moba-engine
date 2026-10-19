@@ -37,6 +37,7 @@ project is pre-1.0, so minor versions may contain breaking API changes (see
 - Deterministic integration tests for the 1v1-mid and ARAM packs (hero counts + replay hashes).
 
 ### Fixed
+- Every cast emits exactly one `AbilityCast`; server event snapshots reuse capacity and pending events use a bounded `VecDeque` (#136).
 - Rules now hash minion/structure `vision_range`, reject non-finite/out-of-range stats with a field-specific error, keep per-unit-kind defaults, and derive the legacy vision fields from the unit stats (#135).
 - Job scope state is reference-counted; `JobRef`/`PendingGuard`/`Scope` no longer hold a
   stack `ScopeShared` pointer (#143).

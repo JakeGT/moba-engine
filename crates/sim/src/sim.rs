@@ -1543,12 +1543,6 @@ impl Simulation {
             ability: slot,
             target,
         });
-        self.push_event(SimEvent::AbilityCast {
-            caster,
-            team,
-            ability: slot,
-            target,
-        });
         for effect in effects.iter() {
             match effect {
                 Effect::None => {}
@@ -2946,6 +2940,47 @@ mod tests {
             })
             .expect("projectile spawned");
         assert_eq!(arc, Fix::from_i32(3));
+    }
+
+    #[test]
+    fn a_cast_emits_exactly_one_cast_event() {
+        let mut content = moba_game::GameContent::default();
+        content.abilities[2].effects.effects[0] = moba_game::Effect::Projectile {
+            speed_per_sec: Fix::from_i32(26),
+            range: Fix::from_i32(11),
+            radius: Fix::ONE,
+            arc: Fix::ZERO,
+            on_hit: moba_game::AreaEffectList::one(moba_game::AreaEffect::Damage {
+                amount: 10,
+                damage_type: moba_game::DamageType::Physical,
+            }),
+        };
+        let mut sim = Simulation::new_with_content(
+            SimConfig {
+                hero_picks: [0; 10],
+                bot_mask: 0,
+                spawn_waves: false,
+                ..SimConfig::default()
+            },
+            std::sync::Arc::new(content),
+        );
+        let blue = sim.hero_entities[0];
+        sim.world.get_mut::<Position>(blue).unwrap().0 = FixVec2::from_ints(100, 100);
+        let mut inputs = TickInputs::new();
+        inputs.set(
+            0,
+            PlayerCommand::CastAbility {
+                slot: 2,
+                target: FixVec2::from_ints(106, 100),
+            },
+        );
+        sim.tick(&inputs);
+        let casts = sim
+            .events()
+            .iter()
+            .filter(|event| matches!(event, SimEvent::AbilityCast { .. }))
+            .count();
+        assert_eq!(casts, 1);
     }
 
     #[test]
