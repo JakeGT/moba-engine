@@ -132,6 +132,7 @@ pub struct NetClient {
     map: crate::protocol::WireMap,
     rules: crate::protocol::WireRules,
     content_hash: u64,
+    content_generation: u32,
     nonce: u64,
     pre_shared_key: Option<[u8; 32]>,
     expected_server: Option<[u8; 32]>,
@@ -243,6 +244,7 @@ impl NetClient {
             map: crate::protocol::WireMap::default(),
             rules: crate::protocol::WireRules::default(),
             content_hash: 0,
+            content_generation: 0,
             nonce,
             pre_shared_key,
             expected_server,
@@ -588,6 +590,7 @@ impl NetClient {
                     self.map = catalog.map;
                     self.rules = catalog.rules;
                     self.content_hash = content_hash;
+                    self.content_generation = 0;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
@@ -595,6 +598,8 @@ impl NetClient {
                 PacketKind::ContentUpdate => {
                     if self.state != ClientState::Connected
                         || message.header.session != self.session
+                        || (message.header.seq != 0
+                            && message.header.seq <= self.content_generation)
                     {
                         continue;
                     }
@@ -634,6 +639,7 @@ impl NetClient {
                     self.map = catalog.map;
                     self.rules = catalog.rules;
                     self.content_hash = hash;
+                    self.content_generation = message.header.seq;
                     self.latest = None;
                     self.history.clear();
                     self.last_acked_snapshot = 0;

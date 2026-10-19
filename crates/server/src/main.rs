@@ -235,6 +235,10 @@ fn main() {
         });
         let content = items_paths.first().map(|path| load_content(path));
         if require_attestation {
+            if content_publisher.is_none() {
+                eprintln!("--require-content-attestation requires --content-publisher");
+                std::process::exit(2);
+            }
             let Some(content) = content.as_ref() else {
                 eprintln!("--require-content-attestation requires --items FILE");
                 std::process::exit(2);
@@ -446,6 +450,10 @@ fn parse_secret(value: &str) -> [u8; 32] {
     }
     let mut key = [0u8; 32];
     for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        if !chunk.iter().all(u8::is_ascii_hexdigit) {
+            eprintln!("secret contains non-hex characters");
+            std::process::exit(2);
+        }
         let text = std::str::from_utf8(chunk).unwrap_or_default();
         key[index] = u8::from_str_radix(text, 16).unwrap_or_else(|_| {
             eprintln!("secret contains non-hex characters");
