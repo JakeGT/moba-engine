@@ -247,7 +247,7 @@ into validated rules; add `UseItem`, item cooldowns, on-hit/on-damaged hooks (D-
 and one passive data item; HUD/keybind/bot support; protocol/replay/SIM_LOGIC bumps.
 
 ### D-6. #149 NetServer extension contract
-Status (2026-10-19): every ServerPhase value is delivered to systems (#201); replayability contract and CI example remain; bot-policy factory survives rematches. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;
+Status (2026-10-19): every ServerPhase value is delivered to systems (#201); replayability contract remains; bot-policy factory survives rematches and a CI-compiled embedding example exists. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;
 deliver all `ServerPhase` values or trim; add `with_bot_policy` surviving rematches and an
 id registry; add a CI-built embedding example; remove/document `WORLD_EXTENT` 256 cap.
 

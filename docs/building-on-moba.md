@@ -97,6 +97,10 @@ Runtime packs are TOML validated by `moba-game` and carried by `Welcome`:
 cargo run -p moba-tools --bin content-check -- content/example-pack.toml
 ```
 
+A minimal `NetServer` + extension-system example lives at
+[`crates/net/examples/embedding.rs`](../crates/net/examples/embedding.rs) and is compiled by
+`cargo check -p moba-net --examples` / clippy `--all-targets`.
+
 See [content-authoring.md](content-authoring.md). Servers can reload between matches with
 `--reload-content`; connected clients receive a protocol-v24 `ContentUpdate` and adopt the
 new catalogue atomically. Live `Playing` matches are never hot-swapped.
