@@ -579,6 +579,7 @@ impl Renderer {
 
         let color_layout = self.swapchain.color_layouts[image_index as usize];
         let depth_layout = self.swapchain.depth_layouts[image_index as usize];
+        let depth_target = depth_attachment_layout(self.swapchain.depth_aspect);
         transition_color(
             &self.device,
             command_buffer,
@@ -586,7 +587,7 @@ impl Renderer {
             color_layout,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
-        if depth_layout != vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
+        if depth_layout != depth_target {
             transition_depth(
                 &self.device,
                 command_buffer,
@@ -597,8 +598,7 @@ impl Renderer {
         }
         self.swapchain.color_layouts[image_index as usize] =
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
-        self.swapchain.depth_layouts[image_index as usize] =
-            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL;
+        self.swapchain.depth_layouts[image_index as usize] = depth_target;
 
         let extent = self.swapchain.extent;
         let clear_color = vk::ClearValue {
@@ -620,7 +620,7 @@ impl Renderer {
         };
         let depth_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(self.swapchain.depth_images[image_index as usize].view())
-            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+            .image_layout(depth_target)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::DONT_CARE)
             .clear_value(depth_clear);
@@ -1225,6 +1225,14 @@ fn transition_color(
     device.cmd_pipeline_barrier2(command_buffer, &dependency);
 }
 
+fn depth_attachment_layout(aspect: vk::ImageAspectFlags) -> vk::ImageLayout {
+    if aspect.contains(vk::ImageAspectFlags::STENCIL) {
+        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    } else {
+        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
+    }
+}
+
 fn transition_depth(
     device: &DeviceContext,
     command_buffer: vk::CommandBuffer,
@@ -1249,7 +1257,7 @@ fn transition_depth(
         )
         .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
         .old_layout(old_layout)
-        .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+        .new_layout(depth_attachment_layout(aspect))
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)

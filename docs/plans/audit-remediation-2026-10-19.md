@@ -218,7 +218,7 @@ Snapshot sequence gating is covered by a unit test; a steady network-frame alloc
 ## Wave D — completion and hardening (P2)
 
 ### D-1. #144 renderer hardening
-Status (2026-10-19): inverse-transpose normals, UI `textureLod`, DeviceLost/InvalidTexture, checked texture size and atlas round-trip landed in #210/#211. Capture extent/format snapshot across swapchain rebuild; D24S8 layout; RAII/error-path
+Status (2026-10-19): inverse-transpose normals, UI `textureLod`, DeviceLost/InvalidTexture, checked texture size, atlas round-trip and D24S8 layout rule landed in #210/#211/#212. Capture extent/format snapshot across swapchain rebuild; D24S8 layout; RAII/error-path
 leaks; replace golden suppression with a correct barrier (or narrowly scope it); inverse-
 transpose normals; `textureLod`; 0×0 resize skip; `DeviceLost`; checked texture size; atlas
 round-trip test; queue-family ignored; client unsafe policy exception/test-support crate.
