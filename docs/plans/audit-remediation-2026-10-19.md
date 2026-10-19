@@ -165,7 +165,7 @@ Status (2026-10-19): #156/#162/#164/#166/#178 implemented; the net snapshot allo
 is now per-thread and passed 20 consecutive release runs. Failure notification was exercised by
 the pre-fix shader/ALSA/criterion failures and created #160 (closed). 20 allocation runs passed;
 the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089 is green**;
-#142 remains open only for the next full scheduled nightly.
+#142 is closed: full nightly **39295169028 is green** with attached logs.
 
 ## Wave C — correctness and replay truth (P1)
 
