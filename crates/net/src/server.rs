@@ -992,16 +992,17 @@ impl NetServer {
         crate::crypto::verify_pack(content)
     }
 
-    fn rotate_content(&mut self) {
+    fn rotate_content(&mut self) -> bool {
         self.content_update_retry = None;
-        if self.rotation.len() < 2 || self.clients.iter().flatten().any(|client| client.connected) {
-            return;
+        if self.rotation.len() < 2 {
+            return false;
         }
         let next = (self.rotation_index + 1) % self.rotation.len();
         let path = self.rotation[next].clone();
         match moba_game::load_content_file(&path) {
             Ok(content) if !self.content_trusted(&content) => {
                 eprintln!("map rotation rejected: pack trust policy failed");
+                false
             }
             Ok(content) => {
                 let hash = content.hash();
@@ -1013,9 +1014,59 @@ impl NetServer {
                     "map rotation: selected {} ({name}, hash {hash:#018x})",
                     path.display()
                 );
+                true
             }
-            Err(error) => eprintln!("map rotation failed for {}: {error}", path.display()),
+            Err(error) => {
+                eprintln!("map rotation failed for {}: {error}", path.display());
+                false
+            }
         }
+    }
+
+    fn broadcast_content_update(&mut self) {
+        self.content_generation = self.content_generation.wrapping_add(1);
+        let generation = self.content_generation;
+        if let Phase::Results(remaining) = self.phase
+            && remaining < 180
+        {
+            // Leave enough time for the update/retries to reach every client.
+            self.phase = Phase::Results(180);
+        }
+        let hash = self.content.hash();
+        let catalog = WireCatalog::from(&*self.content);
+        let mut payload = Vec::new();
+        encode_content_update(&catalog, hash, &mut payload);
+        let targets: Vec<(SocketAddr, u32)> = self
+            .clients
+            .iter()
+            .flatten()
+            .filter(|client| client.connected)
+            .map(|client| (client.addr, client.session))
+            .collect();
+        for client in self.clients.iter_mut().flatten() {
+            client.clear_history();
+            client.net_ids.clear();
+            client.acked_snapshot = 0;
+            client.need_full = true;
+            client.command = None;
+            client.pending_purchase = None;
+            client.last_input_seq = 0;
+        }
+        for (addr, session) in targets {
+            let header = Header {
+                kind: PacketKind::ContentUpdate,
+                flags: 0,
+                session,
+                seq: generation,
+                ack: 0,
+                ack_bits: 0,
+            };
+            if let Err(error) = self.transport.send(addr, &header, &payload) {
+                eprintln!("content update send failed for {addr}: {error}");
+            }
+        }
+        // One send plus three retries at 1.5 s intervals; clients deduplicate by hash.
+        self.content_update_retry = Some((payload, 30, 3, generation));
     }
 
     fn poll_content_reload(&mut self) {
@@ -1050,15 +1101,6 @@ impl NetServer {
                     );
                     return;
                 }
-                let hash = content.hash();
-                self.content_generation = self.content_generation.wrapping_add(1);
-                if let Phase::Results(remaining) = self.phase
-                    && remaining < 180
-                {
-                    // Leave enough time for the update/retries to reach every client.
-                    self.phase = Phase::Results(180);
-                }
-                let generation = self.content_generation;
                 let content = Arc::new(content);
                 self.simulation =
                     Simulation::new_with_content(self.config.sim, Arc::clone(&content));
@@ -1066,42 +1108,9 @@ impl NetServer {
                 self.reassign_teams();
                 self.record_frames.clear();
                 self.recorded = false;
-                let catalog = WireCatalog::from(&*self.content);
-                let mut payload = Vec::new();
-                encode_content_update(&catalog, hash, &mut payload);
-                let targets: Vec<(SocketAddr, u32)> = self
-                    .clients
-                    .iter()
-                    .flatten()
-                    .filter(|client| client.connected)
-                    .map(|client| (client.addr, client.session))
-                    .collect();
-                for client in self.clients.iter_mut().flatten() {
-                    client.clear_history();
-                    client.net_ids.clear();
-                    client.acked_snapshot = 0;
-                    client.need_full = true;
-                    client.command = None;
-                    client.pending_purchase = None;
-                    client.last_input_seq = 0;
-                }
-                for (addr, session) in targets {
-                    let header = Header {
-                        kind: PacketKind::ContentUpdate,
-                        flags: 0,
-                        session,
-                        seq: generation,
-                        ack: 0,
-                        ack_bits: 0,
-                    };
-                    if let Err(error) = self.transport.send(addr, &header, &payload) {
-                        eprintln!("content update send failed for {addr}: {error}");
-                    }
-                }
-                // One send plus three retries at 1.5 s intervals; clients drop duplicate hashes.
-                self.content_update_retry = Some((payload, 30, 3, generation));
+                self.broadcast_content_update();
                 eprintln!(
-                    "content reloaded and broadcast: {} items, hash {hash:#018x}",
+                    "content reloaded and broadcast: {} items",
                     self.content.items.len()
                 );
             }
@@ -1276,8 +1285,6 @@ impl NetServer {
     }
 
     fn start_countdown(&mut self) {
-        // The next match uses the catalogue already negotiated; stop retransmitting.
-        self.content_update_retry = None;
         self.phase = if self.config.countdown_ticks == 0 {
             Phase::Playing
         } else {
@@ -1360,7 +1367,7 @@ impl NetServer {
         let mut config = self.config.sim;
         config.seed = config.seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         self.config.sim = config;
-        self.rotate_content();
+        let rotated = self.rotate_content();
         self.reassign_teams();
         self.simulation = Simulation::new_with_content(config, Arc::clone(&self.content));
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
@@ -1374,6 +1381,9 @@ impl NetServer {
             client.command = None;
             client.pending_purchase = None;
             client.last_input_seq = 0;
+        }
+        if rotated {
+            self.broadcast_content_update();
         }
         self.refresh_bot_mask();
         self.surrender_votes = [0; 2];
