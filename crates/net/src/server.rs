@@ -1188,13 +1188,20 @@ impl NetServer {
             self.poll_content_reload();
         }
         match self.phase {
-            Phase::Lobby => {}
+            Phase::Lobby => {
+                for system in &mut self.systems.0 {
+                    system(&mut self.simulation, ServerPhase::Lobby);
+                }
+            }
             Phase::Countdown(remaining) => {
                 self.phase = if remaining <= 1 {
                     Phase::Playing
                 } else {
                     Phase::Countdown(remaining - 1)
                 };
+                for system in &mut self.systems.0 {
+                    system(&mut self.simulation, ServerPhase::Countdown);
+                }
             }
             Phase::Playing => {
                 self.tick_simulation();
@@ -1208,6 +1215,9 @@ impl NetServer {
                 }
             }
             Phase::Results(remaining) => {
+                for system in &mut self.systems.0 {
+                    system(&mut self.simulation, ServerPhase::Results);
+                }
                 if remaining <= 1 {
                     self.reset_match();
                 } else {
@@ -2336,6 +2346,41 @@ mod tests {
         server.phase = Phase::Playing;
         server.tick().expect("tick");
         assert_eq!(*order.lock().expect("lock"), vec![1, 2]);
+    }
+
+    #[test]
+    fn extension_systems_see_every_server_phase() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 2,
+            results_ticks: 2,
+            client_timeout: Duration::from_millis(100),
+            reconnect_grace: Duration::from_secs(1),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 0,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let mut server = NetServer::bind(config)
+            .expect("bind")
+            .with_system(move |_, phase| recorder.lock().expect("lock").push(phase));
+        server.phase = Phase::Lobby;
+        server.tick().expect("lobby");
+        server.phase = Phase::Countdown(2);
+        server.tick().expect("countdown");
+        server.phase = Phase::Results(2);
+        server.tick().expect("results");
+        let phases = seen.lock().expect("lock");
+        assert!(phases.contains(&ServerPhase::Lobby));
+        assert!(phases.contains(&ServerPhase::Countdown));
+        assert!(phases.contains(&ServerPhase::Results));
     }
 
     #[test]
