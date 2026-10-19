@@ -303,3 +303,27 @@ fn ability_pack_ticks_stay_within_budget() {
     );
     assert!(bytes <= 512, "ability-pack window allocated {bytes} bytes");
 }
+
+#[test]
+fn bot_shop_ticks_stay_within_budget() {
+    let _guard = serial();
+    let mut simulation = Simulation::new(SimConfig {
+        bot_mask: 0x03FF,
+        spawn_waves: false,
+        ..SimConfig::default()
+    });
+    for _ in 0..600 {
+        simulation.tick_with_bots();
+    }
+    reset_counters();
+    for _ in 0..300 {
+        simulation.tick_with_bots();
+    }
+    let (allocations, bytes) = counters();
+    eprintln!("bot shop ticks: {allocations} allocations, {bytes} bytes over 300 ticks");
+    assert!(
+        allocations <= 2,
+        "bot shop window allocated {allocations} times"
+    );
+    assert!(bytes <= 512, "bot shop window allocated {bytes} bytes");
+}
