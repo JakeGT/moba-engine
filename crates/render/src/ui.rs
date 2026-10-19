@@ -466,6 +466,14 @@ impl UiDrawList {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn baked_atlas_matches_builder() {
+        assert_eq!(
+            include_bytes!("../assets/ui-atlas.rgba").as_slice(),
+            super::build_atlas()
+        );
+    }
+
     use super::*;
 
     #[test]

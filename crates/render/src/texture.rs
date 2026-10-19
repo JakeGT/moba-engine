@@ -8,6 +8,7 @@ use crate::error::RenderResult;
 use crate::resources::{CommandPool, GpuBuffer, GpuImage};
 
 /// Uploads tightly-packed RGBA8 pixels into a sampled image.
+#[allow(clippy::too_many_lines)] // Upload/barrier/copy sequence is intentionally linear.
 pub(crate) fn upload_rgba(
     device: &DeviceContext,
     name: &str,
@@ -15,7 +16,14 @@ pub(crate) fn upload_rgba(
     height: u32,
     pixels: &[u8],
 ) -> RenderResult<GpuImage> {
-    assert_eq!(pixels.len(), (width * height * 4) as usize);
+    let expected = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(crate::error::RenderError::InvalidTexture)?;
+    if pixels.len() != expected {
+        return Err(crate::error::RenderError::InvalidTexture);
+    }
     let mut staging = GpuBuffer::new(
         device.device.clone(),
         device.allocator(),
