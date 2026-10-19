@@ -22,6 +22,9 @@ copied into public issues, PRs, commit messages or this plan.
   alternative non-public branch and merge strategy before code is pushed.
 - Security fixes are not “done” when the code is green: they are done when the patched
   release exists, the advisory is published, and regression tests are in `main`.
+- The four advisories split across S-1 (two: session crypto and keyed-peer packet
+  acceptance), S-2 (content trust) and S-3 (catalogue update). S-4 is the public unsafe
+  job-scope lifetime issue #143/#16, not a private advisory.
 
 ## Severity and order
 
@@ -269,7 +272,7 @@ checks. Update `docs/status.md`, task logs and `CHANGELOG.md` as each accepts.
 | Private advisory S-1 | S | transport AEAD counter/anti-replay/encrypted-only | #49, protocol v26 |
 | Private advisory S-2 | S | strong attestation digest + unified loader | #135, #151, content v2 |
 | Private advisory S-3 | S | reliable generation/phase-checked updates | #139, protocol v26 |
-| Private advisory S-4 / #143 | S | scope lifetime + real Loom | #16 |
+| #143/#16 job-scope lifetime | S | scope lifetime + real Loom | #16 |
 | PR #49 RustCrypto upgrade | S | crypto dependency refresh | advisory S-1 |
 | #153 tracking | S | this plan, issue closure/verification | all |
 | #135 rules stats/hash | S | validation, per-table defaults, vision hash | #151 |
