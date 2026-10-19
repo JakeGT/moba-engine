@@ -34,7 +34,7 @@ cooldown_ticks = 180
 mana_cost = 25
 cast_range = 7.0
 kind = "slow"
-radius = 180.0
+radius = 8.0
 factor = 0.55
 duration_ticks = 90
 
@@ -44,7 +44,7 @@ cooldown_ticks = 210
 mana_cost = 28
 cast_range = 7.0
 kind = "root"
-radius = 160.0
+radius = 7.0
 duration_ticks = 75
 
 [[abilities]]
@@ -53,7 +53,7 @@ cooldown_ticks = 240
 mana_cost = 30
 cast_range = 7.0
 kind = "silence"
-radius = 170.0
+radius = 7.0
 duration_ticks = 80
 
 [[abilities]]
@@ -62,7 +62,7 @@ cooldown_ticks = 200
 mana_cost = 24
 cast_range = 7.0
 kind = "burn"
-radius = 150.0
+radius = 6.0
 duration_ticks = 75
 damage = 14
 damage_type = "magic"
@@ -114,7 +114,7 @@ cooldown_ticks = 300
 mana_cost = 40
 cast_range = 6.0
 kind = "burn_zone"
-radius = 100.0
+radius = 6.0
 duration_ticks = 180
 period_ticks = 30
 damage = 12

@@ -1953,6 +1953,34 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             .collect::<Result<Vec<_>, ContentLoadError>>()?,
         None => GameContent::default().modifiers,
     };
+    for required in [
+        ModifierKind::Shield,
+        ModifierKind::Slow,
+        ModifierKind::Haste,
+        ModifierKind::Root,
+        ModifierKind::Silence,
+        ModifierKind::Burn,
+    ] {
+        if !modifiers.iter().any(|modifier| modifier.kind == required) {
+            return Err(invalid_field(
+                "modifiers.kind",
+                "missing required modifier kind",
+            ));
+        }
+    }
+    if let Some(abilities) = &file.abilities {
+        for ability in abilities {
+            if let Some(kind) = ability.on_hit.as_deref() {
+                let kind = parse_modifier_kind(kind)?;
+                if !modifiers.iter().any(|modifier| modifier.kind == kind) {
+                    return Err(invalid_field(
+                        "abilities.on_hit",
+                        ability.on_hit.clone().unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+    }
     let abilities = match file.abilities {
         Some(abilities) => abilities
             .into_iter()
@@ -1966,7 +1994,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         .iter()
                         .position(|definition| definition.kind == kind)
                         .and_then(|index| u16::try_from(index).ok())
-                        .unwrap_or(0)
+                        .expect("modifier kinds validated before ability construction")
                 };
                 let apply = |kind: ModifierKind, duration_ticks: u32, amount: i32| {
                     AreaEffect::ApplyModifier {
