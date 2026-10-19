@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**260 tests**.
+**261 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -132,7 +132,7 @@ replays verify; a stale or mid-match update cannot change the catalogue.
 **Acceptance:** Loom drives `pool.rs`, the injected bug fails, and no reference to the
 scope counter can outlive the scope.
 
-Status (2026-10-19): Arc ownership (#161), blocking wait (#179) and a Loom model driving the real `ScopeShared`/`PendingGuard` types (#182) landed. An injected-decrement failure test remains open.
+Status (2026-10-19): Arc ownership (#161), blocking wait (#179) and a Loom model driving the real `ScopeShared`/`PendingGuard` types (#182) landed. An early-decrement regression test now covers the original bug shape.
 
 ### S-5. Fog-of-war/visibility leaks
 **#138** (security-adjacent information leak).
