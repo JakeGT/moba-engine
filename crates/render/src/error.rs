@@ -35,6 +35,10 @@ pub enum RenderError {
     SwapchainOutOfDate,
     /// The swapchain is suboptimal but still usable.
     SwapchainSuboptimal,
+    /// The device was lost and must be recreated.
+    DeviceLost,
+    /// Texture dimensions overflowed or did not match the pixel buffer.
+    InvalidTexture,
 }
 
 impl fmt::Display for RenderError {
@@ -59,6 +63,8 @@ impl fmt::Display for RenderError {
             Self::NoPresentQueue => f.write_str("no present queue family"),
             Self::SwapchainOutOfDate => f.write_str("swapchain out of date"),
             Self::SwapchainSuboptimal => f.write_str("swapchain suboptimal"),
+            Self::DeviceLost => f.write_str("device lost"),
+            Self::InvalidTexture => f.write_str("invalid texture dimensions"),
         }
     }
 }
@@ -77,7 +83,11 @@ impl std::error::Error for RenderError {
 
 impl From<ash::vk::Result> for RenderError {
     fn from(result: ash::vk::Result) -> Self {
-        Self::Vulkan(result)
+        if result == ash::vk::Result::ERROR_DEVICE_LOST {
+            Self::DeviceLost
+        } else {
+            Self::Vulkan(result)
+        }
     }
 }
 

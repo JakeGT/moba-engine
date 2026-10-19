@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**275 tests**.
+**276 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -218,7 +218,7 @@ Snapshot sequence gating is covered by a unit test; a steady network-frame alloc
 ## Wave D — completion and hardening (P2)
 
 ### D-1. #144 renderer hardening
-Status (2026-10-19): inverse-transpose normals and explicit UI `textureLod` landed in #210. Capture extent/format snapshot across swapchain rebuild; D24S8 layout; RAII/error-path
+Status (2026-10-19): inverse-transpose normals, UI `textureLod`, DeviceLost/InvalidTexture, checked texture size and atlas round-trip landed in #210/#211. Capture extent/format snapshot across swapchain rebuild; D24S8 layout; RAII/error-path
 leaks; replace golden suppression with a correct barrier (or narrowly scope it); inverse-
 transpose normals; `textureLod`; 0×0 resize skip; `DeviceLost`; checked texture size; atlas
 round-trip test; queue-family ignored; client unsafe policy exception/test-support crate.
