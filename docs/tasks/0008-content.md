@@ -55,6 +55,12 @@ deterministic playback and server authority.
 - 1v1/ARAM/mode rules, team size/bot fill, minion/tower stats, vision/XP rules.
 - Content-fuzz target and deterministic mode-pack replay tests.
 
+## Remaining #135 scope
+
+- Hash/validation/per-kind defaults/finite parsing and client-sim vision agreement landed.
+- Still open: replace the `modifier_id(...).unwrap_or(0)` fallback with a validation error and
+  review the large radii in `ability-pack.toml`.
+
 ## Future work (not blocking M8)
 - Real asset meshes/materials and GPU skinning assets.
 - Scripting hooks and more code-driven behaviours (summons, auras, complex triggers).
