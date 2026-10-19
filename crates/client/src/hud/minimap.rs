@@ -136,10 +136,10 @@ pub(crate) fn vision_radius(network: &NetworkView, unit: super::HudUnit<'_>) -> 
             .heroes()
             .get(usize::from(unit.hero_pick()))
             .map_or(35.0, |hero| Fix::from_bits(hero.vision_bits).to_f32()),
-        1 => Fix::from_bits(network.client.rules().melee_vision_bits).to_f32(),
-        2 => Fix::from_bits(network.client.rules().ranged_vision_bits).to_f32(),
-        3 => Fix::from_bits(network.client.rules().tower_vision_bits).to_f32(),
-        4 => Fix::from_bits(network.client.rules().nexus_vision_bits).to_f32(),
+        1 => Fix::from_bits(network.client.rules().melee_minion.vision_range_bits).to_f32(),
+        2 => Fix::from_bits(network.client.rules().ranged_minion.vision_range_bits).to_f32(),
+        3 => Fix::from_bits(network.client.rules().tower.vision_range_bits).to_f32(),
+        4 => Fix::from_bits(network.client.rules().nexus.vision_range_bits).to_f32(),
         _ => 0.0,
     }
 }

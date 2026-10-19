@@ -152,6 +152,8 @@ pub const MAX_DURATION_TICKS: u32 = 1_000_000;
 pub const MAX_RANGE: i32 = 1_000;
 /// Upper bound for movement speed in world units per second.
 pub const MAX_SPEED_PER_SEC: i32 = 100;
+/// Largest accepted haste multiplier.
+pub const MAX_HASTE_FACTOR: i32 = 3;
 /// Upper bound for armour/magic resistance.
 pub const MAX_RESIST: i32 = 100_000;
 
@@ -321,6 +323,83 @@ pub struct RulesSpec {
     pub wave_interval_ticks: u32,
     /// Delay before the first wave, in ticks.
     pub first_wave_ticks: u32,
+}
+
+impl RulesSpec {
+    /// Returns the first invalid rules field, if any.
+    pub fn invalid_field(&self) -> Option<&'static str> {
+        let range = Fix::from_i32(MAX_RANGE);
+        let speed = Fix::from_i32(MAX_SPEED_PER_SEC);
+        let stats = |stats: &MinionStatsSpec, field: &'static str| {
+            if !(1..=MAX_STAT).contains(&stats.max_health)
+                || !(0..=MAX_STAT).contains(&stats.attack_damage)
+                || !(Fix::ZERO..=range).contains(&stats.attack_range)
+                || !(1..=MAX_COOLDOWN_TICKS).contains(&stats.attack_interval_ticks)
+                || !(Fix::from_bits(1)..=speed).contains(&stats.move_speed_per_sec)
+                || stats.armor.unsigned_abs() > MAX_RESIST as u32
+                || stats.magic_resist.unsigned_abs() > MAX_RESIST as u32
+                || !(Fix::from_bits(1)..=range).contains(&stats.vision_range)
+            {
+                Some(field)
+            } else {
+                None
+            }
+        };
+        let structure = |stats: &StructureStatsSpec, field: &'static str| {
+            if !(1..=MAX_STAT).contains(&stats.max_health)
+                || !(0..=MAX_STAT).contains(&stats.attack_damage)
+                || !(Fix::ZERO..=range).contains(&stats.attack_range)
+                || !(1..=MAX_COOLDOWN_TICKS).contains(&stats.attack_interval_ticks)
+                || stats.armor.unsigned_abs() > MAX_RESIST as u32
+                || stats.magic_resist.unsigned_abs() > MAX_RESIST as u32
+                || !(Fix::from_bits(1)..=range).contains(&stats.vision_range)
+            {
+                Some(field)
+            } else {
+                None
+            }
+        };
+        if !(1..=5).contains(&self.team_size) {
+            return Some("team_size");
+        }
+        if !(1..=99).contains(&self.level_cap) {
+            return Some("level_cap");
+        }
+        if self.xp_base == 0 {
+            return Some("xp_base");
+        }
+        if self.xp_per_level == 0 {
+            return Some("xp_per_level");
+        }
+        if self.hero_respawn_ticks == 0 {
+            return Some("hero_respawn_ticks");
+        }
+        if self.wave_interval_ticks == 0 {
+            return Some("wave_interval_ticks");
+        }
+        if self.first_wave_ticks == 0 {
+            return Some("first_wave_ticks");
+        }
+        if self.respawn_per_level > 1_000 {
+            return Some("respawn_per_level");
+        }
+        if self.melee_vision != self.melee_minion.vision_range {
+            return Some("melee_vision");
+        }
+        if self.ranged_vision != self.ranged_minion.vision_range {
+            return Some("ranged_vision");
+        }
+        if self.tower_vision != self.tower.vision_range {
+            return Some("tower_vision");
+        }
+        if self.nexus_vision != self.nexus.vision_range {
+            return Some("nexus_vision");
+        }
+        stats(&self.melee_minion, "melee_minion")
+            .or_else(|| stats(&self.ranged_minion, "ranged_minion"))
+            .or_else(|| structure(&self.tower, "tower"))
+            .or_else(|| structure(&self.nexus, "nexus"))
+    }
 }
 
 impl Default for RulesSpec {
@@ -692,6 +771,8 @@ pub enum ContentError {
     BadAbilityStats,
     /// Modifier definitions are invalid.
     BadModifiers,
+    /// Runtime rules field is invalid; the name identifies the field.
+    BadRules(&'static str),
     /// Map has no lanes or too many lanes/points/structures.
     BadMap,
     /// Map lane names or structure layout are invalid.
@@ -727,6 +808,7 @@ impl core::fmt::Display for ContentError {
                 f.write_str("ability cooldown must be positive and mana/cast range non-negative")
             }
             Self::BadModifiers => f.write_str("modifier names/kinds are invalid or duplicated"),
+            Self::BadRules(field) => write!(f, "invalid rules field: {field}"),
             Self::BadMap => f.write_str("map limits are invalid"),
             Self::BadMapData => f.write_str("map lanes/structures are invalid"),
             Self::BadWalls => f.write_str("map walls are invalid"),
@@ -757,7 +839,9 @@ fn area_effect_valid(effect: &AreaEffect, modifiers: &[ModifierDef]) -> bool {
             match definition.kind {
                 ModifierKind::Shield => (0..=MAX_STAT).contains(amount),
                 ModifierKind::Slow => *factor > Fix::ZERO && *factor < Fix::ONE,
-                ModifierKind::Haste => *factor > Fix::ONE,
+                ModifierKind::Haste => {
+                    (Fix::ONE..=Fix::from_i32(MAX_HASTE_FACTOR)).contains(factor)
+                }
                 ModifierKind::Burn => (1..=MAX_STAT).contains(amount),
                 ModifierKind::Root | ModifierKind::Silence => true,
             }
@@ -1076,24 +1160,8 @@ impl GameContent {
                 return Err(ContentError::BadMapData);
             }
         }
-        if !(1..=5).contains(&self.rules.team_size)
-            || !(1..=99).contains(&self.rules.level_cap)
-            || self.rules.melee_minion.max_health <= 0
-            || self.rules.ranged_minion.max_health <= 0
-            || self.rules.tower.max_health <= 0
-            || self.rules.nexus.max_health <= 0
-            || self.rules.melee_minion.attack_interval_ticks == 0
-            || self.rules.ranged_minion.attack_interval_ticks == 0
-            || self.rules.tower.attack_interval_ticks == 0
-            || self.rules.nexus.attack_interval_ticks == 0
-            || self.rules.xp_base == 0
-            || self.rules.xp_per_level == 0
-            || self.rules.hero_respawn_ticks == 0
-            || self.rules.wave_interval_ticks == 0
-            || self.rules.first_wave_ticks == 0
-            || self.rules.respawn_per_level > 1_000
-        {
-            return Err(ContentError::BadMap);
+        if let Some(field) = self.rules.invalid_field() {
+            return Err(ContentError::BadRules(field));
         }
         if self.map.extent <= Fix::ZERO || self.map.extent > Fix::from_i32(MAX_MAP_COORD) {
             return Err(ContentError::BadMap);
@@ -1325,6 +1393,7 @@ impl GameContent {
             feed(&minion.move_speed_per_sec.to_bits().to_le_bytes());
             feed(&minion.armor.to_le_bytes());
             feed(&minion.magic_resist.to_le_bytes());
+            feed(&minion.vision_range.to_bits().to_le_bytes());
         }
         for structure in [self.rules.tower, self.rules.nexus] {
             feed(&structure.max_health.to_le_bytes());
@@ -1333,6 +1402,7 @@ impl GameContent {
             feed(&structure.attack_interval_ticks.to_le_bytes());
             feed(&structure.armor.to_le_bytes());
             feed(&structure.magic_resist.to_le_bytes());
+            feed(&structure.vision_range.to_bits().to_le_bytes());
         }
         for value in [
             self.rules.hero_respawn_ticks,
@@ -1436,8 +1506,7 @@ struct ContentFile {
     map: Option<MapEntry>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[derive(Copy, Clone, Debug)]
 struct MinionStatsEntry {
     max_health: i32,
     attack_damage: i32,
@@ -1449,24 +1518,7 @@ struct MinionStatsEntry {
     vision_range: f32,
 }
 
-impl Default for MinionStatsEntry {
-    fn default() -> Self {
-        let stats = RulesSpec::default().melee_minion;
-        Self {
-            max_health: stats.max_health,
-            attack_damage: stats.attack_damage,
-            attack_range: stats.attack_range.to_f32(),
-            attack_interval_ticks: stats.attack_interval_ticks,
-            move_speed_per_sec: stats.move_speed_per_sec.to_f32(),
-            armor: stats.armor,
-            magic_resist: stats.magic_resist,
-            vision_range: stats.vision_range.to_f32(),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[derive(Copy, Clone, Debug)]
 struct StructureStatsEntry {
     max_health: i32,
     attack_damage: i32,
@@ -1477,28 +1529,112 @@ struct StructureStatsEntry {
     vision_range: f32,
 }
 
-impl Default for StructureStatsEntry {
-    fn default() -> Self {
-        let stats = RulesSpec::default().tower;
-        Self {
-            max_health: stats.max_health,
-            attack_damage: stats.attack_damage,
-            attack_range: stats.attack_range.to_f32(),
-            attack_interval_ticks: stats.attack_interval_ticks,
-            armor: stats.armor,
-            magic_resist: stats.magic_resist,
-            vision_range: stats.vision_range.to_f32(),
+macro_rules! minion_fields {
+    ($name:ident, $default:expr) => {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, default)]
+        struct $name {
+            max_health: i32,
+            attack_damage: i32,
+            attack_range: f32,
+            attack_interval_ticks: u32,
+            move_speed_per_sec: f32,
+            armor: i32,
+            magic_resist: i32,
+            vision_range: f32,
         }
-    }
+
+        impl Default for $name {
+            fn default() -> Self {
+                let stats: MinionStatsSpec = $default;
+                Self {
+                    max_health: stats.max_health,
+                    attack_damage: stats.attack_damage,
+                    attack_range: stats.attack_range.to_f32(),
+                    attack_interval_ticks: stats.attack_interval_ticks,
+                    move_speed_per_sec: stats.move_speed_per_sec.to_f32(),
+                    armor: stats.armor,
+                    magic_resist: stats.magic_resist,
+                    vision_range: stats.vision_range.to_f32(),
+                }
+            }
+        }
+
+        impl From<$name> for MinionStatsEntry {
+            fn from(entry: $name) -> Self {
+                Self {
+                    max_health: entry.max_health,
+                    attack_damage: entry.attack_damage,
+                    attack_range: entry.attack_range,
+                    attack_interval_ticks: entry.attack_interval_ticks,
+                    move_speed_per_sec: entry.move_speed_per_sec,
+                    armor: entry.armor,
+                    magic_resist: entry.magic_resist,
+                    vision_range: entry.vision_range,
+                }
+            }
+        }
+    };
 }
+
+minion_fields!(MeleeMinionEntry, RulesSpec::default().melee_minion);
+minion_fields!(RangedMinionEntry, RulesSpec::default().ranged_minion);
+
+macro_rules! structure_fields {
+    ($name:ident, $default:expr) => {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, default)]
+        struct $name {
+            max_health: i32,
+            attack_damage: i32,
+            attack_range: f32,
+            attack_interval_ticks: u32,
+            armor: i32,
+            magic_resist: i32,
+            vision_range: f32,
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                let stats: StructureStatsSpec = $default;
+                Self {
+                    max_health: stats.max_health,
+                    attack_damage: stats.attack_damage,
+                    attack_range: stats.attack_range.to_f32(),
+                    attack_interval_ticks: stats.attack_interval_ticks,
+                    armor: stats.armor,
+                    magic_resist: stats.magic_resist,
+                    vision_range: stats.vision_range.to_f32(),
+                }
+            }
+        }
+
+        impl From<$name> for StructureStatsEntry {
+            fn from(entry: $name) -> Self {
+                Self {
+                    max_health: entry.max_health,
+                    attack_damage: entry.attack_damage,
+                    attack_range: entry.attack_range,
+                    attack_interval_ticks: entry.attack_interval_ticks,
+                    armor: entry.armor,
+                    magic_resist: entry.magic_resist,
+                    vision_range: entry.vision_range,
+                }
+            }
+        }
+    };
+}
+
+structure_fields!(TowerStatsEntry, RulesSpec::default().tower);
+structure_fields!(NexusStatsEntry, RulesSpec::default().nexus);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct RulesEntry {
-    melee_minion: MinionStatsEntry,
-    ranged_minion: MinionStatsEntry,
-    tower: StructureStatsEntry,
-    nexus: StructureStatsEntry,
+    melee_minion: MeleeMinionEntry,
+    ranged_minion: RangedMinionEntry,
+    tower: TowerStatsEntry,
+    nexus: NexusStatsEntry,
     level_cap: u8,
     xp_base: u32,
     xp_per_level: u32,
@@ -1518,33 +1654,10 @@ impl Default for RulesEntry {
     fn default() -> Self {
         let rules = RulesSpec::default();
         Self {
-            melee_minion: MinionStatsEntry::default(),
-            ranged_minion: {
-                let stats = RulesSpec::default().ranged_minion;
-                MinionStatsEntry {
-                    max_health: stats.max_health,
-                    attack_damage: stats.attack_damage,
-                    attack_range: stats.attack_range.to_f32(),
-                    attack_interval_ticks: stats.attack_interval_ticks,
-                    move_speed_per_sec: stats.move_speed_per_sec.to_f32(),
-                    armor: stats.armor,
-                    magic_resist: stats.magic_resist,
-                    vision_range: stats.vision_range.to_f32(),
-                }
-            },
-            tower: StructureStatsEntry::default(),
-            nexus: {
-                let stats = RulesSpec::default().nexus;
-                StructureStatsEntry {
-                    max_health: stats.max_health,
-                    attack_damage: stats.attack_damage,
-                    attack_range: stats.attack_range.to_f32(),
-                    attack_interval_ticks: stats.attack_interval_ticks,
-                    armor: stats.armor,
-                    magic_resist: stats.magic_resist,
-                    vision_range: stats.vision_range.to_f32(),
-                }
-            },
+            melee_minion: MeleeMinionEntry::default(),
+            ranged_minion: RangedMinionEntry::default(),
+            tower: TowerStatsEntry::default(),
+            nexus: NexusStatsEntry::default(),
             level_cap: rules.level_cap,
             xp_base: rules.xp_base,
             xp_per_level: rules.xp_per_level,
@@ -2065,61 +2178,61 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         }
         None => GameContent::default().map,
     };
-    let rules = file
-        .rules
-        .map_or_else(RulesSpec::default, |rules| RulesSpec {
-            melee_minion: MinionStatsSpec {
-                max_health: rules.melee_minion.max_health,
-                attack_damage: rules.melee_minion.attack_damage,
-                attack_range: Fix::from_f32(rules.melee_minion.attack_range),
-                attack_interval_ticks: rules.melee_minion.attack_interval_ticks,
-                move_speed_per_sec: Fix::from_f32(rules.melee_minion.move_speed_per_sec),
-                armor: rules.melee_minion.armor,
-                magic_resist: rules.melee_minion.magic_resist,
-                vision_range: Fix::from_f32(rules.melee_minion.vision_range),
-            },
-            ranged_minion: MinionStatsSpec {
-                max_health: rules.ranged_minion.max_health,
-                attack_damage: rules.ranged_minion.attack_damage,
-                attack_range: Fix::from_f32(rules.ranged_minion.attack_range),
-                attack_interval_ticks: rules.ranged_minion.attack_interval_ticks,
-                move_speed_per_sec: Fix::from_f32(rules.ranged_minion.move_speed_per_sec),
-                armor: rules.ranged_minion.armor,
-                magic_resist: rules.ranged_minion.magic_resist,
-                vision_range: Fix::from_f32(rules.ranged_minion.vision_range),
-            },
-            tower: StructureStatsSpec {
-                max_health: rules.tower.max_health,
-                attack_damage: rules.tower.attack_damage,
-                attack_range: Fix::from_f32(rules.tower.attack_range),
-                attack_interval_ticks: rules.tower.attack_interval_ticks,
-                armor: rules.tower.armor,
-                magic_resist: rules.tower.magic_resist,
-                vision_range: Fix::from_f32(rules.tower.vision_range),
-            },
-            nexus: StructureStatsSpec {
-                max_health: rules.nexus.max_health,
-                attack_damage: rules.nexus.attack_damage,
-                attack_range: Fix::from_f32(rules.nexus.attack_range),
-                attack_interval_ticks: rules.nexus.attack_interval_ticks,
-                armor: rules.nexus.armor,
-                magic_resist: rules.nexus.magic_resist,
-                vision_range: Fix::from_f32(rules.nexus.vision_range),
-            },
-            level_cap: rules.level_cap,
-            xp_base: rules.xp_base,
-            xp_per_level: rules.xp_per_level,
-            melee_vision: Fix::from_f32(rules.melee_vision),
-            ranged_vision: Fix::from_f32(rules.ranged_vision),
-            tower_vision: Fix::from_f32(rules.tower_vision),
-            nexus_vision: Fix::from_f32(rules.nexus_vision),
-            team_size: rules.team_size,
-            bot_fill: rules.bot_fill,
-            hero_respawn_ticks: rules.hero_respawn_ticks,
-            respawn_per_level: rules.respawn_per_level,
-            wave_interval_ticks: rules.wave_interval_ticks,
-            first_wave_ticks: rules.first_wave_ticks,
-        });
+    let rules = match file.rules {
+        Some(rules) => {
+            let minion = |stats: MinionStatsEntry,
+                          field: &'static str|
+             -> Result<MinionStatsSpec, ContentLoadError> {
+                Ok(MinionStatsSpec {
+                    max_health: stats.max_health,
+                    attack_damage: stats.attack_damage,
+                    attack_range: fix_param(stats.attack_range, field)?,
+                    attack_interval_ticks: stats.attack_interval_ticks,
+                    move_speed_per_sec: fix_param(stats.move_speed_per_sec, field)?,
+                    armor: stats.armor,
+                    magic_resist: stats.magic_resist,
+                    vision_range: fix_param(stats.vision_range, field)?,
+                })
+            };
+            let structure = |stats: StructureStatsEntry,
+                             field: &'static str|
+             -> Result<StructureStatsSpec, ContentLoadError> {
+                Ok(StructureStatsSpec {
+                    max_health: stats.max_health,
+                    attack_damage: stats.attack_damage,
+                    attack_range: fix_param(stats.attack_range, field)?,
+                    attack_interval_ticks: stats.attack_interval_ticks,
+                    armor: stats.armor,
+                    magic_resist: stats.magic_resist,
+                    vision_range: fix_param(stats.vision_range, field)?,
+                })
+            };
+            let melee_minion = minion(rules.melee_minion.into(), "rules.melee_minion")?;
+            let ranged_minion = minion(rules.ranged_minion.into(), "rules.ranged_minion")?;
+            let tower = structure(rules.tower.into(), "rules.tower")?;
+            let nexus = structure(rules.nexus.into(), "rules.nexus")?;
+            RulesSpec {
+                melee_vision: melee_minion.vision_range,
+                ranged_vision: ranged_minion.vision_range,
+                tower_vision: tower.vision_range,
+                nexus_vision: nexus.vision_range,
+                melee_minion,
+                ranged_minion,
+                tower,
+                nexus,
+                level_cap: rules.level_cap,
+                xp_base: rules.xp_base,
+                xp_per_level: rules.xp_per_level,
+                team_size: rules.team_size,
+                bot_fill: rules.bot_fill,
+                hero_respawn_ticks: rules.hero_respawn_ticks,
+                respawn_per_level: rules.respawn_per_level,
+                wave_interval_ticks: rules.wave_interval_ticks,
+                first_wave_ticks: rules.first_wave_ticks,
+            }
+        }
+        None => RulesSpec::default(),
+    };
     let attestation = match (file.publisher.as_deref(), file.signature.as_deref()) {
         (None, None) => None,
         (Some(publisher), Some(signature)) => Some(PackAttestation {
@@ -2494,5 +2607,55 @@ kind = "charm"
         let mut content = GameContent::default();
         content.items[0].cost = 0;
         assert_eq!(content.validate(), Err(ContentError::FreeItem));
+    }
+
+    #[test]
+    fn rules_vision_is_hashed_and_derives_legacy_fields() {
+        let text = "[rules.melee_minion]\nvision_range = 12.0\n";
+        let content = load_toml(text).expect("rules");
+        assert_eq!(
+            content.rules.melee_vision,
+            content.rules.melee_minion.vision_range
+        );
+        let mut changed = content.clone();
+        changed.rules.melee_minion.vision_range = Fix::from_i32(11);
+        assert_ne!(changed.hash(), content.hash());
+        let mut mismatched = content;
+        mismatched.rules.melee_vision = Fix::from_i32(1);
+        assert_eq!(
+            mismatched.validate(),
+            Err(ContentError::BadRules("melee_vision"))
+        );
+    }
+
+    #[test]
+    fn partial_ranged_and_nexus_tables_keep_their_own_defaults() {
+        let ranged = load_toml("[rules.ranged_minion]\nmax_health = 999\n").expect("ranged");
+        assert_eq!(ranged.rules.ranged_minion.max_health, 999);
+        assert_eq!(ranged.rules.ranged_minion.attack_damage, 20);
+        assert_eq!(ranged.rules.ranged_minion.attack_range, Fix::from_i32(7));
+        let nexus = load_toml("[rules.nexus]\nmax_health = 6000\n").expect("nexus");
+        assert_eq!(nexus.rules.nexus.max_health, 6000);
+        assert_eq!(nexus.rules.nexus.attack_damage, 85);
+        assert_eq!(nexus.rules.nexus.attack_range, Fix::from_i32(9));
+    }
+
+    #[test]
+    fn invalid_rules_name_the_field_and_reject_nonfinite_floats() {
+        let negative = load_toml("[rules.melee_minion]\nattack_damage = -1\n");
+        assert!(matches!(
+            negative,
+            Err(ContentLoadError::Invalid(ContentError::BadRules(
+                "melee_minion"
+            )))
+        ));
+        let nan = load_toml("[rules.melee_minion]\nvision_range = nan\n");
+        assert!(matches!(
+            nan,
+            Err(ContentLoadError::InvalidField {
+                field: "rules.melee_minion",
+                ..
+            })
+        ));
     }
 }
