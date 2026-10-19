@@ -166,7 +166,7 @@ damage_type = "magic"
 ```
 
 Adding a *new effect primitive* still requires engine code and a protocol bump; combining
-existing primitives and modifiers is data-only.
+existing primitives and modifiers is data-only; targeting and effect selection remain code-defined.
 
 ## Publisher attestation
 

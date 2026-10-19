@@ -71,5 +71,4 @@ key, `--revoke-client-key KEY` removes it; config fields are `rotate_client_keys
 `revoke_client_keys`. Revoking the last key leaves identity enforcement enabled, so every client
 is rejected rather than falling open. Rotation/revocation applies before the next match; connected
 sessions are not re-authenticated mid-match. Account identities, reputation and transparency
-feeds are external integrations (see `docs/adr/0006-identity-trust.md`). Optional player-count
-attestations are signed by the pinned server key and are advisory, not independent proof.
+feeds are external integrations (see `docs/adr/0006-identity-trust.md`). Player-count attestations are a design note in ADR 0006 only; they are not implemented.
