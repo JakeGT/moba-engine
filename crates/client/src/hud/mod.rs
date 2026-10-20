@@ -5,6 +5,7 @@ mod healthbars;
 mod hit;
 mod minimap;
 mod model;
+mod scoreboard;
 mod status;
 pub(crate) mod theme;
 
