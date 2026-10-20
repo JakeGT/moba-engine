@@ -1921,6 +1921,17 @@ impl Simulation {
         })
     }
 
+    fn modifier_on_damaged(&self, target: Entity) -> i32 {
+        self.world.get::<Modifiers>(target).map_or(0, |modifiers| {
+            modifiers
+                .entries()
+                .iter()
+                .filter_map(|modifier| self.content.modifiers.get(usize::from(modifier.def_id)))
+                .map(|definition| definition.on_damaged_damage)
+                .sum()
+        })
+    }
+
     fn on_damaged_bonus(&self, target: Entity) -> i32 {
         if self.world.get::<HeroSlot>(target).is_none() {
             return 0;
@@ -2018,7 +2029,9 @@ impl Simulation {
                 DamageType::Physical,
                 snapshot.attacker,
             );
-            let thorns = self.on_damaged_bonus(snapshot.target);
+            let thorns = self
+                .on_damaged_bonus(snapshot.target)
+                .saturating_add(self.modifier_on_damaged(snapshot.target));
             if thorns > 0 && self.world.has::<Health>(snapshot.attacker) {
                 self.damage(
                     snapshot.attacker,
@@ -3523,6 +3536,29 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn modifier_on_damaged_bonus_applies() {
+        let mut content = GameContent::default();
+        content.modifiers[0].on_damaged_damage = 12;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        assert_eq!(sim.modifier_on_damaged(hero), 0);
+        let mut modifiers = Modifiers::default();
+        modifiers.entries[0] = Modifier {
+            def_id: 0,
+            kind: ModifierKind::Shield,
+            remaining: 10,
+            factor: Fix::ONE,
+            amount: 1,
+            damage_type: DamageType::Physical,
+            source: hero,
+        };
+        modifiers.len = 1;
+        let _ = sim.world.insert(hero, modifiers);
+        assert_eq!(sim.modifier_on_damaged(hero), 12);
     }
 
     #[test]

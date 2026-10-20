@@ -222,6 +222,8 @@ pub struct ModifierDef {
     pub bonus_attack_damage: i32,
     /// Damage dealt when the modifier expires.
     pub on_expire_damage: i32,
+    /// Damage reflected to attackers while active.
+    pub on_damaged_damage: i32,
 }
 
 /// An owned, runtime item definition.
@@ -831,6 +833,7 @@ fn default_modifiers() -> Vec<ModifierDef> {
         bonus_armor: 0,
         bonus_attack_damage: 0,
         on_expire_damage: 0,
+        on_damaged_damage: 0,
     })
     .collect()
 }
@@ -1226,6 +1229,7 @@ impl GameContent {
             if modifier.bonus_armor.unsigned_abs() > MAX_RESIST as u32
                 || modifier.bonus_attack_damage.unsigned_abs() > MAX_STAT as u32
                 || modifier.on_expire_damage.unsigned_abs() > MAX_STAT as u32
+                || modifier.on_damaged_damage.unsigned_abs() > MAX_STAT as u32
             {
                 return Err(ContentError::BadModifiers);
             }
@@ -1534,6 +1538,7 @@ impl GameContent {
             feed(&modifier.bonus_armor.to_le_bytes());
             feed(&modifier.bonus_attack_damage.to_le_bytes());
             feed(&modifier.on_expire_damage.to_le_bytes());
+            feed(&modifier.on_damaged_damage.to_le_bytes());
         }
         len(feed, self.map.lanes.len());
         for lane in &self.map.lanes {
@@ -1619,6 +1624,8 @@ struct ModifierEntry {
     bonus_attack_damage: i32,
     #[serde(default)]
     on_expire_damage: i32,
+    #[serde(default)]
+    on_damaged_damage: i32,
 }
 
 #[derive(Deserialize)]
@@ -2162,6 +2169,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                     bonus_armor: modifier.bonus_armor,
                     bonus_attack_damage: modifier.bonus_attack_damage,
                     on_expire_damage: modifier.on_expire_damage,
+                    on_damaged_damage: modifier.on_damaged_damage,
                 })
             })
             .collect::<Result<Vec<_>, ContentLoadError>>()?,
