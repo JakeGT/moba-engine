@@ -2081,11 +2081,6 @@ impl Simulation {
         while index < self.projectiles.len() {
             let mut projectile = self.projectiles[index];
             projectile.position += projectile.direction * projectile.speed_per_tick;
-            projectile.remaining -= projectile.speed_per_tick;
-            if projectile.remaining <= Fix::ZERO {
-                self.projectiles.swap_remove(index);
-                continue;
-            }
             let mut hit: Option<(Fix, Entity)> = None;
             self.grid
                 .for_each_in_circle(projectile.position, projectile.radius, |candidate| {
@@ -2107,6 +2102,11 @@ impl Simulation {
                     position: projectile.position,
                 });
                 self.apply_area_effects_to(projectile.owner, target, projectile.on_hit);
+                self.projectiles.swap_remove(index);
+                continue;
+            }
+            projectile.remaining -= projectile.speed_per_tick;
+            if projectile.remaining <= Fix::ZERO {
                 self.projectiles.swap_remove(index);
             } else {
                 self.projectiles[index] = projectile;
