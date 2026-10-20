@@ -331,7 +331,12 @@ impl Fix {
                 Self(0)
             };
         }
-        let quotient = ((self.0 as i128) << FRAC_BITS) / rhs.0 as i128;
+        let numerator = (self.0 as i128) << FRAC_BITS;
+        let denominator = rhs.0 as i128;
+        let mut quotient = numerator / denominator;
+        if numerator % denominator != 0 && (numerator < 0) != (denominator < 0) {
+            quotient -= 1;
+        }
         if quotient > MAX as i128 {
             Self(MAX)
         } else if quotient < MIN as i128 {
@@ -917,5 +922,14 @@ mod tests {
         let (sin, cos) = Fix::from_f64(core::f64::consts::FRAC_PI_2).sin_cos();
         let rotated = FixVec2::from_ints(1, 0).rotate(sin, cos);
         assert!(rotated.distance(FixVec2::from_ints(0, 1)) < Fix::from_f64(1e-6));
+    }
+
+    #[test]
+    fn division_floors_for_all_signs() {
+        let half = Fix::from_bits(Fix::ONE.0 / 2);
+        assert_eq!(Fix::from_bits(-1) / half, Fix::from_bits(-2));
+        assert_eq!(Fix::from_bits(-3) / Fix::ONE, Fix::from_bits(-3));
+        assert_eq!(Fix::from_bits(-1) * half, Fix::from_bits(-1));
+        assert_eq!(Fix::from_bits(1) / half, Fix::from_bits(2));
     }
 }

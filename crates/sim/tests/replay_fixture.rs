@@ -9,5 +9,5 @@ fn checked_in_v7_replay_fixture_verifies() {
     assert_eq!(replay.frames.len(), 300);
     let result = replay.play().expect("fixture replay");
     assert_eq!(result.ticks, 300);
-    assert_eq!(result.state_hash, 0x3314_143b_ee21_bb51);
+    assert_eq!(result.state_hash, 0xb916_bd66_e00b_4c4a);
 }
