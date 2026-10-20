@@ -58,6 +58,18 @@ pub enum MapTheme {
 }
 
 impl MapTheme {
+    /// Stable asset-manifest key for this map theme.
+    #[must_use]
+    pub const fn asset_name(self) -> &'static str {
+        match self {
+            Self::Grass => "map-grass",
+            Self::Stone => "map-stone",
+            Self::Snow => "map-snow",
+            Self::Desert => "map-desert",
+            Self::Arcane => "map-arcane",
+        }
+    }
+
     /// Parses a theme id.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
@@ -2849,6 +2861,25 @@ move_speed = nan
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn map_themes_have_unique_asset_names() {
+        let mut names = [""; 5];
+        for (index, theme) in [
+            MapTheme::Grass,
+            MapTheme::Stone,
+            MapTheme::Snow,
+            MapTheme::Desert,
+            MapTheme::Arcane,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            names[index] = theme.asset_name();
+        }
+        names.sort_unstable();
+        assert!(names.windows(2).all(|pair| pair[0] != pair[1]));
     }
 
     #[test]
