@@ -76,14 +76,13 @@ impl AssetManifest {
                 validate_path(&entry.path)?;
             }
             for entry in list {
-                self.walk_fallback(entry, &names)?;
+                Self::walk_fallback(entry, &names)?;
             }
         }
         Ok(())
     }
 
     fn walk_fallback(
-        &self,
         entry: &AssetEntry,
         names: &BTreeMap<&str, &AssetEntry>,
     ) -> Result<(), AssetError> {
@@ -118,9 +117,7 @@ impl AssetManifest {
             let Some(fallback) = current.fallback.as_deref() else {
                 return Some(current);
             };
-            let Some(next) = list.iter().find(|entry| entry.name == fallback) else {
-                return None;
-            };
+            let next = list.iter().find(|entry| entry.name == fallback)?;
             if std::ptr::eq(next, current) {
                 return None;
             }
