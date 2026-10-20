@@ -19,13 +19,13 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Item | Current value | Source of truth |
 |---|---|---|
 | Workspace version | `0.2.0` | `Cargo.toml` |
-| Wire protocol | **v28** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
+| Wire protocol | **v29** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
 | Replay format | **v5** | `crates/sim/src/replay.rs::VERSION` |
 | Simulation logic | **v7** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content.rs` |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprint, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **288 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **289 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
