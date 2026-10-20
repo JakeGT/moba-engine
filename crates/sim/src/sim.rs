@@ -1888,6 +1888,28 @@ impl Simulation {
         }
     }
 
+    fn modifier_armor(&self, entity: Entity) -> i32 {
+        self.world.get::<Modifiers>(entity).map_or(0, |modifiers| {
+            modifiers
+                .entries()
+                .iter()
+                .filter_map(|modifier| self.content.modifiers.get(usize::from(modifier.def_id)))
+                .map(|definition| definition.bonus_armor)
+                .sum()
+        })
+    }
+
+    fn modifier_attack_damage(&self, entity: Entity) -> i32 {
+        self.world.get::<Modifiers>(entity).map_or(0, |modifiers| {
+            modifiers
+                .entries()
+                .iter()
+                .filter_map(|modifier| self.content.modifiers.get(usize::from(modifier.def_id)))
+                .map(|definition| definition.bonus_attack_damage)
+                .sum()
+        })
+    }
+
     fn on_damaged_bonus(&self, target: Entity) -> i32 {
         if self.world.get::<HeroSlot>(target).is_none() {
             return 0;
@@ -1975,9 +1997,13 @@ impl Simulation {
                 continue;
             }
             let bonus = self.on_hit_bonus(snapshot.attacker);
+            let modifier_damage = self.modifier_attack_damage(snapshot.attacker);
             self.damage(
                 snapshot.target,
-                snapshot.damage.saturating_add(bonus),
+                snapshot
+                    .damage
+                    .saturating_add(bonus)
+                    .saturating_add(modifier_damage),
                 DamageType::Physical,
                 snapshot.attacker,
             );
@@ -2154,10 +2180,11 @@ impl Simulation {
                 armor: 0,
                 magic_resist: 0,
             });
+        let bonus_armor = self.modifier_armor(target);
         let dealt = mitigate_typed(
             amount,
             damage_type,
-            resistances.armor,
+            resistances.armor.saturating_add(bonus_armor),
             resistances.magic_resist,
         );
         let mut damage = dealt;
@@ -3485,6 +3512,31 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn modifier_stat_bonuses_apply() {
+        let mut content = GameContent::default();
+        content.modifiers[0].bonus_armor = 40;
+        content.modifiers[0].bonus_attack_damage = 25;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        assert_eq!(sim.modifier_armor(hero), 0);
+        let mut modifiers = Modifiers::default();
+        modifiers.entries[0] = Modifier {
+            def_id: 0,
+            kind: ModifierKind::Shield,
+            remaining: 10,
+            factor: Fix::ONE,
+            amount: 1,
+            damage_type: DamageType::Physical,
+            source: hero,
+        };
+        modifiers.len = 1;
+        let _ = sim.world.insert(hero, modifiers);
+        assert_eq!(sim.modifier_armor(hero), 40);
+        assert_eq!(sim.modifier_attack_damage(hero), 25);
     }
 
     #[test]
