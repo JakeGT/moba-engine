@@ -30,7 +30,8 @@ use moba_game::Team;
 use moba_net::protocol::{
     EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_SPAWN, EVENT_STRUCTURE_DESTROYED,
     EVENT_UNIT_DIED, MatchPhase, NetEvent, STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD,
-    STATUS_SILENCE, STATUS_SLOW, WireCommand, dequantize_position, quantize_position,
+    STATUS_SILENCE, STATUS_SLOW, SnapshotState, WireCommand, dequantize_position,
+    quantize_position,
 };
 use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
 use moba_platform::{
@@ -109,6 +110,13 @@ pub(crate) struct NetworkView {
 /// Snapshot processing only needs a clone when the sequence advances.
 fn snapshot_is_new(last_seq: u32, incoming_seq: u32) -> bool {
     incoming_seq != last_seq
+}
+
+/// Clones a snapshot only when its sequence advances.
+fn snapshot_to_process(last_seq: u32, snapshot: Option<&SnapshotState>) -> Option<SnapshotState> {
+    snapshot
+        .filter(|snapshot| snapshot_is_new(last_seq, snapshot.seq))
+        .cloned()
 }
 
 struct ClientApp {
@@ -408,60 +416,57 @@ impl App for ClientApp {
                     }
                 }
                 if failure.is_none() {
-                    let new_snapshot = network.client.snapshot().is_some_and(|snapshot| {
-                        snapshot_is_new(network.last_snapshot_seq, snapshot.seq)
-                    });
-                    if new_snapshot {
-                        if let Some(snapshot) = network.client.snapshot().cloned() {
-                            network.last_snapshot_seq = snapshot.seq;
-                            network.phase =
-                                MatchPhase::from_u8(snapshot.phase).unwrap_or(MatchPhase::Lobby);
-                            network.countdown = snapshot.countdown;
-                            network.ready_count =
-                                u8::try_from(snapshot.ready_mask.count_ones()).unwrap_or(u8::MAX);
-                            network.player_count =
-                                u8::try_from(snapshot.player_mask.count_ones()).unwrap_or(u8::MAX);
-                            network.ready = network.own_slot < 10
-                                && snapshot.ready_mask & (1 << network.own_slot) != 0;
-                            if snapshot.tick < network.last_tick {
-                                // Rematch: server restarted at tick zero with fresh net ids.
-                                network.interpolator.clear();
-                                network.own_net_id = None;
-                                network.prediction.set_target(None);
-                                network.client.clear_pending_input();
-                            }
-                            network.last_tick = snapshot.tick;
-                            network.interpolator.push(snapshot.clone());
-                            if let Some(own) = snapshot.entities.iter().find(|entity| {
-                                entity.hero_slot == network.own_slot
-                                    && entity.team == network.client.team().index() as u8
+                    if let Some(snapshot) =
+                        snapshot_to_process(network.last_snapshot_seq, network.client.snapshot())
+                    {
+                        network.last_snapshot_seq = snapshot.seq;
+                        network.phase =
+                            MatchPhase::from_u8(snapshot.phase).unwrap_or(MatchPhase::Lobby);
+                        network.countdown = snapshot.countdown;
+                        network.ready_count =
+                            u8::try_from(snapshot.ready_mask.count_ones()).unwrap_or(u8::MAX);
+                        network.player_count =
+                            u8::try_from(snapshot.player_mask.count_ones()).unwrap_or(u8::MAX);
+                        network.ready = network.own_slot < 10
+                            && snapshot.ready_mask & (1 << network.own_slot) != 0;
+                        if snapshot.tick < network.last_tick {
+                            // Rematch: server restarted at tick zero with fresh net ids.
+                            network.interpolator.clear();
+                            network.own_net_id = None;
+                            network.prediction.set_target(None);
+                            network.client.clear_pending_input();
+                        }
+                        network.last_tick = snapshot.tick;
+                        network.interpolator.push(snapshot.clone());
+                        if let Some(own) = snapshot.entities.iter().find(|entity| {
+                            entity.hero_slot == network.own_slot
+                                && entity.team == network.client.team().index() as u8
+                        }) {
+                            network.own_net_id = Some(own.net_id);
+                            network.prediction.set_dead(own.is_dead());
+                            network.prediction.reconcile(own.position());
+                            if let Some(item) = network.demo_buy.filter(|_| {
+                                !network.demo_bought && network.phase == MatchPhase::Playing
                             }) {
-                                network.own_net_id = Some(own.net_id);
-                                network.prediction.set_dead(own.is_dead());
-                                network.prediction.reconcile(own.position());
-                                if let Some(item) = network.demo_buy.filter(|_| {
-                                    !network.demo_bought && network.phase == MatchPhase::Playing
-                                }) {
-                                    if network
-                                        .client
-                                        .send_command(WireCommand::BuyItem { item })
-                                        .is_ok()
-                                    {
-                                        network.demo_bought = true;
-                                    }
+                                if network
+                                    .client
+                                    .send_command(WireCommand::BuyItem { item })
+                                    .is_ok()
+                                {
+                                    network.demo_bought = true;
                                 }
-                                if let Some(target) = network.demo_move.filter(|_| {
-                                    !network.demo_sent && network.phase == MatchPhase::Playing
-                                }) {
-                                    let (x, y) = quantize_position(target);
-                                    if network
-                                        .client
-                                        .send_command(WireCommand::MoveTo { x, y })
-                                        .is_ok()
-                                    {
-                                        network.prediction.set_target(Some(target));
-                                        network.demo_sent = true;
-                                    }
+                            }
+                            if let Some(target) = network.demo_move.filter(|_| {
+                                !network.demo_sent && network.phase == MatchPhase::Playing
+                            }) {
+                                let (x, y) = quantize_position(target);
+                                if network
+                                    .client
+                                    .send_command(WireCommand::MoveTo { x, y })
+                                    .is_ok()
+                                {
+                                    network.prediction.set_target(Some(target));
+                                    network.demo_sent = true;
                                 }
                             }
                         }
@@ -1529,5 +1534,16 @@ mod tests {
         assert!(!super::snapshot_is_new(7, 7));
         assert!(super::snapshot_is_new(7, 8));
         assert!(super::snapshot_is_new(8, 7));
+    }
+
+    #[test]
+    fn unchanged_snapshots_do_not_allocate() {
+        let snapshot = moba_net::protocol::SnapshotState::default();
+        let ((), allocations) = super::allocation_probe::probe(|| {
+            for _ in 0..100 {
+                let _ = super::snapshot_to_process(0, Some(&snapshot));
+            }
+        });
+        assert_eq!(allocations, 0);
     }
 }
