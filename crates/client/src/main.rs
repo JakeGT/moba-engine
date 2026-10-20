@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod hud;
+mod input;
 mod settings;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
