@@ -2,7 +2,7 @@
 
 use super::theme;
 use super::{
-    Camera, Instant, NetworkView, UiDrawList, Vec3, Vec4, hud_units, map_center, project_to_screen,
+    Camera, Instant, NetworkView, UiDrawList, Vec3, hud_units, map_center, project_to_screen,
     rendered_entity_position, unit_hud_height,
 };
 
@@ -43,19 +43,13 @@ pub(crate) fn draw_health_bars(
         } else {
             theme::RED_ACCENT
         };
-        ui.rect(
-            x,
-            y,
-            bar_width,
-            bar_height,
-            Vec4::new(0.02, 0.03, 0.04, 0.85),
-        );
+        ui.rect(x, y, bar_width, bar_height, theme::HEALTHBAR_BG);
         ui.rect(
             x,
             y,
             bar_width * fraction.clamp(0.0, 1.0),
             bar_height,
-            Vec4::new(0.2, 0.85, 0.38, 1.0),
+            theme::HEALTHBAR_ALLY,
         );
         ui.outline(x, y, bar_width, bar_height, 1.0, team_color);
         if unit.kind() == 0 {
@@ -63,27 +57,27 @@ pub(crate) fn draw_health_bars(
             for (active, color) in [
                 (
                     unit.status_bits() & crate::hud::STATUS_SHIELD != 0,
-                    Vec4::new(0.3, 0.75, 1.0, 1.0),
+                    theme::SHIELD,
                 ),
                 (
                     unit.status_bits() & crate::hud::STATUS_SLOW != 0,
-                    Vec4::new(0.6, 0.4, 0.95, 1.0),
+                    theme::SLOW,
                 ),
                 (
                     unit.status_bits() & crate::hud::STATUS_ROOT != 0,
-                    Vec4::new(0.95, 0.8, 0.25, 1.0),
+                    theme::HASTE,
                 ),
                 (
                     unit.status_bits() & crate::hud::STATUS_SILENCE != 0,
-                    Vec4::new(0.7, 0.7, 0.75, 1.0),
+                    theme::ROOT,
                 ),
                 (
                     unit.status_bits() & crate::hud::STATUS_BURN != 0,
-                    Vec4::new(1.0, 0.45, 0.12, 1.0),
+                    theme::BURN,
                 ),
                 (
                     unit.status_bits() & crate::hud::STATUS_HASTE != 0,
-                    Vec4::new(0.3, 0.95, 0.4, 1.0),
+                    theme::REGEN,
                 ),
             ] {
                 if active {

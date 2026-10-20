@@ -1,12 +1,13 @@
 //! Shop overlay.
 
+use crate::hud::theme;
 use moba_core::math::Vec4;
 
 use crate::app::NetworkView;
 use moba_net::protocol::NetProgress;
 use moba_platform::InputState;
 
-use crate::hud::{HitList, HudAction, item_summary, register, theme};
+use crate::hud::{HitList, HudAction, item_summary, register};
 use crate::hud_fmt;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -26,14 +27,7 @@ pub(crate) fn draw_shop(
     let shop_h = 390.0;
     let sx = (width_f - shop_w) * 0.5;
     let sy = ((height_f - shop_h) * 0.5 - 80.0).max(40.0);
-    ui.panel(
-        sx,
-        sy,
-        shop_w,
-        shop_h,
-        Vec4::new(0.01, 0.02, 0.035, 0.94),
-        border,
-    );
+    ui.panel(sx, sy, shop_w, shop_h, theme::SHOP_TOOLTIP, border);
     register(hits, HudAction::Block, sx, sy, shop_w, shop_h);
     ui.text_shadowed(sx + 24.0, sy + 18.0, 3.5, text, "SHOP");
     ui.text(
@@ -77,7 +71,7 @@ pub(crate) fn draw_shop(
         let name_color = if affordable {
             text
         } else {
-            Vec4::new(0.45, 0.5, 0.58, 1.0)
+            theme::SHOP_DISABLED
         };
         ui.text(
             sx + 24.0,
@@ -101,7 +95,7 @@ pub(crate) fn draw_shop(
             if affordable {
                 theme::GOLD
             } else {
-                Vec4::new(0.55, 0.4, 0.3, 1.0)
+                theme::SHOP_WARN
             },
             &hud_fmt!("{}G", item.cost),
         );

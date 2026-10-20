@@ -1,6 +1,7 @@
 //! HUD status.
 
 use super::{Camera, FixVec2, UiDrawList, Vec2, Vec3, Vec4, project_to_screen};
+use crate::hud::theme;
 use std::sync::OnceLock;
 
 use crate::hud_fmt;
@@ -52,7 +53,7 @@ pub(crate) fn draw_perf(ui: &mut UiDrawList, width: f32, frame_ms: f32, fps: f32
         width - 24.0 - UiDrawList::text_width(&label, 1.8),
         54.0,
         1.8,
-        Vec4::new(0.55, 0.62, 0.72, 1.0),
+        theme::STATUS_DIM,
         &label,
     );
 }

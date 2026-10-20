@@ -1,5 +1,6 @@
 //! Tab scoreboard overlay.
 
+use crate::hud::theme;
 use moba_core::math::Vec4;
 use moba_net::protocol::SnapshotState;
 
@@ -29,7 +30,7 @@ pub(crate) fn draw_scoreboard(
         sy,
         panel_width,
         panel_height,
-        Vec4::new(0.01, 0.02, 0.035, 0.9),
+        theme::SCOREBOARD_BG,
         border,
     );
     register(hits, HudAction::Block, sx, sy, panel_width, panel_height);
@@ -67,9 +68,9 @@ pub(crate) fn draw_scoreboard(
     for (index, (team, slot, pick, hp, max_hp, level)) in rows[..count].iter().enumerate() {
         let y = sy + 64.0 + index as f32 * 24.0;
         let color = if *team == Some(0) {
-            Vec4::new(0.45, 0.7, 1.0, 1.0)
+            theme::SCOREBOARD_BLUE
         } else {
-            Vec4::new(1.0, 0.5, 0.4, 1.0)
+            theme::SCOREBOARD_RED
         };
         let name = network
             .client

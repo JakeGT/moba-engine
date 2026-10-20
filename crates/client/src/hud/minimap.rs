@@ -2,8 +2,8 @@
 
 use super::theme;
 use super::{
-    Fix, FixVec2, HitList, HudAction, NetworkView, UiDrawList, Vec2, Vec4, VisionCircles,
-    hud_units, map_center, map_extent, map_lanes, map_walls, register,
+    Fix, FixVec2, HitList, HudAction, NetworkView, UiDrawList, Vec2, VisionCircles, hud_units,
+    map_center, map_extent, map_lanes, map_walls, register,
 };
 
 pub(crate) fn draw_minimap(
@@ -17,27 +17,20 @@ pub(crate) fn draw_minimap(
     let margin = 24.0;
     let x = width as f32 - size - margin;
     let y = height as f32 - size - margin;
-    ui.panel(
-        x,
-        y,
-        size,
-        size,
-        Vec4::new(0.01, 0.02, 0.035, 0.82),
-        theme::PANEL_CHROME,
-    );
+    ui.panel(x, y, size, size, theme::MINIMAP_BG, theme::PANEL_CHROME);
     register(hits, HudAction::Minimap, x, y, size, size);
     let extent = map_extent(network);
     let inner = size - 20.0;
     let left = x + 10.0;
     let top = y + 10.0;
-    ui.rect(left, top, inner, inner, Vec4::new(0.04, 0.08, 0.06, 0.9));
+    ui.rect(left, top, inner, inner, theme::MINIMAP_GROUND);
     let map = |position: FixVec2| {
         Vec2::new(
             left + position.x.to_f32() / extent * inner,
             top + position.y.to_f32() / extent * inner,
         )
     };
-    let lane_color = Vec4::new(0.22, 0.38, 0.28, 0.85);
+    let lane_color = theme::MINIMAP_LANE;
     map_lanes(network, |points| {
         for pair in points.windows(2) {
             let a = map(FixVec2::from_ints(
@@ -51,7 +44,7 @@ pub(crate) fn draw_minimap(
             ui.line(a.x, a.y, b.x, b.y, 1.5, lane_color);
         }
     });
-    let wall_color = Vec4::new(0.55, 0.42, 0.28, 1.0);
+    let wall_color = theme::MINIMAP_WALL;
     map_walls(network, |a, b| {
         let a = map(FixVec2::from_ints(i32::from(a[0]), i32::from(a[1])));
         let b = map(FixVec2::from_ints(i32::from(b[0]), i32::from(b[1])));
