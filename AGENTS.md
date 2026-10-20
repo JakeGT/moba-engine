@@ -83,7 +83,8 @@ scripts/          agent-verify.sh and operational helpers
    pre-size pools.
 5. **`unsafe`:** only in `core`, `ecs`, `jobs`, `platform`, `render`; every block needs a
    `// SAFETY:` proof and one unsafe operation per block. Other crates are
-   `#![forbid(unsafe_code)]`.
+   `#![forbid(unsafe_code)]`. The client keeps its test-only counting allocator as a
+   documented test exception; non-test client code is covered by crate-level `forbid`.
 6. **Versioning:** bump `PROTOCOL_VERSION` for any wire change, replay `VERSION` for replay
    layout changes and `SIM_LOGIC_VERSION` for deterministic behavior changes. Update content
    hashing/docs for schema changes. Never reinterpret an existing version.
