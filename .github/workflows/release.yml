@@ -25,7 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - name: Leaf package verify
         run: cargo package -p moba-core --locked
       - name: Inspect every packaged file list
@@ -44,7 +44,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - run: cargo test --workspace --release --locked
 
   build:
@@ -66,7 +66,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - name: Install shader compiler (macOS)
         if: runner.os == 'macOS'
         run: brew install glslang
