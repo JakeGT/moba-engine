@@ -19,7 +19,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Item | Current value | Source of truth |
 |---|---|---|
 | Workspace version | `0.2.0` | `Cargo.toml` |
-| Wire protocol | **v26** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
+| Wire protocol | **v27** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
 | Replay format | **v5** | `crates/sim/src/replay.rs::VERSION` |
 | Simulation logic | **v7** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content.rs` |

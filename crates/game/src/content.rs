@@ -237,6 +237,10 @@ pub struct ItemSpec {
     pub magic_resist: i32,
     /// Bonus movement speed in world units per second.
     pub move_speed_per_sec: Fix,
+    /// Self-heal applied by the active (0 = no active).
+    pub active_heal: i32,
+    /// Active cooldown in ticks (0 = no active).
+    pub active_cooldown_ticks: u16,
 }
 
 /// An owned lane path.
@@ -769,6 +773,8 @@ impl From<&ItemDef> for ItemSpec {
             armor: item.armor,
             magic_resist: item.magic_resist,
             move_speed_per_sec: item.move_speed_per_sec,
+            active_heal: item.active_heal,
+            active_cooldown_ticks: item.active_cooldown_ticks,
         }
     }
 }
@@ -1146,6 +1152,9 @@ impl GameContent {
             }
             if item.move_speed_per_sec < Fix::ZERO
                 || item.move_speed_per_sec > Fix::from_i32(MAX_SPEED_PER_SEC)
+                || !(0..=MAX_ITEM_STAT).contains(&item.active_heal)
+                || u32::from(item.active_cooldown_ticks) > MAX_COOLDOWN_TICKS
+                || (item.active_heal > 0) != (item.active_cooldown_ticks > 0)
             {
                 return Err(ContentError::BadItemStats);
             }
@@ -1412,6 +1421,8 @@ impl GameContent {
                 item.attack_damage as u32,
                 item.armor as u32,
                 item.magic_resist as u32,
+                item.active_heal as u32,
+                u32::from(item.active_cooldown_ticks),
             ] {
                 feed(&value.to_le_bytes());
             }
@@ -1930,6 +1941,10 @@ struct ItemEntry {
     magic_resist: i32,
     #[serde(default)]
     move_speed: f32,
+    #[serde(default)]
+    active_heal: i32,
+    #[serde(default)]
+    active_cooldown_ticks: u16,
 }
 
 #[derive(Deserialize)]
@@ -2099,6 +2114,8 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 armor: item.armor,
                 magic_resist: item.magic_resist,
                 move_speed_per_sec: fix_param(item.move_speed, "items.move_speed")?,
+                active_heal: item.active_heal,
+                active_cooldown_ticks: item.active_cooldown_ticks,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
