@@ -537,6 +537,8 @@ impl App for ClientApp {
                             center,
                             simulation.current_tick().get() as f32 / 30.0,
                             entity.index() as f32,
+                            0.0,
+                            1.0,
                         );
                     } else {
                         push_unit(units, position.0, *kind, *team, fraction, 0, center);

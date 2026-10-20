@@ -63,6 +63,32 @@ pub(crate) fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitI
         } else {
             f32::from(entity.health) / f32::from(entity.max_health)
         };
+        if kind == UnitKind::Hero {
+            let previous = network
+                .interpolator
+                .position(entity.net_id, render_tick - 2.0)
+                .unwrap_or(position);
+            let dx = position.x.to_f32() - previous.x.to_f32();
+            let dy = position.y.to_f32() - previous.y.to_f32();
+            let speed_sq = dx * dx + dy * dy;
+            let (facing, gait) = if speed_sq > 0.0001 {
+                (dy.atan2(dx), 1.0)
+            } else {
+                (0.0, 0.0)
+            };
+            push_hero_rig(
+                units,
+                position,
+                team,
+                fraction,
+                center,
+                render_tick / 30.0,
+                f32::from(entity.net_id),
+                facing,
+                gait,
+            );
+            continue;
+        }
         push_unit(
             units,
             position,
@@ -100,6 +126,8 @@ pub(crate) fn push_hero_rig(
     center: f32,
     time: f32,
     phase_offset: f32,
+    facing: f32,
+    gait: f32,
 ) {
     let color = match team {
         Team::Blue => Vec4::new(0.28, 0.55, 1.0, 1.0),
@@ -117,10 +145,16 @@ pub(crate) fn push_hero_rig(
         0.0,
         position.y.to_f32() - center,
     );
-    let phase = (time * 6.0 + phase_offset).sin();
-    let swing = (time * 9.0 + phase_offset).sin() * 0.35;
+    let gait = gait.clamp(0.0, 1.0);
+    let phase = (time * 6.0 + phase_offset).sin() * gait;
+    let swing = (time * 9.0 + phase_offset).sin() * 0.35 * gait;
+    let facing_rotation = Quat::from_rotation_y(facing);
     let part = |offset: Vec3, scale: Vec3, rotation: f32| {
-        Mat4::from_scale_rotation_translation(scale, Quat::from_rotation_z(rotation), base + offset)
+        Mat4::from_scale_rotation_translation(
+            scale,
+            facing_rotation * Quat::from_rotation_z(rotation),
+            base + facing_rotation * offset,
+        )
     };
     // Torso, head, swinging arms and counter-swinging legs form a readable low-poly rig.
     units.push(UnitInstance::new(
