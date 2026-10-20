@@ -1,15 +1,17 @@
 //! Minimal client-only procedural audio.
 //!
-//! One output stream plays short synthesized tones for gameplay events. If no output device
-//! is available (headless CI, container), the engine silently disables itself; no audio type
-//! reaches the simulation, network or server crates.
+//! One output stream plays short synthesized tones for gameplay events. Scheduling uses a
+//! lock-free bounded queue, so the real-time callback never waits on a mutex. If no output
+//! device is available (headless CI, container), the engine silently disables itself.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossbeam_queue::ArrayQueue;
 
+/// Maximum queued sound requests.
+const MAX_QUEUED: usize = 64;
 /// Maximum simultaneously scheduled tones.
 const MAX_VOICES: usize = 16;
 
@@ -49,20 +51,17 @@ struct Tone {
 
 #[derive(Default)]
 struct Synth {
-    tones: VecDeque<Tone>,
+    tones: std::collections::VecDeque<Tone>,
     sample_rate: f32,
     volume: f32,
 }
 
 impl Synth {
     fn schedule(&mut self, sound: Sound) {
-        if self.volume <= 0.0 || self.samples_for(sound) == 0 {
+        if self.volume <= 0.0 || self.sample_rate <= 0.0 {
             return;
         }
         let (frequency, seconds) = sound.tone();
-        if self.sample_rate <= 0.0 {
-            return;
-        }
         let samples = (seconds * self.sample_rate) as u32;
         if self.tones.len() >= MAX_VOICES {
             self.tones.pop_front();
@@ -75,13 +74,9 @@ impl Synth {
         });
     }
 
-    fn samples_for(&self, sound: Sound) -> u32 {
-        let (_, seconds) = sound.tone();
-        if self.sample_rate <= 0.0 {
-            0
-        } else {
-            (seconds * self.sample_rate) as u32
-        }
+    #[cfg(test)]
+    fn voice_count(&self) -> usize {
+        self.tones.len()
     }
 
     fn next_sample(&mut self) -> f32 {
@@ -103,9 +98,12 @@ impl Synth {
     }
 }
 
-fn clear_tones(synth: &Arc<Mutex<Synth>>) {
-    if let Ok(mut synth) = synth.lock() {
-        synth.tones.clear();
+fn render<T: Copy>(data: &mut [T], channels: usize, synth: &mut Synth, convert: impl Fn(f32) -> T) {
+    for frame in data.chunks_mut(channels) {
+        let sample = convert(synth.next_sample());
+        for output in frame {
+            *output = sample;
+        }
     }
 }
 
@@ -119,10 +117,10 @@ fn to_u16(sample: f32) -> u16 {
 
 /// Client audio engine; disabled gracefully when no device exists.
 pub(crate) struct Audio {
-    synth: Arc<Mutex<Synth>>,
+    scheduler: Arc<ArrayQueue<Sound>>,
     stream: Option<cpal::Stream>,
     mute: bool,
-    volume: f32,
+    volume: Arc<AtomicU32>,
     lost: Arc<AtomicBool>,
 }
 
@@ -131,129 +129,118 @@ impl Audio {
     #[must_use]
     #[allow(clippy::too_many_lines)] // Device/format setup is one linear path.
     pub(crate) fn new(volume: f32, mute: bool) -> Self {
-        let synth = Arc::new(Mutex::new(Synth {
-            volume: volume.clamp(0.0, 1.0),
-            ..Synth::default()
-        }));
+        let volume = Arc::new(AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()));
+        let scheduler = Arc::new(ArrayQueue::new(MAX_QUEUED));
+        let lost = Arc::new(AtomicBool::new(false));
         let host = cpal::default_host();
         let Some(device) = host.default_output_device() else {
-            return Self::disabled(synth, mute);
+            return Self::disabled(scheduler, volume, mute, lost);
         };
         let Ok(supported) = device.default_output_config() else {
-            return Self::disabled(synth, mute);
+            return Self::disabled(scheduler, volume, mute, lost);
         };
         let format = supported.sample_format();
         let config = supported.config();
         let sample_rate = config.sample_rate.0 as f32;
         let channels = usize::from(config.channels);
-        if let Ok(mut synth) = synth.lock() {
-            synth.sample_rate = sample_rate;
-        }
-        let callback_synth = Arc::clone(&synth);
-        let error_synth = Arc::clone(&synth);
-        let lost = Arc::new(AtomicBool::new(false));
-        let error_lost = Arc::clone(&lost);
-        let stream = match format {
-            cpal::SampleFormat::F32 => device.build_output_stream(
+        let render_f32 = {
+            let queue = Arc::clone(&scheduler);
+            let volume = Arc::clone(&volume);
+            let lost = Arc::clone(&lost);
+            device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
-                    let mut synth = callback_synth
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    for frame in data.chunks_mut(channels) {
-                        let sample = synth.next_sample();
-                        for output in frame {
-                            *output = sample;
-                        }
+                    let mut synth = Synth {
+                        sample_rate,
+                        volume: f32::from_bits(volume.load(Ordering::Relaxed)),
+                        ..Synth::default()
+                    };
+                    while let Some(sound) = queue.pop() {
+                        synth.schedule(sound);
                     }
+                    render(data, channels, &mut synth, |sample| sample);
                 },
-                move |_error| {
-                    clear_tones(&error_synth);
-                    error_lost.store(true, Ordering::Relaxed);
-                },
+                move |_error| lost.store(true, Ordering::Relaxed),
                 None,
-            ),
-            cpal::SampleFormat::I16 => {
-                let callback_synth = Arc::clone(&synth);
-                let error_synth = Arc::clone(&synth);
-                device.build_output_stream(
-                    &config,
-                    move |data: &mut [i16], _| {
-                        let mut synth = callback_synth
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
-                        for frame in data.chunks_mut(channels) {
-                            let sample = to_i16(synth.next_sample());
-                            for output in frame {
-                                *output = sample;
-                            }
-                        }
-                    },
-                    move |_error| {
-                        clear_tones(&error_synth);
-                        error_lost.store(true, Ordering::Relaxed);
-                    },
-                    None,
-                )
-            }
-            cpal::SampleFormat::U16 => {
-                let callback_synth = Arc::clone(&synth);
-                let error_synth = Arc::clone(&synth);
-                device.build_output_stream(
-                    &config,
-                    move |data: &mut [u16], _| {
-                        let mut synth = callback_synth
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
-                        for frame in data.chunks_mut(channels) {
-                            let sample = to_u16(synth.next_sample());
-                            for output in frame {
-                                *output = sample;
-                            }
-                        }
-                    },
-                    move |_error| {
-                        clear_tones(&error_synth);
-                        error_lost.store(true, Ordering::Relaxed);
-                    },
-                    None,
-                )
-            }
-            _ => {
-                return Self::disabled(synth, mute);
-            }
+            )
+        };
+        let render_i16 = {
+            let queue = Arc::clone(&scheduler);
+            let volume = Arc::clone(&volume);
+            let lost = Arc::clone(&lost);
+            device.build_output_stream(
+                &config,
+                move |data: &mut [i16], _| {
+                    let mut synth = Synth {
+                        sample_rate,
+                        volume: f32::from_bits(volume.load(Ordering::Relaxed)),
+                        ..Synth::default()
+                    };
+                    while let Some(sound) = queue.pop() {
+                        synth.schedule(sound);
+                    }
+                    render(data, channels, &mut synth, to_i16);
+                },
+                move |_error| lost.store(true, Ordering::Relaxed),
+                None,
+            )
+        };
+        let render_u16 = {
+            let queue = Arc::clone(&scheduler);
+            let volume = Arc::clone(&volume);
+            let lost = Arc::clone(&lost);
+            device.build_output_stream(
+                &config,
+                move |data: &mut [u16], _| {
+                    let mut synth = Synth {
+                        sample_rate,
+                        volume: f32::from_bits(volume.load(Ordering::Relaxed)),
+                        ..Synth::default()
+                    };
+                    while let Some(sound) = queue.pop() {
+                        synth.schedule(sound);
+                    }
+                    render(data, channels, &mut synth, to_u16);
+                },
+                move |_error| lost.store(true, Ordering::Relaxed),
+                None,
+            )
+        };
+        let stream = match format {
+            cpal::SampleFormat::F32 => render_f32,
+            cpal::SampleFormat::I16 => render_i16,
+            cpal::SampleFormat::U16 => render_u16,
+            _ => return Self::disabled(scheduler, volume, mute, lost),
         };
         match stream {
             Ok(stream) => {
                 if stream.play().is_err() {
-                    return Self::disabled(synth, mute);
+                    return Self::disabled(scheduler, volume, mute, lost);
                 }
                 Self {
-                    synth,
+                    scheduler,
                     stream: Some(stream),
                     mute,
                     volume,
                     lost,
                 }
             }
-            Err(_) => Self::disabled(synth, mute),
+            Err(_) => Self::disabled(scheduler, volume, mute, lost),
         }
     }
 
-    fn disabled(synth: Arc<Mutex<Synth>>, mute: bool) -> Self {
+    fn disabled(
+        scheduler: Arc<ArrayQueue<Sound>>,
+        volume: Arc<AtomicU32>,
+        mute: bool,
+        lost: Arc<AtomicBool>,
+    ) -> Self {
         Self {
-            synth,
+            scheduler,
             stream: None,
             mute,
-            volume: 1.0,
-            lost: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Reopens the output device after a runtime stream error.
-    pub(crate) fn poll(&mut self) {
-        if self.stream.is_some() && self.lost.swap(false, Ordering::Relaxed) {
-            *self = Self::new(self.volume, self.mute);
+            volume,
+            lost,
         }
     }
 
@@ -262,9 +249,7 @@ impl Audio {
         if self.mute || self.stream.is_none() {
             return;
         }
-        if let Ok(mut synth) = self.synth.lock() {
-            synth.schedule(sound);
-        }
+        let _ = self.scheduler.push(sound);
     }
 
     /// Toggles mute and returns the new state.
@@ -273,13 +258,22 @@ impl Audio {
         self.mute
     }
 
+    /// Reopens the output device after a runtime stream error.
+    pub(crate) fn poll(&mut self) {
+        if self.stream.is_some() && self.lost.swap(false, Ordering::Relaxed) {
+            *self = Self::new(
+                f32::from_bits(self.volume.load(Ordering::Relaxed)),
+                self.mute,
+            );
+        }
+    }
+
     /// Updates volume/mute at runtime.
     #[cfg(test)]
     fn configure(&mut self, volume: f32, mute: bool) {
         self.mute = mute;
-        if let Ok(mut synth) = self.synth.lock() {
-            synth.volume = volume.clamp(0.0, 1.0);
-        }
+        self.volume
+            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     /// Whether an output stream is active.
@@ -325,7 +319,7 @@ mod tests {
         for _ in 0..64 {
             synth.schedule(Sound::Attack);
         }
-        assert_eq!(synth.tones.len(), MAX_VOICES);
+        assert_eq!(synth.voice_count(), MAX_VOICES);
     }
 
     #[test]
@@ -341,18 +335,14 @@ mod tests {
     #[test]
     fn headless_engine_is_inert_and_configurable() {
         let mut audio = Audio::disabled(
-            Arc::new(Mutex::new(Synth {
-                volume: 1.0,
-                sample_rate: 48_000.0,
-                ..Synth::default()
-            })),
+            Arc::new(ArrayQueue::new(MAX_QUEUED)),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
             false,
+            Arc::new(AtomicBool::new(false)),
         );
         assert!(!audio.is_active());
         audio.play(Sound::Attack);
-        if let Ok(synth) = audio.synth.lock() {
-            assert!(synth.tones.is_empty());
-        }
+        assert!(audio.scheduler.is_empty());
         audio.configure(0.5, true);
         assert!(!audio.is_active());
         assert!(!audio.toggle_mute());
