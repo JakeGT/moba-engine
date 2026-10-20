@@ -2492,6 +2492,34 @@ impl Simulation {
                 continue;
             }
             if let Some(hero) = self.hero_entities.get(slot).copied() {
+                if let Some(progress) = self.world.get::<Progression>(hero).copied()
+                    && let Some(cooldowns) = self.world.get::<ItemCooldowns>(hero).copied()
+                    && view.health * 2 <= view.max_health
+                {
+                    let mut used = false;
+                    for item_slot in 0..usize::from(progress.item_count) {
+                        let item_id = progress.items[item_slot];
+                        if cooldowns.0[item_slot] == 0
+                            && self
+                                .content
+                                .items
+                                .get(usize::from(item_id))
+                                .is_some_and(|item| {
+                                    item.active_heal > 0 && item.active_cooldown_ticks > 0
+                                })
+                        {
+                            inputs.set(
+                                slot,
+                                PlayerCommand::UseItem(u8::try_from(item_slot).unwrap_or(0)),
+                            );
+                            used = true;
+                            break;
+                        }
+                    }
+                    if used {
+                        continue;
+                    }
+                }
                 let near_shop = self.world.get::<Position>(hero).is_some_and(|position| {
                     position
                         .0
