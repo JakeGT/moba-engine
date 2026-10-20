@@ -478,7 +478,7 @@ impl Simulation {
             bot_policy: None,
             bot_rng: core::array::from_fn(|index| {
                 Rng::from_seed(
-                    bot_seed ^ (0xB0B0_0000_0000_0000 | (index % 5).wrapping_mul(0x9E37) as u64),
+                    bot_seed ^ (0xB0B0_0000_0000_0000 | index.wrapping_mul(0x9E37) as u64),
                 )
             }),
         };
@@ -1826,12 +1826,16 @@ impl Simulation {
                 let distance = candidate.position.distance_sq(position);
                 if candidate.kind.is_structure() {
                     if distance <= stats.range_sq
-                        && best_structure.is_none_or(|(best, _)| distance < best)
+                        && best_structure.is_none_or(|(best, entity)| {
+                            distance < best || (distance == best && candidate.entity < entity)
+                        })
                     {
                         best_structure = Some((distance, candidate.entity));
                     }
                 } else if distance <= MINION_AGGRO_SQ
-                    && best_unit.is_none_or(|(best, _)| distance < best)
+                    && best_unit.is_none_or(|(best, entity)| {
+                        distance < best || (distance == best && candidate.entity < entity)
+                    })
                 {
                     best_unit = Some((distance, candidate.entity));
                 }
@@ -1888,11 +1892,15 @@ impl Simulation {
                     return;
                 }
                 if candidate.kind.is_minion() {
-                    if best_minion.is_none_or(|(best, _)| distance < best) {
+                    if best_minion.is_none_or(|(best, entity)| {
+                        distance < best || (distance == best && candidate.entity < entity)
+                    }) {
                         best_minion = Some((distance, candidate.entity));
                     }
                 } else if candidate.kind.is_hero()
-                    && best_hero.is_none_or(|(best, _)| distance < best)
+                    && best_hero.is_none_or(|(best, entity)| {
+                        distance < best || (distance == best && candidate.entity < entity)
+                    })
                 {
                     best_hero = Some((distance, candidate.entity));
                 }
