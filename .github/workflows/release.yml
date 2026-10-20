@@ -21,7 +21,7 @@ jobs:
     name: package metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
@@ -31,7 +31,7 @@ jobs:
       - name: Inspect every packaged file list
         run: |
           cargo package --workspace --locked --no-verify --list | tee package-list.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: package-list
           path: package-list.txt
@@ -40,7 +40,7 @@ jobs:
     name: release tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler
@@ -61,7 +61,7 @@ jobs:
             target: macos-aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install shader compiler (Linux)
@@ -103,7 +103,7 @@ jobs:
             Copy-Item "target/release/$bin.exe" "dist/moba-${{ matrix.target }}/"
           }
           Compress-Archive -Path "dist/moba-${{ matrix.target }}" -DestinationPath "moba-${{ matrix.target }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: moba-${{ matrix.target }}
           path: |
@@ -116,12 +116,12 @@ jobs:
     needs: [package, test, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
       - name: Create or update GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
