@@ -52,11 +52,17 @@ impl DeviceContext {
         for physical in devices {
             // SAFETY: `physical` came from this instance.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
+            let name = device_name(&properties);
             if properties.api_version < vk::API_VERSION_1_3 {
-                let _ = writeln!(reasons, "device too old ({:#x}); ", properties.api_version);
+                let version = properties.api_version;
+                let _ = writeln!(
+                    reasons,
+                    "{name}: Vulkan {}.{} < 1.3; ",
+                    vk::api_version_major(version),
+                    vk::api_version_minor(version)
+                );
                 continue;
             }
-            let name = device_name(&properties);
             // SAFETY: `physical` came from this instance.
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
@@ -93,8 +99,8 @@ impl DeviceContext {
                 continue;
             }
 
-            // Dynamic rendering and synchronization2 are core in Vulkan 1.3 but remain
-            // optional features, so they are still queried (MoltenVK/portability).
+            // Both features are mandatory in Vulkan 1.3; they are still checked because
+            // portability drivers (MoltenVK) are not fully conformant.
             let features_13 = query_vulkan13(instance, physical);
             if features_13.dynamic_rendering != vk::TRUE || features_13.synchronization2 != vk::TRUE
             {
