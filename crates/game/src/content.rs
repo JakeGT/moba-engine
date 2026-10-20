@@ -239,6 +239,8 @@ pub struct ItemSpec {
     pub move_speed_per_sec: Fix,
     /// Bonus on-hit damage.
     pub on_hit_damage: u16,
+    /// Damage reflected to attackers.
+    pub on_damaged_damage: u16,
     /// Self-heal applied by the active (0 = no active).
     pub active_heal: i32,
     /// Active cooldown in ticks (0 = no active).
@@ -776,6 +778,7 @@ impl From<&ItemDef> for ItemSpec {
             magic_resist: item.magic_resist,
             move_speed_per_sec: item.move_speed_per_sec,
             on_hit_damage: item.on_hit_damage,
+            on_damaged_damage: item.on_damaged_damage,
             active_heal: item.active_heal,
             active_cooldown_ticks: item.active_cooldown_ticks,
         }
@@ -1158,6 +1161,7 @@ impl GameContent {
                 || !(0..=MAX_ITEM_STAT).contains(&item.active_heal)
                 || u32::from(item.active_cooldown_ticks) > MAX_COOLDOWN_TICKS
                 || item.on_hit_damage > 1_000
+                || item.on_damaged_damage > 1_000
                 || (item.active_heal > 0) != (item.active_cooldown_ticks > 0)
             {
                 return Err(ContentError::BadItemStats);
@@ -1426,6 +1430,7 @@ impl GameContent {
                 item.armor as u32,
                 item.magic_resist as u32,
                 u32::from(item.on_hit_damage),
+                u32::from(item.on_damaged_damage),
                 item.active_heal as u32,
                 u32::from(item.active_cooldown_ticks),
             ] {
@@ -1949,6 +1954,8 @@ struct ItemEntry {
     #[serde(default)]
     on_hit_damage: u16,
     #[serde(default)]
+    on_damaged_damage: u16,
+    #[serde(default)]
     active_heal: i32,
     #[serde(default)]
     active_cooldown_ticks: u16,
@@ -2122,6 +2129,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 magic_resist: item.magic_resist,
                 move_speed_per_sec: fix_param(item.move_speed, "items.move_speed")?,
                 on_hit_damage: item.on_hit_damage,
+                on_damaged_damage: item.on_damaged_damage,
                 active_heal: item.active_heal,
                 active_cooldown_ticks: item.active_cooldown_ticks,
             })

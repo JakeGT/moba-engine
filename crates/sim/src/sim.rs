@@ -1883,6 +1883,19 @@ impl Simulation {
         }
     }
 
+    fn on_damaged_bonus(&self, target: Entity) -> i32 {
+        if self.world.get::<HeroSlot>(target).is_none() {
+            return 0;
+        }
+        self.world.get::<Progression>(target).map_or(0, |progress| {
+            progress.items[..usize::from(progress.item_count)]
+                .iter()
+                .filter_map(|item| self.content.items.get(usize::from(*item)))
+                .map(|item| i32::from(item.on_damaged_damage))
+                .sum()
+        })
+    }
+
     fn on_hit_bonus(&self, attacker: Entity) -> i32 {
         if self.world.get::<HeroSlot>(attacker).is_none() {
             return 0;
@@ -1963,6 +1976,15 @@ impl Simulation {
                 DamageType::Physical,
                 snapshot.attacker,
             );
+            let thorns = self.on_damaged_bonus(snapshot.target);
+            if thorns > 0 && self.world.has::<Health>(snapshot.attacker) {
+                self.damage(
+                    snapshot.attacker,
+                    thorns,
+                    DamageType::Physical,
+                    snapshot.target,
+                );
+            }
             if let Some(stats) = self.world.get_mut::<AttackStats>(snapshot.attacker) {
                 stats.cooldown = snapshot.interval;
             }
@@ -3458,6 +3480,21 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn item_on_damaged_bonus_counts_inventory() {
+        let mut content = GameContent::default();
+        content.items[0].on_damaged_damage = 15;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        assert_eq!(sim.on_damaged_bonus(hero), 0);
+        let mut progress = *sim.world.get::<Progression>(hero).expect("progress");
+        progress.items[0] = 0;
+        progress.item_count = 1;
+        let _ = sim.world.insert(hero, progress);
+        assert_eq!(sim.on_damaged_bonus(hero), 15);
     }
 
     #[test]
