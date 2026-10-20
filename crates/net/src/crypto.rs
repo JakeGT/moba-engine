@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -178,7 +178,7 @@ pub fn hello_tag(
     spectate: bool,
 ) -> [u8; 32] {
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+        <HmacSha256 as KeyInit>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
     mac.update(b"moba-hello-v1");
     mac.update(&protocol.to_le_bytes());
     mac.update(&nonce.to_le_bytes());
@@ -198,7 +198,7 @@ pub fn verify_hello_tag(
     tag: &[u8; 32],
 ) -> bool {
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+        <HmacSha256 as KeyInit>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
     mac.update(b"moba-hello-v1");
     mac.update(&protocol.to_le_bytes());
     mac.update(&nonce.to_le_bytes());
@@ -218,7 +218,7 @@ pub fn welcome_tag(
     content_hash: u64,
 ) -> [u8; 32] {
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+        <HmacSha256 as KeyInit>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
     mac.update(b"moba-welcome-v1");
     mac.update(&client_nonce.to_le_bytes());
     mac.update(&server_nonce.to_le_bytes());
@@ -240,7 +240,7 @@ pub fn verify_welcome_tag(
     tag: &[u8; 32],
 ) -> bool {
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
+        <HmacSha256 as KeyInit>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
     mac.update(b"moba-welcome-v1");
     mac.update(&client_nonce.to_le_bytes());
     mac.update(&server_nonce.to_le_bytes());
@@ -256,9 +256,19 @@ pub fn verify_welcome_tag(
 /// Returns an I/O error when the OS randomness source is unavailable.
 pub fn random_nonce() -> std::io::Result<u64> {
     let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .map_err(|error| std::io::Error::other(format!("randomness: {error}")))?;
     Ok(u64::from_le_bytes(bytes))
+}
+
+/// Whether 32 bytes decode to a usable Ed25519 public key.
+///
+/// Rejects encodings that are not curve points and small-order ("weak") keys, which
+/// `verify_strict` would refuse on every handshake anyway. Configuration loaders call this
+/// so a bad pinned or allow-listed key fails loudly at startup instead of silently.
+#[must_use]
+pub fn is_valid_identity_key(key: &[u8; 32]) -> bool {
+    VerifyingKey::from_bytes(key).is_ok_and(|key| !key.is_weak())
 }
 
 /// Derives the Ed25519 public key for a 32-byte identity seed.
@@ -358,7 +368,7 @@ pub fn verify_server_welcome(
         slot,
         content_hash,
     );
-    key.verify(&message, &Signature::from_bytes(signature))
+    key.verify_strict(&message, &Signature::from_bytes(signature))
         .is_ok()
 }
 
@@ -414,7 +424,7 @@ pub fn verify_client_hello(
     let Ok(key) = VerifyingKey::from_bytes(public_key) else {
         return false;
     };
-    key.verify(
+    key.verify_strict(
         &client_identity_message(protocol, client_nonce, challenge, reconnect, spectate),
         &Signature::from_bytes(signature),
     )
