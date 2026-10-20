@@ -23,13 +23,13 @@ spectator camera, status effects and runtime-content examples.
 |---|---|
 | Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, rules, levels/XP, gold, items and shop |
 | Networking | Custom UDP protocol (v36): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
-| Client | Vulkan 1.2 renderer with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
+| Client | Vulkan 1.3 renderer with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
 | Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 304 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
-Requirements: Rust 1.88+, a Vulkan 1.2 driver, and `glslc` (Vulkan SDK or
+Requirements: Rust 1.88+, a Vulkan 1.3 driver, and `glslc` (Vulkan SDK or
 `glslang-tools`) to build shaders. Linux, Windows and macOS (MoltenVK) are supported.
 
 ```bash

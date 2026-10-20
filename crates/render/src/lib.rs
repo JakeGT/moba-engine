@@ -1,9 +1,9 @@
 //! Vulkan renderer: device setup, swapchain, pipelines and the render loop.
 //!
-//! The renderer targets Vulkan 1.2 with `VK_KHR_dynamic_rendering`,
-//! `VK_KHR_synchronization2` and descriptor indexing, falling back to promoted core
-//! features on Vulkan 1.3+ devices. It owns no winit types; the surface is created from
-//! the platform's [`moba_platform::Window`].
+//! The renderer requires Vulkan 1.3 and uses core dynamic rendering and synchronization2
+//! (ADR-0002). On macOS it runs through `MoltenVK` or `KosmicKrisp` with
+//! `VK_KHR_portability_subset`. It owns no winit types; the surface is created from the
+//! platform's [`moba_platform::Window`].
 
 #![allow(clippy::module_name_repetitions)]
 

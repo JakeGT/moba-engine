@@ -103,10 +103,10 @@ fn compile(compiler: &Compiler, shader: &Path, out_dir: &Path) {
     let mut command = Command::new(compiler.path());
     match compiler {
         Compiler::Glslc(_) => {
-            command.arg("--target-env=vulkan1.2").arg("-O");
+            command.arg("--target-env=vulkan1.3").arg("-O");
         }
         Compiler::Glslang(_) => {
-            command.arg("-V").arg("--target-env").arg("vulkan1.2");
+            command.arg("-V").arg("--target-env").arg("vulkan1.3");
         }
     }
     command.arg("-o").arg(&output).arg(shader);
@@ -124,6 +124,7 @@ fn compile(compiler: &Compiler, shader: &Path, out_dir: &Path) {
 
 fn validate(validator: &Path, module: &Path) {
     let status: ExitStatus = Command::new(validator)
+        .args(["--target-env", "vulkan1.3"])
         .arg(module)
         .status()
         .unwrap_or_else(|error| panic!("failed to run spirv-val: {error}"));

@@ -9,9 +9,9 @@ pub enum RenderError {
     Loader(ash::LoadingError),
     /// A Vulkan call returned an error.
     Vulkan(ash::vk::Result),
-    /// No physical device supports Vulkan 1.2 and the required features.
+    /// No physical device supports Vulkan 1.3 and the required features.
     NoSuitableDevice(String),
-    /// The loader does not support Vulkan 1.2.
+    /// The loader does not support Vulkan 1.3.
     UnsupportedApiVersion(u32),
     /// A required instance extension is missing.
     MissingInstanceExtension(String),
@@ -48,7 +48,7 @@ impl fmt::Display for RenderError {
             Self::Vulkan(result) => write!(f, "Vulkan error: {result:?}"),
             Self::NoSuitableDevice(reason) => write!(f, "no suitable GPU found: {reason}"),
             Self::UnsupportedApiVersion(version) => {
-                write!(f, "Vulkan 1.2 is required, loader provides {version:#x}")
+                write!(f, "Vulkan 1.3 is required, loader provides {version:#x}")
             }
             Self::MissingInstanceExtension(name) => {
                 write!(f, "missing instance extension {name}")

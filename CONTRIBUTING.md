@@ -11,7 +11,7 @@ dual-licensed under MIT OR Apache-2.0, matching the project.
 - Rust **1.88+** (edition 2024). `rust-toolchain.toml` requests the floating `stable` channel;
   CI additionally checks the MSRV (1.88) job. Use `scripts/agent-verify.sh` for a portable gate
   if `just`/`cargo-nextest` are unavailable.
-- A Vulkan **1.2+** driver for the client; `glslc` (Vulkan SDK) or `glslangValidator` to
+- A Vulkan **1.3+** driver for the client; `glslc` (Vulkan SDK) or `glslangValidator` to
   compile shaders. The dedicated server and tests need no GPU.
 - Optional: `just` and `cargo-nextest`, which the `justfile` prefers. All gates also work
   with plain `cargo`.
