@@ -89,7 +89,7 @@ Status (2026-10-19): #139 client-side catalogue validation and duplicate-hash su
 landed in #180; generation numbers/retry delivery and connected-player rotation landed in #188; explicit ack and advisory regression tests remain open.
 
 Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
-queue eviction (#169) and high-priority event selection (#175) landed. Event-buffer capacity reuse and encoded overhead are now covered; a full allocation-counter guard remains open.
+queue eviction (#169) and high-priority event selection (#175) landed. Event-buffer and transport send-buffer reuse landed; a full allocation-counter guard remains open.
 
 Status (2026-10-19): #135 is complete — rules hash/validation/per-kind defaults, finite
 parsing, client/sim vision agreement (#168), explicit modifier validation instead of the
