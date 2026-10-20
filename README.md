@@ -29,7 +29,7 @@ spectator camera, status effects and runtime-content examples.
 
 ## Quick start
 
-Requirements: Rust 1.85+, a Vulkan 1.2 driver, and `glslc` (Vulkan SDK or
+Requirements: Rust 1.88+, a Vulkan 1.2 driver, and `glslc` (Vulkan SDK or
 `glslang-tools`) to build shaders. Linux, Windows and macOS (MoltenVK) are supported.
 
 ```bash

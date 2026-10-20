@@ -169,7 +169,7 @@ cargo run -p moba-engine --example custom_content
 
 ## Fresh checkout / GPU
 
-- Rust **1.85+** (workspace MSRV) and a `glslc`/`glslangValidator` for shader builds.
+- Rust **1.88+** (workspace MSRV) and a `glslc`/`glslangValidator` for shader builds.
 - Linux Vulkan 1.2+; Windows Vulkan driver; macOS uses MoltenVK through the windowing stack.
 - CI goldens use lavapipe; local software Vulkan setup is in
   [`docs/dev/software-vulkan.md`](docs/dev/software-vulkan.md).
@@ -204,7 +204,7 @@ than asserting a win. Do not copy stale numbers from old docs without re-running
 6. Commit with conventional messages (`feat(area): ...`, `fix(area): ...`, `docs: ...`).
 7. Open a PR using `.github/PULL_REQUEST_TEMPLATE.md`; include commands and evidence.
    `main` is protected (no direct/force pushes; required checks `gates` ×3 OS,
-   `tools + deterministic soak`, `release tests + doctests`, `MSRV (1.85)`, `renderer-gate`,
+   `tools + deterministic soak`, `release tests + doctests`, `MSRV`, `renderer-gate`,
    `deny`, `miri`; linear history). Use a body file for Markdown
    with backticks. Renaming a CI job requires updating the ruleset's required checks.
 8. Watch checks, squash-merge, delete the branch, then `fetch` + `reset --hard origin/main`.

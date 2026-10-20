@@ -29,5 +29,5 @@ moba-game.workspace = true
 moba-net.workspace = true
 serde.workspace = true
 toml.workspace = true
-cpal = "0.15"
+cpal = "0.18"
 crossbeam-queue.workspace = true

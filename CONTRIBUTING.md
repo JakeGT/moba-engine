@@ -8,8 +8,8 @@ dual-licensed under MIT OR Apache-2.0, matching the project.
 
 ## Setup
 
-- Rust **1.85+** (edition 2024). `rust-toolchain.toml` requests the floating `stable` channel;
-  CI additionally checks the 1.85 MSRV job. Use `scripts/agent-verify.sh` for a portable gate
+- Rust **1.88+** (edition 2024). `rust-toolchain.toml` requests the floating `stable` channel;
+  CI additionally checks the MSRV (1.88) job. Use `scripts/agent-verify.sh` for a portable gate
   if `just`/`cargo-nextest` are unavailable.
 - A Vulkan **1.2+** driver for the client; `glslc` (Vulkan SDK) or `glslangValidator` to
   compile shaders. The dedicated server and tests need no GPU.
@@ -115,7 +115,7 @@ it. Renderer/content/security work has component labels and milestone groups.
 `main` is protected: direct pushes, force-pushes and deletion are blocked, history must be
 linear, and every change lands through a pull request (squash or rebase merge) once the
 required CI checks pass: `gates` on Linux, Windows and macOS, `tools + deterministic soak`,
-`release tests + doctests`, `MSRV (1.85)`, `renderer-gate`, `deny` and `miri`. Branches must be up to date with `main` before merging. Release tags
+`release tests + doctests`, `MSRV`, `renderer-gate`, `deny` and `miri`. Branches must be up to date with `main` before merging. Release tags
 (`v*`) cannot be moved or deleted. If you rename a CI job, update the required checks in the
 repository ruleset in the same PR.
 
