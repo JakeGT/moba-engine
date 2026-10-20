@@ -1430,6 +1430,9 @@ impl WireCatalog {
                 respawn_per_level: self.rules.respawn_per_level,
                 wave_interval_ticks: self.rules.wave_interval_ticks,
                 first_wave_ticks: self.rules.first_wave_ticks,
+                starting_gold: moba_game::RulesSpec::default().starting_gold,
+                gold_per_interval: moba_game::RulesSpec::default().gold_per_interval,
+                gold_tick_interval: moba_game::RulesSpec::default().gold_tick_interval,
             },
             attestation: None,
             map: MapSpec {
