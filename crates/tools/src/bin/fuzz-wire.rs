@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use moba_core::Rng;
 use moba_net::protocol::{
     Header, Hello, InputMessage, NetEntity, PacketKind, SnapshotDelta, Welcome, WireCatalog,
-    WireCommand, decode_hello, decode_input, decode_packet, decode_snapshot, decode_welcome,
-    encode_hello, encode_input, encode_packet, encode_snapshot, encode_welcome,
+    WireCommand, decode_content_update, decode_hello, decode_input, decode_packet, decode_snapshot,
+    decode_welcome, encode_content_update, encode_hello, encode_input, encode_packet,
+    encode_snapshot, encode_welcome,
 };
 
 fn main() {
@@ -48,6 +49,7 @@ fn fuzz_once(rng: &mut Rng) {
     let _ = decode_input(&noise);
     let _ = decode_hello(&noise);
     let _ = decode_welcome(&noise);
+    let _ = decode_content_update(&noise);
 
     let mut snapshot = valid_snapshot(rng);
     mutate(rng, &mut snapshot);
@@ -63,6 +65,11 @@ fn fuzz_once(rng: &mut Rng) {
             let _ = decode_snapshot(payload);
         }
     }
+
+    let mut content_update = Vec::new();
+    encode_content_update(&WireCatalog::default(), rng.next_u64(), &mut content_update);
+    mutate(rng, &mut content_update);
+    let _ = decode_content_update(&content_update);
 
     let message = InputMessage {
         client_tick: rng.next_u32(),
