@@ -1436,6 +1436,7 @@ impl WireCatalog {
                 xp_radius: moba_game::RulesSpec::default().xp_radius,
                 shop_radius: moba_game::RulesSpec::default().shop_radius,
                 shared_xp_percent: moba_game::RulesSpec::default().shared_xp_percent,
+                rewards: moba_game::RulesSpec::default().rewards,
             },
             attestation: None,
             map: MapSpec {
