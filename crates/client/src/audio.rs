@@ -229,6 +229,16 @@ impl Audio {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn headless() -> Self {
+        Self::disabled(
+            Arc::new(ArrayQueue::new(MAX_QUEUED)),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            true,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
     fn disabled(
         scheduler: Arc<ArrayQueue<Sound>>,
         volume: Arc<AtomicU32>,
