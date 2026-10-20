@@ -235,6 +235,12 @@ impl Audio {
         }
     }
 
+    /// Toggles mute and returns the new state.
+    pub(crate) fn toggle_mute(&mut self) -> bool {
+        self.mute = !self.mute;
+        self.mute
+    }
+
     /// Updates volume/mute at runtime.
     #[cfg(test)]
     fn configure(&mut self, volume: f32, mute: bool) {
@@ -304,5 +310,7 @@ mod tests {
         }
         audio.configure(0.5, true);
         assert!(!audio.is_active());
+        assert!(!audio.toggle_mute());
+        assert!(audio.toggle_mute());
     }
 }
