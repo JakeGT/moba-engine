@@ -371,10 +371,15 @@ pub struct RulesSpec {
     pub shared_xp_percent: u32,
     /// Kill rewards per unit kind.
     pub rewards: RewardsSpec,
+    /// Whether destroying a nexus ends the match.
+    pub nexus_win: bool,
+    /// Score limit that ends the match (0 disables).
+    pub score_limit: u16,
 }
 
 impl RulesSpec {
     /// Returns the first invalid rules field, if any.
+    #[allow(clippy::too_many_lines)] // One ordered validation pass.
     pub fn invalid_field(&self) -> Option<&'static str> {
         let range = Fix::from_i32(MAX_RANGE);
         let speed = Fix::from_i32(MAX_SPEED_PER_SEC);
@@ -460,6 +465,9 @@ impl RulesSpec {
                 return Some("rewards");
             }
         }
+        if self.score_limit > 1_000 {
+            return Some("score_limit");
+        }
         if self.melee_vision != self.melee_minion.vision_range {
             return Some("melee_vision");
         }
@@ -540,6 +548,8 @@ impl Default for RulesSpec {
             shop_radius: Fix::from_i32(30),
             shared_xp_percent: 130,
             rewards: RewardsSpec::default(),
+            nexus_win: true,
+            score_limit: 0,
         }
     }
 }
@@ -1518,6 +1528,8 @@ impl GameContent {
             feed(&reward.xp.to_le_bytes());
             feed(&reward.gold.to_le_bytes());
         }
+        feed(&[u8::from(self.rules.nexus_win)]);
+        feed(&self.rules.score_limit.to_le_bytes());
         string(feed, &self.map.name);
         feed(&[self.map.theme.id()]);
         feed(&self.map.extent.to_bits().to_le_bytes());
@@ -1776,6 +1788,8 @@ struct RulesEntry {
     shop_radius: f32,
     shared_xp_percent: u32,
     rewards: RewardsEntry,
+    nexus_win: bool,
+    score_limit: u16,
 }
 
 #[derive(Deserialize)]
@@ -1851,6 +1865,8 @@ impl Default for RulesEntry {
             shop_radius: rules.shop_radius.to_f32(),
             shared_xp_percent: rules.shared_xp_percent,
             rewards: RewardsEntry::default(),
+            nexus_win: rules.nexus_win,
+            score_limit: rules.score_limit,
         }
     }
 }
@@ -2467,6 +2483,8 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         gold: rules.rewards.hero.gold,
                     },
                 },
+                nexus_win: rules.nexus_win,
+                score_limit: rules.score_limit,
             }
         }
         None => RulesSpec::default(),

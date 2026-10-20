@@ -2,7 +2,7 @@
 
 Status: **draft plan, ready for execution**  
 Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**285 tests**.
+**286 tests**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -242,7 +242,7 @@ drop the all-kinds-present rule; generic replicated status flags; stun/armour-sh
 packs; zero-allocation guard; content/protocol/SIM_LOGIC bump.
 
 ### D-5. #148 economy and item actives/passives
-Starting/passive gold, radii, shared-XP percentage and per-unit XP/gold rewards are validated rules (#244–#246); aggro, win condition, item actives/passives and HUD/bot support remain.
+Starting/passive gold, radii, shared-XP, unit rewards and win conditions are validated rules (#244–#247); aggro, item actives/passives and HUD/bot support remain.
 
 ### D-6. #149 NetServer extension contract
 Status (2026-10-19): every ServerPhase value is delivered to systems (#201); **#149 closed** — every phase delivered, replay contract documented, bot-policy factory + id registry survive rematches, CI embedding example and 256 cap documented. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;

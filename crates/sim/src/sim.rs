@@ -2018,6 +2018,16 @@ impl Simulation {
                         Team::Red => self.red_score = self.red_score.saturating_add(1),
                     }
                 }
+                let limit = u32::from(self.content.rules.score_limit);
+                if limit > 0 && self.outcome.is_none() {
+                    if self.blue_score >= limit {
+                        self.outcome = Some(Team::Blue);
+                        self.push_event(SimEvent::MatchEnded { winner: Team::Blue });
+                    } else if self.red_score >= limit {
+                        self.outcome = Some(Team::Red);
+                        self.push_event(SimEvent::MatchEnded { winner: Team::Red });
+                    }
+                }
                 self.award_bounty(team, kind, position, credit.map(|credit| credit.entity));
                 self.push_event(SimEvent::UnitDied {
                     entity,
@@ -2052,7 +2062,8 @@ impl Simulation {
                     kind,
                     position,
                 });
-                if kind == UnitKind::Nexus && self.outcome.is_none() {
+                if kind == UnitKind::Nexus && self.content.rules.nexus_win && self.outcome.is_none()
+                {
                     self.outcome = Some(team.enemy());
                     self.push_event(SimEvent::MatchEnded {
                         winner: team.enemy(),
@@ -2796,6 +2807,18 @@ mod tests {
                 .any(|event| matches!(event, SimEvent::MatchEnded { winner: Team::Blue }))
         );
         assert!(!sim.world.entities().any(|entity| entity == nexus));
+    }
+
+    #[test]
+    fn nexus_win_rule_can_be_disabled() {
+        let mut content = GameContent::default();
+        content.rules.nexus_win = false;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let nexus = find_unit(&sim, UnitKind::Nexus, Team::Red);
+        sim.world.get_mut::<Health>(nexus).expect("health").current = 0;
+        sim.tick(&TickInputs::new());
+        assert!(sim.outcome().is_none());
     }
 
     #[test]
