@@ -17,8 +17,9 @@ mod sim;
 
 pub use components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
-    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier, Modifiers,
-    MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind, VisionRange,
+    HeroIdentity, HeroSlot, ItemCooldowns, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier,
+    Modifiers, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind,
+    VisionRange,
 };
 pub use moba_game::ModifierKind;
 pub use replay::{Replay, ReplayError, ReplayResult, SIM_LOGIC_VERSION};

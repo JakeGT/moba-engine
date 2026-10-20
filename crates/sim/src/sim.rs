@@ -13,8 +13,9 @@ use moba_nav::SpatialGrid;
 
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
-    HeroIdentity, HeroSlot, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier, Modifiers,
-    MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind, VisionRange,
+    HeroIdentity, HeroSlot, ItemCooldowns, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier,
+    Modifiers, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind,
+    VisionRange,
 };
 
 /// Number of player slots (5v5).
@@ -45,6 +46,7 @@ const HASH_LAST_HIT_BY: u32 = 26;
 const HASH_ATTACK_DAMAGE_TYPE: u32 = 27;
 const HASH_PROJECTILE: u32 = 28;
 const HASH_ZONE: u32 = 29;
+const HASH_ITEM_COOLDOWNS: u32 = 30;
 
 /// Hard cap on in-flight projectiles.
 pub const MAX_PROJECTILES: usize = 64;
@@ -112,6 +114,8 @@ pub enum PlayerCommand {
     },
     /// Purchases an item from the catalogue (must be near the team nexus).
     BuyItem(u8),
+    /// Uses the active on inventory slot `0..6`.
+    UseItem(u8),
     /// Concedes the match for the sender's team.
     Surrender,
 }
@@ -883,6 +887,12 @@ impl Simulation {
                     hasher.write_u32(cooldown);
                 }
             }
+            if let Some(cooldowns) = self.world.get::<ItemCooldowns>(entity) {
+                hasher.write_u32(HASH_ITEM_COOLDOWNS);
+                for cooldown in cooldowns.0 {
+                    hasher.write_u32(u32::from(cooldown));
+                }
+            }
             if let Some(walker) = self.world.get::<LaneWalker>(entity) {
                 hasher.write_u32(HASH_LANE_WALKER);
                 hasher.write_u32(u32::from(walker.lane));
@@ -1060,6 +1070,7 @@ impl Simulation {
             .insert(entity, HeroSlot(u8::try_from(slot).expect("slot fits u8")));
         let _ = self.world.insert(entity, HeroIdentity(hero_id));
         let _ = self.world.insert(entity, Cooldowns::default());
+        let _ = self.world.insert(entity, ItemCooldowns::default());
         let _ = self.world.insert(
             entity,
             Progression {
@@ -1297,6 +1308,11 @@ impl Simulation {
         for (_, stats) in self.world.query::<&mut AttackStats>() {
             stats.cooldown = stats.cooldown.saturating_sub(1);
         }
+        for (_, cooldowns) in self.world.query::<&mut ItemCooldowns>() {
+            for cooldown in &mut cooldowns.0 {
+                *cooldown = cooldown.saturating_sub(1);
+            }
+        }
         for (_, (health, mana, regen)) in self
             .world
             .query_filtered::<(&mut Health, &mut Mana, &Regen), Without<Dead>>()
@@ -1471,6 +1487,9 @@ impl Simulation {
                 }
                 PlayerCommand::BuyItem(item) => {
                     self.buy_item(entity, item);
+                }
+                PlayerCommand::UseItem(slot) => {
+                    self.use_item(entity, slot);
                 }
                 PlayerCommand::Surrender => {
                     if self.outcome.is_none() {
@@ -2257,6 +2276,36 @@ impl Simulation {
             return false;
         }
         self.buy_item(hero, item_id)
+    }
+
+    fn use_item(&mut self, hero: Entity, slot: u8) {
+        if self.world.has::<Dead>(hero) {
+            return;
+        }
+        let Some(progress) = self.world.get::<Progression>(hero).copied() else {
+            return;
+        };
+        if slot >= progress.item_count {
+            return;
+        }
+        let item_id = progress.items[usize::from(slot)];
+        let Some(item) = self.content.items.get(usize::from(item_id)) else {
+            return;
+        };
+        if item.active_heal <= 0 || item.active_cooldown_ticks == 0 {
+            return;
+        }
+        let Some(mut cooldowns) = self.world.get::<ItemCooldowns>(hero).copied() else {
+            return;
+        };
+        if cooldowns.0[usize::from(slot)] != 0 {
+            return;
+        }
+        if let Some(health) = self.world.get_mut::<Health>(hero) {
+            health.current = (health.current + item.active_heal).min(health.max);
+        }
+        cooldowns.0[usize::from(slot)] = item.active_cooldown_ticks;
+        let _ = self.world.insert(hero, cooldowns);
     }
 
     #[allow(clippy::too_many_lines)] // Flat stat application is clearer than a trait tower.
@@ -3334,6 +3383,7 @@ mod tests {
             },
         );
         let _ = world.insert(entity, AttackDamageType(DamageType::Physical));
+        let _ = world.insert(entity, ItemCooldowns::default());
 
         let mut actual = sim.world().registered_component_types();
         actual.sort_unstable();
@@ -3345,6 +3395,7 @@ mod tests {
             TypeId::of::<AttackTarget>(),
             TypeId::of::<MoveTarget>(),
             TypeId::of::<Cooldowns>(),
+            TypeId::of::<ItemCooldowns>(),
             TypeId::of::<LaneWalker>(),
             TypeId::of::<Dead>(),
             TypeId::of::<HeroIdentity>(),
@@ -3363,6 +3414,31 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn item_active_heals_and_respects_cooldown() {
+        let mut content = GameContent::default();
+        content.items[0].active_heal = 100;
+        content.items[0].active_cooldown_ticks = 2;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        let mut progress = *sim.world.get::<Progression>(hero).expect("progress");
+        progress.items[0] = 0;
+        progress.item_count = 1;
+        let _ = sim.world.insert(hero, progress);
+        let _ = sim.world.insert(hero, Regen { health: 0, mana: 0 });
+        sim.world.get_mut::<Health>(hero).expect("health").current = 1;
+        let mut inputs = TickInputs::new();
+        inputs.set(0, PlayerCommand::UseItem(0));
+        sim.tick(&inputs);
+        assert_eq!(sim.world.get::<Health>(hero).expect("health").current, 101);
+        sim.tick(&inputs);
+        assert_eq!(sim.world.get::<Health>(hero).expect("health").current, 101);
+        sim.tick(&TickInputs::new());
+        sim.tick(&inputs);
+        assert_eq!(sim.world.get::<Health>(hero).expect("health").current, 201);
     }
 
     #[test]

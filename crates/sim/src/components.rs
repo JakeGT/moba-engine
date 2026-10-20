@@ -245,6 +245,10 @@ pub struct HeroIdentity(pub HeroId);
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cooldowns(pub [u32; 3]);
 
+/// Remaining cooldown in ticks for the six item slots.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemCooldowns(pub [u16; 6]);
+
 /// Marks a dead hero waiting to respawn.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Dead {

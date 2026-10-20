@@ -415,6 +415,10 @@ fn encode_command(command: &PlayerCommand, out: &mut Vec<u8>) {
             out.push(*item);
         }
         PlayerCommand::Surrender => out.push(5),
+        PlayerCommand::UseItem(slot) => {
+            out.push(6);
+            out.push(*slot);
+        }
     }
 }
 
@@ -429,6 +433,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<PlayerCommand, ReplayError>
         },
         4 => PlayerCommand::BuyItem(reader.u8()?),
         5 => PlayerCommand::Surrender,
+        6 => PlayerCommand::UseItem(reader.u8()?),
         _ => return Err(ReplayError::BadData),
     })
 }

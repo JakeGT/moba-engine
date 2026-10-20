@@ -2267,6 +2267,7 @@ fn wire_to_command(
             target: dequantize_position(x, y),
         },
         WireCommand::BuyItem { item } => PlayerCommand::BuyItem(item),
+        WireCommand::UseItem { slot } => PlayerCommand::UseItem(slot),
         WireCommand::Ready { .. } => return None,
         WireCommand::Surrender => PlayerCommand::Surrender,
     })
