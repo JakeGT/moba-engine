@@ -342,14 +342,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "moba-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
 ]
 
 [[package]]
 name = "moba-ecs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
 ]
@@ -366,17 +366,18 @@ dependencies = [
 
 [[package]]
 name = "moba-game"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
  "serde",
+ "sha2",
  "toml",
 ]
 
 [[package]]
 name = "moba-jobs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-deque",
  "moba-core",
@@ -384,14 +385,14 @@ dependencies = [
 
 [[package]]
 name = "moba-nav"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
 ]
 
 [[package]]
 name = "moba-net"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -402,12 +403,13 @@ dependencies = [
  "moba-ecs",
  "moba-game",
  "moba-sim",
+ "moba-test-support",
  "sha2",
 ]
 
 [[package]]
 name = "moba-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
@@ -415,6 +417,10 @@ dependencies = [
  "moba-jobs",
  "moba-nav",
 ]
+
+[[package]]
+name = "moba-test-support"
+version = "0.3.0"
 
 [[package]]
 name = "opaque-debug"

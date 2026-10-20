@@ -325,6 +325,12 @@ pub struct RulesSpec {
     pub wave_interval_ticks: u32,
     /// Delay before the first wave, in ticks.
     pub first_wave_ticks: u32,
+    /// Starting gold per hero.
+    pub starting_gold: u32,
+    /// Passive gold granted per interval.
+    pub gold_per_interval: u32,
+    /// Ticks between passive gold grants.
+    pub gold_tick_interval: u32,
 }
 
 impl RulesSpec {
@@ -384,6 +390,15 @@ impl RulesSpec {
         }
         if self.respawn_per_level > 1_000 {
             return Some("respawn_per_level");
+        }
+        if self.starting_gold > 1_000_000 {
+            return Some("starting_gold");
+        }
+        if self.gold_per_interval > 1_000 {
+            return Some("gold_per_interval");
+        }
+        if self.gold_tick_interval == 0 || self.gold_tick_interval > 10_000 {
+            return Some("gold_tick_interval");
         }
         if self.melee_vision != self.melee_minion.vision_range {
             return Some("melee_vision");
@@ -458,6 +473,9 @@ impl Default for RulesSpec {
             respawn_per_level: 0,
             wave_interval_ticks: 900,
             first_wave_ticks: 30,
+            starting_gold: 500,
+            gold_per_interval: 1,
+            gold_tick_interval: 15,
         }
     }
 }
@@ -1416,6 +1434,9 @@ impl GameContent {
             self.rules.respawn_per_level,
             self.rules.wave_interval_ticks,
             self.rules.first_wave_ticks,
+            self.rules.starting_gold,
+            self.rules.gold_per_interval,
+            self.rules.gold_tick_interval,
         ] {
             feed(&value.to_le_bytes());
         }
@@ -1670,6 +1691,9 @@ struct RulesEntry {
     respawn_per_level: u32,
     wave_interval_ticks: u32,
     first_wave_ticks: u32,
+    starting_gold: u32,
+    gold_per_interval: u32,
+    gold_tick_interval: u32,
 }
 
 impl Default for RulesEntry {
@@ -1693,6 +1717,9 @@ impl Default for RulesEntry {
             respawn_per_level: rules.respawn_per_level,
             wave_interval_ticks: rules.wave_interval_ticks,
             first_wave_ticks: rules.first_wave_ticks,
+            starting_gold: rules.starting_gold,
+            gold_per_interval: rules.gold_per_interval,
+            gold_tick_interval: rules.gold_tick_interval,
         }
     }
 }
@@ -2281,6 +2308,9 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 respawn_per_level: rules.respawn_per_level,
                 wave_interval_ticks: rules.wave_interval_ticks,
                 first_wave_ticks: rules.first_wave_ticks,
+                starting_gold: rules.starting_gold,
+                gold_per_interval: rules.gold_per_interval,
+                gold_tick_interval: rules.gold_tick_interval,
             }
         }
         None => RulesSpec::default(),

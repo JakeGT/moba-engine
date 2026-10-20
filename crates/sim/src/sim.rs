@@ -6,9 +6,8 @@ use std::sync::Arc;
 use moba_core::{Fix, FixVec2, Rng, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
-    AreaEffect, AreaEffectList, DamageType, EMPTY_ITEM, Effect, GOLD_PER_INTERVAL,
-    GOLD_TICK_INTERVAL, GameContent, HeroId, LEVEL_GROWTH, ModifierKind, SHOP_RADIUS,
-    STARTING_GOLD, Targeting, Team, XP_RADIUS, mitigate_typed,
+    AreaEffect, AreaEffectList, DamageType, EMPTY_ITEM, Effect, GameContent, HeroId, LEVEL_GROWTH,
+    ModifierKind, SHOP_RADIUS, Targeting, Team, XP_RADIUS, mitigate_typed,
 };
 use moba_nav::SpatialGrid;
 
@@ -744,13 +743,15 @@ impl Simulation {
         if self.outcome.is_some() {
             return;
         }
-        if self.tick.get() % GOLD_TICK_INTERVAL == 0 {
+        if self.tick.get() % self.content.rules.gold_tick_interval == 0 {
             for hero in self.hero_entities {
                 if self.world.has::<Dead>(hero) {
                     continue;
                 }
                 if let Some(progress) = self.world.get_mut::<Progression>(hero) {
-                    progress.gold = progress.gold.saturating_add(GOLD_PER_INTERVAL);
+                    progress.gold = progress
+                        .gold
+                        .saturating_add(self.content.rules.gold_per_interval);
                 }
             }
         }
@@ -1064,7 +1065,7 @@ impl Simulation {
             Progression {
                 level: 1,
                 xp: 0,
-                gold: STARTING_GOLD,
+                gold: self.content.rules.starting_gold,
                 items: [EMPTY_ITEM; 6],
                 item_count: 0,
             },
@@ -3342,6 +3343,27 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn economy_rules_drive_starting_and_passive_gold() {
+        let mut content = GameContent::default();
+        content.rules.starting_gold = 123;
+        content.rules.gold_per_interval = 7;
+        content.rules.gold_tick_interval = 1;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        assert_eq!(
+            sim.world.get::<Progression>(hero).expect("progress").gold,
+            123
+        );
+        let inputs = sim.bot_inputs();
+        sim.tick(&inputs);
+        assert_eq!(
+            sim.world.get::<Progression>(hero).expect("progress").gold,
+            130
+        );
     }
 
     #[test]
