@@ -2559,6 +2559,7 @@ mod tests {
             silenced: false,
             burning: false,
             hasted: false,
+            status_bits: 0,
         };
         assert!(RawEvent::visible_to(
             &raw,
@@ -3065,6 +3066,7 @@ cost = 1
             silenced: false,
             burning: false,
             hasted: false,
+            status_bits: 0,
         }
     }
 

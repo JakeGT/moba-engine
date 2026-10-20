@@ -226,6 +226,8 @@ pub struct ModifierDef {
     pub on_damaged_damage: i32,
     /// Damage dealt each tick while active.
     pub on_tick_damage: i32,
+    /// Replicated status bits while active.
+    pub status_bits: u16,
 }
 
 /// An owned, runtime item definition.
@@ -837,6 +839,7 @@ fn default_modifiers() -> Vec<ModifierDef> {
         on_expire_damage: 0,
         on_damaged_damage: 0,
         on_tick_damage: 0,
+        status_bits: 0,
     })
     .collect()
 }
@@ -1544,6 +1547,7 @@ impl GameContent {
             feed(&modifier.on_expire_damage.to_le_bytes());
             feed(&modifier.on_damaged_damage.to_le_bytes());
             feed(&modifier.on_tick_damage.to_le_bytes());
+            feed(&modifier.status_bits.to_le_bytes());
         }
         len(feed, self.map.lanes.len());
         for lane in &self.map.lanes {
@@ -1633,6 +1637,8 @@ struct ModifierEntry {
     on_damaged_damage: i32,
     #[serde(default)]
     on_tick_damage: i32,
+    #[serde(default)]
+    status_bits: u16,
 }
 
 #[derive(Deserialize)]
@@ -2178,6 +2184,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                     on_expire_damage: modifier.on_expire_damage,
                     on_damaged_damage: modifier.on_damaged_damage,
                     on_tick_damage: modifier.on_tick_damage,
+                    status_bits: modifier.status_bits,
                 })
             })
             .collect::<Result<Vec<_>, ContentLoadError>>()?,
