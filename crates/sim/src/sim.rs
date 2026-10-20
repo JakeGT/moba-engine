@@ -758,7 +758,11 @@ impl Simulation {
         if self.outcome.is_some() {
             return;
         }
-        if self.tick.get() % self.content.rules.gold_tick_interval == 0 {
+        if self
+            .tick
+            .get()
+            .is_multiple_of(self.content.rules.gold_tick_interval)
+        {
             for hero in self.hero_entities {
                 if self.world.has::<Dead>(hero) {
                     continue;
@@ -1184,7 +1188,7 @@ impl Simulation {
         self.wave = self.wave.saturating_add(1);
         // Alternate spawn order so neither team systematically receives the first tick of
         // wave movement/entity ordering.
-        let order = if self.wave % 2 == 0 {
+        let order = if self.wave.is_multiple_of(2) {
             [Team::Red, Team::Blue]
         } else {
             [Team::Blue, Team::Red]
@@ -1468,7 +1472,7 @@ impl Simulation {
 
     /// Deterministic scheduling phase: half the seeds resolve blue first, half red first.
     fn blue_first(&self) -> bool {
-        (self.tick.get().wrapping_add((self.config.seed & 1) as u32)) % 2 == 0
+        (self.tick.get().wrapping_add((self.config.seed & 1) as u32)).is_multiple_of(2)
     }
 
     fn apply_inputs(&mut self, inputs: &TickInputs) {
@@ -1535,12 +1539,12 @@ impl Simulation {
                     self.use_item(entity, slot);
                 }
                 PlayerCommand::Surrender => {
-                    if self.outcome.is_none() {
-                        if let Some(team) = self.world.get::<Team>(entity).copied() {
-                            let winner = team.enemy();
-                            self.outcome = Some(winner);
-                            self.push_event(SimEvent::MatchEnded { winner });
-                        }
+                    if self.outcome.is_none()
+                        && let Some(team) = self.world.get::<Team>(entity).copied()
+                    {
+                        let winner = team.enemy();
+                        self.outcome = Some(winner);
+                        self.push_event(SimEvent::MatchEnded { winner });
                     }
                 }
             }
@@ -2674,24 +2678,22 @@ impl Simulation {
                         .distance_sq(self.content.map.nexus_position(view.team))
                         <= self.content.rules.shop_radius * self.content.rules.shop_radius
                 });
-                if near_shop {
-                    if let Some(progress) = self.world.get::<Progression>(hero) {
-                        if usize::from(progress.item_count) < moba_game::ITEM_SLOTS {
-                            let affordable: Vec<u8> = self
-                                .content
-                                .items
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, item)| item.cost <= progress.gold)
-                                .map(|(id, _)| u8::try_from(id).unwrap_or(0))
-                                .collect();
-                            if !affordable.is_empty() {
-                                let pick =
-                                    usize::try_from(buy_roll).unwrap_or(0) % affordable.len();
-                                inputs.set(slot, PlayerCommand::BuyItem(affordable[pick]));
-                                continue;
-                            }
-                        }
+                if near_shop
+                    && let Some(progress) = self.world.get::<Progression>(hero)
+                    && usize::from(progress.item_count) < moba_game::ITEM_SLOTS
+                {
+                    let affordable: Vec<u8> = self
+                        .content
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| item.cost <= progress.gold)
+                        .map(|(id, _)| u8::try_from(id).unwrap_or(0))
+                        .collect();
+                    if !affordable.is_empty() {
+                        let pick = usize::try_from(buy_roll).unwrap_or(0) % affordable.len();
+                        inputs.set(slot, PlayerCommand::BuyItem(affordable[pick]));
+                        continue;
                     }
                 }
             }

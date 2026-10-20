@@ -279,14 +279,11 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 self.app.on_focus(focused);
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(key) = map_key(code) {
-                        self.input.handle_key(
-                            key,
-                            event.state == ElementState::Pressed,
-                            event.repeat,
-                        );
-                    }
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && let Some(key) = map_key(code)
+                {
+                    self.input
+                        .handle_key(key, event.state == ElementState::Pressed, event.repeat);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {

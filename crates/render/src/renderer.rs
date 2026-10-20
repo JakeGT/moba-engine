@@ -1075,7 +1075,7 @@ impl Renderer {
         // Expose conventional tightly packed RGBA to callers.
         match format {
             vk::Format::B8G8R8A8_SRGB | vk::Format::B8G8R8A8_UNORM => {
-                for pixel in rgba.chunks_exact_mut(4) {
+                for pixel in rgba.as_chunks_mut::<4>().0 {
                     pixel.swap(0, 2);
                 }
             }

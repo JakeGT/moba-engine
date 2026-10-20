@@ -58,12 +58,12 @@ fn ready_gate_and_surrender_vote() {
     let mut playing = false;
     while start.elapsed() < Duration::from_secs(3) {
         pump(&mut client, 0.05);
-        if let Some(state) = client.snapshot() {
-            if state.phase == MatchPhase::Playing as u8 {
-                playing = true;
-                assert_eq!(state.ready_mask & 1, 1);
-                break;
-            }
+        if let Some(state) = client.snapshot()
+            && state.phase == MatchPhase::Playing as u8
+        {
+            playing = true;
+            assert_eq!(state.ready_mask & 1, 1);
+            break;
         }
     }
     assert!(playing, "ready starts countdown and play");
@@ -75,11 +75,11 @@ fn ready_gate_and_surrender_vote() {
     let mut outcome = 0;
     while start.elapsed() < Duration::from_secs(2) {
         pump(&mut client, 0.05);
-        if let Some(state) = client.snapshot() {
-            if state.outcome != 0 {
-                outcome = state.outcome;
-                break;
-            }
+        if let Some(state) = client.snapshot()
+            && state.outcome != 0
+        {
+            outcome = state.outcome;
+            break;
         }
     }
     assert_eq!(outcome, 2, "blue surrender gives red the win");

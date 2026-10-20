@@ -489,7 +489,7 @@ mod tests {
         let atlas = build_atlas();
         assert_eq!(atlas.len(), (ATLAS_WIDTH * ATLAS_HEIGHT * 4) as usize);
         assert_eq!(&atlas[0..4], &[255, 255, 255, 255]);
-        assert!(atlas.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        assert!(atlas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 255));
         let (u0, v0) = glyph_uv('A');
         assert!(u0[0] > 0.0 && u0[1] > 0.0);
         assert!(u0[0] < v0[0] && u0[1] < v0[1]);

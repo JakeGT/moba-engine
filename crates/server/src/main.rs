@@ -453,7 +453,7 @@ fn parse_secret(value: &str) -> [u8; 32] {
         std::process::exit(2);
     }
     let mut key = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
         if !chunk.iter().all(u8::is_ascii_hexdigit) {
             eprintln!("secret contains non-hex characters");
             std::process::exit(2);
@@ -485,7 +485,7 @@ fn load_identity_seed(path: &std::path::Path) -> [u8; 32] {
         eprintln!("server key must be 64 hex characters");
         std::process::exit(2);
     }
-    for (index, chunk) in text.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let value = std::str::from_utf8(chunk).unwrap_or_default();
         seed[index] = u8::from_str_radix(value, 16).unwrap_or_else(|_| {
             eprintln!("server key contains non-hex characters");

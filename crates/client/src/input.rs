@@ -211,12 +211,12 @@ pub(crate) fn handle_network_input(
         crate::settings::MouseBinding::Left => MouseButton::Left,
         crate::settings::MouseBinding::Right => MouseButton::Right,
     };
-    if input.was_mouse_pressed(attack_button) {
-        if let Some(target) = nearest_enemy(network, ground) {
-            let _ = network
-                .client
-                .send_command(WireCommand::Attack { net_id: target });
-        }
+    if input.was_mouse_pressed(attack_button)
+        && let Some(target) = nearest_enemy(network, ground)
+    {
+        let _ = network
+            .client
+            .send_command(WireCommand::Attack { net_id: target });
     }
     for (key, slot) in [
         (bindings.cast_q, 0u8),

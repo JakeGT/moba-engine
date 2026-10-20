@@ -60,10 +60,10 @@ fn fuzz_once(rng: &mut Rng) {
     counted[32..34].copy_from_slice(&extreme.to_le_bytes());
     let _ = decode_snapshot(&counted);
     let mut packet = Vec::new();
-    if encode_packet(&header(PacketKind::Snapshot), &snapshot, &mut packet).is_ok() {
-        if let Ok((_, payload)) = decode_packet(&packet) {
-            let _ = decode_snapshot(payload);
-        }
+    if encode_packet(&header(PacketKind::Snapshot), &snapshot, &mut packet).is_ok()
+        && let Ok((_, payload)) = decode_packet(&packet)
+    {
+        let _ = decode_snapshot(payload);
     }
 
     let mut content_update = Vec::new();

@@ -68,56 +68,55 @@ pub(crate) fn draw_abilities(
             ui.text(bx + 4.0, by + 24.0, 1.8, text, &hud_fmt!("{seconds:.1}"));
         }
     }
-    if let Some(slot) = hovered_ability {
-        if let Some(ability) = network
+    if let Some(slot) = hovered_ability
+        && let Some(ability) = network
             .client
             .abilities()
             .get(usize::from(ability_ids[slot]))
-        {
-            let name = ability.name_str();
-            let kind = match ability.targeting_kind {
-                0 => "SELF",
-                1 => "POINT",
-                _ => "DIRECTION",
-            };
-            let range = Fix::from_bits(ability.cast_range_bits).to_f32();
-            let tx = (x + 14.0 + slot as f32 * 48.0).min(width_f - 270.0);
-            let ty = (y + 146.0 + 46.0).min(height_f - 86.0);
-            ui.panel(tx, ty, 270.0, 72.0, theme::TOOLTIP_BG, theme::GOLD);
-            ui.text(tx + 10.0, ty + 8.0, 2.0, theme::GOLD, name);
-            ui.text(
-                tx + 10.0,
-                ty + 28.0,
-                1.7,
-                text,
-                &hud_fmt!(
-                    "{kind}  RANGE {range:.1}  CD {:.1}s  MANA {}",
-                    f32::from(u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)) / 30.0,
-                    ability.mana_cost
-                ),
-            );
-            let effect = ability
-                .effects
-                .get(usize::from(ability.effect_count.saturating_sub(1)))
-                .copied()
-                .unwrap_or_default();
-            let kind = match effect.kind {
-                0 => "NO EFFECT",
-                1 => "DAMAGE",
-                2 => "HEAL",
-                3 => "MODIFIER",
-                4 => "DISPLACE",
-                5 => "PROJECTILE",
-                6 => "AREA",
-                _ => "ZONE",
-            };
-            ui.text(
-                tx + 10.0,
-                ty + 48.0,
-                1.7,
-                muted,
-                &hud_fmt!("{kind}  AMOUNT {}", effect.amount),
-            );
-        }
+    {
+        let name = ability.name_str();
+        let kind = match ability.targeting_kind {
+            0 => "SELF",
+            1 => "POINT",
+            _ => "DIRECTION",
+        };
+        let range = Fix::from_bits(ability.cast_range_bits).to_f32();
+        let tx = (x + 14.0 + slot as f32 * 48.0).min(width_f - 270.0);
+        let ty = (y + 146.0 + 46.0).min(height_f - 86.0);
+        ui.panel(tx, ty, 270.0, 72.0, theme::TOOLTIP_BG, theme::GOLD);
+        ui.text(tx + 10.0, ty + 8.0, 2.0, theme::GOLD, name);
+        ui.text(
+            tx + 10.0,
+            ty + 28.0,
+            1.7,
+            text,
+            &hud_fmt!(
+                "{kind}  RANGE {range:.1}  CD {:.1}s  MANA {}",
+                f32::from(u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)) / 30.0,
+                ability.mana_cost
+            ),
+        );
+        let effect = ability
+            .effects
+            .get(usize::from(ability.effect_count.saturating_sub(1)))
+            .copied()
+            .unwrap_or_default();
+        let kind = match effect.kind {
+            0 => "NO EFFECT",
+            1 => "DAMAGE",
+            2 => "HEAL",
+            3 => "MODIFIER",
+            4 => "DISPLACE",
+            5 => "PROJECTILE",
+            6 => "AREA",
+            _ => "ZONE",
+        };
+        ui.text(
+            tx + 10.0,
+            ty + 48.0,
+            1.7,
+            muted,
+            &hud_fmt!("{kind}  AMOUNT {}", effect.amount),
+        );
     }
 }

@@ -109,12 +109,11 @@ fn custom_item_catalogue_reaches_client_and_shop() {
                 .entities
                 .iter()
                 .find(|entity| entity.hero_slot == client.player_slot())
-        }) {
-            if own.progress.items.contains(&0) {
-                assert!(own.progress.gold < 500);
-                bought = true;
-                break;
-            }
+        }) && own.progress.items.contains(&0)
+        {
+            assert!(own.progress.gold < 500);
+            bought = true;
+            break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -129,17 +128,16 @@ fn custom_item_catalogue_reaches_client_and_shop() {
                 .map(|entity| (entity.kind, entity.team, entity.hero_slot))
                 .collect::<Vec<_>>())
         );
-        if let Some(state) = client.snapshot() {
-            if let Some(own) = state
+        if let Some(state) = client.snapshot()
+            && let Some(own) = state
                 .entities
                 .iter()
                 .find(|entity| entity.hero_slot == client.player_slot())
-            {
-                eprintln!(
-                    "own gold={} items={:?}",
-                    own.progress.gold, own.progress.items
-                );
-            }
+        {
+            eprintln!(
+                "own gold={} items={:?}",
+                own.progress.gold, own.progress.items
+            );
         }
     }
     assert!(bought, "custom item purchased through the server");

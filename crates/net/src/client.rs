@@ -531,8 +531,8 @@ impl NetClient {
                         usize::from(catalog.hero_count).min(crate::protocol::MAX_WIRE_HEROES);
                     let ability_count =
                         usize::from(catalog.ability_count).min(crate::protocol::MAX_WIRE_ABILITIES);
-                    if let Some(pinned) = self.expected_server {
-                        if !welcome.identity
+                    if let Some(pinned) = self.expected_server
+                        && (!welcome.identity
                             || welcome.server_public_key != pinned
                             || !verify_server_welcome(
                                 &pinned,
@@ -543,12 +543,11 @@ impl NetClient {
                                 welcome.slot,
                                 content_hash,
                                 &welcome.server_signature,
-                            )
-                        {
-                            self.state = ClientState::Disconnected;
-                            self.push_event(ClientEvent::Disconnected);
-                            continue;
-                        }
+                            ))
+                    {
+                        self.state = ClientState::Disconnected;
+                        self.push_event(ClientEvent::Disconnected);
+                        continue;
                     }
                     self.server_public_key = welcome.identity.then_some(welcome.server_public_key);
                     if let Some(key) = self.pre_shared_key {
@@ -922,10 +921,10 @@ impl NetClient {
         if sequence_after(delta.acked_input, self.last_acked_input) {
             self.last_acked_input = delta.acked_input;
         }
-        if let Some(pending) = &self.pending {
-            if !sequence_after(pending.input_seq, self.last_acked_input) {
-                self.pending = None;
-            }
+        if let Some(pending) = &self.pending
+            && !sequence_after(pending.input_seq, self.last_acked_input)
+        {
+            self.pending = None;
         }
         if self
             .latest

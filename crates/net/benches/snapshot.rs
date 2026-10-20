@@ -20,7 +20,7 @@ fn entity(id: u16, x: u16, y: u16) -> NetEntity {
         } else {
             1
         },
-        team: u8::from(id % 2 != 0),
+        team: u8::from(!id.is_multiple_of(2)),
         hero_slot: if id < 10 { id as u8 } else { 0xFF },
         hero_pick: 0,
         flags: 0,

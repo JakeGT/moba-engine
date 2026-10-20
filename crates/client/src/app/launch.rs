@@ -59,7 +59,7 @@ pub(crate) fn parse_secret() -> Option<[u8; 32]> {
         return None;
     }
     let mut key = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk).ok()?;
         key[index] = u8::from_str_radix(text, 16).ok()?;
     }
@@ -74,7 +74,7 @@ pub(crate) fn parse_server_public() -> Option<[u8; 32]> {
         return None;
     }
     let mut key = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk).ok()?;
         key[index] = u8::from_str_radix(text, 16).ok()?;
     }
@@ -89,7 +89,7 @@ pub(crate) fn parse_identity_seed() -> Option<[u8; 32]> {
         return None;
     }
     let mut seed = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk).ok()?;
         seed[index] = u8::from_str_radix(text, 16).ok()?;
     }
@@ -177,7 +177,7 @@ pub(crate) fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<(
     let mut file = BufWriter::new(File::create(path)?);
     write!(file, "P6\n{} {}\n255\n", frame.width, frame.height)?;
     let mut rgb = Vec::with_capacity(frame.rgba.len() / 4 * 3);
-    for pixel in frame.rgba.chunks_exact(4) {
+    for pixel in frame.rgba.as_chunks::<4>().0 {
         rgb.extend_from_slice(&pixel[..3]);
     }
     file.write_all(&rgb)?;
