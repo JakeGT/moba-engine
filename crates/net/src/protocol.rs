@@ -1433,6 +1433,9 @@ impl WireCatalog {
                 starting_gold: moba_game::RulesSpec::default().starting_gold,
                 gold_per_interval: moba_game::RulesSpec::default().gold_per_interval,
                 gold_tick_interval: moba_game::RulesSpec::default().gold_tick_interval,
+                xp_radius: moba_game::RulesSpec::default().xp_radius,
+                shop_radius: moba_game::RulesSpec::default().shop_radius,
+                shared_xp_percent: moba_game::RulesSpec::default().shared_xp_percent,
             },
             attestation: None,
             map: MapSpec {
