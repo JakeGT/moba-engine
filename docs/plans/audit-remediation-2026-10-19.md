@@ -260,7 +260,7 @@ device recovery work.
 
 ### D-8. #151 remaining hash/replay enforcement
 
-Status: checked-in v7 fixture verifies in tests; checked-in fixture and fully non-default parity are covered; decode-allocation cap landed in #225; compile-time hash coverage remains.
+Status: checked-in v7 fixture verifies in tests; checked-in fixture and fully non-default parity are covered; **#151 closed** — decode memory cap (#225) and exhaustive component-field destructuring guard (#243).
 If not fully landed in S-2: compile-time hash coverage, checked-in replay fixture, fully
 non-default parity pack, decode amplification cap/allocation assertion.
 
