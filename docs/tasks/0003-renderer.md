@@ -3,7 +3,7 @@
 **Milestone:** M3   **Crates touched:** shaders, render, client   **Reviewers:** gpu-safety + perf + /code-review
 
 ## Goal
-A Vulkan 1.2+ renderer that draws the MOBA scene (terrain + hundreds of instanced units)
+A Vulkan 1.3+ renderer that draws the MOBA scene (terrain + hundreds of instanced units)
 with zero validation messages, and a reproducible way to capture its output on machines
 without a GPU.
 
@@ -12,9 +12,9 @@ without a GPU.
   module validated by `spirv-val` when installed.
 - Instance creation with optional Khronos validation layer (`Off`/`IfAvailable`/`Required`)
   and a debug messenger; surface creation via `ash-window` + raw window handles.
-- Physical-device scoring, queue-family selection, Vulkan 1.2/1.3 feature negotiation,
-  descriptor indexing + dynamic rendering + synchronization2 (core on 1.3, extension
-  loaders on 1.2), `gpu_allocator` suballocation.
+- Physical-device scoring, queue-family selection, Vulkan 1.3 feature checks (core
+  dynamic rendering + synchronization2; the 1.2 extension fallback was removed by the
+  2026-10-20 ADR-0002 amendment), `gpu_allocator` suballocation.
 - Swapchain with format/present-mode/depth-format selection, per-image render-finished
   semaphores and resizing.
 - Dynamic-rendering frame loop with explicit sync2 barriers, depth testing, instanced units

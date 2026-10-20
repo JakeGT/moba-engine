@@ -12,7 +12,7 @@ Issue tracker: <https://github.com/JakeGT/moba-engine/issues>
 
 ## Current contract
 
-A server-authoritative MOBA engine in Rust 2024 with a Vulkan 1.2+ client. Deterministic 30 Hz
+A server-authoritative MOBA engine in Rust 2024 with a Vulkan 1.3+ client. Deterministic 30 Hz
 simulation, UDP netcode, runtime TOML content, replay tooling and a layered workspace intended
 for embedding and extension. This is a **pre-1.0 preview**, not a finished commercial title.
 
@@ -170,7 +170,7 @@ cargo run -p moba-engine --example custom_content
 ## Fresh checkout / GPU
 
 - Rust **1.88+** (workspace MSRV) and a `glslc`/`glslangValidator` for shader builds.
-- Linux Vulkan 1.2+; Windows Vulkan driver; macOS uses MoltenVK through the windowing stack.
+- Vulkan 1.3+ driver on Linux and Windows; macOS uses MoltenVK through the windowing stack.
 - CI goldens use lavapipe; local software Vulkan setup is in
   [`docs/dev/software-vulkan.md`](docs/dev/software-vulkan.md).
 - Real GPU frame logging: `MOBA_VSYNC=0 MOBA_FRAME_LOG=/tmp/frames.log` (see

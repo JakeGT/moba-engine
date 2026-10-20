@@ -129,10 +129,11 @@ impl InstanceContext {
         // older than 1.1 return `None`, which we treat as Vulkan 1.0.
         let loader_version =
             unsafe { entry.try_enumerate_instance_version() }?.unwrap_or(vk::API_VERSION_1_0);
-        if loader_version < vk::API_VERSION_1_2 {
+        if loader_version < vk::API_VERSION_1_3 {
             return Err(RenderError::UnsupportedApiVersion(loader_version));
         }
-        let instance_version = loader_version.min(vk::API_VERSION_1_3);
+        // Vulkan 1.3 is the baseline (ADR-0002); request exactly that API version.
+        let instance_version = vk::API_VERSION_1_3;
 
         let application_name = c"MOBA";
         let engine_name = c"moba-engine";
@@ -196,10 +197,6 @@ impl InstanceContext {
 
     pub(crate) fn validation_error_count() -> u64 {
         VALIDATION_ERRORS.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn instance_version(&self) -> u32 {
-        self.instance_version
     }
 }
 

@@ -11,8 +11,6 @@ use crate::error::{RenderError, RenderResult};
 use crate::instance::InstanceContext;
 
 const SWAPCHAIN: &CStr = c"VK_KHR_swapchain";
-const DYNAMIC_RENDERING: &CStr = c"VK_KHR_dynamic_rendering";
-const SYNCHRONIZATION2: &CStr = c"VK_KHR_synchronization2";
 const PORTABILITY_SUBSET: &CStr = c"VK_KHR_portability_subset";
 
 pub(crate) struct DeviceContext {
@@ -25,9 +23,6 @@ pub(crate) struct DeviceContext {
     pub(crate) allocator: Option<Arc<Mutex<Allocator>>>,
     pub(crate) name: String,
     pub(crate) surface: ash::khr::surface::Instance,
-    core_13: bool,
-    dynamic_rendering: Option<ash::khr::dynamic_rendering::Device>,
-    synchronization2: Option<ash::khr::synchronization2::Device>,
 }
 
 struct Candidate {
@@ -36,10 +31,7 @@ struct Candidate {
     graphics_family: u32,
     present_family: u32,
     score: u32,
-    core_13: bool,
     extensions: Vec<&'static CStr>,
-    dynamic_rendering_extension: bool,
-    synchronization2_extension: bool,
 }
 
 impl DeviceContext {
@@ -60,11 +52,17 @@ impl DeviceContext {
         for physical in devices {
             // SAFETY: `physical` came from this instance.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
-            if properties.api_version < vk::API_VERSION_1_2 {
-                let _ = writeln!(reasons, "device too old ({:#x}); ", properties.api_version);
+            let name = device_name(&properties);
+            if properties.api_version < vk::API_VERSION_1_3 {
+                let version = properties.api_version;
+                let _ = writeln!(
+                    reasons,
+                    "{name}: Vulkan {}.{} < 1.3; ",
+                    vk::api_version_major(version),
+                    vk::api_version_minor(version)
+                );
                 continue;
             }
-            let name = device_name(&properties);
             // SAFETY: `physical` came from this instance.
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
@@ -101,36 +99,17 @@ impl DeviceContext {
                 continue;
             }
 
-            let core_13 = context.instance_version() >= vk::API_VERSION_1_3
-                && properties.api_version >= vk::API_VERSION_1_3;
-            let dynamic_rendering_extension = extension_supported(&available, DYNAMIC_RENDERING);
-            let synchronization2_extension = extension_supported(&available, SYNCHRONIZATION2);
-            if !core_13 && (!dynamic_rendering_extension || !synchronization2_extension) {
+            // Both features are mandatory in Vulkan 1.3; they are still checked because
+            // portability drivers (MoltenVK) are not fully conformant.
+            let features_13 = query_vulkan13(instance, physical);
+            if features_13.dynamic_rendering != vk::TRUE || features_13.synchronization2 != vk::TRUE
+            {
                 let _ = writeln!(reasons, "{name}: no dynamic rendering/synchronization2; ");
-                continue;
-            }
-
-            let (supports_dynamic_rendering, supports_synchronization2) = if core_13 {
-                let features_13 = query_vulkan13(instance, physical);
-                (
-                    features_13.dynamic_rendering == vk::TRUE
-                        && features_13.synchronization2 == vk::TRUE,
-                    true,
-                )
-            } else {
-                query_extension_features(instance, physical)
-            };
-            if !supports_dynamic_rendering || !supports_synchronization2 {
-                let _ = writeln!(reasons, "{name}: required features unsupported; ");
                 continue;
             }
             let mut extensions = vec![SWAPCHAIN];
             if extension_supported(&available, PORTABILITY_SUBSET) {
                 extensions.push(PORTABILITY_SUBSET);
-            }
-            if !core_13 {
-                extensions.push(DYNAMIC_RENDERING);
-                extensions.push(SYNCHRONIZATION2);
             }
 
             let mut score = match properties.device_type {
@@ -140,9 +119,6 @@ impl DeviceContext {
                 vk::PhysicalDeviceType::CPU => 100,
                 _ => 10,
             };
-            if core_13 {
-                score += 25;
-            }
             if graphics_family == present_family {
                 score += 10;
             }
@@ -153,10 +129,7 @@ impl DeviceContext {
                 graphics_family,
                 present_family,
                 score,
-                core_13,
                 extensions,
-                dynamic_rendering_extension,
-                synchronization2_extension,
             };
             if best
                 .as_ref()
@@ -183,21 +156,7 @@ impl DeviceContext {
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
-        let mut dynamic_rendering =
-            vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-        let mut synchronization2 =
-            vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
-
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default();
-        if candidate.core_13 {
-            features_2 = features_2.push_next(&mut features_13);
-        } else {
-            debug_assert!(candidate.dynamic_rendering_extension);
-            debug_assert!(candidate.synchronization2_extension);
-            features_2 = features_2
-                .push_next(&mut dynamic_rendering)
-                .push_next(&mut synchronization2);
-        }
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features_13);
 
         let priorities = [1.0f32];
         let mut queue_infos = vec![
@@ -233,23 +192,6 @@ impl DeviceContext {
         // SAFETY: same as above for the present family.
         let present_queue = unsafe { device.get_device_queue(candidate.present_family, 0) };
 
-        let dynamic_rendering = if candidate.core_13 {
-            None
-        } else {
-            Some(ash::khr::dynamic_rendering::Device::new(
-                &context.instance,
-                &device,
-            ))
-        };
-        let synchronization2 = if candidate.core_13 {
-            None
-        } else {
-            Some(ash::khr::synchronization2::Device::new(
-                &context.instance,
-                &device,
-            ))
-        };
-
         // `AllocatorDebugSettings` is `#[non_exhaustive]` since gpu-allocator 0.28.
         let mut debug_settings = gpu_allocator::AllocatorDebugSettings::default();
         debug_settings.log_leaks_on_shutdown = false;
@@ -272,71 +214,40 @@ impl DeviceContext {
             allocator: Some(Arc::new(Mutex::new(allocator))),
             name: device_name(&candidate.properties),
             surface,
-            core_13: candidate.core_13,
-            dynamic_rendering,
-            synchronization2,
         })
     }
 
-    /// Starts dynamic rendering. Uses core Vulkan 1.3 on modern devices and the KHR
-    /// extension on 1.2 devices.
+    /// Starts dynamic rendering (core Vulkan 1.3).
     pub(crate) fn cmd_begin_rendering(
         &self,
         command_buffer: vk::CommandBuffer,
         rendering_info: &vk::RenderingInfo<'_>,
     ) {
-        if self.core_13 {
-            // SAFETY: the command buffer is recording and `rendering_info` is live.
-            unsafe {
-                self.device
-                    .cmd_begin_rendering(command_buffer, rendering_info);
-            }
-        } else {
-            let loader = self
-                .dynamic_rendering
-                .as_ref()
-                .expect("extension loader exists on 1.2 devices");
-            // SAFETY: the extension was enabled at device creation and the command buffer
-            // is recording.
-            unsafe { loader.cmd_begin_rendering(command_buffer, rendering_info) };
+        // SAFETY: the command buffer is recording, `rendering_info` is live, and the
+        // `dynamicRendering` feature was enabled at device creation.
+        unsafe {
+            self.device
+                .cmd_begin_rendering(command_buffer, rendering_info);
         }
     }
 
     /// Ends dynamic rendering.
     pub(crate) fn cmd_end_rendering(&self, command_buffer: vk::CommandBuffer) {
-        if self.core_13 {
-            // SAFETY: a dynamic rendering pass is active on this command buffer.
-            unsafe { self.device.cmd_end_rendering(command_buffer) };
-        } else {
-            let loader = self
-                .dynamic_rendering
-                .as_ref()
-                .expect("extension loader exists on 1.2 devices");
-            // SAFETY: a dynamic rendering pass is active on this command buffer.
-            unsafe { loader.cmd_end_rendering(command_buffer) };
-        }
+        // SAFETY: a dynamic rendering pass is active on this command buffer.
+        unsafe { self.device.cmd_end_rendering(command_buffer) };
     }
 
-    /// Records a synchronization2 pipeline barrier.
+    /// Records a synchronization2 pipeline barrier (core Vulkan 1.3).
     pub(crate) fn cmd_pipeline_barrier2(
         &self,
         command_buffer: vk::CommandBuffer,
         dependency_info: &vk::DependencyInfo<'_>,
     ) {
-        if self.core_13 {
-            // SAFETY: the command buffer is recording and the dependency info is live.
-            unsafe {
-                self.device
-                    .cmd_pipeline_barrier2(command_buffer, dependency_info);
-            }
-        } else {
-            let loader = self
-                .synchronization2
-                .as_ref()
-                .expect("extension loader exists on 1.2 devices");
-            // SAFETY: the extension was enabled at device creation and the command buffer
-            // is recording.
-            unsafe { loader.cmd_pipeline_barrier2(command_buffer, dependency_info) };
+        // SAFETY: the command buffer is recording, the dependency info is live, and the
+        // `synchronization2` feature was enabled at device creation.
+        unsafe {
+            self.device
+                .cmd_pipeline_barrier2(command_buffer, dependency_info);
         }
     }
 
@@ -393,21 +304,4 @@ fn query_vulkan13(
         unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
     }
     features
-}
-
-fn query_extension_features(instance: &Instance, physical: vk::PhysicalDevice) -> (bool, bool) {
-    let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
-    let mut synchronization2 = vk::PhysicalDeviceSynchronization2Features::default();
-    {
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut dynamic_rendering)
-            .push_next(&mut synchronization2);
-        // SAFETY: the physical device belongs to this instance and every struct in the
-        // chain is a valid extension feature struct for the call.
-        unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
-    }
-    (
-        dynamic_rendering.dynamic_rendering == vk::TRUE,
-        synchronization2.synchronization2 == vk::TRUE,
-    )
 }

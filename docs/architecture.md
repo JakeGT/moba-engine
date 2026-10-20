@@ -91,7 +91,7 @@ No key material is logged. This is a private-server mode, not public identity; s
 
 ## Rendering
 
-`moba-render` owns a Vulkan 1.2 device with dynamic rendering and synchronization2. One
+`moba-render` owns a Vulkan 1.3 device with core dynamic rendering and synchronization2. One
 frame:
 
 - terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes
