@@ -647,6 +647,15 @@ impl NetClient {
                     self.latest = None;
                     self.history.clear();
                     self.last_acked_snapshot = 0;
+                    let header = crate::protocol::Header {
+                        kind: crate::protocol::PacketKind::ContentAck,
+                        flags: 0,
+                        session: self.session,
+                        seq: self.content_generation,
+                        ack: 0,
+                        ack_bits: 0,
+                    };
+                    let _ = self.transport.send(self.server, &header, &[]);
                     self.push_event(ClientEvent::ContentUpdated { hash });
                 }
                 PacketKind::Snapshot => {
