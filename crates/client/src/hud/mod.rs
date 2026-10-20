@@ -1,5 +1,6 @@
 //! HUD/layout drawing shared by network and local-preview modes.
 
+mod abilities;
 mod geometry;
 mod healthbars;
 mod hit;
