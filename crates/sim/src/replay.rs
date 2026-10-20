@@ -30,6 +30,8 @@ const VERSION: u8 = 5;
 pub const SIM_LOGIC_VERSION: u8 = 7;
 /// Minimum bytes per frame on the wire (`present` bitmask, no commands).
 const MIN_FRAME_BYTES: usize = 4;
+/// Upper bound on decoded frame memory (64 MiB).
+const MAX_DECODED_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// A checkpoint is `tick u32 + state hash u64`.
 const MIN_CHECKPOINT_BYTES: usize = 12;
 
@@ -329,7 +331,10 @@ impl Replay {
         let has_hash = reader.u8()? != 0;
         let expected = reader.u64()?;
         let frame_count = usize::try_from(reader.u32()?).map_err(|_| ReplayError::BadData)?;
-        if frame_count > reader.remaining() / MIN_FRAME_BYTES {
+        if frame_count > reader.remaining() / MIN_FRAME_BYTES
+            || frame_count.saturating_mul(core::mem::size_of::<TickInputs>())
+                > MAX_DECODED_FRAME_BYTES
+        {
             return Err(ReplayError::BadData);
         }
         let mut frames = Vec::with_capacity(frame_count);
@@ -684,5 +689,14 @@ mod allocation_tests {
             Replay::decode(&encoded),
             Err(ReplayError::BadData)
         ));
+    }
+
+    #[test]
+    fn absurd_frame_count_is_rejected_before_allocation() {
+        let replay = Replay::new(SimConfig::default());
+        let mut bytes = replay.encode();
+        let length = bytes.len();
+        bytes[length - 8..length - 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(Replay::decode(&bytes), Err(ReplayError::BadData)));
     }
 }
