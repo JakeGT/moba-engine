@@ -112,14 +112,7 @@ pub(crate) fn draw_shop(
         let summary = item_summary(item);
         let tx = (cursor_x + 14.0).min(width_f - 270.0);
         let ty = (cursor_y + 14.0).min(height_f - 74.0);
-        ui.panel(
-            tx,
-            ty,
-            260.0,
-            60.0,
-            Vec4::new(0.01, 0.02, 0.035, 0.96),
-            theme::GOLD,
-        );
+        ui.panel(tx, ty, 260.0, 60.0, theme::TOOLTIP_BG, theme::GOLD);
         ui.text(tx + 10.0, ty + 8.0, 2.0, theme::GOLD, name);
         ui.text(tx + 10.0, ty + 30.0, 1.8, text, &summary);
     }
