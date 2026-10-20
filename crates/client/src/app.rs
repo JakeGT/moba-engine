@@ -108,6 +108,20 @@ pub(crate) struct NetworkView {
 }
 
 /// Snapshot processing only needs a clone when the sequence advances.
+fn local_sound(event: &moba_sim::SimEvent) -> Option<crate::audio::Sound> {
+    use crate::audio::Sound;
+    match event {
+        moba_sim::SimEvent::AbilityCast { .. } => Some(Sound::Cast),
+        moba_sim::SimEvent::ProjectileSpawned { .. } | moba_sim::SimEvent::ProjectileHit { .. } => {
+            Some(Sound::Attack)
+        }
+        moba_sim::SimEvent::UnitDied { .. } => Some(Sound::Death),
+        moba_sim::SimEvent::StructureDestroyed { .. } => Some(Sound::Objective),
+        moba_sim::SimEvent::MatchEnded { .. } => Some(Sound::Ui),
+        _ => None,
+    }
+}
+
 fn snapshot_is_new(last_seq: u32, incoming_seq: u32) -> bool {
     incoming_seq != last_seq
 }
@@ -123,6 +137,7 @@ struct ClientApp {
     renderer: Option<Renderer>,
     simulation: Option<Simulation>,
     network: Option<NetworkView>,
+    local_audio: Option<crate::audio::Audio>,
     units: Vec<UnitInstance>,
     ui: UiDrawList,
     scoreboard_visible: bool,
@@ -179,6 +194,7 @@ impl ClientApp {
             renderer: None,
             simulation: None,
             network: None,
+            local_audio: None,
             units: Vec::with_capacity(moba_sim::MAX_UNITS),
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
@@ -544,6 +560,13 @@ impl App for ClientApp {
                 };
                 for _ in 0..ticks {
                     simulation.tick_with_bots();
+                    if let Some(audio) = self.local_audio.as_mut() {
+                        for event in simulation.events() {
+                            if let Some(sound) = local_sound(event) {
+                                audio.play(sound);
+                            }
+                        }
+                    }
                     simulation.clear_events();
                 }
                 units.clear();
@@ -1532,6 +1555,14 @@ mod tests {
         assert_eq!(team_from_u8(0), Some(Team::Blue));
         assert_eq!(team_from_u8(1), Some(Team::Red));
         assert_eq!(team_from_u8(2), None);
+    }
+
+    #[test]
+    fn local_sim_events_map_to_audio() {
+        assert_eq!(
+            super::local_sound(&moba_sim::SimEvent::MatchEnded { winner: Team::Blue }),
+            Some(crate::audio::Sound::Ui)
+        );
     }
 
     #[test]
