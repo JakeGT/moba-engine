@@ -68,7 +68,8 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 - Renderer: validation-required lavapipe capture passes with zero messages. Real NVIDIA
   RTX 5070 Ti at 1920×1080: p50 4.181 ms, p95 4.197 ms, p99 4.212 ms, max 4.538 ms (vsync off).
   macOS hosted runner recorded p95 16.945 ms; Windows hosted runner has no Vulkan GPU.
-- Release: `v0.1.0`, `v0.2.0` and `v0.3.0` tag workflows build Linux/Windows/macOS archives;
+- Release: `v0.1.0`, `v0.2.0` and `v0.3.0` workflows build Linux/Windows/macOS archives;
+  [v0.3.0](https://github.com/JakeGT/moba-engine/releases/tag/v0.3.0) is the current preview.
   crates.io publication remains opt-in (`publish = false`, #21).
 - CI: Linux/Windows/macOS gates, Miri, cargo-deny, release tests/doctests, MSRV, no-op/real
   `renderer-gate`, docs link/contract check, golden/fuzz/Loom/platform workflows. Nightly

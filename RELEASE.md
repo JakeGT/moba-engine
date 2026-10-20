@@ -44,8 +44,10 @@ is opt-in until crate names/ownership are settled.
 - `v0.3.0` (2026-10-20): current preview after the audit remediation. Workspace **0.3.0**,
   protocol **v36**, replay **v5**, simulation logic **v7**, **304 tests**; full
   `scripts/agent-verify.sh --full` passed locally, golden state hash
-  `0x8db35a0f5aab5190`. Artifacts are produced by the tag workflow; see the GitHub release for
-  the run and attached archives.
+  `0x8db35a0f5aab5190`. Release workflow run `39476849105` passed release tests,
+  package-list inspection and Linux/Windows/macOS builds; artifacts are attached to the
+  GitHub release. The run was dispatched from `main` because the tag is immutable; the only
+  difference from the tag is the release-workflow dependency fix.
 - Remaining release blocker: **#21** registry publication (ownership + `CARGO_REGISTRY_TOKEN`);
   `publish = false` is intentional until that is approved. Real Windows/macOS GPU validation
   is tracked separately in **#9/#127**, and post-1.0 asset/skinning work in **#276**.
