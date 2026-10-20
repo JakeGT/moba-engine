@@ -96,6 +96,20 @@ impl Synth {
     }
 }
 
+fn clear_tones(synth: &Arc<Mutex<Synth>>) {
+    if let Ok(mut synth) = synth.lock() {
+        synth.tones.clear();
+    }
+}
+
+fn to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
+}
+
+fn to_u16(sample: f32) -> u16 {
+    ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * f32::from(u16::MAX)) as u16
+}
+
 /// Client audio engine; disabled gracefully when no device exists.
 pub(crate) struct Audio {
     synth: Arc<Mutex<Synth>>,
@@ -118,9 +132,7 @@ impl Audio {
         let Ok(supported) = device.default_output_config() else {
             return Self::disabled(synth, mute);
         };
-        if supported.sample_format() != cpal::SampleFormat::F32 {
-            return Self::disabled(synth, mute);
-        }
+        let format = supported.sample_format();
         let config = supported.config();
         let sample_rate = config.sample_rate.0 as f32;
         let channels = usize::from(config.channels);
@@ -129,26 +141,67 @@ impl Audio {
         }
         let callback_synth = Arc::clone(&synth);
         let error_synth = Arc::clone(&synth);
-        let stream = device.build_output_stream(
-            &config,
-            move |data: &mut [f32], _| {
-                let mut synth = callback_synth
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                for frame in data.chunks_mut(channels) {
-                    let sample = synth.next_sample();
-                    for output in frame {
-                        *output = sample;
+        let stream = match format {
+            cpal::SampleFormat::F32 => device.build_output_stream(
+                &config,
+                move |data: &mut [f32], _| {
+                    let mut synth = callback_synth
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    for frame in data.chunks_mut(channels) {
+                        let sample = synth.next_sample();
+                        for output in frame {
+                            *output = sample;
+                        }
                     }
-                }
-            },
-            move |_error| {
-                if let Ok(mut synth) = error_synth.lock() {
-                    synth.tones.clear();
-                }
-            },
-            None,
-        );
+                },
+                move |_error| clear_tones(&error_synth),
+                None,
+            ),
+            cpal::SampleFormat::I16 => {
+                let callback_synth = Arc::clone(&synth);
+                let error_synth = Arc::clone(&synth);
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _| {
+                        let mut synth = callback_synth
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        for frame in data.chunks_mut(channels) {
+                            let sample = to_i16(synth.next_sample());
+                            for output in frame {
+                                *output = sample;
+                            }
+                        }
+                    },
+                    move |_error| clear_tones(&error_synth),
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let callback_synth = Arc::clone(&synth);
+                let error_synth = Arc::clone(&synth);
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [u16], _| {
+                        let mut synth = callback_synth
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        for frame in data.chunks_mut(channels) {
+                            let sample = to_u16(synth.next_sample());
+                            for output in frame {
+                                *output = sample;
+                            }
+                        }
+                    },
+                    move |_error| clear_tones(&error_synth),
+                    None,
+                )
+            }
+            _ => {
+                return Self::disabled(synth, mute);
+            }
+        };
         match stream {
             Ok(stream) => {
                 if stream.play().is_err() {
@@ -222,6 +275,16 @@ mod tests {
         }
         frequencies.sort_unstable();
         assert!(frequencies.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn sample_conversions_cover_the_full_range() {
+        assert_eq!(to_i16(-1.0), i16::MIN + 1);
+        assert_eq!(to_i16(0.0), 0);
+        assert_eq!(to_i16(1.0), i16::MAX);
+        assert_eq!(to_u16(-1.0), 0);
+        assert_eq!(to_u16(0.0), 32_767);
+        assert_eq!(to_u16(1.0), u16::MAX);
     }
 
     #[test]
