@@ -138,8 +138,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 0,
         magic_resist: 0,
         move_speed_per_sec: Fix::ZERO,
-        active_heal: 0,
-        active_cooldown_ticks: 0,
+        active_heal: 250,
+        active_cooldown_ticks: 300,
     },
     ItemDef {
         name: "Warhammer",
