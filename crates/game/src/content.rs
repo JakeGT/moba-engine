@@ -216,6 +216,10 @@ pub struct ModifierDef {
     pub name: String,
     /// Behaviour kind.
     pub kind: ModifierKind,
+    /// Flat armour bonus while active.
+    pub bonus_armor: i32,
+    /// Flat attack-damage bonus while active.
+    pub bonus_attack_damage: i32,
 }
 
 /// An owned, runtime item definition.
@@ -822,6 +826,8 @@ fn default_modifiers() -> Vec<ModifierDef> {
     .map(|(name, kind)| ModifierDef {
         name: String::from(name),
         kind,
+        bonus_armor: 0,
+        bonus_attack_damage: 0,
     })
     .collect()
 }
@@ -1214,6 +1220,11 @@ impl GameContent {
             return Err(ContentError::BadModifiers);
         }
         for (index, modifier) in self.modifiers.iter().enumerate() {
+            if modifier.bonus_armor.unsigned_abs() > MAX_RESIST as u32
+                || modifier.bonus_attack_damage.unsigned_abs() > MAX_STAT as u32
+            {
+                return Err(ContentError::BadModifiers);
+            }
             if modifier.name.is_empty()
                 || modifier.name.len() > MAX_ITEM_NAME
                 || !modifier.name.is_ascii()
@@ -1566,6 +1577,8 @@ impl GameContent {
         for modifier in &self.modifiers {
             string(feed, &modifier.name);
             feed(&[modifier.kind as u8]);
+            feed(&modifier.bonus_armor.to_le_bytes());
+            feed(&modifier.bonus_attack_damage.to_le_bytes());
         }
         len(feed, self.map.lanes.len());
         for lane in &self.map.lanes {
@@ -1645,6 +1658,10 @@ impl std::error::Error for ContentLoadError {}
 struct ModifierEntry {
     name: String,
     kind: String,
+    #[serde(default)]
+    bonus_armor: i32,
+    #[serde(default)]
+    bonus_attack_damage: i32,
 }
 
 #[derive(Deserialize)]
@@ -2185,6 +2202,8 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 Ok(ModifierDef {
                     name: modifier.name,
                     kind: parse_modifier_kind(&modifier.kind)?,
+                    bonus_armor: modifier.bonus_armor,
+                    bonus_attack_damage: modifier.bonus_attack_damage,
                 })
             })
             .collect::<Result<Vec<_>, ContentLoadError>>()?,
