@@ -83,14 +83,7 @@ pub(crate) fn draw_abilities(
             let range = Fix::from_bits(ability.cast_range_bits).to_f32();
             let tx = (x + 14.0 + slot as f32 * 48.0).min(width_f - 270.0);
             let ty = (y + 146.0 + 46.0).min(height_f - 86.0);
-            ui.panel(
-                tx,
-                ty,
-                270.0,
-                72.0,
-                Vec4::new(0.01, 0.02, 0.035, 0.96),
-                theme::GOLD,
-            );
+            ui.panel(tx, ty, 270.0, 72.0, theme::TOOLTIP_BG, theme::GOLD);
             ui.text(tx + 10.0, ty + 8.0, 2.0, theme::GOLD, name);
             ui.text(
                 tx + 10.0,

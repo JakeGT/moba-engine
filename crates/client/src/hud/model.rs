@@ -188,9 +188,9 @@ pub(crate) fn build_network_hud(
     let border = theme::PANEL_CHROME;
     let text = theme::TEXT;
     let muted = theme::MUTED;
-    let health = Vec4::new(0.18, 0.82, 0.36, 1.0);
-    let mana = Vec4::new(0.22, 0.50, 1.0, 1.0);
-    let track = Vec4::new(0.055, 0.075, 0.095, 1.0);
+    let health = theme::HEALTH;
+    let mana = theme::MANA;
+    let track = theme::TRACK;
     let width_f = width as f32;
     let height_f = height as f32;
     draw_perf(ui, width_f, frame_ms, fps);
@@ -477,7 +477,7 @@ pub(crate) fn build_network_hud(
             panel_w - 28.0,
             8.0,
             xp_fraction,
-            Vec4::new(0.85, 0.68, 0.25, 1.0),
+            theme::XP,
             track,
             border,
         );
@@ -592,11 +592,11 @@ pub(crate) fn build_network_hud(
         let victory = winner == network.client.team();
         let label = if victory { "VICTORY" } else { "DEFEAT" };
         let color = if victory {
-            Vec4::new(0.35, 1.0, 0.5, 1.0)
+            theme::VICTORY
         } else {
-            Vec4::new(1.0, 0.35, 0.28, 1.0)
+            theme::DEFEAT
         };
-        ui.rect(0.0, 0.0, width_f, height_f, Vec4::new(0.0, 0.0, 0.0, 0.35));
+        ui.rect(0.0, 0.0, width_f, height_f, theme::OVERLAY);
         ui.panel(
             (width_f - 460.0) * 0.5,
             height_f * 0.36,
@@ -631,7 +631,7 @@ pub(crate) fn build_network_hud(
             (width_f - UiDrawList::text_width("RESPAWNING", 5.0)) * 0.5,
             height_f * 0.42,
             5.0,
-            Vec4::new(1.0, 0.35, 0.25, 1.0),
+            theme::RESPAWN,
             "RESPAWNING",
         );
     }
