@@ -379,6 +379,8 @@ pub struct RulesSpec {
     pub shared_xp_percent: u32,
     /// Kill rewards per unit kind.
     pub rewards: RewardsSpec,
+    /// Whether structures prioritize heroes over minions.
+    pub structure_heroes_first: bool,
     /// Whether destroying a nexus ends the match.
     pub nexus_win: bool,
     /// Score limit that ends the match (0 disables).
@@ -556,6 +558,7 @@ impl Default for RulesSpec {
             shop_radius: Fix::from_i32(30),
             shared_xp_percent: 130,
             rewards: RewardsSpec::default(),
+            structure_heroes_first: false,
             nexus_win: true,
             score_limit: 0,
         }
@@ -1549,6 +1552,7 @@ impl GameContent {
             feed(&reward.xp.to_le_bytes());
             feed(&reward.gold.to_le_bytes());
         }
+        feed(&[u8::from(self.rules.structure_heroes_first)]);
         feed(&[u8::from(self.rules.nexus_win)]);
         feed(&self.rules.score_limit.to_le_bytes());
         string(feed, &self.map.name);
@@ -1809,6 +1813,7 @@ struct RulesEntry {
     shop_radius: f32,
     shared_xp_percent: u32,
     rewards: RewardsEntry,
+    structure_heroes_first: bool,
     nexus_win: bool,
     score_limit: u16,
 }
@@ -1886,6 +1891,7 @@ impl Default for RulesEntry {
             shop_radius: rules.shop_radius.to_f32(),
             shared_xp_percent: rules.shared_xp_percent,
             rewards: RewardsEntry::default(),
+            structure_heroes_first: rules.structure_heroes_first,
             nexus_win: rules.nexus_win,
             score_limit: rules.score_limit,
         }
@@ -2516,6 +2522,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                         gold: rules.rewards.hero.gold,
                     },
                 },
+                structure_heroes_first: rules.structure_heroes_first,
                 nexus_win: rules.nexus_win,
                 score_limit: rules.score_limit,
             }
