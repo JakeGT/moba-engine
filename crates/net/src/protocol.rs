@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 30;
+pub const PROTOCOL_VERSION: u8 = 31;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -652,6 +652,8 @@ pub struct WireModifier {
     pub bonus_armor: i32,
     /// Flat attack-damage bonus.
     pub bonus_attack_damage: i32,
+    /// Damage dealt on expiry.
+    pub on_expire_damage: i32,
 }
 
 impl WireModifier {
@@ -1048,6 +1050,7 @@ impl From<&GameContent> for WireCatalog {
                 kind,
                 bonus_armor,
                 bonus_attack_damage,
+                on_expire_damage,
             } = modifier;
             wire.name_len = put_wire_name(&mut wire.name, name);
             wire.kind = match kind {
@@ -1060,6 +1063,7 @@ impl From<&GameContent> for WireCatalog {
             };
             wire.bonus_armor = *bonus_armor;
             wire.bonus_attack_damage = *bonus_attack_damage;
+            wire.on_expire_damage = *on_expire_damage;
         }
 
         let MapSpec {
@@ -1370,6 +1374,7 @@ impl WireCatalog {
                     name: read_wire_name(&modifier.name, modifier.name_len, WIRE_MODIFIER_NAME)?,
                     bonus_armor: modifier.bonus_armor,
                     bonus_attack_damage: modifier.bonus_attack_damage,
+                    on_expire_damage: modifier.on_expire_damage,
                     kind: match modifier.kind {
                         0 => moba_game::ModifierKind::Shield,
                         1 => moba_game::ModifierKind::Slow,
@@ -1745,6 +1750,7 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         out.push(modifier.kind);
         put_u32(out, modifier.bonus_armor as u32);
         put_u32(out, modifier.bonus_attack_damage as u32);
+        put_u32(out, modifier.on_expire_damage as u32);
     }
     for minion in [catalog.rules.melee_minion, catalog.rules.ranged_minion] {
         out.extend_from_slice(&minion.max_health.to_le_bytes());
@@ -1927,6 +1933,7 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         modifier.kind = reader.u8()?;
         modifier.bonus_armor = reader.i32()?;
         modifier.bonus_attack_damage = reader.i32()?;
+        modifier.on_expire_damage = reader.i32()?;
     }
     let mut stats = [WireMinionStats::default(); 2];
     for minion in &mut stats {
