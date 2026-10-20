@@ -86,10 +86,10 @@ impl Interpolator {
                 if let Some(entity) = state.get(net_id) {
                     before = Some((tick, entity));
                 }
-            } else if after.is_none() {
-                if let Some(entity) = state.get(net_id) {
-                    after = Some((tick, entity));
-                }
+            } else if after.is_none()
+                && let Some(entity) = state.get(net_id)
+            {
+                after = Some((tick, entity));
             }
         }
         match (before, after) {

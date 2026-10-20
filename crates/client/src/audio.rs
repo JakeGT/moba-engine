@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use arrayvec::ArrayVec;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
@@ -49,9 +50,13 @@ struct Tone {
     samples: u32,
 }
 
+/// Real-time synthesizer owned by the output callback.
+///
+/// Voices live in a fixed-capacity array so the audio thread never allocates, and the synth
+/// persists across callbacks so tones longer than one device buffer play to completion.
 #[derive(Default)]
 struct Synth {
-    tones: std::collections::VecDeque<Tone>,
+    tones: ArrayVec<Tone, MAX_VOICES>,
     sample_rate: f32,
     volume: f32,
 }
@@ -63,10 +68,10 @@ impl Synth {
         }
         let (frequency, seconds) = sound.tone();
         let samples = (seconds * self.sample_rate) as u32;
-        if self.tones.len() >= MAX_VOICES {
-            self.tones.pop_front();
+        if self.tones.is_full() {
+            self.tones.remove(0); // Drop the oldest voice.
         }
-        self.tones.push_back(Tone {
+        self.tones.push(Tone {
             phase: 0.0,
             step: std::f32::consts::TAU * frequency / self.sample_rate,
             remaining: samples,
@@ -79,22 +84,21 @@ impl Synth {
         self.tones.len()
     }
 
+    /// Mixes every active voice into one sample.
     fn next_sample(&mut self) -> f32 {
-        let Some(tone) = self.tones.front_mut() else {
-            return 0.0;
-        };
-        let envelope = if tone.samples == 0 {
-            0.0
-        } else {
-            tone.remaining as f32 / tone.samples as f32
-        };
-        let sample = tone.phase.sin() * envelope * 0.18 * self.volume;
-        tone.phase = (tone.phase + tone.step) % std::f32::consts::TAU;
-        tone.remaining = tone.remaining.saturating_sub(1);
-        if tone.remaining == 0 {
-            self.tones.pop_front();
+        let mut mix = 0.0;
+        for tone in &mut self.tones {
+            let envelope = if tone.samples == 0 {
+                0.0
+            } else {
+                tone.remaining as f32 / tone.samples as f32
+            };
+            mix += tone.phase.sin() * envelope * 0.18;
+            tone.phase = (tone.phase + tone.step) % std::f32::consts::TAU;
+            tone.remaining = tone.remaining.saturating_sub(1);
         }
-        sample
+        self.tones.retain(|tone| tone.remaining > 0);
+        (mix * self.volume).clamp(-1.0, 1.0)
     }
 }
 
@@ -115,6 +119,38 @@ fn to_u16(sample: f32) -> u16 {
     ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * f32::from(u16::MAX)) as u16
 }
 
+/// Builds an output stream for one device sample format.
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    (scheduler, volume, lost): (&Arc<ArrayQueue<Sound>>, &Arc<AtomicU32>, &Arc<AtomicBool>),
+    convert: fn(f32) -> T,
+) -> Result<cpal::Stream, cpal::Error>
+where
+    T: cpal::SizedSample + Copy + Send + 'static,
+{
+    let channels = usize::from(config.channels);
+    let mut synth = Synth {
+        sample_rate: config.sample_rate as f32,
+        ..Synth::default()
+    };
+    let queue = Arc::clone(scheduler);
+    let volume = Arc::clone(volume);
+    let lost = Arc::clone(lost);
+    device.build_output_stream(
+        config,
+        move |data: &mut [T], _| {
+            synth.volume = f32::from_bits(volume.load(Ordering::Relaxed));
+            while let Some(sound) = queue.pop() {
+                synth.schedule(sound);
+            }
+            render(data, channels, &mut synth, convert);
+        },
+        move |_error| lost.store(true, Ordering::Relaxed),
+        None,
+    )
+}
+
 /// Client audio engine; disabled gracefully when no device exists.
 pub(crate) struct Audio {
     scheduler: Arc<ArrayQueue<Sound>>,
@@ -127,7 +163,6 @@ pub(crate) struct Audio {
 impl Audio {
     /// Opens the default output device. Never panics on missing hardware.
     #[must_use]
-    #[allow(clippy::too_many_lines)] // Device/format setup is one linear path.
     pub(crate) fn new(volume: f32, mute: bool) -> Self {
         let volume = Arc::new(AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()));
         let scheduler = Arc::new(ArrayQueue::new(MAX_QUEUED));
@@ -141,75 +176,11 @@ impl Audio {
         };
         let format = supported.sample_format();
         let config = supported.config();
-        let sample_rate = config.sample_rate.0 as f32;
-        let channels = usize::from(config.channels);
-        let render_f32 = {
-            let queue = Arc::clone(&scheduler);
-            let volume = Arc::clone(&volume);
-            let lost = Arc::clone(&lost);
-            device.build_output_stream(
-                &config,
-                move |data: &mut [f32], _| {
-                    let mut synth = Synth {
-                        sample_rate,
-                        volume: f32::from_bits(volume.load(Ordering::Relaxed)),
-                        ..Synth::default()
-                    };
-                    while let Some(sound) = queue.pop() {
-                        synth.schedule(sound);
-                    }
-                    render(data, channels, &mut synth, |sample| sample);
-                },
-                move |_error| lost.store(true, Ordering::Relaxed),
-                None,
-            )
-        };
-        let render_i16 = {
-            let queue = Arc::clone(&scheduler);
-            let volume = Arc::clone(&volume);
-            let lost = Arc::clone(&lost);
-            device.build_output_stream(
-                &config,
-                move |data: &mut [i16], _| {
-                    let mut synth = Synth {
-                        sample_rate,
-                        volume: f32::from_bits(volume.load(Ordering::Relaxed)),
-                        ..Synth::default()
-                    };
-                    while let Some(sound) = queue.pop() {
-                        synth.schedule(sound);
-                    }
-                    render(data, channels, &mut synth, to_i16);
-                },
-                move |_error| lost.store(true, Ordering::Relaxed),
-                None,
-            )
-        };
-        let render_u16 = {
-            let queue = Arc::clone(&scheduler);
-            let volume = Arc::clone(&volume);
-            let lost = Arc::clone(&lost);
-            device.build_output_stream(
-                &config,
-                move |data: &mut [u16], _| {
-                    let mut synth = Synth {
-                        sample_rate,
-                        volume: f32::from_bits(volume.load(Ordering::Relaxed)),
-                        ..Synth::default()
-                    };
-                    while let Some(sound) = queue.pop() {
-                        synth.schedule(sound);
-                    }
-                    render(data, channels, &mut synth, to_u16);
-                },
-                move |_error| lost.store(true, Ordering::Relaxed),
-                None,
-            )
-        };
+        let shared = (&scheduler, &volume, &lost);
         let stream = match format {
-            cpal::SampleFormat::F32 => render_f32,
-            cpal::SampleFormat::I16 => render_i16,
-            cpal::SampleFormat::U16 => render_u16,
+            cpal::SampleFormat::F32 => build_stream(&device, config, shared, |sample| sample),
+            cpal::SampleFormat::I16 => build_stream(&device, config, shared, to_i16),
+            cpal::SampleFormat::U16 => build_stream(&device, config, shared, to_u16),
             _ => return Self::disabled(scheduler, volume, mute, lost),
         };
         match stream {
@@ -330,6 +301,31 @@ mod tests {
             synth.schedule(Sound::Attack);
         }
         assert_eq!(synth.voice_count(), MAX_VOICES);
+    }
+
+    #[test]
+    fn tones_continue_across_callbacks_and_mix() {
+        let mut synth = Synth {
+            sample_rate: 48_000.0,
+            volume: 1.0,
+            ..Synth::default()
+        };
+        synth.schedule(Sound::Death); // 0.22 s ≈ 10 560 samples.
+        synth.schedule(Sound::Attack);
+        let mut buffer = [0.0f32; 512];
+        render(&mut buffer, 1, &mut synth, |sample| sample);
+        assert_eq!(synth.voice_count(), 2, "both voices play at once");
+        for _ in 0..10 {
+            render(&mut buffer, 1, &mut synth, |sample| sample);
+        }
+        // Past the attack (2 400 samples) but inside the death tone.
+        assert_eq!(synth.voice_count(), 1);
+        assert!(buffer.iter().any(|sample| sample.abs() > 0.0));
+        for _ in 0..40 {
+            render(&mut buffer, 1, &mut synth, |sample| sample);
+        }
+        assert_eq!(synth.voice_count(), 0);
+        assert!(buffer.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

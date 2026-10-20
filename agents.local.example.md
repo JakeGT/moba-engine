@@ -6,7 +6,7 @@ secrets or absolute paths tied to your machine.
 ## Toolchain
 
 ```bash
-rustc --version   # Rust 1.85+
+rustc --version   # Rust 1.88+
 cargo --version
 ```
 

@@ -160,12 +160,10 @@ impl Rng {
 
     /// Fills a byte buffer.
     pub fn fill_bytes(&mut self, out: &mut [u8]) {
-        let mut chunks = out.chunks_exact_mut(8);
-        for chunk in &mut chunks {
-            let value = self.next_u64().to_le_bytes();
-            chunk.copy_from_slice(&value);
+        let (chunks, remainder) = out.as_chunks_mut::<8>();
+        for chunk in chunks {
+            *chunk = self.next_u64().to_le_bytes();
         }
-        let remainder = chunks.into_remainder();
         if !remainder.is_empty() {
             let value = self.next_u64().to_le_bytes();
             remainder.copy_from_slice(&value[..remainder.len()]);

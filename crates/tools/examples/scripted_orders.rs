@@ -19,14 +19,14 @@ fn main() {
         let mut inputs = TickInputs::default();
         inputs.set(0, PlayerCommand::MoveTo(target));
         simulation.tick(&inputs);
-        if tick % 120 == 0 {
-            if let Some(position) = simulation.hero_position(0) {
-                println!(
-                    "tick {tick:>3}  hero 0 at ({:.2}, {:.2})",
-                    position.x.to_f32(),
-                    position.y.to_f32()
-                );
-            }
+        if tick % 120 == 0
+            && let Some(position) = simulation.hero_position(0)
+        {
+            println!(
+                "tick {tick:>3}  hero 0 at ({:.2}, {:.2})",
+                position.x.to_f32(),
+                position.y.to_f32()
+            );
         }
     }
 

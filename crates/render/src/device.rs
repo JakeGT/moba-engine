@@ -250,14 +250,14 @@ impl DeviceContext {
             ))
         };
 
+        // `AllocatorDebugSettings` is `#[non_exhaustive]` since gpu-allocator 0.28.
+        let mut debug_settings = gpu_allocator::AllocatorDebugSettings::default();
+        debug_settings.log_leaks_on_shutdown = false;
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
             physical_device: physical,
-            debug_settings: gpu_allocator::AllocatorDebugSettings {
-                log_leaks_on_shutdown: false,
-                ..Default::default()
-            },
+            debug_settings,
             buffer_device_address: false,
             allocation_sizes: gpu_allocator::AllocationSizes::default(),
         })?;

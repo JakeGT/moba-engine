@@ -223,13 +223,13 @@ impl Replay {
             return Err(ReplayError::BadData);
         }
         let state_hash = simulation.state_hash();
-        if let Some(expected) = self.expected_hash {
-            if expected != state_hash {
-                return Err(ReplayError::HashMismatch {
-                    expected,
-                    actual: state_hash,
-                });
-            }
+        if let Some(expected) = self.expected_hash
+            && expected != state_hash
+        {
+            return Err(ReplayError::HashMismatch {
+                expected,
+                actual: state_hash,
+            });
         }
         Ok(ReplayResult {
             ticks: simulation.current_tick().get(),

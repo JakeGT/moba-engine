@@ -238,7 +238,7 @@ fn parse_secret(value: &str) -> [u8; 32] {
         fail("secret must be 64 hex characters");
     }
     let mut key = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(chunk).unwrap_or_default();
         key[index] = u8::from_str_radix(text, 16).unwrap_or_else(|_| fail("secret must be hex"));
     }

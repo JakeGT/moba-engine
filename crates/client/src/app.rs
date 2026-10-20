@@ -116,10 +116,10 @@ impl ClientApp {
         for warning in warnings {
             eprintln!("{warning}");
         }
-        if std::env::var_os("MOBA_SAVE_SETTINGS").is_some() {
-            if let Err(error) = settings.save(&crate::settings::Settings::path()) {
-                eprintln!("settings: save failed: {error}");
-            }
+        if std::env::var_os("MOBA_SAVE_SETTINGS").is_some()
+            && let Err(error) = settings.save(&crate::settings::Settings::path())
+        {
+            eprintln!("settings: save failed: {error}");
         }
         let bindings = settings.bindings().0;
         let env_scale = std::env::var("MOBA_UI_SCALE")
@@ -232,10 +232,10 @@ impl ClientApp {
     }
 
     fn fail(&self, message: String) {
-        if let Ok(mut slot) = self.error.lock() {
-            if slot.is_none() {
-                *slot = Some(message);
-            }
+        if let Ok(mut slot) = self.error.lock()
+            && slot.is_none()
+        {
+            *slot = Some(message);
         }
     }
 }
@@ -292,10 +292,10 @@ impl App for ClientApp {
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
         self.last_frame = now;
-        if let Some(samples) = self.frame_log.as_mut() {
-            if samples.len() < 10_000 {
-                samples.push(raw_ms);
-            }
+        if let Some(samples) = self.frame_log.as_mut()
+            && samples.len() < 10_000
+        {
+            samples.push(raw_ms);
         }
         self.frame_ms = if self.frame_ms == 0.0 {
             raw_ms
@@ -341,10 +341,10 @@ impl App for ClientApp {
                 if let Err(error) = network.client.poll() {
                     failure = Some(format!("receive failed: {error}"));
                 }
-                if failure.is_none() {
-                    if let Err(error) = network.client.update() {
-                        failure = Some(format!("network update failed: {error}"));
-                    }
+                if failure.is_none()
+                    && let Err(error) = network.client.update()
+                {
+                    failure = Some(format!("network update failed: {error}"));
                 }
                 if failure.is_none() {
                     while let Some(event) = network.client.next_event() {
@@ -411,14 +411,12 @@ impl App for ClientApp {
                             network.prediction.reconcile(own.position());
                             if let Some(item) = network.demo_buy.filter(|_| {
                                 !network.demo_bought && network.phase == MatchPhase::Playing
-                            }) {
-                                if network
-                                    .client
-                                    .send_command(WireCommand::BuyItem { item })
-                                    .is_ok()
-                                {
-                                    network.demo_bought = true;
-                                }
+                            }) && network
+                                .client
+                                .send_command(WireCommand::BuyItem { item })
+                                .is_ok()
+                            {
+                                network.demo_bought = true;
                             }
                             if let Some(target) = network.demo_move.filter(|_| {
                                 !network.demo_sent && network.phase == MatchPhase::Playing

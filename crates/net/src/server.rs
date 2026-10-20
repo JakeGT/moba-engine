@@ -1237,7 +1237,7 @@ impl NetServer {
     pub fn tick(&mut self) -> io::Result<()> {
         let frame_started = Instant::now();
         self.frame = self.frame.wrapping_add(1);
-        if self.frame % 30 == 0 {
+        if self.frame.is_multiple_of(30) {
             self.poll_content_reload();
         }
         match self.phase {
@@ -1279,7 +1279,7 @@ impl NetServer {
             }
         }
         let interval = u64::from(self.config.snapshot_interval.max(1));
-        if self.frame % interval == 0 {
+        if self.frame.is_multiple_of(interval) {
             self.send_snapshots()?;
         }
         let frame_nanos = frame_started.elapsed().as_nanos() as u64;
@@ -1299,10 +1299,10 @@ impl NetServer {
             let Some(client) = self.clients[slot].as_mut() else {
                 continue;
             };
-            if let Some(wire) = client.command.take() {
-                if let Some(command) = wire_to_command(client, wire, &mut self.simulation) {
-                    inputs.set(slot, command);
-                }
+            if let Some(wire) = client.command.take()
+                && let Some(command) = wire_to_command(client, wire, &mut self.simulation)
+            {
+                inputs.set(slot, command);
             }
             if let Some(item) = client.pending_purchase.take() {
                 inputs.set_purchase(slot, item);
@@ -1310,11 +1310,13 @@ impl NetServer {
         }
         if let Some(team) = self.pending_surrender.take() {
             for slot in 0..self.config.max_clients.min(self.clients.len()) {
-                if let Some(client) = self.clients[slot].as_ref() {
-                    if client.connected && !client.spectator && client.team == team {
-                        inputs.set(slot, PlayerCommand::Surrender);
-                        break;
-                    }
+                if let Some(client) = self.clients[slot].as_ref()
+                    && client.connected
+                    && !client.spectator
+                    && client.team == team
+                {
+                    inputs.set(slot, PlayerCommand::Surrender);
+                    break;
                 }
             }
         }
@@ -1333,7 +1335,7 @@ impl NetServer {
         }
         self.simulation.clear_events();
         if self.config.record.is_some()
-            && self.record_frames.len() % 150 == 0
+            && self.record_frames.len().is_multiple_of(150)
             && !self.record_frames.is_empty()
         {
             self.record_checkpoints.push((
@@ -1409,10 +1411,12 @@ impl NetServer {
         self.surrender_votes[team.index()] |= 1 << slot;
         let mut connected = 0u16;
         for index in 0..self.config.max_clients.min(self.clients.len()) {
-            if let Some(player) = self.clients[index].as_ref() {
-                if player.connected && !player.spectator && player.team == team {
-                    connected |= 1 << index;
-                }
+            if let Some(player) = self.clients[index].as_ref()
+                && player.connected
+                && !player.spectator
+                && player.team == team
+            {
+                connected |= 1 << index;
             }
         }
         if connected != 0 && self.surrender_votes[team.index()] & connected == connected {
@@ -2111,12 +2115,13 @@ impl NetServer {
         let mut ready_mask = 0u16;
         let mut player_mask = 0u16;
         for slot in 0..self.config.max_clients.min(self.clients.len()) {
-            if let Some(player) = self.clients[slot].as_ref() {
-                if player.connected && !player.spectator {
-                    player_mask |= 1 << slot;
-                    if player.ready {
-                        ready_mask |= 1 << slot;
-                    }
+            if let Some(player) = self.clients[slot].as_ref()
+                && player.connected
+                && !player.spectator
+            {
+                player_mask |= 1 << slot;
+                if player.ready {
+                    ready_mask |= 1 << slot;
                 }
             }
         }

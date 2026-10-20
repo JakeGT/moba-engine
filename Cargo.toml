@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["MOBA Engine contributors"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -46,14 +46,14 @@ hmac = "0.12"
 sha2 = "0.10"
 ed25519-dalek = "2"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-glam = "0.30"
-gpu-allocator = "0.27"
+toml = "1"
+glam = "0.34"
+gpu-allocator = "0.28"
 raw-window-handle = "0.6"
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 
 # Dev-only.
-criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

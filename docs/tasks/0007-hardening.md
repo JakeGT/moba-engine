@@ -39,7 +39,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 
 ## CI gates
 - Cross-platform fmt/clippy/tests/docs/features/layering and a checked golden state hash.
-- Release tests/doctests and MSRV 1.85 jobs.
+- Release tests/doctests and MSRV (1.88) jobs.
 - `ci-tools`: content-check fixtures, 10-match deterministic soak, 30-second wire fuzz and
   bench compilation.
 - Nightly/manual: one-hour fuzz, five-minute 10-client soak, 50-match soak and benchmark log;
@@ -107,7 +107,7 @@ Bot masks, allocation guards, grid gathering and slow-tick tracing landed; #140 
   (exercised by #160; short green run 39239367089).
 - [x] Sim and snapshot allocation tests use per-thread counters; 20 consecutive release
   repeats of each pass.
-- [x] `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` are required checks.
+- [x] `release tests + doctests`, `MSRV` and `renderer-gate` are required checks.
 - [x] Full nightly **39295169028** green with logs; #142 closed.
 - [x] `renderer-gate` runs on every PR (no-op for non-renderer paths) and fully on renderer
   changes/dispatch; macOS MoltenVK probe runs automatically for renderer paths.

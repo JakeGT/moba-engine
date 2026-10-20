@@ -133,7 +133,7 @@ impl GpuBuffer {
         let bytes = core::mem::size_of::<T>()
             .checked_mul(count)
             .filter(|bytes| *bytes <= self.size as usize)?;
-        if bytes == 0 || (mapped.as_ptr() as usize) % core::mem::align_of::<T>() != 0 {
+        if bytes == 0 || !(mapped.as_ptr() as usize).is_multiple_of(core::mem::align_of::<T>()) {
             return None;
         }
         // SAFETY: the requested byte range is inside the mapping, the mapped pointer is
