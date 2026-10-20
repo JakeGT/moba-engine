@@ -73,6 +73,10 @@ pub struct ItemDef {
     pub magic_resist: i32,
     /// Bonus movement speed in world units per second.
     pub move_speed_per_sec: Fix,
+    /// Self-heal applied by the active (0 = no active).
+    pub active_heal: i32,
+    /// Active cooldown in ticks (0 = no active).
+    pub active_cooldown_ticks: u16,
 }
 
 /// Item catalogue in stable id order.
@@ -86,6 +90,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 0,
         magic_resist: 0,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Chain Vest",
@@ -96,6 +102,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 8,
         magic_resist: 0,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Mana Crystal",
@@ -106,6 +114,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 0,
         magic_resist: 6,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Swift Boots",
@@ -116,6 +126,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 0,
         magic_resist: 0,
         move_speed_per_sec: Fix::from_bits(5_153_960_755),
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Ogre Heart",
@@ -126,6 +138,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 0,
         magic_resist: 0,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Warhammer",
@@ -136,6 +150,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 10,
         magic_resist: 0,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Spellguard",
@@ -146,6 +162,8 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 0,
         magic_resist: 25,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
     ItemDef {
         name: "Bastion Plate",
@@ -156,5 +174,7 @@ pub const ITEMS: &[ItemDef] = &[
         armor: 30,
         magic_resist: 0,
         move_speed_per_sec: Fix::ZERO,
+        active_heal: 0,
+        active_cooldown_ticks: 0,
     },
 ];

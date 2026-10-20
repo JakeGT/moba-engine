@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 26;
+pub const PROTOCOL_VERSION: u8 = 27;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -315,6 +315,10 @@ pub struct WireItem {
     pub magic_resist: i32,
     /// Movement speed bonus in raw fixed-point bits.
     pub move_speed_bits: i64,
+    /// Self-heal applied by the active (0 = no active).
+    pub active_heal: i32,
+    /// Active cooldown in ticks (0 = no active).
+    pub active_cooldown_ticks: u16,
 }
 
 impl Default for WireItem {
@@ -329,6 +333,8 @@ impl Default for WireItem {
             armor: 0,
             magic_resist: 0,
             move_speed_bits: 0,
+            active_heal: 0,
+            active_cooldown_ticks: 0,
         }
     }
 }
@@ -846,6 +852,8 @@ impl From<&GameContent> for WireCatalog {
                 armor,
                 magic_resist,
                 move_speed_per_sec,
+                active_heal,
+                active_cooldown_ticks,
             } = item;
             wire.name_len = put_wire_name(&mut wire.name, name);
             wire.cost = *cost;
@@ -855,6 +863,8 @@ impl From<&GameContent> for WireCatalog {
             wire.armor = *armor;
             wire.magic_resist = *magic_resist;
             wire.move_speed_bits = move_speed_per_sec.to_bits();
+            wire.active_heal = *active_heal;
+            wire.active_cooldown_ticks = *active_cooldown_ticks;
         }
 
         catalog.hero_count = u8::try_from(content_heroes.len().min(MAX_WIRE_HEROES))
@@ -1273,6 +1283,8 @@ impl WireCatalog {
                     armor: item.armor,
                     magic_resist: item.magic_resist,
                     move_speed_per_sec: Fix::from_bits(item.move_speed_bits),
+                    active_heal: item.active_heal,
+                    active_cooldown_ticks: item.active_cooldown_ticks,
                 })
             })
             .collect::<Result<Vec<_>, WireError>>()?;
@@ -1629,6 +1641,8 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         put_u32(out, item.armor as u32);
         put_u32(out, item.magic_resist as u32);
         out.extend_from_slice(&item.move_speed_bits.to_le_bytes());
+        put_u32(out, item.active_heal as u32);
+        out.extend_from_slice(&item.active_cooldown_ticks.to_le_bytes());
     }
     out.push(catalog.hero_count);
     for hero in &catalog.heroes {
@@ -1805,6 +1819,8 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         item.armor = reader.i32()?;
         item.magic_resist = reader.i32()?;
         item.move_speed_bits = reader.i64()?;
+        item.active_heal = reader.i32()?;
+        item.active_cooldown_ticks = reader.u16()?;
     }
     catalog.hero_count = reader.u8()?;
     for hero in &mut catalog.heroes {
