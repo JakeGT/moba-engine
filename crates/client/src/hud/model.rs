@@ -512,6 +512,12 @@ pub(crate) fn build_network_hud(
                     let short = name.get(..4).unwrap_or(name);
                     ui.text(bx + 1.0, by + 19.0, 1.2, muted, short);
                 }
+                let cooldown = progress.item_cooldowns[slot];
+                if cooldown > 0 {
+                    let seconds = f32::from(cooldown) / 30.0;
+                    ui.rect(bx, by, 34.0, 26.0, theme::COOLDOWN);
+                    ui.text(bx + 2.0, by + 8.0, 1.6, text, &hud_fmt!("{seconds:.0}"));
+                }
             }
         }
     }

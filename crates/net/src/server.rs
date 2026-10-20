@@ -2128,6 +2128,13 @@ impl NetServer {
             };
             for unit in units {
                 let mut entity = NetEntity::from_observed(client.net_id_for(unit.entity), unit);
+                if let Some(cooldowns) = self
+                    .simulation
+                    .world()
+                    .get::<moba_sim::ItemCooldowns>(unit.entity)
+                {
+                    entity.progress.item_cooldowns = cooldowns.0;
+                }
                 if unit.hero_slot != Some(viewer_slot) {
                     // Gold and inventory are private to the owning player.
                     entity.progress.gold = 0;

@@ -141,6 +141,7 @@ fn valid_snapshot(rng: &mut Rng) -> Vec<u8> {
                 xp: rng.next_u32() as u16,
                 gold: rng.next_u32() as u16,
                 items: [0xFF; 6],
+                item_cooldowns: [0; 6],
             },
         });
     }

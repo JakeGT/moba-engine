@@ -2187,6 +2187,8 @@ pub struct NetProgress {
     pub gold: u16,
     /// Inventory item ids (`0xFF` empty).
     pub items: [u8; 6],
+    /// Remaining item active cooldowns in ticks.
+    pub item_cooldowns: [u16; 6],
 }
 
 /// Quantised entity state carried in snapshots.
@@ -2299,6 +2301,7 @@ impl NetEntity {
                 xp: clamp_u16_u32(unit.xp),
                 gold: clamp_u16_u32(unit.gold),
                 items: unit.items,
+                item_cooldowns: [0; 6],
             },
         }
     }
@@ -2801,6 +2804,9 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         put_u16(out, spawn.progress.xp);
         put_u16(out, spawn.progress.gold);
         out.extend_from_slice(&spawn.progress.items);
+        for cooldown in spawn.progress.item_cooldowns {
+            put_u16(out, cooldown);
+        }
     }
     for update in &delta.updates {
         put_u16(out, update.net_id);
@@ -2853,6 +2859,9 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
             put_u16(out, progress.xp);
             put_u16(out, progress.gold);
             out.extend_from_slice(&progress.items);
+            for cooldown in progress.item_cooldowns {
+                put_u16(out, cooldown);
+            }
         }
     }
     for net_id in &delta.despawns {
@@ -2927,6 +2936,14 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
                     .bytes(6)?
                     .try_into()
                     .map_err(|_| WireError::Truncated)?,
+                item_cooldowns: [
+                    reader.u16()?,
+                    reader.u16()?,
+                    reader.u16()?,
+                    reader.u16()?,
+                    reader.u16()?,
+                    reader.u16()?,
+                ],
             },
         });
     }
@@ -2974,6 +2991,14 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
                         .bytes(6)?
                         .try_into()
                         .map_err(|_| WireError::Truncated)?,
+                    item_cooldowns: [
+                        reader.u16()?,
+                        reader.u16()?,
+                        reader.u16()?,
+                        reader.u16()?,
+                        reader.u16()?,
+                        reader.u16()?,
+                    ],
                 })
             })
             .transpose()?;
@@ -3482,6 +3507,7 @@ mod tests {
             xp: 120,
             gold: 750,
             items: [0, 1, 0xFF, 0xFF, 0xFF, 0xFF],
+            item_cooldowns: [0; 6],
         };
         current[1].mana = 50;
         current.push(entity(3, 50, 60, 600));
