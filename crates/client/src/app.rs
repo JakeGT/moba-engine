@@ -1144,6 +1144,14 @@ fn handle_shop_input(network: &mut NetworkView, input: &InputState, ui_action: O
     }
 }
 
+fn ground_orders_allowed(
+    ui_action: Option<HudAction>,
+    phase: MatchPhase,
+    focus: InputFocus,
+) -> bool {
+    ui_action.is_none() && phase == MatchPhase::Playing && matches!(focus, InputFocus::Gameplay)
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One ordered focus/input sequence.
 fn handle_network_input(
     network: &mut NetworkView,
@@ -1205,15 +1213,12 @@ fn handle_network_input(
         }
         InputFocus::Gameplay => {}
     }
-    if network.phase != MatchPhase::Playing {
+    if !ground_orders_allowed(ui_action, network.phase, InputFocus::from_shop(*shop)) {
         return;
     }
     let Some(cursor) = input.cursor() else {
         return;
     };
-    if ui_action.is_some() {
-        return;
-    }
     let Some(ground) = cursor_ground(camera, cursor, width, height, map_center(network)) else {
         return;
     };
@@ -1556,8 +1561,8 @@ pub(crate) mod allocation_probe {
 #[cfg(test)]
 mod tests {
     use super::{
-        Camera, Fix, FixVec2, InputFocus, Team, UnitKind, Vec2, Vec3, cursor_ground, kind_from_u8,
-        team_from_u8,
+        Camera, Fix, FixVec2, HudAction, InputFocus, MatchPhase, Team, UnitKind, Vec2, Vec3,
+        cursor_ground, kind_from_u8, team_from_u8,
     };
 
     #[test]
@@ -1607,6 +1612,25 @@ mod tests {
         assert!(!super::snapshot_is_new(7, 7));
         assert!(super::snapshot_is_new(7, 8));
         assert!(super::snapshot_is_new(8, 7));
+    }
+
+    #[test]
+    fn ui_actions_block_ground_orders() {
+        assert!(!super::ground_orders_allowed(
+            Some(HudAction::Block),
+            MatchPhase::Playing,
+            super::InputFocus::Gameplay
+        ));
+        assert!(!super::ground_orders_allowed(
+            None,
+            MatchPhase::Playing,
+            super::InputFocus::Shop
+        ));
+        assert!(super::ground_orders_allowed(
+            None,
+            MatchPhase::Playing,
+            super::InputFocus::Gameplay
+        ));
     }
 
     #[test]
