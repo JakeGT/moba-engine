@@ -804,8 +804,19 @@ impl Simulation {
     #[must_use]
     #[allow(clippy::too_many_lines)] // Deterministic field coverage is intentionally flat.
     pub fn state_hash(&self) -> u64 {
+        self.hash_state(self.config.seed)
+    }
+
+    /// Hash that ignores the match seed, for cross-seed balance/outcome comparisons.
+    #[must_use]
+    pub fn state_hash_normalized(&self) -> u64 {
+        self.hash_state(0)
+    }
+
+    #[allow(clippy::too_many_lines)] // Deterministic field coverage is intentionally flat.
+    fn hash_state(&self, seed: u64) -> u64 {
         let mut hasher = StableHasher::new();
-        hasher.write_u64(self.config.seed);
+        hasher.write_u64(seed);
         // `bot_mask` is a server-side input source, not simulation state. Recording it
         // only at the end of a replay made mid-match disconnects diverge; generated inputs
         // are already resolved and recorded per tick.
@@ -3751,6 +3762,15 @@ mod tests {
         sim.tick(&TickInputs::new());
         sim.tick(&inputs);
         assert_eq!(sim.world.get::<Health>(hero).expect("health").current, 201);
+    }
+
+    #[test]
+    fn normalized_hash_ignores_seed() {
+        let a = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        let mut b = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        b.config.seed = a.config.seed.wrapping_add(1);
+        assert_ne!(a.state_hash(), b.state_hash());
+        assert_eq!(a.state_hash_normalized(), b.state_hash_normalized());
     }
 
     #[test]
