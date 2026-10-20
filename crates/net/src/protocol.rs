@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 34;
+pub const PROTOCOL_VERSION: u8 = 35;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -1069,6 +1069,7 @@ impl From<&GameContent> for WireCatalog {
                 moba_game::ModifierKind::Root => 3,
                 moba_game::ModifierKind::Silence => 4,
                 moba_game::ModifierKind::Burn => 5,
+                moba_game::ModifierKind::Stun => 6,
             };
             wire.bonus_armor = *bonus_armor;
             wire.bonus_attack_damage = *bonus_attack_damage;
@@ -1397,6 +1398,7 @@ impl WireCatalog {
                         3 => moba_game::ModifierKind::Root,
                         4 => moba_game::ModifierKind::Silence,
                         5 => moba_game::ModifierKind::Burn,
+                        6 => moba_game::ModifierKind::Stun,
                         _ => return Err(WireError::BadValue),
                     },
                 })
