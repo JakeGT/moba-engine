@@ -62,7 +62,7 @@ pub(crate) fn draw_abilities(
                 by,
                 box_size,
                 box_size * fraction.clamp(0.0, 1.0),
-                Vec4::new(0.0, 0.0, 0.0, 0.62),
+                theme::COOLDOWN,
             );
             let seconds = f32::from(remaining) / 30.0;
             ui.text(bx + 4.0, by + 24.0, 1.8, text, &hud_fmt!("{seconds:.1}"));

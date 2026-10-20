@@ -3,7 +3,7 @@
 use super::theme;
 use super::{
     Camera, Fix, HitList, HudAction, HudString, InputState, Key, NetworkView, Simulation, Team,
-    UiDrawList, Vec4, draw_health_bars, draw_minimap, draw_perf, draw_world_circle, register,
+    UiDrawList, draw_health_bars, draw_minimap, draw_perf, draw_world_circle, register,
 };
 use crate::{hud_fmt, hud_static};
 use moba_core::FixVec2;
@@ -206,7 +206,7 @@ pub(crate) fn build_network_hud(
             width_f - 280.0,
             12.0 + index as f32 * 14.0,
             1.7,
-            Vec4::new(0.92, 0.84, 0.62, 1.0),
+            theme::HERO_NAME,
             &entry.text,
         );
     }
@@ -232,7 +232,7 @@ pub(crate) fn build_network_hud(
                 };
                 let range = Fix::from_bits(ability.cast_range_bits).to_f32();
                 let radius = Fix::from_bits(ability.radius_bits).to_f32();
-                let ring = Vec4::new(0.35, 0.78, 1.0, 0.55);
+                let ring = theme::CAST_RING;
                 if range > 0.0 {
                     draw_world_circle(ui, camera, center, range, width, height, ring);
                 }
@@ -244,7 +244,7 @@ pub(crate) fn build_network_hud(
                         radius,
                         width,
                         height,
-                        Vec4::new(1.0, 0.78, 0.30, 0.50),
+                        theme::TARGET_RING,
                     );
                 }
             }
@@ -307,7 +307,7 @@ pub(crate) fn build_network_hud(
         (width_f - timer_width) * 0.5 + 18.0,
         52.0,
         2.0,
-        Vec4::new(0.4, 0.65, 1.0, 1.0),
+        theme::TEAM_BLUE,
         &hud_fmt!("BLUE {blue}"),
     );
     ui.text(
