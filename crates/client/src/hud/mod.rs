@@ -6,6 +6,7 @@ mod hit;
 mod minimap;
 mod model;
 mod scoreboard;
+mod shop;
 mod status;
 pub(crate) mod theme;
 
