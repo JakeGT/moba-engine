@@ -242,7 +242,7 @@ drop the all-kinds-present rule; generic replicated status flags; stun/armour-sh
 packs; zero-allocation guard; content/protocol/SIM_LOGIC bump.
 
 ### D-5. #148 economy and item actives/passives
-Starting/passive gold, radii, shared-XP, unit rewards, win conditions and the item-active schema and `UseItem` behavior/cooldowns landed (#244–#249); cooldown replication/HUD, Ogre Heart active, bot use, Ironblade on-hit and Chain Vest on-damaged hooks landed (#250–#254); aggro rules remain.
+Starting/passive gold, radii, shared-XP, unit rewards, win conditions and the item-active schema and `UseItem` behavior/cooldowns landed (#244–#249); cooldown replication/HUD, **#148 closed** — rules-driven economy (starting/passive gold, radii, shared XP, rewards, win/aggro), item actives/cooldowns, on-hit/on-damaged hooks, HUD cooldowns, keybind and bot support landed (#244–#255).
 
 ### D-6. #149 NetServer extension contract
 Status (2026-10-19): every ServerPhase value is delivered to systems (#201); **#149 closed** — every phase delivered, replay contract documented, bot-policy factory + id registry survive rematches, CI embedding example and 256 cap documented. Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;

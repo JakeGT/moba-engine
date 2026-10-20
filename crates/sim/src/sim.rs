@@ -1865,7 +1865,12 @@ impl Simulation {
                     best_hero = Some((distance, candidate.entity));
                 }
             });
-            attack_target.0 = best_minion.or(best_hero).map(|(_, entity)| entity);
+            attack_target.0 = if self.content.rules.structure_heroes_first {
+                best_hero.or(best_minion)
+            } else {
+                best_minion.or(best_hero)
+            }
+            .map(|(_, entity)| entity);
         }
     }
 

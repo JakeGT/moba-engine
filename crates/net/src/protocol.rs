@@ -1461,6 +1461,7 @@ impl WireCatalog {
                 shop_radius: moba_game::RulesSpec::default().shop_radius,
                 shared_xp_percent: moba_game::RulesSpec::default().shared_xp_percent,
                 rewards: moba_game::RulesSpec::default().rewards,
+                structure_heroes_first: moba_game::RulesSpec::default().structure_heroes_first,
                 nexus_win: moba_game::RulesSpec::default().nexus_win,
                 score_limit: moba_game::RulesSpec::default().score_limit,
             },
