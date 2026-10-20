@@ -4,7 +4,7 @@
 [![Issues](https://img.shields.io/github/issues/JakeGT/moba-engine)](https://github.com/JakeGT/moba-engine/issues)
 
 A server-authoritative multiplayer MOBA engine written in Rust and Vulkan. Current contract:
-wire protocol **v32**, replay format **v5** (simulation logic **v7**), workspace **0.2.0**.
+wire protocol **v33**, replay format **v5** (simulation logic **v7**), workspace **0.2.0**.
 
 > **Status: preview (0.2.0).** The engine is playable end-to-end — dedicated server, UDP
 > netcode, deterministic simulation, Vulkan client with HUD and fog of war — but the public
@@ -22,10 +22,10 @@ spectator camera, status effects and runtime-content examples.
 | Area | Capability |
 |---|---|
 | Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, rules, levels/XP, gold, items and shop |
-| Networking | Custom UDP protocol (v32): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
+| Networking | Custom UDP protocol (v33): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.2 renderer with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 292 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 293 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
