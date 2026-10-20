@@ -1348,6 +1348,16 @@ impl Simulation {
                         modifier.damage_type,
                         modifier.source,
                     ));
+                } else if let Some(definition) =
+                    self.content.modifiers.get(usize::from(modifier.def_id))
+                    && definition.on_tick_damage > 0
+                {
+                    burn_hits.push((
+                        entity,
+                        definition.on_tick_damage,
+                        DamageType::Magic,
+                        modifier.source,
+                    ));
                 }
                 let expired = modifier.remaining == 0
                     || (modifier.kind == ModifierKind::Shield && modifier.amount <= 0);
@@ -3536,6 +3546,35 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn modifier_on_tick_deals_configured_damage() {
+        let mut content = GameContent::default();
+        content.modifiers[0].on_tick_damage = 7;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        let _ = sim.world.insert(hero, Regen { health: 0, mana: 0 });
+        let mut modifiers = Modifiers::default();
+        modifiers.entries[0] = Modifier {
+            def_id: 0,
+            kind: ModifierKind::Shield,
+            remaining: 10,
+            factor: Fix::ONE,
+            amount: 1,
+            damage_type: DamageType::Physical,
+            source: hero,
+        };
+        modifiers.len = 1;
+        let _ = sim.world.insert(hero, modifiers);
+        let before = sim.world.get::<Health>(hero).expect("health").current;
+        sim.tick(&TickInputs::new());
+        let after = sim.world.get::<Health>(hero).expect("health").current;
+        assert!(
+            after < before,
+            "on-tick should damage ({before} -> {after})"
+        );
     }
 
     #[test]
