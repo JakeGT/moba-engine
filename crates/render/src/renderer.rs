@@ -493,8 +493,14 @@ impl Renderer {
             }?;
             let desired =
                 crate::swapchain::choose_extent(capabilities, vk::Extent2D { width, height });
-            if desired != self.swapchain.extent {
-                self.recreate_swapchain()?;
+            if desired != self.swapchain.extent
+                && let Err(error) = self.recreate_swapchain()
+            {
+                // A 0x0/minimised surface or a racing resize is a skipped frame, not fatal.
+                return match error {
+                    RenderError::SwapchainOutOfDate | RenderError::SwapchainSuboptimal => Ok(()),
+                    error => Err(error),
+                };
             }
         }
         if self.capture_pending {
