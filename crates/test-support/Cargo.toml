@@ -1,0 +1,13 @@
+[package]
+name = "moba-test-support"
+description = "Shared test-only allocation counters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

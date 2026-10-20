@@ -1326,6 +1326,7 @@ dependencies = [
  "moba-game",
  "moba-netsim",
  "moba-sim",
+ "moba-test-support",
  "sha2",
 ]
 
@@ -1389,6 +1390,10 @@ dependencies = [
  "moba-jobs",
  "moba-nav",
 ]
+
+[[package]]
+name = "moba-test-support"
+version = "0.3.0"
 
 [[package]]
 name = "moba-tools"
