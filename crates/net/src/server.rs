@@ -1894,6 +1894,18 @@ impl NetServer {
                     self.cast_surrender_vote(index);
                 }
             }
+            PacketKind::ContentAck => {
+                let Some(index) = self.client_index_by_addr(message.addr) else {
+                    return Ok(());
+                };
+                let client = self.clients[index].as_ref().expect("index is live");
+                if message.header.session == client.session
+                    && client.connected
+                    && message.header.seq == self.content_generation
+                {
+                    self.content_update_retry = None;
+                }
+            }
             PacketKind::SnapshotAck => {
                 let Some(index) = self.client_index_by_addr(message.addr) else {
                     return Ok(());

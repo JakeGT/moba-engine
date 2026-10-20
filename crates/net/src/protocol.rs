@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 35;
+pub const PROTOCOL_VERSION: u8 = 36;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -55,6 +55,8 @@ pub enum PacketKind {
     Challenge = 10,
     /// Server -> client full catalogue update between matches.
     ContentUpdate = 11,
+    /// Client -> server acknowledgement of a catalogue update.
+    ContentAck = 12,
 }
 
 impl PacketKind {
@@ -72,6 +74,7 @@ impl PacketKind {
             9 => Self::Fragment,
             10 => Self::Challenge,
             11 => Self::ContentUpdate,
+            12 => Self::ContentAck,
             _ => return None,
         })
     }
