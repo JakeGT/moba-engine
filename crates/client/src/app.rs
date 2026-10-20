@@ -324,6 +324,11 @@ impl App for ClientApp {
 
     #[allow(clippy::too_many_lines)] // The frame is one explicit presentation sequence.
     fn on_frame(&mut self, frame: &mut Frame<'_>) -> FrameOutcome {
+        if frame.input().was_key_pressed(Key::M)
+            && let Some(network) = self.network.as_mut()
+        {
+            network.audio.toggle_mute();
+        }
         self.frames += 1;
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
