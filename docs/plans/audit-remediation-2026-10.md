@@ -8,7 +8,7 @@ Scope: all audit findings #23–#45 from 2026-10-18.
 
 W0–W3 and all actionable W4/W5 work landed and shipped in `v0.2.0`:
 #7, #8, #10–#20, #22–#44 (excluding external-resource items) are closed with tests/evidence.
-Current contract: protocol **v26**, replay **v5**, simulation logic **v7**, **248 tests**, golden
+Contract at completion: protocol **v26**, replay **v5**, simulation logic **v7**, **248 tests**, golden
 state hash `0x8db35a0f5aab5190`, golden render workflow green.
 
 Two exit items remain and are deferred rather than claimed:

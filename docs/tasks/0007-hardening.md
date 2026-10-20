@@ -34,7 +34,7 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
   operators and analytics.
 
 - **Fuzzing**: historical one-hour wire-decoder runs completed **2,476,647,000 iterations
-  clean** on v11 and **2,384,035,000 iterations clean** on v12. Current protocol v25 uses the
+  clean** on v11 and **2,384,035,000 iterations clean** on v12. Current protocol v36 uses the
   deterministic fuzzer plus cargo-fuzz `wire`/`replay`/`content` targets.
 
 ## CI gates

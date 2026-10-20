@@ -26,8 +26,7 @@ tiers make breakage predictable and reviews honest.
 
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` must pass.
 - CI runs the test suite on Linux, Windows and macOS.
-- `cargo-semver-checks` is not wired into CI yet (#21); compare against `v0.2.0` before the
-  next release. The release workflow verifies package file lists and artifacts; registry
+- `cargo-semver-checks` is not wired into CI yet (#21); compare against `v0.3.0` before the next release. The release workflow verifies package file lists and artifacts; registry
   publication order/policy is documented in `RELEASE.md`.
 - `cargo-public-api` diffs are reviewed when preparing release notes.
 

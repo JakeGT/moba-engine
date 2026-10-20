@@ -40,7 +40,7 @@ Priority order:
 3. issues with complete acceptance criteria and an available environment;
 4. roadmap items that do not depend on external services.
 
-Check the open issues and the audit plan first:
+Check the open issues and the completed audit plan first:
 
 ```bash
 gh issue list --repo JakeGT/moba-engine --state open

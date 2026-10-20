@@ -1,8 +1,8 @@
 # Second-audit remediation plan — 2026-10-19
 
-Status: **draft plan, ready for execution**  
-Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**304 tests**.
+Status: **complete (2026-10-20)**, with post-1.0 feature work deferred to **#276**.  
+Completion baseline: `main` at `07d1449`, protocol **v36**, replay **v5**, simulation logic
+**v7**, **304 tests**. Plan baseline: `main` at `64951a0`, protocol **v26**.
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
@@ -101,7 +101,7 @@ Private advisory: content-pack attestation bypass; **#135**, **#151**.
   allocation with the counting allocator.
 
 Status (2026-10-19): #139 client-side catalogue validation and duplicate-hash suppression
-landed in #180; generation numbers/retry delivery and connected-player rotation landed in #188; explicit ack and advisory regression tests remain open.
+landed in #180; generation numbers/retry delivery and connected-player rotation landed in #188; explicit ContentAck, generation checks and connected-rotation tests landed (#271/#272).
 
 Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
 queue eviction (#169) and high-priority event selection (#175) landed. Event-buffer and transport send-buffer reuse landed; a NetServer allocation guard now asserts zero with events (#223). Fragmented sends still allocate per fragment.

@@ -3,7 +3,7 @@
 The workspace is pre-1.0. Releases are Git tags with prebuilt artifacts; crates.io publishing
 is opt-in until crate names/ownership are settled.
 
-## Publish policy (0.2.0)
+## Publish policy (0.3.0)
 
 - **Intended for crates.io later:** `moba-core`, `moba-ecs`, `moba-jobs`, `moba-nav`,
   `moba-game`, `moba-sim`, `moba-net`, `moba-engine`.
@@ -38,14 +38,17 @@ is opt-in until crate names/ownership are settled.
 ## Tagged release evidence
 
 - `v0.1.0`: first preview tag, workflow-built Linux/Windows/macOS archives.
-- `v0.2.0`: current preview (2026-10-18). Release workflow run `39156546938` passed; attached
+- `v0.2.0` (2026-10-18): release workflow run `39156546938` passed; attached
   `moba-linux-x86_64.tar.gz`, `moba-macos-aarch64.tar.gz`, `moba-windows-x86_64.zip` and
   `package-list.txt`. Package-list inspection and release tests passed.
-- Current contract at `v0.2.0` plus follow-ups: workspace 0.2.0, protocol **v25**, replay
-  **v5**, simulation logic **v6**, **248 tests**.
+- `v0.3.0` (2026-10-20): current preview after the audit remediation. Workspace **0.3.0**,
+  protocol **v36**, replay **v5**, simulation logic **v7**, **304 tests**; full
+  `scripts/agent-verify.sh --full` passed locally, golden state hash
+  `0x8db35a0f5aab5190`. Artifacts are produced by the tag workflow; see the GitHub release for
+  the run and attached archives.
 - Remaining release blocker: **#21** registry publication (ownership + `CARGO_REGISTRY_TOKEN`);
   `publish = false` is intentional until that is approved. Real Windows/macOS GPU validation
-  is tracked separately in **#9/#127**.
+  is tracked separately in **#9/#127**, and post-1.0 asset/skinning work in **#276**.
 
 ## Stability tiers
 

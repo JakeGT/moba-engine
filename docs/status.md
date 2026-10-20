@@ -68,8 +68,8 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 - Renderer: validation-required lavapipe capture passes with zero messages. Real NVIDIA
   RTX 5070 Ti at 1920×1080: p50 4.181 ms, p95 4.197 ms, p99 4.212 ms, max 4.538 ms (vsync off).
   macOS hosted runner recorded p95 16.945 ms; Windows hosted runner has no Vulkan GPU.
-- Release: `v0.1.0` and `v0.2.0` tag workflows build Linux/Windows/macOS archives; crates.io
-  publication remains opt-in (`publish = false`, #21).
+- Release: `v0.1.0`, `v0.2.0` and `v0.3.0` tag workflows build Linux/Windows/macOS archives;
+  crates.io publication remains opt-in (`publish = false`, #21).
 - CI: Linux/Windows/macOS gates, Miri, cargo-deny, release tests/doctests, MSRV, no-op/real
   `renderer-gate`, docs link/contract check, golden/fuzz/Loom/platform workflows. Nightly
   failures open an issue automatically. Hosted-runner capability limits are documented, not treated as passes.
@@ -95,10 +95,10 @@ Second-audit plan: [`docs/plans/audit-remediation-2026-10-19.md`](plans/audit-re
   decision.
 - **#21** — crates.io publication. Metadata, release artifacts and policy are ready; registry
   ownership plus `CARGO_REGISTRY_TOKEN` are required. `publish = false` remains intentional.
-- **#45** — extensibility roadmap map; **#46** — audit-plan tracker. These remain as maps, not
-  unfinished implementation work.
-- Future product work (not blocking the current preview): real asset meshes/skeletal assets,
-  50-concurrent-match load test, independent external review, larger balance sweeps.
+- **#45** — extensibility roadmap map, not unfinished implementation work.
+- **#276** — post-1.0 asset-pipeline/GPU-skinning work and residual mirror/balance coverage.
+- Future product work (not blocking the current preview): 50-concurrent-match load test,
+  independent external review, larger balance sweeps.
 
 ## Open-source surface
 
