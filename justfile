@@ -82,10 +82,10 @@ bench:
 
 # Save the current bench results as the baseline to compare PRs against.
 bench-baseline:
-    cargo bench --workspace -- --save-baseline main
+    cargo bench --workspace --benches -- --save-baseline main
 
 bench-compare:
-    cargo bench --workspace -- --baseline main
+    cargo bench --workspace --benches -- --baseline main
 
 # Five-minute ten-client network soak (150 ms RTT, 5% loss, 30 ms jitter).
 soak:
