@@ -3746,6 +3746,14 @@ mod tests {
     }
 
     #[test]
+    fn bot_mask_does_not_change_state_hash() {
+        let mut sim = idle([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
+        let baseline = sim.state_hash();
+        sim.config.bot_mask ^= 0x03FF;
+        assert_eq!(sim.state_hash(), baseline);
+    }
+
+    #[test]
     fn economy_rules_drive_starting_and_passive_gold() {
         let mut content = GameContent::default();
         content.rules.starting_gold = 123;
