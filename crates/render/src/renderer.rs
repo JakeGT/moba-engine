@@ -95,6 +95,25 @@ impl Drop for Surface {
 /// `Renderer` owns the device and the swapchain. Field order is load-bearing: GPU
 /// resources are declared before the device and the device before the surface/instance so
 /// that Rust drops them children-first.
+/// Sampler paired with its device so setup failures cannot leak it.
+struct OwnedSampler(ash::Device, vk::Sampler);
+
+impl OwnedSampler {
+    fn new(device: &ash::Device, info: &vk::SamplerCreateInfo) -> RenderResult<Self> {
+        // SAFETY: the device is live and the create info is fully initialised.
+        let sampler = unsafe { device.create_sampler(info, None) }?;
+        Ok(Self(device.clone(), sampler))
+    }
+}
+
+impl Drop for OwnedSampler {
+    fn drop(&mut self) {
+        // SAFETY: the sampler belongs to this device and is destroyed exactly once.
+        unsafe { self.0.destroy_sampler(self.1, None) };
+    }
+}
+
+/// Vulkan renderer owning the swapchain, pipelines and UI resources.
 pub struct Renderer {
     swapchain: Swapchain,
     terrain_mesh: GpuMesh,
@@ -103,7 +122,8 @@ pub struct Renderer {
     _instance_layout: DescriptorSetLayout,
     _ui_layout: DescriptorSetLayout,
     _ui_atlas: GpuImage,
-    ui_sampler: vk::Sampler,
+    #[allow(dead_code)] // Held for RAII drop.
+    ui_sampler: OwnedSampler,
     ui_sets: Vec<vk::DescriptorSet>,
     _descriptor_pool: DescriptorPool,
     pipeline_layout: PipelineLayout,
@@ -225,7 +245,7 @@ impl Renderer {
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
         // SAFETY: the device is live and the sampler info is fully initialised.
-        let ui_sampler = unsafe { device.device.create_sampler(&sampler_info, None) }?;
+        let ui_sampler = OwnedSampler::new(&device.device, &sampler_info)?;
 
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
@@ -308,7 +328,7 @@ impl Renderer {
             (0..FRAMES_IN_FLIGHT).map(|_| ui_layout.handle()).collect();
         let ui_sets = descriptor_pool.allocate(&device.device, &ui_set_layouts)?;
         let image_info = [vk::DescriptorImageInfo::default()
-            .sampler(ui_sampler)
+            .sampler(ui_sampler.1)
             .image_view(ui_atlas.view())
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         let writes: Vec<vk::WriteDescriptorSet<'_>> = ui_sets
@@ -1112,7 +1132,6 @@ impl Drop for Renderer {
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
         // SAFETY: the device is idle and this sampler is owned by the renderer.
-        unsafe { self.device.device.destroy_sampler(self.ui_sampler, None) };
     }
 }
 
