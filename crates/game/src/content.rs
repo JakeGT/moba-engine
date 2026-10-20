@@ -331,6 +331,12 @@ pub struct RulesSpec {
     pub gold_per_interval: u32,
     /// Ticks between passive gold grants.
     pub gold_tick_interval: u32,
+    /// Shared-XP radius around a kill.
+    pub xp_radius: Fix,
+    /// Shop interaction radius around the nexus.
+    pub shop_radius: Fix,
+    /// Shared minion XP percentage (100 = full).
+    pub shared_xp_percent: u32,
 }
 
 impl RulesSpec {
@@ -399,6 +405,15 @@ impl RulesSpec {
         }
         if self.gold_tick_interval == 0 || self.gold_tick_interval > 10_000 {
             return Some("gold_tick_interval");
+        }
+        if !(Fix::ZERO..=range).contains(&self.xp_radius) || self.xp_radius == Fix::ZERO {
+            return Some("xp_radius");
+        }
+        if !(Fix::ZERO..=range).contains(&self.shop_radius) || self.shop_radius == Fix::ZERO {
+            return Some("shop_radius");
+        }
+        if !(100..=300).contains(&self.shared_xp_percent) {
+            return Some("shared_xp_percent");
         }
         if self.melee_vision != self.melee_minion.vision_range {
             return Some("melee_vision");
@@ -476,6 +491,9 @@ impl Default for RulesSpec {
             starting_gold: 500,
             gold_per_interval: 1,
             gold_tick_interval: 15,
+            xp_radius: Fix::from_i32(30),
+            shop_radius: Fix::from_i32(30),
+            shared_xp_percent: 130,
         }
     }
 }
@@ -1440,6 +1458,10 @@ impl GameContent {
         ] {
             feed(&value.to_le_bytes());
         }
+        for value in [self.rules.xp_radius, self.rules.shop_radius] {
+            feed(&value.to_bits().to_le_bytes());
+        }
+        feed(&self.rules.shared_xp_percent.to_le_bytes());
         string(feed, &self.map.name);
         feed(&[self.map.theme.id()]);
         feed(&self.map.extent.to_bits().to_le_bytes());
@@ -1694,6 +1716,9 @@ struct RulesEntry {
     starting_gold: u32,
     gold_per_interval: u32,
     gold_tick_interval: u32,
+    xp_radius: f32,
+    shop_radius: f32,
+    shared_xp_percent: u32,
 }
 
 impl Default for RulesEntry {
@@ -1720,6 +1745,9 @@ impl Default for RulesEntry {
             starting_gold: rules.starting_gold,
             gold_per_interval: rules.gold_per_interval,
             gold_tick_interval: rules.gold_tick_interval,
+            xp_radius: rules.xp_radius.to_f32(),
+            shop_radius: rules.shop_radius.to_f32(),
+            shared_xp_percent: rules.shared_xp_percent,
         }
     }
 }
@@ -2311,6 +2339,9 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 starting_gold: rules.starting_gold,
                 gold_per_interval: rules.gold_per_interval,
                 gold_tick_interval: rules.gold_tick_interval,
+                xp_radius: fix_param(rules.xp_radius, "rules.xp_radius")?,
+                shop_radius: fix_param(rules.shop_radius, "rules.shop_radius")?,
+                shared_xp_percent: rules.shared_xp_percent,
             }
         }
         None => RulesSpec::default(),

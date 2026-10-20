@@ -7,7 +7,7 @@ use moba_core::{Fix, FixVec2, Rng, StableHasher, Tick};
 use moba_ecs::{Entity, With, Without, World};
 use moba_game::{
     AreaEffect, AreaEffectList, DamageType, EMPTY_ITEM, Effect, GameContent, HeroId, LEVEL_GROWTH,
-    ModifierKind, SHOP_RADIUS, Targeting, Team, XP_RADIUS, mitigate_typed,
+    ModifierKind, Targeting, Team, mitigate_typed,
 };
 use moba_nav::SpatialGrid;
 
@@ -2145,14 +2145,17 @@ impl Simulation {
             let Some(hero_position) = self.world.get::<Position>(hero).map(|p| p.0) else {
                 continue;
             };
-            if hero_position.distance_sq(position) <= XP_RADIUS * XP_RADIUS {
+            if hero_position.distance_sq(position)
+                <= self.content.rules.xp_radius * self.content.rules.xp_radius
+            {
                 beneficiaries[count] = hero;
                 count += 1;
             }
         }
         if count > 0 {
             // League-style shared minion experience: 130% split among nearby allies.
-            let shared = (unit_xp(kind) * 13 / 10) / u32::try_from(count).unwrap_or(1);
+            let shared = (unit_xp(kind) * self.content.rules.shared_xp_percent / 100)
+                / u32::try_from(count).unwrap_or(1);
             let share = shared.max(1);
             for hero in &beneficiaries[..count] {
                 self.grant_xp(*hero, share);
@@ -2262,7 +2265,9 @@ impl Simulation {
         let Some(position) = self.world.get::<Position>(hero).map(|p| p.0) else {
             return false;
         };
-        if position.distance_sq(self.content.map.nexus_position(team)) > SHOP_RADIUS * SHOP_RADIUS {
+        if position.distance_sq(self.content.map.nexus_position(team))
+            > self.content.rules.shop_radius * self.content.rules.shop_radius
+        {
             return false;
         }
         let Some(mut progress) = self.world.get::<Progression>(hero).copied() else {
@@ -2430,7 +2435,7 @@ impl Simulation {
                     position
                         .0
                         .distance_sq(self.content.map.nexus_position(view.team))
-                        <= SHOP_RADIUS * SHOP_RADIUS
+                        <= self.content.rules.shop_radius * self.content.rules.shop_radius
                 });
                 if near_shop {
                     if let Some(progress) = self.world.get::<Progression>(hero) {
