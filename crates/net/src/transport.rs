@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::SessionCrypto;
 use crate::protocol::{
-    FLAG_ENCRYPTED, HEADER_LEN, Header, MAX_DATAGRAM, MAX_PAYLOAD, PacketKind, decode_packet,
-    encode_packet, sequence_after,
+    FLAG_ENCRYPTED, Header, MAX_DATAGRAM, MAX_PAYLOAD, PacketKind, decode_packet, encode_packet,
+    sequence_after,
 };
 
 /// Fragment payload overhead: message id, index, count, inner kind, inner seq.
@@ -70,6 +70,7 @@ fn plaintext_allowed(has_key: bool, kind: PacketKind, flags: u16) -> bool {
 pub struct UdpTransport {
     socket: UdpSocket,
     buffer: Vec<u8>,
+    send_buffer: Vec<u8>,
     fragment_id: u16,
     assemblies: Vec<Assembly>,
     peers: Vec<(SocketAddr, SessionCrypto)>,
@@ -88,6 +89,7 @@ impl UdpTransport {
         Ok(Self {
             socket,
             buffer: vec![0; MAX_DATAGRAM],
+            send_buffer: Vec::with_capacity(MAX_DATAGRAM),
             fragment_id: 0,
             assemblies: Vec::new(),
             peers: Vec::new(),
@@ -176,13 +178,16 @@ impl UdpTransport {
             ));
         }
         if payload.len() <= MAX_PAYLOAD {
-            let mut datagram = Vec::with_capacity(HEADER_LEN + payload.len());
+            let mut datagram = core::mem::take(&mut self.send_buffer);
+            datagram.clear();
             encode_packet(header, payload, &mut datagram)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            if self.send_datagram(&datagram, addr)? {
+            let sent = self.send_datagram(&datagram, addr);
+            if sent.as_ref().is_ok_and(|sent| *sent) {
                 self.bytes_sent += datagram.len() as u64;
             }
-            return Ok(());
+            self.send_buffer = datagram;
+            return sent.map(|_| ());
         }
 
         let total = payload.len().div_ceil(MAX_FRAGMENT_CHUNK);
