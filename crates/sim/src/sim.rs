@@ -2135,6 +2135,7 @@ impl Simulation {
         last_hit: Option<Entity>,
     ) {
         let enemy = dead_team.enemy();
+        let reward = self.unit_rewards(kind);
         let mut beneficiaries = [Entity::PLACEHOLDER; MAX_PLAYERS];
         let mut count = 0usize;
         for hero in self.hero_entities {
@@ -2154,7 +2155,7 @@ impl Simulation {
         }
         if count > 0 {
             // League-style shared minion experience: 130% split among nearby allies.
-            let shared = (unit_xp(kind) * self.content.rules.shared_xp_percent / 100)
+            let shared = (reward.0 * self.content.rules.shared_xp_percent / 100)
                 / u32::try_from(count).unwrap_or(1);
             let share = shared.max(1);
             for hero in &beneficiaries[..count] {
@@ -2170,7 +2171,7 @@ impl Simulation {
             return;
         }
         if let Some(progress) = self.world.get_mut::<Progression>(killer) {
-            progress.gold = progress.gold.saturating_add(unit_gold(kind));
+            progress.gold = progress.gold.saturating_add(reward.1);
         }
     }
 
@@ -2615,25 +2616,16 @@ impl Simulation {
         });
         best.map(|(_, target)| target)
     }
-}
 
-const fn unit_xp(kind: UnitKind) -> u32 {
-    match kind {
-        UnitKind::MeleeMinion => 32,
-        UnitKind::RangedMinion => 45,
-        UnitKind::Tower => 220,
-        UnitKind::Nexus => 300,
-        UnitKind::Hero => 180,
-    }
-}
-
-const fn unit_gold(kind: UnitKind) -> u32 {
-    match kind {
-        UnitKind::MeleeMinion => 20,
-        UnitKind::RangedMinion => 25,
-        UnitKind::Tower => 250,
-        UnitKind::Nexus => 500,
-        UnitKind::Hero => 300,
+    fn unit_rewards(&self, kind: UnitKind) -> (u32, u32) {
+        let reward = match kind {
+            UnitKind::MeleeMinion => self.content.rules.rewards.melee_minion,
+            UnitKind::RangedMinion => self.content.rules.rewards.ranged_minion,
+            UnitKind::Tower => self.content.rules.rewards.tower,
+            UnitKind::Nexus => self.content.rules.rewards.nexus,
+            UnitKind::Hero => self.content.rules.rewards.hero,
+        };
+        (reward.xp, reward.gold)
     }
 }
 

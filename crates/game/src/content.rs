@@ -177,6 +177,38 @@ pub enum ModifierKind {
     Burn = 5,
 }
 
+/// XP and gold awarded for a kill.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnitRewardsSpec {
+    /// XP granted to nearby allies.
+    pub xp: u32,
+    /// Gold granted to the last hitter.
+    pub gold: u32,
+}
+
+/// Per-unit-kind rewards.
+#[allow(missing_docs)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct RewardsSpec {
+    pub melee_minion: UnitRewardsSpec,
+    pub ranged_minion: UnitRewardsSpec,
+    pub tower: UnitRewardsSpec,
+    pub nexus: UnitRewardsSpec,
+    pub hero: UnitRewardsSpec,
+}
+
+impl Default for RewardsSpec {
+    fn default() -> Self {
+        Self {
+            melee_minion: UnitRewardsSpec { xp: 32, gold: 20 },
+            ranged_minion: UnitRewardsSpec { xp: 45, gold: 25 },
+            tower: UnitRewardsSpec { xp: 220, gold: 250 },
+            nexus: UnitRewardsSpec { xp: 300, gold: 500 },
+            hero: UnitRewardsSpec { xp: 180, gold: 300 },
+        }
+    }
+}
+
 /// An owned modifier definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModifierDef {
@@ -337,6 +369,8 @@ pub struct RulesSpec {
     pub shop_radius: Fix,
     /// Shared minion XP percentage (100 = full).
     pub shared_xp_percent: u32,
+    /// Kill rewards per unit kind.
+    pub rewards: RewardsSpec,
 }
 
 impl RulesSpec {
@@ -414,6 +448,17 @@ impl RulesSpec {
         }
         if !(100..=300).contains(&self.shared_xp_percent) {
             return Some("shared_xp_percent");
+        }
+        for reward in [
+            self.rewards.melee_minion,
+            self.rewards.ranged_minion,
+            self.rewards.tower,
+            self.rewards.nexus,
+            self.rewards.hero,
+        ] {
+            if reward.xp > 100_000 || reward.gold > 100_000 {
+                return Some("rewards");
+            }
         }
         if self.melee_vision != self.melee_minion.vision_range {
             return Some("melee_vision");
@@ -494,6 +539,7 @@ impl Default for RulesSpec {
             xp_radius: Fix::from_i32(30),
             shop_radius: Fix::from_i32(30),
             shared_xp_percent: 130,
+            rewards: RewardsSpec::default(),
         }
     }
 }
@@ -1462,6 +1508,16 @@ impl GameContent {
             feed(&value.to_bits().to_le_bytes());
         }
         feed(&self.rules.shared_xp_percent.to_le_bytes());
+        for reward in [
+            self.rules.rewards.melee_minion,
+            self.rules.rewards.ranged_minion,
+            self.rules.rewards.tower,
+            self.rules.rewards.nexus,
+            self.rules.rewards.hero,
+        ] {
+            feed(&reward.xp.to_le_bytes());
+            feed(&reward.gold.to_le_bytes());
+        }
         string(feed, &self.map.name);
         feed(&[self.map.theme.id()]);
         feed(&self.map.extent.to_bits().to_le_bytes());
@@ -1719,6 +1775,52 @@ struct RulesEntry {
     xp_radius: f32,
     shop_radius: f32,
     shared_xp_percent: u32,
+    rewards: RewardsEntry,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RewardsEntry {
+    melee_minion: UnitRewardsEntry,
+    ranged_minion: UnitRewardsEntry,
+    tower: UnitRewardsEntry,
+    nexus: UnitRewardsEntry,
+    hero: UnitRewardsEntry,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct UnitRewardsEntry {
+    xp: u32,
+    gold: u32,
+}
+
+impl Default for RewardsEntry {
+    fn default() -> Self {
+        let rewards = RewardsSpec::default();
+        Self {
+            melee_minion: UnitRewardsEntry {
+                xp: rewards.melee_minion.xp,
+                gold: rewards.melee_minion.gold,
+            },
+            ranged_minion: UnitRewardsEntry {
+                xp: rewards.ranged_minion.xp,
+                gold: rewards.ranged_minion.gold,
+            },
+            tower: UnitRewardsEntry {
+                xp: rewards.tower.xp,
+                gold: rewards.tower.gold,
+            },
+            nexus: UnitRewardsEntry {
+                xp: rewards.nexus.xp,
+                gold: rewards.nexus.gold,
+            },
+            hero: UnitRewardsEntry {
+                xp: rewards.hero.xp,
+                gold: rewards.hero.gold,
+            },
+        }
+    }
 }
 
 impl Default for RulesEntry {
@@ -1748,6 +1850,7 @@ impl Default for RulesEntry {
             xp_radius: rules.xp_radius.to_f32(),
             shop_radius: rules.shop_radius.to_f32(),
             shared_xp_percent: rules.shared_xp_percent,
+            rewards: RewardsEntry::default(),
         }
     }
 }
@@ -2342,6 +2445,28 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 xp_radius: fix_param(rules.xp_radius, "rules.xp_radius")?,
                 shop_radius: fix_param(rules.shop_radius, "rules.shop_radius")?,
                 shared_xp_percent: rules.shared_xp_percent,
+                rewards: RewardsSpec {
+                    melee_minion: UnitRewardsSpec {
+                        xp: rules.rewards.melee_minion.xp,
+                        gold: rules.rewards.melee_minion.gold,
+                    },
+                    ranged_minion: UnitRewardsSpec {
+                        xp: rules.rewards.ranged_minion.xp,
+                        gold: rules.rewards.ranged_minion.gold,
+                    },
+                    tower: UnitRewardsSpec {
+                        xp: rules.rewards.tower.xp,
+                        gold: rules.rewards.tower.gold,
+                    },
+                    nexus: UnitRewardsSpec {
+                        xp: rules.rewards.nexus.xp,
+                        gold: rules.rewards.nexus.gold,
+                    },
+                    hero: UnitRewardsSpec {
+                        xp: rules.rewards.hero.xp,
+                        gold: rules.rewards.hero.gold,
+                    },
+                },
             }
         }
         None => RulesSpec::default(),
