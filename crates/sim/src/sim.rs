@@ -2091,20 +2091,34 @@ impl Simulation {
         let mut index = 0;
         while index < self.projectiles.len() {
             let mut projectile = self.projectiles[index];
+            let start = projectile.position;
             projectile.position += projectile.direction * projectile.speed_per_tick;
+            let end = projectile.position;
+            let sweep = (end - start).length() > projectile.radius * Fix::from_i32(2);
+            let midpoint = (start + end) / Fix::from_i32(2);
+            let radius = if sweep {
+                projectile.radius + (end - start).length() / Fix::from_i32(2)
+            } else {
+                projectile.radius
+            };
             let mut hit: Option<(Fix, Entity)> = None;
-            self.grid
-                .for_each_in_circle(projectile.position, projectile.radius, |candidate| {
-                    if candidate.team == projectile.team {
-                        return;
-                    }
-                    let distance = candidate.position.distance_sq(projectile.position);
-                    if hit.is_none_or(|(best, entity)| {
+            self.grid.for_each_in_circle(midpoint, radius, |candidate| {
+                if candidate.team == projectile.team {
+                    return;
+                }
+                let distance = if sweep {
+                    segment_distance_sq(candidate.position, start, end)
+                } else {
+                    candidate.position.distance_sq(end)
+                };
+                if distance <= projectile.radius * projectile.radius
+                    && hit.is_none_or(|(best, entity)| {
                         distance < best || (distance == best && candidate.entity < entity)
-                    }) {
-                        hit = Some((distance, candidate.entity));
-                    }
-                });
+                    })
+                {
+                    hit = Some((distance, candidate.entity));
+                }
+            });
             if let Some((_, target)) = hit {
                 self.push_event(SimEvent::ProjectileHit {
                     owner: projectile.owner,
@@ -2851,6 +2865,17 @@ impl Simulation {
     }
 }
 
+fn segment_distance_sq(point: FixVec2, start: FixVec2, end: FixVec2) -> Fix {
+    let segment = end - start;
+    let length_sq = segment.length_sq();
+    if length_sq == Fix::ZERO {
+        return point.distance_sq(start);
+    }
+    let offset = point - start;
+    let area = cross(segment, offset);
+    area * area / length_sq
+}
+
 fn cross(a: FixVec2, b: FixVec2) -> Fix {
     a.x * b.y - a.y * b.x
 }
@@ -3180,6 +3205,24 @@ mod tests {
         }
         assert!(!sim.world.has::<Dead>(hero));
         assert!(sim.world.get::<Health>(hero).unwrap().current > 0);
+    }
+
+    #[test]
+    fn segment_distance_supports_fast_projectile_sweeps() {
+        let start = FixVec2::from_ints(0, 0);
+        let end = FixVec2::from_ints(10, 0);
+        assert_eq!(
+            super::segment_distance_sq(FixVec2::from_ints(5, 0), start, end),
+            Fix::ZERO
+        );
+        assert_eq!(
+            super::segment_distance_sq(FixVec2::from_ints(5, 2), start, end),
+            Fix::from_i32(4)
+        );
+        assert_eq!(
+            super::segment_distance_sq(FixVec2::from_ints(2, 3), start, start),
+            Fix::from_i32(13)
+        );
     }
 
     #[test]
