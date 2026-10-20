@@ -712,8 +712,12 @@ pub(crate) fn build_local_hud(
 
 #[cfg(test)]
 mod tests {
-    use super::{HitList, HudModel, MatchPhase, Simulation, UiDrawList, build_local_hud};
+    use super::{
+        Camera, HitList, HudModel, InputState, MatchPhase, NetworkView, Simulation, UiDrawList,
+        build_local_hud, build_network_hud,
+    };
     use crate::{hud_fmt, hud_static};
+    use moba_core::math::Vec3;
     use moba_sim::SimConfig;
 
     #[test]
@@ -737,6 +741,32 @@ mod tests {
             build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
         });
         assert_eq!(allocations, 0, "steady-state HUD allocation");
+    }
+
+    #[test]
+    fn network_hud_has_zero_steady_state_allocations() {
+        let network = NetworkView::test_stub();
+        let camera = Camera::perspective(
+            Vec3::new(0.0, 30.0, 30.0),
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0),
+            0.8,
+            16.0 / 9.0,
+            0.1,
+            200.0,
+        );
+        let input = InputState::default();
+        let mut ui = UiDrawList::new();
+        let mut hits = HitList::new();
+        build_network_hud(
+            &mut ui, &network, false, false, &input, &camera, 1280, 720, 16.0, 60.0, &mut hits,
+        );
+        let ((), allocations) = crate::app::allocation_probe::probe(|| {
+            build_network_hud(
+                &mut ui, &network, false, false, &input, &camera, 1280, 720, 16.0, 60.0, &mut hits,
+            );
+        });
+        assert_eq!(allocations, 0, "steady-state network HUD allocation");
     }
 
     #[test]

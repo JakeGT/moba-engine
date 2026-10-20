@@ -1379,6 +1379,37 @@ impl Drop for ClientApp {
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
 impl NetworkView {
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        let client = NetClient::start("127.0.0.1:9".parse().expect("addr")).expect("client");
+        Self {
+            client,
+            prediction: PredictionState::new(Fix::from_f32(5.0)),
+            interpolator: Interpolator::new(2.0, 30.0),
+            own_slot: 0,
+            own_net_id: None,
+            last_snapshot_seq: 0,
+            phase: MatchPhase::Lobby,
+            countdown: 0,
+            spectator: false,
+            ready: false,
+            ready_count: 0,
+            player_count: 0,
+            last_tick: 0,
+            demo_move: None,
+            demo_sent: false,
+            demo_buy: None,
+            demo_bought: false,
+            shop_page: 0,
+            spectator_pan: Vec3::ZERO,
+            spectator_yaw: -0.7,
+            spectator_zoom: 1.0,
+            kill_feed: VecDeque::with_capacity(6),
+            projectiles: Vec::with_capacity(32),
+            audio: crate::audio::Audio::headless(),
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // Event-to-HUD/audio mapping is linear.
     fn handle_game_event(&mut self, event: NetEvent) {
         match event.kind {
