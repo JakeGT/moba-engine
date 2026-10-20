@@ -3125,6 +3125,95 @@ cost = 1
     }
 
     #[test]
+    fn connected_clients_receive_rotation_updates() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let addr = server.local_addr().expect("addr");
+        server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
+        server.watch_rotation(vec![
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/1v1-mid.toml"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/map-pack.toml"),
+        ]);
+        server.reset_match();
+        assert!(server.clients[0].as_ref().expect("client").connected);
+        assert!(server.content_update_retry.is_some());
+        assert!(server.content_generation > 0);
+        assert_eq!(
+            server.content.map.name,
+            server.simulation.content().map.name
+        );
+    }
+
+    #[test]
+    fn content_ack_clears_matching_retry_only() {
+        let config = ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            sim: SimConfig::default(),
+            snapshot_interval: 1,
+            max_clients: 10,
+            countdown_ticks: 0,
+            results_ticks: 10,
+            client_timeout: Duration::from_secs(3),
+            reconnect_grace: Duration::from_secs(2),
+            pre_shared_key: None,
+            record: None,
+            max_spectators: 8,
+            max_packets_per_second: 120,
+            max_total_packets_per_second: 2_000,
+            require_ready: false,
+        };
+        let mut server = NetServer::bind(config).expect("bind");
+        let addr = server.local_addr().expect("addr");
+        server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
+        let session = server.clients[0].as_ref().expect("client").session;
+        server.content_generation = 5;
+        server.content_update_retry = Some((Vec::new(), 0, 3, 5));
+        let stale = ReceivedMessage {
+            addr,
+            header: Header {
+                kind: PacketKind::ContentAck,
+                flags: 0,
+                session,
+                seq: 4,
+                ack: 0,
+                ack_bits: 0,
+            },
+            payload: Vec::new(),
+        };
+        server.handle_message(stale).expect("stale ack");
+        assert!(server.content_update_retry.is_some());
+        let ack = ReceivedMessage {
+            addr,
+            header: Header {
+                kind: PacketKind::ContentAck,
+                flags: 0,
+                session,
+                seq: 5,
+                ack: 0,
+                ack_bits: 0,
+            },
+            payload: Vec::new(),
+        };
+        server.handle_message(ack).expect("ack");
+        assert!(server.content_update_retry.is_none());
+    }
+
+    #[test]
     fn content_update_retry_clears_on_match_reset() {
         let config = ServerConfig {
             bind: "127.0.0.1:0".parse().expect("address"),
