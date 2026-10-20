@@ -345,6 +345,12 @@ impl App for ClientApp {
         {
             network.audio.toggle_mute();
         }
+        if let Some(network) = self.network.as_mut() {
+            network.audio.poll();
+        }
+        if let Some(audio) = self.local_audio.as_mut() {
+            audio.poll();
+        }
         self.frames += 1;
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
