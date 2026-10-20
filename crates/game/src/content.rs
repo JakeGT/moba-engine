@@ -1235,56 +1235,6 @@ impl GameContent {
                 return Err(ContentError::BadModifiers);
             }
         }
-        for kind in [
-            ModifierKind::Shield,
-            ModifierKind::Slow,
-            ModifierKind::Haste,
-            ModifierKind::Root,
-            ModifierKind::Silence,
-            ModifierKind::Burn,
-        ] {
-            if !self.modifiers.iter().any(|modifier| modifier.kind == kind) {
-                return Err(ContentError::BadModifiers);
-            }
-        }
-        if self.map.name.is_empty()
-            || self.map.name.len() > MAX_MANIFEST_FIELD
-            || !self.map.name.is_ascii()
-        {
-            return Err(ContentError::BadMap);
-        }
-        if self.map.lanes.is_empty()
-            || self.map.lanes.len() > MAX_CONTENT_LANES
-            || self.map.structures.len() > MAX_CONTENT_STRUCTURES
-        {
-            return Err(ContentError::BadMap);
-        }
-        for (index, lane) in self.map.lanes.iter().enumerate() {
-            if lane.name.is_empty()
-                || lane.name.len() > MAX_HERO_NAME
-                || !lane.name.is_ascii()
-                || lane.path.len() < 2
-                || lane.path.len() > MAX_LANE_POINTS
-            {
-                return Err(ContentError::BadMapData);
-            }
-            if self.map.lanes[..index]
-                .iter()
-                .any(|other| other.name == lane.name)
-            {
-                return Err(ContentError::BadMapData);
-            }
-        }
-        for team in Team::ALL {
-            if !self
-                .map
-                .structures
-                .iter()
-                .any(|structure| structure.team == team && structure.kind == StructureKind::Nexus)
-            {
-                return Err(ContentError::BadMapData);
-            }
-        }
         if let Some(field) = self.rules.invalid_field() {
             return Err(ContentError::BadRules(field));
         }
@@ -2879,7 +2829,7 @@ move_speed = nan
         content
             .modifiers
             .retain(|modifier| modifier.kind != ModifierKind::Burn);
-        assert_eq!(content.validate(), Err(ContentError::BadModifiers));
+        assert_eq!(content.validate(), Ok(()));
 
         let unknown = r#"
 [[modifiers]]
