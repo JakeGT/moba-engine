@@ -27,9 +27,9 @@ replay = re.search(r'(?:pub )?const VERSION: u8 = (\d+)', read('crates/sim/src/r
 logic = re.search(r'SIM_LOGIC_VERSION: u8 = (\d+)', read('crates/sim/src/replay.rs')).group(1)
 
 checks = {
-    'protocol': (f'**v{protocol}**', ['AGENTS.md', 'docs/status.md']),
-    'replay': (f'**v{replay}**', ['docs/status.md', 'AGENTS.md']),
-    'simulation logic': (f'**v{logic}**', ['AGENTS.md', 'docs/status.md']),
+    'protocol': (f'**v{protocol}**', ['AGENTS.md', 'docs/status.md', 'docs/agents.md', 'CLAUDE.md']),
+    'replay': (f'**v{replay}**', ['docs/status.md', 'AGENTS.md', 'docs/agents.md', 'CLAUDE.md']),
+    'simulation logic': (f'**v{logic}**', ['AGENTS.md', 'docs/status.md', 'docs/agents.md', 'CLAUDE.md']),
 }
 for name, (needle, files) in checks.items():
     for path in files:
@@ -38,7 +38,7 @@ for name, (needle, files) in checks.items():
 
 # Test counts in the front-door docs must agree.
 counts = {}
-for path in ['README.md', 'docs/status.md', 'AGENTS.md']:
+for path in ['README.md', 'docs/status.md', 'AGENTS.md', 'docs/agents.md', 'CLAUDE.md']:
     text = read(path)
     match = re.search(r'(\d+)\s+(?:workspace\s+)?(?:tests|passed)', text)
     if match:
