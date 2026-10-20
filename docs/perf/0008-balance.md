@@ -55,3 +55,11 @@ the isolated all-modifier path uses **10 allocations / 1,920 B** (under the 30 /
 
 - Re-run after #39's `BotPolicy` seam and after every bot/ability change.
 - 300 matches detect only large side biases; use ≥5,000 for a 1% resolution.
+
+## 5,000-match determinism sweep (2026-10-20)
+
+`match-soak --matches 5000 --ticks 3000` completed **15,000,000 ticks** with
+`determinism=ok`; avg **7 µs/tick**, worst **481 µs**. All 5,000 matches hit the
+3,000-tick cap without an outcome, so this run does not measure side win rates — it
+only exercises long-running determinism. A balance-resolution sweep needs a much
+larger tick budget or a shorter win condition.
