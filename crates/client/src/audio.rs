@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+/// Maximum simultaneously scheduled tones.
+const MAX_VOICES: usize = 16;
+
 /// One game event that maps to a sound.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Sound {
@@ -61,6 +64,9 @@ impl Synth {
             return;
         }
         let samples = (seconds * self.sample_rate) as u32;
+        if self.tones.len() >= MAX_VOICES {
+            self.tones.pop_front();
+        }
         self.tones.push_back(Tone {
             phase: 0.0,
             step: std::f32::consts::TAU * frequency / self.sample_rate,
@@ -307,6 +313,19 @@ mod tests {
         }
         frequencies.sort_unstable();
         assert!(frequencies.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn voice_pool_is_bounded() {
+        let mut synth = Synth {
+            sample_rate: 48_000.0,
+            volume: 1.0,
+            ..Synth::default()
+        };
+        for _ in 0..64 {
+            synth.schedule(Sound::Attack);
+        }
+        assert_eq!(synth.tones.len(), MAX_VOICES);
     }
 
     #[test]
