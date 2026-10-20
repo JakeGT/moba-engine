@@ -1883,6 +1883,21 @@ impl Simulation {
         }
     }
 
+    fn on_hit_bonus(&self, attacker: Entity) -> i32 {
+        if self.world.get::<HeroSlot>(attacker).is_none() {
+            return 0;
+        }
+        self.world
+            .get::<Progression>(attacker)
+            .map_or(0, |progress| {
+                progress.items[..usize::from(progress.item_count)]
+                    .iter()
+                    .filter_map(|item| self.content.items.get(usize::from(*item)))
+                    .map(|item| i32::from(item.on_hit_damage))
+                    .sum()
+            })
+    }
+
     fn resolve_attacks(&mut self) {
         self.attackers.clear();
         for (attacker, (stats, target)) in self.world.query::<(&AttackStats, &AttackTarget)>() {
@@ -1941,9 +1956,10 @@ impl Simulation {
             if attacker_position.distance_sq(target_position) > snapshot.range_sq {
                 continue;
             }
+            let bonus = self.on_hit_bonus(snapshot.attacker);
             self.damage(
                 snapshot.target,
-                snapshot.damage,
+                snapshot.damage.saturating_add(bonus),
                 DamageType::Physical,
                 snapshot.attacker,
             );
@@ -3442,6 +3458,21 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn item_on_hit_bonus_counts_inventory() {
+        let mut content = GameContent::default();
+        content.items[0].on_hit_damage = 20;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        assert_eq!(sim.on_hit_bonus(hero), 0);
+        let mut progress = *sim.world.get::<Progression>(hero).expect("progress");
+        progress.items[0] = 0;
+        progress.item_count = 1;
+        let _ = sim.world.insert(hero, progress);
+        assert_eq!(sim.on_hit_bonus(hero), 20);
     }
 
     #[test]

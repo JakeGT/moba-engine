@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 27;
+pub const PROTOCOL_VERSION: u8 = 28;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -315,6 +315,8 @@ pub struct WireItem {
     pub magic_resist: i32,
     /// Movement speed bonus in raw fixed-point bits.
     pub move_speed_bits: i64,
+    /// Bonus on-hit damage.
+    pub on_hit_damage: u16,
     /// Self-heal applied by the active (0 = no active).
     pub active_heal: i32,
     /// Active cooldown in ticks (0 = no active).
@@ -333,6 +335,7 @@ impl Default for WireItem {
             armor: 0,
             magic_resist: 0,
             move_speed_bits: 0,
+            on_hit_damage: 0,
             active_heal: 0,
             active_cooldown_ticks: 0,
         }
@@ -852,6 +855,7 @@ impl From<&GameContent> for WireCatalog {
                 armor,
                 magic_resist,
                 move_speed_per_sec,
+                on_hit_damage,
                 active_heal,
                 active_cooldown_ticks,
             } = item;
@@ -863,6 +867,7 @@ impl From<&GameContent> for WireCatalog {
             wire.armor = *armor;
             wire.magic_resist = *magic_resist;
             wire.move_speed_bits = move_speed_per_sec.to_bits();
+            wire.on_hit_damage = *on_hit_damage;
             wire.active_heal = *active_heal;
             wire.active_cooldown_ticks = *active_cooldown_ticks;
         }
@@ -1283,6 +1288,7 @@ impl WireCatalog {
                     armor: item.armor,
                     magic_resist: item.magic_resist,
                     move_speed_per_sec: Fix::from_bits(item.move_speed_bits),
+                    on_hit_damage: item.on_hit_damage,
                     active_heal: item.active_heal,
                     active_cooldown_ticks: item.active_cooldown_ticks,
                 })
@@ -1641,6 +1647,7 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         put_u32(out, item.armor as u32);
         put_u32(out, item.magic_resist as u32);
         out.extend_from_slice(&item.move_speed_bits.to_le_bytes());
+        out.extend_from_slice(&item.on_hit_damage.to_le_bytes());
         put_u32(out, item.active_heal as u32);
         out.extend_from_slice(&item.active_cooldown_ticks.to_le_bytes());
     }
@@ -1819,6 +1826,7 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         item.armor = reader.i32()?;
         item.magic_resist = reader.i32()?;
         item.move_speed_bits = reader.i64()?;
+        item.on_hit_damage = reader.u16()?;
         item.active_heal = reader.i32()?;
         item.active_cooldown_ticks = reader.u16()?;
     }
