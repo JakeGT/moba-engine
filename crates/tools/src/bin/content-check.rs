@@ -95,6 +95,7 @@ fn main() {
                                 | moba_game::ModifierKind::Root
                                 | moba_game::ModifierKind::Silence
                                 | moba_game::ModifierKind::Burn
+                                | moba_game::ModifierKind::Stun
                         )
                     })
             })

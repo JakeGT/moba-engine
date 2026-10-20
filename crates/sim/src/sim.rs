@@ -1271,7 +1271,7 @@ impl Simulation {
                     modifier.damage_type = damage_type;
                     modifier.source = source;
                 }
-                ModifierKind::Root | ModifierKind::Silence => {}
+                ModifierKind::Root | ModifierKind::Silence | ModifierKind::Stun => {}
             }
         } else if usize::from(modifiers.len) < MAX_MODIFIERS {
             let index = usize::from(modifiers.len);
@@ -1492,7 +1492,7 @@ impl Simulation {
                     if self
                         .world
                         .get::<Modifiers>(entity)
-                        .is_none_or(|m| !m.has(ModifierKind::Root))
+                        .is_none_or(|m| !m.has(ModifierKind::Root) && !m.has(ModifierKind::Stun))
                     {
                         let destination = self.clamp_position(position);
                         if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
@@ -1577,14 +1577,14 @@ impl Simulation {
         if self
             .world
             .get::<Modifiers>(caster)
-            .is_some_and(|m| m.has(ModifierKind::Silence))
+            .is_some_and(|m| m.has(ModifierKind::Silence) || m.has(ModifierKind::Stun))
         {
             return;
         }
         if self
             .world
             .get::<Modifiers>(caster)
-            .is_some_and(|m| m.has(ModifierKind::Root))
+            .is_some_and(|m| m.has(ModifierKind::Root) || m.has(ModifierKind::Stun))
             && effects
                 .iter()
                 .any(|effect| matches!(effect, Effect::Displace { .. }))

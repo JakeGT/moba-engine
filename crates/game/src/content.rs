@@ -175,6 +175,8 @@ pub enum ModifierKind {
     Silence = 4,
     /// Damage over time.
     Burn = 5,
+    /// Prevents movement and casts.
+    Stun = 6,
 }
 
 /// XP and gold awarded for a kill.
@@ -970,7 +972,7 @@ fn area_effect_valid(effect: &AreaEffect, modifiers: &[ModifierDef]) -> bool {
                     (Fix::ONE..=Fix::from_i32(MAX_HASTE_FACTOR)).contains(factor)
                 }
                 ModifierKind::Burn => (1..=MAX_STAT).contains(amount),
-                ModifierKind::Root | ModifierKind::Silence => true,
+                ModifierKind::Root | ModifierKind::Silence | ModifierKind::Stun => true,
             }
         }
     }
@@ -2067,6 +2069,7 @@ fn parse_modifier_kind(value: &str) -> Result<ModifierKind, ContentLoadError> {
         "root" => Ok(ModifierKind::Root),
         "silence" => Ok(ModifierKind::Silence),
         "burn" => Ok(ModifierKind::Burn),
+        "stun" => Ok(ModifierKind::Stun),
         other => Err(invalid_field("modifiers.kind", other)),
     }
 }
@@ -2846,6 +2849,14 @@ move_speed = nan
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn stun_modifier_kind_parses() {
+        assert_eq!(
+            super::parse_modifier_kind("stun").expect("stun kind"),
+            ModifierKind::Stun
+        );
     }
 
     #[test]
