@@ -6,6 +6,20 @@ Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic
 Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
 upgrade **#49**, and **four private security advisories** (maintainer-visible only).
 
+## Deferred post-1.0 work
+
+The maintainer deferred the remaining feature-scale epic on 2026-10-20 because there are no
+current users and it is not remediation work:
+
+- **#145/#12:** asset references backed by content packs, manifest-backed per-map rendering,
+  joint/weight layout, GPU skinning with bone matrices/sync2, and the 10-hero frame-cost and
+  networked-animation capture evidence.
+- **#146 residual:** a mirror-safe side-swap test (entity-id tie-break semantics) and a
+  longer outcome-resolving balance sweep.
+
+Groundwork already landed: validated `moba-assets` manifests/fallbacks, map-theme asset keys,
+and a networked procedural hero rig with facing/gait. Tracked in **#276**.
+
 ## How security work is handled
 
 The advisories are private drafts. Their reproduction steps and exploit details must not be
@@ -32,7 +46,8 @@ copied into public issues, PRs, commit messages or this plan.
 |---|---|---|
 | S0 | Private advisories + **#143/#16** (unsafe scope lifetime) | confidentiality/integrity and UB; block a security release |
 | P1 | #135, #136, #137, #138, #140, #141, #142 | correctness, leaks, replay truth, CI trust |
-| P2 | #139, #144, #145/#12, #146, #147, #148, #149, #150, #151, #152 | completion and hardening |
+| P2 | #139, #144, #147, #148, #149, #150, #151, #152 | completion and hardening (done) |
+| Deferred | #145/#12, #146 residual | post-1.0 feature work (#276) |
 | External | #9/#127, #21 | need hardware/credentials, not code alone |
 
 Do not start broad content features (#147/#148) until the hash/validation work (#135/#151)
@@ -224,7 +239,7 @@ transpose normals; `textureLod`; 0×0 resize skip; `DeviceLost`; checked texture
 round-trip test; queue-family ignored; client unsafe policy exception/test-support crate.
 Acceptance: golden with no suppression; forced rebuild/injected failure tests where practical.
 
-### D-2. #145/#12 networked animation and assets
+### D-2. #145/#12 networked animation and assets (deferred to #276)
 Use the hero rig in networked matches with replicated facing/gait/idle; add joint/weight
 layout + bone-matrix storage buffer with sync2 barriers (after #12 asset schema); measure
 10-hero + minion frame cost; capture a networked animated match. #12 must define a validated

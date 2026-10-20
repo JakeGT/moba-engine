@@ -1,11 +1,11 @@
 # Engine status
 
-Last updated: **2026-10-19**. Workspace **0.2.0** preview; protocol **v36**; replay format **v5**;
+Last updated: **2026-10-20**. Workspace **0.3.0** preview; protocol **v36**; replay format **v5**;
 simulation logic **v7**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
 Two external-resource items remain open: real Windows/macOS GPU frame results (#9/#127) and
-crates.io publication enablement (#21). Audit follow-ups remain tracked in the issue tracker.
+crates.io publication enablement (#21). The 2026-10-19 audit remediation is complete; post-1.0 asset/skinning work is tracked in #276.
 
 ## Milestones
 
