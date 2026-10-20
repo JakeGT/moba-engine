@@ -7,8 +7,8 @@
 - [Content authoring](content-authoring.md) — runtime TOML packs for items, heroes, abilities,
   maps, vision walls and the determinism checklist.
 - [API stability](API-STABILITY.md) — pre-1.0 tiers, breakage rules and publishing policy.
-- [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — security-first plan for
-  #49/#135–#153, reopened #12/#16 and four private advisories.
+- [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — completed
+  security-first remediation; post-1.0 asset/skinning work is in #276.
 - [First audit remediation plan](plans/audit-remediation-2026-10.md) — the W0–W5 train that
   produced the 0.2 preview.
 - [Status](status.md) — milestone table, verification evidence and the external blockers.

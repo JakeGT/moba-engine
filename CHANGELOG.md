@@ -1,364 +1,89 @@
-# Second-audit remediation plan — 2026-10-19
+# Changelog
 
-Status: **draft plan, ready for execution**  
-Baseline: `main` at `64951a0`, protocol **v26**, replay **v5**, simulation logic **v7**,
-**262 tests**.
-Sources: the 2026-10-19 re-audit issues **#135–#153**, reopened **#12/#16**, open dependency
-upgrade **#49**, and **four private security advisories** (maintainer-visible only).
+All notable changes are recorded here. The workspace is pre-1.0; minor releases may include
+breaking protocol, replay or content-schema changes.
 
-## How security work is handled
+## [0.3.0] — 2026-10-20
 
-The advisories are private drafts. Their reproduction steps and exploit details must not be
-copied into public issues, PRs, commit messages or this plan.
+Preview release after the 2026-10-19 audit remediation. Protocol **v36**, replay **v5**,
+simulation logic **v7**.
 
-- Work in a **private security fork** associated with the advisory (or a private local
-  branch) until the coordinated release. Do not open public PRs that reveal the issue.
-- Every advisory gets a private remediation comment/checklist with the affected files,
-  tests, reviewer sign-off and release version. The public plan only names the affected
-  subsystem.
-- Land fixes in one coordinated **security release**, publish the advisories with patched
-  versions and credit reporters, then merge any public follow-up cleanup.
-- If the advisory workflow cannot use a private fork, the release manager must approve an
-  alternative non-public branch and merge strategy before code is pushed.
-- Security fixes are not “done” when the code is green: they are done when the patched
-  release exists, the advisory is published, and regression tests are in `main`.
-- The four advisories split across S-1 (two: session crypto and keyed-peer packet
-  acceptance), S-2 (content trust) and S-3 (catalogue update). S-4 is the public unsafe
-  job-scope lifetime issue #143/#16, not a private advisory.
+### Security
+- Hardened session transport (independent AEAD counters, replayed-packet rejection, keyed peers
+  reject unsealed application packets/fragments).
+- Replaced the weak pack digest with domain-separated SHA-256 attestation, strict signature
+  verification and a unified trusted loader.
+- Hardened content parsing/hashing, catalogue updates and client validation.
+- Closed the public unsafe job-scope lifetime issue with scoped ownership, blocking waits and a
+  Loom model.
 
-## Severity and order
+### Simulation
+- Deterministic targeting tie-breaks, symmetric fixed-point division, team-size-agnostic bot
+  seeds and fast-projectile swept collision.
+- Rules-driven starting/passive gold, radii, shared XP, unit rewards, aggro and win conditions.
+- Item actives/cooldowns, on-hit/on-damaged passives, HUD cooldowns and bot item use.
+- Generic modifier stat bonuses, replicated status bits, data-driven expiry/on-tick/on-damaged
+  triggers and a Stun modifier kind.
+- Replay decode memory cap and seed-normalized state hash for cross-seed comparisons.
 
-| Priority | Work | Why first |
-|---|---|---|
-| S0 | Private advisories + **#143/#16** (unsafe scope lifetime) | confidentiality/integrity and UB; block a security release |
-| P1 | #135, #136, #137, #138, #140, #141, #142 | correctness, leaks, replay truth, CI trust |
-| P2 | #139, #144, #145/#12, #146, #147, #148, #149, #150, #151, #152 | completion and hardening |
-| External | #9/#127, #21 | need hardware/credentials, not code alone |
+### Networking
+- Reliable catalogue delivery with generation checks, acknowledgements, retries and
+  connected-client map rotation.
+- Snapshot/event allocation guards, transport send-buffer reuse and per-thread allocation
+  accounting.
 
-Do not start broad content features (#147/#148) until the hash/validation work (#135/#151)
-and the security release train are in place.
+### Renderer
+- Capture extent/format snapshots, corrected present/atlas barriers and validation suppression
+  removal.
+- Setup-failure RAII for buffers, images, samplers and swapchains; resize skip on out-of-date
+  rebuilds.
+- Correct inverse-transpose normals and explicit texture LOD.
+- Downloadable/known-issue validation now counts every error.
 
-## Wave S — security release train
+### Client
+- HUD split into scoreboard/shop/abilities modules; centralized theme colors.
+- Input routing, NetworkView, scene-build and launch modules extracted; `app.rs` under 800 lines.
+- Procedural audio formats, mute, device recovery, bounded lock-free scheduling and offline
+  sound.
+- Networked hero rig with interpolated facing/gait; zero-allocation HUD frame and UI-click
+  routing tests.
 
-One release train avoids repeated protocol/replay/content bumps. Target release **0.3.0**
-(the transport/content changes are not patch-compatible under pre-1.0 semver); the release
-manager may choose a different version only with an explicit compatibility rationale.
+### Content and tooling
+- Validated asset manifests with safe paths, duplicate checks and fallback chains.
+- Stable map-theme asset keys and map-rotation coverage.
+- Fuzzed catalogue decoding; checked replay/fixture and golden-state rebaselines.
 
-### S-1. Session transport cryptography
-Private advisory: session AEAD nonce/counter handling.
+### Documentation
+- Completed the audit remediation plan and closed tracking issues.
+- Replaced the duplicated plan text in this changelog; refreshed status, release and API docs.
+- Recorded a 15,000,000-tick determinism sweep.
 
-- Replace application/echoed sequence numbers in AEAD nonce inputs with a dedicated,
-  strictly increasing per-direction send counter; never seal two packets with the same
-  (key, nonce). Rekey or disconnect before counter exhaustion.
-- Add a sliding receive replay window for sealed packets and drop duplicates.
-- Ensure keyed peers reject unsealed application packets and unsealed reassembled fragments;
-  handshake kinds remain the only pre-key exception.
-- Seal `Disconnect`; check session ids on teardown; replace sequential session ids with
-  random ids.
-- Upgrade the RustCrypto stack (**#49**: chacha20poly1305/hkdf/hmac/sha2/ed25519-dalek/
-  getrandom) or document why a partial upgrade cannot land; add known-answer and
-  no-nonce-reuse tests.
-- Bump **PROTOCOL_VERSION** once for this train and document old-client rejection.
+### Deferred
+- Asset-pipeline integration, GPU skinning and remaining mirror/balance coverage are tracked
+  post-1.0 in [#276](https://github.com/JakeGT/moba-engine/issues/276).
 
-**Acceptance:** no duplicate (direction, nonce) across a loopback session with pings,
-snapshots, disconnects and catalogue updates; plaintext application packets from keyed peers
-are dropped (including fragments); replayed sealed packets are dropped; crypto tests and
-real-UDP integration pass.
+## [0.2.0] — 2026-10-18
 
-### S-2. Content trust and deterministic schema coverage
-Private advisory: content-pack attestation bypass; **#135**, **#151**.
+Preview release with runtime content packs and protocol/content hardening.
 
-- Replace the weak 64-bit signing digest with a canonical, length-prefixed digest (SHA-256)
-  over an explicit domain-separated format; bump the attestation format version and use
-  strict signature verification.
-- Apply **one loader** for startup, map rotation and `--reload-content`; verify attestation
-  and the pinned publisher consistently, and require a publisher key when attestation is
-  mandatory. No unverified pack may reach the simulation.
-- Make `content-check --publisher` imply signature verification; add CLI/JSON tests and a
-  checked-in signed fixture.
-- Fix hex parsing to reject non-ASCII/invalid digits without panicking.
-- **#135:** hash `vision_range`; remove or derive the duplicate `*_vision` fields; validate
-  ranges/velocities/damage/armour and finite floats; give each unit table its own defaults;
-  bound haste; turn the modifier fallback into a validation error; review `ability-pack.toml`
-  radii. Add a hash-change test for every field and a partial-table defaults test.
-- **#151:** destructure every hashed component/content struct (or add a hash trait/derive),
-  add a v5 replay fixture, run parity on fully non-default content, and cap replay decode
-  allocation with the counting allocator.
+- Runtime TOML item/hero/ability/map packs, manifests, signed pack attestation and catalogue
+  updates.
+- Map-driven world extent, arcing projectiles, rules for respawn/wave cadence and per-map
+  themes.
+- Prediction/interpolation, reconnect, spectators, bot policy seam and dense net-id tables.
+- Golden-image renderer gate, replay v5, allocation/soak/fuzz evidence and macOS/Linux CI
+  coverage.
+- Protocol v16–v25; see the `v0.2.0` tag for generated PR notes.
 
-Status (2026-10-19): #139 client-side catalogue validation and duplicate-hash suppression
-landed in #180; generation numbers/ack/retransmit and connected-player rotation remain open.
+## [0.1.0] — 2026-10-18
 
-Status (2026-10-19): #136 duplicate cast events, per-snapshot capacity reuse, O(1) pending
-queue eviction (#169) and high-priority event selection (#175) landed. The NetServer-level
-allocation guard and teamfight bandwidth measurement remain open.
+First preview tag.
 
-Status (2026-10-19): #135 is complete — rules hash/validation/per-kind defaults, finite
-parsing, client/sim vision agreement (#168), explicit modifier validation instead of the
-silent fallback, and reviewed example radii (#174).
+- Deterministic 30 Hz simulation, ECS/jobs runtime, Vulkan renderer, UDP netcode, server and
+  client binaries.
+- Golden state hash, replay format v5 and initial release workflow.
+- Protocol v13–v15; see the `v0.1.0` tag for generated PR notes.
 
-**Acceptance:** tampered/unsigned/untrusted packs fail at startup, rotation and reload;
-two packs differing in a stat never share a signing digest; an unhashed new field fails
-compile/test; client and sim agree on vision; replay/content-check fixtures pass.
-
-### S-3. Catalogue-update delivery and rotation
-Private advisory: client accepts replayed/out-of-phase catalogue updates; **#139**.
-
-- Add a monotonically increasing content generation; client accepts only a newer generation,
-  only in Lobby/Results, and validates the decoded catalogue before swapping.
-- Deliver updates reliably: ack the content hash and retransmit with backoff, or repeat in
-  snapshots until acked. Bound the queue and generation values.
-- Rotate at rematch with connected clients (server policy/rotation or lobby vote), keep the
-  Results scoreboard until the next match, and broadcast the new catalogue to every client.
-- Add `decode_content_update` to the deterministic fuzzer and cargo-fuzz `wire` target.
-- Fix the stale `watch_content` docs.
-- Tests: under netsim 5% loss, a connected client adopts a new pack and plays the next match;
-  two maps rotate in sequence; replay verifies with each pack; replayed/mid-match updates
-  are ignored.
-
-**Acceptance:** a connected client plays two different maps in sequence under loss and both
-replays verify; a stale or mid-match update cannot change the catalogue.
-
-### S-4. Job-scope lifetime and real Loom model
-**#143/#16**, follow-up to the closed but not delivered #16.
-
-- [x] Make `ScopeShared` owned per job (`Arc<ScopeData>`, as `std::thread::scope` does); no
-  raw scope pointer remains in `JobRef`, `PendingGuard` or `Scope`.
-- [ ] Under `cfg(loom)`, drive the real `JobSystem::scope`/`pool.rs` with loom atomics, mutex
-  and condvar; remove `wait_timeout` so lost wake-ups can fail the model; add an injected
-  decrement-before-body bug and show the model fails.
-- Simplify `parallel_for` with `chunks_mut()` and remove unsafe blocks.
-- Correct M1 status (do not call it green until the model drives the real code).
-
-**Acceptance:** Loom drives `pool.rs`, the injected bug fails, and no reference to the
-scope counter can outlive the scope.
-
-Status (2026-10-19): **#143 closed** — Arc ownership (#161), blocking wait (#179), real-type Loom (#182) and early-decrement regression (#183) all landed.
-
-### S-5. Fog-of-war/visibility leaks
-**#138** (security-adjacent information leak).
-
-- Recompute team on server and client after reload/rotation/reconnect; reject rotations that
-  change `team_size` with occupied slots or disconnect affected slots.
-- Redact hidden target/killer position/net id in own-team hit/death events; reject attack
-  orders on targets not currently visible to the attacker.
-- Add reload-team-size, fogged-skillshot and hidden-net-id attack tests.
-
-**Acceptance:** no snapshot/event carries hidden-enemy data; all three regression tests pass.
-
-### S-6. CI trust gate for the security release
-**#142** is a prerequisite, not an afterthought.
-
-- [x] Fix `nightly.yml` shell/pipefail; add failure notification (dispatch 39235240360).
-- [x] Make allocation tests per-thread/serialized; 20 consecutive local release runs passed.
-- [x] Add `release tests + doctests`, `MSRV (1.85)` and `renderer-gate` to the required
-  ruleset; docs updated.
-- [x] Run `renderer-gate` on every PR with a no-op path filter; run macOS MoltenVK
-  automatically for renderer paths.
-- [x] Raise net test client timeouts to ≥3 s; ignore the toolchain pin in Dependabot; remove
-  Windows-probe smoke suppression.
-
-**Acceptance:** one green scheduled nightly with artifacts and a deliberately broken step
-turns red; 20 consecutive green release-allocation runs; a renderer PR cannot merge without
-golden; required-check list matches docs.
-
-Status (2026-10-19): #156/#162/#164/#166/#178 implemented; the net snapshot allocation guard
-is now per-thread and passed 20 consecutive release runs. Failure notification was exercised by
-the pre-fix shader/ALSA/criterion failures and created #160 (closed). 20 allocation runs passed;
-the ruleset has release/MSRV/renderer-gate. Short post-fix nightly **39239367089 is green**;
-#142 remains open only for the next full scheduled nightly.
-
-## Wave C — correctness and replay truth (P1)
-
-### C-1. #136 duplicate cast events and event-path allocations
-- Remove the duplicate `AbilityCast` push; test exactly one event per cast.
-- Reuse `delta.events`; use a ring/VecDeque for pending events; prioritise deaths/objectives
-  within the event cap.
-- Add a NetServer snapshot allocation guard with events present; measure teamfight bandwidth.
-
-### C-2. #137 replay divergence after disconnect
-- Remove `bot_mask` from `state_hash` (preferred; replay inputs are resolved after bots) or
-  record mask changes per frame with a replay layout change.
-- Add a real-UDP disconnect+reconnect match and verify every checkpoint; bump
-  replay/SIM_LOGIC if the hash/layout changes.
-
-### C-3. #140 bot-vision cost and guard gaps
-- Compute both team masks in one pass over vision sources (or reuse server observation), not
-  two full `observe()` passes.
-- Size masks from `MAX_UNITS`; fix out-of-bounds/bit-leak.
-- Give the teamfight guard a real teamfight; add ability-pack (zones/on-hit/area), bot-shop
-  and wave guards; remove per-purchase/lane `collect()` allocations.
-- Use the grid in `gather_enemies`; skip dead units; trace match-soak tail spikes and refresh
-  AGENTS/perf figures.
-
-### C-4. #141 client snapshot/minimap/UI-scale bugs
-- Sequence-check before cloning; recycle the snapshot vector; add a steady network-frame
-  allocation guard.
-- Use map extent in `minimap_world`; test extents 128/200/256.
-- Implement or remove `HudAction::Ability`; reject non-finite UI scale.
-
-### C-5. #135/#151 integration checks
-- Keep the content-hash/validation and hash-coverage work from S-2 as the single source of
-  truth; no separate ad-hoc fix.
-
-Status (2026-10-19): #140 single-pass bot fog masks landed in #173; `tick_full_5v5`
-measured 5.566 ms, −14.3% vs the prior baseline. Ability-pack allocation guard added in #176.
-Bot-shop/wave guard additions, grid/dead-unit checks and teammate-targeting privacy remain.
-
-Status (2026-10-19): #137 removes `bot_mask` from the state hash, bumps `SIM_LOGIC_VERSION`
-to 7, updates the golden hash and adds a mask-independence test (#172). A real-UDP
-disconnect/reconnect checkpoint test remains open.
-
-Status (2026-10-19): #138 hidden event endpoints (including own-team events), unseen attack
-orders, stale teams after reload and reload/occupied-slot rejection landed in #171/#177. A
-reload team-size integration test remains open.
-
-Status (2026-10-19): client snapshot sequencing (clone only on a new seq), map-extent minimap
-clicks, removal of the unwired ability hit region and UI-scale finiteness landed in #170.
-The steady network-frame allocation guard remains open.
-
-## Wave D — completion and hardening (P2)
-
-### D-1. #144 renderer hardening
-Capture extent/format snapshot across swapchain rebuild; D24S8 layout; RAII/error-path
-leaks; replace golden suppression with a correct barrier (or narrowly scope it); inverse-
-transpose normals; `textureLod`; 0×0 resize skip; `DeviceLost`; checked texture size; atlas
-round-trip test; queue-family ignored; client unsafe policy exception/test-support crate.
-Acceptance: golden with no suppression; forced rebuild/injected failure tests where practical.
-
-### D-2. #145/#12 networked animation and assets
-Use the hero rig in networked matches with replicated facing/gait/idle; add joint/weight
-layout + bone-matrix storage buffer with sync2 barriers (after #12 asset schema); measure
-10-hero + minion frame cost; capture a networked animated match. #12 must define a validated
-asset manifest, missing-asset fallback and per-map visuals before the GPU-skinning path.
-
-### D-3. #146 determinism hygiene
-Entity tie-breaks in every targeting path; one rounding mode for `Fix::mul/div`; side-swap
-mirror test; team-size-agnostic bot RNG; distinct-outcome match-soak reporting and ≥5k sweep;
-swept projectile segment-circle hits before removal, skip dead; bump SIM_LOGIC (batch with
-#137/#135 hash train).
-
-### D-4. #147 generic modifiers
-`ModifierDef` with stat mods, status flags and `on_tick`/`on_damaged`/`on_expire` effects;
-drop the all-kinds-present rule; generic replicated status flags; stun/armour-shred data
-packs; zero-allocation guard; content/protocol/SIM_LOGIC bump.
-
-### D-5. #148 economy and item actives/passives
-Move starting gold, passive gold, bounties, unit XP, XP/shop radius, aggro and win condition
-into validated rules; add `UseItem`, item cooldowns, on-hit/on-damaged hooks (D-4), one active
-and one passive data item; HUD/keybind/bot support; protocol/replay/SIM_LOGIC bumps.
-
-### D-6. #149 NetServer extension contract
-Systems: either registered/replayed deterministically or explicitly invalidate/mark replays;
-deliver all `ServerPhase` values or trim; add `with_bot_policy` surviving rematches and an
-id registry; add a CI-built embedding example; remove/document `WORLD_EXTENT` 256 cap.
-
-### D-7. #150 HUD/audio completion
-Split `shop`/`scoreboard`/`abilities` out of `build_network_hud`; move colors to `theme`;
-keep `moba_net` inside `hud/model.rs`; network HUD allocation/fixture tests and input-router
-test; audio local-sim events, I16/U16 conversion, device-loss reopen, mute key, fixed voice
-pool/lock-free queue. Acceptance: `app.rs` <800 lines, HUD tests exist, offline sound and
-device recovery work.
-
-### D-8. #151 remaining hash/replay enforcement
-If not fully landed in S-2: compile-time hash coverage, checked-in replay fixture, fully
-non-default parity pack, decode amplification cap/allocation assertion.
-
-### D-9. #152 docs truth pass 2
-Link every status ✅ to evidence; correct nightly/validation/Loom/claims; content-authoring
-composition/kind/rule claims; building-on-moba v24/replay-system claims; SECURITY attestation
-status; perf allocation wording; AGENTS tick figure; fuzz job name/corpus (add replay/#28
-seeds). Must follow the final implementation, not this plan.
-
-## Release and compatibility plan
-
-1. **Protocol:** one bump to **v26** for S-1/S-3 (and any event fields that require it).
-   Reject old clients explicitly; document migration in `docs/tasks/0005-networking.md`.
-2. **Replay/logic:** batch hash-affecting fixes (#135 content hash, #137 bot mask, #146
-   determinism/projectiles) into **replay v6 / SIM_LOGIC v7**, re-record fixtures and
-   regenerate the golden state hash; document the intentional divergence.
-3. **Content:** attestation format v2; content-hash changes for rules/vision fields; signed
-   fixture; all example packs revalidated/re-signed; replay compatibility notes.
-4. **Golden:** renderer changes (#144/#145) may require a deliberate fingerprint rebaseline;
-   rebaseline only from CI's 1280×720 capture and link the run.
-5. **Release:** cut **v0.3.0** only after S0–S2 and the CI gate are green; publish the four
-   advisories as patched in `>=0.3.0`, then close the private records. Publish platform
-   artifacts with the existing release workflow. #21 registry publishing remains external.
-6. **No public disclosure** of advisory details before the coordinated release. The release
-   notes describe fixed classes and patched versions without exploit recipes.
-
-## Work batches
-
-| Batch | Contents | Exit |
-|---|---|---|
-| 0 (now) | #142 CI trust, private advisory forks, RustCrypto upgrade spike (#49), #143 design | gates reproducible; private branch exists |
-| 1 | S-1 transport, S-4 jobs, S-5 visibility | protocol v26 draft; Loom real; leak tests |
-| 2 | S-2 content trust + #135/#151, S-3 update delivery + #139 | signed fixture; loss/rotation tests |
-| 3 | C-1..C-4 (#136/#137/#140/#141) | P1 acceptance; replay v6/logic v7 |
-| 4 | D-1..D-9 | P2 acceptance; docs truth pass |
-| 5 | Release v0.3.0 + advisories | patched release published; advisories closed |
-
-Each batch lands as small PRs (security fixes in private branches) and must not weaken required
-checks. Update `docs/status.md`, task logs and `CHANGELOG.md` as each accepts.
-
-## Coverage table
-
-| Item | Wave | Primary work | Depends |
-|---|---|---|---|
-| Private advisory S-1 | S | transport AEAD counter/anti-replay/encrypted-only | #49, protocol v26 |
-| Private advisory S-2 | S | strong attestation digest + unified loader | #135, #151, content v2 |
-| Private advisory S-3 | S | reliable generation/phase-checked updates | #139, protocol v26 |
-| #143/#16 job-scope lifetime | S | scope lifetime + real Loom | #16 |
-| PR #49 RustCrypto upgrade | S | crypto dependency refresh | advisory S-1 |
-| #153 tracking | S | this plan, issue closure/verification | all |
-| #135 rules stats/hash | S | validation, per-table defaults, vision hash | #151 |
-| #136 duplicate events/alloc | C | one cast event; reuse event buffers | — |
-| #137 replay disconnect | C | bot_mask hash/replay frame | replay v6 |
-| #138 fog leaks | S | team recompute, redaction, attack visibility | — |
-| #139 reliable ContentUpdate/rotation | S | ack/generation/rotation/tests | protocol v26 |
-| #140 bot vision/guards | C | single-pass masks, guards, grid gather | — |
-| #141 client snapshot/minimap/scale | C | seq check/recycle, extent, ability click/scale | — |
-| #142 CI trust | S | nightly, required checks, renderer gates, timeouts | — |
-| #143 jobs lifetime | S | Arc scope shared/real Loom | #16 |
-| #144 renderer hardening | D | capture/layout/leaks/barrier/shader/policy | golden |
-| #145 GPU skinning/network rig | D | networked rig, joints/weights, asset schema | #12 |
-| #12 asset pipeline (reopened) | D | validated asset manifest/fallback/per-map visuals | #145 |
-| #146 determinism hygiene | D | tie-breaks/rounding/side-swap/projectiles | replay v6/logic v7 |
-| #147 generic ModifierDef | D | stat mods/flags/triggers/data packs | #135/#151 |
-| #148 economy/items | D | rules economy, UseItem/cooldowns/hooks | #147/#151 |
-| #149 NetServer extension | D | systems/replay contract, phases, bot policy, example | #137 |
-| #150 HUD/audio | D | module split/tests/audio robustness | — |
-| #151 hash/replay enforcement | S/D | compile-time coverage, fixture, parity, decode cap | #135 |
-| #152 docs truth pass 2 | D | final docs after code | all |
-| #9/#127 platform GPU | External | hardware/revised acceptance | external |
-| #21 crates.io | External | registry ownership/token | external |
-
-## Risks and controls
-
-- **Disclosure risk:** private advisory work only; no details in public plan/issues; release
-  notes reviewed by the security lead.
-- **Format churn:** one protocol v26 and one replay v6/logic v7 train; no mixing with P2
-  feature bumps. Use the plan's batching table.
-- **Golden/replay invalidation:** rebaseline from CI artifacts, not local windows; link every
-  rebaseline commit/run; re-record fixtures in the same PR as the logic change.
-- **RustCrypto migration:** API/behavior changes in #49; land behind tests and don't combine
-  with unrelated feature work.
-- **Hidden dependencies:** #135/#151 must precede #147/#148 and attestation v2; #12 must
-  precede #145 GPU skinning; #142 must gate all security merges.
-- **Capacity:** security review needs a second maintainer; if unavailable, do not publish
-  fixes as “verified”—leave advisories private and report the blocker.
-- **External blockers:** #9/#127 and #21 remain; do not claim them as part of this audit.
-
-## Exit criteria
-
-- Four advisories fixed, privately reviewed, patched release published, advisories published
-  and closed; regression tests in `main`.
-- All P1 acceptance criteria and P2 implementation issues accepted/closed.
-- Protocol v26, replay v6/SIM_LOGIC v7 (if applicable), content/attestation v2 documented;
-  old clients/replays rejected clearly.
-- Required checks: gates ×3, tools, deny, miri, release/doctests, MSRV, docs, renderer-gate;
-  one scheduled nightly green with artifacts; 20 consecutive release-allocation runs.
-- Golden render/state hash rebaselined deliberately with linked CI runs; all shipped packs
-  validate and signed fixtures verify.
-- `docs/status.md`, task logs, AGENTS/agent runbook, SECURITY, content-authoring, perf and
-  CHANGELOG match the implementation; `scripts/check-docs.sh` and `scripts/agent-verify.sh
-  --full` pass.
+[0.3.0]: https://github.com/JakeGT/moba-engine/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/JakeGT/moba-engine/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/JakeGT/moba-engine/releases/tag/v0.1.0

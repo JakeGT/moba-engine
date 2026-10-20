@@ -33,7 +33,7 @@ Re-run the commands before quoting these values; update this table when a contra
 
 1. [`README.md`](README.md) — quick start and feature overview.
 2. [`docs/plans/audit-remediation-2026-10-19.md`](docs/plans/audit-remediation-2026-10-19.md) —
-   active security-first remediation plan; security details stay in the private advisories.
+   completed remediation plan; post-1.0 asset/skinning work is tracked in #276.
 3. [`docs/architecture.md`](docs/architecture.md) — layers, data flow, determinism, netcode.
 4. [`docs/status.md`](docs/status.md) — what is done, measured and still open.
 5. [`docs/agents.md`](docs/agents.md) — agent workflow and verification matrix.
@@ -250,6 +250,7 @@ gh workflow run loom.yml --repo JakeGT/moba-engine --ref main
   pass from a compile-only or probe-only job.
 - **#21:** crates.io publication needs registry ownership and `CARGO_REGISTRY_TOKEN`.
   `publish = false` is intentional; tagged GitHub releases are the distribution path.
+- **#276:** post-1.0 asset-pipeline/GPU-skinning work and residual mirror/balance coverage.
 - Product roadmap items may be opened for future work; do not close a tracking issue merely
   because its wave landed. Update `docs/status.md` and the plan instead.
 
