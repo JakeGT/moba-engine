@@ -2022,6 +2022,12 @@ impl NetServer {
         self.send_welcome(addr, slot, nonce, session)
     }
 
+    /// Rejects a Hello.
+    ///
+    /// Always plaintext: a Hello's source address is unauthenticated, and sealing the reply
+    /// with a key already installed for that address would turn one spoofed Hello into a
+    /// genuine, authenticated Disconnect for whoever owns the address. Connected clients drop
+    /// unsealed application packets, so only a client that is still handshaking acts on it.
     fn reject_client(&mut self, addr: SocketAddr, session: u32, reason: u8) -> io::Result<()> {
         let header = Header {
             kind: PacketKind::Disconnect,
@@ -2031,7 +2037,7 @@ impl NetServer {
             ack: 0,
             ack_bits: 0,
         };
-        self.transport.send(addr, &header, &[reason])
+        self.transport.send_plaintext(addr, &header, &[reason])
     }
 
     #[allow(clippy::too_many_lines)] // Handshake catalogue assembly is one linear frame.
@@ -2905,6 +2911,32 @@ cost = 1
         assert!(limiter.allow_at(other, start));
         assert!(limiter.allow_at(addr, start + Duration::from_millis(100)));
         assert!(!limiter.allow_at(addr, start + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn hello_rejects_are_never_sealed_with_the_address_owners_key() {
+        let mut server = NetServer::bind(ServerConfig {
+            bind: "127.0.0.1:0".parse().expect("address"),
+            ..ServerConfig::default()
+        })
+        .expect("bind");
+        let victim = std::net::UdpSocket::bind("127.0.0.1:0").expect("victim socket");
+        victim
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        let victim_addr = victim.local_addr().expect("victim addr");
+        // The victim has an established, keyed session with the server.
+        server
+            .transport
+            .set_peer_key(victim_addr, SessionCrypto::new([9; 32], 0x1234, 1));
+        // A spoofed Hello from the victim's address is rejected...
+        server.reject_client(victim_addr, 0, 1).expect("reject");
+        let mut buffer = [0u8; 256];
+        let (length, _) = victim.recv_from(&mut buffer).expect("reject datagram");
+        let (header, _) = crate::protocol::decode_packet(&buffer[..length]).expect("packet");
+        assert_eq!(header.kind, PacketKind::Disconnect);
+        // ...in plaintext, which the victim's keyed transport drops.
+        assert_eq!(header.flags & crate::protocol::FLAG_ENCRYPTED, 0);
     }
 
     #[test]

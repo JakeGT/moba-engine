@@ -71,9 +71,11 @@ fn another_token_cannot_take_over_a_reserved_slot() {
 
     let hijack =
         NetClient::connect_with_session_key(addr, Duration::from_secs(1), session, Some(TOKEN_B));
-    assert!(
-        hijack.is_err(),
-        "a different valid token must not resume someone else's session"
+    let error = hijack.expect_err("a different valid token must not resume someone else's session");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionAborted,
+        "rejected outright, not merely timed out"
     );
 
     let resumed =

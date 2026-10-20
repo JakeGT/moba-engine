@@ -667,6 +667,12 @@ impl NetClient {
                     self.handle_snapshot(message.header, &message.payload);
                 }
                 PacketKind::Disconnect => {
+                    // Once connected, only a Disconnect for our own session counts.
+                    if self.state == ClientState::Connected
+                        && message.header.session != self.session
+                    {
+                        continue;
+                    }
                     if self.state != ClientState::Disconnected {
                         self.state = ClientState::Disconnected;
                         self.push_event(ClientEvent::Disconnected);

@@ -6,7 +6,7 @@ commands, workflow, blockers). The operational runbook is **[docs/agents.md](doc
 is in `agents.local.md` (gitignored; template at `agents.local.example.md`).
 
 Current contract: workspace **0.3.0**, wire protocol **v37**, replay **v5**, simulation logic
-**v7**, **315 tests**; Rust MSRV 1.88, Vulkan 1.3 minimum. Use `scripts/agent-verify.sh` (add `--full` for release/features/Loom/
+**v7**, **316 tests**; Rust MSRV 1.88, Vulkan 1.3 minimum. Use `scripts/agent-verify.sh` (add `--full` for release/features/Loom/
 soak/fuzz) as the default gate; `just` may not be installed.
 
 Claude-specific hooks and reviewer definitions live in `.claude/`:

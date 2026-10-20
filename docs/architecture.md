@@ -190,6 +190,8 @@ Since protocol v37:
 - **Every keyed handshake** (PSK, token or identity) first answers an address-bound server `Challenge`. The Hello HMAC (`moba-hello-v2`) covers that challenge, so a captured Hello can't be replayed to another server or match that shares the same keys.
 - **Session ids** are random 32-bit values.
 - **Reconnects and re-handshakes** for an existing slot must authenticate with the same token/PSK, and in identity mode the same client public key, that opened it. Another valid credential gets reject code 3.
+- **Hello rejects** are sent unsealed, so a spoofed Hello can't produce an authenticated Disconnect for a connected player.
+- **PSK-only mode** is one shared trust domain. Every holder of the PSK is the same credential, so a slot is protected only by its random session id. Use per-client tokens or identities when players must not be able to impersonate each other.
 
 ## Client identity
 
