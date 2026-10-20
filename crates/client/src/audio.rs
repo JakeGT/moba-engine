@@ -5,6 +5,7 @@
 //! reaches the simulation, network or server crates.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -115,11 +116,14 @@ pub(crate) struct Audio {
     synth: Arc<Mutex<Synth>>,
     stream: Option<cpal::Stream>,
     mute: bool,
+    volume: f32,
+    lost: Arc<AtomicBool>,
 }
 
 impl Audio {
     /// Opens the default output device. Never panics on missing hardware.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Device/format setup is one linear path.
     pub(crate) fn new(volume: f32, mute: bool) -> Self {
         let synth = Arc::new(Mutex::new(Synth {
             volume: volume.clamp(0.0, 1.0),
@@ -141,6 +145,8 @@ impl Audio {
         }
         let callback_synth = Arc::clone(&synth);
         let error_synth = Arc::clone(&synth);
+        let lost = Arc::new(AtomicBool::new(false));
+        let error_lost = Arc::clone(&lost);
         let stream = match format {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 &config,
@@ -155,7 +161,10 @@ impl Audio {
                         }
                     }
                 },
-                move |_error| clear_tones(&error_synth),
+                move |_error| {
+                    clear_tones(&error_synth);
+                    error_lost.store(true, Ordering::Relaxed);
+                },
                 None,
             ),
             cpal::SampleFormat::I16 => {
@@ -174,7 +183,10 @@ impl Audio {
                             }
                         }
                     },
-                    move |_error| clear_tones(&error_synth),
+                    move |_error| {
+                        clear_tones(&error_synth);
+                        error_lost.store(true, Ordering::Relaxed);
+                    },
                     None,
                 )
             }
@@ -194,7 +206,10 @@ impl Audio {
                             }
                         }
                     },
-                    move |_error| clear_tones(&error_synth),
+                    move |_error| {
+                        clear_tones(&error_synth);
+                        error_lost.store(true, Ordering::Relaxed);
+                    },
                     None,
                 )
             }
@@ -211,6 +226,8 @@ impl Audio {
                     synth,
                     stream: Some(stream),
                     mute,
+                    volume,
+                    lost,
                 }
             }
             Err(_) => Self::disabled(synth, mute),
@@ -222,6 +239,15 @@ impl Audio {
             synth,
             stream: None,
             mute,
+            volume: 1.0,
+            lost: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Reopens the output device after a runtime stream error.
+    pub(crate) fn poll(&mut self) {
+        if self.stream.is_some() && self.lost.swap(false, Ordering::Relaxed) {
+            *self = Self::new(self.volume, self.mute);
         }
     }
 
@@ -312,5 +338,6 @@ mod tests {
         assert!(!audio.is_active());
         assert!(!audio.toggle_mute());
         assert!(audio.toggle_mute());
+        audio.poll();
     }
 }
