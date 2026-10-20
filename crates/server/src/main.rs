@@ -306,6 +306,18 @@ fn main() {
         if items_paths.len() > 1 {
             server.watch_rotation(items_paths.clone());
         }
+        // Fail loudly on keys `verify_strict` would reject on every handshake.
+        for key in client_identity_keys
+            .iter()
+            .chain(rotate_client_keys.iter().map(|(_, new)| new))
+        {
+            if !moba_net::crypto::is_valid_identity_key(key) {
+                eprintln!(
+                    "client identity key is not a valid Ed25519 public key (malformed or weak)"
+                );
+                std::process::exit(2);
+            }
+        }
         if !client_identity_keys.is_empty() {
             server.require_client_identity(client_identity_keys.iter().copied());
         }

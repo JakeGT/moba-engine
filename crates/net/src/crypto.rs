@@ -261,6 +261,16 @@ pub fn random_nonce() -> std::io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+/// Whether 32 bytes decode to a usable Ed25519 public key.
+///
+/// Rejects encodings that are not curve points and small-order ("weak") keys, which
+/// `verify_strict` would refuse on every handshake anyway. Configuration loaders call this
+/// so a bad pinned or allow-listed key fails loudly at startup instead of silently.
+#[must_use]
+pub fn is_valid_identity_key(key: &[u8; 32]) -> bool {
+    VerifyingKey::from_bytes(key).is_ok_and(|key| !key.is_weak())
+}
+
 /// Derives the Ed25519 public key for a 32-byte identity seed.
 #[must_use]
 pub fn identity_public_key(seed: &[u8; 32]) -> [u8; 32] {

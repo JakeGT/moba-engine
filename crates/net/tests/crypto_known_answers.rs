@@ -7,8 +7,9 @@
 
 use moba_net::SessionCrypto;
 use moba_net::crypto::{
-    derive_session_key, hello_tag, identity_public_key, sign_client_hello, sign_pack,
-    sign_server_welcome, verify_client_hello, verify_pack, verify_server_welcome, welcome_tag,
+    derive_session_key, hello_tag, identity_public_key, is_valid_identity_key, sign_client_hello,
+    sign_pack, sign_server_welcome, verify_client_hello, verify_hello_tag, verify_pack,
+    verify_server_welcome, verify_welcome_tag, welcome_tag,
 };
 use moba_net::protocol::{Header, PacketKind};
 
@@ -33,6 +34,32 @@ fn handshake_tags_are_stable() {
         hex(&welcome_tag(&PSK, 11, 22, 33, 4, 0xDEAD_BEEF)),
         "4f98d9d18e447b091d41a3f51d03020326ca0dcc2ce5c87838cb928c990880e5"
     );
+}
+
+#[test]
+fn handshake_tags_verify_and_reject_tampering() {
+    let hello = hello_tag(&PSK, 36, 7, 9, true);
+    assert!(verify_hello_tag(&PSK, 36, 7, 9, true, &hello));
+    assert!(!verify_hello_tag(&PSK, 36, 7, 9, false, &hello));
+    let welcome = welcome_tag(&PSK, 11, 22, 33, 4, 5);
+    assert!(verify_welcome_tag(&PSK, 11, 22, 33, 4, 5, &welcome));
+    let mut tampered = welcome;
+    tampered[0] ^= 1;
+    assert!(!verify_welcome_tag(&PSK, 11, 22, 33, 4, 5, &tampered));
+}
+
+#[test]
+fn weak_and_malformed_identity_keys_are_rejected() {
+    assert!(is_valid_identity_key(&identity_public_key(&SEED)));
+    // The identity point (encoded y = 1) and y = 0 are small-order, so "weak".
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    assert!(!is_valid_identity_key(&identity));
+    assert!(!is_valid_identity_key(&[0u8; 32]));
+    // Not a valid prime-order point either way: rejected.
+    let mut off_curve = [0u8; 32];
+    off_curve[0] = 2;
+    assert!(!is_valid_identity_key(&off_curve));
 }
 
 #[test]

@@ -51,11 +51,22 @@ pub(crate) fn parse_demo_move() -> Option<FixVec2> {
     ))
 }
 
-pub(crate) fn parse_secret() -> Option<[u8; 32]> {
-    let value = std::env::var("MOBA_SECRET").ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        eprintln!("MOBA_SECRET must be 64 hex characters; ignoring");
+/// Parses an optional 32-byte hex value from an environment variable.
+///
+/// Fails closed: a variable that is set but malformed is an error, never silently ignored,
+/// so a typo cannot downgrade a pinned or authenticated connection to an unprotected one.
+fn hex32_env(name: &str) -> Result<Option<[u8; 32]>, String> {
+    let Ok(value) = std::env::var(name) else {
+        return Ok(None);
+    };
+    parse_hex32(&value)
+        .map(Some)
+        .ok_or_else(|| format!("{name} must be exactly 64 hex characters"))
+}
+
+fn parse_hex32(value: &str) -> Option<[u8; 32]> {
+    let bytes = value.trim().as_bytes();
+    if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
     let mut key = [0u8; 32];
@@ -66,40 +77,28 @@ pub(crate) fn parse_secret() -> Option<[u8; 32]> {
     Some(key)
 }
 
-pub(crate) fn parse_server_public() -> Option<[u8; 32]> {
-    let value = std::env::var("MOBA_SERVER_PUBKEY").ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        eprintln!("MOBA_SERVER_PUBKEY must be 64 hex characters; ignoring");
-        return None;
-    }
-    let mut key = [0u8; 32];
-    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
-        let text = std::str::from_utf8(chunk).ok()?;
-        key[index] = u8::from_str_radix(text, 16).ok()?;
-    }
-    Some(key)
+pub(crate) fn parse_secret() -> Result<Option<[u8; 32]>, String> {
+    hex32_env("MOBA_SECRET")
 }
 
-pub(crate) fn parse_identity_seed() -> Option<[u8; 32]> {
-    let value = std::env::var("MOBA_CLIENT_IDENTITY").ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        eprintln!("MOBA_CLIENT_IDENTITY must be 64 hex characters; ignoring");
-        return None;
+pub(crate) fn parse_server_public() -> Result<Option<[u8; 32]>, String> {
+    let key = hex32_env("MOBA_SERVER_PUBKEY")?;
+    if key.is_some_and(|key| !moba_net::crypto::is_valid_identity_key(&key)) {
+        return Err(String::from(
+            "MOBA_SERVER_PUBKEY is not a valid Ed25519 public key (malformed or weak)",
+        ));
     }
-    let mut seed = [0u8; 32];
-    for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
-        let text = std::str::from_utf8(chunk).ok()?;
-        seed[index] = u8::from_str_radix(text, 16).ok()?;
-    }
-    Some(seed)
+    Ok(key)
+}
+
+pub(crate) fn parse_identity_seed() -> Result<Option<[u8; 32]>, String> {
+    hex32_env("MOBA_CLIENT_IDENTITY")
 }
 
 pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
-    let secret = parse_secret();
-    let server_public = parse_server_public();
-    let identity_seed = parse_identity_seed();
+    let secret = parse_secret()?;
+    let server_public = parse_server_public()?;
+    let identity_seed = parse_identity_seed()?;
     let spectator = std::env::var("MOBA_SPECTATE").is_ok_and(|value| value == "1");
     if spec == "local" {
         let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
@@ -211,5 +210,22 @@ impl Drop for ClientApp {
         );
         let _ = std::fs::write(&path, &report);
         eprintln!("frame log: {}", report.trim_end());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex32;
+
+    #[test]
+    fn hex32_accepts_only_exact_hex_keys() {
+        let key = "ab".repeat(32);
+        assert_eq!(parse_hex32(&key), Some([0xAB; 32]));
+        assert_eq!(parse_hex32(&format!(" {key}\n")), Some([0xAB; 32]));
+        // Typos must fail closed rather than silently disabling pinning/encryption.
+        assert_eq!(parse_hex32(&key[..63]), None);
+        assert_eq!(parse_hex32(&format!("{key}0")), None);
+        assert_eq!(parse_hex32(&format!("g{}", &key[1..])), None);
+        assert_eq!(parse_hex32(&format!("é{}", &key[2..])), None);
     }
 }

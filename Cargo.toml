@@ -38,7 +38,8 @@ ash-window = "0.13"
 bytemuck = { version = "1", features = ["derive"] }
 crossbeam-deque = "0.8"
 crossbeam-queue = "0.3"
-chacha20poly1305 = "0.11"
+# `zeroize` restores the key wiping 0.10 did unconditionally.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 getrandom = "0.4"
 ctrlc = { version = "3", features = ["termination"] }
 hkdf = "0.13"
