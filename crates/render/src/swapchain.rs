@@ -111,7 +111,14 @@ impl Swapchain {
         // create-info pointers are valid for the call.
         let handle = unsafe { loader.create_swapchain(&create_info, None) }?;
         // SAFETY: the swapchain was just created and belongs to this device.
-        let images = unsafe { loader.get_swapchain_images(handle) }?;
+        let images = match unsafe { loader.get_swapchain_images(handle) } {
+            Ok(images) => images,
+            Err(error) => {
+                // SAFETY: the swapchain was created above and has no dependent views yet.
+                unsafe { loader.destroy_swapchain(handle, None) };
+                return Err(error.into());
+            }
+        };
 
         let mut views = Vec::with_capacity(images.len());
         let mut depth_images = Vec::with_capacity(images.len());
@@ -121,13 +128,20 @@ impl Swapchain {
         let (depth_format, depth_aspect) =
             choose_depth_format(&instance_context.instance, device_context);
         for (index, image) in images.iter().enumerate() {
-            views.push(create_image_view(
+            let view = match create_image_view(
                 &device_context.device,
                 *image,
                 format,
                 vk::ImageAspectFlags::COLOR,
-            )?);
-            depth_images.push(GpuImage::new(
+            ) {
+                Ok(view) => view,
+                Err(error) => {
+                    destroy_partial(&device_context.device, &loader, handle, &views);
+                    return Err(error);
+                }
+            };
+            views.push(view);
+            let depth = match GpuImage::new(
                 device_context.device.clone(),
                 device_context.allocator(),
                 &format!("depth-{index}"),
@@ -135,10 +149,24 @@ impl Swapchain {
                 depth_format,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
                 depth_aspect,
-            )?);
+            ) {
+                Ok(image) => image,
+                Err(error) => {
+                    destroy_partial(&device_context.device, &loader, handle, &views);
+                    return Err(error);
+                }
+            };
+            depth_images.push(depth);
+            let semaphore = match Semaphore::new(device_context.device.clone()) {
+                Ok(semaphore) => semaphore,
+                Err(error) => {
+                    destroy_partial(&device_context.device, &loader, handle, &views);
+                    return Err(error);
+                }
+            };
             color_layouts.push(vk::ImageLayout::UNDEFINED);
             depth_layouts.push(vk::ImageLayout::UNDEFINED);
-            render_finished.push(Semaphore::new(device_context.device.clone())?);
+            render_finished.push(semaphore);
         }
 
         Ok(Self {
@@ -285,6 +313,20 @@ fn choose_composite_alpha(flags: vk::CompositeAlphaFlagsKHR) -> vk::CompositeAlp
         }
     }
     vk::CompositeAlphaFlagsKHR::OPAQUE
+}
+
+fn destroy_partial(
+    device: &ash::Device,
+    loader: &khr::swapchain::Device,
+    handle: vk::SwapchainKHR,
+    views: &[vk::ImageView],
+) {
+    for view in views {
+        // SAFETY: each view was created by this device and is destroyed once.
+        unsafe { device.destroy_image_view(*view, None) };
+    }
+    // SAFETY: the swapchain was created by this loader and has no remaining views.
+    unsafe { loader.destroy_swapchain(handle, None) };
 }
 
 fn choose_depth_format(
