@@ -27,8 +27,16 @@ fn hex(bytes: &[u8]) -> String {
 #[test]
 fn handshake_tags_are_stable() {
     assert_eq!(
-        hex(&hello_tag(&PSK, 36, 0x0102_0304_0506_0708, 9, true)),
-        "e07eb5ebce27f47342d164033e4b3aa964bd11c4b034f3f0267f8dc6f7f2e905"
+        // moba-hello-v2 (protocol v37): bound to the server challenge.
+        hex(&hello_tag(
+            &PSK,
+            37,
+            0x0102_0304_0506_0708,
+            0x1122_3344_5566_7788,
+            9,
+            true
+        )),
+        "3513aa17129ce0c09e42086e5658780c45415576cd7785a1488a3b445587f930"
     );
     assert_eq!(
         hex(&welcome_tag(&PSK, 11, 22, 33, 4, 0xDEAD_BEEF)),
@@ -38,9 +46,11 @@ fn handshake_tags_are_stable() {
 
 #[test]
 fn handshake_tags_verify_and_reject_tampering() {
-    let hello = hello_tag(&PSK, 36, 7, 9, true);
-    assert!(verify_hello_tag(&PSK, 36, 7, 9, true, &hello));
-    assert!(!verify_hello_tag(&PSK, 36, 7, 9, false, &hello));
+    let hello = hello_tag(&PSK, 37, 7, 42, 9, true);
+    assert!(verify_hello_tag(&PSK, 37, 7, 42, 9, true, &hello));
+    assert!(!verify_hello_tag(&PSK, 37, 7, 42, 9, false, &hello));
+    // Replayed against a different challenge (another server/match): rejected.
+    assert!(!verify_hello_tag(&PSK, 37, 7, 43, 9, true, &hello));
     let welcome = welcome_tag(&PSK, 11, 22, 33, 4, 5);
     assert!(verify_welcome_tag(&PSK, 11, 22, 33, 4, 5, &welcome));
     let mut tampered = welcome;

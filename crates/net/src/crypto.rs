@@ -169,22 +169,48 @@ pub fn derive_session_key(
 }
 
 /// Computes the client hello authenticator.
+///
+/// `server_challenge` is the address-bound value from the server's `Challenge`, so a
+/// captured Hello cannot be replayed to another server (or another match) sharing the key.
 #[must_use]
 pub fn hello_tag(
     pre_shared_key: &[u8; KEY_LEN],
     protocol: u16,
     nonce: u64,
+    server_challenge: u64,
     reconnect: u32,
     spectate: bool,
 ) -> [u8; 32] {
+    hello_mac(
+        pre_shared_key,
+        protocol,
+        nonce,
+        server_challenge,
+        reconnect,
+        spectate,
+    )
+    .finalize()
+    .into_bytes()
+    .into()
+}
+
+fn hello_mac(
+    pre_shared_key: &[u8; KEY_LEN],
+    protocol: u16,
+    nonce: u64,
+    server_challenge: u64,
+    reconnect: u32,
+    spectate: bool,
+) -> HmacSha256 {
     let mut mac =
         <HmacSha256 as KeyInit>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
-    mac.update(b"moba-hello-v1");
+    mac.update(b"moba-hello-v2");
     mac.update(&protocol.to_le_bytes());
     mac.update(&nonce.to_le_bytes());
+    mac.update(&server_challenge.to_le_bytes());
     mac.update(&reconnect.to_le_bytes());
     mac.update(&[u8::from(spectate)]);
-    mac.finalize().into_bytes().into()
+    mac
 }
 
 /// Verifies the client hello authenticator.
@@ -193,18 +219,35 @@ pub fn verify_hello_tag(
     pre_shared_key: &[u8; KEY_LEN],
     protocol: u16,
     nonce: u64,
+    server_challenge: u64,
     reconnect: u32,
     spectate: bool,
     tag: &[u8; 32],
 ) -> bool {
-    let mut mac =
-        <HmacSha256 as KeyInit>::new_from_slice(pre_shared_key).expect("HMAC accepts any key");
-    mac.update(b"moba-hello-v1");
-    mac.update(&protocol.to_le_bytes());
-    mac.update(&nonce.to_le_bytes());
-    mac.update(&reconnect.to_le_bytes());
-    mac.update(&[u8::from(spectate)]);
-    mac.verify_slice(tag).is_ok()
+    hello_mac(
+        pre_shared_key,
+        protocol,
+        nonce,
+        server_challenge,
+        reconnect,
+        spectate,
+    )
+    .verify_slice(tag)
+    .is_ok()
+}
+
+/// A random, non-zero session id.
+///
+/// # Errors
+/// Returns an I/O error when the OS randomness source is unavailable.
+pub fn random_session() -> std::io::Result<u32> {
+    loop {
+        let value = random_nonce()?;
+        let session = (value as u32) ^ ((value >> 32) as u32);
+        if session != 0 {
+            return Ok(session);
+        }
+    }
 }
 
 /// Computes the server welcome authenticator.
@@ -523,10 +566,12 @@ mod tests {
 
     #[test]
     fn handshake_tags_are_keyed() {
-        let tag = hello_tag(&[1; 32], 7, 123, 0, false);
-        assert!(verify_hello_tag(&[1; 32], 7, 123, 0, false, &tag));
-        assert!(!verify_hello_tag(&[2; 32], 7, 123, 0, false, &tag));
-        assert!(!verify_hello_tag(&[1; 32], 7, 123, 0, true, &tag));
+        let tag = hello_tag(&[1; 32], 7, 123, 0, 0, false);
+        assert!(verify_hello_tag(&[1; 32], 7, 123, 0, 0, false, &tag));
+        assert!(!verify_hello_tag(&[2; 32], 7, 123, 0, 0, false, &tag));
+        assert!(!verify_hello_tag(&[1; 32], 7, 123, 0, 0, true, &tag));
+        // A tag made for one server challenge does not verify against another.
+        assert!(!verify_hello_tag(&[1; 32], 7, 123, 99, 0, false, &tag));
         let welcome = welcome_tag(&[1; 32], 123, 456, 9, 3, 0xCAFE);
         assert!(verify_welcome_tag(
             &[1; 32], 123, 456, 9, 3, 0xCAFE, &welcome

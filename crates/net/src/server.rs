@@ -379,7 +379,10 @@ struct ClientConn {
     addr: SocketAddr,
     session: u32,
     slot: u8,
+    /// Token/PSK the owner authenticated with (`None` in open LAN mode).
     key: Option<[u8; 32]>,
+    /// Client identity public key the owner proved, when identities are required.
+    identity: Option<[u8; 32]>,
     spectator: bool,
     team: moba_game::Team,
     connected: bool,
@@ -401,6 +404,11 @@ struct ClientConn {
 }
 
 impl ClientConn {
+    /// Whether a Hello authenticated with `key`/`identity` may act for this slot.
+    fn owned_by(&self, key: Option<[u8; 32]>, identity: Option<[u8; 32]>) -> bool {
+        self.key == key && self.identity == identity
+    }
+
     fn net_id_for(&mut self, entity: moba_ecs::Entity) -> NetId {
         self.net_ids.get_or_insert(entity)
     }
@@ -723,7 +731,6 @@ pub struct NetServer {
     current: Vec<NetEntity>,
     payload: Vec<u8>,
     delta: SnapshotDelta,
-    session_counter: u32,
     stats: ServerStats,
     phase: Phase,
     systems: Systems,
@@ -798,7 +805,6 @@ impl NetServer {
             current: Vec::with_capacity(moba_sim::MAX_UNITS),
             payload: Vec::with_capacity(MAX_DATAGRAM),
             delta: SnapshotDelta::default(),
-            session_counter: 1,
             stats: ServerStats::default(),
             phase: Phase::Lobby,
             systems: Systems::default(),
@@ -907,6 +913,12 @@ impl NetServer {
         } else {
             self.allowed_client_keys[index] = new;
         }
+        // A rotated player can still reconnect to the slot they own.
+        for client in self.clients.iter_mut().flatten() {
+            if client.identity == Some(old) {
+                client.identity = Some(new);
+            }
+        }
         true
     }
 
@@ -920,6 +932,21 @@ impl NetServer {
     #[must_use]
     pub fn allowed_client_key_count(&self) -> usize {
         self.allowed_client_keys.len()
+    }
+
+    /// A random session id that no current slot uses.
+    fn new_session(&self) -> io::Result<u32> {
+        loop {
+            let session = crate::crypto::random_session()?;
+            if !self
+                .clients
+                .iter()
+                .flatten()
+                .any(|client| client.session == session)
+            {
+                return Ok(session);
+            }
+        }
     }
 
     fn issue_challenge(&mut self, addr: SocketAddr) -> io::Result<()> {
@@ -1686,16 +1713,25 @@ impl NetServer {
                     self.reject_client(message.addr, message.header.session, 1)?;
                     return Ok(());
                 }
-                if self.require_client_identity {
-                    if !hello.identity || !self.allowed_client_keys.contains(&hello.client_public) {
-                        self.reject_client(message.addr, 0, 5)?;
-                        return Ok(());
-                    }
-                    if !self.challenge_is_pending(message.addr, hello.server_challenge) {
-                        self.issue_challenge(message.addr)?;
-                        return Ok(());
-                    }
-                    if !crate::crypto::verify_client_hello(
+                let keys_configured =
+                    self.config.pre_shared_key.is_some() || !self.client_keys.is_empty();
+                if self.require_client_identity
+                    && (!hello.identity || !self.allowed_client_keys.contains(&hello.client_public))
+                {
+                    self.reject_client(message.addr, 0, 5)?;
+                    return Ok(());
+                }
+                // Keyed and identity handshakes answer an address-bound challenge first, and
+                // the Hello authenticator covers it, so a captured Hello is useless against
+                // any other server or match that shares the same keys.
+                if (keys_configured || self.require_client_identity)
+                    && !self.challenge_is_pending(message.addr, hello.server_challenge)
+                {
+                    self.issue_challenge(message.addr)?;
+                    return Ok(());
+                }
+                if self.require_client_identity
+                    && !crate::crypto::verify_client_hello(
                         &hello.client_public,
                         hello.protocol,
                         hello.nonce,
@@ -1703,20 +1739,18 @@ impl NetServer {
                         hello.reconnect,
                         hello.spectate,
                         &hello.client_signature,
-                    ) {
-                        let _ = self.take_challenge(message.addr, hello.server_challenge);
-                        self.reject_client(message.addr, 0, 5)?;
-                        return Ok(());
-                    }
+                    )
+                {
                     let _ = self.take_challenge(message.addr, hello.server_challenge);
+                    self.reject_client(message.addr, 0, 5)?;
+                    return Ok(());
                 }
-                let keys_configured =
-                    self.config.pre_shared_key.is_some() || !self.client_keys.is_empty();
                 let matched_key = self.config.pre_shared_key.filter(|key| {
                     verify_hello_tag(
                         key,
                         hello.protocol,
                         hello.nonce,
+                        hello.server_challenge,
                         hello.reconnect,
                         hello.spectate,
                         &hello.auth,
@@ -1730,6 +1764,7 @@ impl NetServer {
                                 key,
                                 hello.protocol,
                                 hello.nonce,
+                                hello.server_challenge,
                                 hello.reconnect,
                                 hello.spectate,
                                 &hello.auth,
@@ -1737,10 +1772,16 @@ impl NetServer {
                         })
                         .copied()
                 });
+                if keys_configured || self.require_client_identity {
+                    // One use per challenge, whether or not the Hello authenticated.
+                    let _ = self.take_challenge(message.addr, hello.server_challenge);
+                }
                 if keys_configured && matched_key.is_none() {
                     self.reject_client(message.addr, 0, 4)?;
                     return Ok(());
                 }
+                // The credential this Hello proved; reconnects must present the same one.
+                let identity = self.require_client_identity.then_some(hello.client_public);
                 if !self.nonces.allow(
                     matched_key.unwrap_or([0; 32]),
                     hello.nonce,
@@ -1752,6 +1793,15 @@ impl NetServer {
                     return Ok(());
                 }
                 if let Some(slot) = self.client_index_by_addr(message.addr) {
+                    if !self.clients[slot]
+                        .as_ref()
+                        .is_some_and(|client| client.owned_by(matched_key, identity))
+                    {
+                        // Another credential cannot re-key or take over this slot, even
+                        // from a spoofed copy of the owner's address.
+                        self.reject_client(message.addr, 0, 3)?;
+                        return Ok(());
+                    }
                     let (connected, session) = {
                         let client = self.clients[slot].as_mut().expect("index is live");
                         if client.connected {
@@ -1786,9 +1836,6 @@ impl NetServer {
                         self.reject_client(message.addr, session, 3)?;
                         return Ok(());
                     }
-                    if let Some(client) = self.clients[slot].as_mut() {
-                        client.key = matched_key;
-                    }
                     self.reconnect_client(slot, message.addr, hello.nonce)?;
                     return Ok(());
                 }
@@ -1801,15 +1848,11 @@ impl NetServer {
                         self.reject_client(message.addr, 0, 3)?;
                         return Ok(());
                     };
-                    if self.clients[slot]
-                        .as_ref()
-                        .is_some_and(|client| client.connected)
-                    {
+                    if self.clients[slot].as_ref().is_some_and(|client| {
+                        client.connected || !client.owned_by(matched_key, identity)
+                    }) {
                         self.reject_client(message.addr, 0, 3)?;
                         return Ok(());
-                    }
-                    if let Some(client) = self.clients[slot].as_mut() {
-                        client.key = matched_key;
                     }
                     self.reconnect_client(slot, message.addr, hello.nonce)?;
                     return Ok(());
@@ -1823,8 +1866,7 @@ impl NetServer {
                     self.reject_client(message.addr, 0, 2)?;
                     return Ok(());
                 };
-                let session = 0xA5A5_0000 | (self.session_counter & 0xFFFF);
-                self.session_counter = self.session_counter.wrapping_add(1);
+                let session = self.new_session()?;
                 let team_size = usize::from(self.content.rules.team_size);
                 let team = if hello.spectate {
                     moba_game::Team::Blue
@@ -1835,6 +1877,7 @@ impl NetServer {
                     addr: message.addr,
                     session,
                     key: matched_key,
+                    identity,
                     slot: if hello.spectate {
                         0xFF
                     } else {
@@ -3251,6 +3294,7 @@ cost = 1
             session: 7,
             slot,
             key: None,
+            identity: None,
             spectator: false,
             team,
             connected: true,

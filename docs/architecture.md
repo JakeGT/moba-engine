@@ -186,6 +186,11 @@ Authenticated Hello nonces are tracked for 60 s (bounded to 2,048 entries). A re
 key/nonce from the same source is treated as a retransmit; the same key/nonce from a different
 source is rejected and counted as `replayed_hellos`.
 
+Since protocol v37:
+- **Every keyed handshake** (PSK, token or identity) first answers an address-bound server `Challenge`. The Hello HMAC (`moba-hello-v2`) covers that challenge, so a captured Hello can't be replayed to another server or match that shares the same keys.
+- **Session ids** are random 32-bit values.
+- **Reconnects and re-handshakes** for an existing slot must authenticate with the same token/PSK, and in identity mode the same client public key, that opened it. Another valid credential gets reject code 3.
+
 ## Client identity
 
 With `require_client_identity`, the server sends a random `Challenge` packet; the client

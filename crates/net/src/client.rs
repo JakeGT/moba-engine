@@ -993,6 +993,7 @@ impl NetClient {
                 &key,
                 protocol,
                 self.nonce,
+                self.challenge,
                 self.reconnect_token,
                 self.spectator,
             )
