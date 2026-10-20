@@ -145,6 +145,25 @@ pub(crate) fn handle_network_input(
         }
         return;
     }
+    if matches!(InputFocus::from_shop(*shop), InputFocus::Gameplay) {
+        for (slot, key) in [
+            Key::Digit1,
+            Key::Digit2,
+            Key::Digit3,
+            Key::Digit4,
+            Key::Digit5,
+            Key::Digit6,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if input.was_key_pressed(key) {
+                let _ = network
+                    .client
+                    .send_command(WireCommand::UseItem { slot: slot as u8 });
+            }
+        }
+    }
     if input.was_key_pressed(bindings.ready) && network.phase == MatchPhase::Lobby {
         let ready = !network.ready;
         if network

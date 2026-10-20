@@ -42,13 +42,13 @@ crates.io publication enablement (#21). Audit follow-ups remain tracked in the i
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **286 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **287 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
   pass. `scripts/agent-verify.sh --full` runs these plus Loom/bench compile/soak/fuzz.
-- Deterministic cross-OS golden state hash: `0x7327fdf242be1814`.
+- Deterministic cross-OS golden state hash: `0x8db35a0f5aab5190`.
 - Golden render workflow: 64×36 fingerprint on lavapipe with validation + sync validation;
   latest rebaseline after the animated hero rig is green.
 - Deterministic wire fuzzer historical evidence: v11 **2,476,647,000** iterations clean and

@@ -2155,6 +2155,11 @@ pub enum WireCommand {
     },
     /// Vote to end the match for the sender's team.
     Surrender,
+    /// Use the active on an inventory slot.
+    UseItem {
+        /// Inventory slot `0..6`.
+        slot: u8,
+    },
 }
 
 /// Client intent payload.
@@ -2723,6 +2728,10 @@ fn encode_command(out: &mut Vec<u8>, command: WireCommand) {
             out.push(u8::from(ready));
         }
         WireCommand::Surrender => out.push(6),
+        WireCommand::UseItem { slot } => {
+            out.push(7);
+            out.push(slot);
+        }
     }
 }
 
