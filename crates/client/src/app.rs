@@ -18,20 +18,18 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use moba_core::Fix;
 use moba_core::math::Vec3;
-use moba_core::{Fix, FixVec2};
 use moba_game::Team;
 use moba_net::protocol::{MatchPhase, SnapshotState, WireCommand, quantize_position};
-use moba_net::{ClientEvent, Interpolator, NetClient, PredictionState};
-use moba_platform::{App, Frame, FrameOutcome, Key, Window, WindowConfig, run as run_window};
+use moba_net::{ClientEvent, Interpolator, PredictionState};
+use moba_platform::{App, Frame, FrameOutcome, Key, Window};
 use moba_render::{
-    Camera, CapturedFrame, RenderConfig, Renderer, Scene, UiDrawList, UnitInstance, ValidationMode,
+    Camera, RenderConfig, Renderer, Scene, UiDrawList, UnitInstance, ValidationMode,
 };
 use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
@@ -595,207 +593,15 @@ impl App for ClientApp {
     }
 }
 
-fn frames_is_capture(frames: u64, capture_frame: u64, capture_path: Option<&Path>) -> bool {
-    capture_path.is_some() && frames >= capture_frame
-}
-
-fn capture_and_exit(
-    renderer: &mut Renderer,
-    scene: &Scene<'_>,
-    ui: &UiDrawList,
-    capture_path: Option<&Path>,
-    failure: &mut Option<String>,
-) {
-    let Some(path) = capture_path else {
-        return;
-    };
-    match renderer.capture_frame_with_ui(scene, ui) {
-        Ok(frame) => {
-            if let Err(error) = write_ppm(path, &frame) {
-                *failure = Some(format!("capture write failed: {error}"));
-            }
-        }
-        Err(error) => *failure = Some(format!("capture failed: {error}")),
-    }
-}
-
-fn parse_demo_move() -> Option<FixVec2> {
-    let value = std::env::var("MOBA_DEMO_MOVE").ok()?;
-    let (x, y) = value.split_once(',')?;
-    Some(FixVec2::from_ints(
-        x.trim().parse().ok()?,
-        y.trim().parse().ok()?,
-    ))
-}
-
-fn parse_secret() -> Option<[u8; 32]> {
-    let value = std::env::var("MOBA_SECRET").ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        eprintln!("MOBA_SECRET must be 64 hex characters; ignoring");
-        return None;
-    }
-    let mut key = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
-        let text = std::str::from_utf8(chunk).ok()?;
-        key[index] = u8::from_str_radix(text, 16).ok()?;
-    }
-    Some(key)
-}
-
-fn parse_server_public() -> Option<[u8; 32]> {
-    let value = std::env::var("MOBA_SERVER_PUBKEY").ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        eprintln!("MOBA_SERVER_PUBKEY must be 64 hex characters; ignoring");
-        return None;
-    }
-    let mut key = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
-        let text = std::str::from_utf8(chunk).ok()?;
-        key[index] = u8::from_str_radix(text, 16).ok()?;
-    }
-    Some(key)
-}
-
-fn parse_identity_seed() -> Option<[u8; 32]> {
-    let value = std::env::var("MOBA_CLIENT_IDENTITY").ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() != 64 {
-        eprintln!("MOBA_CLIENT_IDENTITY must be 64 hex characters; ignoring");
-        return None;
-    }
-    let mut seed = [0u8; 32];
-    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
-        let text = std::str::from_utf8(chunk).ok()?;
-        seed[index] = u8::from_str_radix(text, 16).ok()?;
-    }
-    Some(seed)
-}
-
-fn connect_network(spec: &str) -> Result<NetClient, String> {
-    let secret = parse_secret();
-    let server_public = parse_server_public();
-    let identity_seed = parse_identity_seed();
-    let spectator = std::env::var("MOBA_SPECTATE").is_ok_and(|value| value == "1");
-    if spec == "local" {
-        let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
-            bind: "127.0.0.1:0".parse().expect("loopback address"),
-            sim: SimConfig::default(),
-            snapshot_interval: 1,
-            max_clients: 10,
-            countdown_ticks: 90,
-            results_ticks: 450,
-            client_timeout: Duration::from_secs(5),
-            reconnect_grace: Duration::from_secs(60),
-            pre_shared_key: secret,
-            record: None,
-            max_spectators: 8,
-            max_packets_per_second: 120,
-            max_total_packets_per_second: 2_000,
-            require_ready: false,
-        })
-        .map_err(|error| format!("local server failed: {error}"))?;
-        let addr = server
-            .local_addr()
-            .map_err(|error| format!("local server address: {error}"))?;
-        std::thread::spawn(move || {
-            let _ = server.run_for(Duration::from_secs(3_600));
-        });
-        let auth = moba_net::client::ClientAuth {
-            pre_shared_key: secret,
-            expected_server: None,
-            identity_seed,
-            spectator,
-        };
-        NetClient::connect_with_auth(addr, Duration::from_secs(5), auth)
-            .map_err(|error| format!("local connection failed: {error}"))
-    } else {
-        let addr = spec
-            .parse()
-            .map_err(|error| format!("invalid MOBA_SERVER {spec}: {error}"))?;
-        let auth = moba_net::client::ClientAuth {
-            pre_shared_key: secret,
-            expected_server: server_public,
-            identity_seed,
-            spectator,
-        };
-        NetClient::connect_with_auth(addr, Duration::from_secs(5), auth)
-            .map_err(|error| format!("connection to {spec} failed: {error}"))
-    }
-}
-
+mod launch;
 mod scene_build;
 
+pub(crate) use launch::{
+    capture_and_exit, connect_network, frames_is_capture, parse_demo_move, run,
+};
 pub(crate) use scene_build::{
     map_theme, network_camera, push_hero_rig, push_unit, rebuild_network_units,
 };
-
-pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let quit_after_frames = std::env::var("MOBA_SMOKE_FRAMES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(u64::MAX);
-    let capture_path = std::env::var("MOBA_CAPTURE").ok().map(PathBuf::from);
-    let capture_frame = std::env::var("MOBA_CAPTURE_FRAME")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(3);
-    let error = Arc::new(Mutex::new(None::<String>));
-    let app = ClientApp::new(
-        quit_after_frames,
-        capture_path,
-        capture_frame,
-        Arc::clone(&error),
-    );
-    let config = WindowConfig::new("MOBA", 1280, 720);
-    run_window(config, app)?;
-    if let Some(message) = error.lock().ok().and_then(|mut slot| slot.take()) {
-        return Err(message.into());
-    }
-    Ok(())
-}
-
-fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<()> {
-    let mut file = BufWriter::new(File::create(path)?);
-    write!(file, "P6\n{} {}\n255\n", frame.width, frame.height)?;
-    let mut rgb = Vec::with_capacity(frame.rgba.len() / 4 * 3);
-    for pixel in frame.rgba.chunks_exact(4) {
-        rgb.extend_from_slice(&pixel[..3]);
-    }
-    file.write_all(&rgb)?;
-    file.flush()
-}
-
-impl Drop for ClientApp {
-    fn drop(&mut self) {
-        let (Some(mut samples), Some(path)) = (self.frame_log.take(), self.frame_log_path.take())
-        else {
-            return;
-        };
-        let warmup = samples.len().min(60);
-        let mut samples = samples.split_off(warmup);
-        if samples.is_empty() {
-            return;
-        }
-        samples.sort_by(f32::total_cmp);
-        let percentile = |fraction: f32| {
-            let index = ((samples.len() - 1) as f32 * fraction).round() as usize;
-            samples[index]
-        };
-        let mean = samples.iter().sum::<f32>() / samples.len() as f32;
-        let report = format!(
-            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}\n",
-            samples.len(),
-            percentile(0.50),
-            percentile(0.95),
-            percentile(0.99),
-            samples[samples.len() - 1],
-        );
-        let _ = std::fs::write(&path, &report);
-        eprintln!("frame log: {}", report.trim_end());
-    }
-}
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
 #[cfg(test)]
@@ -860,10 +666,11 @@ pub(crate) mod allocation_probe {
 
 #[cfg(test)]
 mod tests {
-    use super::{Camera, Fix, FixVec2, MatchPhase, Team, UnitKind, Vec3};
+    use super::{Camera, Fix, MatchPhase, Team, UnitKind, Vec3};
     use crate::app::scene_build::{kind_from_u8, team_from_u8};
     use crate::hud::HudAction;
     use crate::input::{InputFocus, cursor_ground, ground_orders_allowed};
+    use moba_core::FixVec2;
     use moba_core::math::Vec2;
 
     #[test]
