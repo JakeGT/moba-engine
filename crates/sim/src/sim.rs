@@ -375,6 +375,8 @@ pub struct ObservedUnit {
     pub burning: bool,
     /// Whether a movement haste is active.
     pub hasted: bool,
+    /// Generic replicated status bits from active modifiers.
+    pub status_bits: u16,
 }
 
 /// Strategy that produces bot commands each tick.
@@ -724,6 +726,15 @@ impl Simulation {
                 silenced: modifiers.is_some_and(|m| m.has(ModifierKind::Silence)),
                 burning: modifiers.is_some_and(|m| m.has(ModifierKind::Burn)),
                 hasted: modifiers.is_some_and(|m| m.has(ModifierKind::Haste)),
+                status_bits: modifiers.map_or(0, |modifiers| {
+                    modifiers
+                        .entries()
+                        .iter()
+                        .filter_map(|modifier| {
+                            self.content.modifiers.get(usize::from(modifier.def_id))
+                        })
+                        .fold(0, |bits, definition| bits | definition.status_bits)
+                }),
             });
         }
         self.observed_candidates = candidates;
@@ -3546,6 +3557,34 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn modifier_status_bits_replicate() {
+        let mut content = GameContent::default();
+        content.modifiers[0].status_bits = 0x0100;
+        let mut sim =
+            Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
+        let hero = sim.hero_entities[0];
+        let mut modifiers = Modifiers::default();
+        modifiers.entries[0] = Modifier {
+            def_id: 0,
+            kind: ModifierKind::Shield,
+            remaining: 10,
+            factor: Fix::ONE,
+            amount: 1,
+            damage_type: DamageType::Physical,
+            source: hero,
+        };
+        modifiers.len = 1;
+        let _ = sim.world.insert(hero, modifiers);
+        let mut observed = Vec::new();
+        sim.observed_all(&mut observed);
+        let unit = observed
+            .iter()
+            .find(|unit| unit.entity == hero)
+            .expect("hero observed");
+        assert_ne!(unit.status_bits & 0x0100, 0);
     }
 
     #[test]
