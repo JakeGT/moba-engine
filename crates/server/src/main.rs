@@ -37,6 +37,8 @@ fn main() {
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
     let mut max_total_packets_per_second = 2_000u32;
+    let mut match_count = 1usize;
+    let mut workers: Option<usize> = None;
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let config_path = raw_args
         .iter()
@@ -111,6 +113,12 @@ fn main() {
         if let Some(value) = file.max_total_pps {
             max_total_packets_per_second = value;
         }
+        if let Some(value) = file.matches {
+            match_count = value;
+        }
+        if file.workers.is_some() {
+            workers = file.workers;
+        }
     }
     let mut args = raw_args.into_iter();
     while let Some(argument) = args.next() {
@@ -155,6 +163,12 @@ fn main() {
             }
             "--results-log" => results_log = args.next().map(std::path::PathBuf::from),
             "--ready" => require_ready = true,
+            "--matches" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    match_count = value;
+                }
+            }
+            "--workers" => workers = args.next().and_then(|value| value.parse().ok()),
             "--max-pps" => {
                 if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
                     max_packets_per_second = value;
@@ -214,7 +228,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--rotate-client-key OLD:NEW] [--revoke-client-key HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--matches N] [--workers K] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--rotate-client-key OLD:NEW] [--revoke-client-key HEX] [--config FILE]"
                 );
                 return;
             }
@@ -278,7 +292,7 @@ fn main() {
             max_total_packets_per_second,
             require_ready,
         };
-        let mut server = if let Some(content) = content {
+        if let Some(content) = content.as_ref() {
             eprintln!(
                 "content: {} {} ({} items, hash {:#018x})",
                 content.manifest.name,
@@ -286,25 +300,10 @@ fn main() {
                 content.items.len(),
                 content.hash()
             );
-            NetServer::bind_with_content(server_config, Arc::new(content))
-        } else {
-            NetServer::bind(server_config)
         }
-        .unwrap_or_else(|error| {
-            eprintln!("cannot bind {bind}: {error}");
+        if reload_content && items_paths.is_empty() {
+            eprintln!("--reload-content requires --items FILE");
             std::process::exit(2);
-        });
-        server.set_content_trust(require_attestation, content_publisher);
-        if reload_content {
-            if let Some(path) = items_paths.first().cloned() {
-                server.watch_content(path);
-            } else {
-                eprintln!("--reload-content requires --items FILE");
-                std::process::exit(2);
-            }
-        }
-        if items_paths.len() > 1 {
-            server.watch_rotation(items_paths.clone());
         }
         // Fail loudly on keys `verify_strict` would reject on every handshake.
         for key in client_identity_keys
@@ -318,46 +317,94 @@ fn main() {
                 std::process::exit(2);
             }
         }
-        if !client_identity_keys.is_empty() {
-            server.require_client_identity(client_identity_keys.iter().copied());
+        let identity_seed = server_key.as_ref().map(|path| load_identity_seed(path));
+        let content = content.map(Arc::new);
+        if match_count == 0 {
+            eprintln!("--matches must be at least 1");
+            std::process::exit(2);
         }
-        for (old, new) in &rotate_client_keys {
-            if !server.rotate_client_key(*old, *new) {
-                eprintln!("client key rotation skipped: old key is not in the allowlist");
+        let multi = match_count > 1;
+        let mut servers = Vec::with_capacity(match_count);
+        for index in 0..match_count {
+            // Match 0 keeps the configured port, seed and paths, so `--matches 1` is
+            // exactly the single-match server.
+            let mut match_config = server_config.clone();
+            match_config.bind = offset_port(bind, index);
+            match_config.sim.seed = config
+                .seed
+                .wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            if multi {
+                match_config.record = match_config
+                    .record
+                    .as_deref()
+                    .map(|path| moba_net::host::suffixed_path(path, index));
             }
-        }
-        for key in &revoke_client_keys {
-            if !server.revoke_client_key(*key) {
-                eprintln!("client key revocation skipped: key is not in the allowlist");
-            }
-        }
-        if !rotate_client_keys.is_empty() || !revoke_client_keys.is_empty() {
-            eprintln!(
-                "client identity allowlist: {} key(s)",
-                server.allowed_client_key_count()
-            );
-        }
-        if let Some(path) = results_log.clone() {
-            server.set_results_log(path);
-        }
-        for token in &client_tokens {
-            server.add_client_key(*token);
-        }
-        let mut identity_note = String::new();
-        if let Some(path) = server_key.as_ref() {
-            let seed = load_identity_seed(path);
-            let public = server.set_server_identity(seed);
-            identity_note = format!(" identity={}", hex(&public));
-        }
-        eprintln!(
-            "network server listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results, {}){identity_note}",
-            server.local_addr().expect("bound address"),
-            if secret.is_some() || !client_tokens.is_empty() {
-                "encrypted"
+            let mut server = if let Some(content) = content.as_ref() {
+                NetServer::bind_with_content(match_config, Arc::clone(content))
             } else {
-                "plaintext LAN mode"
+                NetServer::bind(match_config)
             }
-        );
+            .unwrap_or_else(|error| {
+                eprintln!("cannot bind {}: {error}", offset_port(bind, index));
+                std::process::exit(2);
+            });
+            server.set_content_trust(require_attestation, content_publisher);
+            if reload_content && let Some(path) = items_paths.first().cloned() {
+                server.watch_content(path);
+            }
+            if items_paths.len() > 1 {
+                server.watch_rotation(items_paths.clone());
+            }
+            if !client_identity_keys.is_empty() {
+                server.require_client_identity(client_identity_keys.iter().copied());
+            }
+            for (old, new) in &rotate_client_keys {
+                if !server.rotate_client_key(*old, *new) && index == 0 {
+                    eprintln!("client key rotation skipped: old key is not in the allowlist");
+                }
+            }
+            for key in &revoke_client_keys {
+                if !server.revoke_client_key(*key) && index == 0 {
+                    eprintln!("client key revocation skipped: key is not in the allowlist");
+                }
+            }
+            if index == 0 && (!rotate_client_keys.is_empty() || !revoke_client_keys.is_empty()) {
+                eprintln!(
+                    "client identity allowlist: {} key(s)",
+                    server.allowed_client_key_count()
+                );
+            }
+            if let Some(path) = results_log.as_deref() {
+                server.set_results_log(if multi {
+                    moba_net::host::suffixed_path(path, index)
+                } else {
+                    path.to_path_buf()
+                });
+            }
+            for token in &client_tokens {
+                server.add_client_key(*token);
+            }
+            let mut identity_note = String::new();
+            if let Some(seed) = identity_seed {
+                let public = server.set_server_identity(seed);
+                identity_note = format!(" identity={}", hex(&public));
+            }
+            eprintln!(
+                "network server{} listening on {} for {seconds}s (30 Hz, 10 bot slots, {countdown_secs}s countdown, {results_secs}s results, {}){identity_note}",
+                if multi {
+                    format!(" match {index}")
+                } else {
+                    String::new()
+                },
+                server.local_addr().expect("bound address"),
+                if secret.is_some() || !client_tokens.is_empty() {
+                    "encrypted"
+                } else {
+                    "plaintext LAN mode"
+                }
+            );
+            servers.push(server);
+        }
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal_flag = Arc::clone(&shutdown);
         if let Err(error) = ctrlc::set_handler(move || {
@@ -365,27 +412,53 @@ fn main() {
         }) {
             eprintln!("signal handler: {error}");
         }
-        server
-            .run_until(Duration::from_secs(seconds), &shutdown)
-            .unwrap_or_else(|error| {
-                eprintln!("network server error: {error}");
-                std::process::exit(1);
-            });
-        server.finish_recording();
-        let stats = server.stats();
+        let worker_count = workers.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+        });
+        let mut host = moba_net::MatchHost::new(servers, worker_count);
+        if multi {
+            eprintln!(
+                "hosting {match_count} matches on {} worker thread(s)",
+                host.workers()
+            );
+        }
+        let report = host.run_until(Duration::from_secs(seconds), &shutdown);
         eprintln!("network shutdown requested; replay flushed if one was in progress");
-        eprintln!(
-            "network done: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} replayed_hellos={} avg_tick_us={} max_tick_us={}",
-            stats.clients,
-            stats.ticks,
-            stats.snapshots_sent,
-            stats.bytes_sent / 1024,
-            stats.bytes_received / 1024,
-            stats.rate_limited,
-            stats.replayed_hellos,
-            stats.tick_avg_nanos / 1_000,
-            stats.tick_max_nanos / 1_000
-        );
+        for (index, stats) in report.matches.iter().enumerate() {
+            eprintln!(
+                "network done{}: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB rate_limited={} replayed_hellos={} avg_tick_us={} max_tick_us={}",
+                if multi {
+                    format!(" match {index}")
+                } else {
+                    String::new()
+                },
+                stats.clients,
+                stats.ticks,
+                stats.snapshots_sent,
+                stats.bytes_sent / 1024,
+                stats.bytes_received / 1024,
+                stats.rate_limited,
+                stats.replayed_hellos,
+                stats.tick_avg_nanos / 1_000,
+                stats.tick_max_nanos / 1_000
+            );
+        }
+        if multi {
+            let ticks = report.ticks();
+            eprintln!(
+                "host: frames={} overruns={} tick_p50_us={} tick_p99_us={} tick_max_us={}",
+                report.frames(),
+                report.overruns(),
+                ticks.percentile_nanos(50.0) / 1_000,
+                ticks.percentile_nanos(99.0) / 1_000,
+                ticks.max_nanos() / 1_000
+            );
+        }
+        let errors: u64 = report.workers.iter().map(|worker| worker.errors).sum();
+        if errors > 0 {
+            eprintln!("network server: {errors} socket error(s) during the run");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -536,10 +609,29 @@ struct FileServerConfig {
     ready: Option<bool>,
     max_pps: Option<u32>,
     max_total_pps: Option<u32>,
+    matches: Option<usize>,
+    workers: Option<usize>,
     client_tokens: Option<Vec<String>>,
     client_identity_keys: Option<Vec<String>>,
     rotate_client_keys: Option<Vec<String>>,
     revoke_client_keys: Option<Vec<String>>,
+}
+
+/// `addr` with its port increased by `index` (exits on overflow; port 0 stays ephemeral).
+fn offset_port(addr: std::net::SocketAddr, index: usize) -> std::net::SocketAddr {
+    if addr.port() == 0 || index == 0 {
+        return addr;
+    }
+    let Some(port) = u16::try_from(usize::from(addr.port()) + index).ok() else {
+        eprintln!(
+            "--matches {index}+ overflows the port range from {}",
+            addr.port()
+        );
+        std::process::exit(2);
+    };
+    let mut addr = addr;
+    addr.set_port(port);
+    addr
 }
 
 fn parse_key_pair(value: &str) -> ([u8; 32], [u8; 32]) {

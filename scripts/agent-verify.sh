@@ -86,6 +86,9 @@ if [[ "$FULL" == "1" ]]; then
 
   section "short wire fuzz"
   cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 10
+
+  section "multi-match load test"
+  cargo run --release -p moba-tools --bin load-test -- --matches 4 --clients 10 --seconds 10
 fi
 
 printf '\nagent-verify: ok\n'

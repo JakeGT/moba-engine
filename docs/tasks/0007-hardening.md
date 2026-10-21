@@ -54,8 +54,11 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 - Criterion captures: snapshot codec and simulation ticks in `docs/perf/0007-profiling.md`.
 - Final one-hour v12 fuzz and 10-client lossy soak.
 
+- 50 concurrent matches per box: `MatchHost` + `moba-server --matches N`, verified by
+  `load-test` (see [`docs/perf/0010-multi-match.md`](../perf/0010-multi-match.md), #291).
+
 ## Still open
-- 50 concurrent matches per box and independent external review.
+- Independent external review.
 - Account/reputation/key-transparency services remain external integrations (ADR 0006);
   player-count attestation is designed, not implemented.
 - [x] Sanitizer-backed fuzzing (cargo-fuzz/ASan) in addition to the deterministic fuzzer:

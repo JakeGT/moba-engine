@@ -153,6 +153,12 @@ values, and secrets can reference paths or 64-hex strings.
 `NetServer::run_until` accepts a shutdown flag; the server binary sets it from
 Ctrl-C/SIGINT, then flushes the recording before exiting.
 
+`MatchHost` (`crates/net/src/host.rs`) runs many `NetServer`s in one process (`moba-server --matches N`).
+- Each match keeps its own UDP socket on consecutive ports, so the protocol and client are unchanged.
+- Matches are split across long-lived worker threads. Each worker polls its sockets and ticks every due match on the shared 30 Hz schedule.
+- Workers record per-match tick durations in a fixed-size histogram, plus frame lateness and overruns.
+- `moba-tools load-test` drives N matches × C real clients and fails on budget misses ([perf note](perf/0010-multi-match.md)).
+
 `NetServer` can watch a content file (`watch_content`/`--reload-content`) and swap it only
 in Lobby/Results (never `Playing`); the simulation is recreated and connected clients receive a
 full catalogue `ContentUpdate` for the next match.

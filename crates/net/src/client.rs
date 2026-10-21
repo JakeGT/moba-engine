@@ -68,6 +68,10 @@ pub struct ClientStats {
     pub bytes_received: u64,
     /// UDP bytes sent.
     pub bytes_sent: u64,
+    /// UDP datagrams received (for header-overhead accounting).
+    pub datagrams_received: u64,
+    /// UDP datagrams sent.
+    pub datagrams_sent: u64,
     /// Applied snapshots.
     pub snapshots: u64,
     /// Latest round-trip estimate.
@@ -895,6 +899,8 @@ impl NetClient {
         ClientStats {
             bytes_received: self.transport.bytes_received,
             bytes_sent: self.transport.bytes_sent,
+            datagrams_received: self.transport.datagrams_received,
+            datagrams_sent: self.transport.datagrams_sent,
             snapshots: self.snapshots_received,
             rtt_ms: self.rtt_ms,
             state: Some(self.state),
