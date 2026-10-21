@@ -48,6 +48,7 @@ is opt-in until crate names/ownership are settled.
   package-list inspection and Linux/Windows/macOS builds; artifacts are attached to the
   GitHub release. The run was dispatched from `main` because the tag is immutable; the only
   difference from the tag is the release-workflow dependency fix.
+- `v0.4.0` (2026-10-21): security release for GHSA-jw7c-q9x9-cgg3 (published, patched 0.4.0). Workspace **0.4.0**, protocol **v37**, replay **v5**, simulation logic **v7**, 316 tests. `scripts/agent-verify.sh --full` passed locally (635 test runs). Release workflow run `39599870292` passed release tests, package metadata, Linux/Windows/macOS builds and asset attachment (`moba-linux-x86_64.tar.gz`, `moba-macos-aarch64.tar.gz`, `moba-windows-x86_64.zip`, `package-list.txt`). The 0.3.0 advisories GHSA-23q3, GHSA-vpcq, GHSA-9j54 and GHSA-v6g8 were published the same day with patched version 0.3.0.
 - Remaining release blocker: **#21** registry publication (ownership + `CARGO_REGISTRY_TOKEN`);
   `publish = false` is intentional until that is approved. Real Windows/macOS GPU validation
   is tracked separately in **#9/#127**, and post-1.0 asset/skinning work in **#276**.

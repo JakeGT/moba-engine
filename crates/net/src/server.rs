@@ -151,6 +151,8 @@ pub struct ServerStats {
     pub frame_slow_1ms: u64,
     /// Mean simulation tick, filled by [`NetServer::stats`].
     pub tick_avg_nanos: u64,
+    /// Snapshots that failed to encode or send; the other clients are still served.
+    pub snapshot_send_errors: u64,
 }
 
 #[derive(Debug)]
@@ -1307,7 +1309,7 @@ impl NetServer {
         }
         let interval = u64::from(self.config.snapshot_interval.max(1));
         if self.frame.is_multiple_of(interval) {
-            self.send_snapshots()?;
+            self.send_snapshots();
         }
         let frame_nanos = frame_started.elapsed().as_nanos() as u64;
         if frame_nanos >= 1_000_000 {
@@ -2147,7 +2149,7 @@ impl NetServer {
     }
 
     #[allow(clippy::too_many_lines)] // Snapshot fan-out is one ordered pass.
-    fn send_snapshots(&mut self) -> io::Result<()> {
+    fn send_snapshots(&mut self) {
         let mut observed = core::mem::take(&mut self.observed);
         for team in moba_game::Team::ALL {
             self.simulation
@@ -2254,8 +2256,12 @@ impl NetServer {
             {
                 delta.events.push(event.to_net(client));
             }
-            encode_snapshot(&delta, &mut payload)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            // A failure for one client must not starve the clients after it (or drop the
+            // scratch buffers taken above), so count it and move on.
+            if encode_snapshot(&delta, &mut payload).is_err() {
+                self.stats.snapshot_send_errors += 1;
+                continue;
+            }
             client.snapshot_seq = client.snapshot_seq.wrapping_add(1);
             let seq = client.snapshot_seq;
             let header = Header {
@@ -2266,7 +2272,12 @@ impl NetServer {
                 ack: client.last_input_seq,
                 ack_bits: 0,
             };
-            self.transport.send(client.addr, &header, &payload)?;
+            if self.transport.send(client.addr, &header, &payload).is_err() {
+                self.stats.snapshot_send_errors += 1;
+                // Keep the previous baseline: the next snapshot is a full one.
+                client.need_full = true;
+                continue;
+            }
             client.bytes_sent += payload.len() as u64;
             client.need_full = false;
             client.record(seq, &current);
@@ -2307,7 +2318,6 @@ impl NetServer {
                 self.content_update_retry = Some((payload, wait, remaining, generation));
             }
         }
-        Ok(())
     }
 }
 
@@ -2741,10 +2751,10 @@ mod tests {
             arc: moba_core::Fix::ZERO,
         };
         server.pending_events.push_back(event);
-        server.send_snapshots().expect("snapshot");
+        server.send_snapshots();
         let events_capacity = server.delta.events.capacity();
         server.pending_events.push_back(event);
-        server.send_snapshots().expect("snapshot");
+        server.send_snapshots();
         assert_eq!(server.delta.events.capacity(), events_capacity);
     }
 
@@ -3495,12 +3505,12 @@ cost = 1
         };
         for _ in 0..200 {
             server.pending_events.push_back(event);
-            server.send_snapshots().expect("warm");
+            server.send_snapshots();
         }
         moba_test_support::reset();
         for _ in 0..100 {
             server.pending_events.push_back(event);
-            server.send_snapshots().expect("snapshot");
+            server.send_snapshots();
         }
         let (allocations, bytes) = moba_test_support::counters();
         eprintln!("snapshot send: {allocations} allocations, {bytes} bytes");

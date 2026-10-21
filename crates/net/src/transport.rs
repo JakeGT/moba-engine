@@ -76,6 +76,8 @@ pub struct UdpTransport {
     peers: Vec<(SocketAddr, SessionCrypto)>,
     pub(crate) bytes_sent: u64,
     pub(crate) bytes_received: u64,
+    pub(crate) datagrams_sent: u64,
+    pub(crate) datagrams_received: u64,
 }
 
 impl UdpTransport {
@@ -95,6 +97,8 @@ impl UdpTransport {
             peers: Vec::new(),
             bytes_sent: 0,
             bytes_received: 0,
+            datagrams_sent: 0,
+            datagrams_received: 0,
         })
     }
 
@@ -185,6 +189,7 @@ impl UdpTransport {
             let sent = self.send_datagram(&datagram, addr);
             if sent.as_ref().is_ok_and(|sent| *sent) {
                 self.bytes_sent += datagram.len() as u64;
+                self.datagrams_sent += 1;
             }
             self.send_buffer = datagram;
             return sent.map(|_| ());
@@ -218,6 +223,7 @@ impl UdpTransport {
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             if self.send_datagram(&datagram, addr)? {
                 self.bytes_sent += datagram.len() as u64;
+                self.datagrams_sent += 1;
             }
         }
         Ok(())
@@ -244,6 +250,7 @@ impl UdpTransport {
             match self.socket.recv_from(&mut self.buffer) {
                 Ok((length, addr)) => {
                     self.bytes_received += length as u64;
+                    self.datagrams_received += 1;
                     if let Some(message) = self.handle_datagram(addr, length) {
                         self.expire_assemblies();
                         return Ok(Some(message));

@@ -42,7 +42,7 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **316 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **322 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.

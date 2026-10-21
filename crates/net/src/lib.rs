@@ -7,6 +7,7 @@
 
 pub mod client;
 pub mod crypto;
+pub mod host;
 pub mod interpolation;
 pub mod prediction;
 pub mod protocol;
@@ -15,6 +16,7 @@ pub mod transport;
 
 pub use client::{ClientEvent, ClientStats, NetClient};
 pub use crypto::{CryptoError, SessionCrypto};
+pub use host::{HostReport, MatchHost, TickHistogram, WorkerStats};
 pub use interpolation::Interpolator;
 pub use prediction::PredictionState;
 pub use protocol::{
