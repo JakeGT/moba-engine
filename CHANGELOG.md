@@ -33,6 +33,9 @@ Security release. Protocol **v37** (not wire-compatible with 0.3.x), replay **v5
   - The audio callback no longer allocates.
   - Only the stream for the device's sample format is opened.
 
+### Content
+- The built-in content's manifest version is now `BUILTIN_CONTENT_VERSION` ("0.3.0") instead of the crate version. Engine releases no longer change the default content hash, so existing default-content replays stay valid.
+
 ### Tooling
 - `just bench-baseline` / `bench-compare` now pass criterion flags only to bench targets.
 - The docs consistency check also covers CLAUDE.md and docs/agents.md.

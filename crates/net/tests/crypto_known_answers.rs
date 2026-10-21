@@ -136,6 +136,9 @@ fn identity_signatures_are_stable() {
 #[test]
 fn pack_signature_is_stable() {
     let mut content = moba_game::GameContent::default();
+    // Pinned explicitly so a future built-in content revision can't silently change the
+    // known answer (the bytes were produced with manifest version "0.3.0").
+    content.manifest.version = String::from("0.3.0");
     let attestation = sign_pack(&content, &SEED);
     assert_eq!(
         hex(&attestation.signature),
