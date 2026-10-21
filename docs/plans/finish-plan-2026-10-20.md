@@ -50,7 +50,7 @@ The repo-wide rules in [AGENTS.md](../../AGENTS.md) and the runbook [docs/agents
 - **Mirror:** the side-swap mirror may be *asymmetric*. Exact symmetry is not required, so WP-2.2 is descoped (see there).
 - **#9 / #127:** the maintainer will do the real Windows/macOS GPU run by hand.
 - **#21:** crates.io publication will be done by hand by the maintainer.
-- **Security:** security fixes are merged and advisories published (WP-6.4).
+- **Security:** security fixes are merged and advisories published. WP-6.4 is done.
 - **Playtest:** the M6 playtest (WP-5.2) waits until phases 3–4 are complete.
 
 **Milestone exit criteria still open:**
@@ -351,10 +351,10 @@ These are never closed with simulated or hosted-runner evidence.
   - **Note:** #9's comments suggest closing it as superseded by #127.
 - **WP-6.2** (#21): **the maintainer does this by hand.** Agents must not change `publish = false` (`Cargo.toml:17`), add a registry token or publish crates. WP-7.1 (semver CI against a git tag) is still agent work.
 - **WP-6.3:** an independent external security review (M7).
-- **WP-6.4** (2026-10-21, PR #295 merged, tag `v0.4.0`):
-  - Merge the 0.4.0 security release and tag `v0.4.0`.
-  - Verify the release artifacts.
-  - Then publish GHSA-jw7c-q9x9-cgg3 (patched 0.4.0) and the four 0.3.0 advisories (patched 0.3.0).
+- **WP-6.4: DONE (2026-10-21).**
+  - #295 merged and tagged `v0.4.0`; release run `39599870292` attached all artifacts.
+  - GHSA-jw7c-q9x9-cgg3 is published (patched 0.4.0).
+  - GHSA-23q3, GHSA-vpcq, GHSA-9j54 and GHSA-v6g8 are published (patched 0.3.0).
 
 ### Phase 7: 1.0 release
 - **WP-7.1 Semver CI:** add `cargo-semver-checks` to CI/`release.yml` against the **git tag baseline** (`--baseline-rev v0.3.0`). This doesn't need crates.io, so it isn't blocked by #21.
