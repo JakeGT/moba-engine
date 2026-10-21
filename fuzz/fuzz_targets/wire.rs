@@ -1,10 +1,28 @@
 #![no_main]
 
+use std::sync::OnceLock;
+
 use libfuzzer_sys::fuzz_target;
 use moba_net::protocol::{
-    decode_content_update, decode_hello, decode_input, decode_packet, decode_snapshot,
-    decode_welcome,
+    WireCatalog, decode_content_update, decode_hello, decode_input, decode_packet, decode_snapshot,
+    decode_welcome, encode_content_update,
 };
+
+/// A valid `ContentUpdate` for the built-in catalogue, encoded once.
+///
+/// The fuzzer mutates a copy of these bytes with its input, so `decode_content_update` sees a
+/// realistic catalogue — including every hashed `RulesSpec` field carried since v38 — rather
+/// than only random noise. Building the catalogue once keeps the per-input cost to decoding.
+fn fixture() -> &'static Vec<u8> {
+    static FIXTURE: OnceLock<Vec<u8>> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let catalog = WireCatalog::from(&moba_game::GameContent::default());
+        let content_hash = catalog.content_hash().expect("built-in catalogue hashes");
+        let mut content_update = Vec::with_capacity(8_192);
+        encode_content_update(&catalog, content_hash, &mut content_update);
+        content_update
+    })
+}
 
 fuzz_target!(|data: &[u8]| {
     let _ = decode_packet(data);
@@ -13,4 +31,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_hello(data);
     let _ = decode_welcome(data);
     let _ = decode_content_update(data);
+
+    let mut mutated = fixture().clone();
+    for (slot, byte) in mutated.iter_mut().zip(data) {
+        *slot ^= *byte;
+    }
+    let _ = decode_content_update(&mutated);
 });

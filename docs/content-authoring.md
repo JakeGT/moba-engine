@@ -209,6 +209,35 @@ melee_vision = 9.0
 ranged_vision = 10.0
 tower_vision = 13.0
 nexus_vision = 14.0
+starting_gold = 500
+gold_per_interval = 1
+gold_tick_interval = 15
+xp_radius = 30.0
+shop_radius = 30.0
+shared_xp_percent = 130
+structure_heroes_first = false
+nexus_win = true
+score_limit = 0
+
+[rules.rewards.melee_minion]
+xp = 32
+gold = 20
+
+[rules.rewards.ranged_minion]
+xp = 45
+gold = 25
+
+[rules.rewards.tower]
+xp = 220
+gold = 250
+
+[rules.rewards.nexus]
+xp = 300
+gold = 500
+
+[rules.rewards.hero]
+xp = 180
+gold = 300
 
 [rules.melee_minion]
 max_health = 320
@@ -255,6 +284,17 @@ vision_range = 14.0
 `cargo test -p moba-sim --test mode_packs`. Servers rotate packs when repeated `--items`
 paths are supplied (empty-lobby rotation). Minion/tower combat stat blocks are exposed under
 `[rules.melee_minion]`, `[rules.ranged_minion]`, `[rules.tower]` and `[rules.nexus]`.
+
+Every hashed `[rules]` field is carried in the handshake (protocol **v38**): the economy fields
+(`starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`,
+`shared_xp_percent`, `[rules.rewards.*]`) and the win-condition fields (`structure_heroes_first`,
+`nexus_win`, `score_limit`) reach a joining client, so its rules match the server's instead of
+falling back to defaults. `content/economy-override.toml` is the regression pack;
+`cargo test -p moba-net --test content` joins a real UDP client against it and compares the
+client's rules and content hash with the server's. Adding a `RulesSpec` field fails to compile
+until it is hashed (`feed_catalogue`) and carried (`impl From<&GameContent> for WireCatalog`),
+and the per-field parity test in `crates/net/src/protocol.rs` fails until the wire conversion
+round-trips it.
 
 ## Maps
 

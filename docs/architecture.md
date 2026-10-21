@@ -127,7 +127,7 @@ the authoritative tick (which is single-threaded for determinism).
 
 **Extension limit:** content packs cover items, heroes, ability numbers/kinds, growth, rules,
 maps, lanes, structures, vision walls, themes, attestations and map rotation. Live per-client
-catalogue updates landed in protocol v24. Real asset meshes/skeletal assets and scripting hooks
+catalogue updates landed in the v24 protocol. Real asset meshes/skeletal assets and scripting hooks
 remain future work (tracked in GitHub Issues).
 
 ## Threading model
@@ -192,12 +192,17 @@ Authenticated Hello nonces are tracked for 60 s (bounded to 2,048 entries). A re
 key/nonce from the same source is treated as a retransmit; the same key/nonce from a different
 source is rejected and counted as `replayed_hellos`.
 
-Since protocol v37:
+Since the v37 handshake hardening:
 - **Every keyed handshake** (PSK, token or identity) first answers an address-bound server `Challenge`. The Hello HMAC (`moba-hello-v2`) covers that challenge, so a captured Hello can't be replayed to another server or match that shares the same keys.
 - **Session ids** are random 32-bit values.
 - **Reconnects and re-handshakes** for an existing slot must authenticate with the same token/PSK, and in identity mode the same client public key, that opened it. Another valid credential gets reject code 3.
 - **Hello rejects** are sent unsealed, so a spoofed Hello can't produce an authenticated Disconnect for a connected player.
 - **PSK-only mode** is one shared trust domain. Every holder of the PSK is the same credential, so a slot is protected only by its random session id. Use per-client tokens or identities when players must not be able to impersonate each other.
+
+Since v38, the catalogue carries **every hashed `RulesSpec` field**, including the economy
+(`starting_gold`, passive gold, XP/shop radii, shared XP, rewards) and the win conditions
+(`structure_heroes_first`, `nexus_win`, `score_limit`). A pack that overrides them is joinable,
+and a joining client receives the server's rules instead of defaults.
 
 ## Client identity
 

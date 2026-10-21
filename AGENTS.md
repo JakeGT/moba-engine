@@ -19,13 +19,13 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Item | Current value | Source of truth |
 |---|---|---|
 | Workspace version | `0.4.0` | `Cargo.toml` |
-| Wire protocol | **v37** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
+| Wire protocol | **v38** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
 | Replay format | **v5** | `crates/sim/src/replay.rs::VERSION` |
 | Simulation logic | **v7** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content.rs` |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprint, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **322 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **324 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -61,7 +61,7 @@ crates/server     headless dedicated server
 crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wire,
                   state-hash, image-check, vulkan-probe, bake-ui-atlas
 crates/engine     umbrella crate + embedding examples
-content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps)
+content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
 docs/             architecture, status, tasks, ADRs, perf logs, screenshots, agent guide
 fuzz/             standalone cargo-fuzz crate (wire/replay/content)
 scripts/          agent-verify.sh and operational helpers
