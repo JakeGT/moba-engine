@@ -1186,27 +1186,28 @@ impl From<&GameContent> for WireCatalog {
             nexus_win,
             score_limit,
         } = content_rules;
+        // The nested destructures guard reward kinds and per-unit scalars as well: a new
+        // `RewardsSpec` kind or `UnitRewardsSpec` field fails to compile here until it is wired.
+        let moba_game::RewardsSpec {
+            melee_minion: melee_reward,
+            ranged_minion: ranged_reward,
+            tower: tower_reward,
+            nexus: nexus_reward,
+            hero: hero_reward,
+        } = content_rewards;
+        let unit = |reward: &moba_game::UnitRewardsSpec| {
+            let moba_game::UnitRewardsSpec { xp, gold } = reward;
+            WireUnitRewards {
+                xp: *xp,
+                gold: *gold,
+            }
+        };
         let rewards = WireRewards {
-            melee_minion: WireUnitRewards {
-                xp: content_rewards.melee_minion.xp,
-                gold: content_rewards.melee_minion.gold,
-            },
-            ranged_minion: WireUnitRewards {
-                xp: content_rewards.ranged_minion.xp,
-                gold: content_rewards.ranged_minion.gold,
-            },
-            tower: WireUnitRewards {
-                xp: content_rewards.tower.xp,
-                gold: content_rewards.tower.gold,
-            },
-            nexus: WireUnitRewards {
-                xp: content_rewards.nexus.xp,
-                gold: content_rewards.nexus.gold,
-            },
-            hero: WireUnitRewards {
-                xp: content_rewards.hero.xp,
-                gold: content_rewards.hero.gold,
-            },
+            melee_minion: unit(melee_reward),
+            ranged_minion: unit(ranged_reward),
+            tower: unit(tower_reward),
+            nexus: unit(nexus_reward),
+            hero: unit(hero_reward),
         };
         catalog.rules = WireRules {
             melee_minion: minion(*melee_minion),
@@ -3742,11 +3743,19 @@ mod tests {
             xp_radius,
             shop_radius,
             shared_xp_percent,
-            rewards,
+            rewards: rules_rewards,
             structure_heroes_first,
             nexus_win,
             score_limit,
         } = RulesSpec::default();
+        // Same exhaustive-destructure guard for the nested rewards.
+        let moba_game::RewardsSpec {
+            melee_minion: melee_reward,
+            ranged_minion: ranged_reward,
+            tower: tower_reward,
+            nexus: nexus_reward,
+            hero: hero_reward,
+        } = rules_rewards;
         let mutations: Vec<Mutation> = vec![
             (
                 "melee_minion",
@@ -3861,8 +3870,52 @@ mod tests {
                 Box::new(move |rules| rules.shared_xp_percent = shared_xp_percent + 1),
             ),
             (
-                "rewards",
-                Box::new(move |rules| rules.rewards.hero.gold = rewards.hero.gold + 1),
+                "rewards.melee_minion.xp",
+                Box::new(move |rules| {
+                    rules.rewards.melee_minion.xp = melee_reward.xp + 1;
+                }),
+            ),
+            (
+                "rewards.melee_minion.gold",
+                Box::new(move |rules| {
+                    rules.rewards.melee_minion.gold = melee_reward.gold + 1;
+                }),
+            ),
+            (
+                "rewards.ranged_minion.xp",
+                Box::new(move |rules| {
+                    rules.rewards.ranged_minion.xp = ranged_reward.xp + 1;
+                }),
+            ),
+            (
+                "rewards.ranged_minion.gold",
+                Box::new(move |rules| {
+                    rules.rewards.ranged_minion.gold = ranged_reward.gold + 1;
+                }),
+            ),
+            (
+                "rewards.tower.xp",
+                Box::new(move |rules| rules.rewards.tower.xp = tower_reward.xp + 1),
+            ),
+            (
+                "rewards.tower.gold",
+                Box::new(move |rules| rules.rewards.tower.gold = tower_reward.gold + 1),
+            ),
+            (
+                "rewards.nexus.xp",
+                Box::new(move |rules| rules.rewards.nexus.xp = nexus_reward.xp + 1),
+            ),
+            (
+                "rewards.nexus.gold",
+                Box::new(move |rules| rules.rewards.nexus.gold = nexus_reward.gold + 1),
+            ),
+            (
+                "rewards.hero.xp",
+                Box::new(move |rules| rules.rewards.hero.xp = hero_reward.xp + 1),
+            ),
+            (
+                "rewards.hero.gold",
+                Box::new(move |rules| rules.rewards.hero.gold = hero_reward.gold + 1),
             ),
             (
                 "structure_heroes_first",

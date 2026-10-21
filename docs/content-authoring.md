@@ -288,12 +288,13 @@ paths are supplied (empty-lobby rotation). Minion/tower combat stat blocks are e
 Every hashed `[rules]` field is carried in the handshake (protocol **v38**): the economy fields
 (`starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`,
 `shared_xp_percent`, `[rules.rewards.*]`) and the win-condition fields (`structure_heroes_first`,
-`nexus_win`, `score_limit`) reach a joining client, so client prediction uses the pack's rules
-instead of the defaults. `content/economy-override.toml` is the regression pack;
+`nexus_win`, `score_limit`) reach a joining client, so its rules match the server's instead of
+falling back to defaults. `content/economy-override.toml` is the regression pack;
 `cargo test -p moba-net --test content` joins a real UDP client against it and compares the
 client's rules and content hash with the server's. Adding a `RulesSpec` field fails to compile
-until it is hashed (`feed_catalogue`) and carried (`WireRules::from`), and the per-field parity
-test in `crates/net/src/protocol.rs` fails until the wire conversion round-trips it.
+until it is hashed (`feed_catalogue`) and carried (`impl From<&GameContent> for WireCatalog`),
+and the per-field parity test in `crates/net/src/protocol.rs` fails until the wire conversion
+round-trips it.
 
 ## Maps
 

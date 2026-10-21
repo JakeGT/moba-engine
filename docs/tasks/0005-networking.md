@@ -12,8 +12,8 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   handshake codecs, quantised commands (1/16 unit, map extent capped at 256), per-client network ids, full/delta
   snapshots with field masks, bounded decoders and a malformed-input fuzz test.
   - Since **v38** the handshake catalogue carries every hashed `RulesSpec` field (economy,
-    rewards and win conditions), so any content pack can be joined with prediction using the
-    server's rules; a per-field parity test and an exhaustiveness guard keep it complete.
+    rewards and win conditions), so any content pack can be joined and the client's rules match
+    the server's; a per-field parity test and an exhaustiveness guard keep it complete.
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.
 - **Server**: handshake and slot assignment, session tokens, input sequencing, bot fill for

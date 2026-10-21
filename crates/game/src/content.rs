@@ -1562,15 +1562,25 @@ impl GameContent {
             feed(&value.to_bits().to_le_bytes());
         }
         feed(&shared_xp_percent.to_le_bytes());
+        // Exhaustive nested destructures too: a new reward kind or a new per-unit scalar fails
+        // to compile here until it is hashed.
+        let RewardsSpec {
+            melee_minion: melee_reward,
+            ranged_minion: ranged_reward,
+            tower: tower_reward,
+            nexus: nexus_reward,
+            hero: hero_reward,
+        } = rewards;
         for reward in [
-            rewards.melee_minion,
-            rewards.ranged_minion,
-            rewards.tower,
-            rewards.nexus,
-            rewards.hero,
+            melee_reward,
+            ranged_reward,
+            tower_reward,
+            nexus_reward,
+            hero_reward,
         ] {
-            feed(&reward.xp.to_le_bytes());
-            feed(&reward.gold.to_le_bytes());
+            let UnitRewardsSpec { xp, gold } = reward;
+            feed(&xp.to_le_bytes());
+            feed(&gold.to_le_bytes());
         }
         feed(&[u8::from(*structure_heroes_first)]);
         feed(&[u8::from(*nexus_win)]);

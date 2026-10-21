@@ -16,8 +16,8 @@ breaking protocol, replay or content-schema changes.
 - Added `content/economy-override.toml`; `cargo test -p moba-net --test content` joins a real
   UDP client against it and compares the client's rules and content hash with the server's.
 - Added a per-field wire parity test covering every hashed `RulesSpec` field, plus exhaustive
-  `RulesSpec` destructures in `feed_catalogue` and `WireRules::from` so a future hashed field
-  cannot be added without being hashed and carried.
+  `RulesSpec` destructures in `feed_catalogue` and `From<&GameContent> for WireCatalog` so a
+  future hashed field cannot be added without being hashed and carried.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
 

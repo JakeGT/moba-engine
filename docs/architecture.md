@@ -202,7 +202,7 @@ Since the v37 handshake hardening:
 Since v38, the catalogue carries **every hashed `RulesSpec` field**, including the economy
 (`starting_gold`, passive gold, XP/shop radii, shared XP, rewards) and the win conditions
 (`structure_heroes_first`, `nexus_win`, `score_limit`). A pack that overrides them is joinable,
-and client prediction runs with the server's rules.
+and a joining client receives the server's rules instead of defaults.
 
 ## Client identity
 
