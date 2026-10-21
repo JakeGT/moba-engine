@@ -3,6 +3,24 @@
 All notable changes are recorded here. The workspace is pre-1.0; minor releases may include
 breaking protocol, replay or content-schema changes.
 
+## [Unreleased]
+
+### Content and networking
+- **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
+  carried in the handshake: `starting_gold`, `gold_per_interval`, `gold_tick_interval`,
+  `xp_radius`, `shop_radius`, `shared_xp_percent`, `[rules.rewards.*]`, `structure_heroes_first`,
+  `nexus_win` and `score_limit` (#294).
+  - Previously `WireCatalog::to_content` substituted `RulesSpec::default()` for them, so a pack
+    that overrode any of them produced a different client-side content hash and the client
+    dropped the Welcome.
+- Added `content/economy-override.toml`; `cargo test -p moba-net --test content` joins a real
+  UDP client against it and compares the client's rules and content hash with the server's.
+- Added a per-field wire parity test covering every hashed `RulesSpec` field, plus exhaustive
+  `RulesSpec` destructures in `feed_catalogue` and `WireRules::from` so a future hashed field
+  cannot be added without being hashed and carried.
+- The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
+  field's encoder/decoder path.
+
 ## [0.4.0] — 2026-10-21
 
 Security release. Protocol **v37** (not wire-compatible with 0.3.x), replay **v5**, simulation logic **v7**. Content hashes and replays are unchanged.

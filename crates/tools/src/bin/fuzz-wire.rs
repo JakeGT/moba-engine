@@ -67,7 +67,18 @@ fn fuzz_once(rng: &mut Rng) {
     }
 
     let mut content_update = Vec::new();
-    encode_content_update(&WireCatalog::default(), rng.next_u64(), &mut content_update);
+    let catalog = WireCatalog::from(&moba_game::GameContent::default());
+    let content_hash = catalog.content_hash().expect("default catalogue hashes");
+    encode_content_update(&catalog, content_hash, &mut content_update);
+    // A freshly encoded catalogue (every hashed rules field included) must round-trip exactly;
+    // the mutated bytes below only need to be panic-free.
+    match decode_content_update(&content_update) {
+        Ok((decoded, decoded_hash)) => {
+            assert_eq!(decoded, catalog, "clean catalogue round trip");
+            assert_eq!(decoded_hash, content_hash, "clean catalogue hash");
+        }
+        Err(error) => panic!("freshly encoded catalogue must decode: {error:?}"),
+    }
     mutate(rng, &mut content_update);
     let _ = decode_content_update(&content_update);
 
@@ -91,7 +102,7 @@ fn fuzz_once(rng: &mut Rng) {
         server_nonce: rng.next_u64(),
         auth: [0; 32],
         spectator: rng.next_bool(),
-        catalog: WireCatalog::default(),
+        catalog,
         content_hash: 0,
         identity: false,
         server_public_key: [0; 32],

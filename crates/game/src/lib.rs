@@ -29,9 +29,9 @@ pub use content::{
     MAX_CONTENT_LANES, MAX_CONTENT_MODIFIERS, MAX_CONTENT_STRUCTURES, MAX_CONTENT_WALLS,
     MAX_HERO_NAME, MAX_ITEM_NAME, MAX_LANE_POINTS, MAX_MANIFEST_FIELD, MAX_MAP_COORD,
     MODIFIER_BURN, MODIFIER_HASTE, MODIFIER_ROOT, MODIFIER_SHIELD, MODIFIER_SILENCE, MODIFIER_SLOW,
-    MapSpec, MapTheme, MinionStatsSpec, ModifierDef, ModifierKind, PackAttestation, RulesSpec,
-    StructureSpec, StructureStatsSpec, WallSpec, load_file as load_content_file,
-    load_toml as load_content_toml,
+    MapSpec, MapTheme, MinionStatsSpec, ModifierDef, ModifierKind, PackAttestation, RewardsSpec,
+    RulesSpec, StructureSpec, StructureStatsSpec, UnitRewardsSpec, WallSpec,
+    load_file as load_content_file, load_toml as load_content_toml,
 };
 pub use hero::{HEROES, HeroDef, HeroId};
 pub use item::{
