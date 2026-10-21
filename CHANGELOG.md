@@ -3,6 +3,43 @@
 All notable changes are recorded here. The workspace is pre-1.0; minor releases may include
 breaking protocol, replay or content-schema changes.
 
+## [0.4.0] — 2026-10-21
+
+Security release. Protocol **v37** (not wire-compatible with 0.3.x), replay **v5**, simulation logic **v7**. Content hashes and replays are unchanged.
+
+### Security
+- **GHSA-jw7c-q9x9-cgg3:**
+  - Reconnects and re-handshakes are bound to the credential that opened the slot: the same token/PSK, and in identity mode the same client key.
+  - Session ids are random.
+  - Keyed handshakes answer an address-bound server challenge, which the Hello authenticator (`moba-hello-v2`) covers, so a captured Hello can't be replayed to another server or match.
+  - Hello rejects are sent unsealed, and connected clients only act on a `Disconnect` for their own session.
+- The client fails closed on malformed `MOBA_SERVER_PUBKEY`, `MOBA_SECRET` and `MOBA_CLIENT_IDENTITY`.
+- The server validates allow-listed and rotated identity keys at startup.
+- Server and client identity signatures use `verify_strict`.
+- AEAD keys are zeroized again.
+
+### Platform and toolchain
+- Vulkan **1.3** is the minimum. The 1.2 extension fallback is removed (ADR-0002 amended), and shaders target `vulkan1.3`.
+- Rust MSRV **1.88**. The CI check is now named `MSRV`.
+- Dependencies are at their latest releases:
+  - RustCrypto/dalek: chacha20poly1305 0.11, hmac/hkdf 0.13, sha2 0.11, ed25519-dalek 3, getrandom 0.4. Wire and signature compatibility is proven by known-answer tests.
+  - glam 0.34, toml 1.1, gpu-allocator 0.28, cpal 0.18, criterion 0.8.
+  - GitHub Actions bumped to their current majors.
+
+### Client
+- Audio fixes:
+  - Tones play to completion across device buffers.
+  - Voices mix instead of queueing.
+  - The audio callback no longer allocates.
+  - Only the stream for the device's sample format is opened.
+
+### Content
+- The built-in content's manifest version is now `BUILTIN_CONTENT_VERSION` ("0.3.0") instead of the crate version. Engine releases no longer change the default content hash, so existing default-content replays stay valid.
+
+### Tooling
+- `just bench-baseline` / `bench-compare` now pass criterion flags only to bench targets.
+- The docs consistency check also covers CLAUDE.md and docs/agents.md.
+
 ## [0.3.0] — 2026-10-20
 
 Preview release after the 2026-10-19 audit remediation. Protocol **v36**, replay **v5**,

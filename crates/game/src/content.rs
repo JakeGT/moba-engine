@@ -31,11 +31,18 @@ pub struct ContentManifest {
     pub author: String,
 }
 
+/// Revision of the built-in content, independent of the engine version.
+///
+/// The manifest version is part of the content hash, which replays record. Tying it to the
+/// crate version made every engine release invalidate replays of unchanged built-in
+/// content. Bump this only when the built-in catalogue itself changes.
+pub const BUILTIN_CONTENT_VERSION: &str = "0.3.0";
+
 impl Default for ContentManifest {
     fn default() -> Self {
         Self {
             name: String::from("Core"),
-            version: String::from(env!("CARGO_PKG_VERSION")),
+            version: String::from(BUILTIN_CONTENT_VERSION),
             author: String::from("MOBA Engine"),
         }
     }

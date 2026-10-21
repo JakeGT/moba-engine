@@ -10,12 +10,12 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 
 | Item | Value | Source of truth |
 |---|---|---|
-| Workspace version | `0.3.0` pre-1.0 | `Cargo.toml` |
-| Wire protocol | **v36** | `crates/net/src/protocol.rs` |
+| Workspace version | `0.4.0` pre-1.0 | `Cargo.toml` |
+| Wire protocol | **v37** | `crates/net/src/protocol.rs` |
 | Replay format | **v5**, simulation logic **v7** | `crates/sim/src/replay.rs` |
 | Content | runtime TOML, hashed; signed packs optional |
 | Toolchain | Rust MSRV **1.88**, Vulkan **1.3** minimum | `Cargo.toml`, ADR-0002 | `crates/game/src/content.rs` |
-| Tests | **312 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **316 passed**, 3 ignored | `cargo test --workspace --locked` |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprint, lavapipe + validation | `.github/workflows/render-golden.yml` |
 

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["MOBA Engine contributors"]
@@ -18,18 +18,18 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates. Layering is enforced by `just layering`.
-moba-core = { path = "crates/core", version = "0.3.0" }
-moba-ecs = { path = "crates/ecs", version = "0.3.0" }
-moba-jobs = { path = "crates/jobs", version = "0.3.0" }
-moba-platform = { path = "crates/platform", version = "0.3.0" }
-moba-shaders = { path = "crates/shaders", version = "0.3.0" }
-moba-render = { path = "crates/render", version = "0.3.0" }
-moba-assets = { path = "crates/assets", version = "0.3.0" }
-moba-nav = { path = "crates/nav", version = "0.3.0" }
-moba-sim = { path = "crates/sim", version = "0.3.0" }
-moba-game = { path = "crates/game", version = "0.3.0" }
-moba-net = { path = "crates/net", version = "0.3.0" }
-moba-netsim = { path = "crates/netsim", version = "0.3.0" }
+moba-core = { path = "crates/core", version = "0.4.0" }
+moba-ecs = { path = "crates/ecs", version = "0.4.0" }
+moba-jobs = { path = "crates/jobs", version = "0.4.0" }
+moba-platform = { path = "crates/platform", version = "0.4.0" }
+moba-shaders = { path = "crates/shaders", version = "0.4.0" }
+moba-render = { path = "crates/render", version = "0.4.0" }
+moba-assets = { path = "crates/assets", version = "0.4.0" }
+moba-nav = { path = "crates/nav", version = "0.4.0" }
+moba-sim = { path = "crates/sim", version = "0.4.0" }
+moba-game = { path = "crates/game", version = "0.4.0" }
+moba-net = { path = "crates/net", version = "0.4.0" }
+moba-netsim = { path = "crates/netsim", version = "0.4.0" }
 
 # Third-party. Versions are resolved once here so every crate agrees.
 arrayvec = "0.7"
