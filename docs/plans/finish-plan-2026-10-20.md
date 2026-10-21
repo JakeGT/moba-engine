@@ -117,7 +117,9 @@ Order: **Phase 0** first (bugs and stale docs), then phases 1–5. Within a phas
 
 ### Phase 0: correctness and stale-doc fixes
 
-#### WP-0.1 [proto] Rules fields missing from the wire (#294, P1)
+#### WP-0.1 [proto] Rules fields missing from the wire (#294, P1): **DONE in PR #297**
+Protocol **v38**. Evidence: `wire_rules_parity_covers_every_hashed_field` (one mutation per hashed rules field, including every reward scalar) and `economy_override_pack_reaches_a_real_udp_client` (real UDP join against `content/economy-override.toml`). Exhaustive-destructure guards in `feed_catalogue` and `From<&GameContent> for WireCatalog`. `scripts/agent-verify.sh --full` passed; golden state hash unchanged.
+
 - **Problem:** about 10 `RulesSpec` fields are hashed but not sent; `to_content` substitutes defaults. So a pack overriding them can't be joined: the client drops the Welcome on hash mismatch.
   - Fields: `starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`, `shared_xp_percent`, `rewards`, `structure_heroes_first`, `nexus_win`, `score_limit`.
   - Code: `crates/game/src/content.rs` ~1525–1547 (feed); `crates/net/src/protocol.rs` ~1495–1504 (defaults); `client.rs` ~525 (drop).
