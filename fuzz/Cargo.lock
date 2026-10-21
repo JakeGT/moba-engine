@@ -324,14 +324,14 @@ dependencies = [
 
 [[package]]
 name = "moba-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "glam",
 ]
 
 [[package]]
 name = "moba-ecs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "moba-core",
 ]
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "moba-game"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "moba-jobs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crossbeam-deque",
  "moba-core",
@@ -367,14 +367,14 @@ dependencies = [
 
 [[package]]
 name = "moba-nav"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "moba-core",
 ]
 
 [[package]]
 name = "moba-net"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "moba-sim"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "moba-core",
  "moba-ecs",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "moba-test-support"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "poly1305"

@@ -18,7 +18,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 
 | Item | Current value | Source of truth |
 |---|---|---|
-| Workspace version | `0.3.0` | `Cargo.toml` |
+| Workspace version | `0.4.0` | `Cargo.toml` |
 | Wire protocol | **v37** | `crates/net/src/protocol.rs::PROTOCOL_VERSION` |
 | Replay format | **v5** | `crates/sim/src/replay.rs::VERSION` |
 | Simulation logic | **v7** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
