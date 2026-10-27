@@ -31,6 +31,9 @@ breaking protocol, replay or content-schema changes.
 - Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`
   (pure move; public paths, content hashes, signatures and the golden state hash are unchanged).
 - Split `moba-net`'s `protocol.rs` and `server.rs` into `protocol/` and `server/` module directories (pure move; public paths, wire format v38 and behaviour unchanged).
+- Split `crates/sim/src/sim.rs` (4,846 lines) into a `sim/` module directory (spawn, status,
+  inputs, abilities, movement, combat, deaths, items, bots, vision, hashing, tests); pure move,
+  no behaviour, API or state-hash change.
 
 ## [0.4.0] — 2026-10-21
 
