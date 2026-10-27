@@ -20,6 +20,8 @@ breaking protocol, replay or content-schema changes.
 - Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,
   performance targets, ADRs to write and art-production requirements.
 - **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
+### Determinism and balance
+- Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.
 
 ### Content and networking
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
