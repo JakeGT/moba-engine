@@ -10,7 +10,7 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 
 | Item | Value | Source of truth |
 |---|---|---|
-| Workspace version | `0.4.0` pre-1.0 | `Cargo.toml` |
+| Workspace version | `0.4.1` pre-1.0 | `Cargo.toml` |
 | Wire protocol | **v37** | `crates/net/src/protocol.rs` |
 | Replay format | **v5**, simulation logic **v7** | `crates/sim/src/replay.rs` |
 | Content | runtime TOML, hashed; signed packs optional |
