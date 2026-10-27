@@ -899,9 +899,13 @@ mod tests {
 
     #[test]
     fn flooded_match_is_capped_and_neighbours_keep_running() {
+        // Small budgets, so junk is charged even where the OS delivers only a fraction of the
+        // flood (macOS's default UDP receive buffer drops most of it).
         let template = ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             countdown_ticks: 0,
+            max_packets_per_second: 10,
+            max_total_packets_per_second: 40,
             ..ServerConfig::default()
         };
         let content = Arc::new(GameContent::default());
