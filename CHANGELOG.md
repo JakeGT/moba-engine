@@ -30,6 +30,7 @@ breaking protocol, replay or content-schema changes.
 ### Internal
 - Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`
   (pure move; public paths, content hashes, signatures and the golden state hash are unchanged).
+- Split `moba-net`'s `protocol.rs` and `server.rs` into `protocol/` and `server/` module directories (pure move; public paths, wire format v38 and behaviour unchanged).
 
 ## [0.4.0] — 2026-10-21
 

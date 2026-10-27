@@ -22,7 +22,7 @@ for f in [p for p in root.rglob('*.md') if 'target' not in p.parts]:
 def read(path):
     return (root / path).read_text(errors='ignore')
 
-protocol = re.search(r'PROTOCOL_VERSION: u8 = (\d+)', read('crates/net/src/protocol.rs')).group(1)
+protocol = re.search(r'PROTOCOL_VERSION: u8 = (\d+)', read('crates/net/src/protocol/mod.rs')).group(1)
 replay = re.search(r'(?:pub )?const VERSION: u8 = (\d+)', read('crates/sim/src/replay.rs')).group(1)
 logic = re.search(r'SIM_LOGIC_VERSION: u8 = (\d+)', read('crates/sim/src/replay.rs')).group(1)
 
