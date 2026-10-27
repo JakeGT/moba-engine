@@ -34,7 +34,12 @@ fn main() {
     let mut iterations = 0u64;
     // Build the built-in catalogue and verify it once; constructing it (or re-hashing it) per
     // iteration would dominate the run and shrink the coverage the gate actually provides.
-    let catalog = WireCatalog::from(&moba_game::GameContent::default());
+    // Visual names (v40) are set so the decoder and the hash's trailing visuals block see
+    // populated name bytes.
+    let mut content = moba_game::GameContent::default();
+    content.heroes[0].model = Some(String::from("sentinel"));
+    content.map.visuals = Some(String::from("map-lava"));
+    let catalog = WireCatalog::from(&content);
     verify_catalogue_round_trip(&catalog);
     while start.elapsed() < Duration::from_secs(seconds) {
         for _ in 0..1_000 {
@@ -45,8 +50,9 @@ fn main() {
     eprintln!("fuzz-wire: {iterations} iterations clean in {seconds}s");
 }
 
-/// One full, valid catalogue (including every hashed rules field) must round-trip exactly and
-/// keep its content hash. Mutated bytes are only required to be panic-free.
+/// One full, valid catalogue (every hashed rules field, hero model and map visuals name) must
+/// round-trip exactly and keep its content hash. Mutated bytes are only required to be
+/// panic-free.
 fn verify_catalogue_round_trip(catalog: &WireCatalog) {
     let content_hash = catalog.content_hash().expect("default catalogue hashes");
     let mut content_update = Vec::new();

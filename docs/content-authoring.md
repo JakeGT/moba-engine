@@ -7,6 +7,7 @@ sections fall back to the engine's default pack. Example packs:
 - [`content/example-pack.toml`](../content/example-pack.toml) — items + one hero
 - [`content/ability-pack.toml`](../content/ability-pack.toml) — all 10 ability kinds
 - [`content/map-pack.toml`](../content/map-pack.toml) — one-lane map + vision wall
+- [`content/sentinel-pack.toml`](../content/sentinel-pack.toml) — `[assets]` manifest and a hero `model`
 
 Validate and inspect a pack:
 
@@ -285,7 +286,7 @@ vision_range = 14.0
 paths are supplied (empty-lobby rotation). Minion/tower combat stat blocks are exposed under
 `[rules.melee_minion]`, `[rules.ranged_minion]`, `[rules.tower]` and `[rules.nexus]`.
 
-Every hashed `[rules]` field is carried in the handshake (protocol **v38**): the economy fields
+Every hashed `[rules]` field is carried in the handshake (since protocol **v38**): the economy fields
 (`starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`,
 `shared_xp_percent`, `[rules.rewards.*]`) and the win-condition fields (`structure_heroes_first`,
 `nexus_win`, `score_limit`) reach a joining client, so its rules match the server's instead of
@@ -342,6 +343,80 @@ TOML packs can only express integer coordinates, so these rules matter mostly fo
 built in code (`MapSpec::wire_point` / `MapSpec::wire_extent` give the exact wire value).
 `NetServer::bind_with_content` validates its pack and returns `InvalidInput` for one that
 fails, and clients validate the catalogue in both the Welcome and `ContentUpdate`.
+
+## Assets
+
+A pack can name visual assets: a hero `model` and a map `visuals`. The names are declared in an
+optional `[assets]` manifest that maps each name to a file in the pack
+([`content/sentinel-pack.toml`](../content/sentinel-pack.toml) is the example):
+
+```toml
+[[assets.units]]           # hero models
+name = "knight"
+path = "models/knight.glb"
+fallback = "sentinel"      # optional; another [[assets.units]] name
+
+[[assets.units]]
+name = "sentinel"
+path = "models/sentinel.glb"
+
+[[assets.maps]]            # per-map visuals
+name = "lava"
+path = "maps/lava.glb"
+
+[[heroes]]
+name = "Knight"
+# ...stats...
+model = "knight"           # optional; omitted draws the procedural rig
+
+[map]
+theme = "stone"
+visuals = "lava"           # optional; defaults to the theme's name, e.g. "map-stone"
+# ...geometry...
+```
+
+**Names.** `model` and `visuals` are 1..=16 of `[A-Za-z0-9_-]`: names, never paths. Every
+`model` must name an `[[assets.units]]` entry and every explicit `visuals` an
+`[[assets.maps]]` entry of the same pack; the load fails otherwise. An omitted `visuals` is the
+theme's built-in name (`map-grass`, `map-stone`, `map-snow`, `map-desert`, `map-arcane`) and
+needs no entry. Writing the theme's own name explicitly is the same content (and hash) as
+omitting it, but then it must be declared. Manifest entry names are unique within each list.
+A `fallback` must name an entry in the same list, and chains may not loop or exceed 16 steps.
+
+**Paths** are relative to the pack file's directory: ASCII, no leading `/`, no `.` or `..`
+component, and no `\`, `:` (drive letters, alternate streams) or control characters, so a path
+means the same thing on every OS and can never leave the pack. `content-check` also checks
+every manifest entry's file. It must end in `.glb` (the only format the engine loads, see
+[ADR-0007](adr/0007-mesh-format.md)), exist as a regular file and not resolve outside the pack
+directory through a symlink. Unit models must also parse with the bounded loader. Entries no
+hero references are checked too. The asset count and any errors appear in both outputs:
+
+```text
+$ cargo run -p moba-tools --bin content-check -- --json content/sentinel-pack.toml
+{"file":"content/sentinel-pack.toml",...,"assets":1,...,"valid":true,"warnings":0,"errors":[]}
+```
+
+A pack that fails to load (unknown name, bad path, fallback cycle, TOML error) prints
+`{"file":...,"valid":false,"errors":["..."]}`. A pack that loads but has an unusable file
+prints the full summary with `"valid":false` and one error per file. Both exit with status 1.
+
+**What travels, and what is hashed.** Network clients never see pack files: they receive
+only the catalogue in the handshake. The `model` and `visuals` **names** are part of the
+content hash, the publisher signature and the catalogue (protocol v40), because they are part
+of the pack's identity and every client should ask for the same visual. The `[assets]`
+manifest (paths and fallbacks) is pack-local. It is not hashed, not signed and never sent, so
+moving a file inside a pack changes nothing on the wire. Packs that name no visuals hash
+exactly as before #285, so their replays and signatures stay valid.
+
+**Resolution is local and cosmetic.** A client resolves a model name against its own asset
+root (`MOBA_ASSET_ROOT`, default `content`) as `<root>/models/<name>.glb`. Lay unit files out
+as `models/<name>.glb` so the pack directory doubles as an asset root. A missing, unreadable or
+malformed file is logged once and that hero keeps the procedural rig; a missing asset never
+fails a match. Two players with different local files see different meshes and the same
+match. Visuals never affect the simulation, the state hash or server authority. The client
+override `MOBA_HERO_MODELS=hero=model,...` (dev only) replaces the catalogue's model for the
+heroes it matches. Map `visuals` are validated and carried now. Per-map rendering from them
+is #287.
 
 ## Hot reload
 

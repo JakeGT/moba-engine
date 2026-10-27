@@ -112,7 +112,14 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
     let identity_seed = parse_identity_seed()?;
     let spectator = std::env::var("MOBA_SPECTATE").is_ok_and(|value| value == "1");
     if spec == "local" {
-        let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
+        // The loopback server plays `MOBA_CONTENT` when set, like the local preview, so a
+        // pack's catalogue (hero models included) reaches the client over the real wire path.
+        let content = match std::env::var_os("MOBA_CONTENT") {
+            Some(path) => moba_game::load_content_file(Path::new(&path))
+                .map_err(|error| format!("MOBA_CONTENT load failed: {error}"))?,
+            None => moba_game::GameContent::default(),
+        };
+        let config = moba_net::ServerConfig {
             bind: "127.0.0.1:0".parse().expect("loopback address"),
             sim: SimConfig::default(),
             snapshot_interval: 1,
@@ -127,8 +134,9 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
             max_packets_per_second: 120,
             max_total_packets_per_second: 2_000,
             require_ready: false,
-        })
-        .map_err(|error| format!("local server failed: {error}"))?;
+        };
+        let mut server = moba_net::NetServer::bind_with_content(config, Arc::new(content))
+            .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
             .local_addr()
             .map_err(|error| format!("local server address: {error}"))?;

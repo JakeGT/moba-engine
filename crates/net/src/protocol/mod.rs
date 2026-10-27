@@ -33,9 +33,9 @@ pub use catalog::{
     MAX_WIRE_ABILITIES, MAX_WIRE_AREA_EFFECTS, MAX_WIRE_EFFECTS, MAX_WIRE_HEROES, MAX_WIRE_ITEMS,
     MAX_WIRE_LANE_POINTS, MAX_WIRE_LANES, MAX_WIRE_MODIFIERS, MAX_WIRE_STRUCTURES, MAX_WIRE_WALLS,
     WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME, WIRE_LANE_NAME, WIRE_MANIFEST_FIELD,
-    WIRE_MODIFIER_NAME, WireAbility, WireAreaEffect, WireCatalog, WireEffect, WireHero, WireItem,
-    WireLane, WireMap, WireMinionStats, WireModifier, WireRewards, WireRules, WireStructure,
-    WireStructureStats, WireUnitRewards, WireWall,
+    WIRE_MODIFIER_NAME, WIRE_VISUAL_NAME, WireAbility, WireAreaEffect, WireCatalog, WireEffect,
+    WireHero, WireItem, WireLane, WireMap, WireMinionStats, WireModifier, WireRewards, WireRules,
+    WireStructure, WireStructureStats, WireUnitRewards, WireWall,
 };
 pub use catalog_codec::{decode_content_update, encode_content_update};
 pub use handshake::{Hello, Welcome, decode_hello, decode_welcome, encode_hello, encode_welcome};
@@ -53,7 +53,7 @@ pub use snapshot_codec::{decode_snapshot, encode_snapshot};
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 38;
+pub const PROTOCOL_VERSION: u8 = 40;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.

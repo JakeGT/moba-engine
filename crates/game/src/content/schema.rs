@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::DEFAULT_MAP_EXTENT;
 
-use super::{MinionStatsSpec, RewardsSpec, RulesSpec, StructureStatsSpec};
+use super::{AssetManifest, MinionStatsSpec, RewardsSpec, RulesSpec, StructureStatsSpec};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +43,9 @@ pub(super) struct ContentFile {
     pub(super) modifiers: Option<Vec<ModifierEntry>>,
     pub(super) rules: Option<RulesEntry>,
     pub(super) map: Option<MapEntry>,
+    /// Optional `[assets]` manifest (`[[assets.units]]`, `[[assets.maps]]`), the same shape
+    /// as a standalone `moba_assets::AssetManifest`.
+    pub(super) assets: Option<AssetManifest>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -295,6 +298,9 @@ pub(super) struct MapEntry {
     pub(super) structures: Vec<StructureEntry>,
     #[serde(default)]
     pub(super) walls: Vec<WallEntry>,
+    /// Visuals name in `[[assets.maps]]`; defaults to the theme's `asset_name()`.
+    #[serde(default)]
+    pub(super) visuals: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -429,4 +435,7 @@ pub(super) struct HeroEntry {
     pub(super) attack_damage_per_level: Option<i32>,
     pub(super) armor_per_level: Option<i32>,
     pub(super) magic_resist_per_level: Option<i32>,
+    /// Model name in `[[assets.units]]`; omitted draws the procedural rig.
+    #[serde(default)]
+    pub(super) model: Option<String>,
 }

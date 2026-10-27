@@ -4,8 +4,8 @@ use super::WireError;
 use super::bytes::{Reader, put_u32};
 use super::catalog::{
     MAX_WIRE_AREA_EFFECTS, MAX_WIRE_EFFECTS, WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME,
-    WIRE_LANE_NAME, WIRE_MANIFEST_FIELD, WIRE_MODIFIER_NAME, WireCatalog, WireMinionStats,
-    WireRewards, WireRules, WireStructureStats, WireUnitRewards,
+    WIRE_LANE_NAME, WIRE_MANIFEST_FIELD, WIRE_MODIFIER_NAME, WIRE_VISUAL_NAME, WireCatalog,
+    WireMinionStats, WireRewards, WireRules, WireStructureStats, WireUnitRewards,
 };
 
 #[allow(clippy::too_many_lines)] // Wire field order mirrors `decode_catalog`.
@@ -82,6 +82,8 @@ pub(super) fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         ] {
             out.extend_from_slice(&value.to_le_bytes());
         }
+        out.extend_from_slice(&hero.model);
+        out.push(hero.model_len);
     }
     out.push(catalog.ability_count);
     for ability in &catalog.abilities {
@@ -196,6 +198,8 @@ pub(super) fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
     out.extend_from_slice(&map.name);
     out.push(map.name_len);
     out.push(map.theme);
+    out.extend_from_slice(&map.visuals);
+    out.push(map.visuals_len);
     out.extend_from_slice(&map.extent.to_le_bytes());
     out.push(map.lane_count);
     for lane in &map.lanes {
@@ -280,6 +284,8 @@ pub(super) fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, Wir
         hero.attack_damage_per_level = reader.i32()?;
         hero.armor_per_level = reader.i32()?;
         hero.magic_resist_per_level = reader.i32()?;
+        hero.model.copy_from_slice(reader.bytes(WIRE_VISUAL_NAME)?);
+        hero.model_len = reader.u8()?;
     }
     catalog.ability_count = reader.u8()?;
     for ability in &mut catalog.abilities {
@@ -412,6 +418,8 @@ pub(super) fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, Wir
     map.name.copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);
     map.name_len = reader.u8()?;
     map.theme = reader.u8()?;
+    map.visuals.copy_from_slice(reader.bytes(WIRE_VISUAL_NAME)?);
+    map.visuals_len = reader.u8()?;
     map.extent = reader.u16()?;
     map.lane_count = reader.u8()?;
     for lane in &mut map.lanes {

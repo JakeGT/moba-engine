@@ -1,6 +1,6 @@
 # Ability composition (#38 phase 2b)
 
-Status: complete (protocol v15+; current protocol v38 / sim logic v7).
+Status: complete (protocol v15+; current protocol v40 / sim logic v7).
 
 ## Model
 

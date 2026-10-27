@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{AreaEffect, AreaEffectList, Effect, EffectList, Targeting};
 
-use super::{GameContent, RewardsSpec, RulesSpec, UnitRewardsSpec};
+use super::{GameContent, HeroSpec, MapSpec, RewardsSpec, RulesSpec, UnitRewardsSpec};
 
 fn hash_area_effects(feed: &mut dyn FnMut(&[u8]), effects: &AreaEffectList) {
     feed(&[u8::try_from(effects.iter().count()).unwrap_or(u8::MAX)]);
@@ -192,33 +192,54 @@ impl GameContent {
         }
         len(feed, self.heroes.len());
         for hero in &self.heroes {
-            string(feed, &hero.name);
+            // Structural guard: no `..`, so a new `HeroSpec` field fails to compile here until
+            // it is hashed (and carried on the wire; see the hero parity test in `moba-net`).
+            let HeroSpec {
+                name,
+                max_health,
+                max_mana,
+                health_regen_per_tick,
+                mana_regen_per_tick,
+                attack_damage,
+                attack_range,
+                attack_interval_ticks,
+                move_speed_per_sec,
+                armor,
+                magic_resist,
+                vision_range,
+                abilities,
+                health_per_level,
+                mana_per_level,
+                attack_damage_per_level,
+                armor_per_level,
+                magic_resist_per_level,
+                // Hashed in the trailing visuals block below, so packs without visuals keep
+                // their pre-#285 hash.
+                model: _,
+            } = hero;
+            string(feed, name);
             for value in [
-                hero.max_health as u32,
-                hero.max_mana as u32,
-                hero.health_regen_per_tick as u32,
-                hero.mana_regen_per_tick as u32,
-                hero.attack_damage as u32,
-                hero.attack_interval_ticks,
-                hero.armor as u32,
-                hero.magic_resist as u32,
+                *max_health as u32,
+                *max_mana as u32,
+                *health_regen_per_tick as u32,
+                *mana_regen_per_tick as u32,
+                *attack_damage as u32,
+                *attack_interval_ticks,
+                *armor as u32,
+                *magic_resist as u32,
             ] {
                 feed(&value.to_le_bytes());
             }
-            for value in [
-                hero.attack_range,
-                hero.move_speed_per_sec,
-                hero.vision_range,
-            ] {
+            for value in [attack_range, move_speed_per_sec, vision_range] {
                 feed(&value.to_bits().to_le_bytes());
             }
-            feed(&hero.abilities);
+            feed(abilities);
             for value in [
-                hero.health_per_level as u32,
-                hero.mana_per_level as u32,
-                hero.attack_damage_per_level as u32,
-                hero.armor_per_level as u32,
-                hero.magic_resist_per_level as u32,
+                *health_per_level as u32,
+                *mana_per_level as u32,
+                *attack_damage_per_level as u32,
+                *armor_per_level as u32,
+                *magic_resist_per_level as u32,
             ] {
                 feed(&value.to_le_bytes());
             }
@@ -359,6 +380,38 @@ impl GameContent {
                 feed(&point.x.to_bits().to_le_bytes());
                 feed(&point.y.to_bits().to_le_bytes());
             }
+        }
+        // Structural guard for the map: every other field is fed above.
+        let MapSpec {
+            name: _,
+            theme: _,
+            extent: _,
+            lanes: _,
+            structures: _,
+            walls: _,
+            blue_spawn: _,
+            red_spawn: _,
+            visuals: map_visuals,
+        } = &self.map;
+        // Visual asset names (#285). Presentation only, but part of the pack's identity, so
+        // they are hashed and signed. The block is appended **only when a name is set**, so
+        // every pack, replay and signature from before #285 keeps its exact bytes. Everything
+        // before it is length-prefixed, so the trailing block cannot collide with another
+        // pack's feed.
+        if map_visuals.is_some() || self.heroes.iter().any(|hero| hero.model.is_some()) {
+            let optional = |feed: &mut dyn FnMut(&[u8]), value: Option<&str>| match value {
+                None => feed(&[0]),
+                Some(value) => {
+                    feed(&[1]);
+                    string(feed, value);
+                }
+            };
+            string(feed, "visuals");
+            len(feed, self.heroes.len());
+            for hero in &self.heroes {
+                optional(&mut *feed, hero.model.as_deref());
+            }
+            optional(&mut *feed, map_visuals.as_deref());
         }
     }
 

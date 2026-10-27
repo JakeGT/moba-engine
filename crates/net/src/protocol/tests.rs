@@ -267,10 +267,206 @@ fn wire_catalogue_round_trips_fully_nondefault_content() {
     content.map.name = String::from("Parity Map");
     content.map.theme = moba_game::MapTheme::Arcane;
     content.map.extent = moba_core::Fix::from_i32(200);
+    content.heroes[0].model = Some(String::from("knight"));
+    content.map.visuals = Some(String::from("lava-rock"));
     let wire = WireCatalog::from(&content);
     let decoded = wire.to_content().expect("round trip");
     assert_eq!(decoded, content);
     assert_eq!(decoded.hash(), content.hash());
+}
+
+/// Asserts a mutated catalogue is valid, changes the hash, and crosses the wire losslessly.
+fn assert_visual_parity(name: &str, content: &GameContent, base: &GameContent) {
+    assert_eq!(content.validate(), Ok(()), "{name}: must stay valid");
+    assert_ne!(content.hash(), base.hash(), "{name}: must change the hash");
+    let wire = WireCatalog::from(content);
+    assert_eq!(
+        wire.content_hash().expect("wire hash"),
+        content.hash(),
+        "{name}: hashed hero/visual field is not carried on the wire"
+    );
+    let decoded = wire.to_content().expect("content");
+    assert_eq!(decoded.heroes, content.heroes, "{name}: heroes differ");
+    assert_eq!(decoded.map, content.map, "{name}: map differs");
+    let mut bytes = Vec::new();
+    encode_catalog(&wire, &mut bytes);
+    let mut reader = Reader::new(&bytes);
+    assert_eq!(
+        decode_catalog(&mut reader).expect("decode catalogue"),
+        wire,
+        "{name}: encode/decode round trip"
+    );
+    assert_eq!(reader.remaining(), 0, "{name}: trailing bytes");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One mutation per hashed hero field.
+fn wire_hero_parity_covers_every_hashed_field() {
+    use moba_game::{HeroSpec, MAX_CONTENT_HEROES, MAX_VISUAL_NAME};
+    type Mutation = (&'static str, Box<dyn Fn(&mut HeroSpec)>);
+    let base = GameContent::default();
+    // Exhaustive destructure with no `..`: adding a `HeroSpec` field fails to compile here
+    // until a mutation for it is added below (#285 added `model`).
+    let HeroSpec {
+        name: _,
+        max_health: _,
+        max_mana: _,
+        health_regen_per_tick: _,
+        mana_regen_per_tick: _,
+        attack_damage: _,
+        attack_range: _,
+        attack_interval_ticks: _,
+        move_speed_per_sec: _,
+        armor: _,
+        magic_resist: _,
+        vision_range: _,
+        abilities: _,
+        health_per_level: _,
+        mana_per_level: _,
+        attack_damage_per_level: _,
+        armor_per_level: _,
+        magic_resist_per_level: _,
+        model: _,
+    } = &base.heroes[0];
+    assert_eq!(
+        base.heroes.iter().find_map(|hero| hero.model.as_ref()),
+        None
+    );
+    // Each mutation is relative to the hero it is applied to, so it always changes it.
+    let mutations: Vec<Mutation> = vec![
+        ("name", Box::new(|hero| hero.name.push('X'))),
+        ("max_health", Box::new(|hero| hero.max_health += 1)),
+        ("max_mana", Box::new(|hero| hero.max_mana += 1)),
+        (
+            "health_regen_per_tick",
+            Box::new(|hero| hero.health_regen_per_tick += 1),
+        ),
+        (
+            "mana_regen_per_tick",
+            Box::new(|hero| hero.mana_regen_per_tick += 1),
+        ),
+        ("attack_damage", Box::new(|hero| hero.attack_damage += 1)),
+        (
+            "attack_range",
+            Box::new(|hero| hero.attack_range += Fix::ONE),
+        ),
+        (
+            "attack_interval_ticks",
+            Box::new(|hero| hero.attack_interval_ticks += 1),
+        ),
+        (
+            "move_speed_per_sec",
+            Box::new(|hero| hero.move_speed_per_sec += Fix::ONE),
+        ),
+        ("armor", Box::new(|hero| hero.armor += 1)),
+        ("magic_resist", Box::new(|hero| hero.magic_resist += 1)),
+        (
+            "vision_range",
+            Box::new(|hero| hero.vision_range += Fix::ONE),
+        ),
+        ("abilities", Box::new(|hero| hero.abilities.swap(0, 1))),
+        (
+            "health_per_level",
+            Box::new(|hero| hero.health_per_level += 1),
+        ),
+        ("mana_per_level", Box::new(|hero| hero.mana_per_level += 1)),
+        (
+            "attack_damage_per_level",
+            Box::new(|hero| hero.attack_damage_per_level += 1),
+        ),
+        (
+            "armor_per_level",
+            Box::new(|hero| hero.armor_per_level += 1),
+        ),
+        (
+            "magic_resist_per_level",
+            Box::new(|hero| hero.magic_resist_per_level += 1),
+        ),
+        (
+            "model",
+            Box::new(|hero| hero.model = Some(String::from("knight"))),
+        ),
+    ];
+    let last = base.heroes.len() - 1;
+    for (field, mutate) in &mutations {
+        for index in [0, last] {
+            let mut content = base.clone();
+            mutate(&mut content.heroes[index]);
+            assert_visual_parity(&format!("heroes[{index}].{field}"), &content, &base);
+        }
+    }
+
+    // Which hero has which name matters, not only whether any name is set.
+    let mut modelled = base.clone();
+    modelled.heroes[0].model = Some(String::from("knight"));
+    let mut renamed = modelled.clone();
+    renamed.heroes[0].model = Some(String::from("sentinel"));
+    assert_visual_parity("renamed model", &renamed, &modelled);
+    let mut moved = modelled.clone();
+    moved.heroes[0].model = None;
+    moved.heroes[last].model = Some(String::from("knight"));
+    assert_visual_parity("moved model", &moved, &modelled);
+
+    // Visual names at capacity, on every wire hero slot, plus an explicit map visuals name.
+    let mut content = base.clone();
+    let hero = content.heroes[0].clone();
+    content.heroes.resize(MAX_CONTENT_HEROES, hero);
+    for (index, hero) in content.heroes.iter_mut().enumerate() {
+        hero.name = format!("Hero{index}");
+        let digit = char::from(b'a' + u8::try_from(index).expect("small"));
+        hero.model = Some(std::iter::repeat_n(digit, MAX_VISUAL_NAME).collect());
+    }
+    content.map.visuals = Some("m".repeat(MAX_VISUAL_NAME));
+    assert_visual_parity("visual names at capacity", &content, &base);
+    let mut map_only = base.clone();
+    map_only.map.visuals = Some(String::from("lava_rock-2"));
+    assert_visual_parity("map.visuals", &map_only, &base);
+    let mut map_renamed = map_only.clone();
+    map_renamed.map.visuals = Some(String::from("ice"));
+    assert_visual_parity("map.visuals renamed", &map_renamed, &map_only);
+}
+
+#[test]
+fn wire_visual_names_are_validated_by_the_client() {
+    let mut content = GameContent::default();
+    content.heroes[0].model = Some(String::from("knight"));
+    content.map.visuals = Some(String::from("lava"));
+    let wire = WireCatalog::from(&content);
+    assert_eq!(wire.heroes[0].model_str(), Some("knight"));
+    assert_eq!(wire.heroes[1].model_str(), None);
+    assert_eq!(wire.map.visuals_str(), Some("lava"));
+
+    // A hostile server can put path-like bytes on the wire; `to_content` carries them and
+    // the client's `validate` (run on every catalogue it receives) rejects them, so a name
+    // can never escape the client's asset root.
+    for bad in [&b"../etc/passwd"[..], b"a/b", b"c:x", b"x.glb", b"a\\b"] {
+        let mut hostile = wire;
+        hostile.heroes[0].model = [0; WIRE_VISUAL_NAME];
+        hostile.heroes[0].model[..bad.len()].copy_from_slice(bad);
+        hostile.heroes[0].model_len = u8::try_from(bad.len()).expect("short");
+        let decoded = hostile.to_content().expect("structurally valid");
+        assert_eq!(
+            decoded.validate(),
+            Err(moba_game::ContentError::BadVisualName("heroes.model")),
+            "{bad:?}"
+        );
+        let mut hostile = wire;
+        hostile.map.visuals = [0; WIRE_VISUAL_NAME];
+        hostile.map.visuals[..bad.len()].copy_from_slice(bad);
+        hostile.map.visuals_len = u8::try_from(bad.len()).expect("short");
+        assert_eq!(
+            hostile.to_content().expect("structurally valid").validate(),
+            Err(moba_game::ContentError::BadVisualName("map.visuals")),
+            "{bad:?}"
+        );
+    }
+    // Over-long lengths and invalid UTF-8 are structural errors.
+    let mut hostile = wire;
+    hostile.heroes[0].model_len = u8::try_from(WIRE_VISUAL_NAME + 1).expect("small");
+    assert_eq!(hostile.to_content(), Err(WireError::BadValue));
+    let mut hostile = wire;
+    hostile.map.visuals[0] = 0xFF;
+    assert_eq!(hostile.to_content(), Err(WireError::BadValue));
 }
 
 #[test]
@@ -577,6 +773,8 @@ fn wire_map_parity_covers_every_coordinate_kind() {
         walls,
         blue_spawn: _,
         red_spawn: _,
+        // A name, not geometry: covered by `wire_hero_parity_covers_every_hashed_field`.
+        visuals: _,
     } = &base.map;
     let LaneSpec { name: _, path: _ } = &lanes[0];
     let StructureSpec {
