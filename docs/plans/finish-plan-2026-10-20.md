@@ -52,6 +52,8 @@ The repo-wide rules in [AGENTS.md](../../AGENTS.md) and the runbook [docs/agents
 - **#21:** crates.io publication will be done by hand by the maintainer.
 - **Security:** security fixes are merged and advisories published. WP-6.4 is done.
 - **Playtest:** the M6 playtest (WP-5.2) waits until phases 3–4 are complete.
+- **Merging (2026-10-27):** the orchestrating agent may squash-merge a PR once every required CI check is green and its review pass (§3) found nothing blocking. This supersedes rule 1.2 for the orchestrator only; implementing agents still stop at `ready-for-review`. Protocol numbers are taken in merge order (next free after v38 is v39) and recorded in the PR and CHANGELOG, superseding rule 1.4's per-bump ask.
+- **PR #297 (WP-0.1) merged 2026-10-27**; `main` is protocol **v38**.
 
 **Milestone exit criteria still open:**
 
@@ -135,7 +137,7 @@ Protocol **v38**. Evidence: `wire_rules_parity_covers_every_hashed_field` (one m
 - **Reviewers:** netcode-reviewer.
 - **Pitfall:** `MAX_DATAGRAM`/Welcome size. Check that the Welcome still fragments correctly, since it already fragments.
 
-#### WP-0.2 Stale docs (no code)
+#### WP-0.2 Stale docs (no code): **DONE 2026-10-27** except the `0008-balance.md` item, which ships with WP-2.3
 - README "Server hardening" says rate limiting happens "before decoding". The code limits **after** `recv` → header decode → AEAD open → reassembly (`crates/net/src/server/ingress.rs` `poll`, `transport.rs` `recv`). Correct the wording, and note that WP-1.2 changes this.
 - `.claude/agents/gpu-safety-reviewer.md` still says "Vulkan 1.2 + descriptor indexing". Change it to Vulkan 1.3 core with dynamic rendering and sync2 (ADR-0002).
 - `docs/dev/software-vulkan.md` ~84 says the golden workflow sets `MOBA_IGNORE_KNOWN_PRESENT_HAZARD=1`. No workflow or code reads it (grep on 2026-10-21). Remove the claim, or re-validate the hazard under lavapipe and document the result.
