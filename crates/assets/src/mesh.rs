@@ -1,7 +1,9 @@
 //! Validated CPU-side static meshes.
 //!
 //! [`MeshData`] is the hand-off type between asset loaders and the renderer. Its invariants
-//! are checked once, at construction, so the renderer can upload it without re-validating:
+//! are checked once, at construction. The renderer's indexed draws depend on them for memory
+//! safety (it also re-checks index ranges at registration), so never add a constructor,
+//! `Default`, `Deserialize` or mutable accessor that bypasses [`MeshData::new`]:
 //!
 //! - at least one triangle, at most [`MeshData::MAX_VERTICES`] vertices and
 //!   [`MeshData::MAX_INDICES`] indices;

@@ -2,3 +2,4 @@
 *.png binary
 *.ppm binary
 *.spv binary
+*.glb binary

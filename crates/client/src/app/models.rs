@@ -144,6 +144,14 @@ impl ModelLibrary {
         }
     }
 
+    /// Forgets every uploaded mesh. Call when a new renderer is created (its mesh table holds
+    /// only the cube, so cached `MeshId`s would be stale). Cached failures are kept: the same
+    /// files would fail again and were already logged.
+    pub(crate) fn renderer_recreated(&mut self) {
+        self.loaded.retain(|(_, model)| model.is_none());
+        self.heroes.clear();
+    }
+
     /// The interim name mapping, used by callers until hero specs carry model names.
     pub(crate) fn bindings(&self) -> &ModelBindings {
         &self.bindings
@@ -304,6 +312,25 @@ mod tests {
         let feet = good.normalize.transform_point3(Vec3::ZERO);
         assert!((top.y - HERO_MODEL_HEIGHT).abs() < 0.05, "{top:?}");
         assert!(feet.y.abs() < 1e-5, "{feet:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_new_renderer_reuploads_models() {
+        let root = temp_root("recreate");
+        std::fs::write(root.join("models/good.glb"), SAMPLE).expect("write sample");
+        let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
+        let mut uploads = 0u16;
+        let mut register = |_: &MeshData| {
+            uploads += 1;
+            Ok(MeshId::CUBE)
+        };
+        library.bind_heroes([Some("good"), Some("missing")], &mut register);
+        library.renderer_recreated();
+        assert_eq!(library.hero(0), None, "stale ids are dropped");
+        library.bind_heroes([Some("good"), Some("missing")], &mut register);
+        assert_eq!(uploads, 2, "the model is uploaded to the new renderer");
+        assert!(library.hero(0).is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 

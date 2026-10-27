@@ -34,8 +34,10 @@ use crate::mesh::{MeshData, MeshError};
 
 /// Largest accepted `.glb` file (16 MiB).
 pub const MAX_GLB_BYTES: usize = 16 << 20;
-/// Largest accepted JSON chunk (1 MiB). Static meshes need a few KiB.
-pub const MAX_JSON_BYTES: usize = 1 << 20;
+/// Largest accepted JSON chunk (256 KiB). Static meshes need a few KiB. The cap also bounds
+/// the parsed document: a hostile array of empty `{}` objects expands to roughly 250 bytes
+/// per 3 input bytes, so the worst case is tens of MiB, transiently, at load time.
+pub const MAX_JSON_BYTES: usize = 256 << 10;
 /// Nodes the scene walk may visit (shared subtrees count once per visit).
 const MAX_NODE_VISITS: usize = 1_024;
 /// Deepest node hierarchy accepted.
@@ -126,7 +128,9 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
 
 /// Parses a binary glTF file into one merged, validated static mesh.
 ///
-/// Never panics and never allocates more than a small multiple of the capped input size.
+/// Never panics. Allocation is bounded by the caps: the parsed JSON document (see
+/// [`MAX_JSON_BYTES`]) plus at most [`MeshData::MAX_VERTICES`] vertices and
+/// [`MeshData::MAX_INDICES`] indices.
 ///
 /// # Errors
 /// Returns a [`GlbError`] describing the first problem found.

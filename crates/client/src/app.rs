@@ -262,6 +262,8 @@ impl App for ClientApp {
         };
         match Renderer::new(window, config) {
             Ok(mut renderer) => {
+                // `on_start` may run again after a resume with a fresh mesh table.
+                self.models.renderer_recreated();
                 if let Some(network) = &self.network {
                     models::bind_hero_models(
                         &mut self.models,

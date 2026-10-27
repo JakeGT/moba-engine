@@ -40,8 +40,9 @@ content hash.
   animations and morph targets are ignored. Sparse accessors and any `extensionsRequired`
   entry (for example Draco or meshopt compression) are rejected.
 - **Untrusted-input limits** (`moba-assets`, feature `glb`):
-  - file ≤ 16 MiB (checked from metadata before reading) and JSON chunk ≤ 1 MiB, so the
-    `serde_json` heap stays a small multiple of the input;
+  - file ≤ 16 MiB (checked from metadata before reading) and JSON chunk ≤ 256 KiB. A hostile
+    chunk of empty objects still expands to tens of MiB of parsed structs, but only
+    transiently and only at load time;
   - ≤ 65,536 vertices and ≤ 393,216 indices (128 Ki triangles), checked *before* reserving;
   - node walk ≤ 1,024 visits and depth ≤ 32 (cycles fail), ≤ 4,096 primitives inspected;
   - every offset, stride (≤ 252) and count is checked arithmetic; all indices must be in

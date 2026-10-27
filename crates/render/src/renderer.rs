@@ -472,14 +472,16 @@ impl Renderer {
     /// (including the built-in cube) can be registered.
     ///
     /// # Errors
-    /// [`RenderError::TooManyMeshes`] once every slot is used, otherwise allocation or Vulkan
+    /// [`RenderError::TooManyMeshes`] once every slot is used, [`RenderError::InvalidMesh`]
+    /// if the mesh fails the renderer's own index-range check, otherwise allocation or Vulkan
     /// errors from the upload.
     pub fn register_mesh(&mut self, data: &crate::MeshData) -> RenderResult<MeshId> {
         if self.meshes.len() >= MAX_MESHES {
             return Err(RenderError::TooManyMeshes);
         }
         let id = u16::try_from(self.meshes.len()).map_err(|_| RenderError::TooManyMeshes)?;
-        let gpu = mesh::upload(&self.device, &mesh::CpuMesh::from_asset(data))?;
+        let cpu = mesh::CpuMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
+        let gpu = mesh::upload(&self.device, &cpu)?;
         self.meshes.push(gpu);
         Ok(MeshId::from_index(id))
     }
@@ -825,9 +827,8 @@ impl Renderer {
                         &[0],
                     );
                 }
-                // SAFETY: the index buffer is a 32-bit index buffer whose indices are all
-                // below the mesh's vertex count (cube by construction, assets by
-                // `MeshData` validation).
+                // SAFETY: the buffer is live, was created with INDEX_BUFFER usage and holds
+                // `u32` indices.
                 unsafe {
                     self.device.device.cmd_bind_index_buffer(
                         command_buffer,
@@ -836,7 +837,11 @@ impl Renderer {
                         vk::IndexType::UINT32,
                     );
                 }
-                // SAFETY: `mesh_starts[slot] + count <= unit_count <= max_instances`, the
+                // SAFETY: indices: `index_count == indices.len()`, so firstIndex 0 +
+                // indexCount fits the index buffer, and every index is below the vertex
+                // count (cube by construction; registered meshes re-checked in
+                // `CpuMesh::from_asset`), so no vertex fetch leaves the vertex buffer.
+                // Instances: `mesh_starts[slot] + count <= unit_count <= max_instances`, the
                 // instance buffer's element capacity, by construction in `bucket_by_mesh`.
                 unsafe {
                     self.device.device.cmd_draw_indexed(

@@ -42,6 +42,9 @@ pub enum RenderError {
     /// [`Renderer::register_mesh`](crate::Renderer::register_mesh) was called with every
     /// mesh slot in use.
     TooManyMeshes,
+    /// A mesh passed to [`Renderer::register_mesh`](crate::Renderer::register_mesh) is not a
+    /// non-empty triangle list with in-range indices.
+    InvalidMesh,
 }
 
 impl fmt::Display for RenderError {
@@ -73,6 +76,9 @@ impl fmt::Display for RenderError {
                 "mesh limit reached ({} including the built-in cube)",
                 crate::renderer::MAX_MESHES
             ),
+            Self::InvalidMesh => {
+                f.write_str("invalid mesh (empty, not triangles or index out of range)")
+            }
         }
     }
 }
