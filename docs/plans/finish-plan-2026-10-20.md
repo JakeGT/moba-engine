@@ -167,8 +167,8 @@ The tightest margin is upstream under 5 % loss: 3.6 of the 4 KB/s budget.
 
 ### Phase 2: determinism mirror and balance (#290)
 **Background (verified 2026-10-21):** an exact side-swap mirror is impossible today.
-- **Waves use point reflection, heroes use x-mirror.** `hero_spawn` is an x-mirror (red negates `dx`, `map.rs` ~100–107), but `spawn_wave` offsets formations with `direction.perpendicular()` (`sim.rs` ~1205–1217), which is a point reflection.
-- **Tie-breaks use raw entity ids.** `candidate.entity < entity` (`sim.rs` ~1845, 1852, 1911, 1917, 2120, 2850), and ids interleave after the first deaths (LIFO free list, `crates/ecs/src/entity.rs` ~93).
+- **Waves use point reflection, heroes use x-mirror.** `hero_spawn` is an x-mirror (red negates `dx`, `map.rs` ~100–107), but `spawn_wave` offsets formations with `direction.perpendicular()` (`crates/sim/src/sim/spawn.rs` ~225–235), which is a point reflection.
+- **Tie-breaks use raw entity ids.** `candidate.entity < entity` (`sim/movement.rs` ~48, 55, 114, 120; `sim/combat.rs` ~190; `sim/bots.rs` ~316), and ids interleave after the first deaths (LIFO free list, `crates/ecs/src/entity.rs` ~93).
 - **ECS iteration isn't stable within a team.** It's archetype/row order with `swap_remove` and archetype moves (`world.rs` ~140).
 - **Command and attack order flips the whole list.** `apply_inputs` and `resolve_attacks` reverse all ten slots on alternate ticks (~1474–1485, ~2025–2031).
 - **Deaths and win checks favour blue.** Deaths are processed in ECS order (~2150), and the score and nexus checks look at blue first (~2193–2235).
@@ -223,7 +223,7 @@ Then:
 
 - **Accept:** the mirror test is exact (apart from (f)) with waves on, the replay fixture and golden hash are regenerated with the reason given, and the allocation guards pass.
 - **Reviewers:** perf-reviewer, netcode-reviewer (snapshot determinism), orchestrator.
-- **Pitfall:** `MAX_UNITS` cap starvation. Waves spawn blue first (`sim.rs` ~1133), so the cap starves red. Spawn interleaved by serial, or reserve capacity per team.
+- **Pitfall:** `MAX_UNITS` cap starvation. Waves spawn blue first (`sim/spawn.rs` `spawn_wave` ~206), so the cap starves red. Spawn interleaved by serial, or reserve capacity per team.
 
 #### WP-2.3 Outcome-resolving balance sweep
 - **Fix `match-soak`** (`crates/tools/src/bin/match-soak.rs`): `unique_hashes` uses `state_hash()`, which mixes in the seed, so it proves nothing. Use `state_hash_normalized()`.
