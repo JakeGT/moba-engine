@@ -12,6 +12,10 @@ breaking protocol, replay or content-schema changes.
 - `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
 ### Build
 - Removed unused internal dependency edges (`sim`/`server`/`client` → `moba-jobs`; `server` → `moba-core`/`moba-ecs`; `client`/`game` → `moba-ecs`; `jobs` → `moba-core`). `moba-test-support` (a counting allocator) is now a dev-dependency only of `moba-net`. `cpal` and `loom` moved to workspace dependencies.
+### Documentation
+- Corrected stale claims: README rate-limit placement (applied after decode, not before), the
+  GPU reviewer's Vulkan target (1.3 core), a validation-hazard suppression variable that nothing
+  reads, and `docs/status.md` still listing the 50-match load test as open (done in #293).
 
 ### Content and networking
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
