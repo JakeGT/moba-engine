@@ -20,6 +20,10 @@ breaking protocol, replay or content-schema changes.
 - Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,
   performance targets, ADRs to write and art-production requirements.
 - **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
+### Determinism and balance
+- Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.
+### Determinism and balance
+- `match-soak` now counts `unique_hashes` with `state_hash_normalized()`, and adds `--threads N` and a `balance:` line (draws, Wilson 95 % blue win rate over decided matches, resolution-tick percentiles). A 5,000-match, 60,000-tick sweep measured blue at 44.21 % (95 % CI 42.84–45.60 %), a red bias traced to the point-reflected wave formation (`docs/perf/0008-balance.md`, #290).
 
 ### Content and networking
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
@@ -54,6 +58,28 @@ breaking protocol, replay or content-schema changes.
 - Split `crates/sim/src/sim.rs` (4,846 lines) into a `sim/` module directory (spawn, status,
   inputs, abilities, movement, combat, deaths, items, bots, vision, hashing, tests); pure move,
   no behaviour, API or state-hash change.
+
+### Documentation
+- Added the [playtest runbook](docs/playtest.md) (WP-5.1): hosting, tokens/identity, firewall, bots and spectators, client join variables, ~100 ms RTT with `tc netem`, replay/results/frame-log collection and a feedback form.
+
+### CI
+- Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
+
+## [0.4.1] — 2026-10-27
+
+Security patch release cut from `v0.4.0` on the `release/0.4.x` branch. Protocol **v37**, replay
+**v5**, simulation logic **v7**: wire-, replay- and content-compatible with 0.4.0, and no public
+API change. Lockfile-only dependency updates.
+
+### Security
+- `ctutils` 0.4.3 → 0.4.6 ([RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385)).
+  Before 0.4.4, `ctutils::Choice` mask generation could compile to a branch on common targets,
+  and `u128` comparisons branched on 32-bit targets, which can leak secret values through timing.
+  `ctutils` is used by the RustCrypto stack under `moba-net`: `sha2`/`hmac`/`hkdf` (per-client
+  tokens, key derivation), `curve25519-dalek`/`ed25519-dalek` (server/client identity) and
+  `poly1305`/`chacha20poly1305` (session AEAD). Also updated in `fuzz/Cargo.lock`.
+- `tokio` 1.54.0 → 1.54.1 ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384);
+  1.54.0 was yanked). Only reached through `winit`'s wasm path; native builds do not run it.
 
 ## [0.4.0] — 2026-10-21
 
