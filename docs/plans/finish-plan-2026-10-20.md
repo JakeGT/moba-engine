@@ -364,6 +364,7 @@ These are never closed with simulated or hosted-runner evidence.
 
 ### Phase 7: 1.0 release
 - **WP-7.1 Semver CI:** add `cargo-semver-checks` to CI/`release.yml` against the **git tag baseline** (`--baseline-rev v0.3.0`). This doesn't need crates.io, so it isn't blocked by #21.
+  - **Implemented** as the informational `semver (informational)` job in `ci.yml` via `scripts/semver-check.sh`. The baseline is the latest `v*` tag, now `v0.4.0`. The job isn't in `release.yml`, because a pushed tag is immutable and the verdict must be known before tagging (see `RELEASE.md` step 2).
 - **WP-7.2 API review:** go through `docs/API-STABILITY.md`'s tiers. Mark public enums and structs `#[non_exhaustive]` where the API promises extensibility, and document the 1.0 surface.
 - **WP-7.3 Release:** follow `RELEASE.md`: a final docs truth pass, CHANGELOG, `v1.0.0` tag, release artifacts (`release.yml`), and publish once WP-6.2 is resolved.
 - **Gate:** phases 0–5 done, and phase 6 resolved or explicitly waived by the maintainer **in writing on the issue**.

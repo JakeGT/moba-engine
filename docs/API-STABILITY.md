@@ -26,8 +26,18 @@ tiers make breakage predictable and reviews honest.
 
 - `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` must pass.
 - CI runs the test suite on Linux, Windows and macOS.
-- `cargo-semver-checks` is not wired into CI yet (#21); compare against `v0.3.0` before the next release. The release workflow verifies package file lists and artifacts; registry
-  publication order/policy is documented in `RELEASE.md`.
+- `cargo-semver-checks` runs in CI as the informational `semver (informational)` job
+  ([ci.yml](../.github/workflows/ci.yml), [scripts/semver-check.sh](../scripts/semver-check.sh)).
+  - It compares the Foundation, Engine and Embedding crates against the latest release tag
+    (`--baseline-rev`, currently `v0.4.0`). The baseline is a git tag, not crates.io, so it
+    works with `publish = false` (#21).
+  - It is not a required check, because pre-1.0 minors may break the API. A breaking change
+    shows up as a warning and a job summary.
+  - A "requires new major version" verdict means the next release must bump the minor
+    version (`0.X+1.0`) and list the break in `CHANGELOG.md`.
+  - Run it locally with `scripts/semver-check.sh [TAG]`.
+- The release workflow verifies package file lists and artifacts; registry publication
+  order/policy is documented in `RELEASE.md`.
 - `cargo-public-api` diffs are reviewed when preparing release notes.
 
 ## Publishing
