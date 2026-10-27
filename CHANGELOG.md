@@ -64,6 +64,22 @@ breaking protocol, replay or content-schema changes.
 ### CI
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
 
+## [0.4.1] — 2026-10-27
+
+Security patch release cut from `v0.4.0` on the `release/0.4.x` branch. Protocol **v37**, replay
+**v5**, simulation logic **v7**: wire-, replay- and content-compatible with 0.4.0, and no public
+API change. Lockfile-only dependency updates.
+
+### Security
+- `ctutils` 0.4.3 → 0.4.6 ([RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385)).
+  Before 0.4.4, `ctutils::Choice` mask generation could compile to a branch on common targets,
+  and `u128` comparisons branched on 32-bit targets, which can leak secret values through timing.
+  `ctutils` is used by the RustCrypto stack under `moba-net`: `sha2`/`hmac`/`hkdf` (per-client
+  tokens, key derivation), `curve25519-dalek`/`ed25519-dalek` (server/client identity) and
+  `poly1305`/`chacha20poly1305` (session AEAD). Also updated in `fuzz/Cargo.lock`.
+- `tokio` 1.54.0 → 1.54.1 ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384);
+  1.54.0 was yanked). Only reached through `winit`'s wasm path; native builds do not run it.
+
 ## [0.4.0] — 2026-10-21
 
 Security release. Protocol **v37** (not wire-compatible with 0.3.x), replay **v5**, simulation logic **v7**. Content hashes and replays are unchanged.
