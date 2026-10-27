@@ -186,6 +186,12 @@ clients receive a full `ContentUpdate` and atomically replace catalogue-dependen
 Optional Ed25519 attestations cover the manifest + content hash, and servers can pin the
 publisher key. Servers may rotate packs between empty-lobby matches.
 
+`moba_game::content` is split by concern: `spec.rs` (in-memory specs), `schema.rs` (serde TOML
+tables, `deny_unknown_fields`), `load.rs` (TOML → specs), `validate.rs` (range checks),
+`hash.rs` (canonical catalogue feed, FNV hash and signing message), `manifest.rs` (pack
+identity/attestation) and `error.rs`. A new content field touches `schema.rs`, `load.rs`,
+`spec.rs`, `validate.rs` and `hash.rs`; the hash feed order is a replay/signature contract.
+
 ## Handshake replay window
 
 Authenticated Hello nonces are tracked for 60 s (bounded to 2,048 entries). A repeated

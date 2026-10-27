@@ -292,7 +292,7 @@ Every hashed `[rules]` field is carried in the handshake (protocol **v38**): the
 falling back to defaults. `content/economy-override.toml` is the regression pack;
 `cargo test -p moba-net --test content` joins a real UDP client against it and compares the
 client's rules and content hash with the server's. Adding a `RulesSpec` field fails to compile
-until it is hashed (`feed_catalogue`) and carried (`impl From<&GameContent> for WireCatalog`),
+until it is hashed (`feed_catalogue` in `crates/game/src/content/hash.rs`) and carried (`impl From<&GameContent> for WireCatalog`),
 and the per-field parity test in `crates/net/src/protocol.rs` fails until the wire conversion
 round-trips it.
 

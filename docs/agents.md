@@ -13,8 +13,8 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 | Workspace version | `0.4.0` pre-1.0 | `Cargo.toml` |
 | Wire protocol | **v38** | `crates/net/src/protocol.rs` |
 | Replay format | **v5**, simulation logic **v7** | `crates/sim/src/replay.rs` |
-| Content | runtime TOML, hashed; signed packs optional |
-| Toolchain | Rust MSRV **1.88**, Vulkan **1.3** minimum | `Cargo.toml`, ADR-0002 | `crates/game/src/content.rs` |
+| Content | runtime TOML, hashed; signed packs optional | `crates/game/src/content/` |
+| Toolchain | Rust MSRV **1.88**, Vulkan **1.3** minimum | `Cargo.toml`, ADR-0002 |
 | Tests | **324 passed**, 3 ignored | `cargo test --workspace --locked` |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprint, lavapipe + validation | `.github/workflows/render-golden.yml` |
@@ -122,7 +122,8 @@ Also run:
 - **Netcode/security:** `crates/net`, `crates/netsim`, `crates/server`.
 - **GPU/unsafe:** `crates/render`, `crates/shaders`, `crates/platform`.
 - **Client/HUD/audio/settings:** `crates/client`, `crates/platform`.
-- **Content:** `crates/game/src/content.rs`, `content/`, `docs/content-authoring.md`.
+- **Content:** `crates/game/src/content/` (`schema.rs` TOML schema, `validate.rs`, `hash.rs`
+  canonical feed), `content/`, `docs/content-authoring.md`.
 - **Tools/CI:** `crates/tools`, `.github/workflows`, `fuzz/`, `scripts/`.
 
 Run the matching `.claude/agents/*-reviewer.md` prompt before merging risky changes.

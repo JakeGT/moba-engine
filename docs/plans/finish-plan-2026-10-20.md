@@ -122,7 +122,7 @@ Protocol **v38**. Evidence: `wire_rules_parity_covers_every_hashed_field` (one m
 
 - **Problem:** about 10 `RulesSpec` fields are hashed but not sent; `to_content` substitutes defaults. So a pack overriding them can't be joined: the client drops the Welcome on hash mismatch.
   - Fields: `starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`, `shared_xp_percent`, `rewards`, `structure_heroes_first`, `nexus_win`, `score_limit`.
-  - Code: `crates/game/src/content.rs` ~1525–1547 (feed); `crates/net/src/protocol.rs` ~1495–1504 (defaults); `client.rs` ~525 (drop).
+  - Code: `crates/game/src/content/hash.rs` `feed_catalogue` rules destructure (feed; was `content.rs` ~1525–1547 before the module split); `crates/net/src/protocol.rs` ~1495–1504 (defaults); `client.rs` ~525 (drop).
   - Reproduced on `e31fee4` with a probe that sets `starting_gold += 100`.
 - **Do:**
   1. Add the fields to `WireRules`, covering encode/decode/`From<&GameContent>`/`to_content`, with the same bounds `validate()` enforces.
@@ -239,7 +239,7 @@ Then:
 
 #### WP-3.1 [proto] Packs reference assets; content-check validates them (#285)
 - **Schema:**
-  - Optional `[assets]` in `ContentFile` (`content.rs` ~1660, `deny_unknown_fields`), with the same shape as `AssetManifest`.
+  - Optional `[assets]` in `ContentFile` (`crates/game/src/content/schema.rs`, `deny_unknown_fields`), with the same shape as `AssetManifest`.
   - `HeroEntry.model: Option<String>` (≤ 16 ASCII), stored in `HeroSpec`.
   - `MapEntry.visuals: Option<String>`, defaulting to `theme.asset_name()`.
   - `moba-game` depends on `moba-assets`.
