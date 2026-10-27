@@ -51,6 +51,17 @@ pub(crate) fn parse_demo_move() -> Option<FixVec2> {
     ))
 }
 
+/// Player-camera orbit distance: `MOBA_CAMERA_DISTANCE` metres (clamped to 8–120) or 46.
+///
+/// Read once at startup (close-up captures of hero models), never per frame.
+pub(crate) fn parse_follow_distance() -> f32 {
+    std::env::var("MOBA_CAMERA_DISTANCE")
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map_or(46.0, |value| value.clamp(8.0, 120.0))
+}
+
 /// Parses an optional 32-byte hex value from an environment variable.
 ///
 /// Fails closed: a variable that is set but malformed is an error, never silently ignored,

@@ -62,20 +62,56 @@ impl Camera {
     }
 }
 
-/// One drawable unit: a model matrix and a team colour.
+/// Handle to a mesh owned by the renderer.
+///
+/// [`MeshId::CUBE`] (id 0) is the built-in unit cube used by every procedural shape. Other
+/// ids come from [`Renderer::register_mesh`](crate::Renderer::register_mesh) and stay valid
+/// for the renderer's lifetime. An id the renderer does not know draws as the cube.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MeshId(u16);
+
+impl MeshId {
+    /// The built-in unit cube.
+    pub const CUBE: Self = Self(0);
+
+    pub(crate) const fn from_index(index: u16) -> Self {
+        Self(index)
+    }
+
+    /// Slot index inside the renderer's mesh table.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// One drawable unit: a model matrix, a colour and the mesh to draw.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnitInstance {
     /// Model-to-world transform.
     pub transform: Mat4,
     /// Linear-space RGBA colour.
     pub color: Vec4,
+    /// Mesh drawn for this instance ([`MeshId::CUBE`] by default).
+    pub mesh: MeshId,
 }
 
 impl UnitInstance {
-    /// Creates an instance from a transform and colour.
+    /// Creates a cube instance from a transform and colour.
     #[must_use]
     pub const fn new(transform: Mat4, color: Vec4) -> Self {
-        Self { transform, color }
+        Self {
+            transform,
+            color,
+            mesh: MeshId::CUBE,
+        }
+    }
+
+    /// Returns this instance drawn with `mesh` instead.
+    #[must_use]
+    pub const fn with_mesh(mut self, mesh: MeshId) -> Self {
+        self.mesh = mesh;
+        self
     }
 
     /// Convenience constructor for an upright unit placed on the ground plane.
@@ -88,6 +124,7 @@ impl UnitInstance {
                 position + Vec3::Y * (height * 0.5),
             ),
             color,
+            mesh: MeshId::CUBE,
         }
     }
 }

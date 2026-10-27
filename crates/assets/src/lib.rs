@@ -1,14 +1,25 @@
-//! Validated asset manifests and fallback resolution.
+//! Validated asset manifests, fallback resolution and static meshes.
 //!
 //! Asset paths are relative, ASCII and must stay inside the pack. A missing named asset
 //! resolves through its declared fallback chain; the renderer can then use a procedural
 //! placeholder instead of failing a match.
+//!
+//! [`MeshData`] is the validated hand-off type between loaders and the renderer. The `glb`
+//! feature adds [`load_glb`], a bounded binary-glTF loader for untrusted files (ADR-0007).
 
 #![forbid(unsafe_code)]
+
+#[cfg(feature = "glb")]
+mod glb;
+mod mesh;
 
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+
+#[cfg(feature = "glb")]
+pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
+pub use mesh::{MeshData, MeshError};
 
 /// One asset entry.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

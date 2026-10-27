@@ -23,3 +23,4 @@ moba-game.workspace = true
 moba-net.workspace = true
 moba-netsim.workspace = true
 moba-render.workspace = true
+moba-assets = { workspace = true, features = ["glb"] }

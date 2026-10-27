@@ -52,7 +52,7 @@ crates/game       defaults + runtime content, abilities, items, map, mitigation,
 crates/sim        deterministic simulation, status effects, bots, replay
 crates/net        UDP transport, protocol, crypto, snapshots, prediction, server/client
 crates/netsim     lossy-link conditioner
-crates/assets     asset/model extension point (real assets remain future work)
+crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader (ADR-0007)
 crates/render     ash/Vulkan renderer, terrain/fog, UI atlas, animated rig
 crates/shaders    GLSL -> SPIR-V build
 crates/platform   winit window/input/fixed step

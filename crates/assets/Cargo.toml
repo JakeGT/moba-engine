@@ -1,6 +1,6 @@
 [package]
 name = "moba-assets"
-description = "Asset baking scaffolding; the content pipeline lands in M8."
+description = "Asset manifests, fallback resolution and the bounded .glb mesh loader."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,3 +20,9 @@ workspace = true
 moba-core.workspace = true
 serde.workspace = true
 toml.workspace = true
+gltf = { workspace = true, optional = true }
+
+[features]
+default = []
+# Bounded binary glTF (.glb) static-mesh loader (ADR-0007).
+glb = ["dep:gltf"]
