@@ -188,7 +188,7 @@ fn validate_map(map: &MapSpec) -> Result<(), ContentError> {
         return Err(ContentError::BadMapData);
     }
     // Counts the wire catalogue would otherwise silently truncate. An empty lane path is
-    // rejected too: lane walkers index the first and last waypoint.
+    // rejected too: `LaneSpec::point` (wave spawning, lane walkers) underflows on it.
     if lanes.len() > MAX_CONTENT_LANES
         || structures.len() > MAX_CONTENT_STRUCTURES
         || lanes
