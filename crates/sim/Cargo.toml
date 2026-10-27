@@ -20,7 +20,6 @@ workspace = true
 moba-core.workspace = true
 moba-ecs.workspace = true
 moba-game.workspace = true
-moba-jobs.workspace = true
 moba-nav.workspace = true
 
 [dev-dependencies]

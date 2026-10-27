@@ -109,7 +109,10 @@ content, replay and secret/identity paths.
 ### Server hardening
 
 The dedicated server enforces a per-address UDP budget (default 120 packets/s, burst 120)
-before decoding; raise/lower with `--max-pps N` or disable with `0`. Ctrl-C/SIGINT requests a graceful shutdown and flushes an in-progress replay.
+on each decoded message; raise/lower with `--max-pps N` or disable with `0`. The budget is
+applied in `NetServer::poll` *after* `UdpTransport::recv` has decoded the header, opened any
+AEAD payload and reassembled fragments, so datagrams that fail to decode are dropped without
+being charged to the sender's budget (moving the check ahead of decode is tracked in #292). Ctrl-C/SIGINT requests a graceful shutdown and flushes an in-progress replay.
 `--results-log matches.jsonl` appends one JSON record per completed match (seed, ticks,
 score, content/state hashes and replay path). A global budget (`--max-total-pps`, default
 2000) caps distributed/spoofed-source floods. It

@@ -1184,9 +1184,7 @@ dependencies = [
  "crossbeam-queue",
  "moba-assets",
  "moba-core",
- "moba-ecs",
  "moba-game",
- "moba-jobs",
  "moba-net",
  "moba-platform",
  "moba-render",
@@ -1229,7 +1227,6 @@ name = "moba-game"
 version = "0.4.0"
 dependencies = [
  "moba-core",
- "moba-ecs",
  "serde",
  "sha2",
  "toml",
@@ -1241,7 +1238,6 @@ version = "0.4.0"
 dependencies = [
  "crossbeam-deque",
  "loom",
- "moba-core",
 ]
 
 [[package]]
@@ -1305,10 +1301,7 @@ name = "moba-server"
 version = "0.4.0"
 dependencies = [
  "ctrlc",
- "moba-core",
- "moba-ecs",
  "moba-game",
- "moba-jobs",
  "moba-net",
  "moba-sim",
  "serde",
@@ -1327,7 +1320,6 @@ dependencies = [
  "moba-core",
  "moba-ecs",
  "moba-game",
- "moba-jobs",
  "moba-nav",
 ]
 

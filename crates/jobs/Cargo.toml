@@ -17,8 +17,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-moba-core.workspace = true
 crossbeam-deque.workspace = true
 
 [dev-dependencies]
-loom = "0.7"
+loom.workspace = true
