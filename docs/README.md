@@ -7,6 +7,10 @@
 - [Content authoring](content-authoring.md) — runtime TOML packs for items, heroes, abilities,
   maps, vision walls and the determinism checklist.
 - [API stability](API-STABILITY.md) — pre-1.0 tiers, breakage rules and publishing policy.
+- [Finish plan](plans/finish-plan-2026-10-20.md) — current work packages, review protocol and
+  maintainer decisions for the remaining milestones.
+- [AAA graphics roadmap](plans/aaa-graphics-roadmap.md) — proposal: phases R0–R8 from the
+  preview renderer to AAA-quality, readable, scalable MOBA visuals, plus art-production needs.
 - [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — completed
   security-first remediation; post-1.0 asset/skinning work is in #276.
 - [First audit remediation plan](plans/audit-remediation-2026-10.md) — the W0–W5 train that
