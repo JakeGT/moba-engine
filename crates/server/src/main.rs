@@ -495,11 +495,17 @@ fn main() {
         }
         simulation.clear_events();
 
-        if let Some(winner) = simulation.outcome() {
-            eprintln!(
-                "match over at tick {}: {winner:?} wins",
-                simulation.current_tick().get()
-            );
+        if let Some(outcome) = simulation.outcome() {
+            match outcome.winner() {
+                Some(winner) => eprintln!(
+                    "match over at tick {}: {winner:?} wins",
+                    simulation.current_tick().get()
+                ),
+                None => eprintln!(
+                    "match over at tick {}: draw",
+                    simulation.current_tick().get()
+                ),
+            }
             break;
         }
     }

@@ -11,11 +11,11 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use moba_game::GameContent;
-use moba_sim::{SimConfig, Simulation, TickInputs};
+use moba_sim::{MatchOutcome, SimConfig, Simulation, TickInputs};
 
 struct MatchResult {
     hash: u64,
-    outcome: Option<moba_game::Team>,
+    outcome: Option<MatchOutcome>,
     ticks: u32,
     tick_nanos: u64,
     max_tick_nanos: u64,
@@ -193,9 +193,10 @@ fn main() {
             }
         }
         let outcome_index = match first.outcome {
-            None => 0,
-            Some(moba_game::Team::Blue) => 1,
-            Some(moba_game::Team::Red) => 2,
+            // Unresolved and same-tick (drawn) matches both count as no winner.
+            None | Some(MatchOutcome::Draw) => 0,
+            Some(MatchOutcome::Winner(moba_game::Team::Blue)) => 1,
+            Some(MatchOutcome::Winner(moba_game::Team::Red)) => 2,
         };
         outcomes[outcome_index] += 1;
         hashes.push(first.hash);

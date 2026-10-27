@@ -6,7 +6,7 @@ use moba_core::math::Vec3;
 use moba_core::{Fix, FixVec2};
 use moba_net::protocol::{
     EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_SPAWN, EVENT_STRUCTURE_DESTROYED,
-    EVENT_UNIT_DIED, MatchPhase, NetEvent, dequantize_position,
+    EVENT_UNIT_DIED, MATCH_ENDED_DRAW, MatchPhase, NetEvent, dequantize_position,
 };
 use moba_net::{Interpolator, NetClient, PredictionState};
 
@@ -154,7 +154,9 @@ impl NetworkView {
             }
             EVENT_MATCH_ENDED => {
                 self.audio.play(crate::audio::Sound::Ui);
-                let text = if event.team == 0 {
+                let text = if event.value == MATCH_ENDED_DRAW {
+                    String::from("Match drawn")
+                } else if event.team == 0 {
                     String::from("Blue team wins")
                 } else {
                     String::from("Red team wins")

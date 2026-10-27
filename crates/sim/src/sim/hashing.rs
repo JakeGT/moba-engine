@@ -10,7 +10,7 @@ use crate::components::{
     MoveTarget, Position, Progression, Regen, Resistances, UnitKind, VisionRange,
 };
 
-use super::Simulation;
+use super::{MatchOutcome, Simulation};
 
 const HASH_POSITION: u32 = 1;
 const HASH_HEALTH: u32 = 2;
@@ -72,7 +72,8 @@ impl Simulation {
         hasher.write_u32(self.blue_score);
         hasher.write_u32(self.red_score);
         match self.outcome {
-            Some(team) => hasher.write_u32(1 + team.index() as u32),
+            Some(MatchOutcome::Winner(team)) => hasher.write_u32(1 + team.index() as u32),
+            Some(MatchOutcome::Draw) => hasher.write_u32(3),
             None => hasher.write_u32(0),
         }
 

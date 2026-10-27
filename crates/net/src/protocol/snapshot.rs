@@ -256,7 +256,7 @@ pub struct SnapshotDelta {
     pub blue_score: u32,
     /// Red team hero kills.
     pub red_score: u32,
-    /// Match outcome: 0 none, 1 blue, 2 red.
+    /// Match outcome (`OUTCOME_*`): 0 none, 1 blue, 2 red, 3 draw (since v39).
     pub outcome: u8,
     /// Current match phase.
     pub phase: u8,
@@ -324,8 +324,20 @@ pub const EVENT_PROJECTILE_HIT: u8 = 3;
 pub const EVENT_UNIT_DIED: u8 = 4;
 /// Structure destroyed event.
 pub const EVENT_STRUCTURE_DESTROYED: u8 = 5;
-/// Match ended event.
+/// Match ended event. `value` is the winning team index (0 blue, 1 red) or
+/// [`MATCH_ENDED_DRAW`].
 pub const EVENT_MATCH_ENDED: u8 = 6;
+/// [`EVENT_MATCH_ENDED`] `value` for a drawn match (since v39).
+pub const MATCH_ENDED_DRAW: u16 = 2;
+
+/// [`SnapshotDelta::outcome`]: the match is still running.
+pub const OUTCOME_NONE: u8 = 0;
+/// [`SnapshotDelta::outcome`]: blue won.
+pub const OUTCOME_BLUE: u8 = 1;
+/// [`SnapshotDelta::outcome`]: red won.
+pub const OUTCOME_RED: u8 = 2;
+/// [`SnapshotDelta::outcome`]: both teams met a win condition in the same tick (since v39).
+pub const OUTCOME_DRAW: u8 = 3;
 /// Zone spawned event.
 pub const EVENT_ZONE_SPAWNED: u8 = 7;
 
