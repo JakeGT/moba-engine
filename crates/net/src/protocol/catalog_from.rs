@@ -1,5 +1,6 @@
 //! [`GameContent`] -> [`WireCatalog`] conversion.
 
+use moba_core::FixVec2;
 use moba_game::{
     AbilitySpec, AreaEffect, AreaEffectList, ContentManifest, DamageType, Effect, GameContent,
     HeroSpec, ItemSpec, LaneSpec, MapSpec, ModifierDef, StructureKind, StructureSpec, Targeting,
@@ -407,6 +408,12 @@ impl From<&GameContent> for WireCatalog {
             nexus_win: *nexus_win,
             score_limit: *score_limit,
         };
+        // Map geometry, counts and names below are exact for content that passed
+        // `GameContent::validate` (#296): it rejects every coordinate `MapSpec::wire_point` /
+        // `MapSpec::wire_extent` cannot carry, over-capacity lane/point/structure/wall counts,
+        // and over-long or non-ASCII map/lane names. The fallbacks only fire for unvalidated
+        // content, whose reconstructed hash then differs, so the client rejects it.
+        let point = |point: &FixVec2| MapSpec::wire_point(*point).unwrap_or_default();
         let map = &mut catalog.map;
         map.name_len = put_wire_name(&mut map.name, content_name);
         map.theme = content_theme.id();
@@ -417,20 +424,13 @@ impl From<&GameContent> for WireCatalog {
             wire.name_len = put_wire_name(&mut wire.name, name);
             wire.point_count = u8::try_from(path.len().min(MAX_WIRE_LANE_POINTS))
                 .unwrap_or(u8::try_from(MAX_WIRE_LANE_POINTS).unwrap_or(u8::MAX));
-            for (target, point) in wire.points.iter_mut().zip(path) {
-                target[0] = i16::try_from(point.x.to_i64()).unwrap_or(0);
-                target[1] = i16::try_from(point.y.to_i64()).unwrap_or(0);
+            for (target, waypoint) in wire.points.iter_mut().zip(path) {
+                *target = point(waypoint);
             }
         }
-        map.extent = u16::try_from(extent.to_i64()).unwrap_or(256);
-        map.blue_spawn = [
-            i16::try_from(blue_spawn.x.to_i64()).unwrap_or(0),
-            i16::try_from(blue_spawn.y.to_i64()).unwrap_or(0),
-        ];
-        map.red_spawn = [
-            i16::try_from(red_spawn.x.to_i64()).unwrap_or(0),
-            i16::try_from(red_spawn.y.to_i64()).unwrap_or(0),
-        ];
+        map.extent = MapSpec::wire_extent(*extent).unwrap_or(256);
+        map.blue_spawn = point(blue_spawn);
+        map.red_spawn = point(red_spawn);
         map.structure_count = u8::try_from(content_structures.len().min(MAX_WIRE_STRUCTURES))
             .unwrap_or(u8::try_from(MAX_WIRE_STRUCTURES).unwrap_or(u8::MAX));
         for (wire, structure) in map.structures.iter_mut().zip(content_structures) {
@@ -445,24 +445,15 @@ impl From<&GameContent> for WireCatalog {
                 StructureKind::Tower => 0,
                 StructureKind::Nexus => 1,
             };
-            wire.position = [
-                i16::try_from(position.x.to_i64()).unwrap_or(0),
-                i16::try_from(position.y.to_i64()).unwrap_or(0),
-            ];
+            wire.position = point(position);
             wire.lane = lane.unwrap_or(0xFF);
         }
         map.wall_count = u8::try_from(content_walls.len().min(MAX_WIRE_WALLS))
             .unwrap_or(u8::try_from(MAX_WIRE_WALLS).unwrap_or(u8::MAX));
         for (wire, wall) in map.walls.iter_mut().zip(content_walls) {
             let WallSpec { a, b } = wall;
-            wire.a = [
-                i16::try_from(a.x.to_i64()).unwrap_or(0),
-                i16::try_from(a.y.to_i64()).unwrap_or(0),
-            ];
-            wire.b = [
-                i16::try_from(b.x.to_i64()).unwrap_or(0),
-                i16::try_from(b.y.to_i64()).unwrap_or(0),
-            ];
+            wire.a = point(a);
+            wire.b = point(b);
         }
         catalog
     }

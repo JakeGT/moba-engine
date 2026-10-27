@@ -34,6 +34,8 @@ jobs:
         run: cargo +nightly fuzz run replay -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
       - name: Fuzz content
         run: cargo +nightly fuzz run content -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
+      - name: Fuzz glb
+        run: cargo +nightly fuzz run glb -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
       - name: Upload crash artifacts
         if: always()
         uses: actions/upload-artifact@v7

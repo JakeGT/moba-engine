@@ -10,6 +10,16 @@ breaking protocol, replay or content-schema changes.
   branches). It sits under `sha2`/`hmac`/`hkdf`, `ed25519-dalek` and `poly1305`, i.e. the
   session AEAD, token HMAC and identity signatures in `moba-net`. Also updated in `fuzz/Cargo.lock`.
 - `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
+### Build
+- Removed unused internal dependency edges (`sim`/`server`/`client` → `moba-jobs`; `server` → `moba-core`/`moba-ecs`; `client`/`game` → `moba-ecs`; `jobs` → `moba-core`). `moba-test-support` (a counting allocator) is now a dev-dependency only of `moba-net`. `cpal` and `loom` moved to workspace dependencies.
+### Documentation
+- Corrected stale claims: README rate-limit placement (applied after decode, not before), the
+  GPU reviewer's Vulkan target (1.3 core), a validation-hazard suppression variable that nothing
+  reads, and `docs/status.md` still listing the 50-match load test as open (done in #293).
+### Planning
+- Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,
+  performance targets, ADRs to write and art-production requirements.
+- **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
 
 ### Content and networking
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
@@ -27,11 +37,23 @@ breaking protocol, replay or content-schema changes.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
 - Multi-match flood isolation (#292): datagrams are charged against the per-address, per-match and new optional host-wide (`--host-max-pps`, `HostBudget`) budgets before decoding, so undecodable junk counts too; `MatchHost` polls round-robin with a per-match cap of 64 datagrams / 500 µs per pass; `--reload-content` loads the pack once per host (`ContentWatch`) and shares it across matches; `load-test --flood-port K --flood-pps N` verifies the isolation. `--max-pps 0` now disables only the per-address budget, not the per-match one.
+- `GameContent::validate` now rejects map geometry the wire catalogue would silently truncate
+  (#296): a fractional or out-of-`i16`/`u16` extent, spawn, lane waypoint, structure position
+  or wall endpoint (new `ContentError::BadMapCoordinate(field)`; adding a variant is a breaking
+  change for exhaustive matches), more than 4 lanes / 16 waypoints / 32 structures, empty lane
+  paths (which panicked the wave spawner), and over-long or non-ASCII map/lane names.
+  `NetServer::bind_with_content` now validates its pack (`ErrorKind::InvalidInput`), and the
+  client validates the Welcome catalogue as it already did for `ContentUpdate`. No wire-format
+  change (still protocol v38); shipped pack hashes are unchanged. New `MapSpec::wire_point` /
+  `MapSpec::wire_extent` and `MAX_LANE_NAME` are shared by validation and the wire conversion.
 
 ### Internal
 - Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`
   (pure move; public paths, content hashes, signatures and the golden state hash are unchanged).
 - Split `moba-net`'s `protocol.rs` and `server.rs` into `protocol/` and `server/` module directories (pure move; public paths, wire format v38 and behaviour unchanged).
+- Split `crates/sim/src/sim.rs` (4,846 lines) into a `sim/` module directory (spawn, status,
+  inputs, abilities, movement, combat, deaths, items, bots, vision, hashing, tests); pure move,
+  no behaviour, API or state-hash change.
 
 ## [0.4.0] — 2026-10-21
 

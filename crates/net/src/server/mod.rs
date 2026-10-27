@@ -286,11 +286,16 @@ impl NetServer {
         Self::bind_with_content(config, Arc::new(GameContent::default()))
     }
 
-    /// Binds with a validated runtime content pack.
+    /// Binds with a runtime content pack, which must pass [`GameContent::validate`].
     ///
     /// # Errors
-    /// Returns an OS error when the socket cannot be bound.
+    /// Returns [`io::ErrorKind::InvalidInput`] (wrapping the [`moba_game::ContentError`])
+    /// when the content is invalid — invalid content may not survive the wire catalogue, so
+    /// clients would reject the Welcome — or an OS error when the socket cannot be bound.
     pub fn bind_with_content(config: ServerConfig, content: Arc<GameContent>) -> io::Result<Self> {
+        content
+            .validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let transport = UdpTransport::bind(config.bind)?;
         let total_slots = config.max_clients + config.max_spectators;
         let config_sim = config.sim;

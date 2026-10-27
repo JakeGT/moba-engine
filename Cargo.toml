@@ -49,12 +49,16 @@ ed25519-dalek = "3"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 glam = "0.34"
+# Binary glTF (.glb) parsing for the asset loader (ADR-0007). Exact pin; no import/image/base64.
+gltf = { version = "=1.4.1", default-features = false }
 gpu-allocator = "0.28"
 raw-window-handle = "0.6"
+cpal = "0.18"
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 
 # Dev-only.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+loom = "0.7"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

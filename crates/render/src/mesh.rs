@@ -16,8 +16,8 @@ pub(crate) struct Vertex {
     pub(crate) normal: [f32; 3],
 }
 
-/// CPU-side mesh data.
-pub(crate) struct MeshData {
+/// CPU-side interleaved mesh, ready for [`upload`].
+pub(crate) struct CpuMesh {
     pub(crate) vertices: Vec<Vertex>,
     pub(crate) indices: Vec<u32>,
 }
@@ -29,7 +29,7 @@ pub(crate) struct GpuMesh {
     pub(crate) index_count: u32,
 }
 
-impl MeshData {
+impl CpuMesh {
     /// Unit cube centred at the origin, one metre tall before scaling.
     pub(crate) fn cube() -> Self {
         let mut vertices = Vec::with_capacity(24);
@@ -127,11 +127,42 @@ impl MeshData {
         let indices = vec![0, 1, 2, 0, 2, 3];
         Self { vertices, indices }
     }
+
+    /// Interleaves a validated asset mesh into the shared `{position, normal}` layout.
+    ///
+    /// Returns `None` unless the mesh is a non-empty triangle list with one normal per
+    /// position and every index below the vertex count. `moba_assets::MeshData` already
+    /// guarantees this; the renderer re-checks (load time, O(n)) because the indexed draws'
+    /// memory safety depends on it and the type lives in another crate.
+    pub(crate) fn from_asset(data: &moba_assets::MeshData) -> Option<Self> {
+        let vertex_count = data.positions().len();
+        if vertex_count == 0
+            || data.normals().len() != vertex_count
+            || data.indices().is_empty()
+            || !data.indices().len().is_multiple_of(3)
+            || data
+                .indices()
+                .iter()
+                .any(|&index| index as usize >= vertex_count)
+        {
+            return None;
+        }
+        let vertices = data
+            .positions()
+            .iter()
+            .zip(data.normals())
+            .map(|(&position, &normal)| Vertex { position, normal })
+            .collect();
+        Some(Self {
+            vertices,
+            indices: data.indices().to_vec(),
+        })
+    }
 }
 
 /// Uploads a mesh to device-local memory through staging buffers.
 #[allow(clippy::too_many_lines)] // One-time upload sequence; splitting hides the barriers.
-pub(crate) fn upload(device: &DeviceContext, data: &MeshData) -> RenderResult<GpuMesh> {
+pub(crate) fn upload(device: &DeviceContext, data: &CpuMesh) -> RenderResult<GpuMesh> {
     let allocator = device.allocator();
     let vertex_bytes: &[u8] = bytemuck::cast_slice(&data.vertices);
     let index_bytes: &[u8] = bytemuck::cast_slice(&data.indices);
@@ -236,13 +267,29 @@ pub(crate) fn upload(device: &DeviceContext, data: &MeshData) -> RenderResult<Gp
     let commands = [command];
     let submit = vk::SubmitInfo::default().command_buffers(&commands);
     // SAFETY: the command buffer is executable and the graphics queue belongs to the device.
+    // The queue is externally synchronised: every submit to it happens on the renderer's
+    // thread, through `&DeviceContext` borrowed from a `&mut Renderer` (or during `new`).
     unsafe {
         device
             .device
             .queue_submit(device.graphics_queue, &[submit], vk::Fence::null())
     }?;
-    // SAFETY: waiting for our own submission to finish is valid at init time.
-    unsafe { device.device.queue_wait_idle(device.graphics_queue) }?;
+    // SAFETY: same external synchronisation as the submit. The wait also covers any frame
+    // still in flight (load-time stall only; `register_mesh` is never called per frame).
+    if let Err(error) = unsafe { device.device.queue_wait_idle(device.graphics_queue) } {
+        // The copy may still be executing: dropping the pool or buffers now would free
+        // resources the GPU is using. Wait for the whole device instead; if that fails too,
+        // leak them rather than risk a use-after-free.
+        // SAFETY: the device handle is live; waiting has no other preconditions.
+        if unsafe { device.device.device_wait_idle() }.is_err() {
+            core::mem::forget(pool);
+            core::mem::forget(vertex_staging);
+            core::mem::forget(index_staging);
+            core::mem::forget(vertices);
+            core::mem::forget(indices);
+        }
+        return Err(error.into());
+    }
 
     drop(vertex_staging);
     drop(index_staging);
@@ -253,4 +300,24 @@ pub(crate) fn upload(device: &DeviceContext, data: &MeshData) -> RenderResult<Gp
         indices,
         index_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CpuMesh;
+
+    #[test]
+    fn asset_meshes_interleave_positions_and_normals() {
+        let data = moba_assets::MeshData::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0.0, 0.0, 1.0]; 3],
+            vec![0, 1, 2],
+        )
+        .expect("valid mesh");
+        let cpu = CpuMesh::from_asset(&data).expect("re-check passes");
+        assert_eq!(cpu.vertices.len(), 3);
+        assert_eq!(cpu.vertices[1].position, [1.0, 0.0, 0.0]);
+        assert_eq!(cpu.vertices[2].normal, [0.0, 0.0, 1.0]);
+        assert_eq!(cpu.indices, vec![0, 1, 2]);
+    }
 }

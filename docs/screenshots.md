@@ -120,6 +120,25 @@ Client using a runtime pack's custom Vanguard hero, stats and name.
 
 One-lane map pack with custom structures/spawns and minimap geometry.
 
+### Custom hero model (.glb)
+![Custom hero model](images/m8-custom-model.png)
+
+Local networked match (`MOBA_SERVER=local`) with the shipped `content/models/sentinel.glb`
+loaded from the client-local asset root and drawn through `Renderer::register_mesh` and the
+per-mesh instanced draw (ADR-0007). Minions and structures stay on the cube mesh in the same
+frame. Lavapipe, 1280×720, validation and synchronization validation required, zero messages.
+The camera is pulled in with `MOBA_CAMERA_DISTANCE=12`:
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=Blade=sentinel,Guardian=sentinel,Mage=sentinel \
+MOBA_CAMERA_DISTANCE=12 MOBA_SMOKE_FRAMES=1000 \
+MOBA_CAPTURE=/tmp/frame.ppm MOBA_CAPTURE_FRAME=960 \
+MOBA_VULKAN_VALIDATION=required cargo run -p moba-client
+```
+
+A missing, path-escaping or truncated model logs one `[assets]` line and that hero keeps the
+procedural rig.
+
 ## Reproducing a capture
 
 The client supports headless readback without changing the renderer:

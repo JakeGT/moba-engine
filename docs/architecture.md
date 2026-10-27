@@ -178,7 +178,7 @@ datagrams, capped polls and average/max simulation tick nanoseconds for operator
 ## Runtime content
 
 `GameContent` owns the runtime item, hero, ability and map catalogues; the simulation holds
-an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` accepts a validated pack;
+an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` validates the pack (`InvalidInput` if `GameContent::validate` fails);
 the server publishes it in `Welcome`, and clients use the received `WireItem`, `WireHero`,
 `WireCatalog`/`WireAbility`/`WireEffect`/`WireModifier` and `WireMap` entries for shop, HUD,
 modifier names, effects, vision, range/radius overlays and minimap rendering. Abilities are

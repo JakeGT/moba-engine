@@ -75,15 +75,16 @@ Regenerate deliberately with `--write` only for intentional visual changes; uplo
 and diff PPM artifacts from CI when reviewing a mismatch. Trigger on a PR by adding the
 `render-golden` label.
 
-### Known validation-layer workaround
+### Validation-layer history
 
-Ubuntu's VVL 1.3.275 reports a submit-time `SYNC-HAZARD-PRESENT-AFTER-WRITE` for the
+Ubuntu's VVL 1.3.275 used to report a submit-time `SYNC-HAZARD-PRESENT-AFTER-WRITE` for the
 swapchain→present layout transition even though present waits on the render-finished
 semaphore; upstream fixed this in [VVL #7480](https://github.com/KhronosGroup/Vulkan-ValidationLayers/pull/7480)
-([issue #7479](https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7479)). The
-golden workflow sets `MOBA_IGNORE_KNOWN_PRESENT_HAZARD=1`, which suppresses **only** that exact
-message from the error count/log. Every other validation error still fails the capture.
-Remove the variable when the runner ships a newer layer.
+([issue #7479](https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/7479)). No
+suppression is in place: neither the golden workflow nor the client reads any "ignore known
+hazard" variable (checked 2026-10-27), and the golden capture runs with validation + sync
+validation and fails on **any** validation message. It is green (latest run 39644967954). If
+the hazard reappears on a runner image, fix or document it here rather than filtering it.
 
 ## macOS MoltenVK probe
 
