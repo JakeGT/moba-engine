@@ -1,7 +1,7 @@
 # Engine status
 
-Last updated: **2026-10-21**. Workspace **0.4.0** preview; protocol **v38**; replay format **v5**;
-simulation logic **v7**; content packs are validated runtime TOML.
+Last updated: **2026-10-21**. Workspace **0.4.0** preview; protocol **v39**; replay format **v5**;
+simulation logic **v8**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
 Two external-resource items remain open: real Windows/macOS GPU frame results (#9/#127) and
@@ -16,7 +16,7 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 | M2 | Platform | 🟡 | Linux runtime verified; Windows/macOS compile and CI-checked, runtime GPU validation still open (#9). winit/input, 30 Hz step, settings and headless modes present. |
 | M3 | Renderer | 🟡 | Vulkan 1.3 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, textured UI atlas, animated hero rig, map themes, [golden-image CI](../.github/workflows/render-golden.yml) and [NVIDIA timings](perf/0007-real-hardware.md). Windows/macOS real-GPU timing remains open (#127). |
 | M4 | Simulation | ✅ | [Deterministic 5v5](perf/0004-simulation.md), 3 lanes, towers/nexuses, minions, vision-respecting bots, respawns, XP/gold/items, modes/rules; measured ~26.3 µs/tick steady benchmark (7.876 ms/300 ticks, 2026-10-19). |
-| M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v38, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
+| M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v39, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
 | M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
 | M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model. 50 *concurrent* matches per box and independent review remain open. |
 | M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Asset meshes/skinning assets remain future rendering work. |
