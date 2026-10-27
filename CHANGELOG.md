@@ -27,6 +27,10 @@ breaking protocol, replay or content-schema changes.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
 
+### Internal
+- Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`
+  (pure move; public paths, content hashes, signatures and the golden state hash are unchanged).
+
 ## [0.4.0] — 2026-10-21
 
 Security release. Protocol **v37** (not wire-compatible with 0.3.x), replay **v5**, simulation logic **v7**. Content hashes and replays are unchanged.
