@@ -22,9 +22,17 @@ mod ui;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
-pub use renderer::{CapturedFrame, RenderConfig, Renderer, ui_vertices_truncated};
-pub use scene::{Camera, MeshId, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles};
+pub use renderer::{
+    CapturedFrame, DEFAULT_MAX_BONES, RenderConfig, Renderer, bones_truncated,
+    skinned_instances_dropped, ui_vertices_truncated,
+};
+pub use scene::{
+    BoneRange, Camera, MeshId, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles,
+};
 
-/// Validated static mesh accepted by [`Renderer::register_mesh`].
+/// One joint's skinning matrix (three `vec4` rows) as stored in [`Scene::bones`].
+pub use moba_assets::JointMatrix;
+/// Validated mesh accepted by [`Renderer::register_mesh`] and, when it carries a skin,
+/// [`Renderer::register_skinned_mesh`].
 pub use moba_assets::MeshData;
 pub use ui::{ATLAS_HEIGHT, ATLAS_WIDTH, UiDrawList, UiVertex, build_atlas};

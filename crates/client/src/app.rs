@@ -16,7 +16,9 @@
 //! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
 //! - `MOBA_ASSET_ROOT=<dir>` (default `content`) and `MOBA_HERO_MODELS=<hero=model,...>`
-//!   draw heroes with `<dir>/models/<model>.glb`; any failure falls back to the rig.
+//!   draw heroes with `<dir>/models/<model>.glb`; any failure falls back to the rig. A
+//!   model with a skin is GPU-skinned (walk clip driven by gait); `MOBA_NO_SKINNING=1`
+//!   draws it static instead.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
@@ -80,6 +82,7 @@ struct ClientApp {
     local_audio: Option<crate::audio::Audio>,
     units: Vec<UnitInstance>,
     models: models::ModelLibrary,
+    bones: skinning::BonePool,
     ui: UiDrawList,
     scoreboard_visible: bool,
     shop_visible: bool,
@@ -138,6 +141,7 @@ impl ClientApp {
             local_audio: None,
             units: Vec::with_capacity(moba_sim::MAX_UNITS),
             models: models::ModelLibrary::from_env(),
+            bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
@@ -258,6 +262,8 @@ impl App for ClientApp {
             max_instances: 1_024,
             vsync: std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"),
             ui_scale: self.ui_scale,
+            max_bones: moba_render::DEFAULT_MAX_BONES,
+            skinning: self.models.skinning(),
             ..RenderConfig::default()
         };
         match Renderer::new(window, config) {
@@ -357,6 +363,7 @@ impl App for ClientApp {
                 simulation,
                 units,
                 models,
+                bones,
                 ui,
                 scoreboard_visible,
                 shop_visible,
@@ -481,7 +488,7 @@ impl App for ClientApp {
                             network.prediction.step();
                         }
                     }
-                    rebuild_network_units(network, models, units);
+                    rebuild_network_units(network, models, units, bones);
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
@@ -517,8 +524,9 @@ impl App for ClientApp {
                         network.update_effects(frame_ms);
                         let vision = build_vision(network);
                         let tint = map_theme(network.client.map().theme).0;
-                        let scene =
-                            Scene::with_vision(camera, units, vision).with_terrain_tint(tint);
+                        let scene = Scene::with_vision(camera, units, vision)
+                            .with_terrain_tint(tint)
+                            .with_bones(bones.bones());
                         if let Some(renderer) = renderer.as_mut() {
                             if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                                 capture_and_exit(
@@ -554,6 +562,7 @@ impl App for ClientApp {
                     simulation.clear_events();
                 }
                 units.clear();
+                bones.clear();
                 let world = simulation.world();
                 for entity in world.entities() {
                     let (Some(position), Some(team), Some(kind), Some(health)) = (
@@ -575,15 +584,19 @@ impl App for ClientApp {
                             .and_then(|hero| models.hero(usize::from(hero.0.0)));
                         push_hero(
                             units,
+                            bones,
+                            models,
                             model,
-                            position.0,
-                            *team,
-                            fraction,
-                            center,
-                            simulation.current_tick().get() as f32 / 30.0,
-                            entity.index() as f32,
-                            0.0,
-                            1.0,
+                            &HeroPose {
+                                position: position.0,
+                                team: *team,
+                                health_fraction: fraction,
+                                center,
+                                time: simulation.current_tick().get() as f32 / 30.0,
+                                phase_offset: entity.index() as f32,
+                                facing: 0.0,
+                                gait: 1.0,
+                            },
                         );
                     } else {
                         push_unit(units, position.0, *kind, *team, fraction, 0, center);
@@ -607,7 +620,9 @@ impl App for ClientApp {
                     );
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
                     let tint = map_theme(simulation.content().map.theme.id()).0;
-                    let scene = Scene::new(camera, units).with_terrain_tint(tint);
+                    let scene = Scene::new(camera, units)
+                        .with_terrain_tint(tint)
+                        .with_bones(bones.bones());
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
@@ -643,13 +658,14 @@ impl App for ClientApp {
 mod launch;
 mod models;
 mod scene_build;
+mod skinning;
 
 pub(crate) use launch::{
     capture_and_exit, connect_network, frames_is_capture, parse_demo_move, parse_follow_distance,
     run,
 };
 pub(crate) use scene_build::{
-    map_theme, network_camera, push_hero, push_unit, rebuild_network_units,
+    HeroPose, map_theme, network_camera, push_hero, push_unit, rebuild_network_units,
 };
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.

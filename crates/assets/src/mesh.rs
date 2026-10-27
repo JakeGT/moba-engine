@@ -12,8 +12,10 @@
 //! - finite positions and normals.
 //!
 //! The fields are private so a mesh that violates them cannot be built outside this module.
-//! Skinning attributes (joints/weights) are future work (WP-4.1) and will be added as
-//! optional per-vertex streams next to the existing ones.
+//! A mesh may also carry a [`MeshSkin`] (WP-4.1): per-vertex joints and weights, one per
+//! position, attached through [`MeshData::with_skin`], which checks the count.
+
+use crate::skin::{MeshSkin, SkinError};
 
 /// Why a mesh was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +34,8 @@ pub enum MeshError {
     IndexOutOfRange,
     /// A position or normal component is NaN or infinite.
     NonFinite,
+    /// The skin, skeleton or clip is invalid, or its streams do not match the vertex count.
+    Skin(SkinError),
 }
 
 impl core::fmt::Display for MeshError {
@@ -44,6 +48,7 @@ impl core::fmt::Display for MeshError {
             Self::NotTriangles => "index count is not a multiple of three",
             Self::IndexOutOfRange => "index out of range",
             Self::NonFinite => "non-finite vertex data",
+            Self::Skin(error) => return write!(f, "skin: {error}"),
         };
         f.write_str(text)
     }
@@ -51,12 +56,19 @@ impl core::fmt::Display for MeshError {
 
 impl std::error::Error for MeshError {}
 
-/// A validated static triangle mesh: positions, normals and `u32` indices.
+impl From<SkinError> for MeshError {
+    fn from(error: SkinError) -> Self {
+        Self::Skin(error)
+    }
+}
+
+/// A validated triangle mesh: positions, normals, `u32` indices and an optional skin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    skin: Option<MeshSkin>,
 }
 
 impl MeshData {
@@ -107,7 +119,27 @@ impl MeshData {
             positions,
             normals,
             indices,
+            skin: None,
         })
+    }
+
+    /// Attaches skinning streams. Positions and normals are then the bind pose.
+    ///
+    /// # Errors
+    /// [`MeshError::Skin`] with [`SkinError::LengthMismatch`] unless the skin has exactly one
+    /// joint/weight entry per vertex.
+    pub fn with_skin(mut self, skin: MeshSkin) -> Result<Self, MeshError> {
+        if skin.joints().len() != self.positions.len() {
+            return Err(SkinError::LengthMismatch.into());
+        }
+        self.skin = Some(skin);
+        Ok(self)
+    }
+
+    /// The skin, if the mesh is skinned.
+    #[must_use]
+    pub fn skin(&self) -> Option<&MeshSkin> {
+        self.skin.as_ref()
     }
 
     /// Vertex positions in model space (metres, +Y up).

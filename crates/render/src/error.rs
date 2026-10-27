@@ -43,8 +43,13 @@ pub enum RenderError {
     /// mesh slot in use.
     TooManyMeshes,
     /// A mesh passed to [`Renderer::register_mesh`](crate::Renderer::register_mesh) is not a
-    /// non-empty triangle list with in-range indices.
+    /// non-empty triangle list with in-range indices (or, for
+    /// [`Renderer::register_skinned_mesh`](crate::Renderer::register_skinned_mesh), has no
+    /// valid skin).
     InvalidMesh,
+    /// GPU skinning is unavailable: disabled in [`RenderConfig`](crate::RenderConfig) or
+    /// the skinned pipeline failed to build. Draw the static mesh instead.
+    SkinningUnavailable,
 }
 
 impl fmt::Display for RenderError {
@@ -79,6 +84,7 @@ impl fmt::Display for RenderError {
             Self::InvalidMesh => {
                 f.write_str("invalid mesh (empty, not triangles or index out of range)")
             }
+            Self::SkinningUnavailable => f.write_str("GPU skinning is unavailable"),
         }
     }
 }

@@ -3,11 +3,62 @@
 use ash::vk;
 
 use crate::error::{RenderError, RenderResult};
-use crate::mesh::Vertex;
+use crate::mesh::{SkinnedVertex, Vertex};
+
+/// Vertex buffer layout consumed by a scene pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VertexLayout {
+    /// [`Vertex`]: position and normal, stride 24 (unit and terrain).
+    Static,
+    /// [`SkinnedVertex`]: position, normal, `R8G8B8A8_UINT` joints, `R8G8B8A8_UNORM`
+    /// weights, stride 32 (`skinned.vert`).
+    Skinned,
+}
+
+impl VertexLayout {
+    fn stride(self) -> u32 {
+        let size = match self {
+            Self::Static => core::mem::size_of::<Vertex>(),
+            Self::Skinned => core::mem::size_of::<SkinnedVertex>(),
+        };
+        u32::try_from(size).expect("vertex stride fits u32")
+    }
+
+    /// Attribute descriptions; locations 0/1 are shared, 2/3 exist only when skinned.
+    fn attributes(self) -> &'static [vk::VertexInputAttributeDescription] {
+        const fn attribute(
+            location: u32,
+            format: vk::Format,
+            offset: u32,
+        ) -> vk::VertexInputAttributeDescription {
+            vk::VertexInputAttributeDescription {
+                location,
+                binding: 0,
+                format,
+                offset,
+            }
+        }
+        const STATIC: [vk::VertexInputAttributeDescription; 2] = [
+            attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
+            attribute(1, vk::Format::R32G32B32_SFLOAT, 12),
+        ];
+        const SKINNED: [vk::VertexInputAttributeDescription; 4] = [
+            attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
+            attribute(1, vk::Format::R32G32B32_SFLOAT, 12),
+            attribute(2, vk::Format::R8G8B8A8_UINT, 24),
+            attribute(3, vk::Format::R8G8B8A8_UNORM, 28),
+        ];
+        match self {
+            Self::Static => &STATIC,
+            Self::Skinned => &SKINNED,
+        }
+    }
+}
 
 /// Immutable inputs for one scene pipeline.
 pub(crate) struct PipelineSpec {
     pub(crate) layout: vk::PipelineLayout,
+    pub(crate) vertex_layout: VertexLayout,
     pub(crate) vertex: vk::ShaderModule,
     pub(crate) fragment: vk::ShaderModule,
     pub(crate) color_format: vk::Format,
@@ -30,23 +81,11 @@ pub(crate) fn create(device: &ash::Device, spec: &PipelineSpec) -> RenderResult<
 
     let bindings = [vk::VertexInputBindingDescription::default()
         .binding(0)
-        .stride(u32::try_from(core::mem::size_of::<Vertex>()).expect("vertex stride fits u32"))
+        .stride(spec.vertex_layout.stride())
         .input_rate(vk::VertexInputRate::VERTEX)];
-    let attributes = [
-        vk::VertexInputAttributeDescription::default()
-            .location(0)
-            .binding(0)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(0),
-        vk::VertexInputAttributeDescription::default()
-            .location(1)
-            .binding(0)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(12),
-    ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)
-        .vertex_attribute_descriptions(&attributes);
+        .vertex_attribute_descriptions(spec.vertex_layout.attributes());
 
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -229,5 +268,27 @@ pub(crate) fn create_ui(
             .pop()
             .ok_or(RenderError::Shader("no UI pipeline returned")),
         Err((_, error)) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VertexLayout;
+    use crate::mesh::SkinnedVertex;
+
+    #[test]
+    fn skinned_attributes_match_the_vertex_struct() {
+        let attributes = VertexLayout::Skinned.attributes();
+        assert_eq!(VertexLayout::Skinned.stride(), 32);
+        assert_eq!(VertexLayout::Static.stride(), 24);
+        assert_eq!(
+            attributes[2].offset as usize,
+            core::mem::offset_of!(SkinnedVertex, joints)
+        );
+        assert_eq!(
+            attributes[3].offset as usize,
+            core::mem::offset_of!(SkinnedVertex, weights)
+        );
+        assert_eq!(VertexLayout::Static.attributes().len(), 2);
     }
 }

@@ -375,13 +375,6 @@ impl DescriptorPool {
 }
 
 impl PipelineLayout {
-    pub(crate) fn new(
-        device: ash::Device,
-        set_layouts: &[vk::DescriptorSetLayout],
-    ) -> RenderResult<Self> {
-        Self::with_push_constants(device, set_layouts, &[])
-    }
-
     pub(crate) fn with_push_constants(
         device: ash::Device,
         set_layouts: &[vk::DescriptorSetLayout],

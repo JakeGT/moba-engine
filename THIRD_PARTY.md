@@ -37,10 +37,12 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ## Sample hero model
 
-`content/models/sentinel.glb` (and its copy in `fuzz/corpus/glb/`) is not third-party art. It
-is generated from code in this repository by `cargo run -p moba-tools --bin sample-mesh`
-(`crates/tools/src/bin/sample-mesh.rs`), so it carries the repository's MIT OR Apache-2.0
-licence. A unit test checks that the committed bytes match the generator.
+`content/models/sentinel.glb` and its rigged, animated variant
+`content/models/sentinel-skinned.glb` (and their copies in `fuzz/corpus/glb/`) are not
+third-party art. Both are generated from code in this repository by
+`cargo run -p moba-tools --bin sample-mesh` (`crates/tools/src/bin/sample-mesh.rs`), so they
+carry the repository's MIT OR Apache-2.0 licence. Unit tests check that the committed bytes
+match the generator.
 
 The `.glb` loader uses the `gltf` crate family (MIT OR Apache-2.0) with default features
 disabled; see [ADR-0007](docs/adr/0007-mesh-format.md).

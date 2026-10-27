@@ -1,6 +1,7 @@
 //! Presentation-side scene data: camera and per-instance transforms.
 
 use bytemuck::{Pod, Zeroable};
+use moba_assets::JointMatrix;
 use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, perspective_rh};
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
@@ -85,6 +86,30 @@ impl MeshId {
     }
 }
 
+/// The joints of one skinned instance inside [`Scene::bones`].
+///
+/// [`BoneRange::NONE`] (the default) means the instance is not skinned. A skinned mesh
+/// instance without a valid range (empty, or past the bones uploaded this frame) is not
+/// drawn and is counted in [`skinned_instances_dropped`](crate::skinned_instances_dropped).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BoneRange {
+    /// Index of the instance's first joint matrix in [`Scene::bones`].
+    pub first: u32,
+    /// Number of joint matrices (the skeleton's joint count).
+    pub count: u32,
+}
+
+impl BoneRange {
+    /// No bones: a static instance.
+    pub const NONE: Self = Self { first: 0, count: 0 };
+
+    /// `count` joint matrices starting at `first`.
+    #[must_use]
+    pub const fn new(first: u32, count: u32) -> Self {
+        Self { first, count }
+    }
+}
+
 /// One drawable unit: a model matrix, a colour and the mesh to draw.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnitInstance {
@@ -94,6 +119,8 @@ pub struct UnitInstance {
     pub color: Vec4,
     /// Mesh drawn for this instance ([`MeshId::CUBE`] by default).
     pub mesh: MeshId,
+    /// Joint matrices for a skinned mesh ([`BoneRange::NONE`] for static meshes).
+    pub bones: BoneRange,
 }
 
 impl UnitInstance {
@@ -104,6 +131,7 @@ impl UnitInstance {
             transform,
             color,
             mesh: MeshId::CUBE,
+            bones: BoneRange::NONE,
         }
     }
 
@@ -111,6 +139,14 @@ impl UnitInstance {
     #[must_use]
     pub const fn with_mesh(mut self, mesh: MeshId) -> Self {
         self.mesh = mesh;
+        self
+    }
+
+    /// Returns this instance posed by `bones` (for a mesh from
+    /// [`Renderer::register_skinned_mesh`](crate::Renderer::register_skinned_mesh)).
+    #[must_use]
+    pub const fn with_bones(mut self, bones: BoneRange) -> Self {
+        self.bones = bones;
         self
     }
 
@@ -125,6 +161,7 @@ impl UnitInstance {
             ),
             color,
             mesh: MeshId::CUBE,
+            bones: BoneRange::NONE,
         }
     }
 }
@@ -140,6 +177,9 @@ pub struct Scene<'a> {
     pub vision: VisionCircles,
     /// Terrain tint (RGB, `1.0` = default grass palette).
     pub terrain_tint: [f32; 4],
+    /// Joint matrices for skinned instances, indexed by [`UnitInstance::bones`]. Up to
+    /// [`RenderConfig::max_bones`](crate::RenderConfig::max_bones) are uploaded per frame.
+    pub bones: &'a [JointMatrix],
 }
 
 /// Up to 16 allied vision circles used to darken unseen terrain.
@@ -205,6 +245,7 @@ impl<'a> Scene<'a> {
                 wall_count: 0,
             },
             terrain_tint: [0.10, 0.16, 0.11, 1.0],
+            bones: &[],
         }
     }
 
@@ -220,6 +261,7 @@ impl<'a> Scene<'a> {
             units,
             vision,
             terrain_tint: [0.10, 0.16, 0.11, 1.0],
+            bones: &[],
         }
     }
 
@@ -227,6 +269,13 @@ impl<'a> Scene<'a> {
     #[must_use]
     pub const fn with_terrain_tint(mut self, tint: [f32; 4]) -> Self {
         self.terrain_tint = tint;
+        self
+    }
+
+    /// Sets the joint matrices that skinned instances index.
+    #[must_use]
+    pub const fn with_bones(mut self, bones: &'a [JointMatrix]) -> Self {
+        self.bones = bones;
         self
     }
 

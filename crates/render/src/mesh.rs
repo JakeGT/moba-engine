@@ -8,12 +8,74 @@ use crate::device::DeviceContext;
 use crate::error::RenderResult;
 use crate::resources::{CommandPool, GpuBuffer};
 
-/// Vertex layout shared by every scene pipeline.
+/// Vertex layout of the static scene pipelines (unit and terrain), stride 24.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
+}
+
+/// Vertex layout of the skinned pipeline (`skinned.vert`), stride 32: position and normal
+/// as in [`Vertex`], then four `R8G8B8A8_UINT` joints and four `R8G8B8A8_UNORM` weights.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct SkinnedVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) joints: [u8; 4],
+    pub(crate) weights: [u8; 4],
+}
+
+/// CPU-side interleaved skinned mesh, ready for [`upload_bytes`].
+pub(crate) struct CpuSkinnedMesh {
+    pub(crate) vertices: Vec<SkinnedVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) joint_count: u32,
+}
+
+impl CpuSkinnedMesh {
+    /// Interleaves a validated skinned asset into [`SkinnedVertex`].
+    ///
+    /// Returns `None` unless the mesh has a skin with 1..=`MAX_JOINTS` joints, one
+    /// joint/weight entry per vertex, every joint index below the joint count, and passes
+    /// [`CpuMesh::from_asset`]'s index checks. `moba_assets` guarantees all of this; the
+    /// renderer re-checks at load time because the shader's bone reads depend on it (the
+    /// shader also clamps joints to the draw's range).
+    pub(crate) fn from_asset(data: &moba_assets::MeshData) -> Option<Self> {
+        let skin = data.skin()?;
+        let joint_count = skin.skeleton().joint_count();
+        let vertex_count = data.positions().len();
+        if joint_count == 0
+            || joint_count > moba_assets::MAX_JOINTS
+            || skin.joints().len() != vertex_count
+            || skin.weights().len() != vertex_count
+            || skin
+                .joints()
+                .iter()
+                .flatten()
+                .any(|&joint| usize::from(joint) >= joint_count)
+        {
+            return None;
+        }
+        let base = CpuMesh::from_asset(data)?;
+        let vertices = base
+            .vertices
+            .iter()
+            .zip(skin.joints().iter().zip(skin.weights()))
+            .map(|(vertex, (&joints, &weights))| SkinnedVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                joints,
+                weights,
+            })
+            .collect();
+        Some(Self {
+            vertices,
+            indices: base.indices,
+            joint_count: u32::try_from(joint_count).ok()?,
+        })
+    }
 }
 
 /// CPU-side interleaved mesh, ready for [`upload`].
@@ -27,6 +89,9 @@ pub(crate) struct GpuMesh {
     pub(crate) vertices: GpuBuffer,
     pub(crate) indices: GpuBuffer,
     pub(crate) index_count: u32,
+    /// `0` for a static [`Vertex`] mesh; otherwise the skin's joint count and the vertices
+    /// are [`SkinnedVertex`].
+    pub(crate) joint_count: u32,
 }
 
 impl CpuMesh {
@@ -160,12 +225,39 @@ impl CpuMesh {
     }
 }
 
-/// Uploads a mesh to device-local memory through staging buffers.
-#[allow(clippy::too_many_lines)] // One-time upload sequence; splitting hides the barriers.
+/// Uploads a static mesh to device-local memory through staging buffers.
 pub(crate) fn upload(device: &DeviceContext, data: &CpuMesh) -> RenderResult<GpuMesh> {
+    upload_bytes(
+        device,
+        bytemuck::cast_slice(&data.vertices),
+        &data.indices,
+        0,
+    )
+}
+
+/// Uploads a skinned mesh to device-local memory through staging buffers.
+pub(crate) fn upload_skinned(
+    device: &DeviceContext,
+    data: &CpuSkinnedMesh,
+) -> RenderResult<GpuMesh> {
+    upload_bytes(
+        device,
+        bytemuck::cast_slice(&data.vertices),
+        &data.indices,
+        data.joint_count,
+    )
+}
+
+/// Uploads interleaved vertex bytes and `u32` indices through staging buffers.
+#[allow(clippy::too_many_lines)] // One-time upload sequence; splitting hides the barriers.
+fn upload_bytes(
+    device: &DeviceContext,
+    vertex_bytes: &[u8],
+    indices_data: &[u32],
+    joint_count: u32,
+) -> RenderResult<GpuMesh> {
     let allocator = device.allocator();
-    let vertex_bytes: &[u8] = bytemuck::cast_slice(&data.vertices);
-    let index_bytes: &[u8] = bytemuck::cast_slice(&data.indices);
+    let index_bytes: &[u8] = bytemuck::cast_slice(indices_data);
 
     let mut vertex_staging = GpuBuffer::new(
         device.device.clone(),
@@ -294,17 +386,59 @@ pub(crate) fn upload(device: &DeviceContext, data: &CpuMesh) -> RenderResult<Gpu
     drop(vertex_staging);
     drop(index_staging);
 
-    let index_count = u32::try_from(data.indices.len()).expect("index count fits u32");
+    let index_count = u32::try_from(indices_data.len()).expect("index count fits u32");
     Ok(GpuMesh {
         vertices,
         indices,
         index_count,
+        joint_count,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CpuMesh;
+    use super::{CpuMesh, CpuSkinnedMesh, SkinnedVertex};
+
+    #[test]
+    fn skinned_vertices_are_32_bytes_with_joints_then_weights() {
+        assert_eq!(core::mem::size_of::<SkinnedVertex>(), 32);
+        assert_eq!(core::mem::offset_of!(SkinnedVertex, joints), 24);
+        assert_eq!(core::mem::offset_of!(SkinnedVertex, weights), 28);
+    }
+
+    #[test]
+    fn skinned_asset_meshes_interleave_joints_and_weights() {
+        let triangle = || {
+            moba_assets::MeshData::new(
+                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                vec![[0.0, 0.0, 1.0]; 3],
+                vec![0, 1, 2],
+            )
+            .expect("valid mesh")
+        };
+        assert!(CpuSkinnedMesh::from_asset(&triangle()).is_none(), "no skin");
+        let skeleton = moba_assets::Skeleton::new(
+            vec![None, Some(0)],
+            vec![moba_assets::JointTransform::IDENTITY; 2],
+            vec![moba_core::math::Mat4::IDENTITY; 2],
+            vec![moba_core::math::Mat4::IDENTITY; 2],
+            None,
+        )
+        .expect("skeleton");
+        let skin = moba_assets::MeshSkin::new(
+            vec![[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]],
+            vec![[255, 0, 0, 0], [255, 0, 0, 0], [128, 127, 0, 0]],
+            skeleton,
+        )
+        .expect("skin");
+        let data = triangle().with_skin(skin).expect("skinned mesh");
+        let cpu = CpuSkinnedMesh::from_asset(&data).expect("re-check passes");
+        assert_eq!(cpu.joint_count, 2);
+        assert_eq!(cpu.vertices[2].joints, [0, 1, 0, 0]);
+        assert_eq!(cpu.vertices[2].weights, [128, 127, 0, 0]);
+        assert_eq!(cpu.vertices[1].position, [1.0, 0.0, 0.0]);
+        assert_eq!(cpu.indices, vec![0, 1, 2]);
+    }
 
     #[test]
     fn asset_meshes_interleave_positions_and_normals() {
