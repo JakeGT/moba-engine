@@ -440,7 +440,38 @@ impl From<&MapDef> for MapSpec {
     }
 }
 
+/// `value` as a whole number of world units, or `None` when it has a fractional part.
+const fn whole_units(value: Fix) -> Option<i64> {
+    if value.fract().to_bits() == 0 {
+        Some(value.to_i64())
+    } else {
+        None
+    }
+}
+
 impl MapSpec {
+    /// The exact `[x, y]` the network catalogue carries for a map point (lane waypoint,
+    /// spawn, structure position or wall endpoint), or `None` when either axis is fractional
+    /// or outside `i16`.
+    ///
+    /// Map geometry travels as whole world units. [`GameContent::validate`] rejects every
+    /// point this returns `None` for, so the wire conversion is lossless for validated
+    /// content and the client reconstructs the same content hash.
+    ///
+    /// [`GameContent::validate`]: super::GameContent::validate
+    #[must_use]
+    pub fn wire_point(point: FixVec2) -> Option<[i16; 2]> {
+        let axis = |value: Fix| whole_units(value).and_then(|units| i16::try_from(units).ok());
+        Some([axis(point.x)?, axis(point.y)?])
+    }
+
+    /// The exact value the network catalogue carries for [`MapSpec::extent`], or `None` when
+    /// it is fractional or outside `u16`. See [`MapSpec::wire_point`].
+    #[must_use]
+    pub fn wire_extent(extent: Fix) -> Option<u16> {
+        whole_units(extent).and_then(|units| u16::try_from(units).ok())
+    }
+
     /// Team spawn point.
     #[must_use]
     pub const fn spawn(&self, team: Team) -> FixVec2 {

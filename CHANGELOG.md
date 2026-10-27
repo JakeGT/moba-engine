@@ -36,6 +36,15 @@ breaking protocol, replay or content-schema changes.
   future hashed field cannot be added without being hashed and carried.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
+- `GameContent::validate` now rejects map geometry the wire catalogue would silently truncate
+  (#296): a fractional or out-of-`i16`/`u16` extent, spawn, lane waypoint, structure position
+  or wall endpoint (new `ContentError::BadMapCoordinate(field)`; adding a variant is a breaking
+  change for exhaustive matches), more than 4 lanes / 16 waypoints / 32 structures, empty lane
+  paths (which panicked the wave spawner), and over-long or non-ASCII map/lane names.
+  `NetServer::bind_with_content` now validates its pack (`ErrorKind::InvalidInput`), and the
+  client validates the Welcome catalogue as it already did for `ContentUpdate`. No wire-format
+  change (still protocol v38); shipped pack hashes are unchanged. New `MapSpec::wire_point` /
+  `MapSpec::wire_extent` and `MAX_LANE_NAME` are shared by validation and the wire conversion.
 
 ### Internal
 - Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`

@@ -27,10 +27,10 @@ pub use content::{
     AbilitySpec, ContentError, ContentLoadError, ContentManifest, GameContent, HeroSpec, ItemSpec,
     LaneSpec, MAX_ABILITY_NAME, MAX_CONTENT_ABILITIES, MAX_CONTENT_HEROES, MAX_CONTENT_ITEMS,
     MAX_CONTENT_LANES, MAX_CONTENT_MODIFIERS, MAX_CONTENT_STRUCTURES, MAX_CONTENT_WALLS,
-    MAX_HERO_NAME, MAX_ITEM_NAME, MAX_LANE_POINTS, MAX_MANIFEST_FIELD, MAX_MAP_COORD,
-    MODIFIER_BURN, MODIFIER_HASTE, MODIFIER_ROOT, MODIFIER_SHIELD, MODIFIER_SILENCE, MODIFIER_SLOW,
-    MapSpec, MapTheme, MinionStatsSpec, ModifierDef, ModifierKind, PackAttestation, RewardsSpec,
-    RulesSpec, StructureSpec, StructureStatsSpec, UnitRewardsSpec, WallSpec,
+    MAX_HERO_NAME, MAX_ITEM_NAME, MAX_LANE_NAME, MAX_LANE_POINTS, MAX_MANIFEST_FIELD,
+    MAX_MAP_COORD, MODIFIER_BURN, MODIFIER_HASTE, MODIFIER_ROOT, MODIFIER_SHIELD, MODIFIER_SILENCE,
+    MODIFIER_SLOW, MapSpec, MapTheme, MinionStatsSpec, ModifierDef, ModifierKind, PackAttestation,
+    RewardsSpec, RulesSpec, StructureSpec, StructureStatsSpec, UnitRewardsSpec, WallSpec,
     load_file as load_content_file, load_toml as load_content_toml,
 };
 pub use hero::{HEROES, HeroDef, HeroId};

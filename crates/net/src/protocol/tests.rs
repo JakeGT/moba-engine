@@ -526,6 +526,252 @@ fn wire_rules_parity_covers_every_hashed_field() {
     }
 }
 
+/// Asserts `content` is valid and crosses the wire losslessly (hash, content and bytes).
+fn assert_wire_parity(name: &str, content: &GameContent) {
+    assert_eq!(
+        content.validate(),
+        Ok(()),
+        "{name}: mutation must stay valid"
+    );
+    let wire = WireCatalog::from(content);
+    assert_eq!(
+        wire.content_hash().expect("wire hash"),
+        content.hash(),
+        "{name}: client-reconstructed hash differs"
+    );
+    assert_eq!(
+        &wire.to_content().expect("content").map,
+        &content.map,
+        "{name}: map differs after From/to_content"
+    );
+    let mut bytes = Vec::new();
+    encode_catalog(&wire, &mut bytes);
+    let mut reader = Reader::new(&bytes);
+    assert_eq!(
+        decode_catalog(&mut reader).expect("decode catalogue"),
+        wire,
+        "{name}: encode/decode round trip"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One mutation table per map coordinate kind.
+fn wire_map_parity_covers_every_coordinate_kind() {
+    use moba_core::{Fix, FixVec2};
+    use moba_game::{ContentError, LaneSpec, MapSpec, StructureSpec, WallSpec};
+    type Set = Box<dyn Fn(&mut MapSpec, Fix)>;
+    let mut base = GameContent::default();
+    base.map.walls.push(WallSpec {
+        a: FixVec2::from_ints(80, 96),
+        b: FixVec2::from_ints(80, 160),
+    });
+    assert_wire_parity("base", &base);
+    // Exhaustive destructures with no `..`: adding map geometry fails to compile here until
+    // it has a coordinate mutation below (or is listed as non-geometric).
+    let MapSpec {
+        name: _,
+        theme: _,
+        extent: _,
+        lanes,
+        structures,
+        walls,
+        blue_spawn: _,
+        red_spawn: _,
+    } = &base.map;
+    let LaneSpec { name: _, path: _ } = &lanes[0];
+    let StructureSpec {
+        team: _,
+        position: _,
+        kind: _,
+        lane: _,
+    } = &structures[0];
+    let WallSpec { a: _, b: _ } = &walls[0];
+    let axis = |set: fn(&mut FixVec2, Fix), select: fn(&mut MapSpec) -> &mut FixVec2| -> Set {
+        Box::new(move |map, value| set(select(map), value))
+    };
+    let x: fn(&mut FixVec2, Fix) = |point, value| point.x = value;
+    let y: fn(&mut FixVec2, Fix) = |point, value| point.y = value;
+    let blue: fn(&mut MapSpec) -> &mut FixVec2 = |map| &mut map.blue_spawn;
+    let red: fn(&mut MapSpec) -> &mut FixVec2 = |map| &mut map.red_spawn;
+    let lane: fn(&mut MapSpec) -> &mut FixVec2 = |map| &mut map.lanes[0].path[1];
+    let structure: fn(&mut MapSpec) -> &mut FixVec2 = |map| &mut map.structures[0].position;
+    let wall_a: fn(&mut MapSpec) -> &mut FixVec2 = |map| &mut map.walls[0].a;
+    let wall_b: fn(&mut MapSpec) -> &mut FixVec2 = |map| &mut map.walls[0].b;
+    let point_cases: Vec<(&'static str, Set)> = vec![
+        ("map.blue_spawn", axis(x, blue)),
+        ("map.blue_spawn", axis(y, blue)),
+        ("map.red_spawn", axis(x, red)),
+        ("map.red_spawn", axis(y, red)),
+        ("map.lanes.path", axis(x, lane)),
+        ("map.lanes.path", axis(y, lane)),
+        ("map.structures.position", axis(x, structure)),
+        ("map.structures.position", axis(y, structure)),
+        ("map.walls.a", axis(x, wall_a)),
+        ("map.walls.a", axis(y, wall_a)),
+        ("map.walls.b", axis(x, wall_b)),
+        ("map.walls.b", axis(y, wall_b)),
+    ];
+    // (field, setter, valid whole value, values outside the wire integer type).
+    let mut cases: Vec<(&'static str, Set, Fix, [Fix; 2])> = point_cases
+        .into_iter()
+        .map(|(field, set)| {
+            (
+                field,
+                set,
+                Fix::from_i32(101),
+                [Fix::from_i32(40_000), Fix::from_i32(-40_000)],
+            )
+        })
+        .collect();
+    cases.push((
+        "map.extent",
+        Box::new(|map, value| map.extent = value),
+        Fix::from_i32(250),
+        [Fix::from_i32(70_000), Fix::from_i32(-1)],
+    ));
+    for (field, set, valid, out_of_wire_range) in &cases {
+        let mut content = base.clone();
+        set(&mut content.map, *valid);
+        assert_ne!(content.hash(), base.hash(), "{field}: must change the hash");
+        assert_wire_parity(field, &content);
+
+        for fractional in [
+            *valid + Fix::from_f64(0.5),
+            Fix::from_bits(valid.to_bits() + 1),
+        ] {
+            let mut content = base.clone();
+            set(&mut content.map, fractional);
+            assert_eq!(
+                content.validate(),
+                Err(ContentError::BadMapCoordinate(field)),
+                "{field}: fractional {fractional:?}"
+            );
+            // Why validation matters: the wire would truncate this and break the hash.
+            assert_ne!(
+                WireCatalog::from(&content).content_hash(),
+                Ok(content.hash()),
+                "{field}: fractional value must not survive the wire"
+            );
+        }
+        for value in out_of_wire_range {
+            let mut content = base.clone();
+            set(&mut content.map, *value);
+            assert_eq!(
+                content.validate(),
+                Err(ContentError::BadMapCoordinate(field)),
+                "{field}: {value:?} does not fit the wire type"
+            );
+            assert_ne!(
+                WireCatalog::from(&content).content_hash(),
+                Ok(content.hash()),
+                "{field}: out-of-range value must not survive the wire"
+            );
+        }
+        // Whole and wire-representable, but outside the world: still rejected.
+        let mut content = base.clone();
+        set(&mut content.map, Fix::from_i32(300));
+        assert!(
+            content.validate().is_err(),
+            "{field}: 300 is outside the 0..=256 world"
+        );
+    }
+
+    // The issue's exact repro.
+    let mut content = GameContent::default();
+    content.map.extent = Fix::from_f64(128.5);
+    assert_eq!(
+        content.validate(),
+        Err(ContentError::BadMapCoordinate("map.extent"))
+    );
+}
+
+#[test]
+fn wire_map_names_and_counts_are_validated_instead_of_truncated() {
+    use moba_core::FixVec2;
+    use moba_game::{
+        ContentError, MAX_CONTENT_LANES, MAX_CONTENT_STRUCTURES, MAX_LANE_NAME, MAX_LANE_POINTS,
+        MAX_MANIFEST_FIELD,
+    };
+    let base = GameContent::default();
+    let check = |name: &str, mutate: &dyn Fn(&mut GameContent), expected: ContentError| {
+        let mut content = base.clone();
+        mutate(&mut content);
+        assert_eq!(content.validate(), Err(expected), "{name}");
+    };
+    check(
+        "map name too long",
+        &|c| c.map.name = "m".repeat(MAX_MANIFEST_FIELD + 1),
+        ContentError::BadMapData,
+    );
+    check(
+        "map name non-ASCII",
+        &|c| c.map.name = String::from("Kartë"),
+        ContentError::BadMapData,
+    );
+    check(
+        "lane name too long",
+        &|c| c.map.lanes[0].name = "l".repeat(MAX_LANE_NAME + 1),
+        ContentError::BadMapData,
+    );
+    check(
+        "lane name empty",
+        &|c| c.map.lanes[0].name.clear(),
+        ContentError::BadMapData,
+    );
+    check(
+        "too many lanes",
+        &|c| {
+            let lane = c.map.lanes[0].clone();
+            c.map.lanes.resize(MAX_CONTENT_LANES + 1, lane);
+        },
+        ContentError::BadMap,
+    );
+    check(
+        "too many lane points",
+        &|c| {
+            let point = c.map.lanes[0].path[0];
+            c.map.lanes[0].path.resize(MAX_LANE_POINTS + 1, point);
+        },
+        ContentError::BadMap,
+    );
+    check(
+        "empty lane path",
+        &|c| c.map.lanes[0].path.clear(),
+        ContentError::BadMap,
+    );
+    check(
+        "too many structures",
+        &|c| {
+            let structure = c.map.structures[0];
+            c.map
+                .structures
+                .resize(MAX_CONTENT_STRUCTURES + 1, structure);
+        },
+        ContentError::BadMap,
+    );
+
+    // The limits themselves are carried exactly.
+    let mut content = base.clone();
+    content.map.name = "m".repeat(MAX_MANIFEST_FIELD);
+    content.map.lanes[0].name = "l".repeat(MAX_LANE_NAME);
+    let point = content.map.lanes[0].path[0];
+    content.map.lanes[0].path.resize(MAX_LANE_POINTS, point);
+    let lane = content.map.lanes[0].clone();
+    content.map.lanes.resize(MAX_CONTENT_LANES, lane);
+    let structure = content.map.structures[0];
+    content
+        .map
+        .structures
+        .resize(MAX_CONTENT_STRUCTURES, structure);
+    content.map.walls = (0..moba_game::MAX_CONTENT_WALLS)
+        .map(|index| moba_game::WallSpec {
+            a: FixVec2::from_ints(1, i32::try_from(index).expect("small")),
+            b: FixVec2::from_ints(2, i32::try_from(index).expect("small")),
+        })
+        .collect();
+    assert_wire_parity("capacity limits", &content);
+}
+
 #[test]
 fn wire_catalogue_round_trips_nonzero_projectile_arc() {
     use moba_game::{Effect, GameContent};
