@@ -12,6 +12,7 @@ use moba_render::{Camera, UnitInstance};
 use moba_sim::UnitKind;
 
 use crate::app::NetworkView;
+use crate::app::models::{HeroModel, ModelLibrary};
 use crate::hud::{HudUnit, map_center, rendered_entity_position};
 
 pub(crate) fn map_theme(theme: u8) -> ([f32; 4], Vec4) {
@@ -24,7 +25,11 @@ pub(crate) fn map_theme(theme: u8) -> ([f32; 4], Vec4) {
     }
 }
 
-pub(crate) fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitInstance>) {
+pub(crate) fn rebuild_network_units(
+    network: &NetworkView,
+    models: &ModelLibrary,
+    units: &mut Vec<UnitInstance>,
+) {
     units.clear();
     let Some(latest) = network.interpolator.latest() else {
         return;
@@ -76,8 +81,9 @@ pub(crate) fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitI
             } else {
                 (0.0, 0.0)
             };
-            push_hero_rig(
+            push_hero(
                 units,
+                models.hero(usize::from(entity.hero_pick)),
                 position,
                 team,
                 fraction,
@@ -117,6 +123,64 @@ pub(crate) fn rebuild_network_units(network: &NetworkView, units: &mut Vec<UnitI
     }
 }
 
+fn hero_color(team: Team, health_fraction: f32) -> Vec4 {
+    let color = match team {
+        Team::Blue => Vec4::new(0.28, 0.55, 1.0, 1.0),
+        Team::Red => Vec4::new(1.0, 0.34, 0.28, 1.0),
+    };
+    let brightness = 0.55 + 0.45 * health_fraction.clamp(0.0, 1.0);
+    Vec4::new(
+        color.x * brightness,
+        color.y * brightness,
+        color.z * brightness,
+        1.0,
+    )
+}
+
+/// Pushes a hero as its loaded model when there is one, otherwise as the procedural rig.
+#[allow(clippy::too_many_arguments)] // Rig pose inputs are explicit.
+pub(crate) fn push_hero(
+    units: &mut Vec<UnitInstance>,
+    model: Option<HeroModel>,
+    position: FixVec2,
+    team: Team,
+    health_fraction: f32,
+    center: f32,
+    time: f32,
+    phase_offset: f32,
+    facing: f32,
+    gait: f32,
+) {
+    let Some(model) = model else {
+        push_hero_rig(
+            units,
+            position,
+            team,
+            health_fraction,
+            center,
+            time,
+            phase_offset,
+            facing,
+            gait,
+        );
+        return;
+    };
+    // A static mesh has no joints (GPU skinning is WP-4.1); a small stride bob keeps
+    // moving heroes readable.
+    let bob = (time * 12.0 + phase_offset).sin().abs() * 0.12 * gait.clamp(0.0, 1.0);
+    let base = Vec3::new(
+        position.x.to_f32() - center,
+        bob,
+        position.y.to_f32() - center,
+    );
+    // Models face +Z (glTF); `facing` is the movement angle in the map's (x, z) plane.
+    let rotation = Quat::from_rotation_y(core::f32::consts::FRAC_PI_2 - facing);
+    let transform = Mat4::from_rotation_translation(rotation, base) * model.normalize;
+    units.push(
+        UnitInstance::new(transform, hero_color(team, health_fraction)).with_mesh(model.mesh),
+    );
+}
+
 #[allow(clippy::too_many_arguments)] // Rig pose inputs are explicit.
 pub(crate) fn push_hero_rig(
     units: &mut Vec<UnitInstance>,
@@ -129,17 +193,7 @@ pub(crate) fn push_hero_rig(
     facing: f32,
     gait: f32,
 ) {
-    let color = match team {
-        Team::Blue => Vec4::new(0.28, 0.55, 1.0, 1.0),
-        Team::Red => Vec4::new(1.0, 0.34, 0.28, 1.0),
-    };
-    let brightness = 0.55 + 0.45 * health_fraction.clamp(0.0, 1.0);
-    let color = Vec4::new(
-        color.x * brightness,
-        color.y * brightness,
-        color.z * brightness,
-        1.0,
-    );
+    let color = hero_color(team, health_fraction);
     let base = Vec3::new(
         position.x.to_f32() - center,
         0.0,
@@ -313,5 +367,5 @@ pub(crate) fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -
         0.0,
         predicted.y.to_f32() - world_center,
     );
-    Camera::orbit(center, 46.0, -0.7, 0.95, aspect)
+    Camera::orbit(center, network.follow_distance, -0.7, 0.95, aspect)
 }

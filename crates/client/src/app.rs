@@ -15,6 +15,9 @@
 //! - `MOBA_DEMO_MOVE=x,y` issues one move order after the first snapshot (capture demos).
 //! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
+//! - `MOBA_ASSET_ROOT=<dir>` (default `content`) and `MOBA_HERO_MODELS=<hero=model,...>`
+//!   draw heroes with `<dir>/models/<model>.glb`; any failure falls back to the rig.
+//! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -76,6 +79,7 @@ struct ClientApp {
     network: Option<NetworkView>,
     local_audio: Option<crate::audio::Audio>,
     units: Vec<UnitInstance>,
+    models: models::ModelLibrary,
     ui: UiDrawList,
     scoreboard_visible: bool,
     shop_visible: bool,
@@ -133,6 +137,7 @@ impl ClientApp {
             network: None,
             local_audio: None,
             units: Vec::with_capacity(moba_sim::MAX_UNITS),
+            models: models::ModelLibrary::from_env(),
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
@@ -191,6 +196,7 @@ impl ClientApp {
                         spectator_pan: Vec3::ZERO,
                         spectator_yaw: -0.7,
                         spectator_zoom: camera_zoom,
+                        follow_distance: parse_follow_distance(),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
                         audio: crate::audio::Audio::new(audio_volume, audio_mute),
@@ -255,7 +261,28 @@ impl App for ClientApp {
             ..RenderConfig::default()
         };
         match Renderer::new(window, config) {
-            Ok(renderer) => {
+            Ok(mut renderer) => {
+                if let Some(network) = &self.network {
+                    models::bind_hero_models(
+                        &mut self.models,
+                        &mut renderer,
+                        network
+                            .client
+                            .heroes()
+                            .iter()
+                            .map(moba_net::protocol::WireHero::name_str),
+                    );
+                } else if let Some(simulation) = &self.simulation {
+                    models::bind_hero_models(
+                        &mut self.models,
+                        &mut renderer,
+                        simulation
+                            .content()
+                            .heroes
+                            .iter()
+                            .map(|hero| hero.name.as_str()),
+                    );
+                }
                 let title = if let Some(network) = &self.network {
                     if network.spectator {
                         String::from("MOBA — spectator")
@@ -327,6 +354,7 @@ impl App for ClientApp {
                 network,
                 simulation,
                 units,
+                models,
                 ui,
                 scoreboard_visible,
                 shop_visible,
@@ -374,6 +402,19 @@ impl App for ClientApp {
                                 network.last_snapshot_seq = 0;
                                 network.projectiles.clear();
                                 network.kill_feed.clear();
+                                // Content reload: rebind hero models (cached, so only new
+                                // names touch the disk or the GPU).
+                                if let Some(renderer) = renderer.as_mut() {
+                                    models::bind_hero_models(
+                                        models,
+                                        renderer,
+                                        network
+                                            .client
+                                            .heroes()
+                                            .iter()
+                                            .map(moba_net::protocol::WireHero::name_str),
+                                    );
+                                }
                             }
                             ClientEvent::Snapshot { .. } => {}
                         }
@@ -438,7 +479,7 @@ impl App for ClientApp {
                             network.prediction.step();
                         }
                     }
-                    rebuild_network_units(network, units);
+                    rebuild_network_units(network, models, units);
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
@@ -527,8 +568,12 @@ impl App for ClientApp {
                     let fraction = health.current as f32 / health.max as f32;
                     let center = simulation.content().map.extent.to_f32() * 0.5;
                     if *kind == UnitKind::Hero {
-                        push_hero_rig(
+                        let model = world
+                            .get::<moba_sim::HeroIdentity>(entity)
+                            .and_then(|hero| models.hero(usize::from(hero.0.0)));
+                        push_hero(
                             units,
+                            model,
                             position.0,
                             *team,
                             fraction,
@@ -594,13 +639,15 @@ impl App for ClientApp {
 }
 
 mod launch;
+mod models;
 mod scene_build;
 
 pub(crate) use launch::{
-    capture_and_exit, connect_network, frames_is_capture, parse_demo_move, run,
+    capture_and_exit, connect_network, frames_is_capture, parse_demo_move, parse_follow_distance,
+    run,
 };
 pub(crate) use scene_build::{
-    map_theme, network_camera, push_hero_rig, push_unit, rebuild_network_units,
+    map_theme, network_camera, push_hero, push_unit, rebuild_network_units,
 };
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.

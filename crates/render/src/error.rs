@@ -39,6 +39,9 @@ pub enum RenderError {
     DeviceLost,
     /// Texture dimensions overflowed or did not match the pixel buffer.
     InvalidTexture,
+    /// [`Renderer::register_mesh`](crate::Renderer::register_mesh) was called with every
+    /// mesh slot in use.
+    TooManyMeshes,
 }
 
 impl fmt::Display for RenderError {
@@ -65,6 +68,11 @@ impl fmt::Display for RenderError {
             Self::SwapchainSuboptimal => f.write_str("swapchain suboptimal"),
             Self::DeviceLost => f.write_str("device lost"),
             Self::InvalidTexture => f.write_str("invalid texture dimensions"),
+            Self::TooManyMeshes => write!(
+                f,
+                "mesh limit reached ({} including the built-in cube)",
+                crate::renderer::MAX_MESHES
+            ),
         }
     }
 }

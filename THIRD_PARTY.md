@@ -35,4 +35,14 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## Sample hero model
+
+`content/models/sentinel.glb` (and its copy in `fuzz/corpus/glb/`) is not third-party art. It
+is generated from code in this repository by `cargo run -p moba-tools --bin sample-mesh`
+(`crates/tools/src/bin/sample-mesh.rs`), so it carries the repository's MIT OR Apache-2.0
+licence. A unit test checks that the committed bytes match the generator.
+
+The `.glb` loader uses the `gltf` crate family (MIT OR Apache-2.0) with default features
+disabled; see [ADR-0007](docs/adr/0007-mesh-format.md).
+
 The full repository license is dual MIT/Apache-2.0; see `LICENSE-MIT` and `LICENSE-APACHE`.

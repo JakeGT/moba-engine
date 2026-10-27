@@ -17,13 +17,15 @@ use crate::resources::{
     CommandPool, DescriptorPool, DescriptorSetLayout, Fence, GpuBuffer, GpuImage, GraphicsPipeline,
     PipelineLayout, Semaphore, ShaderModule,
 };
-use crate::scene::{CameraUniform, GpuInstance, Scene};
+use crate::scene::{CameraUniform, GpuInstance, MeshId, Scene};
 use crate::swapchain::Swapchain;
 use crate::texture;
 use crate::ui::{UiDrawList, UiVertex};
 use gpu_allocator::MemoryLocation;
 
 const FRAMES_IN_FLIGHT: usize = 2;
+/// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
+pub(crate) const MAX_MESHES: usize = 64;
 const UI_ATLAS: &[u8] = include_bytes!("../assets/ui-atlas.rgba");
 static UI_VERTICES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
 static UI_TRUNCATION_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -40,7 +42,8 @@ const CAMERA_UNIFORM_SIZE: u64 = core::mem::size_of::<CameraUniform>() as u64;
 pub struct RenderConfig {
     /// Validation layer policy.
     pub validation: ValidationMode,
-    /// Maximum number of units drawn per frame. The instance buffer is pre-sized.
+    /// Maximum number of units drawn per frame, shared by every mesh. The instance buffer
+    /// is pre-sized; units past the cap are dropped in scene order.
     pub max_instances: usize,
     /// Request vertical sync (FIFO). Disable to allow mailbox/immediate.
     pub vsync: bool,
@@ -117,7 +120,13 @@ impl Drop for OwnedSampler {
 pub struct Renderer {
     swapchain: Swapchain,
     terrain_mesh: GpuMesh,
-    unit_mesh: GpuMesh,
+    /// Unit meshes: slot 0 is the cube, the rest come from `register_mesh`. Never shrinks,
+    /// so a `MeshId` stays valid and no frame in flight can reference a freed mesh.
+    meshes: Vec<GpuMesh>,
+    /// Per-frame bucketing scratch (instances per mesh, first instance, write cursor).
+    mesh_counts: [u32; MAX_MESHES],
+    mesh_starts: [u32; MAX_MESHES],
+    mesh_cursors: [u32; MAX_MESHES],
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
     _ui_layout: DescriptorSetLayout,
@@ -317,8 +326,9 @@ impl Renderer {
             )?,
         );
 
-        let terrain_mesh = mesh::upload(&device, &mesh::MeshData::plane(300.0))?;
-        let unit_mesh = mesh::upload(&device, &mesh::MeshData::cube())?;
+        let terrain_mesh = mesh::upload(&device, &mesh::CpuMesh::plane(300.0))?;
+        let mut meshes = Vec::with_capacity(MAX_MESHES);
+        meshes.push(mesh::upload(&device, &mesh::CpuMesh::cube())?);
 
         let descriptor_layouts: Vec<vk::DescriptorSetLayout> = (0..FRAMES_IN_FLIGHT)
             .flat_map(|_| [camera_layout.handle(), instance_layout.handle()])
@@ -405,7 +415,10 @@ impl Renderer {
             window: window.clone(),
             swapchain,
             terrain_mesh,
-            unit_mesh,
+            meshes,
+            mesh_counts: [0; MAX_MESHES],
+            mesh_starts: [0; MAX_MESHES],
+            mesh_cursors: [0; MAX_MESHES],
             _camera_layout: camera_layout,
             _instance_layout: instance_layout,
             _ui_layout: ui_layout,
@@ -449,6 +462,32 @@ impl Renderer {
     #[must_use]
     pub fn validation_error_count(&self) -> u64 {
         InstanceContext::validation_error_count()
+    }
+
+    /// Uploads a static mesh and returns its id for [`UnitInstance::mesh`](crate::UnitInstance).
+    ///
+    /// Load-time only: the upload goes through a staging buffer and a transfer → vertex-input
+    /// `synchronization2` barrier, then waits for the graphics queue to idle. Do not call it
+    /// per frame. Meshes live as long as the renderer; ids are never reused. Up to 64 meshes
+    /// (including the built-in cube) can be registered.
+    ///
+    /// # Errors
+    /// [`RenderError::TooManyMeshes`] once every slot is used, otherwise allocation or Vulkan
+    /// errors from the upload.
+    pub fn register_mesh(&mut self, data: &crate::MeshData) -> RenderResult<MeshId> {
+        if self.meshes.len() >= MAX_MESHES {
+            return Err(RenderError::TooManyMeshes);
+        }
+        let id = u16::try_from(self.meshes.len()).map_err(|_| RenderError::TooManyMeshes)?;
+        let gpu = mesh::upload(&self.device, &mesh::CpuMesh::from_asset(data))?;
+        self.meshes.push(gpu);
+        Ok(MeshId::from_index(id))
+    }
+
+    /// Number of registered meshes, including the built-in cube.
+    #[must_use]
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
     }
 
     /// Current swapchain extent in physical pixels.
@@ -547,6 +586,14 @@ impl Renderer {
             let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint);
             frame.camera_buffer.write_bytes(0, bytes_of(&uniform));
             if unit_count > 0 {
+                let units = &scene.units[..unit_count];
+                bucket_by_mesh(
+                    units,
+                    self.meshes.len(),
+                    &mut self.mesh_counts,
+                    &mut self.mesh_starts,
+                    &mut self.mesh_cursors,
+                );
                 let mapped = frame
                     .instance_buffer
                     .mapped_slice_mut::<GpuInstance>(unit_count)
@@ -555,8 +602,13 @@ impl Renderer {
                             "instance buffer is not host visible",
                         ))
                     })?;
-                for (destination, source) in mapped.iter_mut().zip(&scene.units[..unit_count]) {
-                    *destination = GpuInstance::from(*source);
+                // Each mesh's instances land contiguously at its `mesh_starts` slot, so one
+                // draw per mesh reads them through `firstInstance` (gl_InstanceIndex).
+                for unit in units {
+                    let slot = mesh_slot(unit.mesh, self.meshes.len());
+                    let cursor = &mut self.mesh_cursors[slot];
+                    mapped[*cursor as usize] = GpuInstance::from(*unit);
+                    *cursor += 1;
                 }
             }
             let ui_total = ui.map_or(0, |list| list.vertices().len());
@@ -758,34 +810,44 @@ impl Renderer {
                     self.unit_pipeline.handle(),
                 );
             }
-            // SAFETY: same as above.
-            unsafe {
-                self.device.device.cmd_bind_vertex_buffers(
-                    command_buffer,
-                    0,
-                    &[self.unit_mesh.vertices.handle()],
-                    &[0],
-                );
-            }
-            // SAFETY: the index buffer is a 32-bit index buffer.
-            unsafe {
-                self.device.device.cmd_bind_index_buffer(
-                    command_buffer,
-                    self.unit_mesh.indices.handle(),
-                    0,
-                    vk::IndexType::UINT32,
-                );
-            }
-            // SAFETY: `unit_count` was bounded by the instance buffer capacity.
-            unsafe {
-                self.device.device.cmd_draw_indexed(
-                    command_buffer,
-                    self.unit_mesh.index_count,
-                    u32::try_from(unit_count).expect("unit count fits u32"),
-                    0,
-                    0,
-                    0,
-                );
+            for (slot, mesh) in self.meshes.iter().enumerate() {
+                let count = self.mesh_counts[slot];
+                if count == 0 {
+                    continue;
+                }
+                // SAFETY: the mesh buffers live as long as the renderer and the bound unit
+                // pipeline consumes this vertex layout.
+                unsafe {
+                    self.device.device.cmd_bind_vertex_buffers(
+                        command_buffer,
+                        0,
+                        &[mesh.vertices.handle()],
+                        &[0],
+                    );
+                }
+                // SAFETY: the index buffer is a 32-bit index buffer whose indices are all
+                // below the mesh's vertex count (cube by construction, assets by
+                // `MeshData` validation).
+                unsafe {
+                    self.device.device.cmd_bind_index_buffer(
+                        command_buffer,
+                        mesh.indices.handle(),
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                }
+                // SAFETY: `mesh_starts[slot] + count <= unit_count <= max_instances`, the
+                // instance buffer's element capacity, by construction in `bucket_by_mesh`.
+                unsafe {
+                    self.device.device.cmd_draw_indexed(
+                        command_buffer,
+                        mesh.index_count,
+                        count,
+                        0,
+                        0,
+                        self.mesh_starts[slot],
+                    );
+                }
             }
         }
 
@@ -1141,6 +1203,37 @@ impl Drop for Renderer {
     }
 }
 
+/// Maps an instance's mesh to a live slot; unknown ids draw as the cube.
+fn mesh_slot(mesh: MeshId, mesh_count: usize) -> usize {
+    let index = mesh.index();
+    if index < mesh_count { index } else { 0 }
+}
+
+/// Counting-sort bucketing of `units` by mesh, without allocating.
+///
+/// On return `counts[m]` is the number of instances of mesh `m`, `starts[m]` the first
+/// instance slot of that mesh's contiguous run, and `cursors[m] == starts[m]` (the write
+/// cursor the caller advances while scattering). Runs are in mesh-slot order and keep scene
+/// order within a mesh, so a scene that only uses the cube is laid out exactly as before.
+fn bucket_by_mesh(
+    units: &[crate::UnitInstance],
+    mesh_count: usize,
+    counts: &mut [u32; MAX_MESHES],
+    starts: &mut [u32; MAX_MESHES],
+    cursors: &mut [u32; MAX_MESHES],
+) {
+    counts.fill(0);
+    for unit in units {
+        counts[mesh_slot(unit.mesh, mesh_count)] += 1;
+    }
+    let mut next = 0u32;
+    for slot in 0..MAX_MESHES {
+        starts[slot] = next;
+        next += counts[slot];
+    }
+    *cursors = *starts;
+}
+
 fn write_descriptors(
     device: &Device,
     camera_set: vk::DescriptorSet,
@@ -1304,4 +1397,41 @@ fn transition_depth(
     let dependency =
         vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&barrier));
     device.cmd_pipeline_barrier2(command_buffer, &dependency);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_MESHES, bucket_by_mesh};
+    use crate::{MeshId, UnitInstance};
+    use moba_core::math::{Mat4, Vec4};
+
+    fn unit(mesh: u16) -> UnitInstance {
+        UnitInstance::new(Mat4::IDENTITY, Vec4::ONE).with_mesh(MeshId::from_index(mesh))
+    }
+
+    #[test]
+    fn buckets_are_contiguous_and_unknown_meshes_draw_as_cubes() {
+        let units = [unit(2), unit(0), unit(1), unit(2), unit(9), unit(0)];
+        let mut counts = [0; MAX_MESHES];
+        let mut starts = [0; MAX_MESHES];
+        let mut cursors = [0; MAX_MESHES];
+        bucket_by_mesh(&units, 3, &mut counts, &mut starts, &mut cursors);
+        // Mesh 9 is not registered (3 meshes), so it joins the cube bucket.
+        assert_eq!(&counts[..4], &[3, 1, 2, 0]);
+        assert_eq!(&starts[..4], &[0, 3, 4, 6]);
+        assert_eq!(cursors, starts);
+        assert_eq!(starts[MAX_MESHES - 1], 6);
+    }
+
+    #[test]
+    fn cube_only_scenes_keep_one_run_in_scene_order() {
+        let units = [unit(0); 5];
+        let mut counts = [7; MAX_MESHES];
+        let mut starts = [7; MAX_MESHES];
+        let mut cursors = [7; MAX_MESHES];
+        bucket_by_mesh(&units, 1, &mut counts, &mut starts, &mut cursors);
+        assert_eq!(counts[0], 5);
+        assert_eq!(starts[0], 0);
+        assert!(counts[1..].iter().all(|&count| count == 0));
+    }
 }

@@ -16,8 +16,8 @@ pub(crate) struct Vertex {
     pub(crate) normal: [f32; 3],
 }
 
-/// CPU-side mesh data.
-pub(crate) struct MeshData {
+/// CPU-side interleaved mesh, ready for [`upload`].
+pub(crate) struct CpuMesh {
     pub(crate) vertices: Vec<Vertex>,
     pub(crate) indices: Vec<u32>,
 }
@@ -29,7 +29,7 @@ pub(crate) struct GpuMesh {
     pub(crate) index_count: u32,
 }
 
-impl MeshData {
+impl CpuMesh {
     /// Unit cube centred at the origin, one metre tall before scaling.
     pub(crate) fn cube() -> Self {
         let mut vertices = Vec::with_capacity(24);
@@ -127,11 +127,28 @@ impl MeshData {
         let indices = vec![0, 1, 2, 0, 2, 3];
         Self { vertices, indices }
     }
+
+    /// Interleaves a validated asset mesh into the shared `{position, normal}` layout.
+    ///
+    /// `moba_assets::MeshData` guarantees a non-empty triangle list whose indices are all in
+    /// range, so the GPU never fetches a vertex outside the uploaded buffer.
+    pub(crate) fn from_asset(data: &moba_assets::MeshData) -> Self {
+        let vertices = data
+            .positions()
+            .iter()
+            .zip(data.normals())
+            .map(|(&position, &normal)| Vertex { position, normal })
+            .collect();
+        Self {
+            vertices,
+            indices: data.indices().to_vec(),
+        }
+    }
 }
 
 /// Uploads a mesh to device-local memory through staging buffers.
 #[allow(clippy::too_many_lines)] // One-time upload sequence; splitting hides the barriers.
-pub(crate) fn upload(device: &DeviceContext, data: &MeshData) -> RenderResult<GpuMesh> {
+pub(crate) fn upload(device: &DeviceContext, data: &CpuMesh) -> RenderResult<GpuMesh> {
     let allocator = device.allocator();
     let vertex_bytes: &[u8] = bytemuck::cast_slice(&data.vertices);
     let index_bytes: &[u8] = bytemuck::cast_slice(&data.indices);
