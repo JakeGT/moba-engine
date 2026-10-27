@@ -54,6 +54,9 @@ breaking protocol, replay or content-schema changes.
   inputs, abilities, movement, combat, deaths, items, bots, vision, hashing, tests); pure move,
   no behaviour, API or state-hash change.
 
+### Documentation
+- Added the [playtest runbook](docs/playtest.md) (WP-5.1): hosting, tokens/identity, firewall, bots and spectators, client join variables, ~100 ms RTT with `tc netem`, replay/results/frame-log collection and a feedback form.
+
 ## [0.4.0] — 2026-10-21
 
 Security release. Protocol **v37** (not wire-compatible with 0.3.x), replay **v5**, simulation logic **v7**. Content hashes and replays are unchanged.

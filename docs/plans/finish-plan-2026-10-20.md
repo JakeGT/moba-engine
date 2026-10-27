@@ -318,7 +318,9 @@ Then:
 
 ### Phase 5: M6 playtest (needs people)
 
-#### WP-5.1 Playtest runbook (`docs/playtest.md`)
+#### WP-5.1 Playtest runbook ([`docs/playtest.md`](../playtest.md))
+**Runbook written:** [docs/playtest.md](../playtest.md), with every command re-checked against the code and smoke-tested locally. One correction to the facts below: with `--matches N`, record and results paths also get a `-mNN` suffix (`match-m00.mbr`, `matches-m00.jsonl`); rematches within a match add `.matchN`.
+
 Facts to use (all verified):
 - **Host:**
   ```
