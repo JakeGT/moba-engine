@@ -17,8 +17,17 @@ is opt-in until crate names/ownership are settled.
 
 1. **Scope and notes** — update `CHANGELOG.md`, `docs/status.md` and any migration notes.
 2. **API** — run `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`;
-   review public API changes against [docs/API-STABILITY.md](docs/API-STABILITY.md). When
-   `cargo-semver-checks` is available, compare against the previous tag for each library crate.
+   review public API changes against [docs/API-STABILITY.md](docs/API-STABILITY.md). Run
+   `scripts/semver-check.sh` (or `just semver`; needs
+   `cargo install cargo-semver-checks --locked`), which diffs the library crates against the
+   previous release tag (`--baseline-rev`, latest `v*` tag by default). CI's informational
+   `semver (informational)` job runs the same script on every PR and push to `main`; check
+   its summary on the last `main` run before tagging.
+   - **No semver update required:** a patch release (`0.X.Y+1`) is allowed.
+   - **Requires new major version:** the next release must bump the minor version
+     (`0.X+1.0`), and the CHANGELOG must list the breaking changes.
+   - The check never publishes anything and works with `publish = false`: the crates are
+     passed explicitly with `-p`, because `--workspace` skips unpublishable crates.
 3. **Quality** — `cargo fmt --all --check`, clippy with `-D warnings`, full tests, layering,
    and a short soak/fuzz for affected areas.
 4. **Metadata** — set `repository`, `homepage`/`documentation` and per-crate `readme` when the
@@ -33,7 +42,7 @@ is opt-in until crate names/ownership are settled.
    attaches them to the GitHub release.
 8. **crates.io later** — publish in dependency order after the policy above is approved:
    foundation crates, then game/sim/net, then the umbrella crate. Run `cargo package` and
-   `cargo semver-checks` against the previous tag first.
+   `scripts/semver-check.sh <previous tag>` first.
 
 ## Tagged release evidence
 

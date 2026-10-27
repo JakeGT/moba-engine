@@ -101,6 +101,56 @@ jobs:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Public-API diff of the library crates against the latest release tag (WP-7.1).
+  # Informational, not a required check: pre-1.0 minors may break the API
+  # (docs/API-STABILITY.md), so a breaking change is reported as a warning plus a step
+  # summary saying the next release must bump the minor version. It runs here rather than in
+  # release.yml because a tag is immutable once pushed; the result must be known before
+  # tagging (RELEASE.md step 2).
+  semver:
+    name: semver (informational)
+    runs-on: ubuntu-latest
+    env:
+      # Newer-toolchain warnings must not fail the baseline build; this is an API diff.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the baseline is a release tag
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Install shader compiler
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
+      - name: cargo semver-checks against the latest release tag
+        id: check
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          scripts/semver-check.sh 2>&1 | tee semver.log
+      - name: Report
+        if: always()
+        env:
+          OUTCOME: ${{ steps.check.outcome }}
+        run: |
+          baseline=$(sed -n 's/^semver baseline: //p' semver.log)
+          {
+            echo "## cargo-semver-checks vs ${baseline:-unknown baseline}"
+            echo
+            echo '```text'
+            grep -E '^ *(Summary|Finished|semver baseline)|^--- failure|^  (field|variant|function|method|struct|enum|trait|type|constant|static|impl|macro)|^error' semver.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OUTCOME" != success ]; then
+            if grep -q 'semver requires new' semver.log; then
+              echo "::warning title=semver::Public API changed incompatibly since $baseline; the next release must bump the minor version (pre-1.0). See the job summary."
+            else
+              echo "::warning title=semver::cargo-semver-checks did not complete; see the job log."
+            fi
+          fi
+
   miri:
     runs-on: ubuntu-latest
     steps:
