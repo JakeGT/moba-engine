@@ -216,7 +216,7 @@ impl Renderer {
     /// Enables the Khronos validation layer according to `config.validation`; pass
     /// [`ValidationMode::Required`] in CI so a missing layer is a hard failure.
     #[allow(clippy::too_many_lines)] // Pipeline/descriptor/resource wiring belongs together.
-    pub fn new(window: &Window, config: RenderConfig) -> RenderResult<Self> {
+    pub fn new(window: &Window, mut config: RenderConfig) -> RenderResult<Self> {
         assert!(config.max_instances > 0, "max_instances must be positive");
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
@@ -455,12 +455,32 @@ impl Renderer {
             .collect();
         // SAFETY: the sets, sampler and image view are live and the write describes them.
         unsafe { device.device.update_descriptor_sets(&writes, &[]) };
+        // Both SSBOs are bound with `WHOLE_SIZE`, so each must fit one storage-buffer range.
+        let range_limit = u64::from(device.max_storage_buffer_range);
         let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
-            .expect("instance size fits u64")
-            * u64::try_from(config.max_instances).expect("instance count fits u64");
+            .ok()
+            .zip(u64::try_from(config.max_instances).ok())
+            .and_then(|(size, count)| size.checked_mul(count))
+            .filter(|&bytes| bytes <= range_limit)
+            .ok_or_else(|| {
+                RenderError::NoSuitableDevice(format!(
+                    "max_instances {} exceeds the device's storage-buffer range ({range_limit} bytes)",
+                    config.max_instances
+                ))
+            })?;
+        // Clamping the bone budget to the range also keeps `(first_bone + joint) * 3` in
+        // skinned.vert far below `u32::MAX`.
+        let bones_that_fit = usize::try_from(range_limit / BONE_STRIDE).unwrap_or(usize::MAX);
+        if config.max_bones > bones_that_fit {
+            eprintln!(
+                "[render] max_bones {} exceeds the storage-buffer range; using {bones_that_fit}",
+                config.max_bones
+            );
+            config.max_bones = bones_that_fit;
+        }
         // At least one joint so the descriptor always names a non-empty buffer.
-        let bone_buffer_size =
-            BONE_STRIDE * u64::try_from(config.max_bones.max(1)).expect("bone count fits u64");
+        let bone_buffer_size = BONE_STRIDE
+            * u64::try_from(config.max_bones.max(1)).expect("bounded by the range limit");
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for frame_index in 0..FRAMES_IN_FLIGHT {
             let command_pool = CommandPool::new(device.device.clone(), device.graphics_family)?;

@@ -22,6 +22,13 @@ serde.workspace = true
 toml.workspace = true
 gltf = { workspace = true, optional = true }
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "skin_sample"
+harness = false
+
 [features]
 default = []
 # Bounded binary glTF (.glb) static-mesh loader (ADR-0007).

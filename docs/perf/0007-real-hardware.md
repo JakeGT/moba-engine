@@ -19,6 +19,23 @@ Captured 2026-10-18 on the development workstation, not a CI runner.
 Validation-required capture at the same scene produced zero validation messages; artifact
 `docs/images/m8-nvidia-teamfight.png`. This is well inside the 6.9 ms p95 / 16.6 ms max budget.
 
+## GPU skinning: CPU pose cost (WP-4.1)
+
+`cargo bench -p moba-assets --bench skin_sample -- --warm-up-time 1 --measurement-time 3`,
+AMD Ryzen 7 9800X3D, 2026-10-27. `Skeleton::sample` per hero per frame (joint chains with a
+rotation track per joint plus a root translation track; `rest` = idle, `walk` = clip at full
+weight):
+
+| Rig | rest | walk |
+|---|---|---|
+| 7 joints (shipped `sentinel-skinned.glb` size) | 167.7 ns | 597.5 ns |
+| 64 joints (cap) | 947.2 ns | 4.399 µs |
+
+The default bone budget is 16 skinned heroes × 64 joints, so the worst case is about 70 µs of
+CPU per frame (≈1 % of the 6.9 ms budget); 16 sample-sized heroes cost under 10 µs. The bone
+upload is one `copy_from_slice` of at most 48 KiB into persistently mapped memory. The
+networked GPU frame cost of skinned heroes on real hardware is WP-4.2 (#289).
+
 ## Windows / macOS
 
 - Windows dedicated GPU results are not available in this environment. CI Windows runners have
