@@ -5,6 +5,12 @@ breaking protocol, replay or content-schema changes.
 
 ## [Unreleased]
 
+### Security
+- `ctutils` 0.4.3 → 0.4.6 (RUSTSEC-2026-0385: constant-time mask generation could compile to
+  branches). It sits under `sha2`/`hmac`/`hkdf`, `ed25519-dalek` and `poly1305`, i.e. the
+  session AEAD, token HMAC and identity signatures in `moba-net`. Also updated in `fuzz/Cargo.lock`.
+- `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
+
 ### Content and networking
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
   carried in the handshake: `starting_gold`, `gold_per_interval`, `gold_tick_interval`,
