@@ -43,10 +43,14 @@ pub enum ContentError {
     BadModifiers,
     /// Runtime rules field is invalid; the name identifies the field.
     BadRules(&'static str),
-    /// Map has no lanes or too many lanes/points/structures.
+    /// Map extent is out of range, the map has too many lanes or structures, or a lane has
+    /// no waypoints or too many.
     BadMap,
-    /// Map lane names or structure layout are invalid.
+    /// Map/lane names, coordinates outside the world or structure lane indices are invalid.
     BadMapData,
+    /// A map coordinate is not exactly representable in the network catalogue (fractional,
+    /// or outside the wire integer type); the name identifies the field.
+    BadMapCoordinate(&'static str),
     /// Wall count/endpoints are invalid.
     BadWalls,
     /// Manifest fields are empty, too long or non-ASCII.
@@ -80,7 +84,13 @@ impl core::fmt::Display for ContentError {
             Self::BadModifiers => f.write_str("modifier names/kinds are invalid or duplicated"),
             Self::BadRules(field) => write!(f, "invalid rules field: {field}"),
             Self::BadMap => f.write_str("map limits are invalid"),
-            Self::BadMapData => f.write_str("map lanes/structures are invalid"),
+            Self::BadMapData => f.write_str("map names/lanes/structures are invalid"),
+            Self::BadMapCoordinate(field) => {
+                write!(
+                    f,
+                    "map coordinate {field} must be a whole number of world units that fits the wire"
+                )
+            }
             Self::BadWalls => f.write_str("map walls are invalid"),
             Self::BadManifest => f.write_str("manifest fields must be 1..=32 ASCII bytes"),
         }

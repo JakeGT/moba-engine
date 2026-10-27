@@ -1,12 +1,17 @@
 //! Runtime item content is validated, published in the handshake and used by the simulation.
 
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use moba_game::{GameContent, HeroSpec, ItemSpec};
+use moba_game::{ContentError, GameContent, HeroSpec, ItemSpec};
 use moba_net::protocol::{WireCatalog, WireCommand};
-use moba_net::{NetClient, NetServer, ServerConfig};
+use moba_net::{
+    Header, NetClient, NetServer, PacketKind, ServerConfig, UdpTransport, Welcome, decode_hello,
+    encode_welcome,
+};
 use moba_sim::SimConfig;
 
 fn custom_content() -> GameContent {
@@ -55,23 +60,8 @@ fn custom_content() -> GameContent {
 }
 
 fn spawn_server(content: GameContent) -> (SocketAddr, std::thread::JoinHandle<()>) {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 0,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
-    let mut server = NetServer::bind_with_content(config, Arc::new(content)).expect("bind");
+    let mut server =
+        NetServer::bind_with_content(server_config(), Arc::new(content)).expect("bind");
     let addr = server.local_addr().expect("addr");
     let handle = std::thread::spawn(move || {
         server.run_for(Duration::from_secs(3)).expect("server");
@@ -187,4 +177,139 @@ fn economy_override_pack_reaches_a_real_udp_client() {
     assert_eq!(client.rules().score_limit, 25);
     let _ = client.disconnect();
     server.join().expect("server thread");
+}
+
+fn server_config() -> ServerConfig {
+    ServerConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        sim: SimConfig::default(),
+        snapshot_interval: 1,
+        max_clients: 10,
+        countdown_ticks: 0,
+        results_ticks: 0,
+        client_timeout: Duration::from_secs(3),
+        reconnect_grace: Duration::from_secs(2),
+        pre_shared_key: None,
+        record: None,
+        max_spectators: 4,
+        max_packets_per_second: 120,
+        max_total_packets_per_second: 2_000,
+        require_ready: false,
+    }
+}
+
+#[test]
+fn bind_with_content_rejects_invalid_content() {
+    // The #296 repro: a fractional extent used to pass `validate()` and truncate on the wire.
+    let mut fractional_extent = GameContent::default();
+    fractional_extent.map.extent = moba_core::Fix::from_f64(128.5);
+    let mut rules_invalid = GameContent::default();
+    rules_invalid.rules.level_cap = 0;
+    for (content, expected) in [
+        (
+            fractional_extent,
+            ContentError::BadMapCoordinate("map.extent"),
+        ),
+        (rules_invalid, ContentError::BadRules("level_cap")),
+    ] {
+        let error = NetServer::bind_with_content(server_config(), Arc::new(content))
+            .expect_err("invalid content must not bind");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<ContentError>()),
+            Some(&expected),
+            "{error}"
+        );
+    }
+    NetServer::bind_with_content(server_config(), Arc::new(GameContent::default()))
+        .expect("valid content binds");
+}
+
+/// Answers every Hello with a plaintext Welcome carrying `catalog` and the content hash the
+/// client reconstructs from it (so only validation can make the client refuse it), and
+/// returns the client's connect result.
+fn connect_to_scripted_server(catalog: &WireCatalog) -> std::io::Result<NetClient> {
+    let mut transport = UdpTransport::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+    let addr = transport.local_addr().expect("addr");
+    let content_hash = catalog.content_hash().expect("catalogue reconstructs");
+    let catalog = *catalog;
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !server_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+            let Some(message) = transport.recv().expect("recv") else {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            };
+            if message.header.kind != PacketKind::Hello {
+                continue;
+            }
+            let hello = decode_hello(&message.payload).expect("hello");
+            let welcome = Welcome {
+                slot: 0,
+                tick_rate: 30,
+                snapshot_interval: 1,
+                tick: 0,
+                seed: 1,
+                hero_pick: 0,
+                nonce: hello.nonce,
+                server_nonce: 0,
+                auth: [0; 32],
+                spectator: false,
+                catalog,
+                content_hash,
+                identity: false,
+                server_public_key: [0; 32],
+                server_signature: [0; 64],
+            };
+            let header = Header {
+                kind: PacketKind::Welcome,
+                flags: 0,
+                session: 0x5EED,
+                seq: 1,
+                ack: 0,
+                ack_bits: 0,
+            };
+            transport
+                .send(message.addr, &header, &encode_welcome(&welcome))
+                .expect("send welcome");
+        }
+    });
+    let result = NetClient::connect(addr, Duration::from_millis(1_500));
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("scripted server");
+    result
+}
+
+#[test]
+fn client_welcome_validates_the_catalogue_like_content_update() {
+    // Control: the scripted server's Welcome is accepted for valid content.
+    let client = connect_to_scripted_server(&WireCatalog::from(&GameContent::default()))
+        .expect("a valid catalogue is welcomed");
+    assert_eq!(client.content_hash(), GameContent::default().hash());
+    drop(client);
+
+    // A rules-invalid pack whose catalogue round-trips with a matching hash.
+    let mut rules_invalid = GameContent::default();
+    rules_invalid.rules.level_cap = 0;
+    // A map-invalid catalogue: extent 0 reconstructs cleanly but fails `validate()`.
+    let rules_invalid = WireCatalog::from(&rules_invalid);
+    let mut map_invalid = WireCatalog::from(&GameContent::default());
+    map_invalid.map.extent = 0;
+    for (name, catalog) in [("rules", &rules_invalid), ("map", &map_invalid)] {
+        assert!(
+            catalog
+                .to_content()
+                .expect("reconstructs")
+                .validate()
+                .is_err(),
+            "{name}: fixture must be invalid"
+        );
+        let error = connect_to_scripted_server(catalog)
+            .expect_err("a Welcome with invalid content must be refused");
+        assert_eq!(error.kind(), ErrorKind::TimedOut, "{name}: {error}");
+    }
 }

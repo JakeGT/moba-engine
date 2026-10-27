@@ -8,11 +8,13 @@ use moba_core::{Fix, FixVec2};
 use crate::{AreaEffect, AreaEffectList, DamageType, Effect};
 
 use super::{
-    ContentError, GameContent, MAX_ABILITY_NAME, MAX_CONTENT_ABILITIES, MAX_CONTENT_HEROES,
-    MAX_CONTENT_ITEMS, MAX_CONTENT_MODIFIERS, MAX_CONTENT_WALLS, MAX_COOLDOWN_TICKS,
-    MAX_DURATION_TICKS, MAX_HASTE_FACTOR, MAX_HERO_NAME, MAX_ITEM_NAME, MAX_ITEM_STAT,
-    MAX_MANIFEST_FIELD, MAX_MAP_COORD, MAX_RANGE, MAX_RESIST, MAX_SPEED_PER_SEC, MAX_STAT,
-    MinionStatsSpec, ModifierDef, ModifierKind, RulesSpec, StructureStatsSpec,
+    ContentError, GameContent, LaneSpec, MAX_ABILITY_NAME, MAX_CONTENT_ABILITIES,
+    MAX_CONTENT_HEROES, MAX_CONTENT_ITEMS, MAX_CONTENT_LANES, MAX_CONTENT_MODIFIERS,
+    MAX_CONTENT_STRUCTURES, MAX_CONTENT_WALLS, MAX_COOLDOWN_TICKS, MAX_DURATION_TICKS,
+    MAX_HASTE_FACTOR, MAX_HERO_NAME, MAX_ITEM_NAME, MAX_ITEM_STAT, MAX_LANE_NAME, MAX_LANE_POINTS,
+    MAX_MANIFEST_FIELD, MAX_MAP_COORD, MAX_RANGE, MAX_RESIST, MAX_SPEED_PER_SEC, MAX_STAT, MapSpec,
+    MinionStatsSpec, ModifierDef, ModifierKind, RulesSpec, StructureSpec, StructureStatsSpec,
+    WallSpec,
 };
 
 fn area_effect_valid(effect: &AreaEffect, modifiers: &[ModifierDef]) -> bool {
@@ -103,6 +105,108 @@ fn effect_valid(effect: &Effect, modifiers: &[ModifierDef]) -> bool {
                 && area_effects_valid(effects, modifiers)
         }
     }
+}
+
+/// Validates map limits, names and geometry.
+///
+/// Structural guard: every map struct is destructured without `..`, so adding map geometry
+/// fails to compile here until it is validated. Every coordinate must first pass
+/// [`MapSpec::wire_point`] / [`MapSpec::wire_extent`] — the same conversions
+/// `From<&GameContent> for WireCatalog` uses — so validated geometry crosses the wire exactly
+/// and the client reconstructs the server's content hash (#296).
+fn validate_map(map: &MapSpec) -> Result<(), ContentError> {
+    let MapSpec {
+        name,
+        // A closed enum; every variant has a wire id.
+        theme: _,
+        extent,
+        lanes,
+        structures,
+        walls,
+        blue_spawn,
+        red_spawn,
+    } = map;
+    let point = |field: &'static str, point: FixVec2| {
+        MapSpec::wire_point(point)
+            .map(|_| ())
+            .ok_or(ContentError::BadMapCoordinate(field))
+    };
+    MapSpec::wire_extent(*extent).ok_or(ContentError::BadMapCoordinate("map.extent"))?;
+    point("map.blue_spawn", *blue_spawn)?;
+    point("map.red_spawn", *red_spawn)?;
+    for lane in lanes {
+        let LaneSpec { name: _, path } = lane;
+        for waypoint in path {
+            point("map.lanes.path", *waypoint)?;
+        }
+    }
+    for structure in structures {
+        let StructureSpec {
+            team: _,
+            position,
+            kind: _,
+            lane: _,
+        } = structure;
+        point("map.structures.position", *position)?;
+    }
+    for wall in walls {
+        let WallSpec { a, b } = wall;
+        point("map.walls.a", *a)?;
+        point("map.walls.b", *b)?;
+    }
+
+    if *extent <= Fix::ZERO || *extent > Fix::from_i32(MAX_MAP_COORD) {
+        return Err(ContentError::BadMap);
+    }
+    let extent = *extent;
+    let in_world = |point: FixVec2| {
+        point.x >= Fix::ZERO && point.x <= extent && point.y >= Fix::ZERO && point.y <= extent
+    };
+    if !in_world(*blue_spawn)
+        || !in_world(*red_spawn)
+        || lanes
+            .iter()
+            .any(|lane| lane.path.iter().any(|point| !in_world(*point)))
+        || structures
+            .iter()
+            .any(|structure| !in_world(structure.position))
+    {
+        return Err(ContentError::BadMapData);
+    }
+    if walls.len() > MAX_CONTENT_WALLS
+        || walls
+            .iter()
+            .any(|wall| wall.a == wall.b || !in_world(wall.a) || !in_world(wall.b))
+    {
+        return Err(ContentError::BadWalls);
+    }
+    if structures.iter().any(|structure| {
+        structure
+            .lane
+            .is_some_and(|lane| usize::from(lane) >= lanes.len())
+    }) {
+        return Err(ContentError::BadMapData);
+    }
+    // Counts the wire catalogue would otherwise silently truncate. An empty lane path is
+    // rejected too: lane walkers index the first and last waypoint.
+    if lanes.len() > MAX_CONTENT_LANES
+        || structures.len() > MAX_CONTENT_STRUCTURES
+        || lanes
+            .iter()
+            .any(|lane| lane.path.is_empty() || lane.path.len() > MAX_LANE_POINTS)
+    {
+        return Err(ContentError::BadMap);
+    }
+    // Names the wire catalogue would otherwise truncate (possibly mid-UTF-8 sequence).
+    if name.len() > MAX_MANIFEST_FIELD
+        || !name.is_ascii()
+        || lanes.iter().any(|lane| {
+            lane.name.is_empty() || lane.name.len() > MAX_LANE_NAME || !lane.name.is_ascii()
+        })
+    {
+        return Err(ContentError::BadMapData);
+    }
+    Ok(())
 }
 
 impl RulesSpec {
@@ -331,44 +435,7 @@ impl GameContent {
         if let Some(field) = self.rules.invalid_field() {
             return Err(ContentError::BadRules(field));
         }
-        if self.map.extent <= Fix::ZERO || self.map.extent > Fix::from_i32(MAX_MAP_COORD) {
-            return Err(ContentError::BadMap);
-        }
-        let extent = self.map.extent;
-        let in_world = |point: FixVec2| {
-            point.x >= Fix::ZERO && point.x <= extent && point.y >= Fix::ZERO && point.y <= extent
-        };
-        if !in_world(self.map.blue_spawn)
-            || !in_world(self.map.red_spawn)
-            || self
-                .map
-                .lanes
-                .iter()
-                .any(|lane| lane.path.iter().any(|point| !in_world(*point)))
-            || self
-                .map
-                .structures
-                .iter()
-                .any(|structure| !in_world(structure.position))
-        {
-            return Err(ContentError::BadMapData);
-        }
-        if self.map.walls.len() > MAX_CONTENT_WALLS
-            || self
-                .map
-                .walls
-                .iter()
-                .any(|wall| wall.a == wall.b || !in_world(wall.a) || !in_world(wall.b))
-        {
-            return Err(ContentError::BadWalls);
-        }
-        if self.map.structures.iter().any(|structure| {
-            structure
-                .lane
-                .is_some_and(|lane| usize::from(lane) >= self.map.lanes.len())
-        }) {
-            return Err(ContentError::BadMapData);
-        }
+        validate_map(&self.map)?;
         if self.heroes.is_empty() {
             return Err(ContentError::NoHeroes);
         }
