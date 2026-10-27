@@ -80,7 +80,9 @@ Packs carry `name`/`version`/`author` metadata; replays record the pack identity
 content hash. The client shop/HUD, cooldowns, range/radius overlays, vision and minimap use the received complete catalogue, verified against `GameContent::hash`; simulation purchases, hero stats, ability effects and map geometry use the same definitions.
 
 `--reload-content` watches the pack and broadcasts a catalogue update to connected clients in
-the lobby/results phase (never mid-match).
+the lobby/results phase (never mid-match). The pack is loaded and trust-checked once per
+process and shared by every match; replace it atomically (write a temporary file, then
+`mv`/`rename` it over the watched path).
 Servers with repeated `--items FILE` rotate maps between empty-lobby matches and announce the
 selected map. Client identity keys can be rotated/revoked with `--rotate-client-key OLD:NEW` and
 `--revoke-client-key KEY`. Signed packs can be required with `--require-content-attestation --content-publisher HEX`
@@ -108,13 +110,19 @@ content, replay and secret/identity paths.
 
 ### Server hardening
 
-The dedicated server enforces a per-address UDP budget (default 120 packets/s, burst 120)
-before decoding; raise/lower with `--max-pps N` or disable with `0`. Ctrl-C/SIGINT requests a graceful shutdown and flushes an in-progress replay.
+The dedicated server enforces a per-address UDP budget (default 120 packets/s, burst 120);
+raise/lower with `--max-pps N` or disable with `0`. Every datagram is charged straight after
+`recv_from`, before header decode, decryption or fragment reassembly, so undecodable junk
+counts against its sender too. A per-match budget (`--max-total-pps`, default 2000) caps
+distributed/spoofed-source floods, and `--host-max-pps N` adds an optional budget shared by
+every match in the process. With `--matches N`, each worker polls its sockets round-robin and
+caps every match at 64 datagrams or 500 µs per pass, so a flood on one port cannot starve the
+other matches on that worker; measured in [perf/0010](docs/perf/0010-multi-match.md#flood-isolation).
+Ctrl-C/SIGINT requests a graceful shutdown and flushes an in-progress replay.
 `--results-log matches.jsonl` appends one JSON record per completed match (seed, ticks,
-score, content/state hashes and replay path). A global budget (`--max-total-pps`, default
-2000) caps distributed/spoofed-source floods. It
+score, content/state hashes and replay path). The server
 reports drop counts plus average/max simulation tick time in its final stats. Rate limiting is application-layer
-defence; put public servers behind a DDoS/connection gateway as well.
+defence: a spoofed-source flood on one port can still starve new handshakes on that port, so put public servers behind a DDoS/connection gateway as well.
 
 ### Encrypted private servers
 

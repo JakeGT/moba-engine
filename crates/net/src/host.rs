@@ -7,16 +7,229 @@
 //!
 //! Workers are plain long-lived threads rather than `moba-jobs` tasks: the loop sleeps
 //! between ticks and polls non-blocking sockets, which does not fit a fork-join pool.
+//!
+//! **Flood isolation.** A worker polls its sockets round-robin (the starting match rotates
+//! every pass) and caps each match's receive work per pass at [`DEFAULT_POLL_DATAGRAMS`]
+//! datagrams or [`DEFAULT_POLL_TIME`], whichever comes first (see
+//! [`MatchHost::set_poll_budget`]). Unread datagrams stay in that socket's kernel queue, so a
+//! flood on one port costs its neighbours at most one capped slice per pass and the excess is
+//! shed by the kernel. Every datagram is charged against the per-address, per-match and
+//! optional host-wide ([`HostBudget`]) budgets before it is decoded.
+//!
+//! **Shared content reload.** [`MatchHost::watch_content`] loads and trust-checks a watched
+//! pack once, on a host thread, and hands the same `Arc<GameContent>` to every match (each
+//! applies it in its own Lobby/Results phase). Replace the file atomically: write a
+//! temporary file in the same directory, then `rename` it over the watched path.
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use moba_game::GameContent;
 
 use crate::server::{NetServer, SERVER_TICK_RATE, ServerConfig, ServerStats};
+
+/// Default per-match cap on datagrams read in one worker pass.
+pub const DEFAULT_POLL_DATAGRAMS: u32 = 64;
+/// Default per-match cap on receive time in one worker pass.
+pub const DEFAULT_POLL_TIME: Duration = Duration::from_micros(500);
+
+/// Host-wide datagram budget shared by every match on every worker.
+///
+/// A lock-free token bucket (`packets_per_second` refill, burst of one second). Each match
+/// charges it after its own per-address and per-match budgets admit a datagram and before
+/// the datagram is decoded, so it caps the total decode/decrypt work a spoofed-source flood
+/// can cause across the whole process. Legitimate packets compete for the same budget, so
+/// size it above the expected aggregate (≈ 50 pps per connected client) with headroom.
+#[derive(Debug)]
+pub struct HostBudget {
+    rate: u64,
+    burst: i64,
+    epoch: Instant,
+    tokens: AtomicI64,
+    /// Time since `epoch` (µs) up to which tokens have been credited.
+    credited_micros: AtomicU64,
+    rejected: AtomicU64,
+}
+
+impl HostBudget {
+    /// Creates a full bucket; `0` admits everything.
+    #[must_use]
+    pub fn new(packets_per_second: u32) -> Self {
+        let burst = i64::from(packets_per_second.max(1));
+        Self {
+            rate: u64::from(packets_per_second),
+            burst,
+            epoch: Instant::now(),
+            tokens: AtomicI64::new(burst),
+            credited_micros: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+        }
+    }
+
+    /// Configured refill rate (packets per second, 0 = unlimited).
+    #[must_use]
+    pub const fn packets_per_second(&self) -> u64 {
+        self.rate
+    }
+
+    /// Datagrams refused so far.
+    #[must_use]
+    pub fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
+    }
+
+    /// Takes one token at `now`; returns `false` (and counts a rejection) when empty.
+    pub fn try_take(&self, now: Instant) -> bool {
+        if self.rate == 0 {
+            return true;
+        }
+        self.refill(now);
+        if self.tokens.fetch_sub(1, Ordering::AcqRel) >= 1 {
+            return true;
+        }
+        self.tokens.fetch_add(1, Ordering::AcqRel);
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+
+    /// Credits whole tokens for the time since the last credit. One thread wins the
+    /// compare-exchange per interval; the fractional remainder carries over.
+    fn refill(&self, now: Instant) {
+        let now_micros = u64::try_from(now.saturating_duration_since(self.epoch).as_micros())
+            .unwrap_or(u64::MAX);
+        let credited = self.credited_micros.load(Ordering::Acquire);
+        let elapsed = now_micros.saturating_sub(credited);
+        let earned = u128::from(elapsed) * u128::from(self.rate) / 1_000_000;
+        if earned == 0 {
+            return;
+        }
+        let burst = u128::try_from(self.burst).unwrap_or(0);
+        let (credit, advance) = if earned >= burst {
+            (self.burst, elapsed)
+        } else {
+            // `earned * 1e6 / rate <= elapsed` because `earned` was rounded down.
+            let advance =
+                u64::try_from(earned * 1_000_000 / u128::from(self.rate)).unwrap_or(elapsed);
+            (i64::try_from(earned).unwrap_or(self.burst), advance)
+        };
+        if self
+            .credited_micros
+            .compare_exchange(
+                credited,
+                credited + advance,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let before = self.tokens.fetch_add(credit, Ordering::AcqRel);
+        if before.saturating_add(credit) > self.burst {
+            self.tokens.fetch_min(self.burst, Ordering::AcqRel);
+        }
+    }
+}
+
+/// A content pack watched once for a whole host and shared by every match.
+///
+/// [`ContentWatch::poll`] stats the file, and when its modification time changes loads,
+/// validates and trust-checks it **once**, then publishes it under a new generation. Matches
+/// that follow the watch ([`NetServer::follow_content`]) adopt the same `Arc<GameContent>`
+/// in their next Lobby/Results phase, so every match serves the same pack.
+///
+/// Replace the watched file atomically (write a temporary file in the same directory, then
+/// `rename` it over the path). A half-written file fails to load, is logged and is not
+/// published; the next modification is tried again.
+#[derive(Debug)]
+pub struct ContentWatch {
+    path: PathBuf,
+    require_attestation: bool,
+    publisher: Option<[u8; 32]>,
+    modified: Mutex<Option<SystemTime>>,
+    generation: AtomicU64,
+    latest: Mutex<(u64, Option<Arc<GameContent>>)>,
+}
+
+impl ContentWatch {
+    /// Watches `path`, applying the same trust policy as
+    /// [`NetServer::set_content_trust`]. The file's current contents are assumed to be
+    /// loaded already; only later modifications are published.
+    #[must_use]
+    pub fn new(path: PathBuf, require_attestation: bool, publisher: Option<[u8; 32]>) -> Self {
+        let modified = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        Self {
+            path,
+            require_attestation: require_attestation || publisher.is_some(),
+            publisher,
+            modified: Mutex::new(modified),
+            generation: AtomicU64::new(0),
+            latest: Mutex::new((0, None)),
+        }
+    }
+
+    /// Watched path.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Generation of the latest published pack (0 before the first reload).
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Latest published pack and its generation.
+    #[must_use]
+    pub fn latest(&self) -> (u64, Option<Arc<GameContent>>) {
+        let latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        (latest.0, latest.1.clone())
+    }
+
+    /// Checks the file and publishes a new generation when it changed and loaded cleanly.
+    /// Returns whether a new pack was published.
+    pub fn poll(&self) -> bool {
+        let Ok(modified) = std::fs::metadata(&self.path).and_then(|metadata| metadata.modified())
+        else {
+            return false;
+        };
+        {
+            let mut seen = self.modified.lock().unwrap_or_else(PoisonError::into_inner);
+            if *seen == Some(modified) {
+                return false;
+            }
+            *seen = Some(modified);
+        }
+        let content = match moba_game::load_content_file(&self.path) {
+            Ok(content) => content,
+            Err(error) => {
+                eprintln!("content reload failed for {}: {error}", self.path.display());
+                return false;
+            }
+        };
+        if !crate::server::content_trusted(&content, self.require_attestation, self.publisher) {
+            eprintln!("content reload rejected: pack trust policy failed");
+            return false;
+        }
+        let hash = content.hash();
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        let generation = latest.0 + 1;
+        *latest = (generation, Some(Arc::new(content)));
+        self.generation.store(generation, Ordering::Release);
+        eprintln!(
+            "content reload: published {} (generation {generation}, hash {hash:#018x})",
+            self.path.display()
+        );
+        true
+    }
+}
 
 /// Width of one tick-duration histogram bucket.
 const BUCKET_NANOS: u64 = 10_000;
@@ -130,6 +343,8 @@ pub struct WorkerStats {
     pub errors: u64,
     /// Per-match cost per tick (tick plus that match's polling since its previous tick).
     pub ticks: TickHistogram,
+    /// Worker passes in which a match hit its per-pass poll cap (datagrams left queued).
+    pub poll_capped: u64,
 }
 
 impl WorkerStats {
@@ -152,6 +367,12 @@ pub struct HostReport {
     pub workers: Vec<WorkerStats>,
     /// One entry per match, in match order.
     pub matches: Vec<ServerStats>,
+    /// Per-match tick-cost histogram, in match order.
+    pub match_ticks: Vec<TickHistogram>,
+    /// Worker index owning each match, in match order.
+    pub match_workers: Vec<usize>,
+    /// Datagrams refused by the host-wide budget (0 when none is configured).
+    pub host_budget_rejected: u64,
 }
 
 impl HostReport {
@@ -183,22 +404,41 @@ impl HostReport {
 pub struct MatchHost {
     matches: Vec<NetServer>,
     workers: usize,
+    poll_datagrams: u32,
+    poll_time: Duration,
+    budget: Option<Arc<HostBudget>>,
+    content_watch: Option<Arc<ContentWatch>>,
 }
 
 impl MatchHost {
     /// Wraps already-configured servers. `workers` is clamped to `1..=matches`, so the
     /// reported count is the number of threads `run_until` actually starts.
+    ///
+    /// This is the production entry point: configure each `NetServer` (keys, identity,
+    /// trust, results log, ...) before handing it over.
     #[must_use]
     pub fn new(matches: Vec<NetServer>, workers: usize) -> Self {
         let workers = workers.clamp(1, matches.len().max(1));
-        Self { matches, workers }
+        Self {
+            matches,
+            workers,
+            poll_datagrams: DEFAULT_POLL_DATAGRAMS,
+            poll_time: DEFAULT_POLL_TIME,
+            budget: None,
+            content_watch: None,
+        }
     }
 
-    /// Binds `count` matches from one template.
+    /// Binds `count` matches from one template (**test and load-tool helper**).
     ///
     /// Match `i` binds `template.bind` with its port increased by `i`; a template port of
     /// 0 gives every match an ephemeral port. Each match gets a distinct simulation seed
     /// so concurrent matches do not play identically.
+    ///
+    /// Only [`ServerConfig`] is applied: no pre-shared client tokens, client identity
+    /// allowlist, server identity key, content trust policy or results log. Configure
+    /// those through [`MatchHost::matches_mut`] before [`MatchHost::run_until`], or build
+    /// the servers yourself and use [`MatchHost::new`] as `moba-server` does.
     ///
     /// # Errors
     /// Returns the first bind error.
@@ -256,6 +496,34 @@ impl MatchHost {
         &mut self.matches
     }
 
+    /// Caps each match's receive work per worker pass (defaults:
+    /// [`DEFAULT_POLL_DATAGRAMS`], [`DEFAULT_POLL_TIME`]); at least one datagram is read.
+    pub fn set_poll_budget(&mut self, max_datagrams: u32, max_time: Duration) {
+        self.poll_datagrams = max_datagrams.max(1);
+        self.poll_time = max_time;
+    }
+
+    /// Installs a host-wide datagram budget shared by every match (`0` removes it) and
+    /// returns it so callers can read its rejection counter.
+    pub fn set_host_packet_budget(&mut self, packets_per_second: u32) -> Option<Arc<HostBudget>> {
+        self.budget =
+            (packets_per_second > 0).then(|| Arc::new(HostBudget::new(packets_per_second)));
+        for server in &mut self.matches {
+            server.set_host_budget(self.budget.clone());
+        }
+        self.budget.clone()
+    }
+
+    /// Watches one content pack for every match: `run_until` polls it once per second on a
+    /// host thread and each match adopts the shared pack in its next Lobby/Results phase.
+    /// See [`ContentWatch`] for the atomic-replace requirement.
+    pub fn watch_content(&mut self, watch: Arc<ContentWatch>) {
+        for server in &mut self.matches {
+            server.follow_content(Arc::clone(&watch));
+        }
+        self.content_watch = Some(watch);
+    }
+
     /// Runs every match at 30 Hz until `duration` elapses or `shutdown` is set, then
     /// flushes in-progress recordings.
     ///
@@ -269,7 +537,22 @@ impl MatchHost {
         let base = self.matches.len() / workers;
         let extra = self.matches.len() % workers;
         let start = Instant::now();
-        let reports: Vec<WorkerStats> = std::thread::scope(|scope| {
+        let budget = PollBudget {
+            datagrams: self.poll_datagrams,
+            time: self.poll_time,
+        };
+        let watch = self.content_watch.clone();
+        let finished = AtomicBool::new(false);
+        let reports: Vec<(WorkerStats, Vec<TickHistogram>)> = std::thread::scope(|scope| {
+            if let Some(watch) = watch.as_deref() {
+                let finished = &finished;
+                std::thread::Builder::new()
+                    .name(String::from("content-watch"))
+                    .spawn_scoped(scope, move || {
+                        watch_loop(watch, finished, shutdown);
+                    })
+                    .expect("spawn content watcher");
+            }
             let mut rest: &mut [NetServer] = &mut self.matches;
             let mut handles = Vec::with_capacity(workers);
             for index in 0..workers {
@@ -281,36 +564,74 @@ impl MatchHost {
                     std::thread::Builder::new()
                         .name(format!("match-worker-{index}"))
                         .spawn_scoped(scope, move || {
-                            run_worker(chunk, start + phase, duration, shutdown)
+                            run_worker(chunk, start + phase, duration, shutdown, budget)
                         })
                         .expect("spawn match worker"),
                 );
             }
-            handles
+            let reports = handles
                 .into_iter()
                 .map(|handle| handle.join().expect("match worker panicked"))
-                .collect()
+                .collect();
+            finished.store(true, Ordering::Relaxed);
+            reports
         });
         for server in &mut self.matches {
             server.finish_recording();
         }
-        HostReport {
-            workers: reports,
+        let mut report = HostReport {
+            workers: Vec::with_capacity(reports.len()),
             matches: self.matches.iter().map(NetServer::stats).collect(),
+            match_ticks: Vec::with_capacity(self.matches.len()),
+            match_workers: Vec::with_capacity(self.matches.len()),
+            host_budget_rejected: self.budget.as_deref().map_or(0, HostBudget::rejected),
+        };
+        for (index, (worker, ticks)) in reports.into_iter().enumerate() {
+            report
+                .match_workers
+                .extend(core::iter::repeat_n(index, ticks.len()));
+            report.match_ticks.extend(ticks);
+            report.workers.push(worker);
+        }
+        report
+    }
+}
+
+/// Per-match receive cap for one worker pass.
+#[derive(Copy, Clone, Debug)]
+struct PollBudget {
+    datagrams: u32,
+    time: Duration,
+}
+
+/// Polls a shared content watch about once per second until the workers finish.
+fn watch_loop(watch: &ContentWatch, finished: &AtomicBool, shutdown: &AtomicBool) {
+    let step = Duration::from_millis(100);
+    let mut since_poll = Duration::ZERO;
+    while !finished.load(Ordering::Relaxed) && !shutdown.load(Ordering::Relaxed) {
+        std::thread::sleep(step);
+        since_poll += step;
+        if since_poll >= Duration::from_secs(1) {
+            since_poll = Duration::ZERO;
+            watch.poll();
         }
     }
 }
 
 /// Runs one worker's matches on a fixed 30 Hz schedule starting at `first_frame`.
 ///
-/// Each match's poll time since its previous tick is added to that tick's duration, so the
-/// histogram reflects the full per-match cost (receive, decrypt, handshake and tick).
+/// Each pass polls every match once, starting one match later than the previous pass, and
+/// each poll reads at most `budget` (datagrams or time), so a flooded socket cannot starve
+/// the others. Each match's poll time since its previous tick is added to that tick's
+/// duration, so the histograms reflect the full per-match cost (receive, decrypt, handshake
+/// and tick). Returns the worker stats and one histogram per match.
 fn run_worker(
     matches: &mut [NetServer],
     first_frame: Instant,
     duration: Duration,
     shutdown: &AtomicBool,
-) -> WorkerStats {
+    budget: PollBudget,
+) -> (WorkerStats, Vec<TickHistogram>) {
     let tick = Duration::from_secs_f64(1.0 / f64::from(SERVER_TICK_RATE));
     let tick_nanos = tick.as_nanos();
     let mut stats = WorkerStats {
@@ -319,28 +640,40 @@ fn run_worker(
     };
     // Allocated once per worker; the loop itself never allocates.
     let mut poll_nanos = vec![0u64; matches.len()];
+    let mut match_ticks = vec![TickHistogram::default(); matches.len()];
     let mut errors_logged = Instant::now().checked_sub(Duration::from_secs(1));
     let start = Instant::now();
     let mut next_frame = first_frame;
+    let mut first_polled = 0usize;
     while start.elapsed() < duration && !shutdown.load(Ordering::Relaxed) {
         let busy_start = Instant::now();
-        for (server, polled) in matches.iter_mut().zip(poll_nanos.iter_mut()) {
+        for offset in 0..matches.len() {
+            let index = (first_polled + offset) % matches.len();
             let poll_start = Instant::now();
-            if let Err(error) = server.poll() {
-                note_error(&mut stats, &mut errors_logged, "poll", &error);
+            match matches[index].poll_budgeted(budget.datagrams, budget.time) {
+                Ok(true) => stats.poll_capped += 1,
+                Ok(false) => {}
+                Err(error) => note_error(&mut stats, &mut errors_logged, "poll", &error),
             }
-            *polled += nanos(poll_start.elapsed());
+            poll_nanos[index] += nanos(poll_start.elapsed());
         }
+        first_polled = (first_polled + 1) % matches.len().max(1);
         let now = Instant::now();
         if now >= next_frame {
             stats.max_lateness_nanos = stats.max_lateness_nanos.max(nanos(now - next_frame));
-            for (server, polled) in matches.iter_mut().zip(poll_nanos.iter_mut()) {
+            for ((server, polled), histogram) in matches
+                .iter_mut()
+                .zip(poll_nanos.iter_mut())
+                .zip(match_ticks.iter_mut())
+            {
                 let tick_start = Instant::now();
                 if let Err(error) = server.tick() {
                     note_error(&mut stats, &mut errors_logged, "tick", &error);
                 }
-                let cost = nanos(tick_start.elapsed()) + core::mem::take(polled);
-                stats.ticks.record(Duration::from_nanos(cost));
+                let cost =
+                    Duration::from_nanos(nanos(tick_start.elapsed()) + core::mem::take(polled));
+                stats.ticks.record(cost);
+                histogram.record(cost);
             }
             stats.frames += 1;
             next_frame += tick;
@@ -359,7 +692,7 @@ fn run_worker(
         }
     }
     stats.elapsed_nanos = nanos(start.elapsed());
-    stats
+    (stats, match_ticks)
 }
 
 /// Frames lost when the next frame is already `behind` overdue.
@@ -530,5 +863,145 @@ mod tests {
         let report = host.run_until(Duration::from_secs(30), &shutdown);
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(report.frames(), 0);
+    }
+
+    #[test]
+    fn host_budget_refills_and_caps_concurrent_takers() {
+        let budget = HostBudget::new(100);
+        let now = Instant::now();
+        assert_eq!((0..150).filter(|_| budget.try_take(now)).count(), 100);
+        assert_eq!(budget.rejected(), 50);
+        // 50 ms at 100 pps earns five whole tokens.
+        let later = now + Duration::from_millis(50);
+        assert_eq!((0..20).filter(|_| budget.try_take(later)).count(), 5);
+        // A long idle period refills to the burst, never beyond it.
+        let idle = later + Duration::from_secs(3_600);
+        assert_eq!((0..500).filter(|_| budget.try_take(idle)).count(), 100);
+
+        // Many threads racing on the same instant never take more than the burst.
+        let shared = Arc::new(HostBudget::new(1_000));
+        let at = Instant::now();
+        let taken: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let shared = Arc::clone(&shared);
+                    scope.spawn(move || (0..1_000).filter(|_| shared.try_take(at)).count())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .sum()
+        });
+        assert_eq!(taken, 1_000);
+        assert!(HostBudget::new(0).try_take(at), "0 is unlimited");
+    }
+
+    #[test]
+    fn flooded_match_is_capped_and_neighbours_keep_running() {
+        let template = ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            countdown_ticks: 0,
+            ..ServerConfig::default()
+        };
+        let content = Arc::new(GameContent::default());
+        let mut host = MatchHost::bind(&template, &content, 2, 1).unwrap();
+        host.set_poll_budget(8, Duration::from_micros(200));
+        let budget = host
+            .set_host_packet_budget(1_000)
+            .expect("budget installed");
+        let target = host.local_addrs().unwrap()[0];
+        let stop = Arc::new(AtomicBool::new(false));
+        let flood_stop = Arc::clone(&stop);
+        let flooder = std::thread::spawn(move || {
+            // Several sources, so junk gets past the per-address bucket and reaches the
+            // per-match and host-wide budgets.
+            let sockets: Vec<std::net::UdpSocket> = (0..8)
+                .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                .collect();
+            let junk = [0xA5u8; 96];
+            let mut sent = 0u64;
+            while !flood_stop.load(Ordering::Relaxed) {
+                for socket in &sockets {
+                    for _ in 0..16 {
+                        let _ = socket.send_to(&junk, target);
+                        sent += 1;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            sent
+        });
+        let shutdown = AtomicBool::new(false);
+        let report = host.run_until(Duration::from_millis(600), &shutdown);
+        stop.store(true, Ordering::Relaxed);
+        let sent = flooder.join().unwrap();
+        assert!(sent > 1_000, "flood sent {sent}");
+        let flooded = &report.matches[0];
+        assert!(flooded.rate_limited > 0, "junk is charged: {flooded:?}");
+        assert!(
+            report.workers[0].poll_capped > 0,
+            "the per-pass cap engaged"
+        );
+        assert_eq!(report.matches[1].rate_limited, 0);
+        assert_eq!(report.match_ticks.len(), 2);
+        assert_eq!(report.match_workers, vec![0, 0]);
+        // Both matches ticked every frame.
+        assert_eq!(report.match_ticks[1].count(), report.frames());
+        assert_eq!(report.host_budget_rejected, budget.rejected());
+    }
+
+    #[test]
+    fn shared_content_watch_loads_once_for_every_match() {
+        let dir = std::env::temp_dir().join(format!(
+            "moba-shared-reload-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pack.toml");
+        std::fs::write(&path, "[[items]]\nname = \"First\"\ncost = 1\n").unwrap();
+        let template = ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ..ServerConfig::default()
+        };
+        let content = Arc::new(GameContent::default());
+        let mut host = MatchHost::bind(&template, &content, 3, 1).unwrap();
+        let watch = Arc::new(ContentWatch::new(path.clone(), false, None));
+        host.watch_content(Arc::clone(&watch));
+        assert!(!watch.poll(), "unchanged file is not republished");
+
+        // A torn write fails to load and is not published.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&path, "[[items]]\nname = \"Tor").unwrap();
+        assert!(!watch.poll());
+        assert_eq!(watch.generation(), 0);
+
+        // Atomic replace: write a temporary file, then rename it over the watched path.
+        std::thread::sleep(Duration::from_millis(20));
+        let staging = dir.join("pack.toml.tmp");
+        std::fs::write(&staging, "[[items]]\nname = \"Shared\"\ncost = 2\n").unwrap();
+        std::fs::rename(&staging, &path).unwrap();
+        assert!(watch.poll());
+        assert_eq!(watch.generation(), 1);
+        for server in host.matches_mut() {
+            for _ in 0..30 {
+                server.tick().unwrap();
+            }
+        }
+        let matches = host.matches_mut();
+        assert_eq!(matches[0].simulation().content().items[0].name, "Shared");
+        for server in &matches[1..] {
+            assert!(
+                std::ptr::eq(
+                    server.simulation().content(),
+                    matches[0].simulation().content()
+                ),
+                "every match serves the same Arc<GameContent>"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

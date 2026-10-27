@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use moba_sim::{PlayerCommand, Simulation};
 
@@ -18,25 +18,56 @@ use super::match_flow::slot_team;
 use super::{NetServer, Phase};
 
 impl NetServer {
-    /// Processes all pending datagrams.
+    /// Processes pending datagrams: at most 512 datagrams or about 2 ms of receive work.
     ///
     /// # Errors
     /// Returns OS receive errors (apart from `WouldBlock`).
     pub fn poll(&mut self) -> io::Result<()> {
-        for _ in 0..512 {
-            let Some(message) = self.transport.recv()? else {
-                break;
+        self.poll_budgeted(512, Duration::from_millis(2))
+            .map(|_| ())
+    }
+
+    /// Processes pending datagrams, reading at most `max_datagrams` datagrams and stopping
+    /// once `max_time` has elapsed (at least one datagram is read per call).
+    ///
+    /// Every datagram is charged against the per-address, per-match and (when installed)
+    /// host-wide budgets straight after `recv_from`, before its header is decoded or its
+    /// payload decrypted, so undecodable junk counts against its sender like any other
+    /// packet. Datagrams beyond the budget stay in the socket's kernel queue for the next
+    /// call. Returns `true` when the budget ran out before the socket was drained.
+    ///
+    /// # Errors
+    /// Returns OS receive errors (apart from `WouldBlock`).
+    pub fn poll_budgeted(&mut self, max_datagrams: u32, max_time: Duration) -> io::Result<bool> {
+        let deadline = Instant::now() + max_time;
+        let mut budget = max_datagrams.max(1);
+        let exhausted = loop {
+            let limiter = &mut self.limiter;
+            let rate_limited = &mut self.stats.rate_limited;
+            let received = self
+                .transport
+                .recv_admitted(&mut budget, deadline, |addr, now| {
+                    let allowed = limiter.allow_at(addr, now);
+                    if !allowed {
+                        *rate_limited += 1;
+                    }
+                    allowed
+                })?;
+            let Some(message) = received else {
+                break budget == 0 || Instant::now() >= deadline;
             };
-            if !self.limiter.allow_at(message.addr, Instant::now()) {
-                self.stats.rate_limited += 1;
-                continue;
-            }
             if let Err(error) = self.handle_message(message) {
                 eprintln!("net: dropped message: {error}");
             }
+            if budget == 0 || Instant::now() >= deadline {
+                break true;
+            }
+        };
+        if exhausted {
+            self.stats.poll_budget_exhausted += 1;
         }
         self.expire_clients();
-        Ok(())
+        Ok(exhausted)
     }
 
     #[allow(clippy::too_many_lines)] // One match arm per protocol message.

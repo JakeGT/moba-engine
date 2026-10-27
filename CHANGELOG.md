@@ -26,6 +26,7 @@ breaking protocol, replay or content-schema changes.
   future hashed field cannot be added without being hashed and carried.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
+- Multi-match flood isolation (#292): datagrams are charged against the per-address, per-match and new optional host-wide (`--host-max-pps`, `HostBudget`) budgets before decoding, so undecodable junk counts too; `MatchHost` polls round-robin with a per-match cap of 64 datagrams / 500 µs per pass; `--reload-content` loads the pack once per host (`ContentWatch`) and shares it across matches; `load-test --flood-port K --flood-pps N` verifies the isolation. `--max-pps 0` now disables only the per-address budget, not the per-match one.
 
 ### Internal
 - Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`
