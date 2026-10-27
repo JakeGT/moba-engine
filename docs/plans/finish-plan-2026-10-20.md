@@ -21,7 +21,7 @@ The repo-wide rules in [AGENTS.md](../../AGENTS.md) and the runbook [docs/agents
    - If your branch sits on top of another unmerged PR, the base PR's commits are rewritten when it squash-merges. After that, rebase only your own commits: `git rebase --onto origin/main <old-base-tip> <your-branch>`, then force-push with `--force-with-lease`.
    - Prefer branching from `main` and waiting over stacking.
 4. **Contract numbers are shared, so serialise them.**
-   - Before bumping `PROTOCOL_VERSION` (`crates/net/src/protocol.rs`), `SIM_LOGIC_VERSION` (`crates/sim/src/replay.rs`) or the replay `VERSION`, ask the maintainer which number to use. Write the number you were given in the PR.
+   - Before bumping `PROTOCOL_VERSION` (`crates/net/src/protocol/mod.rs`), `SIM_LOGIC_VERSION` (`crates/sim/src/replay.rs`) or the replay `VERSION`, ask the maintainer which number to use. Write the number you were given in the PR.
    - Never reuse a number another open PR has claimed.
    - WPs that bump the protocol are marked **[proto]**, and those that bump sim logic **[logic]**. At most one of each kind may be open at a time.
 5. **Security.**
@@ -122,7 +122,7 @@ Protocol **v38**. Evidence: `wire_rules_parity_covers_every_hashed_field` (one m
 
 - **Problem:** about 10 `RulesSpec` fields are hashed but not sent; `to_content` substitutes defaults. So a pack overriding them can't be joined: the client drops the Welcome on hash mismatch.
   - Fields: `starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`, `shared_xp_percent`, `rewards`, `structure_heroes_first`, `nexus_win`, `score_limit`.
-  - Code: `crates/game/src/content/hash.rs` `feed_catalogue` rules destructure (feed; was `content.rs` ~1525–1547 before the module split); `crates/net/src/protocol.rs` ~1495–1504 (defaults); `client.rs` ~525 (drop).
+  - Code: `crates/game/src/content/hash.rs` `feed_catalogue` rules destructure (feed; was `content.rs` ~1525–1547 before the module split); `crates/net/src/protocol.rs` ~1495–1504 (defaults; that code is now `crates/net/src/protocol/catalog_to.rs`); `client.rs` ~525 (drop).
   - Reproduced on `e31fee4` with a probe that sets `starting_gold += 100`.
 - **Do:**
   1. Add the fields to `WireRules`, covering encode/decode/`From<&GameContent>`/`to_content`, with the same bounds `validate()` enforces.
@@ -136,7 +136,7 @@ Protocol **v38**. Evidence: `wire_rules_parity_covers_every_hashed_field` (one m
 - **Pitfall:** `MAX_DATAGRAM`/Welcome size. Check that the Welcome still fragments correctly, since it already fragments.
 
 #### WP-0.2 Stale docs (no code)
-- README "Server hardening" says rate limiting happens "before decoding". The code limits **after** `recv` → header decode → AEAD open → reassembly (`crates/net/src/server.rs` `poll`, `transport.rs` `recv`). Correct the wording, and note that WP-1.2 changes this.
+- README "Server hardening" says rate limiting happens "before decoding". The code limits **after** `recv` → header decode → AEAD open → reassembly (`crates/net/src/server/ingress.rs` `poll`, `transport.rs` `recv`). Correct the wording, and note that WP-1.2 changes this.
 - `.claude/agents/gpu-safety-reviewer.md` still says "Vulkan 1.2 + descriptor indexing". Change it to Vulkan 1.3 core with dynamic rendering and sync2 (ADR-0002).
 - `docs/dev/software-vulkan.md` ~84 says the golden workflow sets `MOBA_IGNORE_KNOWN_PRESENT_HAZARD=1`. No workflow or code reads it (grep on 2026-10-21). Remove the claim, or re-validate the hazard under lavapipe and document the result.
 - `docs/perf/0008-balance.md` still says `slot % 5` and SIM_LOGIC v4. Fix these as part of WP-2.3 if that happens first.
@@ -151,7 +151,7 @@ The tightest margin is upstream under 5 % loss: 3.6 of the 4 KB/s budget.
 
 #### WP-1.2 Host-wide budget, poll fairness, shared reload (#292, P2)
 - **Facts:**
-  - `RateLimiter` (`server.rs` ~159–247) is per `NetServer` and runs **after** `transport.recv()`.
+  - `RateLimiter` (`crates/net/src/server/rate_limit.rs`) is per `NetServer` and runs **after** `transport.recv()`.
   - `UdpTransport::recv` keeps draining undecodable datagrams for up to a 2 ms deadline per call, and `poll` calls it up to 512 times. So a flood on one port can stall every match on that worker (`host.rs` `run_worker`).
   - `watch_content`/`poll_content_reload` run separately in every match.
 - **Do:**
@@ -371,7 +371,7 @@ These are never closed with simulated or hosted-runner evidence.
 | Lane | WPs, in order | Notes |
 |---|---|---|
 | A: net/content | 0.1 [proto] → 3.1 [proto] | Serial: both bump the protocol |
-| B: net/host | 1.2 | Independent; coordinate with A on `server.rs` conflicts |
+| B: net/host | 1.2 | Independent; coordinate with A on `crates/net/src/server/` conflicts |
 | C: sim | 2.1 → 2.3 → (2.2 [logic] only if 2.3 shows bias) → 2.3 rerun | Exact mirror not required (maintainer decision) |
 | D: render | 0.2 → 3.2 → 3.3 → 4.1 → 4.2 | 3.2 depends on 3.1's schema only for names; it can start against a hard-coded test asset |
 | E: docs/release | 5.1, 7.1, 7.2 | Any time |
