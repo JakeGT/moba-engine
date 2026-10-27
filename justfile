@@ -105,6 +105,11 @@ loom:
 fuzz-wire:
     cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 3600
 
+# Public-API breakage report for the library crates against the latest release tag
+# (or `just semver v0.4.0`). Needs cargo-semver-checks; informational in CI.
+semver BASELINE="":
+    ./scripts/semver-check.sh {{BASELINE}}
+
 # Verify a deterministic replay file.
 replay FILE:
     cargo run -p moba-tools --bin replay -- {{FILE}}

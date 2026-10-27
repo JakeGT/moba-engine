@@ -61,6 +61,8 @@ pub(crate) struct NetworkView {
     pub(crate) spectator_pan: Vec3,
     pub(crate) spectator_yaw: f32,
     pub(crate) spectator_zoom: f32,
+    /// Player-camera orbit distance (`MOBA_CAMERA_DISTANCE`, default 46 m).
+    pub(crate) follow_distance: f32,
     pub(crate) kill_feed: VecDeque<KillFeedEntry>,
     pub(crate) projectiles: Vec<ProjectileFx>,
     pub(crate) audio: crate::audio::Audio,
@@ -92,6 +94,7 @@ impl NetworkView {
             spectator_pan: Vec3::ZERO,
             spectator_yaw: -0.7,
             spectator_zoom: 1.0,
+            follow_distance: 46.0,
             kill_feed: VecDeque::with_capacity(6),
             projectiles: Vec::with_capacity(32),
             audio: crate::audio::Audio::headless(),

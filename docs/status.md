@@ -19,7 +19,7 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 | M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v39, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
 | M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
 | M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model, [50 concurrent matches per box](perf/0010-multi-match.md) (`MatchHost`, `moba-server --matches N`, #293). Independent external review remains open; host-wide datagram budget and flood fairness are tracked in #292. |
-| M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Asset meshes/skinning assets remain future rendering work. |
+| M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Static `.glb` hero models load from a client-local asset root with procedural fallback (#286, ADR-0007); pack model references (#285) and skinning (#288) remain. |
 
 ## Core capabilities
 

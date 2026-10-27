@@ -21,7 +21,7 @@ arrayvec.workspace = true
 moba-core.workspace = true
 moba-platform.workspace = true
 moba-render.workspace = true
-moba-assets.workspace = true
+moba-assets = { workspace = true, features = ["glb"] }
 moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true

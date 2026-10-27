@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 moba-core.workspace = true
+moba-assets.workspace = true
 ash.workspace = true
 ash-window.workspace = true
 bytemuck.workspace = true

@@ -346,6 +346,43 @@ fn validation_rejects_out_of_range_stats_and_map_coordinates() {
 }
 
 #[test]
+fn map_wire_conversions_are_exact_or_none() {
+    let point = |x: Fix, y: Fix| MapSpec::wire_point(FixVec2::new(x, y));
+    assert_eq!(
+        point(Fix::from_i32(-32_768), Fix::from_i32(32_767)),
+        Some([i16::MIN, i16::MAX])
+    );
+    assert_eq!(point(Fix::from_i32(32_768), Fix::ZERO), None);
+    assert_eq!(point(Fix::ZERO, Fix::from_i32(-32_769)), None);
+    assert_eq!(point(Fix::from_f64(-0.5), Fix::ZERO), None);
+    assert_eq!(point(Fix::ZERO, Fix::from_bits(1)), None);
+    assert_eq!(MapSpec::wire_extent(Fix::from_i32(256)), Some(256));
+    assert_eq!(MapSpec::wire_extent(Fix::from_i32(65_535)), Some(u16::MAX));
+    assert_eq!(MapSpec::wire_extent(Fix::from_i32(65_536)), None);
+    assert_eq!(MapSpec::wire_extent(Fix::from_i32(-1)), None);
+    assert_eq!(MapSpec::wire_extent(Fix::from_f64(128.5)), None);
+
+    // #296 repro: a fractional extent used to pass validation and truncate on the wire.
+    let mut content = GameContent::default();
+    content.map.extent = Fix::from_f64(128.5);
+    assert_eq!(
+        content.validate(),
+        Err(ContentError::BadMapCoordinate("map.extent"))
+    );
+    assert!(
+        ContentError::BadMapCoordinate("map.extent")
+            .to_string()
+            .contains("map.extent")
+    );
+    let mut content = GameContent::default();
+    content.map.structures[0].position.x += Fix::from_f64(0.25);
+    assert_eq!(
+        content.validate(),
+        Err(ContentError::BadMapCoordinate("map.structures.position"))
+    );
+}
+
+#[test]
 fn validation_rejects_bad_names_and_duplicates() {
     let mut content = GameContent::default();
     content.items[0].name.clear();
