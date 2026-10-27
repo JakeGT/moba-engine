@@ -11,6 +11,9 @@ max_total_pps = 2000
 # Host several matches on consecutive ports from `listen` (default 1).
 # matches = 4
 # workers = 4
+# Optional datagram budget shared by every match in the process (0 = off). Size it above
+# ~50 packets/s per expected client.
+# host_max_pps = 20000
 
 # Optional content and replay paths (relative to the server's working directory).
 # items = "content/example-pack.toml"

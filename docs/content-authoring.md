@@ -351,9 +351,21 @@ cargo run -p moba-server -- \
   --items content/example-pack.toml --reload-content
 ```
 
-The pack is re-read at most once per second in Lobby/Results. Connected clients receive a
+The server checks the pack about once per second. It is loaded, validated and trust-checked
+**once per process**, and every match (`--matches N`) adopts the same pack in its next
+Lobby/Results phase. Connected clients receive a
 `ContentUpdate` packet with the full validated catalogue and replace catalogue-dependent state
 atomically; a live `Playing` match is never hot-swapped.
+
+Replace the pack atomically, so the server never reads a half-written file:
+
+```bash
+cp new-pack.toml content/.example-pack.toml.tmp   # same directory/filesystem
+mv content/.example-pack.toml.tmp content/example-pack.toml   # rename(2) is atomic
+```
+
+A pack that fails to load (for example a torn in-place write) is logged and ignored; the
+running pack stays in use until the file changes again.
 
 ## Replays
 

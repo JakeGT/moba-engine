@@ -40,6 +40,7 @@ breaking protocol, replay or content-schema changes.
   future hashed field cannot be added without being hashed and carried.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
+- Multi-match flood isolation (#292): datagrams are charged against the per-address, per-match and new optional host-wide (`--host-max-pps`, `HostBudget`) budgets before decoding, so undecodable junk counts too; `MatchHost` polls round-robin with a per-match cap of 64 datagrams / 500 µs per pass; `--reload-content` loads the pack once per host (`ContentWatch`) and shares it across matches; `load-test --flood-port K --flood-pps N` verifies the isolation. `--max-pps 0` now disables only the per-address budget, not the per-match one.
 - `GameContent::validate` now rejects map geometry the wire catalogue would silently truncate
   (#296): a fractional or out-of-`i16`/`u16` extent, spawn, lane waypoint, structure position
   or wall endpoint (new `ContentError::BadMapCoordinate(field)`; adding a variant is a breaking

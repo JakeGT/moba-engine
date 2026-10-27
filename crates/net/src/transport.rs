@@ -240,38 +240,68 @@ impl UdpTransport {
     /// Receives one complete message, or `None` if no complete message is pending.
     ///
     /// Malformed datagrams are ignored. Fragment assemblies older than three seconds are
-    /// discarded.
+    /// discarded. Undecodable datagrams are drained for at most 2 ms per call.
     ///
     /// # Errors
     /// Returns OS errors other than `WouldBlock`.
     pub fn recv(&mut self) -> io::Result<Option<ReceivedMessage>> {
-        let deadline = Instant::now() + Duration::from_millis(2);
-        loop {
-            match self.socket.recv_from(&mut self.buffer) {
+        let mut budget = u32::MAX;
+        self.recv_admitted(
+            &mut budget,
+            Instant::now() + Duration::from_millis(2),
+            |_, _| true,
+        )
+    }
+
+    /// Receives one complete message, reading at most `budget` datagrams before `deadline`.
+    ///
+    /// `admit(addr, now)` runs for every datagram straight after `recv_from`, **before** the
+    /// header is decoded, the payload is decrypted or a fragment is buffered, so a rejected
+    /// datagram costs one syscall and the admission check. Every datagram read (admitted or
+    /// not, decodable or not) decrements `budget`. Returns `Ok(None)` when the socket is
+    /// drained, the budget is spent or the deadline has passed; at least one datagram is read
+    /// per call while `budget > 0`, even past the deadline.
+    ///
+    /// # Errors
+    /// Returns OS errors other than `WouldBlock`.
+    pub fn recv_admitted(
+        &mut self,
+        budget: &mut u32,
+        deadline: Instant,
+        mut admit: impl FnMut(SocketAddr, Instant) -> bool,
+    ) -> io::Result<Option<ReceivedMessage>> {
+        while *budget > 0 {
+            *budget -= 1;
+            let received = self.socket.recv_from(&mut self.buffer);
+            let now = Instant::now();
+            match received {
                 Ok((length, addr)) => {
                     self.bytes_received += length as u64;
                     self.datagrams_received += 1;
-                    if let Some(message) = self.handle_datagram(addr, length) {
-                        self.expire_assemblies();
+                    if admit(addr, now)
+                        && let Some(message) = self.handle_datagram(addr, length)
+                    {
+                        self.expire_assemblies(now);
                         return Ok(Some(message));
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.expire_assemblies();
-                    return Ok(None);
+                    // Nothing was read: a drained socket does not consume budget.
+                    *budget += 1;
+                    break;
                 }
                 Err(error) if transient_udp_error(&error) => {
                     // Windows reports ICMP port-unreachable as ConnectionReset on UDP. It is
                     // harmless: keep draining other datagrams until the deadline.
-                    self.expire_assemblies();
                 }
                 Err(error) => return Err(error),
             }
-            if Instant::now() >= deadline {
-                self.expire_assemblies();
-                return Ok(None);
+            if now >= deadline {
+                break;
             }
         }
+        self.expire_assemblies(Instant::now());
+        Ok(None)
     }
 
     fn peer_has_key(&self, addr: SocketAddr) -> bool {
@@ -376,8 +406,7 @@ impl UdpTransport {
         crypto.open(header, payload).ok()
     }
 
-    fn expire_assemblies(&mut self) {
-        let now = Instant::now();
+    fn expire_assemblies(&mut self, now: Instant) {
         self.assemblies
             .retain(|assembly| now.duration_since(assembly.started) < Duration::from_secs(3));
     }

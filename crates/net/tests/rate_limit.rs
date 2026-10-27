@@ -52,3 +52,71 @@ fn flood_is_rate_limited() {
         "flood packets were dropped: {stats:?}"
     );
 }
+
+fn junk_server(max_packets_per_second: u32) -> NetServer {
+    NetServer::bind(ServerConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        countdown_ticks: 0,
+        max_packets_per_second,
+        max_total_packets_per_second: 0,
+        ..ServerConfig::default()
+    })
+    .expect("bind")
+}
+
+/// Polls until the server stops finding datagrams (loopback delivery is not instantaneous on
+/// every platform).
+fn drain(server: &mut NetServer) {
+    let mut idle = 0;
+    let mut last = server.stats().rate_limited;
+    while idle < 20 {
+        server.poll().expect("poll");
+        let now = server.stats().rate_limited;
+        if now == last {
+            idle += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        } else {
+            idle = 0;
+            last = now;
+        }
+    }
+}
+
+#[test]
+fn undecodable_datagrams_count_against_the_address_budget() {
+    let mut server = junk_server(5);
+    let addr = server.local_addr().expect("addr");
+    let flood = UdpSocket::bind("127.0.0.1:0").expect("flood socket");
+    // Junk that fails header decoding (bad magic); it used to be dropped without ever
+    // reaching the limiter.
+    for _ in 0..40 {
+        let _ = flood.send_to(&[0xEE; 48], addr);
+    }
+    drain(&mut server);
+    let limited = server.stats().rate_limited;
+    // The burst of 5 (plus a token or two of refill) is admitted; the rest is charged.
+    assert!(
+        (30..=35).contains(&limited),
+        "undecodable junk was not charged: rate_limited={limited}"
+    );
+}
+
+#[test]
+fn budgeted_poll_leaves_the_rest_queued() {
+    let mut server = junk_server(1);
+    let addr = server.local_addr().expect("addr");
+    let flood = UdpSocket::bind("127.0.0.1:0").expect("flood socket");
+    for _ in 0..30 {
+        let _ = flood.send_to(&[0xEE; 48], addr);
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let exhausted = server
+        .poll_budgeted(8, Duration::from_secs(1))
+        .expect("poll");
+    assert!(exhausted, "eight datagrams cannot drain thirty");
+    // One admitted (then dropped as undecodable), seven charged.
+    assert_eq!(server.stats().rate_limited, 7);
+    assert_eq!(server.stats().poll_budget_exhausted, 1);
+    drain(&mut server);
+    assert!(server.stats().rate_limited >= 28);
+}
