@@ -17,7 +17,7 @@ use moba_sim::ObservedUnit;
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 37;
+pub const PROTOCOL_VERSION: u8 = 38;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.
@@ -701,6 +701,30 @@ pub struct WireStructureStats {
     pub vision_range_bits: i64,
 }
 
+/// XP and gold granted to the killer of one unit kind.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireUnitRewards {
+    /// XP granted.
+    pub xp: u32,
+    /// Gold granted.
+    pub gold: u32,
+}
+
+/// Kill rewards per unit kind carried in the handshake.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireRewards {
+    /// Melee minion reward.
+    pub melee_minion: WireUnitRewards,
+    /// Ranged minion reward.
+    pub ranged_minion: WireUnitRewards,
+    /// Tower reward.
+    pub tower: WireUnitRewards,
+    /// Nexus reward.
+    pub nexus: WireUnitRewards,
+    /// Hero kill reward.
+    pub hero: WireUnitRewards,
+}
+
 /// Tunable match rules carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WireRules {
@@ -738,6 +762,26 @@ pub struct WireRules {
     pub wave_interval_ticks: u32,
     /// First-wave delay ticks.
     pub first_wave_ticks: u32,
+    /// Starting gold per hero.
+    pub starting_gold: u32,
+    /// Passive gold granted per interval.
+    pub gold_per_interval: u32,
+    /// Ticks between passive gold grants.
+    pub gold_tick_interval: u32,
+    /// Shared-XP radius bits.
+    pub xp_radius_bits: i64,
+    /// Shop interaction radius bits.
+    pub shop_radius_bits: i64,
+    /// Shared minion XP percentage (100 = full).
+    pub shared_xp_percent: u32,
+    /// Kill rewards per unit kind.
+    pub rewards: WireRewards,
+    /// Whether structures prioritize heroes over minions.
+    pub structure_heroes_first: bool,
+    /// Whether destroying a nexus ends the match.
+    pub nexus_win: bool,
+    /// Score limit that ends the match (0 disables).
+    pub score_limit: u16,
 }
 
 /// Complete runtime content catalogue.
@@ -1111,24 +1155,88 @@ impl From<&GameContent> for WireCatalog {
             magic_resist: stats.magic_resist,
             vision_range_bits: stats.vision_range.to_bits(),
         };
+        // Structural guard: this destructure has no `..`, so adding a `RulesSpec` field fails
+        // to compile here until it is carried in `WireRules` (and the parity test is extended).
+        let moba_game::RulesSpec {
+            melee_minion,
+            ranged_minion,
+            tower,
+            nexus,
+            level_cap,
+            xp_base,
+            xp_per_level,
+            melee_vision,
+            ranged_vision,
+            tower_vision,
+            nexus_vision,
+            team_size,
+            bot_fill,
+            hero_respawn_ticks,
+            respawn_per_level,
+            wave_interval_ticks,
+            first_wave_ticks,
+            starting_gold,
+            gold_per_interval,
+            gold_tick_interval,
+            xp_radius,
+            shop_radius,
+            shared_xp_percent,
+            rewards: content_rewards,
+            structure_heroes_first,
+            nexus_win,
+            score_limit,
+        } = content_rules;
+        // The nested destructures guard reward kinds and per-unit scalars as well: a new
+        // `RewardsSpec` kind or `UnitRewardsSpec` field fails to compile here until it is wired.
+        let moba_game::RewardsSpec {
+            melee_minion: melee_reward,
+            ranged_minion: ranged_reward,
+            tower: tower_reward,
+            nexus: nexus_reward,
+            hero: hero_reward,
+        } = content_rewards;
+        let unit = |reward: &moba_game::UnitRewardsSpec| {
+            let moba_game::UnitRewardsSpec { xp, gold } = reward;
+            WireUnitRewards {
+                xp: *xp,
+                gold: *gold,
+            }
+        };
+        let rewards = WireRewards {
+            melee_minion: unit(melee_reward),
+            ranged_minion: unit(ranged_reward),
+            tower: unit(tower_reward),
+            nexus: unit(nexus_reward),
+            hero: unit(hero_reward),
+        };
         catalog.rules = WireRules {
-            melee_minion: minion(content_rules.melee_minion),
-            ranged_minion: minion(content_rules.ranged_minion),
-            tower: structure(content_rules.tower),
-            nexus: structure(content_rules.nexus),
-            level_cap: content_rules.level_cap,
-            xp_base: content_rules.xp_base,
-            xp_per_level: content_rules.xp_per_level,
-            melee_vision_bits: content_rules.melee_vision.to_bits(),
-            ranged_vision_bits: content_rules.ranged_vision.to_bits(),
-            tower_vision_bits: content_rules.tower_vision.to_bits(),
-            nexus_vision_bits: content_rules.nexus_vision.to_bits(),
-            team_size: content_rules.team_size,
-            bot_fill: content_rules.bot_fill,
-            hero_respawn_ticks: content_rules.hero_respawn_ticks,
-            respawn_per_level: content_rules.respawn_per_level,
-            wave_interval_ticks: content_rules.wave_interval_ticks,
-            first_wave_ticks: content_rules.first_wave_ticks,
+            melee_minion: minion(*melee_minion),
+            ranged_minion: minion(*ranged_minion),
+            tower: structure(*tower),
+            nexus: structure(*nexus),
+            level_cap: *level_cap,
+            xp_base: *xp_base,
+            xp_per_level: *xp_per_level,
+            melee_vision_bits: melee_vision.to_bits(),
+            ranged_vision_bits: ranged_vision.to_bits(),
+            tower_vision_bits: tower_vision.to_bits(),
+            nexus_vision_bits: nexus_vision.to_bits(),
+            team_size: *team_size,
+            bot_fill: *bot_fill,
+            hero_respawn_ticks: *hero_respawn_ticks,
+            respawn_per_level: *respawn_per_level,
+            wave_interval_ticks: *wave_interval_ticks,
+            first_wave_ticks: *first_wave_ticks,
+            starting_gold: *starting_gold,
+            gold_per_interval: *gold_per_interval,
+            gold_tick_interval: *gold_tick_interval,
+            xp_radius_bits: xp_radius.to_bits(),
+            shop_radius_bits: shop_radius.to_bits(),
+            shared_xp_percent: *shared_xp_percent,
+            rewards,
+            structure_heroes_first: *structure_heroes_first,
+            nexus_win: *nexus_win,
+            score_limit: *score_limit,
         };
         let map = &mut catalog.map;
         map.name_len = put_wire_name(&mut map.name, content_name);
@@ -1239,6 +1347,23 @@ fn structure_spec(wire: WireStructureStats) -> moba_game::StructureStatsSpec {
         armor: wire.armor,
         magic_resist: wire.magic_resist,
         vision_range: Fix::from_bits(wire.vision_range_bits),
+    }
+}
+
+const fn unit_rewards_spec(wire: WireUnitRewards) -> moba_game::UnitRewardsSpec {
+    moba_game::UnitRewardsSpec {
+        xp: wire.xp,
+        gold: wire.gold,
+    }
+}
+
+const fn rewards_spec(wire: WireRewards) -> moba_game::RewardsSpec {
+    moba_game::RewardsSpec {
+        melee_minion: unit_rewards_spec(wire.melee_minion),
+        ranged_minion: unit_rewards_spec(wire.ranged_minion),
+        tower: unit_rewards_spec(wire.tower),
+        nexus: unit_rewards_spec(wire.nexus),
+        hero: unit_rewards_spec(wire.hero),
     }
 }
 
@@ -1492,16 +1617,16 @@ impl WireCatalog {
                 respawn_per_level: self.rules.respawn_per_level,
                 wave_interval_ticks: self.rules.wave_interval_ticks,
                 first_wave_ticks: self.rules.first_wave_ticks,
-                starting_gold: moba_game::RulesSpec::default().starting_gold,
-                gold_per_interval: moba_game::RulesSpec::default().gold_per_interval,
-                gold_tick_interval: moba_game::RulesSpec::default().gold_tick_interval,
-                xp_radius: moba_game::RulesSpec::default().xp_radius,
-                shop_radius: moba_game::RulesSpec::default().shop_radius,
-                shared_xp_percent: moba_game::RulesSpec::default().shared_xp_percent,
-                rewards: moba_game::RulesSpec::default().rewards,
-                structure_heroes_first: moba_game::RulesSpec::default().structure_heroes_first,
-                nexus_win: moba_game::RulesSpec::default().nexus_win,
-                score_limit: moba_game::RulesSpec::default().score_limit,
+                starting_gold: self.rules.starting_gold,
+                gold_per_interval: self.rules.gold_per_interval,
+                gold_tick_interval: self.rules.gold_tick_interval,
+                xp_radius: moba_core::Fix::from_bits(self.rules.xp_radius_bits),
+                shop_radius: moba_core::Fix::from_bits(self.rules.shop_radius_bits),
+                shared_xp_percent: self.rules.shared_xp_percent,
+                rewards: rewards_spec(self.rules.rewards),
+                structure_heroes_first: self.rules.structure_heroes_first,
+                nexus_win: self.rules.nexus_win,
+                score_limit: self.rules.score_limit,
             },
             attestation: None,
             map: MapSpec {
@@ -1813,9 +1938,29 @@ fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
         catalog.rules.respawn_per_level,
         catalog.rules.wave_interval_ticks,
         catalog.rules.first_wave_ticks,
+        catalog.rules.starting_gold,
+        catalog.rules.gold_per_interval,
+        catalog.rules.gold_tick_interval,
     ] {
         out.extend_from_slice(&value.to_le_bytes());
     }
+    for value in [catalog.rules.xp_radius_bits, catalog.rules.shop_radius_bits] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out.extend_from_slice(&catalog.rules.shared_xp_percent.to_le_bytes());
+    for reward in [
+        catalog.rules.rewards.melee_minion,
+        catalog.rules.rewards.ranged_minion,
+        catalog.rules.rewards.tower,
+        catalog.rules.rewards.nexus,
+        catalog.rules.rewards.hero,
+    ] {
+        out.extend_from_slice(&reward.xp.to_le_bytes());
+        out.extend_from_slice(&reward.gold.to_le_bytes());
+    }
+    out.push(u8::from(catalog.rules.structure_heroes_first));
+    out.push(u8::from(catalog.rules.nexus_win));
+    out.extend_from_slice(&catalog.rules.score_limit.to_le_bytes());
     let map = &catalog.map;
     out.extend_from_slice(&map.name);
     out.push(map.name_len);
@@ -2000,6 +2145,37 @@ fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, WireError> {
         respawn_per_level: reader.u32()?,
         wave_interval_ticks: reader.u32()?,
         first_wave_ticks: reader.u32()?,
+        starting_gold: reader.u32()?,
+        gold_per_interval: reader.u32()?,
+        gold_tick_interval: reader.u32()?,
+        xp_radius_bits: reader.i64()?,
+        shop_radius_bits: reader.i64()?,
+        shared_xp_percent: reader.u32()?,
+        rewards: WireRewards {
+            melee_minion: WireUnitRewards {
+                xp: reader.u32()?,
+                gold: reader.u32()?,
+            },
+            ranged_minion: WireUnitRewards {
+                xp: reader.u32()?,
+                gold: reader.u32()?,
+            },
+            tower: WireUnitRewards {
+                xp: reader.u32()?,
+                gold: reader.u32()?,
+            },
+            nexus: WireUnitRewards {
+                xp: reader.u32()?,
+                gold: reader.u32()?,
+            },
+            hero: WireUnitRewards {
+                xp: reader.u32()?,
+                gold: reader.u32()?,
+            },
+        },
+        structure_heroes_first: reader.u8()? != 0,
+        nexus_win: reader.u8()? != 0,
+        score_limit: reader.u16()?,
     };
     let map = &mut catalog.map;
     map.name.copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);
@@ -3300,6 +3476,10 @@ mod tests {
             server_signature: [0; 64],
         };
         let encoded = encode_welcome(&welcome);
+        assert!(
+            encoded.len() > MAX_DATAGRAM,
+            "the Welcome (catalogue included) must still exercise transport fragmentation"
+        );
         let decoded = decode_welcome(&encoded).expect("welcome decodes");
         assert_eq!(decoded, welcome);
         assert_eq!(
@@ -3529,6 +3709,259 @@ mod tests {
         let decoded = wire.to_content().expect("round trip");
         assert_eq!(decoded, content);
         assert_eq!(decoded.hash(), content.hash());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One mutation per hashed rules field.
+    fn wire_rules_parity_covers_every_hashed_field() {
+        use moba_game::RulesSpec;
+        type Mutation = (&'static str, Box<dyn Fn(&mut RulesSpec)>);
+        // Exhaustive destructure with no `..`: adding a `RulesSpec` field fails to compile here
+        // until a mutation for it is added below, so a hashed field can't be forgotten on the
+        // wire or in the hash.
+        let RulesSpec {
+            melee_minion,
+            ranged_minion,
+            tower,
+            nexus,
+            level_cap,
+            xp_base,
+            xp_per_level,
+            melee_vision,
+            ranged_vision,
+            tower_vision,
+            nexus_vision,
+            team_size,
+            bot_fill,
+            hero_respawn_ticks,
+            respawn_per_level,
+            wave_interval_ticks,
+            first_wave_ticks,
+            starting_gold,
+            gold_per_interval,
+            gold_tick_interval,
+            xp_radius,
+            shop_radius,
+            shared_xp_percent,
+            rewards: rules_rewards,
+            structure_heroes_first,
+            nexus_win,
+            score_limit,
+        } = RulesSpec::default();
+        // Same exhaustive-destructure guard for the nested rewards.
+        let moba_game::RewardsSpec {
+            melee_minion: melee_reward,
+            ranged_minion: ranged_reward,
+            tower: tower_reward,
+            nexus: nexus_reward,
+            hero: hero_reward,
+        } = rules_rewards;
+        let mutations: Vec<Mutation> = vec![
+            (
+                "melee_minion",
+                Box::new(move |rules| {
+                    rules.melee_minion.max_health = melee_minion.max_health + 1;
+                }),
+            ),
+            (
+                "ranged_minion",
+                Box::new(move |rules| {
+                    rules.ranged_minion.max_health = ranged_minion.max_health + 1;
+                }),
+            ),
+            (
+                "tower",
+                Box::new(move |rules| {
+                    rules.tower.max_health = tower.max_health + 1;
+                }),
+            ),
+            (
+                "nexus",
+                Box::new(move |rules| {
+                    rules.nexus.max_health = nexus.max_health + 1;
+                }),
+            ),
+            (
+                "level_cap",
+                Box::new(move |rules| rules.level_cap = level_cap + 1),
+            ),
+            (
+                "xp_base",
+                Box::new(move |rules| rules.xp_base = xp_base + 1),
+            ),
+            (
+                "xp_per_level",
+                Box::new(move |rules| rules.xp_per_level = xp_per_level + 1),
+            ),
+            (
+                "melee_vision",
+                Box::new(move |rules| {
+                    rules.melee_minion.vision_range = melee_vision + moba_core::Fix::ONE;
+                    rules.melee_vision = rules.melee_minion.vision_range;
+                }),
+            ),
+            (
+                "ranged_vision",
+                Box::new(move |rules| {
+                    rules.ranged_minion.vision_range = ranged_vision + moba_core::Fix::ONE;
+                    rules.ranged_vision = rules.ranged_minion.vision_range;
+                }),
+            ),
+            (
+                "tower_vision",
+                Box::new(move |rules| {
+                    rules.tower.vision_range = tower_vision + moba_core::Fix::ONE;
+                    rules.tower_vision = rules.tower.vision_range;
+                }),
+            ),
+            (
+                "nexus_vision",
+                Box::new(move |rules| {
+                    rules.nexus.vision_range = nexus_vision + moba_core::Fix::ONE;
+                    rules.nexus_vision = rules.nexus.vision_range;
+                }),
+            ),
+            (
+                "team_size",
+                Box::new(move |rules| rules.team_size = team_size - 2),
+            ),
+            (
+                "bot_fill",
+                Box::new(move |rules| rules.bot_fill = !bot_fill),
+            ),
+            (
+                "hero_respawn_ticks",
+                Box::new(move |rules| rules.hero_respawn_ticks = hero_respawn_ticks + 1),
+            ),
+            (
+                "respawn_per_level",
+                Box::new(move |rules| rules.respawn_per_level = respawn_per_level + 1),
+            ),
+            (
+                "wave_interval_ticks",
+                Box::new(move |rules| rules.wave_interval_ticks = wave_interval_ticks + 1),
+            ),
+            (
+                "first_wave_ticks",
+                Box::new(move |rules| rules.first_wave_ticks = first_wave_ticks + 1),
+            ),
+            (
+                "starting_gold",
+                Box::new(move |rules| rules.starting_gold = starting_gold + 100),
+            ),
+            (
+                "gold_per_interval",
+                Box::new(move |rules| rules.gold_per_interval = gold_per_interval + 1),
+            ),
+            (
+                "gold_tick_interval",
+                Box::new(move |rules| rules.gold_tick_interval = gold_tick_interval + 1),
+            ),
+            (
+                "xp_radius",
+                Box::new(move |rules| rules.xp_radius = xp_radius + moba_core::Fix::ONE),
+            ),
+            (
+                "shop_radius",
+                Box::new(move |rules| rules.shop_radius = shop_radius + moba_core::Fix::ONE),
+            ),
+            (
+                "shared_xp_percent",
+                Box::new(move |rules| rules.shared_xp_percent = shared_xp_percent + 1),
+            ),
+            (
+                "rewards.melee_minion.xp",
+                Box::new(move |rules| {
+                    rules.rewards.melee_minion.xp = melee_reward.xp + 1;
+                }),
+            ),
+            (
+                "rewards.melee_minion.gold",
+                Box::new(move |rules| {
+                    rules.rewards.melee_minion.gold = melee_reward.gold + 1;
+                }),
+            ),
+            (
+                "rewards.ranged_minion.xp",
+                Box::new(move |rules| {
+                    rules.rewards.ranged_minion.xp = ranged_reward.xp + 1;
+                }),
+            ),
+            (
+                "rewards.ranged_minion.gold",
+                Box::new(move |rules| {
+                    rules.rewards.ranged_minion.gold = ranged_reward.gold + 1;
+                }),
+            ),
+            (
+                "rewards.tower.xp",
+                Box::new(move |rules| rules.rewards.tower.xp = tower_reward.xp + 1),
+            ),
+            (
+                "rewards.tower.gold",
+                Box::new(move |rules| rules.rewards.tower.gold = tower_reward.gold + 1),
+            ),
+            (
+                "rewards.nexus.xp",
+                Box::new(move |rules| rules.rewards.nexus.xp = nexus_reward.xp + 1),
+            ),
+            (
+                "rewards.nexus.gold",
+                Box::new(move |rules| rules.rewards.nexus.gold = nexus_reward.gold + 1),
+            ),
+            (
+                "rewards.hero.xp",
+                Box::new(move |rules| rules.rewards.hero.xp = hero_reward.xp + 1),
+            ),
+            (
+                "rewards.hero.gold",
+                Box::new(move |rules| rules.rewards.hero.gold = hero_reward.gold + 1),
+            ),
+            (
+                "structure_heroes_first",
+                Box::new(move |rules| rules.structure_heroes_first = !structure_heroes_first),
+            ),
+            (
+                "nexus_win",
+                Box::new(move |rules| rules.nexus_win = !nexus_win),
+            ),
+            (
+                "score_limit",
+                Box::new(move |rules| rules.score_limit = score_limit + 1),
+            ),
+        ];
+        let base = GameContent::default();
+        for (name, mutate) in &mutations {
+            let mut content = base.clone();
+            mutate(&mut content.rules);
+            assert!(
+                content.validate().is_ok(),
+                "{name}: mutated content must stay valid: {:?}",
+                content.validate()
+            );
+            assert_ne!(
+                content.hash(),
+                base.hash(),
+                "{name}: mutation must change the content hash"
+            );
+            let wire = WireCatalog::from(&content);
+            assert_eq!(
+                wire.content_hash().expect("wire hash"),
+                content.hash(),
+                "{name}: hashed rules field is not carried on the wire"
+            );
+            assert_eq!(
+                wire.to_content().expect("content").rules,
+                content.rules,
+                "{name}: rules differ after From/to_content"
+            );
+            let mut bytes = Vec::new();
+            encode_catalog(&wire, &mut bytes);
+            let mut reader = Reader::new(&bytes);
+            let decoded = decode_catalog(&mut reader).expect("decode catalogue");
+            assert_eq!(reader.remaining(), 0, "{name}: trailing bytes");
+            assert_eq!(decoded, wire, "{name}: encode/decode round trip");
+        }
     }
 
     #[test]

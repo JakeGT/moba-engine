@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moba_game::{GameContent, HeroSpec, ItemSpec};
-use moba_net::protocol::WireCommand;
+use moba_net::protocol::{WireCatalog, WireCommand};
 use moba_net::{NetClient, NetServer, ServerConfig};
 use moba_sim::SimConfig;
 
@@ -141,6 +141,50 @@ fn custom_item_catalogue_reaches_client_and_shop() {
         }
     }
     assert!(bought, "custom item purchased through the server");
+    let _ = client.disconnect();
+    server.join().expect("server thread");
+}
+
+#[test]
+fn economy_override_pack_reaches_a_real_udp_client() {
+    let content =
+        moba_game::load_content_toml(include_str!("../../../content/economy-override.toml"))
+            .expect("economy pack parses");
+    assert_eq!(content.validate(), Ok(()));
+    assert_eq!(
+        content.rules.starting_gold, 750,
+        "pack must override the default economy"
+    );
+    let expected = WireCatalog::from(&content).rules;
+    let (addr, server) = spawn_server(content.clone());
+    let mut client = NetClient::connect(addr, Duration::from_secs(2)).expect("connect");
+    assert_eq!(
+        client.rules(),
+        &expected,
+        "client rules must equal the server's wire rules"
+    );
+    assert_eq!(
+        client.content_hash(),
+        content.hash(),
+        "wire catalogue hash must match the server pack"
+    );
+    assert_eq!(client.rules().starting_gold, 750);
+    assert_eq!(client.rules().gold_per_interval, 2);
+    assert_eq!(client.rules().gold_tick_interval, 20);
+    assert_eq!(
+        client.rules().xp_radius_bits,
+        moba_core::Fix::from_i32(42).to_bits()
+    );
+    assert_eq!(
+        client.rules().shop_radius_bits,
+        moba_core::Fix::from_i32(36).to_bits()
+    );
+    assert_eq!(client.rules().shared_xp_percent, 175);
+    assert_eq!(client.rules().rewards.melee_minion.xp, 40);
+    assert_eq!(client.rules().rewards.hero.gold, 350);
+    assert!(client.rules().structure_heroes_first);
+    assert!(!client.rules().nexus_win);
+    assert_eq!(client.rules().score_limit, 25);
     let _ = client.disconnect();
     server.join().expect("server thread");
 }

@@ -1,0 +1,40 @@
+# Economy and win-condition overrides.
+#
+# Regression pack for #294: every field here is content-hashed and must reach a joining
+# client in the handshake. `crates/net/tests/content.rs` joins a real UDP client against it
+# and asserts the client's rules and content hash match the server's.
+
+name = "Economy Override"
+version = "1"
+author = "moba-engine"
+
+[rules]
+starting_gold = 750
+gold_per_interval = 2
+gold_tick_interval = 20
+xp_radius = 42.0
+shop_radius = 36.0
+shared_xp_percent = 175
+structure_heroes_first = true
+nexus_win = false
+score_limit = 25
+
+[rules.rewards.melee_minion]
+xp = 40
+gold = 26
+
+[rules.rewards.ranged_minion]
+xp = 55
+gold = 31
+
+[rules.rewards.tower]
+xp = 250
+gold = 300
+
+[rules.rewards.nexus]
+xp = 350
+gold = 600
+
+[rules.rewards.hero]
+xp = 200
+gold = 350

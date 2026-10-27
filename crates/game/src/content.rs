@@ -1489,23 +1489,46 @@ impl GameContent {
                 feed(&value.to_le_bytes());
             }
         }
-        feed(&[
-            self.rules.team_size,
-            u8::from(self.rules.bot_fill),
-            self.rules.level_cap,
-        ]);
-        for value in [self.rules.xp_base, self.rules.xp_per_level] {
+        // Structural guard: this destructure has no `..`, so adding a `RulesSpec` field fails to
+        // compile here until it is hashed (and carried on the wire; see the parity test in
+        // `moba-net`). The bindings are used below so an added field can't be silently ignored.
+        let RulesSpec {
+            melee_minion,
+            ranged_minion,
+            tower,
+            nexus,
+            level_cap,
+            xp_base,
+            xp_per_level,
+            melee_vision,
+            ranged_vision,
+            tower_vision,
+            nexus_vision,
+            team_size,
+            bot_fill,
+            hero_respawn_ticks,
+            respawn_per_level,
+            wave_interval_ticks,
+            first_wave_ticks,
+            starting_gold,
+            gold_per_interval,
+            gold_tick_interval,
+            xp_radius,
+            shop_radius,
+            shared_xp_percent,
+            rewards,
+            structure_heroes_first,
+            nexus_win,
+            score_limit,
+        } = &self.rules;
+        feed(&[*team_size, u8::from(*bot_fill), *level_cap]);
+        for value in [xp_base, xp_per_level] {
             feed(&value.to_le_bytes());
         }
-        for value in [
-            self.rules.melee_vision,
-            self.rules.ranged_vision,
-            self.rules.tower_vision,
-            self.rules.nexus_vision,
-        ] {
+        for value in [melee_vision, ranged_vision, tower_vision, nexus_vision] {
             feed(&value.to_bits().to_le_bytes());
         }
-        for minion in [self.rules.melee_minion, self.rules.ranged_minion] {
+        for minion in [melee_minion, ranged_minion] {
             feed(&minion.max_health.to_le_bytes());
             feed(&minion.attack_damage.to_le_bytes());
             feed(&minion.attack_range.to_bits().to_le_bytes());
@@ -1515,7 +1538,7 @@ impl GameContent {
             feed(&minion.magic_resist.to_le_bytes());
             feed(&minion.vision_range.to_bits().to_le_bytes());
         }
-        for structure in [self.rules.tower, self.rules.nexus] {
+        for structure in [tower, nexus] {
             feed(&structure.max_health.to_le_bytes());
             feed(&structure.attack_damage.to_le_bytes());
             feed(&structure.attack_range.to_bits().to_le_bytes());
@@ -1525,33 +1548,43 @@ impl GameContent {
             feed(&structure.vision_range.to_bits().to_le_bytes());
         }
         for value in [
-            self.rules.hero_respawn_ticks,
-            self.rules.respawn_per_level,
-            self.rules.wave_interval_ticks,
-            self.rules.first_wave_ticks,
-            self.rules.starting_gold,
-            self.rules.gold_per_interval,
-            self.rules.gold_tick_interval,
+            hero_respawn_ticks,
+            respawn_per_level,
+            wave_interval_ticks,
+            first_wave_ticks,
+            starting_gold,
+            gold_per_interval,
+            gold_tick_interval,
         ] {
             feed(&value.to_le_bytes());
         }
-        for value in [self.rules.xp_radius, self.rules.shop_radius] {
+        for value in [xp_radius, shop_radius] {
             feed(&value.to_bits().to_le_bytes());
         }
-        feed(&self.rules.shared_xp_percent.to_le_bytes());
+        feed(&shared_xp_percent.to_le_bytes());
+        // Exhaustive nested destructures too: a new reward kind or a new per-unit scalar fails
+        // to compile here until it is hashed.
+        let RewardsSpec {
+            melee_minion: melee_reward,
+            ranged_minion: ranged_reward,
+            tower: tower_reward,
+            nexus: nexus_reward,
+            hero: hero_reward,
+        } = rewards;
         for reward in [
-            self.rules.rewards.melee_minion,
-            self.rules.rewards.ranged_minion,
-            self.rules.rewards.tower,
-            self.rules.rewards.nexus,
-            self.rules.rewards.hero,
+            melee_reward,
+            ranged_reward,
+            tower_reward,
+            nexus_reward,
+            hero_reward,
         ] {
-            feed(&reward.xp.to_le_bytes());
-            feed(&reward.gold.to_le_bytes());
+            let UnitRewardsSpec { xp, gold } = reward;
+            feed(&xp.to_le_bytes());
+            feed(&gold.to_le_bytes());
         }
-        feed(&[u8::from(self.rules.structure_heroes_first)]);
-        feed(&[u8::from(self.rules.nexus_win)]);
-        feed(&self.rules.score_limit.to_le_bytes());
+        feed(&[u8::from(*structure_heroes_first)]);
+        feed(&[u8::from(*nexus_win)]);
+        feed(&score_limit.to_le_bytes());
         string(feed, &self.map.name);
         feed(&[self.map.theme.id()]);
         feed(&self.map.extent.to_bits().to_le_bytes());
