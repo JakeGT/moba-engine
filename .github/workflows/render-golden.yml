@@ -32,7 +32,12 @@ jobs:
               - 'crates/platform/**'
               - 'crates/client/**'
               - 'crates/assets/**'
-              - 'content/models/**'
+              # The networked golden also depends on the simulation, wire and content.
+              - 'crates/core/**'
+              - 'crates/game/**'
+              - 'crates/sim/**'
+              - 'crates/net/**'
+              - 'content/**'
               - 'tests/golden/**'
               - '.github/workflows/render-golden.yml'
       - uses: dtolnay/rust-toolchain@stable

@@ -89,8 +89,10 @@ pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
 pub(crate) static LOCAL_CAPTURE_ACK: AtomicU32 = AtomicU32::new(0);
 
 /// How long the lock-stepped server waits for the client before ticking anyway, so a lost
-/// snapshot cannot stall a capture forever.
-const LOCKSTEP_PATIENCE: Duration = Duration::from_secs(1);
+/// snapshot cannot stall a capture forever. Long enough that a slow software-rendered frame
+/// (lavapipe with validation) never triggers it; expiry is logged because the capture may
+/// then differ from run to run.
+const LOCKSTEP_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Runs the in-process `MOBA_SERVER=local` server at 30 Hz.
 ///
@@ -102,7 +104,11 @@ const LOCKSTEP_PATIENCE: Duration = Duration::from_secs(1);
 ///   ([`LOCAL_CAPTURE_ACK`]), so the client buffers every snapshot `1..=n` however slowly it
 ///   renders (lavapipe in CI), and interpolation sees the same history on every run;
 /// - after `n` Playing ticks the server keeps polling (the client stays connected) but sends
-///   nothing newer than the tick-`n` snapshot.
+///   nothing newer than the tick-`n` snapshot;
+/// - if the client does not acknowledge a tick within [`LOCKSTEP_PATIENCE`] (a lost
+///   datagram), the server logs it and ticks anyway, including once past `n`, so the client
+///   can still capture (`latest >= n`) instead of hanging;
+/// - a rematch (Lobby/Countdown again) restarts the count with the simulation tick.
 fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
     let Some(stop_at) = stop_at else {
         let _ = server.run_for(Duration::from_secs(3_600));
@@ -120,10 +126,24 @@ fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
         let now = Instant::now();
         if now >= next_tick {
             // A Playing tick advances the simulation by one; Lobby/Countdown ticks do not.
-            let playing = server.phase().0 == MatchPhase::Playing;
-            let caught_up = LOCAL_CAPTURE_ACK.load(Ordering::Acquire) >= played
-                || now.duration_since(waiting_since) >= LOCKSTEP_PATIENCE;
-            if !playing || (played < stop_at && caught_up) {
+            let phase = server.phase().0;
+            let playing = phase == MatchPhase::Playing;
+            if matches!(phase, MatchPhase::Lobby | MatchPhase::Countdown) {
+                played = 0;
+            }
+            let acked = LOCAL_CAPTURE_ACK.load(Ordering::Relaxed);
+            let run = if !playing || (acked >= played && played < stop_at) {
+                true
+            } else if acked < played && now.duration_since(waiting_since) >= LOCKSTEP_PATIENCE {
+                eprintln!(
+                    "[capture] client has not processed tick {played} (latest {acked}) after \
+                     {LOCKSTEP_PATIENCE:?}; ticking anyway, so this capture may not repeat"
+                );
+                true
+            } else {
+                false
+            };
+            if run {
                 if server.tick().is_err() {
                     return;
                 }

@@ -24,11 +24,13 @@
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
-//!   `MOBA_SERVER=local` server stops advancing at `n`, so the frame is repeatable.
+//!   `MOBA_SERVER=local` server is lock-stepped to the client and stops at `n`, so the frame
+//!   is repeatable (with a remote server it is best effort). Projectile effects still advance
+//!   by frame time, so pick a tick before the first fight (the golden uses 120).
 //! - `MOBA_WINDOW_SIZE=<w>x<h>`: logical window size (default 1280x720).
 //! - `MOBA_WARMUP_TICKS=<n>`: the local preview simulates `n` ticks before the first frame;
 //!   in network mode, frame logging and `MOBA_SMOKE_FRAMES` start once Playing reaches tick
-//!   `n`.
+//!   `n` (a client that never reaches it, e.g. a lobby waiting for ready, does not exit).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -231,7 +233,9 @@ impl ClientApp {
                         follow_distance: parse_follow_distance(),
                         overview_camera: std::env::var("MOBA_CAMERA")
                             .is_ok_and(|value| value == "overview"),
-                        capture_tick: parse_capture_tick(),
+                        // Only a capture pins the render tick; otherwise play normally.
+                        capture_tick: parse_capture_tick()
+                            .filter(|_| std::env::var_os("MOBA_CAPTURE").is_some()),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
                         audio: crate::audio::Audio::new(audio_volume, audio_mute),
@@ -494,7 +498,7 @@ impl App for ClientApp {
                         if network.capture_tick.is_some() {
                             // Lets a lock-stepped local capture server run the next tick.
                             launch::LOCAL_CAPTURE_ACK
-                                .store(snapshot.tick, std::sync::atomic::Ordering::Release);
+                                .store(snapshot.tick, std::sync::atomic::Ordering::Relaxed);
                         }
                         network.interpolator.push(snapshot.clone());
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
