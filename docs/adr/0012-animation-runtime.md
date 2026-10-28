@@ -3,6 +3,8 @@
 **Status:** accepted 2026-10-28 (R4a of the [AAA graphics roadmap](../plans/aaa-graphics-roadmap.md#r4--animation-runtime-ml-after-wp-41)).
 Vertex-animation textures for minions and renderer-side bone LOD are R4b and are not decided
 here beyond the direction in [Follow-ups](#follow-ups-r4b-and-later).
+**Amended** 2026-10-28 by R4b-1: basic attacks are driven by the replicated `EVENT_ATTACK`
+(protocol v41), no longer inferred from health drops ([below](#basic-attacks-event_attack-r4b-1)).
 
 ## Context
 WP-4.1 ([ADR-0007](0007-mesh-format.md#skinning-wp-41)) made heroes GPU-skinned with one clip:
@@ -15,8 +17,8 @@ Constraints from the roadmap (§3) and the engine's invariants:
 - **Never touch determinism.** Animation is client-side presentation driven by snapshots and
   presentation events. It never feeds the simulation, the wire, replays or the content hash.
   Root motion is visual only.
-- **No wire change.** What the client already receives has to be enough; a gap is documented,
-  not patched with a protocol bump inside this phase.
+- **No wire change** in R4a. What the client already received had to be enough; the gap
+  (basic attacks) was documented, and closed with its own protocol bump in R4b-1.
 - **No per-frame allocation**, and every feature has an off switch.
 - Model and animation files are client-local and untrusted (a player or a mod controls them),
   like `.glb` models and map visuals.
@@ -107,28 +109,47 @@ feeds them only what the client already has:
 | casts | `EVENT_CAST` (`value` = ability slot; the catalogue maps slot → ability name) | stamped with the tick of the snapshot that carried the event (`ClientEvent::Snapshot` follows its events) |
 | death | `EVENT_UNIT_DIED` (target net id), else the dead flag | the dead hero stays drawn while the death clip plus `death_linger` play |
 | respawn | the dead flag clearing | `HeroRespawned` is not replicated; a hero first seen already dead (mid-match join, reconnect, reload) is marked dead without replaying its death |
-| facing while standing | the last snapshot movement step (≤ 3 m, so a respawn teleport is ignored), or towards the target of the last inferred attack | the WP-4.1 pose snapped stationary heroes to +X |
+| facing while standing | the last snapshot movement step (≤ 3 m, so a respawn teleport is ignored), or towards the target of the last `EVENT_ATTACK` | the WP-4.1 pose snapped stationary heroes to +X |
 | hit reaction | the hero's health dropping between snapshots | at most every 9 ticks (0.3 s), so damage over time does not jitter |
-| basic attacks | **inferred** (see Gaps) | release frame on the inferred hit tick; predicted one interval ahead once two hits confirm the cadence |
+| basic attacks | `EVENT_ATTACK` (since v41: source, target, hit tick as `snapshot tick − aux`, attack interval in `value`) | release frame on the hit tick; the next swing is scheduled one attack interval ahead and withdrawn if no event confirms it |
 | recall | none | the simulation has no recall; the state and `AnimationEvent::Recall` exist for when it does |
 
 Snapshots are interpolated `SNAPSHOT_DELAY_TICKS` (4 ticks, 133 ms) behind the newest one, so
 an event stamped with its tick is known before the view reaches it and the release frame can
-land exactly on it; a wind-up longer than that is partly skipped unless predicted.
+land exactly on it; a wind-up longer than that is partly skipped unless scheduled ahead.
+
+### Basic attacks: `EVENT_ATTACK` (R4b-1)
+The simulation resolves a basic attack instantly in the tick the attacker's cooldown reaches
+zero (`Simulation::resolve_attacks`); there is no wind-up in the simulation, so release and
+hit are the same tick, for melee and ranged attackers alike (no basic attack spawns a
+projectile). `SimEvent::BasicAttack { attacker, team, target, interval_ticks }` is emitted
+with the hit. Events are outputs: they are not hashed or recorded, so the golden state hash
+(`0x8db35a0f5aab5190`), the replay fixture and `SIM_LOGIC_VERSION` are unchanged. Attacks may
+fill at most half of the simulation's 256-event queue (`MAX_ATTACK_EVENTS`), so they never
+crowd out a death or a cast.
+
+On the wire (protocol v41) `EVENT_ATTACK` = 8 is a compact 12-byte record: kind, team,
+source and target net ids, their hero slots, `value` = the attack interval in ticks (the
+attacker's timer: when it can hit again) and `aux` = the hit's age in ticks relative to the
+carrying snapshot. It is filtered per viewer like the other events (both endpoints observed,
+or a spectator) and has the lowest priority under the 16-events-per-snapshot cap: deaths,
+structures and the match end, then the other events, then hero attacks, then the rest. The
+server keeps attacks in their own pending queue, so a burst never evicts other events.
+
+The client triggers `AnimationEvent::Attack` with its release on the hit tick and turns the
+hero to its target. Because the event arrives only `SNAPSHOT_DELAY_TICKS` before the view
+reaches the hit, shorter than the sample clip's 0.35 s wind-up, the next swing is scheduled
+from the attack timer (hit + interval) so it gets its whole wind-up. An attack event within
+two ticks of the scheduled hit confirms it (the animator ignores the repeat); one further
+away replaces it; none by one tick after it withdraws it (`Animator::cancel`: dropped if
+still queued, else faded out from the view's time). The swing after an attacker's last
+hit is therefore shown as a wind-up that fades out; a lost snapshot can also withdraw a
+swing that did happen. Bandwidth: [perf/0009](../perf/0009-presentation-events.md#protocol-v41-basic-attack-events).
 
 ### Gaps (documented, not patched)
-- **No attack event or attack timer on the wire.** Basic attacks resolve instantly in
-  `Simulation::resolve_attacks` when `AttackStats::cooldown` reaches 0, and neither the hit nor
-  the cooldown is replicated (`NetEntity` has ability cooldowns only). The client infers a hit
-  when a stationary hero has an enemy within its catalogue attack range (+1.5 m) whose health
-  dropped in this snapshot, at most once per catalogue attack interval. It misattributes damage
-  from abilities, burns or a second attacker. A predicted swing whose hit has not been
-  observed one tick after its release tick is withdrawn (`Animator::cancel`): dropped if
-  still queued, else faded out from where the interpolated view is, which is usually still
-  in the wind-up. Exact sync needs a presentation event
-  (`EVENT_ATTACK` with source and target, filtered like the others) or the attack cooldown in
-  `NetEntity`. Either is a protocol bump and is left as a follow-up (proposed in the R4a pull
-  request, to be filed as an issue).
+- **Basic attacks** were inferred from health drops in R4a (a stationary hero with a
+  damaged enemy in its catalogue range), which misattributed damage from abilities, burns or
+  a second attacker. Closed by `EVENT_ATTACK` in R4b-1 (above); the inference is gone.
 - **No respawn or recall events**, as above.
 - **The local preview** (no `MOBA_SERVER`) keeps the WP-4.1 pose; the runtime is wired to the
   network view, which is what matches and the golden use.
@@ -180,8 +201,15 @@ units take ~116 µs per frame, ~31 µs with a quarter of them evaluated per fram
 - **A graph of arbitrary blend nodes** (Unreal/Unity-style). More flexible, but the MOBA needs
   locomotion + one action layer + additive reactions; a fixed structure keeps the descriptor
   small, bounded and easy to validate.
-- **Adding an attack event to the wire now.** Exact, but a protocol bump with
-  bandwidth/visibility review belongs in its own change; inference keeps R4a wire-neutral.
+- **Adding an attack event to the wire in R4a.** Exact, but a protocol bump with
+  bandwidth/visibility review belonged in its own change; inference kept R4a wire-neutral.
+  R4b-1 made that change.
+- **Replicating the attack cooldown in `NetEntity`** instead of an event (R4b-1). It gives the
+  timer but not the target, costs bytes on every changed hero update, and a hit would still
+  have to be inferred from the cooldown resetting.
+- **A wind-up event ahead of the hit** (R4b-1). The simulation has no wind-up phase; an event
+  some ticks before the cooldown expires would be a forecast that can still fail (the target
+  leaves range or dies), so the client would need a second, confirming event per attack.
 - **Spring bones on the GPU or physics middleware.** A handful of joints per hero does not
   justify a compute pass or a dependency; the CPU cost is in the numbers above.
 - **VAT for heroes too.** VAT suits crowds with few states (minions); heroes need blending,
@@ -191,7 +219,7 @@ units take ~116 µs per frame, ~31 µs with a quarter of them evaluated per fram
 - **VAT minions** (R4b): bake minion clips into vertex-animation textures and play them in the
   vertex shader; needs R1's texture and material support and a second skinned path.
 - **Bone LOD in the renderer**: reduced skins (fewer joints/influences) for distant units.
-- **`EVENT_ATTACK`** (or replicated attack cooldowns) for exact hit-frame sync.
+- ~~**`EVENT_ATTACK`** for exact hit-frame sync~~: done in R4b-1 (protocol v41).
 - Socket attachments drawn through the instanced mesh path; item visuals.
 - Stride matching (locomotion playback rate from speed) and a 2D blend space if strafing is
   ever needed.

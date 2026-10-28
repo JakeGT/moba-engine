@@ -259,6 +259,80 @@ fn basic_attacks_apply_mitigated_damage() {
 }
 
 #[test]
+fn basic_attacks_emit_one_presentation_event_per_hit() {
+    let mut sim = idle(SimConfig::default().hero_picks);
+    let blue = sim.hero_entities[0];
+    let red = sim.hero_entities[5];
+    sim.world.get_mut::<Position>(blue).unwrap().0 = FixVec2::from_ints(100, 100);
+    sim.world.get_mut::<Position>(red).unwrap().0 = FixVec2::from_ints(101, 100);
+    let interval = sim.world.get::<AttackStats>(blue).unwrap().interval;
+    let mut hits = Vec::new();
+    for tick in 0..=interval {
+        let mut inputs = TickInputs::new();
+        if tick == 0 {
+            inputs.set(0, PlayerCommand::Attack(red));
+        }
+        let before = sim.world.get::<Health>(red).unwrap().current;
+        sim.tick(&inputs);
+        let after = sim.world.get::<Health>(red).unwrap().current;
+        let attacks: Vec<_> = sim
+            .events()
+            .iter()
+            .filter_map(|event| match *event {
+                SimEvent::BasicAttack {
+                    attacker,
+                    team,
+                    target,
+                    interval_ticks,
+                } if attacker == blue => Some((team, target, interval_ticks)),
+                _ => None,
+            })
+            .collect();
+        // The event comes with the hit, in the tick the damage lands, never otherwise.
+        assert_eq!(attacks.len(), usize::from(after < before), "tick {tick}");
+        if let Some(&(team, target, interval_ticks)) = attacks.first() {
+            assert_eq!((team, target, interval_ticks), (Team::Blue, red, interval));
+            hits.push(tick);
+        }
+        sim.clear_events();
+    }
+    assert_eq!(hits, [0, interval], "one hit per attack interval");
+}
+
+#[test]
+fn attack_events_never_crowd_out_other_events() {
+    let mut sim = idle(SimConfig::default().hero_picks);
+    let blue = sim.hero_entities[0];
+    let red = sim.hero_entities[5];
+    for _ in 0..MAX_EVENTS {
+        sim.push_event(SimEvent::BasicAttack {
+            attacker: blue,
+            team: Team::Blue,
+            target: red,
+            interval_ticks: 30,
+        });
+    }
+    assert_eq!(sim.events().len(), MAX_ATTACK_EVENTS);
+    for _ in 0..MAX_EVENTS {
+        sim.push_event(SimEvent::HeroRespawned { entity: red });
+    }
+    assert_eq!(sim.events().len(), MAX_EVENTS);
+    sim.push_event(SimEvent::MatchEnded { winner: None });
+    assert_eq!(
+        sim.events().last(),
+        Some(&SimEvent::MatchEnded { winner: None })
+    );
+    sim.clear_events();
+    sim.push_event(SimEvent::BasicAttack {
+        attacker: blue,
+        team: Team::Blue,
+        target: red,
+        interval_ticks: 30,
+    });
+    assert_eq!(sim.events().len(), 1, "clearing resets the attack budget");
+}
+
+#[test]
 fn skillshots_travel_and_hit() {
     let picks = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
     let mut sim = idle(picks);

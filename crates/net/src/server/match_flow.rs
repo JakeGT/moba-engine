@@ -46,10 +46,15 @@ impl NetServer {
         self.simulation.tick(&inputs);
         for event in self.simulation.events() {
             if let Some(raw) = RawEvent::from_sim(event, &self.simulation) {
-                if self.pending_events.len() >= MAX_SNAPSHOT_EVENTS * 4 {
-                    self.pending_events.pop_front();
+                let queue = if raw.is_attack() {
+                    &mut self.pending_attacks
+                } else {
+                    &mut self.pending_events
+                };
+                if queue.len() >= MAX_SNAPSHOT_EVENTS * 4 {
+                    queue.pop_front();
                 }
-                self.pending_events.push_back(raw);
+                queue.push_back(raw);
             }
         }
         self.simulation.clear_events();

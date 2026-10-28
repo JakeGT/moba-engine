@@ -51,7 +51,7 @@ Steady state allocates nothing:
   (attacks, casts, hits, deaths and respawns, springs, sockets, reports) after a 60-frame
   warm-up: 0 allocations, 0 bytes (`moba-test-support` counting allocator).
 - `moba-client` test `app::animation::tests::steady_state_driver_frames_do_not_allocate` — the
-  client driver's snapshot inference, event flush and per-hero `animate` for 10 heroes over
+  client driver's snapshot pass, event flush (casts and `EVENT_ATTACK`) and per-hero `animate` for 10 heroes over
   56 snapshots: 0 allocations.
 
 ## Not measured here

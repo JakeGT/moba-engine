@@ -115,7 +115,7 @@ servers.
 
 Bot fixed-composition mirror CIs are recorded in [0008-balance.md](0008-balance.md).
 
-Presentation events/status bits and protocol v16 bandwidth are recorded in [0009-presentation-events.md](0009-presentation-events.md).
+Presentation events/status bits and protocol v16 bandwidth are recorded in [0009-presentation-events.md](0009-presentation-events.md), as is the cost of the v41 basic-attack events ([before/after](0009-presentation-events.md#protocol-v41-basic-attack-events)).
 
 ## Dense per-client entity IDs
 

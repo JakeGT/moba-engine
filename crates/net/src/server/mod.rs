@@ -364,6 +364,9 @@ pub struct NetServer {
     record_frames: Vec<TickInputs>,
     record_checkpoints: Vec<(u32, u64)>,
     pending_events: VecDeque<RawEvent>,
+    /// Basic attacks since the last snapshot, kept apart so a burst of them never evicts a
+    /// death or a cast from `pending_events`.
+    pending_attacks: VecDeque<RawEvent>,
     results_log: Option<PathBuf>,
     results_logged: bool,
     recorded: bool,
@@ -443,6 +446,7 @@ impl NetServer {
             record_frames: Vec::new(),
             record_checkpoints: Vec::new(),
             pending_events: VecDeque::with_capacity(MAX_SNAPSHOT_EVENTS * 4),
+            pending_attacks: VecDeque::with_capacity(MAX_SNAPSHOT_EVENTS * 4),
             results_log: None,
             results_logged: false,
             recorded: false,

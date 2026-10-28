@@ -38,6 +38,7 @@ impl NetServer {
         let mut current = core::mem::take(&mut self.current);
         let mut payload = core::mem::take(&mut self.payload);
         let pending_events = core::mem::take(&mut self.pending_events);
+        let pending_attacks = core::mem::take(&mut self.pending_attacks);
         let mut delta = core::mem::take(&mut self.delta);
         let mut ready_mask = 0u16;
         let mut player_mask = 0u16;
@@ -112,21 +113,22 @@ impl NetServer {
             let viewer_team = client.team;
             let spectator = client.spectator;
             delta.events.clear();
-            for event in pending_events
-                .iter()
-                .filter(|event| event.visible_to(viewer_team, spectator, units))
-                .filter(|event| event.high_priority())
-                .take(MAX_SNAPSHOT_EVENTS)
-            {
-                delta.events.push(event.to_net(client));
-            }
-            for event in pending_events
-                .iter()
-                .filter(|event| event.visible_to(viewer_team, spectator, units))
-                .filter(|event| !event.high_priority())
-                .take(MAX_SNAPSHOT_EVENTS.saturating_sub(delta.events.len()))
-            {
-                delta.events.push(event.to_net(client));
+            // Highest priority first (deaths, then other events, then hero attacks, then
+            // other attacks) until the snapshot is full; arrival order within a priority.
+            for priority in 0..=3 {
+                let queue = if priority < 2 {
+                    &pending_events
+                } else {
+                    &pending_attacks
+                };
+                for event in queue
+                    .iter()
+                    .filter(|event| event.priority() == priority)
+                    .filter(|event| event.visible_to(viewer_team, spectator, units))
+                    .take(MAX_SNAPSHOT_EVENTS.saturating_sub(delta.events.len()))
+                {
+                    delta.events.push(event.to_net(client, tick));
+                }
             }
             // A failure for one client must not starve the clients after it (or drop the
             // scratch buffers taken above), so count it and move on.
@@ -162,6 +164,8 @@ impl NetServer {
         self.delta = delta;
         self.pending_events = pending_events;
         self.pending_events.clear();
+        self.pending_attacks = pending_attacks;
+        self.pending_attacks.clear();
         if let Some((payload, wait, remaining, generation)) = self.content_update_retry.take() {
             let (wait, remaining) = if wait == 0 {
                 let targets: Vec<(SocketAddr, u32)> = self

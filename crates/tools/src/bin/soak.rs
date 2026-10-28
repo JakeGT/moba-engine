@@ -8,8 +8,8 @@
 use std::time::{Duration, Instant};
 
 use moba_core::FixVec2;
-use moba_net::client::ClientState;
-use moba_net::protocol::{WireCommand, quantize_position};
+use moba_net::client::{ClientEvent, ClientState};
+use moba_net::protocol::{EVENT_ATTACK, WireCommand, quantize_position};
 use moba_net::{NetClient, NetServer, ServerConfig};
 use moba_netsim::{LinkConfig, LinkProxy};
 use moba_sim::SimConfig;
@@ -139,6 +139,8 @@ fn main() {
         })
         .collect();
     let mut disconnected = false;
+    // Presentation events received per client: (all, basic attacks).
+    let mut events = vec![(0u64, 0u64); clients.len()];
     let mut last_command = Instant::now();
     let measure_start = Instant::now();
     let mut last_report = Instant::now();
@@ -147,7 +149,12 @@ fn main() {
         for (index, client) in clients.iter_mut().enumerate() {
             client.poll().expect("poll");
             client.update().expect("update");
-            while client.next_event().is_some() {}
+            while let Some(event) = client.next_event() {
+                if let ClientEvent::GameEvent(event) = event {
+                    events[index].0 += 1;
+                    events[index].1 += u64::from(event.kind == EVENT_ATTACK);
+                }
+            }
             if client.state() != ClientState::Connected {
                 disconnected = true;
             }
@@ -179,13 +186,15 @@ fn main() {
         let downstream = stats.bytes_received.saturating_sub(baseline[index].0) as f64 / seconds;
         let upstream = stats.bytes_sent.saturating_sub(baseline[index].1) as f64 / seconds;
         eprintln!(
-            "client {index}: slot={} state={:?} snapshots={} down={:.1} KiB/s up={:.2} KiB/s rtt={:?}",
+            "client {index}: slot={} state={:?} snapshots={} down={:.1} KiB/s up={:.2} KiB/s rtt={:?} events={} attacks={}",
             client.player_slot(),
             stats.state,
             stats.snapshots,
             downstream / 1024.0,
             upstream / 1024.0,
-            stats.rtt_ms
+            stats.rtt_ms,
+            events[index].0,
+            events[index].1
         );
         if stats.state != Some(ClientState::Connected) {
             failed = true;

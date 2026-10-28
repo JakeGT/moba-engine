@@ -13,13 +13,14 @@
 //! - **death** from `EVENT_UNIT_DIED` or, if that event was dropped, the dead flag; and
 //!   **respawn** from the dead flag clearing (the simulation's `HeroRespawned` event is not
 //!   replicated);
-//! - **basic attacks** by inference. The wire carries no attack event and no attack timer
-//!   (`AttackStats::cooldown` is server-only; see ADR-0012 "Gaps"), so a hit is inferred
-//!   when a stationary hero has an enemy within its catalogue attack range whose health
-//!   dropped in this snapshot, at most once per catalogue attack interval. The swing is
-//!   stamped so its release frame lands on that snapshot's tick, which the interpolated view
-//!   shows `SNAPSHOT_DELAY_TICKS` later; once two hits confirm the cadence the next swing is
-//!   predicted one interval ahead so it gets its full wind-up.
+//! - **basic attacks** from `EVENT_ATTACK` (protocol v41): `source` hit `target` on the
+//!   snapshot tick `tick - aux`, and can hit again `value` ticks later (its attack interval).
+//!   The swing is stamped so its release frame lands on that tick, and the hero turns to its
+//!   target. The interpolated view shows the tick `SNAPSHOT_DELAY_TICKS` after the event
+//!   arrives, which is shorter than a wind-up, so the next swing is scheduled one attack
+//!   interval ahead (the simulation's attack timer) to get its whole wind-up; it is
+//!   withdrawn if no attack event confirms it. Melee and ranged attacks are the same: the
+//!   simulation resolves both instantly, without a projectile.
 //!
 //! Time is the render tick in seconds, so a pinned capture tick (`MOBA_CAPTURE_TICK`) gives
 //! a pose that does not depend on frame pacing; while pinned, spring bones restart from the
@@ -34,10 +35,9 @@
 //! preallocates everything; steady-state frames do not allocate.
 
 use moba_assets::{AnimationEvent, AnimationGraph, AnimationScratch, Animator, Skeleton};
-use moba_core::Fix;
 use moba_core::math::{Mat4, Vec3, Vec4};
 use moba_net::protocol::{
-    EVENT_CAST, EVENT_UNIT_DIED, NetEvent, SnapshotState, WireAbility, WireHero,
+    EVENT_ATTACK, EVENT_CAST, EVENT_UNIT_DIED, NetEvent, SnapshotState, WireAbility, WireHero,
 };
 use moba_render::JointMatrix;
 
@@ -51,8 +51,6 @@ pub(crate) const MAX_ANIMATED: usize = 32;
 const MAX_QUEUED_EVENTS: usize = 64;
 /// Locomotion phase offset per net id, seconds (as in the WP-4.1 pose).
 const PHASE_SECONDS: f32 = 0.137;
-/// Slack added to the catalogue attack range when inferring hits, metres.
-const RANGE_SLACK: f32 = 1.5;
 /// A hero that moved less than this between snapshots is standing still, metres.
 const STATIONARY: f32 = 0.05;
 /// Fewest ticks between two hit reactions of one hero (damage over time ticks often).
@@ -62,8 +60,12 @@ const TELEPORT: f32 = 3.0;
 /// Seconds before the first snapshot that a hero first seen dead is stamped as having died,
 /// so it is not drawn playing a death that happened before this client saw it.
 const LONG_DEAD_SECONDS: f32 = 3_600.0;
-/// Ticks past a predicted hit after which a swing with no observed hit is withdrawn.
+/// Ticks past a scheduled hit after which a swing that no attack event confirmed is
+/// withdrawn.
 const PREDICTION_SLACK_TICKS: u32 = 1;
+/// A confirmed hit this many ticks or fewer from the scheduled one is the same swing (the
+/// animator ignores a repeat within 0.1 s).
+const SAME_SWING_TICKS: u32 = 2;
 /// Most entities whose previous health is remembered.
 const MAX_TRACKED: usize = moba_sim::MAX_UNITS;
 
@@ -154,15 +156,13 @@ struct Slot {
     rig: usize,
     animator: Animator,
     dead: bool,
-    /// Tick of the last inferred basic-attack hit, and of the one before.
-    hits: [Option<u32>; 2],
     /// Tick of the last hit reaction.
     flinched: Option<u32>,
-    /// Tick of the predicted next hit and its attack interval (seconds), until confirmed or
-    /// withdrawn.
+    /// Tick of the next swing scheduled one attack interval after the last attack event,
+    /// and that interval (seconds), until an attack event confirms or replaces it.
     predicted: Option<(u32, f32)>,
     /// Facing for a stationary hero: the last snapshot movement direction, or towards the
-    /// target of the last inferred attack (map x/y plane, radians).
+    /// target of its last attack (map x/y plane, radians).
     facing: Option<f32>,
     /// Whether a snapshot has shown this hero to the slot yet.
     seen: bool,
@@ -177,12 +177,64 @@ impl Slot {
             rig: usize::MAX,
             animator: Animator::new(0.0),
             dead: false,
-            hits: [None; 2],
             flinched: None,
             predicted: None,
             facing: None,
             seen: false,
             evaluated: None,
+        }
+    }
+}
+
+/// One basic attack from an `EVENT_ATTACK`, ready to apply to its hero's slot.
+#[derive(Clone, Copy, Debug)]
+struct Swing {
+    /// Snapshot tick the hit landed on.
+    hit: u32,
+    /// Ticks until the attacker can hit again (0 if unknown).
+    interval: u16,
+    /// Direction to the target, when known.
+    facing: Option<f32>,
+    /// The interpolated view's time now, seconds.
+    view: f32,
+    tick_seconds: f32,
+}
+
+impl Swing {
+    fn apply(self, slot: &mut Slot, rig: RigRef<'_>) {
+        if slot.dead {
+            return;
+        }
+        let seconds = f32::from(self.interval) * self.tick_seconds;
+        let event = AnimationEvent::Attack { interval: seconds };
+        if let Some((scheduled, scheduled_seconds)) = slot.predicted.take()
+            && scheduled.abs_diff(self.hit) > SAME_SWING_TICKS
+        {
+            // The attack came at another time than its timer said (the target left range
+            // for a while): replace the scheduled swing.
+            let scheduled_event = AnimationEvent::Attack {
+                interval: scheduled_seconds,
+            };
+            slot.animator.cancel(
+                rig.graph,
+                scheduled_event,
+                scheduled as f32 * self.tick_seconds,
+                self.view,
+            );
+        }
+        // Release frame on the hit; a scheduled swing for this hit is not restarted.
+        slot.animator
+            .trigger(rig.graph, event, self.hit as f32 * self.tick_seconds);
+        if let Some(facing) = self.facing {
+            slot.facing = Some(facing);
+        }
+        if self.interval > 0 {
+            // The attack timer: the earliest next hit is one interval later. Scheduling it
+            // now gives that swing its whole wind-up.
+            let next = self.hit.saturating_add(u32::from(self.interval));
+            slot.animator
+                .trigger(rig.graph, event, next as f32 * self.tick_seconds);
+            slot.predicted = Some((next, seconds));
         }
     }
 }
@@ -195,8 +247,8 @@ pub(crate) struct RigRef<'a> {
     pub(crate) graph: &'a AnimationGraph,
 }
 
-/// Animators for the network view's heroes, plus the snapshot history attack inference
-/// needs. Allocated once.
+/// Animators for the network view's heroes, plus the snapshot history that hit reactions
+/// and facing need. Allocated once.
 pub(crate) struct AnimationDriver {
     slots: Box<[Slot]>,
     scratch: Box<AnimationScratch>,
@@ -252,9 +304,9 @@ impl AnimationDriver {
         self.queued_len = 0;
     }
 
-    /// Buffers a cast or death event until [`Self::flush_events`] learns its tick.
+    /// Buffers an attack, cast or death event until [`Self::flush_events`] learns its tick.
     pub(crate) fn queue_event(&mut self, event: &NetEvent) {
-        if !matches!(event.kind, EVENT_CAST | EVENT_UNIT_DIED) {
+        if !matches!(event.kind, EVENT_ATTACK | EVENT_CAST | EVENT_UNIT_DIED) {
             return;
         }
         if let Some(slot) = self.queued.get_mut(self.queued_len) {
@@ -287,8 +339,10 @@ impl AnimationDriver {
         Some(slot)
     }
 
-    /// Applies the queued events of the snapshot at `tick`. `rig_of` resolves a hero's net id
-    /// to its rig, and `ability_name` a `(net id, slot)` cast to its catalogue ability name.
+    /// Applies the queued events of the snapshot at `tick`, then withdraws scheduled swings
+    /// that no attack event confirmed. `rig_of` resolves a hero's net id to its rig (`None`
+    /// for anything else, so a minion's attack or death claims no animator), and
+    /// `ability_name` a `(net id, slot)` cast to its catalogue ability name.
     pub(crate) fn flush_events<'a>(
         &mut self,
         tick: u32,
@@ -296,8 +350,29 @@ impl AnimationDriver {
         mut ability_name: impl FnMut(u16, u8) -> Option<&'a str>,
     ) {
         let at = tick as f32 * self.tick_seconds;
+        // Where the interpolated view is now: a withdrawn swing fades out from there.
+        let view = (tick as f32 - super::SNAPSHOT_DELAY_TICKS) * self.tick_seconds;
         for index in 0..self.queued_len {
             let event = self.queued[index];
+            if event.kind == EVENT_ATTACK {
+                let Some(rig) = rig_of(event.source) else {
+                    continue;
+                };
+                let hit = tick.saturating_sub(u32::from(event.aux));
+                let facing = self.facing_towards(event.source, event.target);
+                let tick_seconds = self.tick_seconds;
+                if let Some(slot) = Self::claim(&mut self.slots, event.source, rig.index) {
+                    let swing = Swing {
+                        hit,
+                        interval: event.value,
+                        facing,
+                        view,
+                        tick_seconds,
+                    };
+                    swing.apply(slot, rig);
+                }
+                continue;
+            }
             let (net_id, animation) = match event.kind {
                 EVENT_CAST => {
                     let slot = u8::try_from(event.value).unwrap_or(u8::MAX);
@@ -318,22 +393,51 @@ impl AnimationDriver {
             if let Some(slot) = Self::claim(&mut self.slots, net_id, rig.index) {
                 if matches!(animation, AnimationEvent::Death) {
                     slot.dead = true;
+                    slot.predicted = None;
                 }
                 slot.animator.trigger(rig.graph, animation, at);
             }
         }
         self.queued_len = 0;
+        // A scheduled swing whose attack event did not come (the fight ended, the target
+        // died, the event was lost) is withdrawn: dropped if still queued, else faded out
+        // from where the view is, which is usually still in the wind-up.
+        for slot in &mut self.slots {
+            let Some((hit, seconds)) = slot.predicted else {
+                continue;
+            };
+            if tick < hit.saturating_add(PREDICTION_SLACK_TICKS) {
+                continue;
+            }
+            let Some(rig) = slot.net_id.and_then(&mut rig_of) else {
+                slot.predicted = None;
+                continue;
+            };
+            let event = AnimationEvent::Attack { interval: seconds };
+            slot.animator
+                .cancel(rig.graph, event, hit as f32 * self.tick_seconds, view);
+            slot.predicted = None;
+        }
     }
 
-    /// Updates death/respawn edges and infers basic-attack hits from a new snapshot.
+    /// The direction from `source` to `target` in the last snapshot (map x/y plane,
+    /// radians), when both are known and apart.
+    fn facing_towards(&self, source: u16, target: u16) -> Option<f32> {
+        let (_, _, sx, sy) = lookup(&self.previous, source)?;
+        let (_, _, tx, ty) = lookup(&self.previous, target)?;
+        let from = moba_net::protocol::dequantize_position(sx, sy);
+        let to = moba_net::protocol::dequantize_position(tx, ty);
+        let (dx, dy) = ((to.x - from.x).to_f32(), (to.y - from.y).to_f32());
+        (dx * dx + dy * dy > 1e-6).then(|| dy.atan2(dx))
+    }
+
+    /// Updates death/respawn edges, hit reactions and movement facing from a new snapshot.
     ///
-    /// `rig_of` maps a hero entity to its rig, `hero_of` a hero pick to its catalogue entry.
-    #[allow(clippy::too_many_lines)] // One pass per hero: edges, facing, hits, predictions.
+    /// `rig_of` maps a hero pick to its rig.
     pub(crate) fn on_snapshot<'a>(
         &mut self,
         snapshot: &SnapshotState,
         mut rig_of: impl FnMut(u8) -> Option<RigRef<'a>>,
-        hero_of: impl Fn(u8) -> Option<&'a WireHero>,
     ) {
         let tick = snapshot.tick;
         let at = tick as f32 * self.tick_seconds;
@@ -382,7 +486,7 @@ impl AnimationDriver {
             } else if !dead && slot.dead {
                 slot.animator
                     .trigger(rig.graph, AnimationEvent::Respawn, at);
-                slot.hits = [None; 2];
+                slot.predicted = None;
             }
             slot.dead = dead;
             if dead {
@@ -398,56 +502,6 @@ impl AnimationDriver {
                 slot.animator.trigger(rig.graph, AnimationEvent::Hit, at);
                 slot.flinched = Some(tick);
             }
-            let Some(spec) = hero_of(hero.hero_pick) else {
-                continue;
-            };
-            let stationary = previous.is_some_and(|(_, _, x, y)| {
-                dequantized_distance((x, y), (hero.x, hero.y)) <= STATIONARY
-            });
-            let range = Fix::from_bits(spec.attack_range_bits).to_f32() + RANGE_SLACK;
-            let interval = spec.attack_interval_ticks.max(1);
-            let target = snapshot
-                .entities
-                .iter()
-                .filter(|_| stationary)
-                .find(|target| {
-                    target.team != hero.team
-                        && !target.is_dead()
-                        && lookup(&self.previous, target.net_id)
-                            .is_some_and(|(_, health, _, _)| target.health < health)
-                        && dequantized_distance((hero.x, hero.y), (target.x, target.y)) <= range
-                });
-            let due = slot.hits[0].is_none_or(|last| tick.saturating_sub(last) + 1 >= interval);
-            if let Some(target) = target.filter(|_| due) {
-                let seconds = interval as f32 * self.tick_seconds;
-                let event = AnimationEvent::Attack { interval: seconds };
-                slot.animator.trigger(rig.graph, event, at);
-                // Face the target while swinging.
-                let (from, to) = (hero.position(), target.position());
-                slot.facing = Some((to.y - from.y).to_f32().atan2((to.x - from.x).to_f32()));
-                // Two hits one interval apart confirm a cadence: predict the next swing so
-                // it gets its whole wind-up (the observed hit is only
-                // `SNAPSHOT_DELAY_TICKS` ahead).
-                let cadence =
-                    slot.hits[0].is_some_and(|last| tick.saturating_sub(last) <= interval + 2);
-                slot.predicted = None;
-                if cadence {
-                    slot.animator.trigger(rig.graph, event, at + seconds);
-                    slot.predicted = Some((tick + interval, seconds));
-                }
-                slot.hits = [Some(tick), slot.hits[0]];
-            }
-            // A predicted swing whose hit did not come (the fight ended, the hero moved) is
-            // withdrawn: queued, or faded out from where the interpolated view is now.
-            if let Some((hit, seconds)) = slot.predicted
-                && tick >= hit + PREDICTION_SLACK_TICKS
-            {
-                let event = AnimationEvent::Attack { interval: seconds };
-                let view = (tick as f32 - super::SNAPSHOT_DELAY_TICKS) * self.tick_seconds;
-                slot.animator
-                    .cancel(rig.graph, event, hit as f32 * self.tick_seconds, view);
-                slot.predicted = None;
-            }
         }
         core::mem::swap(&mut self.previous, &mut self.current);
     }
@@ -458,7 +512,7 @@ impl AnimationDriver {
     }
 
     /// The facing to draw a stationary hero with: its last snapshot movement direction, or
-    /// towards its last inferred attack target. `None` for a hero without an animator.
+    /// towards its last attack's target. `None` for a hero without an animator.
     pub(crate) fn rest_facing(&self, net_id: u16) -> Option<f32> {
         self.slot_index(net_id)
             .and_then(|index| self.slots[index].facing)
@@ -536,13 +590,6 @@ fn lookup(table: &[(u16, u16, u16, u16)], net_id: u16) -> Option<(u16, u16, u16,
         .map(|index| table[index])
 }
 
-/// Distance in world units between two quantised positions.
-fn dequantized_distance(a: (u16, u16), b: (u16, u16)) -> f32 {
-    let a = moba_net::protocol::dequantize_position(a.0, a.1);
-    let b = moba_net::protocol::dequantize_position(b.0, b.1);
-    a.distance(b).to_f32()
-}
-
 /// The ability name for a hero's cast slot from the wire catalogue.
 pub(crate) fn ability_name<'a>(
     heroes: &'a [WireHero],
@@ -560,11 +607,10 @@ pub(crate) fn ability_name<'a>(
 
 #[cfg(test)]
 mod tests {
-    use moba_core::Fix;
     use moba_core::math::{Mat4, Vec3};
     use moba_net::protocol::{
-        ENTITY_FLAG_DEAD, EVENT_CAST, EVENT_UNIT_DIED, NetEntity, NetEvent, NetProgress,
-        SnapshotState, WireHero,
+        ENTITY_FLAG_DEAD, EVENT_ATTACK, EVENT_CAST, EVENT_UNIT_DIED, NetEntity, NetEvent,
+        NetProgress, SnapshotState,
     };
     use moba_render::{MeshData, MeshId};
 
@@ -623,13 +669,6 @@ mod tests {
         state
     }
 
-    fn spec() -> WireHero {
-        let mut hero = WireHero::default();
-        hero.attack_range_bits = Fix::from_i32(5).to_bits();
-        hero.attack_interval_ticks = 24;
-        hero
-    }
-
     fn event(kind: u8, source: u16, target: u16, value: u16) -> NetEvent {
         NetEvent {
             kind,
@@ -640,18 +679,27 @@ mod tests {
         }
     }
 
+    /// `source` hit `target` `age` ticks before the snapshot that carries the event, and can
+    /// hit again `interval` ticks after the hit.
+    fn attack(source: u16, target: u16, interval: u16, age: u16) -> NetEvent {
+        NetEvent {
+            aux: age,
+            ..event(EVENT_ATTACK, source, target, interval)
+        }
+    }
+
     /// The headless R4 check: a scripted sequence of snapshot states and presentation events
-    /// drives the state machine through idle, run, attack (hit frame on the inferred hit),
-    /// cast, death and respawn.
+    /// drives the state machine through idle, run, attack (hit frame on the `EVENT_ATTACK`
+    /// tick), cast, death and respawn.
     #[test]
     #[allow(clippy::too_many_lines)] // One scripted sequence, step by step.
     fn scripted_snapshots_and_events_drive_the_state_machine() {
         let (models, root) = library("script", Some(SET));
         let rig_of = |_: u8| animated_rig(&models, models.hero(0));
+        // As in the app: only a hero's net id resolves to a rig.
+        let hero_rig = |net_id: u16| (net_id == HERO).then(|| rig_of(0)).flatten();
         let rig = rig_of(0).expect("the shipped set binds to the shipped model");
         let graph = rig.graph;
-        let hero_spec = spec();
-        let hero_of = |_: u8| Some(&hero_spec);
         let mut driver = AnimationDriver::new(AnimLod::parse("off"), 30);
         let seconds = |tick: u32| tick as f32 / 30.0;
         let state_name = |driver: &AnimationDriver, tick: u32, speed: f32| {
@@ -667,30 +715,19 @@ mod tests {
                 report,
             )
         };
+        let standing = |minion_health| {
+            vec![
+                entity(HERO, 0, 0, 100.0, 600),
+                entity(MINION, 1, 1, 103.0, minion_health),
+            ]
+        };
 
-        // Ticks 10-11: standing next to a full-health minion: idle, no action.
-        driver.on_snapshot(
-            &snapshot(
-                10,
-                vec![
-                    entity(HERO, 0, 0, 100.0, 600),
-                    entity(MINION, 1, 1, 103.0, 300),
-                ],
-            ),
-            rig_of,
-            hero_of,
-        );
-        driver.on_snapshot(
-            &snapshot(
-                11,
-                vec![
-                    entity(HERO, 0, 0, 100.0, 600),
-                    entity(MINION, 1, 1, 103.0, 300),
-                ],
-            ),
-            rig_of,
-            hero_of,
-        );
+        // Ticks 10-11: standing next to a minion that loses health (to someone else): idle.
+        // Health drops no longer start swings; only attack events do.
+        for (tick, health) in [(10, 300), (11, 270)] {
+            driver.on_snapshot(&snapshot(tick, standing(health)), rig_of);
+            driver.flush_events(tick, hero_rig, |_, _| None);
+        }
         let (action, report) = state_name(&driver, 11, 0.0);
         assert_eq!(action, None);
         assert_eq!(report.locomotion.2, 0.0, "idle");
@@ -699,62 +736,28 @@ mod tests {
         let run = rig.skeleton.clip_index("run").expect("run");
         assert_eq!(report.locomotion, (run, run, 0.0));
 
-        // Tick 12: the minion in range loses health while the hero stands: an inferred hit.
-        driver.on_snapshot(
-            &snapshot(
-                12,
-                vec![
-                    entity(HERO, 0, 0, 100.0, 600),
-                    entity(MINION, 1, 1, 103.0, 270),
-                ],
-            ),
-            rig_of,
-            hero_of,
-        );
+        // Tick 14: the snapshot carries the hero's attack that hit on tick 12 (`aux` 2), and
+        // a minion's attack, which claims no animator.
+        driver.on_snapshot(&snapshot(14, standing(240)), rig_of);
+        driver.queue_event(&attack(HERO, MINION, 24, 2));
+        driver.queue_event(&attack(MINION, HERO, 30, 0));
+        driver.flush_events(14, hero_rig, |_, _| None);
+        assert!(driver.animator(MINION).is_none());
         let (action, report) = state_name(&driver, 12, 0.0);
         assert_eq!(action.as_deref(), Some("attack"));
         // The release frame (0.35 s, the thrust) is on the hit tick.
         assert!((report.action_time - 0.35).abs() < 1e-4, "{report:?}");
-        // The wind-up began before the hit (shown SNAPSHOT_DELAY_TICKS later).
+        // The wind-up began before the hit.
         let (action, _) = state_name(&driver, 6, 0.0);
         assert_eq!(action.as_deref(), Some("attack"));
-        // Another damage tick inside the attack interval is not a new attack.
-        driver.on_snapshot(
-            &snapshot(
-                13,
-                vec![
-                    entity(HERO, 0, 0, 100.0, 600),
-                    entity(MINION, 1, 1, 103.0, 250),
-                ],
-            ),
-            rig_of,
-            hero_of,
-        );
-        assert!((state_name(&driver, 12, 0.0).1.action_time - 0.35).abs() < 1e-4);
-        // A minion out of range, or an ally, never counts.
-        let mut other = AnimationDriver::new(AnimLod::parse("off"), 30);
-        for (tick, health) in [(10, 300), (11, 200)] {
-            other.on_snapshot(
-                &snapshot(
-                    tick,
-                    vec![
-                        entity(HERO, 0, 0, 100.0, 600),
-                        entity(MINION, 1, 1, 120.0, health),
-                        entity(41, 1, 0, 101.0, health),
-                    ],
-                ),
-                rig_of,
-                hero_of,
-            );
-        }
-        assert_eq!(
-            other
-                .animator(HERO)
-                .expect("animator")
-                .report(graph, seconds(11), 0.0)
-                .action,
-            None
-        );
+        // The hero turned to the minion at +x.
+        let facing = driver.rest_facing(HERO).expect("facing");
+        assert!(facing.abs() < 1e-3, "{facing}");
+        // The attack timer schedules the next swing one interval (24 ticks) later, with its
+        // whole wind-up.
+        let (action, report) = state_name(&driver, 36, 0.0);
+        assert_eq!(action.as_deref(), Some("attack"));
+        assert!((report.action_time - 0.35).abs() < 1e-4, "{report:?}");
 
         // Tick 20: the hero takes damage: the additive hit reaction plays over the idle.
         driver.on_snapshot(
@@ -762,19 +765,36 @@ mod tests {
                 20,
                 vec![
                     entity(HERO, 0, 0, 100.0, 550),
-                    entity(MINION, 1, 1, 103.0, 250),
+                    entity(MINION, 1, 1, 103.0, 240),
                 ],
             ),
             rig_of,
-            hero_of,
         );
         let (_, report) = state_name(&driver, 21, 0.0);
         assert!(report.additive_weight > 0.99, "{report:?}");
         assert_eq!(state_name(&driver, 35, 0.0).1.additive_weight, 0.0);
 
+        // Tick 37: no attack event confirmed the hit scheduled for tick 36 (the hero
+        // stopped attacking), so that swing is withdrawn: it fades out from the view's
+        // time (tick 33, where the frame loop has already started its wind-up) and is gone
+        // before its thrust would have finished.
+        driver.begin_frame();
+        assert!(
+            driver
+                .animate(HERO, rig, seconds(33), 0.0, Mat4::IDENTITY, None, false)
+                .is_some()
+        );
+        driver.flush_events(37, hero_rig, |_, _| None);
+        let fading = state_name(&driver, 34, 0.0).1;
+        assert!(
+            fading.action.is_some() && fading.action_weight < 0.9,
+            "{fading:?}"
+        );
+        assert_eq!(state_name(&driver, 39, 0.0).0, None);
+
         // Tick 40: a W cast event in that snapshot (slot 1 → cast2), released on its tick.
         driver.queue_event(&event(EVENT_CAST, HERO, 0xFFFF, 1));
-        driver.flush_events(40, |_| rig_of(0), |_, _| None);
+        driver.flush_events(40, hero_rig, |_, _| None);
         let (action, report) = state_name(&driver, 40, 0.0);
         assert_eq!(action.as_deref(), Some("cast2"));
         assert!((report.action_time - 0.2).abs() < 1e-4);
@@ -783,12 +803,14 @@ mod tests {
         assert_eq!(action.as_deref(), Some("cast2"));
         assert_eq!(report.locomotion, (run, run, 0.0));
 
-        // Tick 60: the death event; the dead flag in later snapshots agrees.
+        // Tick 60: the death event; the dead flag in later snapshots agrees. An attack event
+        // that arrives for a dead hero changes nothing.
         driver.queue_event(&event(EVENT_UNIT_DIED, 0xFFFF, HERO, 0));
-        driver.flush_events(60, |_| rig_of(0), |_, _| None);
+        driver.queue_event(&attack(HERO, MINION, 24, 0));
+        driver.flush_events(60, hero_rig, |_, _| None);
         let mut dead = entity(HERO, 0, 0, 100.0, 0);
         dead.flags = ENTITY_FLAG_DEAD;
-        driver.on_snapshot(&snapshot(61, vec![dead]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(61, vec![dead]), rig_of);
         let (action, report) = state_name(&driver, 70, 0.0);
         assert_eq!(action.as_deref(), Some("death"));
         assert!(report.dead);
@@ -797,11 +819,7 @@ mod tests {
         assert!(!driver.visible(HERO, graph, seconds(60) + 2.8, true));
 
         // Tick 300: the dead flag clears (respawn is not a replicated event).
-        driver.on_snapshot(
-            &snapshot(300, vec![entity(HERO, 0, 0, 20.0, 600)]),
-            rig_of,
-            hero_of,
-        );
+        driver.on_snapshot(&snapshot(300, vec![entity(HERO, 0, 0, 20.0, 600)]), rig_of);
         let (action, report) = state_name(&driver, 300, 0.0);
         assert_eq!(action, None);
         assert!(!report.dead);
@@ -814,68 +832,69 @@ mod tests {
     }
 
     #[test]
-    fn sustained_attacks_are_predicted_one_interval_ahead() {
+    fn sustained_attacks_follow_the_attack_timer() {
         let (models, root) = library("cadence", Some(SET));
         let rig_of = |_: u8| animated_rig(&models, models.hero(0));
+        let hero_rig = |net_id: u16| (net_id == HERO).then(|| rig_of(0)).flatten();
         let graph = rig_of(0).expect("rig").graph;
-        let hero_spec = spec();
         let mut driver = AnimationDriver::new(AnimLod::default(), 30);
-        let mut health = 600;
+        let report = |driver: &AnimationDriver, tick: u32| {
+            driver
+                .animator(HERO)
+                .expect("animator")
+                .report(graph, tick as f32 / 30.0, 0.0)
+        };
+        let is_attack = |report: &moba_assets::AnimatorReport| {
+            report.action.map(|state| graph.state_name(state)) == Some("attack")
+        };
+        // Hits at 24 and 48 (each event arrives in the hit's own snapshot), 24 ticks apart.
         for tick in 0..=48u32 {
-            if tick % 24 == 0 && tick > 0 {
-                health -= 40;
-            }
             driver.on_snapshot(
                 &snapshot(
                     tick,
                     vec![
                         entity(HERO, 0, 0, 100.0, 600),
-                        entity(MINION, 1, 1, 102.0, health),
+                        entity(MINION, 1, 1, 102.0, 300),
                     ],
                 ),
-                |_| rig_of(0),
-                |_| Some(&hero_spec),
+                rig_of,
             );
+            if tick == 24 || tick == 48 {
+                driver.queue_event(&attack(HERO, MINION, 24, 0));
+            }
+            driver.flush_events(tick, hero_rig, |_, _| None);
         }
-        // Hits at 24 and 48 confirm the 24-tick cadence: the swing for tick 72 is queued and
-        // its wind-up starts 0.35 s before it.
-        let animator = driver.animator(HERO).expect("animator");
-        let report = animator.report(graph, 72.0 / 30.0, 0.0);
-        assert_eq!(
-            report.action.map(|state| graph.state_name(state)),
-            Some("attack")
-        );
-        assert!((report.action_time - 0.35).abs() < 1e-3, "{report:?}");
-        // The fight ends: no hit at tick 72, so at tick 73 the predicted swing is withdrawn
-        // and fades out from where the view is (tick 69) instead of playing its thrust.
-        // The view (4 ticks behind) has already started its wind-up.
+        // The confirmed hit at 48 was the swing scheduled at 24, not restarted: its release
+        // is still on tick 48. The next one, for tick 72, is scheduled with its wind-up.
+        for hit in [48, 72] {
+            let report = report(&driver, hit);
+            assert!(is_attack(&report), "{report:?}");
+            assert!((report.action_time - 0.35).abs() < 1e-3, "{report:?}");
+        }
+        // A haste brings the hit forward to 66 with a 20-tick interval: the swing scheduled
+        // for 72 is replaced (a hit within two ticks of it would have been the same swing).
+        driver.queue_event(&attack(HERO, MINION, 20, 0));
+        driver.flush_events(66, hero_rig, |_, _| None);
+        let at_hit = report(&driver, 66);
+        assert!(is_attack(&at_hit), "{at_hit:?}");
+        assert!((at_hit.action_time - 0.35).abs() < 1e-3, "{at_hit:?}");
+        // The fight ends: no hit on 86, so at tick 87 the scheduled swing is withdrawn and
+        // fades out from where the view is (tick 83, already in its wind-up), before its
+        // thrust.
         driver.begin_frame();
         let rig = rig_of(0).expect("rig");
         assert!(
             driver
-                .animate(HERO, rig, 69.0 / 30.0, 0.0, Mat4::IDENTITY, None, false)
+                .animate(HERO, rig, 83.0 / 30.0, 0.0, Mat4::IDENTITY, None, false)
                 .is_some()
         );
-        for tick in 49..=73u32 {
-            driver.on_snapshot(
-                &snapshot(
-                    tick,
-                    vec![
-                        entity(HERO, 0, 0, 100.0, 600),
-                        entity(MINION, 1, 1, 102.0, health),
-                    ],
-                ),
-                |_| rig_of(0),
-                |_| Some(&hero_spec),
-            );
-        }
-        let animator = driver.animator(HERO).expect("animator");
-        let fading = animator.report(graph, 70.0 / 30.0, 0.0);
+        driver.flush_events(87, hero_rig, |_, _| None);
+        let fading = report(&driver, 84);
         assert!(
             fading.action.is_some() && fading.action_weight < 0.9,
             "{fading:?}"
         );
-        assert_eq!(animator.report(graph, 75.0 / 30.0, 0.0).action, None);
+        assert_eq!(report(&driver, 89).action, None);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -967,7 +986,6 @@ mod tests {
         let (models, root) = library("alloc", Some(SET));
         let rig = animated_rig(&models, models.hero(0)).expect("rig");
         let rig_of = move |_: u8| -> Option<RigRef<'_>> { Some(rig) };
-        let hero_spec = spec();
         let mut driver = AnimationDriver::new(AnimLod::default(), 30);
         let view = LodView {
             eye: Vec3::ZERO,
@@ -988,8 +1006,11 @@ mod tests {
             })
             .collect();
         let frame = |driver: &mut AnimationDriver, state: &SnapshotState| {
-            driver.on_snapshot(state, rig_of, |_| Some(&hero_spec));
+            driver.on_snapshot(state, rig_of);
             driver.queue_event(&event(EVENT_CAST, 2, 0xFFFF, 0));
+            if state.tick.is_multiple_of(12) {
+                driver.queue_event(&attack(1, MINION, 12, 0));
+            }
             driver.flush_events(state.tick, |_| Some(rig), |_, _| Some("Fireball"));
             driver.begin_frame();
             let mut sum = 0.0;
@@ -1028,32 +1049,26 @@ mod tests {
         let (models, root) = library("facing", Some(SET));
         let rig_of = |_: u8| animated_rig(&models, models.hero(0));
         let graph = rig_of(0).expect("rig").graph;
-        let hero_spec = spec();
-        let hero_of = |_: u8| Some(&hero_spec);
         // First seen already dead (a mid-match join): dead, but not drawn dying.
         let mut driver = AnimationDriver::new(AnimLod::default(), 30);
         let mut dead = entity(HERO, 0, 0, 100.0, 0);
         dead.flags = ENTITY_FLAG_DEAD;
-        driver.on_snapshot(&snapshot(500, vec![dead]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(500, vec![dead]), rig_of);
         assert!(driver.animator(HERO).expect("animator").is_dead());
         assert!(!driver.visible(HERO, graph, 500.0 / 30.0, true));
         // Seen alive first, then dying: the death plays.
         let mut driver = AnimationDriver::new(AnimLod::default(), 30);
-        driver.on_snapshot(
-            &snapshot(500, vec![entity(HERO, 0, 0, 100.0, 600)]),
-            rig_of,
-            hero_of,
-        );
-        driver.on_snapshot(&snapshot(501, vec![dead]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(500, vec![entity(HERO, 0, 0, 100.0, 600)]), rig_of);
+        driver.on_snapshot(&snapshot(501, vec![dead]), rig_of);
         assert!(driver.visible(HERO, graph, 502.0 / 30.0, true));
 
         // Facing: the last snapshot movement direction, then towards an attack target.
         let mut driver = AnimationDriver::new(AnimLod::default(), 30);
         assert_eq!(driver.rest_facing(HERO), None);
         let mut moved = entity(HERO, 0, 0, 100.0, 600);
-        driver.on_snapshot(&snapshot(10, vec![moved]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(10, vec![moved]), rig_of);
         moved.y += 4; // 0.25 m along +y
-        driver.on_snapshot(&snapshot(11, vec![moved]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(11, vec![moved]), rig_of);
         let facing = driver.rest_facing(HERO).expect("facing");
         assert!(
             (facing - core::f32::consts::FRAC_PI_2).abs() < 1e-3,
@@ -1061,17 +1076,18 @@ mod tests {
         );
         // A respawn-sized jump is a teleport, not a direction.
         moved.x += 16 * 50;
-        driver.on_snapshot(&snapshot(12, vec![moved]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(12, vec![moved]), rig_of);
         assert_eq!(driver.rest_facing(HERO), Some(facing));
-        // An inferred hit on a minion at -x turns the hero towards it.
+        // An attack on a minion at -x turns the hero towards it.
         let minion = |health| {
             let mut minion = entity(MINION, 1, 1, 0.0, health);
             minion.x = moved.x - 32;
             minion.y = moved.y;
             minion
         };
-        driver.on_snapshot(&snapshot(13, vec![moved, minion(300)]), rig_of, hero_of);
-        driver.on_snapshot(&snapshot(14, vec![moved, minion(260)]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(13, vec![moved, minion(300)]), rig_of);
+        driver.queue_event(&attack(HERO, MINION, 24, 0));
+        driver.flush_events(14, |_| rig_of(0), |_, _| None);
         let facing = driver.rest_facing(HERO).expect("facing");
         assert!(
             (facing.abs() - core::f32::consts::PI).abs() < 1e-3,

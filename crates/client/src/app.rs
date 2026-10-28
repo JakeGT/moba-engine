@@ -600,12 +600,9 @@ impl App for ClientApp {
                                 .store(snapshot.tick, std::sync::atomic::Ordering::Relaxed);
                         }
                         network.interpolator.push(snapshot.clone());
-                        let client = &network.client;
-                        animation.on_snapshot(
-                            &snapshot,
-                            |hero| animated_rig(models, models.hero(usize::from(hero))),
-                            |hero| client.heroes().get(usize::from(hero)),
-                        );
+                        animation.on_snapshot(&snapshot, |hero| {
+                            animated_rig(models, models.hero(usize::from(hero)))
+                        });
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
                             entity.hero_slot == network.own_slot
                                 && entity.team == network.client.team().index() as u8

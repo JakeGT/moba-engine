@@ -133,8 +133,10 @@ Today's single pass can't hold shadows, post-processing or VFX. Rebuild the fram
 
 ### R4 — Animation runtime (M–L, after WP-4.1)
 **Status:** R4a (items 1–4, with a 1D blend space, and the update-rate half of 5) is done in
-[ADR-0012](../adr/0012-animation-runtime.md); exact attack sync needs a replicated attack event
-(a protocol follow-up). R4b — VAT minions and renderer bone LOD — waits for R1.
+[ADR-0012](../adr/0012-animation-runtime.md). R4b-1 replicated basic attacks (`EVENT_ATTACK`,
+protocol v41), so attack wind-up and release follow the simulation's attack timer and the hit
+frame lands on the hit tick. The rest of R4b — VAT minions and renderer bone LOD — waits for
+R1.
 
 1. **Clips and blending.** Multiple clips per hero, 1D/2D blend spaces for locomotion, crossfades, additive hit reactions and an upper/lower-body mask (cast while moving).
 2. **Animation state machine** defined in content, driven by snapshot state and presentation events:

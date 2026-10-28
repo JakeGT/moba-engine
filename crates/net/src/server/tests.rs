@@ -4,8 +4,8 @@ use super::results::result_json;
 use super::*;
 use crate::crypto::SessionCrypto;
 use crate::protocol::{
-    EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_UNIT_DIED, Header, MATCH_ENDED_DRAW,
-    OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED, PacketKind,
+    EVENT_ATTACK, EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_UNIT_DIED, Header,
+    MATCH_ENDED_DRAW, OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED, PacketKind,
 };
 use crate::transport::ReceivedMessage;
 use std::path::Path;
@@ -180,6 +180,7 @@ fn event_visibility_requires_an_observed_source_or_target() {
         value: 1,
         aux: 0,
         arc: moba_core::Fix::ZERO,
+        tick: 0,
     };
     let hidden = RawEvent::visible_to(&raw, moba_game::Team::Blue, false, &[]);
     assert!(!hidden, "hidden enemy cast must not leak");
@@ -306,6 +307,7 @@ fn event_buffers_reuse_capacity_between_snapshots() {
         value: 0,
         aux: 0,
         arc: moba_core::Fix::ZERO,
+        tick: 0,
     };
     server.pending_events.push_back(event);
     server.send_snapshots();
@@ -803,6 +805,7 @@ fn events_with_hidden_endpoints_are_filtered() {
         value: 0,
         aux: 0,
         arc: moba_core::Fix::ZERO,
+        tick: 0,
     };
     let blue = [observed(source, moba_game::Team::Blue)];
     assert!(!event.visible_to(moba_game::Team::Blue, false, &blue));
@@ -1109,6 +1112,7 @@ fn snapshot_send_allocations_stay_bounded_with_events() {
         value: 0,
         aux: 0,
         arc: moba_core::Fix::ZERO,
+        tick: 0,
     };
     for _ in 0..200 {
         server.pending_events.push_back(event);
@@ -1169,4 +1173,135 @@ fn shared_reload_retries_until_occupied_slots_fit() {
         "retried once the slot freed"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn basic_attacks_convert_to_attack_events_with_slots_and_interval() {
+    let mut sim = moba_sim::Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    );
+    let blue = sim.hero_entity(0).expect("blue hero");
+    let red = sim.hero_entity(5).expect("red hero");
+    let at = |x| moba_core::FixVec2::from_ints(x, 100);
+    sim.world_mut()
+        .get_mut::<moba_sim::Position>(blue)
+        .expect("position")
+        .0 = at(100);
+    sim.world_mut()
+        .get_mut::<moba_sim::Position>(red)
+        .expect("position")
+        .0 = at(101);
+    let interval = sim
+        .world()
+        .get::<moba_sim::AttackStats>(blue)
+        .expect("attack stats")
+        .interval;
+    let mut inputs = moba_sim::TickInputs::new();
+    inputs.set(0, moba_sim::PlayerCommand::Attack(red));
+    sim.tick(&inputs);
+    let raw = sim
+        .events()
+        .iter()
+        .filter_map(|event| RawEvent::from_sim(event, &sim))
+        .find(|raw| raw.kind == EVENT_ATTACK && raw.source == Some(blue))
+        .expect("the hit is replicated");
+    assert_eq!(raw.target, Some(red));
+    assert_eq!((raw.source_slot, raw.target_slot), (0, 5));
+    assert_eq!(u32::from(raw.value), interval);
+    assert_eq!(raw.priority(), 2, "a hero's attack");
+    // The damage is visible from the state after the hit's tick.
+    assert_eq!(raw.tick, sim.current_tick().get());
+    assert_eq!(raw.tick, 1);
+}
+
+#[test]
+fn attacks_have_the_lowest_snapshot_priority_and_carry_their_age() {
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default().with_spawn_waves(false))
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
+    let mut server = NetServer::bind(config).expect("bind");
+    server.phase = Phase::Playing;
+    let addr = server.local_addr().expect("addr");
+    let mut viewer = test_client(addr, 0, moba_game::Team::Blue);
+    // A spectator sees every event, so only priority decides what is sent.
+    viewer.spectator = true;
+    server.clients[0] = Some(viewer);
+    for _ in 0..3 {
+        server.simulation.tick(&moba_sim::TickInputs::new());
+    }
+    let snapshot_tick = server.simulation.current_tick().get();
+    let entity = |index| Some(moba_ecs::Entity::from_parts(index, 1));
+    let base = RawEvent {
+        kind: EVENT_ATTACK,
+        team: moba_game::Team::Red,
+        source: entity(40),
+        target: entity(41),
+        source_slot: 0xFF,
+        target_slot: 0xFF,
+        position: moba_core::FixVec2::ZERO,
+        end: moba_core::FixVec2::ZERO,
+        direction: moba_core::FixVec2::ZERO,
+        value: 30,
+        aux: 0,
+        arc: moba_core::Fix::ZERO,
+        tick: snapshot_tick - 2,
+    };
+    // A teamfight's worth of minion attacks, then a hero's, then two deaths and a cast.
+    for index in 0..MAX_SNAPSHOT_EVENTS {
+        let mut attack = base;
+        attack.source = entity(100 + index as u32);
+        server.pending_attacks.push_back(attack);
+    }
+    let hero_attack = RawEvent {
+        source: entity(3),
+        source_slot: 6,
+        ..base
+    };
+    server.pending_attacks.push_back(hero_attack);
+    for kind in [EVENT_UNIT_DIED, EVENT_UNIT_DIED, EVENT_CAST] {
+        server.pending_events.push_back(RawEvent {
+            kind,
+            source: entity(3),
+            target: entity(41),
+            source_slot: 6,
+            ..base
+        });
+    }
+    server.send_snapshots();
+    let events = &server.delta.events;
+    assert_eq!(events.len(), MAX_SNAPSHOT_EVENTS);
+    let kinds: Vec<u8> = events.iter().map(|event| event.kind).collect();
+    assert_eq!(
+        &kinds[..4],
+        &[EVENT_UNIT_DIED, EVENT_UNIT_DIED, EVENT_CAST, EVENT_ATTACK]
+    );
+    // The hero's attack goes before every minion attack; the minion attacks that do not fit
+    // are dropped.
+    assert_eq!(events[3].source_slot, 6);
+    assert!(
+        events[4..]
+            .iter()
+            .all(|event| event.kind == EVENT_ATTACK && event.source_slot == 0xFF)
+    );
+    // Compact attack form: its age, the interval, and no position.
+    assert_eq!((events[3].aux, events[3].value), (2, 30));
+    assert_eq!(
+        (events[3].x, events[3].y, events[3].dx, events[3].arc),
+        (0, 0, 0, 0)
+    );
+    assert!(server.pending_attacks.is_empty() && server.pending_events.is_empty());
 }

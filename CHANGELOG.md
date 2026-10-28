@@ -169,6 +169,14 @@ the semver check):
   attack, cast1–3, death, recall and hit clips, with `content/animations/sentinel-skinned.toml`.
   200 animated units cost 0.12 ms of CPU per frame (`docs/perf/0012-animation-runtime.md`). No
   wire, hash, replay or logic change; the networked golden still matches (mean diff 0.014).
+- **Attack hit-frame sync (R4b-1, ADR-0012):** the network client drives basic-attack swings
+  from the new `EVENT_ATTACK` (protocol v41, below) instead of inferring them from health
+  drops: the attack state's release frame lands on the tick the hit landed and the hero turns
+  to its target, for melee and ranged attackers alike (the simulation resolves both
+  instantly). The next swing is scheduled one attack interval ahead from the replicated attack
+  timer, so it plays its whole wind-up, and is withdrawn if no attack event confirms it. The
+  health-drop inference, the catalogue-range heuristic and its two-hit cadence check are
+  gone; damage from abilities, burns or another attacker no longer starts a swing.
 
 ### Determinism and balance
 - Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.
@@ -176,6 +184,12 @@ the semver check):
 - After the v8 fixes (below), the same sweep measures blue at **49.81 %** (95 % CI 48.42–51.20 %), so the bias is gone. `match-soak` now reports `cap_draws` and `same_tick_draws` separately (2 of 5,000 matches were same-tick draws) and `peak_units`. Peak units were 183 of `MAX_UNITS` 512, so wave starvation never occurs.
 
 ### Simulation
+- **`SimEvent::BasicAttack { attacker, team, target, interval_ticks }`** is emitted when a
+  basic attack lands (R4b-1). Events are outputs: no state, hash, replay or logic change
+  (golden state hash `0x8db35a0f5aab5190` and `seed-v8.mbr` unchanged). Attacks fill at most
+  `MAX_ATTACK_EVENTS` (half of `MAX_EVENTS`) of the event queue, so they never crowd out other
+  events. `SimEvent` is `#[non_exhaustive]`, so the variant is additive; matches need a `_`
+  arm already.
 - **Simulation logic v8** (#290). Replays recorded with logic v7 are rejected by this build;
   play them back with a logic-v7 build (0.4.0 or `main` before this change). The checked-in
   replay fixture is now `crates/sim/tests/fixtures/seed-v8.mbr`. The golden state hash is
@@ -192,6 +206,19 @@ the semver check):
     is `Option<Team>` (`None` for a draw).
 
 ### Content and networking
+- **Protocol v41** (not wire-compatible with v40). Snapshots carry **`EVENT_ATTACK`** (8), one
+  per visible basic attack (R4b-1): `source`/`target` net ids and hero slots, `team`,
+  `value` = the attacker's attack interval in ticks and `aux` = the hit's age, so the hit
+  landed on snapshot tick `tick - aux`. It is a compact 12-byte record (no position,
+  direction or arc; those decode as zero) next to the 26-byte form of the other events,
+  filtered per viewer like them, and has the lowest priority under the 16-event cap (deaths,
+  structures and the match end; other events; hero attacks; other attacks). The server keeps
+  attacks in their own pending queue so a burst never evicts a death or a cast. Measured cost:
+  +0.2 KiB/s per client in a bot teamfight soak (7.0–7.1 → 7.2–7.3 KiB/s) and within noise in
+  the 10-player soak; worst case 5.6 KiB/s with every snapshot's cap full of attacks
+  (`docs/perf/0009-presentation-events.md`). `fuzz-wire` and the cargo-fuzz `wire` target now
+  generate events of every kind and check that whatever decodes re-encodes identically;
+  `soak` prints received events and attacks per client.
 - **Protocol v40** (not wire-compatible with v39, which #314 took). Packs can reference
   visual assets (#285, WP-3.1):
   - Optional `[assets]` manifest (`[[assets.units]]` / `[[assets.maps]]`, the

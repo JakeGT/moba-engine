@@ -20,6 +20,9 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   - Since **v40** the catalogue also carries each hero's `model` and the map's `visuals` asset *names*
     (#285). Pack file paths never go on the wire; clients resolve names against their own
     asset root, so differing local assets are cosmetic only.
+  - Since **v41** snapshots carry `EVENT_ATTACK` (8), one compact 12-byte record per visible
+    basic attack (source, target, attack interval, hit age), at the lowest event priority,
+    for animation hit-frame sync (R4b-1, ADR-0012).
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.
 - **Server**: handshake and slot assignment, session tokens, input sequencing, bot fill for

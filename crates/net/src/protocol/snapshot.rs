@@ -342,6 +342,16 @@ pub const OUTCOME_RED: u8 = 2;
 pub const OUTCOME_DRAW: u8 = 3;
 /// Zone spawned event.
 pub const EVENT_ZONE_SPAWNED: u8 = 7;
+/// Basic attack event (since v41): `source` hit `target` (net ids; `source_slot` /
+/// `target_slot` are their hero slots, `team` the attacker's). Basic attacks resolve
+/// instantly, so the release and the hit are the same tick: the damage is first visible in
+/// the snapshot state at tick `snapshot tick - aux`. `value` is the attacker's attack
+/// interval in ticks (when it can hit again). Presentation only.
+///
+/// Encoded compactly: the position, direction and arc fields are not sent for this kind
+/// and decode as zero. Lowest priority of the snapshot's events: a full snapshot drops
+/// attacks first, hero attacks last among them.
+pub const EVENT_ATTACK: u8 = 8;
 
 impl SnapshotDelta {
     /// Whether the delta carries no state at all.
