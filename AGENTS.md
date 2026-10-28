@@ -252,7 +252,8 @@ gh workflow run loom.yml --repo JakeGT/moba-engine --ref main
 - **#21:** crates.io publication needs registry ownership and `CARGO_REGISTRY_TOKEN`.
   `publish = false` is intentional; tagged GitHub releases are the distribution path.
 - **#276:** asset pipeline, GPU skinning and mirror/balance work is done (#308–#319); items have
-  no asset references yet. The M6 playtest (WP-5.2) and the external review (WP-6.3) need people.
+  no asset references yet. The M6 playtest (WP-5.2) and the external review (WP-6.3) need people and are
+  scheduled just before the 1.0 release, with #9/#127 and #21.
 - Product roadmap items may be opened for future work; do not close a tracking issue merely
   because its wave landed. Update `docs/status.md` and the plan instead.
 
