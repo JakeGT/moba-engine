@@ -495,8 +495,9 @@ the example for `content/models/sentinel-skinned.glb`. Like map visuals it is cl
 cosmetic: never hashed, signed, sent or replayed.
 
 **Clips** come from the `.glb`: every glTF animation that drives a joint is one clip, named by
-the animation's `name` (at most 32 clips, 4,096 keys per track, 65,536 per clip and 262,144 per
-model). Joints are named by their nodes' `name`s. Names the descriptor uses are 1..=32 of
+the animation's `name` (at most 32 clips, 4,096 keys per track, 65,536 per clip, 262,144 per
+model and 8,192 animation channels per file, enough for 64 joints × translation, rotation and
+scale × 32 clips). Joints are named by their nodes' `name`s. Names the descriptor uses are 1..=32 of
 `[A-Za-z0-9_-]`, matched ignoring ASCII case; other names in the file are ignored. Export one
 named glTF animation per action.
 

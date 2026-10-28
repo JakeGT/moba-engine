@@ -57,6 +57,13 @@ const RANGE_SLACK: f32 = 1.5;
 const STATIONARY: f32 = 0.05;
 /// Fewest ticks between two hit reactions of one hero (damage over time ticks often).
 const HIT_REACTION_TICKS: u32 = 9;
+/// A snapshot step longer than this (metres) is a teleport (respawn), not a facing.
+const TELEPORT: f32 = 3.0;
+/// Seconds before the first snapshot that a hero first seen dead is stamped as having died,
+/// so it is not drawn playing a death that happened before this client saw it.
+const LONG_DEAD_SECONDS: f32 = 3_600.0;
+/// Ticks past a predicted hit after which a swing with no observed hit is withdrawn.
+const PREDICTION_SLACK_TICKS: u32 = 1;
 /// Most entities whose previous health is remembered.
 const MAX_TRACKED: usize = moba_sim::MAX_UNITS;
 
@@ -151,6 +158,14 @@ struct Slot {
     hits: [Option<u32>; 2],
     /// Tick of the last hit reaction.
     flinched: Option<u32>,
+    /// Tick of the predicted next hit and its attack interval (seconds), until confirmed or
+    /// withdrawn.
+    predicted: Option<(u32, f32)>,
+    /// Facing for a stationary hero: the last snapshot movement direction, or towards the
+    /// target of the last inferred attack (map x/y plane, radians).
+    facing: Option<f32>,
+    /// Whether a snapshot has shown this hero to the slot yet.
+    seen: bool,
     /// Frame the animator last evaluated.
     evaluated: Option<u64>,
 }
@@ -164,6 +179,9 @@ impl Slot {
             dead: false,
             hits: [None; 2],
             flinched: None,
+            predicted: None,
+            facing: None,
+            seen: false,
             evaluated: None,
         }
     }
@@ -310,6 +328,7 @@ impl AnimationDriver {
     /// Updates death/respawn edges and infers basic-attack hits from a new snapshot.
     ///
     /// `rig_of` maps a hero entity to its rig, `hero_of` a hero pick to its catalogue entry.
+    #[allow(clippy::too_many_lines)] // One pass per hero: edges, facing, hits, predictions.
     pub(crate) fn on_snapshot<'a>(
         &mut self,
         snapshot: &SnapshotState,
@@ -335,9 +354,31 @@ impl AnimationDriver {
             let Some(slot) = Self::claim(&mut self.slots, hero.net_id, rig.index) else {
                 continue;
             };
+            let first_sight = !slot.seen;
+            slot.seen = true;
             let dead = hero.is_dead();
+            if let Some((_, _, x, y)) = previous {
+                let (from, to) = (
+                    moba_net::protocol::dequantize_position(x, y),
+                    hero.position(),
+                );
+                let (dx, dy) = ((to.x - from.x).to_f32(), (to.y - from.y).to_f32());
+                let step = (dx * dx + dy * dy).sqrt();
+                if step > STATIONARY && step <= TELEPORT {
+                    slot.facing = Some(dy.atan2(dx));
+                }
+            }
             if dead && !slot.dead {
-                slot.animator.trigger(rig.graph, AnimationEvent::Death, at);
+                // A hero already dead when this client first sees it (a mid-match join, a
+                // reconnect, a reload) is marked dead without replaying its death.
+                let died = if first_sight {
+                    at - LONG_DEAD_SECONDS
+                } else {
+                    at
+                };
+                slot.animator
+                    .trigger(rig.graph, AnimationEvent::Death, died);
+                slot.predicted = None;
             } else if !dead && slot.dead {
                 slot.animator
                     .trigger(rig.graph, AnimationEvent::Respawn, at);
@@ -363,33 +404,50 @@ impl AnimationDriver {
             let stationary = previous.is_some_and(|(_, _, x, y)| {
                 dequantized_distance((x, y), (hero.x, hero.y)) <= STATIONARY
             });
-            if !stationary {
-                continue;
-            }
             let range = Fix::from_bits(spec.attack_range_bits).to_f32() + RANGE_SLACK;
             let interval = spec.attack_interval_ticks.max(1);
-            let landed = snapshot.entities.iter().any(|target| {
-                target.team != hero.team
-                    && !target.is_dead()
-                    && lookup(&self.previous, target.net_id)
-                        .is_some_and(|(_, health, _, _)| target.health < health)
-                    && dequantized_distance((hero.x, hero.y), (target.x, target.y)) <= range
-            });
+            let target = snapshot
+                .entities
+                .iter()
+                .filter(|_| stationary)
+                .find(|target| {
+                    target.team != hero.team
+                        && !target.is_dead()
+                        && lookup(&self.previous, target.net_id)
+                            .is_some_and(|(_, health, _, _)| target.health < health)
+                        && dequantized_distance((hero.x, hero.y), (target.x, target.y)) <= range
+                });
             let due = slot.hits[0].is_none_or(|last| tick.saturating_sub(last) + 1 >= interval);
-            if !(landed && due) {
-                continue;
+            if let Some(target) = target.filter(|_| due) {
+                let seconds = interval as f32 * self.tick_seconds;
+                let event = AnimationEvent::Attack { interval: seconds };
+                slot.animator.trigger(rig.graph, event, at);
+                // Face the target while swinging.
+                let (from, to) = (hero.position(), target.position());
+                slot.facing = Some((to.y - from.y).to_f32().atan2((to.x - from.x).to_f32()));
+                // Two hits one interval apart confirm a cadence: predict the next swing so
+                // it gets its whole wind-up (the observed hit is only
+                // `SNAPSHOT_DELAY_TICKS` ahead).
+                let cadence =
+                    slot.hits[0].is_some_and(|last| tick.saturating_sub(last) <= interval + 2);
+                slot.predicted = None;
+                if cadence {
+                    slot.animator.trigger(rig.graph, event, at + seconds);
+                    slot.predicted = Some((tick + interval, seconds));
+                }
+                slot.hits = [Some(tick), slot.hits[0]];
             }
-            let seconds = interval as f32 * self.tick_seconds;
-            let event = AnimationEvent::Attack { interval: seconds };
-            slot.animator.trigger(rig.graph, event, at);
-            // Two hits one interval apart confirm a cadence: predict the next swing so it
-            // gets its whole wind-up (the observed hit is only `SNAPSHOT_DELAY_TICKS` ahead).
-            let cadence =
-                slot.hits[0].is_some_and(|last| tick.saturating_sub(last) <= interval + 2);
-            if cadence {
-                slot.animator.trigger(rig.graph, event, at + seconds);
+            // A predicted swing whose hit did not come (the fight ended, the hero moved) is
+            // withdrawn: queued, or faded out from where the interpolated view is now.
+            if let Some((hit, seconds)) = slot.predicted
+                && tick >= hit + PREDICTION_SLACK_TICKS
+            {
+                let event = AnimationEvent::Attack { interval: seconds };
+                let view = (tick as f32 - super::SNAPSHOT_DELAY_TICKS) * self.tick_seconds;
+                slot.animator
+                    .cancel(rig.graph, event, hit as f32 * self.tick_seconds, view);
+                slot.predicted = None;
             }
-            slot.hits = [Some(tick), slot.hits[0]];
         }
         core::mem::swap(&mut self.previous, &mut self.current);
     }
@@ -397,6 +455,13 @@ impl AnimationDriver {
     /// Starts a frame (LOD bookkeeping).
     pub(crate) fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// The facing to draw a stationary hero with: its last snapshot movement direction, or
+    /// towards its last inferred attack target. `None` for a hero without an animator.
+    pub(crate) fn rest_facing(&self, net_id: u16) -> Option<f32> {
+        self.slot_index(net_id)
+            .and_then(|index| self.slots[index].facing)
     }
 
     /// Whether a hero should be drawn at render time `now` (seconds): alive, or dead while
@@ -781,6 +846,36 @@ mod tests {
             Some("attack")
         );
         assert!((report.action_time - 0.35).abs() < 1e-3, "{report:?}");
+        // The fight ends: no hit at tick 72, so at tick 73 the predicted swing is withdrawn
+        // and fades out from where the view is (tick 69) instead of playing its thrust.
+        // The view (4 ticks behind) has already started its wind-up.
+        driver.begin_frame();
+        let rig = rig_of(0).expect("rig");
+        assert!(
+            driver
+                .animate(HERO, rig, 69.0 / 30.0, 0.0, Mat4::IDENTITY, None, false)
+                .is_some()
+        );
+        for tick in 49..=73u32 {
+            driver.on_snapshot(
+                &snapshot(
+                    tick,
+                    vec![
+                        entity(HERO, 0, 0, 100.0, 600),
+                        entity(MINION, 1, 1, 102.0, health),
+                    ],
+                ),
+                |_| rig_of(0),
+                |_| Some(&hero_spec),
+            );
+        }
+        let animator = driver.animator(HERO).expect("animator");
+        let fading = animator.report(graph, 70.0 / 30.0, 0.0);
+        assert!(
+            fading.action.is_some() && fading.action_weight < 0.9,
+            "{fading:?}"
+        );
+        assert_eq!(animator.report(graph, 75.0 / 30.0, 0.0).action, None);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -925,6 +1020,63 @@ mod tests {
         });
         assert!(sum.is_finite());
         assert_eq!(allocations, 0, "animation driver frames allocated");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn long_dead_heroes_do_not_replay_their_death_and_facing_is_kept() {
+        let (models, root) = library("facing", Some(SET));
+        let rig_of = |_: u8| animated_rig(&models, models.hero(0));
+        let graph = rig_of(0).expect("rig").graph;
+        let hero_spec = spec();
+        let hero_of = |_: u8| Some(&hero_spec);
+        // First seen already dead (a mid-match join): dead, but not drawn dying.
+        let mut driver = AnimationDriver::new(AnimLod::default(), 30);
+        let mut dead = entity(HERO, 0, 0, 100.0, 0);
+        dead.flags = ENTITY_FLAG_DEAD;
+        driver.on_snapshot(&snapshot(500, vec![dead]), rig_of, hero_of);
+        assert!(driver.animator(HERO).expect("animator").is_dead());
+        assert!(!driver.visible(HERO, graph, 500.0 / 30.0, true));
+        // Seen alive first, then dying: the death plays.
+        let mut driver = AnimationDriver::new(AnimLod::default(), 30);
+        driver.on_snapshot(
+            &snapshot(500, vec![entity(HERO, 0, 0, 100.0, 600)]),
+            rig_of,
+            hero_of,
+        );
+        driver.on_snapshot(&snapshot(501, vec![dead]), rig_of, hero_of);
+        assert!(driver.visible(HERO, graph, 502.0 / 30.0, true));
+
+        // Facing: the last snapshot movement direction, then towards an attack target.
+        let mut driver = AnimationDriver::new(AnimLod::default(), 30);
+        assert_eq!(driver.rest_facing(HERO), None);
+        let mut moved = entity(HERO, 0, 0, 100.0, 600);
+        driver.on_snapshot(&snapshot(10, vec![moved]), rig_of, hero_of);
+        moved.y += 4; // 0.25 m along +y
+        driver.on_snapshot(&snapshot(11, vec![moved]), rig_of, hero_of);
+        let facing = driver.rest_facing(HERO).expect("facing");
+        assert!(
+            (facing - core::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "{facing}"
+        );
+        // A respawn-sized jump is a teleport, not a direction.
+        moved.x += 16 * 50;
+        driver.on_snapshot(&snapshot(12, vec![moved]), rig_of, hero_of);
+        assert_eq!(driver.rest_facing(HERO), Some(facing));
+        // An inferred hit on a minion at -x turns the hero towards it.
+        let minion = |health| {
+            let mut minion = entity(MINION, 1, 1, 0.0, health);
+            minion.x = moved.x - 32;
+            minion.y = moved.y;
+            minion
+        };
+        driver.on_snapshot(&snapshot(13, vec![moved, minion(300)]), rig_of, hero_of);
+        driver.on_snapshot(&snapshot(14, vec![moved, minion(260)]), rig_of, hero_of);
+        let facing = driver.rest_facing(HERO).expect("facing");
+        assert!(
+            (facing.abs() - core::f32::consts::PI).abs() < 1e-3,
+            "{facing}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

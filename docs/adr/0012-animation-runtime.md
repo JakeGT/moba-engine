@@ -30,7 +30,13 @@ Pure CPU code with no GPU dependency, next to the skeleton types it works on:
 - **Clips.** The `.glb` loader keeps every animation that drives a joint, as one named
   `AnimationClip` each (`gltf`'s `names` feature, which adds no dependency). Caps, checked
   before reserving: ≤ 32 clips (`MAX_CLIPS`), ≤ 4,096 keys per track, ≤ 65,536 per clip and
-  ≤ 262,144 per skeleton (`MAX_SKELETON_KEYS`), ≤ 600 s per clip. Clip and joint names are
+  ≤ 262,144 per skeleton (`MAX_SKELETON_KEYS`), ≤ 600 s per clip, and ≤ 8,192 animation
+  channels in the file (`MAX_ANIMATION_CHANNELS`: every one of 64 joints animated in
+  translation, rotation and scale in all 32 clips, plus 2,048 skipped channels of slack;
+  more is `SkinError::ClipTooLarge`). A rig at those caps needs about 350 KiB of compact
+  channel JSON, so the JSON chunk cap rises from 256 KiB to 1 MiB (the transient
+  parsed-document worst case scales with it, to the order of 100 MiB at load time); a unit
+  test loads a rig at the caps. Clip and joint names are
   1–32 of `[A-Za-z0-9_-]`; other names are dropped (the clip stays reachable by index), not
   rejected. Duplicate names resolve to the first. The glb fuzz target now samples every clip
   and drives the animator over whatever loads.
@@ -70,7 +76,8 @@ path compares no strings except a cast's ability name. A missing, oversized, mal
 unresolvable set is logged once and the model keeps the WP-4.1 pose; it never fails a match.
 `MOBA_NO_ANIMATION_SETS=1` is the off switch.
 
-`Animator` is the per-unit runtime, about 4 KiB of fixed-size state:
+`Animator` is the per-unit runtime, about 8 KiB of fixed-size state (8,240 bytes; the
+shared `AnimationScratch` is 9,264):
 
 - **Absolute clock.** `evaluate(now, speed, model_to_world)` takes the render tick in seconds,
   not a frame delta. Locomotion phase, action progress and fades are pure functions of that
@@ -81,8 +88,10 @@ unresolvable set is logged once and the model keeps the WP-4.1 pose; it never fa
   4-entry queue; one in the past starts part-way. An attack faster than its clip speeds the
   clip up to fit the attack interval. Re-triggering the playing or queued state within 0.1 s is
   ignored, so a predicted swing is not restarted when the real hit is observed.
-- **Crossfades.** One current and one previous action; the previous is dropped once the current
-  has faded in. `once` fades out after its last frame, `hold` (death) stays until respawn,
+- **Crossfades.** One current and one previous action. The previous is dropped once the
+  current has faded in if the current covers it (a `full` action, or the same layer);
+  otherwise (an `upper` cast after a full-body slam while running) the joints the current
+  does not drive fade the previous out over its own `fade_out`, so the legs do not snap. `once` fades out after its last frame, `hold` (death) stays until respawn,
   `loop` (recall) runs until replaced or interrupted by movement. One additive slot (hit
   reactions) layers on top. Death clears the queue and ignores everything but respawn.
 - `report(now, speed)` exposes the chosen action, previous action, weights, clip time and
@@ -97,7 +106,8 @@ feeds them only what the client already has:
 | idle ↔ run | interpolated position at the render tick and 2 ticks earlier | both ends interpolated, also for the own (predicted) hero, so the speed depends only on the render tick |
 | casts | `EVENT_CAST` (`value` = ability slot; the catalogue maps slot → ability name) | stamped with the tick of the snapshot that carried the event (`ClientEvent::Snapshot` follows its events) |
 | death | `EVENT_UNIT_DIED` (target net id), else the dead flag | the dead hero stays drawn while the death clip plus `death_linger` play |
-| respawn | the dead flag clearing | `HeroRespawned` is not replicated |
+| respawn | the dead flag clearing | `HeroRespawned` is not replicated; a hero first seen already dead (mid-match join, reconnect, reload) is marked dead without replaying its death |
+| facing while standing | the last snapshot movement step (≤ 3 m, so a respawn teleport is ignored), or towards the target of the last inferred attack | the WP-4.1 pose snapped stationary heroes to +X |
 | hit reaction | the hero's health dropping between snapshots | at most every 9 ticks (0.3 s), so damage over time does not jitter |
 | basic attacks | **inferred** (see Gaps) | release frame on the inferred hit tick; predicted one interval ahead once two hits confirm the cadence |
 | recall | none | the simulation has no recall; the state and `AnimationEvent::Recall` exist for when it does |
@@ -112,8 +122,10 @@ land exactly on it; a wind-up longer than that is partly skipped unless predicte
   the cooldown is replicated (`NetEntity` has ability cooldowns only). The client infers a hit
   when a stationary hero has an enemy within its catalogue attack range (+1.5 m) whose health
   dropped in this snapshot, at most once per catalogue attack interval. It misattributes damage
-  from abilities, burns or a second attacker, and the predicted swing after the last hit of a
-  fight plays once (it stops early if the hero moves). Exact sync needs a presentation event
+  from abilities, burns or a second attacker. A predicted swing whose hit has not been
+  observed one tick after its release tick is withdrawn (`Animator::cancel`): dropped if
+  still queued, else faded out from where the interpolated view is, which is usually still
+  in the wind-up. Exact sync needs a presentation event
   (`EVENT_ATTACK` with source and target, filtered like the others) or the attack cooldown in
   `NetEntity`. Either is a protocol bump and is left as a follow-up (proposed in the R4a pull
   request, to be filed as an issue).

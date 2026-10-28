@@ -499,8 +499,12 @@ impl App for ClientApp {
                             // tick for the animators.
                             ClientEvent::Snapshot { tick, .. } => {
                                 let client = &network.client;
+                                // Heroes only: a minion's death must not claim an animator.
                                 let pick = |net_id: u16| {
-                                    client.entity(net_id).map(|entity| entity.hero_pick)
+                                    client
+                                        .entity(net_id)
+                                        .filter(|entity| entity.kind == 0)
+                                        .map(|entity| entity.hero_pick)
                                 };
                                 animation.flush_events(
                                     tick,

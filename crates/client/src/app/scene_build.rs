@@ -87,10 +87,13 @@ pub(crate) fn rebuild_network_units(
             let dx = position.x.to_f32() - previous.x.to_f32();
             let dy = position.y.to_f32() - previous.y.to_f32();
             let speed_sq = dx * dx + dy * dy;
+            // A stationary animated hero keeps its last movement (or attack) direction; the
+            // WP-4.1 pose kept facing +X.
             let (facing, gait) = if speed_sq > 0.0001 {
                 (dy.atan2(dx), 1.0)
             } else {
-                (0.0, 0.0)
+                let rest = rig.and_then(|_| driver.rest_facing(entity.net_id));
+                (rest.unwrap_or(0.0), 0.0)
             };
             let pose = HeroPose {
                 position,

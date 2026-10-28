@@ -876,7 +876,7 @@ pub struct AnimatorReport {
     pub dead: bool,
 }
 
-/// Preallocated scratch poses and transforms shared by every [`Animator`] of a client.
+/// Preallocated scratch poses (about 9 KiB) shared by every [`Animator`] of a client.
 #[derive(Clone, Debug, Default)]
 pub struct AnimationScratch {
     base: Pose,
@@ -884,7 +884,8 @@ pub struct AnimationScratch {
     extra: Pose,
 }
 
-/// Per-unit animation runtime (fixed size, no heap; about 4 KiB).
+/// Per-unit animation runtime (fixed size, no heap; about 8 KiB: model transforms, skinning
+/// matrices, sockets and spring particles for up to 64 joints).
 #[derive(Clone, Debug)]
 pub struct Animator {
     phase: f32,
@@ -992,28 +993,10 @@ impl Animator {
             _ if self.dead => return false,
             _ => {}
         }
-        let Some(state_id) = graph.state_for(event) else {
+        let Some((play, layer)) = Self::play_for(graph, event, at) else {
             return matches!(event, AnimationEvent::Death);
         };
-        let Some(state) = graph.states.get(state_id.index()) else {
-            return false;
-        };
-        let mut rate = state.speed;
-        if let AnimationEvent::Attack { interval } = event
-            && interval.is_finite()
-            && interval > 0.05
-            && state.duration / rate > interval
-        {
-            // Speed the swing up so one fits the attack cadence.
-            rate = (state.duration / interval).min(SPEED_RANGE.1);
-        }
-        let play = Play {
-            state: state_id.0,
-            start: at - state.release / rate,
-            rate,
-            stopped: None,
-        };
-        if state.layer == Layer::Additive {
+        if layer == Layer::Additive {
             self.additive = Some(play);
             return true;
         }
@@ -1051,6 +1034,67 @@ impl Animator {
         } else {
             false
         }
+    }
+
+    /// The action `event` would start for a release at `at`, and its layer.
+    fn play_for(
+        graph: &AnimationGraph,
+        event: AnimationEvent<'_>,
+        at: f32,
+    ) -> Option<(Play, Layer)> {
+        let state_id = graph.state_for(event)?;
+        let state = graph.states.get(state_id.index())?;
+        let mut rate = state.speed;
+        if let AnimationEvent::Attack { interval } = event
+            && interval.is_finite()
+            && interval > 0.05
+            && state.duration / rate > interval
+        {
+            // Speed the swing up so one fits the attack cadence.
+            rate = (state.duration / interval).min(SPEED_RANGE.1);
+        }
+        let play = Play {
+            state: state_id.0,
+            start: at - state.release / rate,
+            rate,
+            stopped: None,
+        };
+        Some((play, state.layer))
+    }
+
+    /// Withdraws the action an earlier [`Animator::trigger`] with the same `event` and `at`
+    /// queued (a prediction that did not happen): a queued one is dropped; a playing one
+    /// fades out from `stop_at` (clamped to its start). Returns whether one was found.
+    /// Never allocates.
+    pub fn cancel(
+        &mut self,
+        graph: &AnimationGraph,
+        event: AnimationEvent<'_>,
+        at: f32,
+        stop_at: f32,
+    ) -> bool {
+        let Some((play, _)) = Self::play_for(graph, event, at) else {
+            return false;
+        };
+        let same = |other: &Play| {
+            other.state == play.state && (other.start - play.start).abs() < DEDUPE_SECONDS
+        };
+        for pending in &mut self.pending {
+            if pending.as_ref().is_some_and(same) {
+                *pending = None;
+                return true;
+            }
+        }
+        if let Some(current) = self.current.as_mut().filter(|current| same(current)) {
+            let stop = if stop_at.is_finite() {
+                stop_at.max(current.start)
+            } else {
+                current.start
+            };
+            current.stopped = Some(current.stopped.map_or(stop, |stopped| stopped.min(stop)));
+            return true;
+        }
+        false
     }
 
     /// Clock time an action ends (after its fade-out), or infinity while it loops or holds.
@@ -1123,12 +1167,27 @@ impl Animator {
         {
             self.current = None;
         }
-        // The previous action only matters until the current one has fully faded in.
-        if let Some(previous) = self.previous {
-            let covered = self
+        // The previous action only matters until the current one has fully faded in over
+        // every joint it drove: a full-body action (or one on the same layer) covers it at
+        // once; a narrower one (an upper-body cast after a full-body slam) leaves the rest
+        // of the body to fade out over the previous action's own `fade_out`.
+        if let Some(previous) = self.previous.as_mut() {
+            let layer = |play: &Play| {
+                graph
+                    .states
+                    .get(usize::from(play.state))
+                    .map(|state| state.layer)
+            };
+            let faded_in = self
                 .current
-                .is_some_and(|play| Self::weight(graph, &play, now) >= 1.0);
-            if covered || now >= Self::end_time(graph, &previous) {
+                .filter(|play| Self::weight(graph, play, now) >= 1.0);
+            let covered = faded_in.is_some_and(|play| {
+                layer(&play) == Some(Layer::Full) || layer(&play) == layer(previous)
+            });
+            if faded_in.is_some() && !covered && previous.stopped.is_none() {
+                previous.stopped = Some(now);
+            }
+            if covered || now >= Self::end_time(graph, previous) {
                 self.previous = None;
             }
         }
@@ -1529,6 +1588,13 @@ fade_in = 0.0
 fade_out = 0.0
 
 [[states]]
+name = "kick"
+clip = "run"
+layer = "full"
+fade_in = 0.0
+fade_out = 0.2
+
+[[states]]
 name = "death"
 clip = "death"
 mode = "hold"
@@ -1561,6 +1627,10 @@ hit = "hit"
 name = "Frost Nova"
 state = "nova"
 
+[[abilities]]
+name = "Kick"
+state = "kick"
+
 [[springs]]
 joints = ["tail0", "tail1"]
 stiffness = 0.1
@@ -1577,7 +1647,7 @@ rotation = [0.0, 90.0, 0.0]
     fn graph() -> (Skeleton, AnimationGraph) {
         let skeleton = rig();
         let set = AnimationSet::parse(SET).expect("set parses");
-        assert_eq!(set.state_count(), 6);
+        assert_eq!(set.state_count(), 7);
         assert_eq!(set.spring_joint_count(), 2);
         assert_eq!(set.socket_count(), 1);
         let graph = AnimationGraph::bind(&set, &skeleton).expect("set binds");
@@ -1679,6 +1749,24 @@ rotation = [0.0, 90.0, 0.0]
         assert!(close(report.action_weight, 1.0));
         // Repeating the same attack (a prediction confirmed by the snapshot) is a no-op.
         assert!(!animator.trigger(&graph, AnimationEvent::Attack { interval: 0.0 }, 2.05));
+        // Cancelling a prediction: queued ones vanish, playing ones fade out.
+        let mut predicted = animator.clone();
+        assert!(predicted.cancel(&graph, ATTACK, 2.0, 1.6));
+        assert_eq!(
+            predicted.report(&graph, 2.0, 0.0).action,
+            None,
+            "dropped from the queue"
+        );
+        let mut playing = animator.clone();
+        let mut scratch = AnimationScratch::default();
+        playing.evaluate(&graph, &skeleton, 1.8, 0.0, Mat4::IDENTITY, &mut scratch);
+        assert!(playing.cancel(&graph, ATTACK, 2.0, 1.8));
+        assert!(close(playing.report(&graph, 1.85, 0.0).action_weight, 0.5));
+        assert_eq!(playing.report(&graph, 1.95, 0.0).action, None);
+        assert!(
+            !playing.cancel(&graph, ATTACK, 5.0, 5.0),
+            "nothing to cancel"
+        );
         // Fading in from the start and out after the end.
         let mut scratch = AnimationScratch::default();
         animator.evaluate(&graph, &skeleton, 1.70, 0.0, Mat4::IDENTITY, &mut scratch);
@@ -1755,6 +1843,36 @@ rotation = [0.0, 90.0, 0.0]
         assert!(arm(&running).abs_diff_eq(arm(&standing), 1e-5));
         assert_eq!(running.report(&graph, 1.3, 6.0).locomotion, (1, 1, 0.0));
         assert_eq!(running.report(&graph, 1.3, 2.0).locomotion, (0, 1, 0.5));
+
+        // An upper-body cast after a full-body action: the legs keep the full-body action and
+        // fade it out over its own fade_out (0.2 s) instead of snapping to the run cycle.
+        let mut kicker = Animator::new(0.0);
+        let kick = AnimationEvent::Cast {
+            slot: 0,
+            ability: Some("Kick"),
+        };
+        kicker.trigger(&graph, kick, 1.0);
+        kicker.trigger(&graph, cast(0), 1.6);
+        // The cast starts at 1.3 and is fully in at 1.5.
+        kicker.evaluate(&graph, &skeleton, 1.5, 6.0, Mat4::IDENTITY, &mut scratch);
+        let mut run_only = Animator::new(0.0);
+        run_only.trigger(&graph, cast(0), 1.6);
+        run_only.evaluate(&graph, &skeleton, 1.6, 6.0, Mat4::IDENTITY, &mut scratch);
+        kicker.evaluate(&graph, &skeleton, 1.6, 6.0, Mat4::IDENTITY, &mut scratch);
+        let report = kicker.report(&graph, 1.6, 6.0);
+        assert_eq!(name(&graph, report.previous), Some("kick"));
+        assert!(close(report.previous_weight, 0.5), "{report:?}");
+        assert_ne!(
+            leg(&kicker),
+            leg(&run_only),
+            "legs still blend the kick out"
+        );
+        assert_eq!(kicker.report(&graph, 1.75, 6.0).previous, None);
+        // A full-body action covers the previous one as soon as it is in.
+        let mut full = Animator::new(0.0);
+        full.trigger(&graph, cast(0), 1.3);
+        full.trigger(&graph, kick, 1.5);
+        assert_eq!(full.report(&graph, 1.5, 6.0).previous, None);
 
         // Additive hit: layered over whatever plays, then gone.
         let mut hit = Animator::new(0.0);
@@ -1902,6 +2020,15 @@ rotation = [0.0, 90.0, 0.0]
                 assert!(matrices.iter().flatten().flatten().all(|v| v.is_finite()));
             }
         }
+    }
+
+    #[test]
+    fn runtime_state_sizes_match_the_docs() {
+        // About 8 KiB per animator and 9 KiB of shared scratch (ADR-0012).
+        let animator = core::mem::size_of::<Animator>();
+        let scratch = core::mem::size_of::<AnimationScratch>();
+        assert!((7 * 1024..=9 * 1024).contains(&animator), "{animator}");
+        assert!((8 * 1024..=10 * 1024).contains(&scratch), "{scratch}");
     }
 
     #[test]

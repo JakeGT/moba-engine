@@ -147,8 +147,10 @@ the semver check):
   descriptors are client-local and cosmetic. The default and networked golden scenes are
   unchanged (no visuals name, no shipped `map-*` descriptor).
 - **Animation runtime (R4a, ADR-0012):** the `.glb` loader keeps every animation as a named
-  clip (≤ 32 clips, ≤ 262,144 keys per skeleton, joint names; `gltf`'s `names` feature, no new
-  dependency; the glb fuzz target samples every clip and drives the animator). New in
+  clip (≤ 32 clips, ≤ 262,144 keys per skeleton, ≤ 8,192 animation channels per file, joint
+  names; `gltf`'s `names` feature, no new dependency; the glb fuzz target samples every clip
+  and drives the animator). `MAX_JSON_BYTES` rises from 256 KiB to 1 MiB so a rig at those
+  caps fits. New in
   `moba-assets`, pure CPU and allocation-free: `Pose`, `BoneMask`, `Skeleton::sample_clip`
   (loop/clamp; linear, slerp or step keys), `Pose::blend` (crossfade, shortest-path nlerp,
   optional mask) and `Pose::add` (additive layers), `BlendSpace1d`, and a content-defined state

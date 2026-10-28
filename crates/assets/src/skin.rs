@@ -35,6 +35,11 @@ pub const MAX_CLIP_KEYS: usize = 65_536;
 pub const MAX_CLIP_SECONDS: f32 = 600.0;
 /// Most clips one skeleton may carry.
 pub const MAX_CLIPS: usize = 32;
+/// Most animation channels a `.glb` file may have across all of its animations, counting
+/// channels the loader skips (non-joint targets, morph weights): every joint animated in
+/// translation, rotation and scale in every clip (`MAX_CLIPS * MAX_JOINTS * 3` = 6,144) plus
+/// 2,048 of slack. More is [`SkinError::ClipTooLarge`].
+pub const MAX_ANIMATION_CHANNELS: usize = MAX_CLIPS * MAX_JOINTS * 3 + 2_048;
 /// Most keyframes across every clip of one skeleton (about 5 MiB of key data).
 pub const MAX_SKELETON_KEYS: usize = 262_144;
 /// Longest clip or joint name, in bytes.

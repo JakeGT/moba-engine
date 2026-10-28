@@ -47,9 +47,10 @@ pub use pose::{
     BlendSpace1d, BlendSpaceError, BoneMask, ClipWrap, MAX_BLEND_POINTS, Pose, joint_matrix,
 };
 pub use skin::{
-    AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_ANIMATION_NAME, MAX_CLIP_KEYS,
-    MAX_CLIP_SECONDS, MAX_CLIPS, MAX_JOINTS, MAX_SKELETON_KEYS, MAX_TRACK_KEYS, MeshSkin, Skeleton,
-    SkinError, Track, TrackPath, quantize_weights, valid_animation_name,
+    AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_ANIMATION_CHANNELS,
+    MAX_ANIMATION_NAME, MAX_CLIP_KEYS, MAX_CLIP_SECONDS, MAX_CLIPS, MAX_JOINTS, MAX_SKELETON_KEYS,
+    MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
+    valid_animation_name,
 };
 
 /// One asset entry.

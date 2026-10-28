@@ -37,7 +37,8 @@
 //!   [`MAX_CLIPS`]): translation/rotation/scale channels with `f32` keys and `LINEAR`/`STEP`
 //!   interpolation (`CUBICSPLINE` keeps only its values and plays linearly), capped at
 //!   [`MAX_TRACK_KEYS`] keys per track, [`MAX_CLIP_KEYS`] per clip and [`MAX_SKELETON_KEYS`]
-//!   across all clips, all checked before reserving. Channels on non-joint nodes and morph
+//!   across all clips, and at most [`MAX_ANIMATION_CHANNELS`] channels in the file, all
+//!   checked before reserving. Channels on non-joint nodes and morph
 //!   weights are ignored;
 //! - animation and joint names, when they are 1..=32 of `[A-Za-z0-9_-]` (other names are
 //!   dropped, not rejected): the animation runtime (ADR-0012) finds clips such as `idle`,
@@ -54,17 +55,19 @@ use moba_core::math::{Mat3, Mat4, Quat, Vec3};
 
 use crate::mesh::{MeshData, MeshError};
 use crate::skin::{
-    AnimationClip, Interpolation, JointTransform, MAX_CLIP_KEYS, MAX_CLIPS, MAX_JOINTS,
-    MAX_SKELETON_KEYS, MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath,
+    AnimationClip, Interpolation, JointTransform, MAX_ANIMATION_CHANNELS, MAX_CLIP_KEYS, MAX_CLIPS,
+    MAX_JOINTS, MAX_SKELETON_KEYS, MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath,
     quantize_weights, valid_animation_name,
 };
 
 /// Largest accepted `.glb` file (16 MiB).
 pub const MAX_GLB_BYTES: usize = 16 << 20;
-/// Largest accepted JSON chunk (256 KiB). Static meshes need a few KiB. The cap also bounds
-/// the parsed document: a hostile array of empty `{}` objects expands to roughly 250 bytes
-/// per 3 input bytes, so the worst case is tens of MiB, transiently, at load time.
-pub const MAX_JSON_BYTES: usize = 256 << 10;
+/// Largest accepted JSON chunk (1 MiB). Static meshes need a few KiB; a rig at the clip caps
+/// ([`MAX_CLIPS`] clips animating all [`MAX_JOINTS`] joints in translation, rotation and
+/// scale) needs about 350 KiB of compact channel JSON. The cap also bounds the parsed
+/// document: a hostile array of empty `{}` objects expands to roughly 250 bytes per 3 input
+/// bytes, so the worst case is on the order of 100 MiB, transiently, at load time.
+pub const MAX_JSON_BYTES: usize = 1 << 20;
 /// Nodes the scene walk may visit (shared subtrees count once per visit).
 const MAX_NODE_VISITS: usize = 1_024;
 /// Deepest node hierarchy accepted.
@@ -341,8 +344,9 @@ fn read_skeleton(
         .map(|&node| {
             root.nodes[node]
                 .name
-                .clone()
+                .as_deref()
                 .filter(|name| valid_animation_name(name))
+                .map(String::from)
         })
         .collect();
     let clips = read_clips(root, bin, &joint_of)?;
@@ -389,8 +393,8 @@ fn read_clips(
         let mut keys = 0usize;
         for channel in &animation.channels {
             inspected += 1;
-            if inspected > MAX_PRIMITIVES {
-                return Err(GlbError::BadNodeGraph);
+            if inspected > MAX_ANIMATION_CHANNELS {
+                return Err(SkinError::ClipTooLarge.into());
             }
             let Some(joint) = joint_of(channel.target.node.value()) else {
                 continue; // Not a joint of this skin.
@@ -1467,5 +1471,106 @@ mod tests {
         assert_eq!(skeleton.clip_index("idle"), None);
         assert_eq!(skeleton.joint_name(9), None);
         assert_eq!(skeleton.joint_index("cape_1"), Some(8));
+    }
+
+    /// A skinned triangle with `joints` joints (a root and its children) and `clips`
+    /// animations, each animating every joint in translation, rotation and scale, plus
+    /// `extra` channels on the (non-joint) mesh node in the first animation.
+    fn rig_at_limits(joints: usize, clips: usize, extra: usize) -> Vec<u8> {
+        let mut bin = triangle_bin();
+        bin.extend([0, 0]); // pad the u16 indices to 80 bytes
+        bin.extend([0u8; 12]); // JOINTS_0: joint 0 for all three vertices (80)
+        bin.extend([255u8, 0, 0, 0].repeat(3)); // WEIGHTS_0 (92)
+        bin.extend(floats(&[0.0, 1.0])); // key times (104)
+        bin.extend(floats(&[0.0, 0.0, 0.0, 0.0, 0.1, 0.0])); // VEC3 keys (112)
+        bin.extend(floats(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])); // VEC4 keys (136)
+        let children: Vec<String> = (2..=joints).map(|node| node.to_string()).collect();
+        let mut nodes = vec![
+            String::from(r#"{"mesh":0,"skin":0}"#),
+            format!(r#"{{"name":"j1","children":[{}]}}"#, children.join(",")),
+        ];
+        nodes.extend((2..=joints).map(|node| format!(r#"{{"name":"j{node}"}}"#)));
+        let joint_list: Vec<String> = (1..=joints).map(|node| node.to_string()).collect();
+        let mut animations = Vec::new();
+        for clip in 0..clips {
+            let mut channels = Vec::new();
+            for node in 1..=joints {
+                for (sampler, path) in [(0, "translation"), (1, "rotation"), (0, "scale")] {
+                    channels.push(format!(
+                        r#"{{"sampler":{sampler},"target":{{"node":{node},"path":"{path}"}}}}"#
+                    ));
+                }
+            }
+            if clip == 0 {
+                channels.extend((0..extra).map(|_| {
+                    String::from(r#"{"sampler":0,"target":{"node":0,"path":"translation"}}"#)
+                }));
+            }
+            animations.push(format!(
+                r#"{{"name":"c{clip}","samplers":[{{"input":5,"output":6}},{{"input":5,"output":7}}],"channels":[{}]}}"#,
+                channels.join(",")
+            ));
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0,1]}}],
+            "nodes":[{}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"JOINTS_0":3,"WEIGHTS_0":4}},"indices":2}}]}}],
+            "skins":[{{"joints":[{}]}}],
+            "animations":[{}],
+            "buffers":[{{"byteLength":{}}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},
+                           {{"buffer":0,"byteOffset":36,"byteLength":36}},
+                           {{"buffer":0,"byteOffset":72,"byteLength":6}},
+                           {{"buffer":0,"byteOffset":80,"byteLength":12}},
+                           {{"buffer":0,"byteOffset":92,"byteLength":12}},
+                           {{"buffer":0,"byteOffset":104,"byteLength":8}},
+                           {{"buffer":0,"byteOffset":112,"byteLength":24}},
+                           {{"buffer":0,"byteOffset":136,"byteLength":32}}],
+            "accessors":[{POSITION_ACCESSOR},
+                         {{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}},
+                         {{"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}},
+                         {{"bufferView":3,"componentType":5121,"count":3,"type":"VEC4"}},
+                         {{"bufferView":4,"componentType":5121,"normalized":true,"count":3,"type":"VEC4"}},
+                         {{"bufferView":5,"componentType":5126,"count":2,"type":"SCALAR"}},
+                         {{"bufferView":6,"componentType":5126,"count":2,"type":"VEC3"}},
+                         {{"bufferView":7,"componentType":5126,"count":2,"type":"VEC4"}}]}}"#,
+            nodes.join(","),
+            joint_list.join(","),
+            animations.join(","),
+            bin.len(),
+        );
+        assert!(json.len() <= MAX_JSON_BYTES, "{} JSON bytes", json.len());
+        glb(&json, Some(&bin))
+    }
+
+    #[test]
+    fn a_rig_at_the_clip_and_joint_caps_loads() {
+        let mesh = load_glb(&rig_at_limits(MAX_JOINTS, MAX_CLIPS, 0)).expect("rig at the caps");
+        let skeleton = mesh.skin().expect("skin").skeleton();
+        assert_eq!(skeleton.joint_count(), MAX_JOINTS);
+        assert_eq!(skeleton.clips().len(), MAX_CLIPS);
+        assert!(
+            skeleton
+                .clips()
+                .iter()
+                .all(|clip| clip.tracks().len() == MAX_JOINTS * 3)
+        );
+        assert_eq!(skeleton.clip_index("c31"), Some(31));
+        // Skipped (non-joint) channels count too; past the channel cap is a clip error.
+        let skin_error = |result: Result<MeshData, GlbError>| {
+            matches!(
+                result,
+                Err(GlbError::Mesh(MeshError::Skin(SkinError::ClipTooLarge)))
+            )
+        };
+        let slack = MAX_ANIMATION_CHANNELS - MAX_CLIPS * MAX_JOINTS * 3;
+        assert!(load_glb(&rig_at_limits(MAX_JOINTS, MAX_CLIPS, slack)).is_ok());
+        assert!(skin_error(load_glb(&rig_at_limits(
+            MAX_JOINTS,
+            MAX_CLIPS,
+            slack + 1
+        ))));
+        // One clip too many.
+        assert!(skin_error(load_glb(&rig_at_limits(4, MAX_CLIPS + 1, 0))));
     }
 }
