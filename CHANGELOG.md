@@ -43,6 +43,30 @@ breaking protocol, replay or content-schema changes.
     is `Option<Team>` (`None` for a draw).
 
 ### Content and networking
+- **Protocol v40** (not wire-compatible with v39, which #314 took). Packs can reference
+  visual assets (#285, WP-3.1):
+  - Optional `[assets]` manifest (`[[assets.units]]` / `[[assets.maps]]`, the
+    `moba_assets::AssetManifest` shape) in the pack, plus `heroes.model` and `map.visuals`
+    names (1..=16 of `[A-Za-z0-9_-]`; `visuals` defaults to the theme's `asset_name()`). New
+    `HeroSpec::model`, `MapSpec::visuals` / `visuals_name()` and `GameContent::assets`.
+    `moba-game` now depends on `moba-assets` (no `glb` feature, render-free). The new public
+    fields (also `WireHero::model`/`model_len`, `WireMap::visuals`/`visuals_len`) break
+    exhaustive struct literals and patterns.
+  - Loading rejects names with no manifest entry (`ContentLoadError::UnknownAsset`), invalid
+    manifests (`ContentLoadError::Assets`) and malformed names
+    (`ContentError::BadVisualName`). Asset paths now also reject `\`, `:` and control bytes.
+    These are new enum variants, which breaks exhaustive matches.
+  - `content-check` checks every manifest file (`.glb`, exists under the pack directory, no
+    symlink escape, unit models parse) and reports `assets` and `errors` in text and `--json`.
+    Load failures are now JSON too with `--json`. Any error exits with status 1.
+  - The names are hashed, signed and carried: `WireHero::model` and `WireMap::visuals`
+    (16 bytes + length each). The `[assets]` paths are pack-local and never hashed or sent.
+    The hash appends a tagged visuals block only when a name is set, so every shipped pack,
+    the default content, replays and signatures are byte-identical (pinned by a test).
+  - The client draws `HeroSpec::model` / `WireHero::model` from its local asset root.
+    `MOBA_HERO_MODELS` is now a per-hero dev override. `MOBA_SERVER=local` plays
+    `MOBA_CONTENT` when set. Example pack: `content/sentinel-pack.toml` (Guardian uses
+    `models/sentinel.glb`).
 - **Protocol v39** (not wire-compatible with v38): the snapshot `outcome` byte gains
   `3` = draw (`OUTCOME_DRAW`; `OUTCOME_NONE/BLUE/RED` name the existing codes) and
   `EVENT_MATCH_ENDED` carries `value = MATCH_ENDED_DRAW` (2) for a draw. The byte layout is

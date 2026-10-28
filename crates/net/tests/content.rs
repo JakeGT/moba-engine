@@ -17,6 +17,7 @@ use moba_sim::SimConfig;
 fn custom_content() -> GameContent {
     GameContent {
         attestation: None,
+        assets: moba_game::AssetManifest::default(),
         rules: moba_game::RulesSpec::default(),
         manifest: moba_game::ContentManifest::default(),
         items: vec![
@@ -52,6 +53,7 @@ fn custom_content() -> GameContent {
             attack_damage_per_level: 4,
             armor_per_level: 1,
             magic_resist_per_level: 1,
+            model: None,
         }],
         abilities: GameContent::default().abilities,
         modifiers: GameContent::default().modifiers,

@@ -24,8 +24,17 @@ pub use spec::{
     ModifierKind, RewardsSpec, RulesSpec, StructureSpec, StructureStatsSpec, UnitRewardsSpec,
     WallSpec,
 };
+pub use validate::valid_visual_name;
+
+pub use moba_assets::{AssetEntry, AssetError, AssetManifest};
 
 use crate::{ABILITIES, ITEMS, MAP};
+
+/// Maximum length of a visual asset name (`heroes.model`, `map.visuals`) in bytes.
+///
+/// Names are 1..=16 of `[A-Za-z0-9_-]`: they cross the wire and a client resolves them
+/// against its own asset root, so they can never contain a path separator or drive colon.
+pub const MAX_VISUAL_NAME: usize = 16;
 
 /// Maximum number of items in a content pack (matches the wire catalogue).
 pub const MAX_CONTENT_ITEMS: usize = 16;
@@ -101,6 +110,11 @@ pub struct GameContent {
     pub map: MapSpec,
     /// Optional publisher attestation (not part of the content hash).
     pub attestation: Option<PackAttestation>,
+    /// The pack's `[assets]` manifest: names to pack-relative files. Pack-local authoring
+    /// data, like `attestation` it is **not** hashed, signed or sent on the wire (clients
+    /// resolve the hashed `HeroSpec::model` / `MapSpec::visuals` *names* against their own
+    /// asset root). Empty for built-in and wire-reconstructed content.
+    pub assets: AssetManifest,
 }
 
 fn default_modifiers() -> Vec<ModifierDef> {
@@ -137,6 +151,7 @@ impl Default for GameContent {
             rules: RulesSpec::default(),
             map: MapSpec::from(&MAP),
             attestation: None,
+            assets: AssetManifest::default(),
         }
     }
 }

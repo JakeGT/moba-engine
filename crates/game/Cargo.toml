@@ -18,6 +18,8 @@ workspace = true
 
 [dependencies]
 moba-core.workspace = true
+# Manifest schema and path rules only; the `glb` loader feature stays off (render-free).
+moba-assets.workspace = true
 serde.workspace = true
 toml.workspace = true
 sha2.workspace = true

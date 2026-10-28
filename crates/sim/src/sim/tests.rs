@@ -636,6 +636,7 @@ fn custom_content_purchase_updates_observation() {
         abilities: GameContent::default().abilities,
         modifiers: GameContent::default().modifiers,
         map: GameContent::default().map,
+        assets: moba_game::AssetManifest::default(),
     };
     let mut sim = Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
     assert!(sim.purchase(0, 0));

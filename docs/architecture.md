@@ -217,6 +217,11 @@ Since v38, the catalogue carries **every hashed `RulesSpec` field**, including t
 (`structure_heroes_first`, `nexus_win`, `score_limit`). A pack that overrides them is joinable,
 and a joining client receives the server's rules instead of defaults.
 
+Since v40 (#285), it also carries each hero's `model` and the map's `visuals` asset **names**.
+They are hashed and signed with the rest of the pack. Pack file paths never go on the wire: a
+client resolves the names against its own asset root, with procedural fallback, so differing
+local assets are cosmetic only.
+
 ## Client identity
 
 With `require_client_identity`, the server sends a random `Challenge` packet; the client

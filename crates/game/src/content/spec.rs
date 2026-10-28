@@ -407,6 +407,10 @@ pub struct MapSpec {
     pub blue_spawn: FixVec2,
     /// Red spawn.
     pub red_spawn: FixVec2,
+    /// Explicit per-map visuals name (`map.visuals`), resolved by the client against its
+    /// local asset root. `None` means [`MapTheme::asset_name`]; see [`MapSpec::visuals_name`].
+    /// Presentation only, but hashed and carried on the wire like `theme`.
+    pub visuals: Option<String>,
 }
 
 impl From<&MapDef> for MapSpec {
@@ -436,6 +440,7 @@ impl From<&MapDef> for MapSpec {
             walls: Vec::new(),
             blue_spawn: map.blue_spawn,
             red_spawn: map.red_spawn,
+            visuals: None,
         }
     }
 }
@@ -450,6 +455,15 @@ const fn whole_units(value: Fix) -> Option<i64> {
 }
 
 impl MapSpec {
+    /// The visuals name a client resolves: the explicit `visuals`, else the theme's
+    /// [`MapTheme::asset_name`].
+    #[must_use]
+    pub fn visuals_name(&self) -> &str {
+        self.visuals
+            .as_deref()
+            .unwrap_or_else(|| self.theme.asset_name())
+    }
+
     /// The exact `[x, y]` the network catalogue carries for a map point (lane waypoint,
     /// spawn, structure position or wall endpoint), or `None` when either axis is fractional
     /// or outside `i16`.
@@ -596,6 +610,10 @@ pub struct HeroSpec {
     pub armor_per_level: i32,
     /// Magic resistance gained per level.
     pub magic_resist_per_level: i32,
+    /// Optional model name (`heroes.model`), resolved by the client against its local asset
+    /// root; `None` draws the procedural rig. Presentation only, but hashed and carried on
+    /// the wire so every client asks for the same name.
+    pub model: Option<String>,
 }
 
 impl From<&crate::HeroDef> for HeroSpec {
@@ -619,6 +637,7 @@ impl From<&crate::HeroDef> for HeroSpec {
             attack_damage_per_level: crate::LEVEL_GROWTH.attack_damage,
             armor_per_level: crate::LEVEL_GROWTH.armor,
             magic_resist_per_level: crate::LEVEL_GROWTH.magic_resist,
+            model: None,
         }
     }
 }

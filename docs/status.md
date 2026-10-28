@@ -1,6 +1,6 @@
 # Engine status
 
-Last updated: **2026-10-21**. Workspace **0.4.0** preview; protocol **v39**; replay format **v5**;
+Last updated: **2026-10-21**. Workspace **0.4.0** preview; protocol **v40**; replay format **v5**;
 simulation logic **v8**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
@@ -16,10 +16,10 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 | M2 | Platform | 🟡 | Linux runtime verified; Windows/macOS compile and CI-checked, runtime GPU validation still open (#9). winit/input, 30 Hz step, settings and headless modes present. |
 | M3 | Renderer | 🟡 | Vulkan 1.3 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, textured UI atlas, animated hero rig, map themes, [golden-image CI](../.github/workflows/render-golden.yml) and [NVIDIA timings](perf/0007-real-hardware.md). Windows/macOS real-GPU timing remains open (#127). |
 | M4 | Simulation | ✅ | [Deterministic 5v5](perf/0004-simulation.md), 3 lanes, towers/nexuses, minions, vision-respecting bots, respawns, XP/gold/items, modes/rules; measured ~26.3 µs/tick steady benchmark (7.876 ms/300 ticks, 2026-10-19). |
-| M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v39, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
+| M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v40, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
 | M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
 | M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/per-match/host-wide datagram budgets charged before decode, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model, [50 concurrent matches per box](perf/0010-multi-match.md) (`MatchHost`, `moba-server --matches N`, #293) with per-port poll caps and [flood isolation](perf/0010-multi-match.md#flood-isolation) (#292). Independent external review remains open. |
-| M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Static `.glb` hero models load from a client-local asset root with procedural fallback (#286, ADR-0007); pack model references (#285) and skinning (#288) remain. |
+| M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Static `.glb` hero models load from a client-local asset root with procedural fallback (#286, ADR-0007). Packs reference visuals by name through an `[assets]` manifest that content-check validates, and the names are hashed and carried in the catalogue (protocol v40, #285). Per-map visuals (#287) and skinning (#288) remain. |
 
 ## Core capabilities
 

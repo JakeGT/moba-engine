@@ -17,6 +17,9 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   - Since **v39** a match can end in a draw (both teams meet a win condition in one tick):
     snapshot `outcome` 3 (`OUTCOME_DRAW`) and `EVENT_MATCH_ENDED` with `value`
     `MATCH_ENDED_DRAW`.
+  - Since **v40** the catalogue also carries each hero's `model` and the map's `visuals` asset *names*
+    (#285). Pack file paths never go on the wire; clients resolve names against their own
+    asset root, so differing local assets are cosmetic only.
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.
 - **Server**: handshake and slot assignment, session tokens, input sequencing, bot fill for

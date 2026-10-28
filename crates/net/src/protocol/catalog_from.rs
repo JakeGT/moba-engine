@@ -64,6 +64,8 @@ impl From<&GameContent> for WireCatalog {
             rules: content_rules,
             map: content_map,
             attestation: _,
+            // Pack-local file paths never go on the wire; clients resolve the hashed names.
+            assets: _,
         } = content;
         let ContentManifest {
             name,
@@ -128,6 +130,7 @@ impl From<&GameContent> for WireCatalog {
                 attack_damage_per_level,
                 armor_per_level,
                 magic_resist_per_level,
+                model,
             } = hero;
             wire.name_len = put_wire_name(&mut wire.name, name);
             wire.max_health = *max_health;
@@ -147,6 +150,10 @@ impl From<&GameContent> for WireCatalog {
             wire.attack_damage_per_level = *attack_damage_per_level;
             wire.armor_per_level = *armor_per_level;
             wire.magic_resist_per_level = *magic_resist_per_level;
+            // Exact for validated content (1..=16 ASCII bytes); `None` stays length 0.
+            wire.model_len = model
+                .as_deref()
+                .map_or(0, |model| put_wire_name(&mut wire.model, model));
         }
 
         catalog.ability_count = u8::try_from(content_abilities.len().min(MAX_WIRE_ABILITIES))
@@ -305,6 +312,7 @@ impl From<&GameContent> for WireCatalog {
             walls: content_walls,
             blue_spawn,
             red_spawn,
+            visuals: content_visuals,
         } = content_map;
         let minion = |stats: moba_game::MinionStatsSpec| WireMinionStats {
             max_health: stats.max_health,
@@ -417,6 +425,9 @@ impl From<&GameContent> for WireCatalog {
         let map = &mut catalog.map;
         map.name_len = put_wire_name(&mut map.name, content_name);
         map.theme = content_theme.id();
+        map.visuals_len = content_visuals
+            .as_deref()
+            .map_or(0, |visuals| put_wire_name(&mut map.visuals, visuals));
         map.lane_count = u8::try_from(content_lanes.len().min(MAX_WIRE_LANES))
             .unwrap_or(u8::try_from(MAX_WIRE_LANES).unwrap_or(u8::MAX));
         for (wire, lane) in map.lanes.iter_mut().zip(content_lanes) {

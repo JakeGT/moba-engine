@@ -15,8 +15,11 @@
 //! - `MOBA_DEMO_MOVE=x,y` issues one move order after the first snapshot (capture demos).
 //! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
-//! - `MOBA_ASSET_ROOT=<dir>` (default `content`) and `MOBA_HERO_MODELS=<hero=model,...>`
-//!   draw heroes with `<dir>/models/<model>.glb`; any failure falls back to the rig.
+//! - `MOBA_ASSET_ROOT=<dir>` (default `content`): heroes whose catalogue names a `model`
+//!   draw `<dir>/models/<model>.glb`; `MOBA_HERO_MODELS=<hero=model,...>` overrides that per
+//!   hero (dev only). Any failure falls back to the rig.
+//! - `MOBA_CONTENT=<pack.toml>` loads a content pack for the local preview and for the
+//!   `MOBA_SERVER=local` loopback server.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
@@ -272,7 +275,7 @@ impl App for ClientApp {
                             .client
                             .heroes()
                             .iter()
-                            .map(moba_net::protocol::WireHero::name_str),
+                            .map(|hero| (hero.name_str(), hero.model_str())),
                     );
                 } else if let Some(simulation) = &self.simulation {
                     models::bind_hero_models(
@@ -282,7 +285,7 @@ impl App for ClientApp {
                             .content()
                             .heroes
                             .iter()
-                            .map(|hero| hero.name.as_str()),
+                            .map(|hero| (hero.name.as_str(), hero.model.as_deref())),
                     );
                 }
                 let title = if let Some(network) = &self.network {
@@ -414,7 +417,7 @@ impl App for ClientApp {
                                             .client
                                             .heroes()
                                             .iter()
-                                            .map(moba_net::protocol::WireHero::name_str),
+                                            .map(|hero| (hero.name_str(), hero.model_str())),
                                     );
                                 }
                             }
