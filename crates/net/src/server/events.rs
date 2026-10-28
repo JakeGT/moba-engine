@@ -174,9 +174,10 @@ impl RawEvent {
                 aux: u16::try_from(duration_ticks).unwrap_or(u16::MAX),
                 arc: moba_core::Fix::ZERO,
             },
-            moba_sim::SimEvent::WaveSpawned { .. } | moba_sim::SimEvent::HeroRespawned { .. } => {
-                return None;
-            }
+            // `WaveSpawned` and `HeroRespawned` are not replicated. `SimEvent` is
+            // `#[non_exhaustive]`: a new simulation event is not sent to clients until it
+            // gets a wire mapping here.
+            _ => return None,
         };
         Some(raw)
     }

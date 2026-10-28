@@ -26,10 +26,7 @@ fn main() {
         }
     }
 
-    let config = SimConfig {
-        seed,
-        ..SimConfig::default()
-    };
+    let config = SimConfig::default().with_seed(seed);
     let mut simulation = Simulation::new(config);
     let mut deaths = 0usize;
     for _ in 0..ticks {

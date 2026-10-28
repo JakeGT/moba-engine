@@ -6,6 +6,7 @@ use super::snapshot::NetId;
 
 /// A player command as it travels on the wire.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WireCommand {
     /// Clear orders.
     Stop,

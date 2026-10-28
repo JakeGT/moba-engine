@@ -19,10 +19,7 @@ use moba_game::GameContent;
 use moba_sim::{BotPolicy, ObservedUnit, SimConfig, Simulation, TickInputs};
 
 use crate::crypto::identity_public_key;
-use crate::protocol::{
-    InputMessage, MAX_DATAGRAM, MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, SnapshotDelta,
-    SnapshotState, decode_input,
-};
+use crate::protocol::{MAX_DATAGRAM, MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, SnapshotDelta};
 use crate::transport::UdpTransport;
 
 use clients::ClientConn;
@@ -55,6 +52,7 @@ pub const SERVER_TICK_RATE: u16 = 30;
 
 /// Server configuration.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ServerConfig {
     /// UDP bind address.
     pub bind: SocketAddr,
@@ -131,8 +129,112 @@ impl Default for ServerConfig {
     }
 }
 
+impl ServerConfig {
+    /// Returns this config with [`ServerConfig::bind`] set.
+    #[must_use]
+    pub const fn with_bind(mut self, bind: SocketAddr) -> Self {
+        self.bind = bind;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::sim`] set.
+    #[must_use]
+    pub const fn with_sim(mut self, sim: SimConfig) -> Self {
+        self.sim = sim;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::snapshot_interval`] set.
+    #[must_use]
+    pub const fn with_snapshot_interval(mut self, snapshot_interval: u8) -> Self {
+        self.snapshot_interval = snapshot_interval;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::max_clients`] set.
+    #[must_use]
+    pub const fn with_max_clients(mut self, max_clients: usize) -> Self {
+        self.max_clients = max_clients;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::countdown_ticks`] set.
+    #[must_use]
+    pub const fn with_countdown_ticks(mut self, countdown_ticks: u32) -> Self {
+        self.countdown_ticks = countdown_ticks;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::results_ticks`] set.
+    #[must_use]
+    pub const fn with_results_ticks(mut self, results_ticks: u32) -> Self {
+        self.results_ticks = results_ticks;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::client_timeout`] set.
+    #[must_use]
+    pub const fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
+        self.client_timeout = client_timeout;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::reconnect_grace`] set.
+    #[must_use]
+    pub const fn with_reconnect_grace(mut self, reconnect_grace: Duration) -> Self {
+        self.reconnect_grace = reconnect_grace;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::pre_shared_key`] set.
+    #[must_use]
+    pub const fn with_pre_shared_key(mut self, pre_shared_key: Option<[u8; 32]>) -> Self {
+        self.pre_shared_key = pre_shared_key;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::record`] set.
+    #[must_use]
+    pub fn with_record(mut self, record: Option<PathBuf>) -> Self {
+        self.record = record;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::max_spectators`] set.
+    #[must_use]
+    pub const fn with_max_spectators(mut self, max_spectators: usize) -> Self {
+        self.max_spectators = max_spectators;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::max_packets_per_second`] set.
+    #[must_use]
+    pub const fn with_max_packets_per_second(mut self, max_packets_per_second: u32) -> Self {
+        self.max_packets_per_second = max_packets_per_second;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::max_total_packets_per_second`] set.
+    #[must_use]
+    pub const fn with_max_total_packets_per_second(
+        mut self,
+        max_total_packets_per_second: u32,
+    ) -> Self {
+        self.max_total_packets_per_second = max_total_packets_per_second;
+        self
+    }
+
+    /// Returns this config with [`ServerConfig::require_ready`] set.
+    #[must_use]
+    pub const fn with_require_ready(mut self, require_ready: bool) -> Self {
+        self.require_ready = require_ready;
+        self
+    }
+}
+
 /// Server counters for bandwidth and soak tests.
 #[derive(Copy, Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ServerStats {
     /// Connected clients.
     pub clients: usize,
@@ -201,6 +303,7 @@ enum Phase {
 
 /// Observable server phase passed to extension systems.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServerPhase {
     /// Waiting for players.
     Lobby,
@@ -637,21 +740,4 @@ impl NetServer {
         let shutdown = std::sync::atomic::AtomicBool::new(false);
         self.run_until(duration, &shutdown)
     }
-}
-
-/// Unused helper kept for tests/tools: decodes an input payload.
-///
-/// # Errors
-/// Returns a wire error for malformed input.
-pub fn decode_input_message(payload: &[u8]) -> Result<InputMessage, crate::protocol::WireError> {
-    decode_input(payload)
-}
-
-/// Returns the state snapshot that would be built from a delta and a baseline (tooling).
-pub fn apply_delta(
-    baseline: &SnapshotState,
-    delta: &SnapshotDelta,
-    seq: u32,
-) -> Result<SnapshotState, crate::protocol::WireError> {
-    baseline.apply(delta, seq)
 }

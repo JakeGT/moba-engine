@@ -18,22 +18,21 @@ fn replay_path() -> std::path::PathBuf {
 }
 
 fn spawn_server(path: &std::path::Path) -> (SocketAddr, std::thread::JoinHandle<()>) {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 0,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: Some(path.to_path_buf()),
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().unwrap())
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(0)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(Some(path.to_path_buf()))
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let server = NetServer::bind(config).expect("bind");
     let addr = server.local_addr().expect("addr");
     let handle = std::thread::spawn(move || {

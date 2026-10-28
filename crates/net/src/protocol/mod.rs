@@ -69,6 +69,7 @@ pub const MAX_QUANTIZED_POSITION: u16 = 4095;
 /// Packet type in the fixed header.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum PacketKind {
     /// Client -> server connection request.
     Hello = 1,
@@ -141,6 +142,7 @@ pub struct Header {
 
 /// Wire errors; all decoders are total and return this on bad input.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WireError {
     /// Not enough bytes.
     Truncated,

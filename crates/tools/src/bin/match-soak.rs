@@ -69,12 +69,11 @@ impl Settings {
     }
 
     fn run_match(&self, seed: u64, hero_picks: [u8; moba_sim::MAX_PLAYERS]) -> MatchResult {
-        let config = SimConfig {
-            seed,
-            bot_mask: self.bot_mask,
-            spawn_waves: self.spawn_waves,
-            hero_picks,
-        };
+        let config = SimConfig::default()
+            .with_seed(seed)
+            .with_bot_mask(self.bot_mask)
+            .with_spawn_waves(self.spawn_waves)
+            .with_hero_picks(hero_picks);
         let mut simulation = self.content.as_ref().map_or_else(
             || Simulation::new(config),
             |content| Simulation::new_with_content(config, Arc::clone(content)),
@@ -287,10 +286,11 @@ fn main() {
         mismatches += u32::from(*mismatch);
         peak_units = peak_units.max(result.peak_units);
         let outcome_index = match result.outcome {
-            None => 0,
             Some(MatchOutcome::Winner(Team::Blue)) => 1,
             Some(MatchOutcome::Winner(Team::Red)) => 2,
             Some(MatchOutcome::Draw) => 3,
+            // Unresolved. `MatchOutcome` is `#[non_exhaustive]`; an unknown outcome counts here.
+            _ => 0,
         };
         outcomes[outcome_index] += 1;
         if result.outcome.is_some() {

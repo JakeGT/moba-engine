@@ -12,9 +12,8 @@ use crate::crypto::{
     verify_welcome_tag,
 };
 use crate::protocol::{
-    FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotDelta, SnapshotState,
-    WireCommand, decode_hello, decode_packet, decode_snapshot, decode_welcome, encode_hello,
-    encode_input, encode_packet, sequence_after,
+    FLAG_NEED_FULL, Header, InputMessage, NetEntity, PacketKind, SnapshotState, WireCommand,
+    decode_snapshot, decode_welcome, encode_hello, encode_input, sequence_after,
 };
 use crate::transport::UdpTransport;
 
@@ -26,6 +25,7 @@ const HISTORY_LIMIT: usize = 64;
 
 /// Client connection state.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClientState {
     /// Handshake in progress.
     Connecting,
@@ -37,6 +37,7 @@ pub enum ClientState {
 
 /// Observable client events.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClientEvent {
     /// Handshake completed and a slot was assigned.
     Connected {
@@ -63,6 +64,7 @@ pub enum ClientEvent {
 
 /// Client counters for bandwidth/RTT tests.
 #[derive(Copy, Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ClientStats {
     /// UDP bytes received.
     pub bytes_received: u64,
@@ -96,6 +98,7 @@ impl core::fmt::Debug for ClientIdentity {
 
 /// Options for a handshake-capable client connection.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct ClientAuth {
     /// Optional pre-shared/token key.
     pub pre_shared_key: Option<[u8; 32]>,
@@ -115,6 +118,36 @@ impl core::fmt::Debug for ClientAuth {
             .field("identity_seed", &self.identity_seed.is_some())
             .field("spectator", &self.spectator)
             .finish()
+    }
+}
+
+impl ClientAuth {
+    /// Returns these options with [`ClientAuth::pre_shared_key`] set.
+    #[must_use]
+    pub const fn with_pre_shared_key(mut self, pre_shared_key: Option<[u8; 32]>) -> Self {
+        self.pre_shared_key = pre_shared_key;
+        self
+    }
+
+    /// Returns these options with [`ClientAuth::expected_server`] set.
+    #[must_use]
+    pub const fn with_expected_server(mut self, expected_server: Option<[u8; 32]>) -> Self {
+        self.expected_server = expected_server;
+        self
+    }
+
+    /// Returns these options with [`ClientAuth::identity_seed`] set.
+    #[must_use]
+    pub const fn with_identity_seed(mut self, identity_seed: Option<[u8; 32]>) -> Self {
+        self.identity_seed = identity_seed;
+        self
+    }
+
+    /// Returns these options with [`ClientAuth::spectator`] set.
+    #[must_use]
+    pub const fn with_spectator(mut self, spectator: bool) -> Self {
+        self.spectator = spectator;
+        self
     }
 }
 
@@ -1083,43 +1116,6 @@ impl NetClient {
             self.events.push_back(event);
         }
     }
-}
-
-/// Helper for tools/tests: encode a packet with an arbitrary payload.
-///
-/// # Errors
-/// Returns a wire error when the payload is too large.
-pub fn encode_raw(header: &Header, payload: &[u8]) -> Result<Vec<u8>, crate::protocol::WireError> {
-    let mut out = Vec::new();
-    encode_packet(header, payload, &mut out)?;
-    Ok(out)
-}
-
-/// Helper for tools/tests: decode a datagram.
-pub fn decode_raw(data: &[u8]) -> Result<(Header, Vec<u8>), crate::protocol::WireError> {
-    let (header, payload) = decode_packet(data)?;
-    Ok((header, payload.to_vec()))
-}
-
-/// Helper for tools/tests: decode a handshake response.
-pub fn decode_welcome_payload(
-    payload: &[u8],
-) -> Result<crate::protocol::Welcome, crate::protocol::WireError> {
-    decode_welcome(payload)
-}
-
-/// Helper for tools/tests: decode a handshake request.
-pub fn decode_hello_payload(
-    payload: &[u8],
-) -> Result<crate::protocol::Hello, crate::protocol::WireError> {
-    decode_hello(payload)
-}
-
-/// Helper for tools/tests: decode a snapshot payload.
-pub fn decode_snapshot_payload(
-    payload: &[u8],
-) -> Result<SnapshotDelta, crate::protocol::WireError> {
-    decode_snapshot(payload)
 }
 
 #[cfg(test)]

@@ -32,22 +32,21 @@ fn dense_net_ids_handle_generation_reuse() {
 
 #[test]
 fn extension_systems_run_in_order_after_tick() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 1,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(1),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 0,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(1)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(1))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(0)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let order = Arc::new(Mutex::new(Vec::new()));
     let first = Arc::clone(&order);
     let second = Arc::clone(&order);
@@ -72,22 +71,21 @@ fn extension_systems_run_in_order_after_tick() {
 
 #[test]
 fn extension_systems_see_every_server_phase() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 2,
-        results_ticks: 2,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(1),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 0,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(2)
+        .with_results_ticks(2)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(1))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(0)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
     let mut server = NetServer::bind(config)
@@ -107,22 +105,21 @@ fn extension_systems_see_every_server_phase() {
 
 #[test]
 fn client_identity_keys_rotate_and_revoke() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 1,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(1),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 0,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(1)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(1))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(0)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let old = [3u8; 32];
     let new = [4u8; 32];
@@ -141,22 +138,21 @@ fn client_identity_keys_rotate_and_revoke() {
 
 #[test]
 fn rotation_selects_the_next_pack_when_the_lobby_is_empty() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 1,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(1),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 0,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(1)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(1))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(0)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content");
     let mut server = NetServer::bind(config).expect("bind");
     server.watch_rotation(vec![root.join("aram.toml"), root.join("1v1-mid.toml")]);
@@ -187,31 +183,19 @@ fn event_visibility_requires_an_observed_source_or_target() {
     };
     let hidden = RawEvent::visible_to(&raw, moba_game::Team::Blue, false, &[]);
     assert!(!hidden, "hidden enemy cast must not leak");
-    let unit = moba_sim::ObservedUnit {
-        entity: source,
-        kind: UnitKind::Hero,
-        team: moba_game::Team::Red,
-        position: moba_core::FixVec2::from_ints(100, 100),
-        health: 500,
-        max_health: 600,
-        mana: 200,
-        max_mana: 300,
-        dead: false,
-        hero_slot: Some(6),
-        hero_pick: 0,
-        cooldowns: [0; 3],
-        level: 1,
-        xp: 0,
-        gold: 0,
-        items: [0xFF; 6],
-        shielded: false,
-        slowed: false,
-        rooted: false,
-        silenced: false,
-        burning: false,
-        hasted: false,
-        status_bits: 0,
-    };
+    let mut unit = moba_sim::ObservedUnit::new(
+        source,
+        UnitKind::Hero,
+        moba_game::Team::Red,
+        moba_core::FixVec2::from_ints(100, 100),
+    );
+    unit.health = 500;
+    unit.max_health = 600;
+    unit.mana = 200;
+    unit.max_mana = 300;
+    unit.hero_slot = Some(6);
+    unit.hero_pick = 0;
+    unit.level = 1;
     assert!(RawEvent::visible_to(
         &raw,
         moba_game::Team::Blue,
@@ -238,22 +222,21 @@ fn event_visibility_requires_an_observed_source_or_target() {
 
 #[test]
 fn reload_team_size_reassigns_connected_slots() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let mut content = GameContent::default();
     content.rules.team_size = 1;
@@ -291,22 +274,21 @@ fn reload_team_size_reassigns_connected_slots() {
 
 #[test]
 fn event_buffers_reuse_capacity_between_snapshots() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.phase = Phase::Playing;
     let addr = server.local_addr().expect("addr");
@@ -335,22 +317,21 @@ fn event_buffers_reuse_capacity_between_snapshots() {
 
 #[test]
 fn match_flow_transitions_and_resets() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 2,
-        results_ticks: 3,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(2)
+        .with_results_ticks(3)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
 
@@ -401,22 +382,21 @@ fn drawn_match_reaches_results_and_reports_a_draw() {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
     ));
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 3,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(3)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.set_results_log(path.clone());
     server.phase = Phase::Playing;
@@ -491,22 +471,21 @@ cost = 1
 "#,
     )
     .expect("seed content");
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.watch_content(path.clone());
     std::thread::sleep(Duration::from_millis(20));
@@ -539,22 +518,21 @@ fn content_reload_is_deferred_while_playing() {
             .map_or(0, |duration| duration.as_nanos())
     ));
     std::fs::write(&path, "[[items]]\nname = \"Live\"\ncost = 1\n").expect("seed");
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let content = moba_game::load_content_file(&path).expect("load seeded content");
     let mut server = NetServer::bind_with_content(config, Arc::new(content)).expect("bind");
     server.watch_content(path.clone());
@@ -585,11 +563,9 @@ fn rate_limiter_enforces_burst_and_refill() {
 
 #[test]
 fn hello_rejects_are_never_sealed_with_the_address_owners_key() {
-    let mut server = NetServer::bind(ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        ..ServerConfig::default()
-    })
-    .expect("bind");
+    let mut server =
+        NetServer::bind(ServerConfig::default().with_bind("127.0.0.1:0".parse().expect("address")))
+            .expect("bind");
     let victim = std::net::UdpSocket::bind("127.0.0.1:0").expect("victim socket");
     victim
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -611,22 +587,21 @@ fn hello_rejects_are_never_sealed_with_the_address_owners_key() {
 
 #[test]
 fn client_challenges_are_address_bound_and_expire() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let first: SocketAddr = "127.0.0.1:6100".parse().expect("addr");
     let second: SocketAddr = "127.0.0.1:6101".parse().expect("addr");
@@ -654,22 +629,21 @@ fn client_challenges_are_address_bound_and_expire() {
 
 #[test]
 fn run_until_observes_shutdown_flag() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let shutdown = std::sync::atomic::AtomicBool::new(true);
     server
@@ -687,22 +661,21 @@ fn results_log_appends_once_per_match() {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
     ));
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(4)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.set_results_log(path.clone());
     server.write_result_log();
@@ -774,22 +747,21 @@ fn recorded_bot_ticks_replay_deterministically() {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
     ));
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_millis(100),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: Some(replay_path.clone()),
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_millis(100))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(Some(replay_path.clone()))
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.phase = Phase::Playing;
     for _ in 0..60 {
@@ -805,31 +777,13 @@ fn recorded_bot_ticks_replay_deterministically() {
 }
 
 fn observed(entity: moba_ecs::Entity, team: moba_game::Team) -> moba_sim::ObservedUnit {
-    moba_sim::ObservedUnit {
-        entity,
-        kind: UnitKind::Hero,
-        team,
-        position: moba_core::FixVec2::ZERO,
-        health: 100,
-        max_health: 100,
-        mana: 0,
-        max_mana: 0,
-        dead: false,
-        hero_slot: None,
-        hero_pick: 0,
-        cooldowns: [0; 3],
-        level: 1,
-        xp: 0,
-        gold: 0,
-        items: [0xFF; 6],
-        shielded: false,
-        slowed: false,
-        rooted: false,
-        silenced: false,
-        burning: false,
-        hasted: false,
-        status_bits: 0,
-    }
+    let mut unit =
+        moba_sim::ObservedUnit::new(entity, UnitKind::Hero, team, moba_core::FixVec2::ZERO);
+    unit.health = 100;
+    unit.max_health = 100;
+    unit.hero_pick = 0;
+    unit.level = 1;
+    unit
 }
 
 #[test]
@@ -876,22 +830,21 @@ fn slots_map_to_teams_for_every_mode_size() {
 
 #[test]
 fn connected_clients_receive_rotation_updates() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let addr = server.local_addr().expect("addr");
     server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
@@ -911,22 +864,21 @@ fn connected_clients_receive_rotation_updates() {
 
 #[test]
 fn content_ack_clears_matching_retry_only() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let addr = server.local_addr().expect("addr");
     server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
@@ -965,22 +917,21 @@ fn content_ack_clears_matching_retry_only() {
 
 #[test]
 fn content_update_retry_clears_on_match_reset() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.broadcast_content_update();
     assert!(server.content_update_retry.is_some());
@@ -1020,22 +971,21 @@ fn test_client(addr: SocketAddr, slot: u8, team: moba_game::Team) -> ClientConn 
 
 #[test]
 fn broadcast_resets_and_retries_for_a_connected_client() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     let addr = server.local_addr().expect("addr");
     server.clients[0] = Some(test_client(addr, 0, moba_game::Team::Blue));
@@ -1060,22 +1010,21 @@ impl moba_sim::BotPolicy for CountingPolicy {
 
 #[test]
 fn bot_policy_is_reapplied_after_rematch() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let policy_calls = Arc::clone(&calls);
     let mut server = NetServer::bind(config)
@@ -1093,22 +1042,21 @@ fn bot_policy_is_reapplied_after_rematch() {
 
 #[test]
 fn named_bot_policies_can_be_registered_and_selected() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let policy_calls = Arc::clone(&calls);
     let mut server = NetServer::bind(config).expect("bind");
@@ -1129,22 +1077,21 @@ fn named_bot_policies_can_be_registered_and_selected() {
 
 #[test]
 fn snapshot_send_allocations_stay_bounded_with_events() {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 10,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("address"))
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(10)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(2))
+        .with_pre_shared_key(None)
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("bind");
     server.phase = Phase::Playing;
     let addr = server.local_addr().expect("addr");
@@ -1192,11 +1139,9 @@ fn shared_reload_retries_until_occupied_slots_fit() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("pack.toml");
     std::fs::write(&path, "[[items]]\nname = \"First\"\ncost = 1\n").expect("seed pack");
-    let mut server = NetServer::bind(ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("address"),
-        ..ServerConfig::default()
-    })
-    .expect("bind");
+    let mut server =
+        NetServer::bind(ServerConfig::default().with_bind("127.0.0.1:0".parse().expect("address")))
+            .expect("bind");
     let watch = Arc::new(crate::host::ContentWatch::new(path.clone(), false, None));
     server.follow_content(Arc::clone(&watch));
     let addr = server.local_addr().expect("addr");

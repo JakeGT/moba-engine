@@ -169,16 +169,12 @@ fn main() {
         );
     }
 
-    let template = ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("bind address"),
-        countdown_ticks: 0,
-        results_ticks: 0,
-        max_clients: options.clients,
-        // One host serves every client from loopback; per-address limits stay meaningful,
-        // the global per-match budget must cover ten clients.
-        max_total_packets_per_second: 4_000,
-        ..ServerConfig::default()
-    };
+    let template = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().expect("bind address"))
+        .with_countdown_ticks(0)
+        .with_results_ticks(0)
+        .with_max_clients(options.clients)
+        .with_max_total_packets_per_second(4_000);
     let content = Arc::new(moba_game::GameContent::default());
     let mut host = MatchHost::bind(&template, &content, options.matches, options.workers)
         .unwrap_or_else(|error| fail(&format!("cannot bind matches: {error}")));

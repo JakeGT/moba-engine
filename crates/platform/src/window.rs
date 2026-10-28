@@ -11,6 +11,7 @@ use winit::event_loop::ActiveEventLoop;
 
 /// Configuration for the main game window.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct WindowConfig {
     /// Window title.
     pub title: String,
@@ -52,8 +53,53 @@ impl Default for WindowConfig {
     }
 }
 
+impl WindowConfig {
+    /// Returns this config with [`WindowConfig::title`] set.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = title.into();
+        self
+    }
+
+    /// Returns this config with [`WindowConfig::width`] set.
+    #[must_use]
+    pub const fn with_width(mut self, width: u32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// Returns this config with [`WindowConfig::height`] set.
+    #[must_use]
+    pub const fn with_height(mut self, height: u32) -> Self {
+        self.height = height;
+        self
+    }
+
+    /// Returns this config with [`WindowConfig::resizable`] set.
+    #[must_use]
+    pub const fn with_resizable(mut self, resizable: bool) -> Self {
+        self.resizable = resizable;
+        self
+    }
+
+    /// Returns this config with [`WindowConfig::tick_rate`] set.
+    #[must_use]
+    pub const fn with_tick_rate(mut self, tick_rate: u32) -> Self {
+        self.tick_rate = tick_rate;
+        self
+    }
+
+    /// Returns this config with [`WindowConfig::max_frame_rate`] set.
+    #[must_use]
+    pub const fn with_max_frame_rate(mut self, max_frame_rate: u32) -> Self {
+        self.max_frame_rate = max_frame_rate;
+        self
+    }
+}
+
 /// Errors raised while creating or running the platform layer.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PlatformError {
     /// The windowing event loop could not be created or run.
     EventLoop(winit::error::EventLoopError),

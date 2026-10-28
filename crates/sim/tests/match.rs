@@ -3,11 +3,11 @@
 use moba_sim::{SimConfig, Simulation, TickInputs, UnitKind};
 
 fn idle_sim() -> Simulation {
-    Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    })
+    Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    )
 }
 
 #[test]

@@ -9,22 +9,21 @@ use moba_sim::SimConfig;
 const KEY: [u8; 32] = [0x33; 32];
 
 fn spawn_server(seconds: u64) -> (SocketAddr, std::thread::JoinHandle<()>) {
-    let config = ServerConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 0,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(6),
-        pre_shared_key: Some(KEY),
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    };
+    let config = ServerConfig::default()
+        .with_bind("127.0.0.1:0".parse().unwrap())
+        .with_sim(SimConfig::default())
+        .with_snapshot_interval(1)
+        .with_max_clients(10)
+        .with_countdown_ticks(0)
+        .with_results_ticks(0)
+        .with_client_timeout(Duration::from_secs(3))
+        .with_reconnect_grace(Duration::from_secs(6))
+        .with_pre_shared_key(Some(KEY))
+        .with_record(None)
+        .with_max_spectators(8)
+        .with_max_packets_per_second(120)
+        .with_max_total_packets_per_second(2_000)
+        .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("server binds");
     let addr = server.local_addr().expect("local addr");
     let handle = std::thread::spawn(move || {

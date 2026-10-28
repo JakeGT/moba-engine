@@ -57,6 +57,7 @@ const _: () = {
 
 /// One runtime item definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireItem {
     /// Name bytes, padded with zeroes.
     pub name: [u8; WIRE_ITEM_NAME],
@@ -117,6 +118,7 @@ impl WireItem {
 
 /// One runtime hero definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireHero {
     /// Name bytes, padded with zeroes.
     pub name: [u8; WIRE_HERO_NAME],
@@ -210,6 +212,7 @@ impl WireHero {
 
 /// One area/on-hit effect carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireAreaEffect {
     /// 0 none, 1 damage, 2 apply-modifier.
     pub kind: u8,
@@ -227,6 +230,7 @@ pub struct WireAreaEffect {
 
 /// One top-level ability effect carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireEffect {
     /// 0 none, 1 damage, 2 heal, 3 modifier, 4 displace, 5 projectile, 6 area, 7 zone.
     pub kind: u8,
@@ -254,6 +258,7 @@ pub struct WireEffect {
 
 /// One runtime ability definition carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireAbility {
     /// Name bytes, padded with zeroes.
     pub name: [u8; WIRE_ABILITY_NAME],
@@ -305,6 +310,7 @@ impl WireAbility {
 
 /// One lane path carried in the handshake map./// One lane path carried in the handshake map.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireLane {
     /// Name bytes, padded with zeroes.
     pub name: [u8; WIRE_LANE_NAME],
@@ -338,6 +344,7 @@ impl WireLane {
 
 /// One vision-blocking wall segment.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireWall {
     /// First endpoint.
     pub a: [i16; 2],
@@ -347,6 +354,7 @@ pub struct WireWall {
 
 /// Minimap geometry carried in the handshake.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireMap {
     /// Display name bytes, padded with zeroes.
     pub name: [u8; WIRE_MANIFEST_FIELD],
@@ -380,6 +388,7 @@ pub struct WireMap {
 
 /// One placed structure carried in the handshake map.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireStructure {
     /// Team index (blue 0, red 1).
     pub team: u8,
@@ -432,6 +441,7 @@ impl Default for WireMap {
 
 /// One modifier definition carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireModifier {
     /// Name bytes, padded with zeroes.
     pub name: [u8; WIRE_MODIFIER_NAME],
@@ -465,6 +475,7 @@ impl WireModifier {
 /// Runtime minion stats carried in the handshake.
 #[allow(missing_docs)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireMinionStats {
     pub max_health: i32,
     pub attack_damage: i32,
@@ -479,6 +490,7 @@ pub struct WireMinionStats {
 /// Runtime structure stats carried in the handshake.
 #[allow(missing_docs)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireStructureStats {
     pub max_health: i32,
     pub attack_damage: i32,
@@ -491,6 +503,7 @@ pub struct WireStructureStats {
 
 /// XP and gold granted to the killer of one unit kind.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireUnitRewards {
     /// XP granted.
     pub xp: u32,
@@ -500,6 +513,7 @@ pub struct WireUnitRewards {
 
 /// Kill rewards per unit kind carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireRewards {
     /// Melee minion reward.
     pub melee_minion: WireUnitRewards,
@@ -515,6 +529,7 @@ pub struct WireRewards {
 
 /// Tunable match rules carried in the handshake.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireRules {
     /// Melee minion stats.
     pub melee_minion: WireMinionStats,
@@ -574,6 +589,7 @@ pub struct WireRules {
 
 /// Complete runtime content catalogue.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WireCatalog {
     /// Manifest name bytes.
     pub manifest_name: [u8; WIRE_MANIFEST_FIELD],

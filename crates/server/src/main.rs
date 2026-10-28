@@ -245,11 +245,7 @@ fn main() {
         }
     }
 
-    let config = SimConfig {
-        seed,
-        bot_mask: 0x03FF,
-        ..SimConfig::default()
-    };
+    let config = SimConfig::default().with_seed(seed).with_bot_mask(0x03FF);
 
     if content_publisher.is_some() {
         // A pinned publisher only has meaning with attestation enforcement.
@@ -285,22 +281,23 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        let server_config = ServerConfig {
-            bind,
-            sim: config,
-            snapshot_interval: 1,
-            max_clients: 10,
-            countdown_ticks: u32::try_from(countdown_secs.saturating_mul(30)).unwrap_or(u32::MAX),
-            results_ticks: u32::try_from(results_secs.saturating_mul(30)).unwrap_or(u32::MAX),
-            client_timeout: Duration::from_secs(5),
-            reconnect_grace: Duration::from_secs(60),
-            pre_shared_key: secret,
-            record,
-            max_spectators: 8,
-            max_packets_per_second,
-            max_total_packets_per_second,
-            require_ready,
-        };
+        let server_config = ServerConfig::default()
+            .with_bind(bind)
+            .with_sim(config)
+            .with_snapshot_interval(1)
+            .with_max_clients(10)
+            .with_countdown_ticks(
+                u32::try_from(countdown_secs.saturating_mul(30)).unwrap_or(u32::MAX),
+            )
+            .with_results_ticks(u32::try_from(results_secs.saturating_mul(30)).unwrap_or(u32::MAX))
+            .with_client_timeout(Duration::from_secs(5))
+            .with_reconnect_grace(Duration::from_secs(60))
+            .with_pre_shared_key(secret)
+            .with_record(record)
+            .with_max_spectators(8)
+            .with_max_packets_per_second(max_packets_per_second)
+            .with_max_total_packets_per_second(max_total_packets_per_second)
+            .with_require_ready(require_ready);
         if let Some(content) = content.as_ref() {
             eprintln!(
                 "content: {} {} ({} items, hash {:#018x})",
@@ -543,7 +540,8 @@ fn main() {
                 UnitKind::Tower => towers += 1,
                 UnitKind::Nexus => nexuses += 1,
                 UnitKind::MeleeMinion | UnitKind::RangedMinion => minions += 1,
-                UnitKind::Hero => {}
+                // Heroes, and any future (`#[non_exhaustive]`) unit kind, are not tallied.
+                _ => {}
             }
         }
     }

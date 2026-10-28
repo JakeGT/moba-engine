@@ -49,11 +49,11 @@ mod tests {
     #[cfg(feature = "sim")]
     #[test]
     fn headless_embedding_smoke() {
-        let mut simulation = crate::sim::Simulation::new(crate::sim::SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            ..crate::sim::SimConfig::default()
-        });
+        let mut simulation = crate::sim::Simulation::new(
+            crate::sim::SimConfig::default()
+                .with_bot_mask(0)
+                .with_spawn_waves(false),
+        );
         let mut inputs = crate::sim::TickInputs::default();
         inputs.set(
             0,

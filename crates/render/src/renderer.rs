@@ -70,6 +70,7 @@ const CAMERA_UNIFORM_SIZE: u64 = core::mem::size_of::<CameraUniform>() as u64;
 
 /// Renderer configuration.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RenderConfig {
     /// Validation layer policy.
     pub validation: ValidationMode,
@@ -104,6 +105,64 @@ impl Default for RenderConfig {
             max_bones: DEFAULT_MAX_BONES,
             skinning: true,
         }
+    }
+}
+
+impl RenderConfig {
+    /// Returns this config with [`RenderConfig::validation`] set.
+    #[must_use]
+    pub const fn with_validation(mut self, validation: ValidationMode) -> Self {
+        self.validation = validation;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::max_instances`] set.
+    #[must_use]
+    pub const fn with_max_instances(mut self, max_instances: usize) -> Self {
+        self.max_instances = max_instances;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::vsync`] set.
+    #[must_use]
+    pub const fn with_vsync(mut self, vsync: bool) -> Self {
+        self.vsync = vsync;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::clear_color`] set.
+    #[must_use]
+    pub const fn with_clear_color(mut self, clear_color: [f32; 4]) -> Self {
+        self.clear_color = clear_color;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::max_ui_vertices`] set.
+    #[must_use]
+    pub const fn with_max_ui_vertices(mut self, max_ui_vertices: usize) -> Self {
+        self.max_ui_vertices = max_ui_vertices;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::ui_scale`] set.
+    #[must_use]
+    pub const fn with_ui_scale(mut self, ui_scale: f32) -> Self {
+        self.ui_scale = ui_scale;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::max_bones`] set.
+    #[must_use]
+    pub const fn with_max_bones(mut self, max_bones: usize) -> Self {
+        self.max_bones = max_bones;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::skinning`] set.
+    #[must_use]
+    pub const fn with_skinning(mut self, skinning: bool) -> Self {
+        self.skinning = skinning;
+        self
     }
 }
 
@@ -1379,6 +1438,7 @@ impl Renderer {
 
 /// A captured frame, in tightly packed RGBA8.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CapturedFrame {
     /// Width in pixels.
     pub width: u32,

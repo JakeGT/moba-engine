@@ -325,6 +325,7 @@ impl TickHistogram {
 
 /// Timing for one worker thread.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct WorkerStats {
     /// Matches owned by this worker.
     pub matches: usize,
@@ -362,6 +363,7 @@ impl WorkerStats {
 
 /// Result of a host run.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct HostReport {
     /// One entry per worker thread.
     pub workers: Vec<WorkerStats>,
@@ -794,11 +796,9 @@ mod tests {
 
     #[test]
     fn host_runs_matches_concurrently_and_reports() {
-        let template = ServerConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            countdown_ticks: 0,
-            ..ServerConfig::default()
-        };
+        let template = ServerConfig::default()
+            .with_bind("127.0.0.1:0".parse().unwrap())
+            .with_countdown_ticks(0);
         let content = Arc::new(GameContent::default());
         let mut host = MatchHost::bind(&template, &content, 4, 2).unwrap();
         assert_eq!(host.len(), 4);
@@ -836,10 +836,7 @@ mod tests {
 
     #[test]
     fn matches_are_split_evenly_across_workers() {
-        let template = ServerConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            ..ServerConfig::default()
-        };
+        let template = ServerConfig::default().with_bind("127.0.0.1:0".parse().unwrap());
         let content = Arc::new(GameContent::default());
         let mut host = MatchHost::bind(&template, &content, 5, 2).unwrap();
         let shutdown = AtomicBool::new(false);
@@ -851,10 +848,7 @@ mod tests {
 
     #[test]
     fn shutdown_flag_stops_the_host() {
-        let template = ServerConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            ..ServerConfig::default()
-        };
+        let template = ServerConfig::default().with_bind("127.0.0.1:0".parse().unwrap());
         let content = Arc::new(GameContent::default());
         let mut host = MatchHost::bind(&template, &content, 2, 8).unwrap();
         assert_eq!(host.workers(), 2, "workers clamp to the match count");
@@ -901,13 +895,11 @@ mod tests {
     fn flooded_match_is_capped_and_neighbours_keep_running() {
         // Small budgets, so junk is charged even where the OS delivers only a fraction of the
         // flood (macOS's default UDP receive buffer drops most of it).
-        let template = ServerConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            countdown_ticks: 0,
-            max_packets_per_second: 10,
-            max_total_packets_per_second: 40,
-            ..ServerConfig::default()
-        };
+        let template = ServerConfig::default()
+            .with_bind("127.0.0.1:0".parse().unwrap())
+            .with_countdown_ticks(0)
+            .with_max_packets_per_second(10)
+            .with_max_total_packets_per_second(40);
         let content = Arc::new(GameContent::default());
         let mut host = MatchHost::bind(&template, &content, 2, 1).unwrap();
         host.set_poll_budget(8, Duration::from_micros(200));
@@ -967,10 +959,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pack.toml");
         std::fs::write(&path, "[[items]]\nname = \"First\"\ncost = 1\n").unwrap();
-        let template = ServerConfig {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            ..ServerConfig::default()
-        };
+        let template = ServerConfig::default().with_bind("127.0.0.1:0".parse().unwrap());
         let content = Arc::new(GameContent::default());
         let mut host = MatchHost::bind(&template, &content, 3, 1).unwrap();
         let watch = Arc::new(ContentWatch::new(path.clone(), false, None));

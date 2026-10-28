@@ -64,11 +64,9 @@ fn observe_views(c: &mut Criterion) {
 }
 
 fn no_wave_tick(c: &mut Criterion) {
-    let config = SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    };
+    let config = SimConfig::default()
+        .with_bot_mask(0)
+        .with_spawn_waves(false);
     c.bench_function("sim/tick_idle_300_ticks", |b| {
         b.iter_batched(
             || Simulation::new(config),

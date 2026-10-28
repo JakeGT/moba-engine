@@ -9,6 +9,7 @@ use super::{WireError, dequantize_position, quantize_position};
 /// High-level match phase carried in snapshots.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum MatchPhase {
     /// Waiting for players; the simulation is paused.
     Lobby = 0,
@@ -224,6 +225,7 @@ impl NetEntity {
 
 /// Changed fields of one entity.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NetUpdate {
     /// Entity id.
     pub net_id: NetId,
@@ -354,6 +356,7 @@ impl SnapshotDelta {
 
 /// Client snapshot store. Entities are sorted by id.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SnapshotState {
     /// Snapshot sequence this state corresponds to.
     pub seq: u32,

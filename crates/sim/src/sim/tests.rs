@@ -12,12 +12,12 @@ use crate::components::{
 };
 
 fn idle(picks: [u8; MAX_PLAYERS]) -> Simulation {
-    Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        hero_picks: picks,
-        ..SimConfig::default()
-    })
+    Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false)
+            .with_hero_picks(picks),
+    )
 }
 
 fn area_status(
@@ -103,11 +103,9 @@ fn score_limit_one() -> Simulation {
     let mut content = GameContent::default();
     content.rules.score_limit = 1;
     Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
         Arc::new(content),
     )
 }
@@ -304,11 +302,7 @@ fn custom_minion_stats_affect_spawned_minions() {
     let mut content = moba_game::GameContent::default();
     content.rules.melee_minion.max_health = 77;
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: true,
-            ..SimConfig::default()
-        },
+        SimConfig::default().with_bot_mask(0).with_spawn_waves(true),
         std::sync::Arc::new(content),
     );
     for _ in 0..32 {
@@ -329,11 +323,9 @@ fn team_size_one_spawns_only_two_heroes() {
     content.rules.team_size = 1;
     content.rules.bot_fill = false;
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0x3,
-            spawn_waves: false,
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0x3)
+            .with_spawn_waves(false),
         std::sync::Arc::new(content),
     );
     let heroes = sim
@@ -356,11 +348,9 @@ fn custom_respawn_rule_controls_death_timer() {
     content.rules.hero_respawn_ticks = 5;
     content.rules.respawn_per_level = 0;
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
         std::sync::Arc::new(content),
     );
     let hero = sim.hero_entities[0];
@@ -407,12 +397,10 @@ fn arcing_projectile_event_carries_arc() {
     };
     let picks = [0; 10];
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            hero_picks: picks,
-            bot_mask: 0,
-            spawn_waves: false,
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_hero_picks(picks)
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -451,12 +439,10 @@ fn a_cast_emits_exactly_one_cast_event() {
         }),
     };
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            hero_picks: [0; 10],
-            bot_mask: 0,
-            spawn_waves: false,
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_hero_picks([0; 10])
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -480,12 +466,10 @@ fn a_cast_emits_exactly_one_cast_event() {
 
 #[test]
 fn bot_mask_is_not_part_of_the_state_hash() {
-    let config = SimConfig {
-        hero_picks: [0; 10],
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    };
+    let config = SimConfig::default()
+        .with_hero_picks([0; 10])
+        .with_bot_mask(0)
+        .with_spawn_waves(false);
     let mut sim = Simulation::new(config);
     let before = sim.state_hash();
     sim.set_bot_mask(0x3FF);
@@ -1054,11 +1038,7 @@ fn state_hash_covers_combat_and_movement_fields() {
 #[test]
 fn seed_drives_bot_variation_and_scheduling_phase() {
     let run = |seed: u64| {
-        let mut sim = Simulation::new(SimConfig {
-            seed,
-            spawn_waves: false,
-            ..SimConfig::default()
-        });
+        let mut sim = Simulation::new(SimConfig::default().with_seed(seed).with_spawn_waves(false));
         let phase = sim.blue_first();
         let commands = format!("{:?}", sim.bot_inputs());
         (phase, commands)
@@ -1088,12 +1068,10 @@ fn data_only_root_on_hit_skillshot_applies_root() {
     let mut content = content;
     content.heroes[0].abilities = [u8::try_from(index).expect("id"), 1, 2];
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            hero_picks: [0; MAX_PLAYERS],
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false)
+            .with_hero_picks([0; MAX_PLAYERS]),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -1126,12 +1104,10 @@ fn data_only_burn_zone_periodically_damages() {
     let mut content = content;
     content.heroes[0].abilities = [u8::try_from(index).expect("id"), 1, 2];
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            hero_picks: [0; MAX_PLAYERS],
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false)
+            .with_hero_picks([0; MAX_PLAYERS]),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -1197,10 +1173,7 @@ fn state_hash_covers_modifiers() {
 fn state_hash_tracks_burn_source_and_type() {
     use moba_game::GameContent;
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            ..SimConfig::default()
-        },
+        SimConfig::default().with_bot_mask(0),
         std::sync::Arc::new(GameContent::default()),
     );
     let blue = sim.hero_entities[0];
@@ -1242,10 +1215,7 @@ fn burn_ability_deals_damage_over_time_and_expires() {
         ),
     };
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            ..SimConfig::default()
-        },
+        SimConfig::default().with_bot_mask(0),
         std::sync::Arc::new(content),
     );
     let red = sim.hero_entities[5];
@@ -1284,10 +1254,7 @@ fn silence_ability_blocks_casting_and_expires() {
         ),
     };
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            ..SimConfig::default()
-        },
+        SimConfig::default().with_bot_mask(0),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -1361,10 +1328,7 @@ fn root_blocks_dash_but_not_after_expiry() {
     };
     content.heroes[0].abilities = [0, 1, 2];
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            ..SimConfig::default()
-        },
+        SimConfig::default().with_bot_mask(0),
         std::sync::Arc::new(content),
     );
     let red = sim.hero_entities[5];
@@ -1504,12 +1468,10 @@ fn speed_fixture(haste_ticks: u32, slow_ticks: u32) -> (Simulation, Entity, Enti
         hero.abilities = [0, 1, 2];
     }
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            hero_picks: [0; MAX_PLAYERS],
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false)
+            .with_hero_picks([0; MAX_PLAYERS]),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -1608,10 +1570,7 @@ fn haste_ability_boosts_speed_and_expires() {
         ),
     };
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            ..SimConfig::default()
-        },
+        SimConfig::default().with_bot_mask(0),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
@@ -1833,12 +1792,10 @@ fn point_abilities_reject_out_of_range_targets() {
             hero.abilities = [0, 1, 2];
         }
         let mut sim = Simulation::new_with_content(
-            SimConfig {
-                bot_mask: 0,
-                spawn_waves: false,
-                hero_picks: [0; MAX_PLAYERS],
-                ..SimConfig::default()
-            },
+            SimConfig::default()
+                .with_bot_mask(0)
+                .with_spawn_waves(false)
+                .with_hero_picks([0; MAX_PLAYERS]),
             std::sync::Arc::new(content),
         );
         let blue = sim.hero_entities[0];
@@ -1898,12 +1855,10 @@ fn burst_is_centred_on_the_validated_target_point() {
         hero.abilities = [0, 1, 2];
     }
     let mut sim = Simulation::new_with_content(
-        SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            hero_picks: [0; MAX_PLAYERS],
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false)
+            .with_hero_picks([0; MAX_PLAYERS]),
         std::sync::Arc::new(content),
     );
     let blue = sim.hero_entities[0];
