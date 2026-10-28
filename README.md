@@ -23,9 +23,9 @@ spectator camera, status effects and runtime-content examples.
 |---|---|
 | Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, rules, levels/XP, gold, items and shop |
 | Networking | Custom UDP protocol (v40): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
-| Client | Vulkan 1.3 renderer with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
+| Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 416 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 429 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -56,11 +56,15 @@ rotate/zoom the spectator camera.
 **Settings:** copy `moba-settings.example.toml` to `moba-settings.toml` (or set
 `MOBA_SETTINGS=/path/to/file`). Bindings accept `W/A/S/D/Q/E/R/F/B/M/Space/Tab/Enter/Escape/
 Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_scale` is 0.5–3.0;
-`MOBA_UI_SCALE` overrides it for one run. `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
+`MOBA_UI_SCALE` overrides it for one run. `quality` (`low`/`medium`/`high`/`ultra`, default
+`high`) is the rendering quality tier; `MOBA_QUALITY` overrides it. Today it picks the HDR
+target format (Low uses the packed 32-bit format). `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
 (70–420), `attack_button` (`left`/`right`) and spectator camera keys are also configurable.
 `MOBA_SAVE_SETTINGS=1` writes defaults; `MOBA_RESET_SETTINGS=1` resets the file.
 `MOBA_FRAME_LOG=/tmp/frames.log MOBA_VSYNC=0` records raw frame intervals and writes
-p50/p95/p99/max on exit (see `docs/perf/0007-real-hardware.md`).
+p50/p95/p99/max on exit, plus per-pass GPU times from timestamp queries (`gpu_scene_*`,
+`gpu_composite_*`, `gpu_ui_*`, `gpu_total_*`; see `docs/perf/0007-real-hardware.md` and
+`docs/perf/0011-render-graph.md`).
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can

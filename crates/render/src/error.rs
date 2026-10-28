@@ -51,6 +51,8 @@ pub enum RenderError {
     /// GPU skinning is unavailable: disabled in [`RenderConfig`](crate::RenderConfig) or
     /// the skinned pipeline failed to build. Draw the static mesh instead.
     SkinningUnavailable,
+    /// The frame's render graph failed to compile (an internal invariant; ADR-0008).
+    RenderGraph(String),
 }
 
 impl fmt::Display for RenderError {
@@ -80,12 +82,13 @@ impl fmt::Display for RenderError {
             Self::TooManyMeshes => write!(
                 f,
                 "mesh limit reached ({} including the built-in cube)",
-                crate::renderer::MAX_MESHES
+                crate::passes::scene::MAX_MESHES
             ),
             Self::InvalidMesh => {
                 f.write_str("invalid mesh (empty, not triangles or index out of range)")
             }
             Self::SkinningUnavailable => f.write_str("GPU skinning is unavailable"),
+            Self::RenderGraph(reason) => write!(f, "render graph error: {reason}"),
         }
     }
 }

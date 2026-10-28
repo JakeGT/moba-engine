@@ -1,4 +1,4 @@
-//! Persisted client settings: key bindings and UI scale.
+//! Persisted client settings: key bindings, UI scale and rendering quality.
 
 use std::path::{Path, PathBuf};
 
@@ -143,6 +143,8 @@ impl Bindings {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
+    /// Rendering quality tier: `low`, `medium`, `high` or `ultra` (`MOBA_QUALITY` overrides).
+    pub(crate) quality: String,
     pub(crate) audio_volume: f32,
     pub(crate) audio_mute: bool,
     pub(crate) camera_sensitivity: f32,
@@ -154,6 +156,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ui_scale: 1.0,
+            quality: String::from(moba_render::QualityTier::default().name()),
             audio_volume: 0.7,
             audio_mute: false,
             camera_sensitivity: 1.0,
@@ -287,9 +290,22 @@ impl Settings {
         (bindings, warnings)
     }
 
-    /// Clamps numeric settings and reports corrections.
+    /// The configured rendering quality tier (validated by [`Self::sanitize`]).
+    #[must_use]
+    pub(crate) fn quality_tier(&self) -> moba_render::QualityTier {
+        moba_render::QualityTier::from_name(&self.quality).unwrap_or_default()
+    }
+
+    /// Clamps numeric settings, validates names and reports corrections.
     pub(crate) fn sanitize(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
+        if moba_render::QualityTier::from_name(&self.quality).is_none() {
+            warnings.push(format!(
+                "settings: unknown quality {:?} (low/medium/high/ultra); using high",
+                self.quality
+            ));
+            self.quality = String::from(moba_render::QualityTier::default().name());
+        }
         if !self.ui_scale.is_finite() {
             self.ui_scale = 1.0;
             warnings.push(String::from("settings: ui_scale reset"));
@@ -406,12 +422,17 @@ mod tests {
         let mut settings = Settings {
             camera_sensitivity: 99.0,
             camera_zoom: 1.0,
+            quality: String::from("epic"),
             ..Settings::default()
         };
         let warnings = settings.sanitize();
-        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings.len(), 3);
         assert_eq!(settings.camera_sensitivity, SENSITIVITY_MAX);
         assert_eq!(settings.camera_zoom, CAMERA_ZOOM_MIN);
+        assert_eq!(settings.quality_tier(), moba_render::QualityTier::High);
+        settings.quality = String::from("Low");
+        assert_eq!(settings.sanitize(), Vec::<String>::new());
+        assert_eq!(settings.quality_tier(), moba_render::QualityTier::Low);
 
         settings.controls.attack_button = String::from("right");
         let (bindings, warnings) = settings.bindings();

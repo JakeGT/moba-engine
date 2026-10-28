@@ -97,6 +97,34 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Render graph, HDR and tonemap (AAA roadmap R1a, ADR-0008/ADR-0009):** the frame is now a
+  small in-house render graph (`moba-render` `graph`). Passes declare image and buffer
+  accesses, and compiling the graph derives `vkCmdPipelineBarrier2` barriers and layout
+  transitions, pools transients with disjoint lifetimes, and culls passes whose outputs are
+  unused. The logic is pure and unit-tested headless. The graph is compiled once at creation
+  and recorded without allocating. The frame runs `scene` (terrain, units and skinned meshes
+  into an HDR target plus a sampled-capable depth buffer), then `composite` (exposure and an
+  AgX tonemap with a saturation look, into the swapchain), then `ui` (the HUD, not tonemapped),
+  plus `capture` for readbacks. The HDR target is `R16G16B16A16_SFLOAT`, or
+  `B10G11R11_UFLOAT_PACK32` on Low. Per-pass GPU timestamps come from one query pool per frame
+  in flight, created at init; devices without timestamps report `None`.
+  - **New public API (additive):** `QualityTier` (`Low`/`Medium`/`High`/`Ultra`,
+    `#[non_exhaustive]`), `RenderConfig::with_quality_tier` and `with_exposure`,
+    `Renderer::gpu_timings` (returns `GpuTimings`/`PassTiming`), `gpu_timing_supported`,
+    `quality_tier` and `hdr_format_name`, and `RenderError::RenderGraph`.
+  - **Client:** a `quality` setting (`low`/`medium`/`high`/`ultra`, default `high`) with a
+    `MOBA_QUALITY` override. `MOBA_FRAME_LOG` gains `gpu_scene`, `gpu_composite`, `gpu_ui`,
+    `gpu_total` and `gpu_span` p50/p95 columns, plus `quality=`/`hdr=`.
+  - **Golden images:** both fingerprints (`render-fingerprint.rgb`,
+    `render-network-fingerprint.rgb`) were **deliberately rebaselined** for the tonemap on
+    lavapipe, with validation and sync validation reporting 0 messages.
+  - **Cost:** RTX 5070 Ti at 1920×1080: +16–21 µs of GPU per frame, almost all of it the
+    fullscreen composite. Barriers between passes add under 1 µs. See
+    `docs/perf/0011-render-graph.md` for why the roadmap's ≤ 5 % relative criterion cannot hold
+    on a 13–30 µs frame.
+  - `renderer.rs` shrinks from 1,872 to about 900 lines; the pass code moves to
+    `crates/render/src/passes/`.
+  - No wire, replay, logic or content-hash change.
 - **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
 - **GPU skinning (#288, ADR-0007):** the `.glb` loader reads `JOINTS_0`/`WEIGHTS_0`, the skin (≤ 64 joints, inverse bind matrices) and one animation clip under the same untrusted-input caps (fuzzed); `Renderer::register_skinned_mesh` draws skinned instances with `skinned.vert`, a per-frame bone SSBO (set 1 binding 1, default 16 × 64 joints) and a `{first_bone, joint_count}` push constant on the shared pipeline layout. The client poses heroes from facing/gait/render tick with a preallocated bone pool (no new wire fields; over-budget heroes draw static); `MOBA_NO_SKINNING=1`, a missing skin or a failed pipeline fall back to the static mesh or the procedural rig. Ships the generated `content/models/sentinel-skinned.glb` and `content/sentinel-skinned-pack.toml`, which names it for Blade and Guardian through the pack's `model` field.
 - **Networked animated golden and frame cost (#289):** `MOBA_CAPTURE_TICK` captures a networked frame at a pinned match tick, and a `MOBA_SERVER=local` server lock-steps to the client, so the frame is byte-repeatable. The HUD hides FPS, ping and packet counters in capture mode. `render-golden.yml` gains a second fingerprint, `tests/golden/render-network-fingerprint.rgb`, with skinned heroes. Also adds `MOBA_WINDOW_SIZE`, a network-mode `MOBA_WARMUP_TICKS`, and frame-log `cpu_*`/`render_*`/`extent`/`gpu` fields. `MOBA_CAMERA` is now read once. Fixes the UI vertex upload reading back from write-combined memory, which cost about 7 ms per frame with the networked HUD. RTX 5070 Ti at 1920×1080 with 10 skinned heroes: p95 4.192 ms (display-paced), against 8.3–8.5 ms before.

@@ -1,10 +1,11 @@
-//! Swapchain creation, surface format selection and per-image depth buffers.
+//! Swapchain creation and surface format selection. Depth and HDR targets are render-graph
+//! transients ([`crate::targets`]), not per-image swapchain resources.
 
-use ash::{Device, Instance, khr, vk};
+use ash::{Device, khr, vk};
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
-use crate::resources::{GpuImage, Semaphore, create_image_view};
+use crate::resources::{Semaphore, create_image_view};
 
 /// Surface and swapchain state, recreated on resize.
 pub(crate) struct Swapchain {
@@ -15,11 +16,6 @@ pub(crate) struct Swapchain {
     pub(crate) extent: vk::Extent2D,
     pub(crate) images: Vec<vk::Image>,
     pub(crate) views: Vec<vk::ImageView>,
-    pub(crate) depth_images: Vec<GpuImage>,
-    pub(crate) depth_format: vk::Format,
-    pub(crate) depth_aspect: vk::ImageAspectFlags,
-    pub(crate) color_layouts: Vec<vk::ImageLayout>,
-    pub(crate) depth_layouts: Vec<vk::ImageLayout>,
     pub(crate) render_finished: Vec<Semaphore>,
     pub(crate) transfer_src: bool,
 }
@@ -121,13 +117,8 @@ impl Swapchain {
         };
 
         let mut views = Vec::with_capacity(images.len());
-        let mut depth_images = Vec::with_capacity(images.len());
-        let mut color_layouts = Vec::with_capacity(images.len());
-        let mut depth_layouts = Vec::with_capacity(images.len());
         let mut render_finished = Vec::with_capacity(images.len());
-        let (depth_format, depth_aspect) =
-            choose_depth_format(&instance_context.instance, device_context);
-        for (index, image) in images.iter().enumerate() {
+        for image in &images {
             let view = match create_image_view(
                 &device_context.device,
                 *image,
@@ -141,22 +132,6 @@ impl Swapchain {
                 }
             };
             views.push(view);
-            let depth = match GpuImage::new(
-                device_context.device.clone(),
-                device_context.allocator(),
-                &format!("depth-{index}"),
-                extent,
-                depth_format,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-                depth_aspect,
-            ) {
-                Ok(image) => image,
-                Err(error) => {
-                    destroy_partial(&device_context.device, &loader, handle, &views);
-                    return Err(error);
-                }
-            };
-            depth_images.push(depth);
             let semaphore = match Semaphore::new(device_context.device.clone()) {
                 Ok(semaphore) => semaphore,
                 Err(error) => {
@@ -164,8 +139,6 @@ impl Swapchain {
                     return Err(error);
                 }
             };
-            color_layouts.push(vk::ImageLayout::UNDEFINED);
-            depth_layouts.push(vk::ImageLayout::UNDEFINED);
             render_finished.push(semaphore);
         }
 
@@ -177,11 +150,6 @@ impl Swapchain {
             extent,
             images,
             views,
-            depth_images,
-            depth_format,
-            depth_aspect,
-            color_layouts,
-            depth_layouts,
             render_finished,
             transfer_src,
         })
@@ -327,32 +295,4 @@ fn destroy_partial(
     }
     // SAFETY: the swapchain was created by this loader and has no remaining views.
     unsafe { loader.destroy_swapchain(handle, None) };
-}
-
-fn choose_depth_format(
-    instance: &Instance,
-    device: &DeviceContext,
-) -> (vk::Format, vk::ImageAspectFlags) {
-    let candidates = [
-        (vk::Format::D32_SFLOAT, vk::ImageAspectFlags::DEPTH),
-        (
-            vk::Format::D24_UNORM_S8_UINT,
-            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
-        ),
-        (vk::Format::D16_UNORM, vk::ImageAspectFlags::DEPTH),
-    ];
-    for (format, aspect) in candidates {
-        // SAFETY: the physical device belongs to this instance.
-        let properties =
-            unsafe { instance.get_physical_device_format_properties(device.physical, format) };
-        if properties
-            .optimal_tiling_features
-            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
-        {
-            return (format, aspect);
-        }
-    }
-    // D16_UNORM is mandatory for depth attachments on conformant implementations; this is
-    // unreachable on real drivers but keeps the failure explicit.
-    (vk::Format::D32_SFLOAT, vk::ImageAspectFlags::DEPTH)
 }

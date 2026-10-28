@@ -1,72 +1,35 @@
-//! The renderer: swapchain lifecycle, frame synchronisation and scene drawing.
+//! The renderer: device and swapchain lifecycle, frame synchronisation and the frame graph.
+//!
+//! A frame is a precompiled render graph (ADR-0008, [`crate::frame_graph`]): the scene pass
+//! renders into an HDR target, the composite pass tonemaps it into the swapchain image and
+//! the UI pass draws the HUD on top. The pass code lives in [`crate::passes`]; this module
+//! owns acquisition, submission, presentation, resize and the capture readback.
 
 use core::ffi::CStr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use ash::{Device, khr, vk};
-use bytemuck::bytes_of;
+use ash::{khr, vk};
+use gpu_allocator::MemoryLocation;
 use moba_platform::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
+use crate::frame_graph::{self, Binding, Bindings, FramePlan, PassKind};
 use crate::instance::{InstanceContext, ValidationMode};
-use crate::mesh::{self, GpuMesh};
-use crate::pipeline::{self, PipelineSpec, VertexLayout};
-use crate::resources::{
-    CommandPool, DescriptorPool, DescriptorSetLayout, Fence, GpuBuffer, GpuImage, GraphicsPipeline,
-    PipelineLayout, Semaphore, ShaderModule,
-};
-use crate::scene::{BoneRange, CameraUniform, GpuInstance, MeshId, Scene};
+use crate::passes::composite::CompositePass;
+use crate::passes::overlay::UiPass;
+use crate::passes::scene::{ScenePass, SceneTargets};
+use crate::profiler::{GpuProfiler, GpuTimings};
+use crate::quality::QualityTier;
+use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
+use crate::scene::{MeshId, Scene};
 use crate::swapchain::Swapchain;
-use crate::texture;
-use crate::ui::{UiDrawList, UiVertex};
-use bytemuck::{Pod, Zeroable};
-use gpu_allocator::MemoryLocation;
-use moba_assets::JointMatrix;
+use crate::targets::{self, TransientPool};
+use crate::ui::UiDrawList;
 
 const FRAMES_IN_FLIGHT: usize = 2;
-/// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
-pub(crate) const MAX_MESHES: usize = 64;
-const UI_ATLAS: &[u8] = include_bytes!("../assets/ui-atlas.rgba");
-static UI_VERTICES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
-static UI_TRUNCATION_LOGGED: AtomicBool = AtomicBool::new(false);
-static BONES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
-static SKINNED_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
-/// Bytes per joint in the bone buffer: three `vec4` rows.
-const BONE_STRIDE: u64 = core::mem::size_of::<JointMatrix>() as u64;
-/// Push-constant block of `skinned.vert`: the draw's bone range (16 bytes, vertex stage).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct SkinPush {
-    first_bone: u32,
-    joint_count: u32,
-    reserved: [u32; 2],
-}
-const SKIN_PUSH_SIZE: u32 = core::mem::size_of::<SkinPush>() as u32;
-
-/// Joint matrices from [`Scene::bones`] dropped from the most recent frame because they
-/// exceeded [`RenderConfig::max_bones`].
-#[must_use]
-pub fn bones_truncated() -> u64 {
-    BONES_TRUNCATED.load(Ordering::Relaxed)
-}
-
-/// Skinned-mesh instances not drawn in the most recent frame: no bone range, a range past
-/// the uploaded bones, or more skinned draws than the per-frame budget.
-#[must_use]
-pub fn skinned_instances_dropped() -> u64 {
-    SKINNED_DROPPED.load(Ordering::Relaxed)
-}
-
-/// UI vertices dropped from the most recent submitted frame.
-#[must_use]
-pub fn ui_vertices_truncated() -> u64 {
-    UI_VERTICES_TRUNCATED.load(Ordering::Relaxed)
-}
-const CAMERA_UNIFORM_SIZE: u64 = core::mem::size_of::<CameraUniform>() as u64;
 
 /// Renderer configuration.
 #[derive(Clone, Debug)]
@@ -79,18 +42,25 @@ pub struct RenderConfig {
     pub max_instances: usize,
     /// Request vertical sync (FIFO). Disable to allow mailbox/immediate.
     pub vsync: bool,
-    /// Linear RGBA clear colour.
+    /// Linear RGBA clear colour of the HDR scene target (tonemapped like the scene).
     pub clear_color: [f32; 4],
     /// Maximum number of UI vertices per frame.
     pub max_ui_vertices: usize,
     /// HUD scale factor applied when uploading UI vertices.
     pub ui_scale: f32,
     /// Joint matrices uploaded per frame for skinned meshes; [`Scene::bones`] past this are
-    /// dropped and counted ([`bones_truncated`]). Default [`DEFAULT_MAX_BONES`].
+    /// dropped and counted ([`bones_truncated`](crate::bones_truncated)). Default
+    /// [`DEFAULT_MAX_BONES`].
     pub max_bones: usize,
     /// Build the GPU skinning pipeline. When `false` (or if the pipeline fails to build),
     /// [`Renderer::register_skinned_mesh`] returns [`RenderError::SkinningUnavailable`].
     pub skinning: bool,
+    /// Quality tier every tiered feature keys off. Today it picks the HDR target format
+    /// (`Low`: `B10G11R11_UFLOAT_PACK32`, otherwise `R16G16B16A16_SFLOAT`). Default `High`.
+    pub quality_tier: QualityTier,
+    /// Linear exposure multiplier applied before the tonemap. Default `1.0`; a non-finite or
+    /// non-positive value is treated as `1.0`.
+    pub exposure: f32,
 }
 
 impl Default for RenderConfig {
@@ -104,6 +74,8 @@ impl Default for RenderConfig {
             ui_scale: 1.0,
             max_bones: DEFAULT_MAX_BONES,
             skinning: true,
+            quality_tier: QualityTier::High,
+            exposure: 1.0,
         }
     }
 }
@@ -164,29 +136,28 @@ impl RenderConfig {
         self.skinning = skinning;
         self
     }
+
+    /// Returns this config with [`RenderConfig::quality_tier`] set.
+    #[must_use]
+    pub const fn with_quality_tier(mut self, quality_tier: QualityTier) -> Self {
+        self.quality_tier = quality_tier;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::exposure`] set.
+    #[must_use]
+    pub const fn with_exposure(mut self, exposure: f32) -> Self {
+        self.exposure = exposure;
+        self
+    }
 }
 
-struct FrameData {
+/// Per-frame-in-flight command recording and synchronisation.
+struct FrameSync {
     command_pool: CommandPool,
     command_buffer: vk::CommandBuffer,
     image_available: Semaphore,
     fence: Fence,
-    camera_buffer: GpuBuffer,
-    instance_buffer: GpuBuffer,
-    camera_set: vk::DescriptorSet,
-    instance_set: vk::DescriptorSet,
-    ui_buffer: GpuBuffer,
-    /// Joint matrices for this frame's skinned draws (set 1, binding 1).
-    bone_buffer: GpuBuffer,
-}
-
-/// One skinned instance: drawn alone so its push constant can select its bones.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SkinnedDraw {
-    slot: u32,
-    instance: u32,
-    first_bone: u32,
-    joint_count: u32,
 }
 
 struct Surface {
@@ -202,65 +173,29 @@ impl Drop for Surface {
     }
 }
 
-/// The Vulkan renderer.
+/// Vulkan renderer owning the swapchain, the frame graph and its passes.
 ///
-/// `Renderer` owns the device and the swapchain. Field order is load-bearing: GPU
-/// resources are declared before the device and the device before the surface/instance so
-/// that Rust drops them children-first.
-/// Sampler paired with its device so setup failures cannot leak it.
-struct OwnedSampler(ash::Device, vk::Sampler);
-
-impl OwnedSampler {
-    fn new(device: &ash::Device, info: &vk::SamplerCreateInfo) -> RenderResult<Self> {
-        // SAFETY: the device is live and the create info is fully initialised.
-        let sampler = unsafe { device.create_sampler(info, None) }?;
-        Ok(Self(device.clone(), sampler))
-    }
-}
-
-impl Drop for OwnedSampler {
-    fn drop(&mut self) {
-        // SAFETY: the sampler belongs to this device and is destroyed exactly once.
-        unsafe { self.0.destroy_sampler(self.1, None) };
-    }
-}
-
-/// Vulkan renderer owning the swapchain, pipelines and UI resources.
+/// Field order is load-bearing: GPU resources are declared before the device and the device
+/// before the surface/instance so that Rust drops them children-first.
 pub struct Renderer {
     swapchain: Swapchain,
-    terrain_mesh: GpuMesh,
-    /// Unit meshes: slot 0 is the cube, the rest come from `register_mesh`. Never shrinks,
-    /// so a `MeshId` stays valid and no frame in flight can reference a freed mesh.
-    meshes: Vec<GpuMesh>,
-    /// Per-frame bucketing scratch (instances per mesh, first instance, write cursor).
-    mesh_counts: [u32; MAX_MESHES],
-    mesh_starts: [u32; MAX_MESHES],
-    mesh_cursors: [u32; MAX_MESHES],
-    /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
-    skinned_draws: Vec<SkinnedDraw>,
-    _camera_layout: DescriptorSetLayout,
-    _instance_layout: DescriptorSetLayout,
-    _ui_layout: DescriptorSetLayout,
-    _ui_atlas: GpuImage,
-    #[allow(dead_code)] // Held for RAII drop.
-    ui_sampler: OwnedSampler,
-    ui_sets: Vec<vk::DescriptorSet>,
-    _descriptor_pool: DescriptorPool,
-    pipeline_layout: PipelineLayout,
-    unit_pipeline: GraphicsPipeline,
-    terrain_pipeline: GraphicsPipeline,
-    /// `None` when skinning is disabled or the pipeline failed to build.
-    skinned_pipeline: Option<GraphicsPipeline>,
-    ui_pipeline_layout: PipelineLayout,
-    ui_pipeline: GraphicsPipeline,
-    frames: Vec<FrameData>,
+    transients: TransientPool,
+    scene: ScenePass,
+    composite: CompositePass,
+    ui: UiPass,
+    profiler: GpuProfiler,
+    frames: Vec<FrameSync>,
     capture_buffer: Option<GpuBuffer>,
+    /// The normal frame and the capture variant, compiled once at creation.
+    plan: FramePlan,
+    capture_plan: FramePlan,
     capture_pending: bool,
     capture_ready: bool,
     capture_extent: Option<vk::Extent2D>,
     capture_format: Option<vk::Format>,
     images_in_flight: Vec<Option<usize>>,
     frame_index: usize,
+    hdr_format: vk::Format,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -274,7 +209,7 @@ impl Renderer {
     ///
     /// Enables the Khronos validation layer according to `config.validation`; pass
     /// [`ValidationMode::Required`] in CI so a missing layer is a hard failure.
-    #[allow(clippy::too_many_lines)] // Pipeline/descriptor/resource wiring belongs together.
+    #[allow(clippy::too_many_lines)] // Device, graph and pass wiring belongs together.
     pub fn new(window: &Window, mut config: RenderConfig) -> RenderResult<Self> {
         assert!(config.max_instances > 0, "max_instances must be positive");
         let display_handle = window.display_handle()?.as_raw();
@@ -327,319 +262,88 @@ impl Renderer {
             None,
         )?;
 
-        let unit_vertex = ShaderModule::new(device.device.clone(), moba_shaders::UNIT_VERT)?;
-        let unit_fragment = ShaderModule::new(device.device.clone(), moba_shaders::UNIT_FRAG)?;
-        let terrain_vertex = ShaderModule::new(device.device.clone(), moba_shaders::TERRAIN_VERT)?;
-        let terrain_fragment =
-            ShaderModule::new(device.device.clone(), moba_shaders::TERRAIN_FRAG)?;
-        let ui_vertex = ShaderModule::new(device.device.clone(), moba_shaders::UI_VERT)?;
-        let ui_fragment = ShaderModule::new(device.device.clone(), moba_shaders::UI_FRAG)?;
-
-        let camera_binding = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
-        let camera_layout = DescriptorSetLayout::new(device.device.clone(), &camera_binding)?;
-        // Binding 0: instances; binding 1: joint matrices (read only by `skinned.vert`).
-        let instance_binding = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX),
-        ];
-        let instance_layout = DescriptorSetLayout::new(device.device.clone(), &instance_binding)?;
-        let ui_binding = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
-        let ui_layout = DescriptorSetLayout::new(device.device.clone(), &ui_binding)?;
-        let ui_atlas = texture::upload_rgba(
-            &device,
-            "ui-atlas",
-            crate::ui::ATLAS_WIDTH,
-            crate::ui::ATLAS_HEIGHT,
-            UI_ATLAS,
-        )?;
-        let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST)
-            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-        // SAFETY: the device is live and the sampler info is fully initialised.
-        let ui_sampler = OwnedSampler::new(&device.device, &sampler_info)?;
-
-        let pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(
-                    u32::try_from(2 * FRAMES_IN_FLIGHT).expect("descriptor count fits u32"),
-                ),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
-        ];
-        let descriptor_pool = DescriptorPool::new(
-            device.device.clone(),
-            &pool_sizes,
-            u32::try_from(FRAMES_IN_FLIGHT * 3).expect("set count fits u32"),
-        )?;
-
-        let layouts = [camera_layout.handle(), instance_layout.handle()];
-        // One layout for terrain, unit and skinned pipelines keeps the bound descriptor sets
-        // compatible across them; only `skinned.vert` reads the push constant.
-        let skin_push = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .offset(0)
-            .size(SKIN_PUSH_SIZE)];
-        let pipeline_layout =
-            PipelineLayout::with_push_constants(device.device.clone(), &layouts, &skin_push)?;
-
-        let unit_pipeline = GraphicsPipeline::from_raw(
-            device.device.clone(),
-            pipeline::create(
-                &device.device,
-                &PipelineSpec {
-                    layout: pipeline_layout.handle(),
-                    vertex_layout: VertexLayout::Static,
-                    vertex: unit_vertex.handle(),
-                    fragment: unit_fragment.handle(),
-                    color_format: swapchain.format,
-                    depth_format: swapchain.depth_format,
-                    cull_mode: vk::CullModeFlags::NONE,
-                },
-            )?,
-        );
-        let terrain_pipeline = GraphicsPipeline::from_raw(
-            device.device.clone(),
-            pipeline::create(
-                &device.device,
-                &PipelineSpec {
-                    layout: pipeline_layout.handle(),
-                    vertex_layout: VertexLayout::Static,
-                    vertex: terrain_vertex.handle(),
-                    fragment: terrain_fragment.handle(),
-                    color_format: swapchain.format,
-                    depth_format: swapchain.depth_format,
-                    cull_mode: vk::CullModeFlags::NONE,
-                },
-            )?,
-        );
-
-        let skinned_pipeline = if config.skinning {
-            let built = ShaderModule::new(device.device.clone(), moba_shaders::SKINNED_VERT)
-                .and_then(|skinned_vertex| {
-                    pipeline::create(
-                        &device.device,
-                        &PipelineSpec {
-                            layout: pipeline_layout.handle(),
-                            vertex_layout: VertexLayout::Skinned,
-                            vertex: skinned_vertex.handle(),
-                            fragment: unit_fragment.handle(),
-                            color_format: swapchain.format,
-                            depth_format: swapchain.depth_format,
-                            cull_mode: vk::CullModeFlags::NONE,
-                        },
-                    )
-                });
-            match built {
-                Ok(handle) => Some(GraphicsPipeline::from_raw(device.device.clone(), handle)),
-                Err(error) => {
-                    eprintln!(
-                        "[render] skinned pipeline unavailable ({error}); using static meshes"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let ui_push = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .offset(0)
-            .size(8)];
-        let ui_pipeline_layout = PipelineLayout::with_push_constants(
-            device.device.clone(),
-            &[ui_layout.handle()],
-            &ui_push,
-        )?;
-        let ui_pipeline = GraphicsPipeline::from_raw(
-            device.device.clone(),
-            pipeline::create_ui(
-                &device.device,
-                ui_pipeline_layout.handle(),
-                ui_vertex.handle(),
-                ui_fragment.handle(),
-                swapchain.format,
-                swapchain.depth_format,
-            )?,
-        );
-
-        let terrain_mesh = mesh::upload(&device, &mesh::CpuMesh::plane(300.0))?;
-        let mut meshes = Vec::with_capacity(MAX_MESHES);
-        meshes.push(mesh::upload(&device, &mesh::CpuMesh::cube())?);
-
-        let descriptor_layouts: Vec<vk::DescriptorSetLayout> = (0..FRAMES_IN_FLIGHT)
-            .flat_map(|_| [camera_layout.handle(), instance_layout.handle()])
-            .collect();
-        let sets = descriptor_pool.allocate(&device.device, &descriptor_layouts)?;
-        let ui_set_layouts: Vec<vk::DescriptorSetLayout> =
-            (0..FRAMES_IN_FLIGHT).map(|_| ui_layout.handle()).collect();
-        let ui_sets = descriptor_pool.allocate(&device.device, &ui_set_layouts)?;
-        let image_info = [vk::DescriptorImageInfo::default()
-            .sampler(ui_sampler.1)
-            .image_view(ui_atlas.view())
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        let writes: Vec<vk::WriteDescriptorSet<'_>> = ui_sets
-            .iter()
-            .map(|set| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&image_info)
-            })
-            .collect();
-        // SAFETY: the sets, sampler and image view are live and the write describes them.
-        unsafe { device.device.update_descriptor_sets(&writes, &[]) };
-        // Both SSBOs are bound with `WHOLE_SIZE`, so each must fit one storage-buffer range.
-        let range_limit = u64::from(device.max_storage_buffer_range);
-        let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
-            .ok()
-            .zip(u64::try_from(config.max_instances).ok())
-            .and_then(|(size, count)| size.checked_mul(count))
-            .filter(|&bytes| bytes <= range_limit)
-            .ok_or_else(|| {
-                RenderError::NoSuitableDevice(format!(
-                    "max_instances {} exceeds the device's storage-buffer range ({range_limit} bytes)",
-                    config.max_instances
-                ))
-            })?;
-        // Clamping the bone budget to the range also keeps `(first_bone + joint) * 3` in
-        // skinned.vert far below `u32::MAX`.
-        let bones_that_fit = usize::try_from(range_limit / BONE_STRIDE).unwrap_or(usize::MAX);
-        if config.max_bones > bones_that_fit {
-            eprintln!(
-                "[render] max_bones {} exceeds the storage-buffer range; using {bones_that_fit}",
-                config.max_bones
-            );
-            config.max_bones = bones_that_fit;
+        let hdr_format = targets::choose_hdr_format(&device, config.quality_tier);
+        let (depth_format, depth_aspect) = targets::choose_depth_format(&device)?;
+        let graph_error =
+            |error: crate::graph::GraphError| RenderError::RenderGraph(error.to_string());
+        let plan = frame_graph::build(hdr_format, depth_format, depth_aspect, false)
+            .map_err(graph_error)?;
+        let capture_plan = frame_graph::build(hdr_format, depth_format, depth_aspect, true)
+            .map_err(graph_error)?;
+        if plan.graph.slots() != capture_plan.graph.slots() {
+            return Err(RenderError::RenderGraph(String::from(
+                "the capture variant disagrees on transient slots",
+            )));
         }
-        // At least one joint so the descriptor always names a non-empty buffer.
-        let bone_buffer_size = BONE_STRIDE
-            * u64::try_from(config.max_bones.max(1)).expect("bounded by the range limit");
+        if !plan.graph.culled().is_empty() {
+            eprintln!("[render] graph culled passes: {:?}", plan.graph.culled());
+        }
+        let transients = TransientPool::new(&device, plan.graph.slots(), swapchain.extent)?;
+
+        let scene = ScenePass::new(
+            &device,
+            FRAMES_IN_FLIGHT,
+            hdr_format,
+            depth_format,
+            config.max_instances,
+            config.max_bones,
+            config.skinning,
+        )?;
+        config.max_bones = scene.max_bones();
+        let composite = CompositePass::new(&device, swapchain.format, config.exposure)?;
+        let ui = UiPass::new(
+            &device,
+            FRAMES_IN_FLIGHT,
+            swapchain.format,
+            config.max_ui_vertices,
+            config.ui_scale,
+        )?;
+        let profiler = GpuProfiler::new(
+            device.device.clone(),
+            FRAMES_IN_FLIGHT,
+            device.timestamp_valid_bits,
+            device.timestamp_period,
+        )?;
+
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for frame_index in 0..FRAMES_IN_FLIGHT {
+        for _ in 0..FRAMES_IN_FLIGHT {
             let command_pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
             let command_buffer = command_pool.allocate_one()?;
-            let camera_buffer = GpuBuffer::new(
-                device.device.clone(),
-                device.allocator(),
-                "camera-uniform",
-                CAMERA_UNIFORM_SIZE,
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-                MemoryLocation::CpuToGpu,
-            )?;
-            let instance_buffer = GpuBuffer::new(
-                device.device.clone(),
-                device.allocator(),
-                "unit-instances",
-                instance_buffer_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                MemoryLocation::CpuToGpu,
-            )?;
-            let ui_buffer_size = u64::try_from(core::mem::size_of::<UiVertex>())
-                .expect("UI vertex size fits u64")
-                * u64::try_from(config.max_ui_vertices).expect("UI vertex count fits u64");
-            let ui_buffer = GpuBuffer::new(
-                device.device.clone(),
-                device.allocator(),
-                "ui-vertices",
-                ui_buffer_size,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                MemoryLocation::CpuToGpu,
-            )?;
-            let bone_buffer = GpuBuffer::new(
-                device.device.clone(),
-                device.allocator(),
-                "skin-bones",
-                bone_buffer_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                MemoryLocation::CpuToGpu,
-            )?;
-            let camera_set = sets[frame_index * 2];
-            let instance_set = sets[frame_index * 2 + 1];
-            write_descriptors(
-                &device.device,
-                camera_set,
-                instance_set,
-                &camera_buffer,
-                &instance_buffer,
-                &bone_buffer,
-            );
-            frames.push(FrameData {
+            frames.push(FrameSync {
                 command_pool,
                 command_buffer,
                 image_available: Semaphore::new(device.device.clone())?,
                 fence: Fence::new(device.device.clone(), true)?,
-                camera_buffer,
-                instance_buffer,
-                camera_set,
-                instance_set,
-                ui_buffer,
-                bone_buffer,
             });
         }
-
         let images_in_flight = vec![None; swapchain.image_count()];
 
-        Ok(Self {
+        let renderer = Self {
             window: window.clone(),
             swapchain,
-            terrain_mesh,
-            meshes,
-            mesh_counts: [0; MAX_MESHES],
-            mesh_starts: [0; MAX_MESHES],
-            mesh_cursors: [0; MAX_MESHES],
-            skinned_draws: Vec::with_capacity(config.max_instances.min(config.max_bones)),
-            _camera_layout: camera_layout,
-            _instance_layout: instance_layout,
-            _ui_layout: ui_layout,
-            _ui_atlas: ui_atlas,
-            ui_sampler,
-            ui_sets,
-            _descriptor_pool: descriptor_pool,
-            pipeline_layout,
-            unit_pipeline,
-            terrain_pipeline,
-            skinned_pipeline,
-            ui_pipeline_layout,
-            ui_pipeline,
+            transients,
+            scene,
+            composite,
+            ui,
+            profiler,
             frames,
             capture_buffer: None,
+            plan,
+            capture_plan,
             capture_pending: false,
             capture_ready: false,
             capture_extent: None,
             capture_format: None,
             images_in_flight,
             frame_index: 0,
+            hdr_format,
             device,
             surface,
             instance,
             config,
-        })
+        };
+        renderer.bind_transients();
+        Ok(renderer)
     }
 
     /// Human-readable name of the selected GPU.
@@ -660,6 +364,37 @@ impl Renderer {
         InstanceContext::validation_error_count()
     }
 
+    /// The configured quality tier.
+    #[must_use]
+    pub fn quality_tier(&self) -> QualityTier {
+        self.config.quality_tier
+    }
+
+    /// Name of the HDR scene target's format (`"R16G16B16A16_SFLOAT"` or
+    /// `"B10G11R11_UFLOAT_PACK32"`), for logs. `Low` falls back to the 64-bit format when
+    /// the device cannot render to the packed one.
+    #[must_use]
+    pub fn hdr_format_name(&self) -> &'static str {
+        match self.hdr_format {
+            vk::Format::B10G11R11_UFLOAT_PACK32 => "B10G11R11_UFLOAT_PACK32",
+            _ => "R16G16B16A16_SFLOAT",
+        }
+    }
+
+    /// Per-pass GPU timings of the latest frame whose timestamp queries completed (they lag
+    /// the current frame by the frames in flight). `None` until the first frame completes,
+    /// and always on devices whose graphics queue has no timestamp support.
+    #[must_use]
+    pub fn gpu_timings(&self) -> Option<GpuTimings> {
+        self.profiler.latest()
+    }
+
+    /// Whether this device records per-pass GPU timestamps.
+    #[must_use]
+    pub fn gpu_timing_supported(&self) -> bool {
+        self.profiler.enabled()
+    }
+
     /// Uploads a static mesh and returns its id for [`UnitInstance::mesh`](crate::UnitInstance).
     ///
     /// Load-time only: the upload goes through a staging buffer and a transfer → vertex-input
@@ -672,20 +407,14 @@ impl Renderer {
     /// if the mesh fails the renderer's own index-range check, otherwise allocation or Vulkan
     /// errors from the upload.
     pub fn register_mesh(&mut self, data: &crate::MeshData) -> RenderResult<MeshId> {
-        if self.meshes.len() >= MAX_MESHES {
-            return Err(RenderError::TooManyMeshes);
-        }
-        let id = u16::try_from(self.meshes.len()).map_err(|_| RenderError::TooManyMeshes)?;
-        let cpu = mesh::CpuMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
-        let gpu = mesh::upload(&self.device, &cpu)?;
-        self.meshes.push(gpu);
-        Ok(MeshId::from_index(id))
+        self.scene.register_mesh(&self.device, data)
     }
 
     /// Uploads a skinned mesh (its [`MeshSkin`](moba_assets::MeshSkin) joints and weights in
     /// the 32-byte skinned vertex layout) and returns its id. Draw it with a
-    /// [`UnitInstance`](crate::UnitInstance) whose [`BoneRange`] names one joint matrix per
-    /// joint in [`Scene::bones`]; instances without a valid range are skipped and counted.
+    /// [`UnitInstance`](crate::UnitInstance) whose [`BoneRange`](crate::BoneRange) names one
+    /// joint matrix per joint in [`Scene::bones`]; instances without a valid range are
+    /// skipped and counted.
     ///
     /// Load-time only, like [`Self::register_mesh`], and shares its 64 slots.
     ///
@@ -694,29 +423,19 @@ impl Renderer {
     /// to build (register the static mesh instead), [`RenderError::InvalidMesh`] when the mesh
     /// has no valid skin, otherwise as [`Self::register_mesh`].
     pub fn register_skinned_mesh(&mut self, data: &crate::MeshData) -> RenderResult<MeshId> {
-        if self.skinned_pipeline.is_none() {
-            return Err(RenderError::SkinningUnavailable);
-        }
-        if self.meshes.len() >= MAX_MESHES {
-            return Err(RenderError::TooManyMeshes);
-        }
-        let id = u16::try_from(self.meshes.len()).map_err(|_| RenderError::TooManyMeshes)?;
-        let cpu = mesh::CpuSkinnedMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
-        let gpu = mesh::upload_skinned(&self.device, &cpu)?;
-        self.meshes.push(gpu);
-        Ok(MeshId::from_index(id))
+        self.scene.register_skinned_mesh(&self.device, data)
     }
 
     /// Whether [`Self::register_skinned_mesh`] can succeed (the skinned pipeline exists).
     #[must_use]
     pub fn skinning_available(&self) -> bool {
-        self.skinned_pipeline.is_some()
+        self.scene.skinning_available()
     }
 
     /// Number of registered meshes, including the built-in cube.
     #[must_use]
     pub fn mesh_count(&self) -> usize {
-        self.meshes.len()
+        self.scene.mesh_count()
     }
 
     /// Current swapchain extent in physical pixels.
@@ -741,35 +460,59 @@ impl Renderer {
         self.render_internal(scene, Some(ui))
     }
 
-    #[allow(clippy::too_many_lines)] // The frame is one explicit, ordered command stream.
-    fn render_internal(&mut self, scene: &Scene<'_>, ui: Option<&UiDrawList>) -> RenderResult<()> {
+    /// Points passes that sample transients at the current pool images.
+    fn bind_transients(&self) {
+        let hdr = self
+            .plan
+            .graph
+            .slot_of(self.plan.resources.hdr)
+            .expect("the composite keeps the HDR target live");
+        self.composite
+            .bind_hdr(&self.device, self.transients.image(hdr).view());
+    }
+
+    fn transient(&self, resource: crate::graph::ResourceId) -> &GpuImage {
+        let slot = self
+            .plan
+            .graph
+            .slot_of(resource)
+            .expect("frame transients are live in both variants");
+        self.transients.image(slot)
+    }
+
+    /// Recreates the swapchain if the window's chosen extent changed. Returns `false` when
+    /// the frame must be skipped (minimised window or a racing resize).
+    fn sync_extent(&mut self) -> RenderResult<bool> {
         let [width, height] = self.window.size();
         if width == 0 || height == 0 {
-            return Ok(());
+            return Ok(false);
         }
-        if width != self.swapchain.extent.width || height != self.swapchain.extent.height {
-            // A fixed surface extent (common on Wayland/HiDPI) can legitimately differ from
-            // the logical window size forever; only recreate when the chosen extent changes.
-            // SAFETY: the surface and physical device belong to this instance.
-            let capabilities = unsafe {
-                self.device
-                    .surface
-                    .get_physical_device_surface_capabilities(
-                        self.device.physical,
-                        self.surface.handle,
-                    )
-            }?;
-            let desired =
-                crate::swapchain::choose_extent(capabilities, vk::Extent2D { width, height });
-            if desired != self.swapchain.extent
-                && let Err(error) = self.recreate_swapchain()
-            {
-                // A 0x0/minimised surface or a racing resize is a skipped frame, not fatal.
-                return match error {
-                    RenderError::SwapchainOutOfDate | RenderError::SwapchainSuboptimal => Ok(()),
-                    error => Err(error),
-                };
-            }
+        if width == self.swapchain.extent.width && height == self.swapchain.extent.height {
+            return Ok(true);
+        }
+        // A fixed surface extent (common on Wayland/HiDPI) can legitimately differ from the
+        // logical window size forever; only recreate when the chosen extent changes.
+        // SAFETY: the surface and physical device belong to this instance.
+        let capabilities = unsafe {
+            self.device
+                .surface
+                .get_physical_device_surface_capabilities(self.device.physical, self.surface.handle)
+        }?;
+        let desired = crate::swapchain::choose_extent(capabilities, vk::Extent2D { width, height });
+        if desired == self.swapchain.extent {
+            return Ok(true);
+        }
+        match self.recreate_swapchain() {
+            Ok(()) => Ok(true),
+            // A 0x0/minimised surface or a racing resize is a skipped frame, not fatal.
+            Err(RenderError::SwapchainOutOfDate | RenderError::SwapchainSuboptimal) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn render_internal(&mut self, scene: &Scene<'_>, ui: Option<&UiDrawList>) -> RenderResult<()> {
+        if !self.sync_extent()? {
+            return Ok(());
         }
         if self.capture_pending {
             if !self.swapchain.transfer_src {
@@ -787,6 +530,7 @@ impl Renderer {
         // SAFETY: the fence belongs to this device and is waited on with an effectively
         // infinite timeout. It is signalled or will be signalled by the frame's submit.
         unsafe { self.device.device.wait_for_fences(&[fence], true, u64::MAX) }?;
+        self.profiler.collect(frame_index);
 
         let image_available = self.frames[frame_index].image_available.handle();
         let (image_index, suboptimal) = match self.swapchain.acquire(image_available) {
@@ -809,105 +553,8 @@ impl Renderer {
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
 
-        let unit_count = scene.units.len().min(self.config.max_instances);
-        let bone_count = scene.bones.len().min(self.config.max_bones);
-        BONES_TRUNCATED.store(
-            u64::try_from(scene.bones.len() - bone_count).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
-        self.skinned_draws.clear();
-        let mut skinned_dropped = 0u64;
-        {
-            let frame = &mut self.frames[frame_index];
-            let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint);
-            frame.camera_buffer.write_bytes(0, bytes_of(&uniform));
-            if bone_count > 0 {
-                let mapped = frame
-                    .bone_buffer
-                    .mapped_slice_mut::<JointMatrix>(bone_count)
-                    .ok_or_else(|| {
-                        RenderError::NoSuitableDevice(String::from(
-                            "bone buffer is not host visible",
-                        ))
-                    })?;
-                mapped.copy_from_slice(&scene.bones[..bone_count]);
-            }
-            // `bone_count <= max_bones`, which the bone buffer was sized from.
-            let uploaded_bones = u32::try_from(bone_count).unwrap_or(u32::MAX);
-            if unit_count > 0 {
-                let units = &scene.units[..unit_count];
-                bucket_by_mesh(
-                    units,
-                    self.meshes.len(),
-                    &mut self.mesh_counts,
-                    &mut self.mesh_starts,
-                    &mut self.mesh_cursors,
-                );
-                let mapped = frame
-                    .instance_buffer
-                    .mapped_slice_mut::<GpuInstance>(unit_count)
-                    .ok_or_else(|| {
-                        RenderError::NoSuitableDevice(String::from(
-                            "instance buffer is not host visible",
-                        ))
-                    })?;
-                // Each mesh's instances land contiguously at its `mesh_starts` slot, so one
-                // draw per mesh reads them through `firstInstance` (gl_InstanceIndex).
-                for unit in units {
-                    let slot = mesh_slot(unit.mesh, self.meshes.len());
-                    let cursor = &mut self.mesh_cursors[slot];
-                    let instance = *cursor;
-                    mapped[instance as usize] = GpuInstance::from(*unit);
-                    *cursor += 1;
-                    let joints = self.meshes[slot].joint_count;
-                    if joints == 0 {
-                        continue;
-                    }
-                    // A skinned mesh is only drawn with a bone range inside this frame's
-                    // upload; the capacity check keeps `push` from reallocating.
-                    match skinned_draw(unit.bones, joints, uploaded_bones, slot, instance) {
-                        Some(draw) if self.skinned_draws.len() < self.skinned_draws.capacity() => {
-                            self.skinned_draws.push(draw);
-                        }
-                        _ => skinned_dropped += 1,
-                    }
-                }
-            }
-            let ui_total = ui.map_or(0, |list| list.vertices().len());
-            let ui_count = ui_total.min(self.config.max_ui_vertices);
-            let truncated = u64::try_from(ui_total.saturating_sub(ui_count)).unwrap_or(u64::MAX);
-            UI_VERTICES_TRUNCATED.store(truncated, Ordering::Relaxed);
-            if truncated > 0 {
-                if !UI_TRUNCATION_LOGGED.swap(true, Ordering::Relaxed) {
-                    eprintln!(
-                        "[ui] dropped {truncated} UI vertices (max {})",
-                        self.config.max_ui_vertices
-                    );
-                }
-            } else {
-                UI_TRUNCATION_LOGGED.store(false, Ordering::Relaxed);
-            }
-            if ui_count > 0 {
-                let source = ui.expect("UI list exists when UI count is non-zero");
-                let mapped = frame
-                    .ui_buffer
-                    .mapped_slice_mut::<UiVertex>(ui_count)
-                    .ok_or_else(|| {
-                        RenderError::NoSuitableDevice(String::from(
-                            "UI vertex buffer is not host visible",
-                        ))
-                    })?;
-                let scale = self.config.ui_scale;
-                // Scale a local copy and store it once: `mapped` is write-combined host
-                // memory, where every read-back (`target.position[0] *= ...`) is an uncached
-                // load. With a few thousand HUD vertices that cost ~7 ms per frame.
-                for (target, source) in mapped.iter_mut().zip(&source.vertices()[..ui_count]) {
-                    *target = scaled_ui_vertex(*source, scale);
-                }
-            }
-        }
-
-        SKINNED_DROPPED.store(skinned_dropped, Ordering::Relaxed);
+        self.scene.prepare(frame_index, scene)?;
+        self.ui.prepare(frame_index, ui)?;
 
         let command_buffer = self.frames[frame_index].command_buffer;
         let pool = self.frames[frame_index].command_pool.handle();
@@ -925,448 +572,7 @@ impl Renderer {
                 .device
                 .begin_command_buffer(command_buffer, &begin)
         }?;
-
-        let color_layout = self.swapchain.color_layouts[image_index as usize];
-        let depth_layout = self.swapchain.depth_layouts[image_index as usize];
-        let depth_target = depth_attachment_layout(self.swapchain.depth_aspect);
-        transition_color(
-            &self.device,
-            command_buffer,
-            self.swapchain.images[image_index as usize],
-            color_layout,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        );
-        if depth_layout != depth_target {
-            transition_depth(
-                &self.device,
-                command_buffer,
-                self.swapchain.depth_images[image_index as usize].image(),
-                depth_layout,
-                self.swapchain.depth_aspect,
-            );
-        }
-        self.swapchain.color_layouts[image_index as usize] =
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
-        self.swapchain.depth_layouts[image_index as usize] = depth_target;
-
-        let extent = self.swapchain.extent;
-        let clear_color = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: self.config.clear_color,
-            },
-        };
-        let color_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(self.swapchain.views[image_index as usize])
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(clear_color);
-        let depth_clear = vk::ClearValue {
-            depth_stencil: vk::ClearDepthStencilValue {
-                depth: 1.0,
-                stencil: 0,
-            },
-        };
-        let depth_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(self.swapchain.depth_images[image_index as usize].view())
-            .image_layout(depth_target)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .clear_value(depth_clear);
-        let render_info = vk::RenderingInfo::default()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent,
-            })
-            .layer_count(1)
-            .color_attachments(core::slice::from_ref(&color_attachment))
-            .depth_attachment(&depth_attachment);
-        if !self.skinned_draws.is_empty() {
-            // Host writes to this frame's bone buffer → skinned vertex shader reads. The
-            // submit already makes host writes visible; the barrier states the dependency
-            // explicitly. The frame fence (waited above) covers write-after-read against the
-            // previous use of this buffer.
-            let barrier = vk::BufferMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::HOST)
-                .src_access_mask(vk::AccessFlags2::HOST_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_SHADER)
-                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .buffer(self.frames[frame_index].bone_buffer.handle())
-                .offset(0)
-                .size(vk::WHOLE_SIZE);
-            let dependency = vk::DependencyInfo::default()
-                .buffer_memory_barriers(core::slice::from_ref(&barrier));
-            self.device
-                .cmd_pipeline_barrier2(command_buffer, &dependency);
-        }
-        self.device
-            .cmd_begin_rendering(command_buffer, &render_info);
-
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: extent.height as f32,
-            width: extent.width as f32,
-            height: -(extent.height as f32),
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
-        };
-        // SAFETY: the command buffer is recording inside a render pass and the viewport
-        // and scissor are valid for this extent.
-        unsafe {
-            self.device
-                .device
-                .cmd_set_viewport(command_buffer, 0, &[viewport]);
-        }
-        // SAFETY: same as above.
-        unsafe {
-            self.device
-                .device
-                .cmd_set_scissor(command_buffer, 0, &[scissor]);
-        }
-
-        let descriptor_sets = [
-            self.frames[frame_index].camera_set,
-            self.frames[frame_index].instance_set,
-        ];
-        // SAFETY: both sets were allocated from this frame's layout and the pipeline layout
-        // declares them at indices 0 and 1.
-        unsafe {
-            self.device.device.cmd_bind_descriptor_sets(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_layout.handle(),
-                0,
-                &descriptor_sets,
-                &[],
-            );
-        }
-
-        // Terrain.
-        // SAFETY: pipeline, buffers and descriptor sets are live and compatible.
-        unsafe {
-            self.device.device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.terrain_pipeline.handle(),
-            );
-        }
-        // SAFETY: same as above.
-        unsafe {
-            self.device.device.cmd_bind_vertex_buffers(
-                command_buffer,
-                0,
-                &[self.terrain_mesh.vertices.handle()],
-                &[0],
-            );
-        }
-        // SAFETY: the index buffer is a 32-bit index buffer.
-        unsafe {
-            self.device.device.cmd_bind_index_buffer(
-                command_buffer,
-                self.terrain_mesh.indices.handle(),
-                0,
-                vk::IndexType::UINT32,
-            );
-        }
-        // SAFETY: the mesh is uploaded and drawable.
-        unsafe {
-            self.device.device.cmd_draw_indexed(
-                command_buffer,
-                self.terrain_mesh.index_count,
-                1,
-                0,
-                0,
-                0,
-            );
-        }
-
-        if unit_count > 0 {
-            // SAFETY: pipeline, buffers and descriptor sets are live and compatible.
-            unsafe {
-                self.device.device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.unit_pipeline.handle(),
-                );
-            }
-            for (slot, mesh) in self.meshes.iter().enumerate() {
-                let count = self.mesh_counts[slot];
-                // Skinned meshes are drawn per instance below, with their own pipeline.
-                if count == 0 || mesh.joint_count > 0 {
-                    continue;
-                }
-                // SAFETY: the mesh buffers live as long as the renderer and the bound unit
-                // pipeline consumes this vertex layout.
-                unsafe {
-                    self.device.device.cmd_bind_vertex_buffers(
-                        command_buffer,
-                        0,
-                        &[mesh.vertices.handle()],
-                        &[0],
-                    );
-                }
-                // SAFETY: the buffer is live, was created with INDEX_BUFFER usage and holds
-                // `u32` indices.
-                unsafe {
-                    self.device.device.cmd_bind_index_buffer(
-                        command_buffer,
-                        mesh.indices.handle(),
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                }
-                // SAFETY: indices: `index_count == indices.len()`, so firstIndex 0 +
-                // indexCount fits the index buffer, and every index is below the vertex
-                // count (cube by construction; registered meshes re-checked in
-                // `CpuMesh::from_asset`), so no vertex fetch leaves the vertex buffer.
-                // Instances: `mesh_starts[slot] + count <= unit_count <= max_instances`, the
-                // instance buffer's element capacity, by construction in `bucket_by_mesh`.
-                unsafe {
-                    self.device.device.cmd_draw_indexed(
-                        command_buffer,
-                        mesh.index_count,
-                        count,
-                        0,
-                        0,
-                        self.mesh_starts[slot],
-                    );
-                }
-            }
-        }
-
-        if !self.skinned_draws.is_empty()
-            && let Some(skinned_pipeline) = &self.skinned_pipeline
-        {
-            // SAFETY: the pipeline was created with the shared layout the descriptor sets are
-            // bound with, so sets 0/1 stay valid for it.
-            unsafe {
-                self.device.device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    skinned_pipeline.handle(),
-                );
-            }
-            let mut bound_slot = u32::MAX;
-            for draw in &self.skinned_draws {
-                let mesh = &self.meshes[draw.slot as usize];
-                if draw.slot != bound_slot {
-                    bound_slot = draw.slot;
-                    // SAFETY: the mesh buffers live as long as the renderer, and skinned
-                    // meshes (joint_count > 0) hold `SkinnedVertex` data, the layout of the
-                    // bound skinned pipeline.
-                    unsafe {
-                        self.device.device.cmd_bind_vertex_buffers(
-                            command_buffer,
-                            0,
-                            &[mesh.vertices.handle()],
-                            &[0],
-                        );
-                    }
-                    // SAFETY: the buffer is live, was created with INDEX_BUFFER usage and
-                    // holds `u32` indices.
-                    unsafe {
-                        self.device.device.cmd_bind_index_buffer(
-                            command_buffer,
-                            mesh.indices.handle(),
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                    }
-                }
-                let push = SkinPush {
-                    first_bone: draw.first_bone,
-                    joint_count: draw.joint_count,
-                    reserved: [0; 2],
-                };
-                // SAFETY: the shared pipeline layout declares exactly this 16-byte
-                // vertex-stage range at offset 0.
-                unsafe {
-                    self.device.device.cmd_push_constants(
-                        command_buffer,
-                        self.pipeline_layout.handle(),
-                        vk::ShaderStageFlags::VERTEX,
-                        0,
-                        bytes_of(&push),
-                    );
-                }
-                // SAFETY: indices are in range for the vertex buffer (re-checked in
-                // `CpuSkinnedMesh::from_asset`). `draw.instance < unit_count <= max_instances`
-                // (it is a bucketed instance slot). Bones: `skinned_draw` guarantees
-                // `joint_count >= 1` and `first_bone + joint_count <= bone_count <=
-                // max_bones`, the bone buffer's capacity, and the shader clamps each joint
-                // index below `joint_count`, so every bone read stays inside this frame's
-                // upload.
-                unsafe {
-                    self.device.device.cmd_draw_indexed(
-                        command_buffer,
-                        mesh.index_count,
-                        1,
-                        0,
-                        0,
-                        draw.instance,
-                    );
-                }
-            }
-        }
-
-        let ui_count = ui.map_or(0, |list| {
-            list.vertices().len().min(self.config.max_ui_vertices)
-        });
-        if ui_count > 0 {
-            // SAFETY: pipeline, buffer and push constant range are live and compatible.
-            unsafe {
-                self.device.device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.ui_pipeline.handle(),
-                );
-            }
-            // SAFETY: the UI buffer was written for this frame and is large enough.
-            unsafe {
-                self.device.device.cmd_bind_vertex_buffers(
-                    command_buffer,
-                    0,
-                    &[self.frames[frame_index].ui_buffer.handle()],
-                    &[0],
-                );
-            }
-            // SAFETY: the UI set was written for this frame index and matches the layout.
-            unsafe {
-                self.device.device.cmd_bind_descriptor_sets(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.ui_pipeline_layout.handle(),
-                    0,
-                    &[self.ui_sets[frame_index]],
-                    &[],
-                );
-            }
-            let viewport_size = [extent.width as f32, extent.height as f32];
-            // SAFETY: the UI pipeline layout declares exactly this 8-byte vertex-stage push
-            // constant range.
-            unsafe {
-                self.device.device.cmd_push_constants(
-                    command_buffer,
-                    self.ui_pipeline_layout.handle(),
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    bytes_of(&viewport_size),
-                );
-            }
-            // SAFETY: `ui_count` was bounded by the vertex buffer capacity.
-            unsafe {
-                self.device.device.cmd_draw(
-                    command_buffer,
-                    u32::try_from(ui_count).expect("UI vertex count fits u32"),
-                    1,
-                    0,
-                    0,
-                );
-            }
-        }
-
-        self.device.cmd_end_rendering(command_buffer);
-
-        let capturing = self.capture_pending;
-        let color_image = self.swapchain.images[image_index as usize];
-        if capturing {
-            transition_image(
-                &self.device,
-                command_buffer,
-                color_image,
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_READ,
-            );
-            let capture = self.capture_buffer.as_mut().ok_or_else(|| {
-                RenderError::NoSuitableDevice(String::from(
-                    "capture buffer missing while capture is pending",
-                ))
-            })?;
-            let required = u64::from(self.swapchain.extent.width)
-                * u64::from(self.swapchain.extent.height)
-                * 4;
-            if capture.size() < required {
-                return Err(RenderError::NoSuitableDevice(format!(
-                    "capture buffer too small: {} < {required}",
-                    capture.size()
-                )));
-            }
-            let region = vk::BufferImageCopy::default()
-                .buffer_offset(0)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                )
-                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                .image_extent(vk::Extent3D {
-                    width: self.swapchain.extent.width,
-                    height: self.swapchain.extent.height,
-                    depth: 1,
-                });
-            // SAFETY: the image is in TRANSFER_SRC_OPTIMAL, the buffer is large enough and
-            // usable as a copy destination.
-            unsafe {
-                self.device.device.cmd_copy_image_to_buffer(
-                    command_buffer,
-                    color_image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    capture.handle(),
-                    core::slice::from_ref(&region),
-                );
-            }
-            let barrier = vk::BufferMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-                .dst_access_mask(vk::AccessFlags2::HOST_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .buffer(capture.handle())
-                .offset(0)
-                .size(vk::WHOLE_SIZE);
-            let dependency = vk::DependencyInfo::default()
-                .buffer_memory_barriers(core::slice::from_ref(&barrier));
-            self.device
-                .cmd_pipeline_barrier2(command_buffer, &dependency);
-            transition_image(
-                &self.device,
-                command_buffer,
-                color_image,
-                vk::ImageAspectFlags::COLOR,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::TRANSFER_READ,
-                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-                vk::AccessFlags2::NONE,
-            );
-        } else {
-            transition_color(
-                &self.device,
-                command_buffer,
-                color_image,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-            );
-        }
-        self.swapchain.color_layouts[image_index as usize] = vk::ImageLayout::PRESENT_SRC_KHR;
-
+        self.record_frame(command_buffer, frame_index, image_index)?;
         // SAFETY: the command buffer is recording and is ended exactly once.
         unsafe { self.device.device.end_command_buffer(command_buffer) }?;
 
@@ -1392,7 +598,8 @@ impl Renderer {
                 fence,
             )
         }?;
-        if capturing {
+        self.profiler.submitted(frame_index);
+        if self.capture_pending {
             self.capture_pending = false;
             self.capture_ready = true;
         }
@@ -1412,13 +619,144 @@ impl Renderer {
         }
     }
 
+    /// Records the compiled frame graph: per pass, its barriers, a timestamp pair around the
+    /// pass's commands, then the final transitions.
+    fn record_frame(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        frame_index: usize,
+        image_index: u32,
+    ) -> RenderResult<()> {
+        let capturing = self.capture_pending;
+        let extent = self.swapchain.extent;
+        let swapchain_image = self.swapchain.images[image_index as usize];
+        let swapchain_view = self.swapchain.views[image_index as usize];
+        let capture_buffer = if capturing {
+            let capture = self.capture_buffer.as_ref().ok_or_else(|| {
+                RenderError::NoSuitableDevice(String::from(
+                    "capture buffer missing while capture is pending",
+                ))
+            })?;
+            let required = u64::from(extent.width) * u64::from(extent.height) * 4;
+            if capture.size() < required {
+                return Err(RenderError::NoSuitableDevice(format!(
+                    "capture buffer too small: {} < {required}",
+                    capture.size()
+                )));
+            }
+            Some(capture.handle())
+        } else {
+            None
+        };
+        let plan = if capturing {
+            &self.capture_plan
+        } else {
+            &self.plan
+        };
+        let resources = plan.resources;
+        let hdr_view = self.transient(resources.hdr).view();
+        let depth_view = self.transient(resources.depth).view();
+        let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
+        self.profiler.begin_frame(command_buffer, frame_index);
+        for pass in plan.graph.passes() {
+            frame_graph::record_barriers(&self.device, command_buffer, &pass.barriers, &bindings);
+            self.profiler
+                .begin_pass(command_buffer, frame_index, pass.name);
+            match pass.tag {
+                PassKind::Scene => self.scene.record(
+                    &self.device,
+                    command_buffer,
+                    frame_index,
+                    &SceneTargets {
+                        color: hdr_view,
+                        depth: depth_view,
+                        extent,
+                        clear_color: self.config.clear_color,
+                    },
+                ),
+                PassKind::Composite => {
+                    self.composite
+                        .record(&self.device, command_buffer, swapchain_view, extent);
+                }
+                PassKind::Ui => {
+                    self.ui.record(
+                        &self.device,
+                        command_buffer,
+                        frame_index,
+                        swapchain_view,
+                        extent,
+                    );
+                }
+                PassKind::Capture => {
+                    if let Some(buffer) = capture_buffer {
+                        crate::passes::capture::record(
+                            &self.device,
+                            command_buffer,
+                            swapchain_image,
+                            extent,
+                            buffer,
+                        );
+                    }
+                }
+            }
+            self.profiler.end_pass(command_buffer, frame_index);
+        }
+        frame_graph::record_barriers(
+            &self.device,
+            command_buffer,
+            plan.graph.final_barriers(),
+            &bindings,
+        );
+        Ok(())
+    }
+
+    /// This frame's handle for every resource of `plan`.
+    fn bindings(
+        &self,
+        plan: &FramePlan,
+        frame_index: usize,
+        swapchain_image: vk::Image,
+        capture_buffer: Option<vk::Buffer>,
+    ) -> Bindings {
+        let resources = plan.resources;
+        let image = |resource| {
+            let slot = plan
+                .graph
+                .slot_of(resource)
+                .expect("frame transients are live in both variants");
+            Binding::Image {
+                image: self.transients.image(slot).image(),
+                aspect: plan.graph.slots()[slot].desc.aspect,
+            }
+        };
+        let mut bindings = Bindings::new();
+        bindings.set(
+            resources.swapchain,
+            Binding::Image {
+                image: swapchain_image,
+                aspect: vk::ImageAspectFlags::COLOR,
+            },
+        );
+        bindings.set(resources.hdr, image(resources.hdr));
+        bindings.set(resources.depth, image(resources.depth));
+        bindings.set(
+            resources.bones,
+            Binding::Buffer(self.scene.bone_buffer(frame_index)),
+        );
+        if let (Some(resource), Some(buffer)) = (resources.capture, capture_buffer) {
+            bindings.set(resource, Binding::Buffer(buffer));
+        }
+        debug_assert!(plan.graph.resource_count() <= bindings.0.len());
+        bindings
+    }
+
     fn recreate_swapchain(&mut self) -> RenderResult<()> {
         let [width, height] = self.window.size();
         if width == 0 || height == 0 {
             return Ok(());
         }
         // SAFETY: waiting for the device to idle guarantees no frame is still using the old
-        // swapchain before it is replaced.
+        // swapchain or transient images before they are replaced.
         unsafe { self.device.device.device_wait_idle() }?;
         let extent = vk::Extent2D { width, height };
         let swapchain = Swapchain::new(
@@ -1430,6 +768,9 @@ impl Renderer {
             Some(self.swapchain.handle()),
         )?;
         self.swapchain = swapchain;
+        self.transients =
+            TransientPool::new(&self.device, self.plan.graph.slots(), self.swapchain.extent)?;
+        self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
         self.frame_index = 0;
         Ok(())
@@ -1474,6 +815,8 @@ impl Renderer {
         scene: &Scene<'_>,
         ui: Option<&UiDrawList>,
     ) -> RenderResult<CapturedFrame> {
+        // The capture plan imports the readback buffer as idle: every capture waits for the
+        // device below before reading it, so no earlier submission still touches it.
         self.capture_ready = false;
         self.capture_pending = true;
         self.render_internal(scene, ui)?;
@@ -1555,6 +898,7 @@ impl core::fmt::Debug for Renderer {
             .field("device", &self.device.name)
             .field("extent", &self.extent())
             .field("validation", &self.validation_enabled())
+            .field("quality_tier", &self.config.quality_tier)
             .finish_non_exhaustive()
     }
 }
@@ -1564,309 +908,5 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
-        // SAFETY: the device is idle and this sampler is owned by the renderer.
-    }
-}
-
-/// Maps an instance's mesh to a live slot; unknown ids draw as the cube.
-fn mesh_slot(mesh: MeshId, mesh_count: usize) -> usize {
-    let index = mesh.index();
-    if index < mesh_count { index } else { 0 }
-}
-
-/// A UI vertex with its position scaled by the HUD scale, built off the mapped buffer.
-fn scaled_ui_vertex(mut vertex: UiVertex, scale: f32) -> UiVertex {
-    vertex.position[0] *= scale;
-    vertex.position[1] *= scale;
-    vertex
-}
-
-/// The draw for one skinned instance, or `None` if its bone range is empty or reaches past
-/// the `uploaded` joint matrices. The pushed joint count is at most the mesh's.
-fn skinned_draw(
-    bones: BoneRange,
-    mesh_joints: u32,
-    uploaded: u32,
-    slot: usize,
-    instance: u32,
-) -> Option<SkinnedDraw> {
-    if bones.count == 0 || mesh_joints == 0 {
-        return None;
-    }
-    if bones.first.checked_add(bones.count)? > uploaded {
-        return None;
-    }
-    Some(SkinnedDraw {
-        slot: u32::try_from(slot).ok()?,
-        instance,
-        first_bone: bones.first,
-        joint_count: bones.count.min(mesh_joints),
-    })
-}
-
-/// Counting-sort bucketing of `units` by mesh, without allocating.
-///
-/// On return `counts[m]` is the number of instances of mesh `m`, `starts[m]` the first
-/// instance slot of that mesh's contiguous run, and `cursors[m] == starts[m]` (the write
-/// cursor the caller advances while scattering). Runs are in mesh-slot order and keep scene
-/// order within a mesh, so a scene that only uses the cube is laid out exactly as before.
-fn bucket_by_mesh(
-    units: &[crate::UnitInstance],
-    mesh_count: usize,
-    counts: &mut [u32; MAX_MESHES],
-    starts: &mut [u32; MAX_MESHES],
-    cursors: &mut [u32; MAX_MESHES],
-) {
-    counts.fill(0);
-    for unit in units {
-        counts[mesh_slot(unit.mesh, mesh_count)] += 1;
-    }
-    let mut next = 0u32;
-    for slot in 0..MAX_MESHES {
-        starts[slot] = next;
-        next += counts[slot];
-    }
-    *cursors = *starts;
-}
-
-fn write_descriptors(
-    device: &Device,
-    camera_set: vk::DescriptorSet,
-    instance_set: vk::DescriptorSet,
-    camera_buffer: &GpuBuffer,
-    instance_buffer: &GpuBuffer,
-    bone_buffer: &GpuBuffer,
-) {
-    let camera_info = [vk::DescriptorBufferInfo::default()
-        .buffer(camera_buffer.handle())
-        .offset(0)
-        .range(CAMERA_UNIFORM_SIZE)];
-    let instance_info = [vk::DescriptorBufferInfo::default()
-        .buffer(instance_buffer.handle())
-        .offset(0)
-        .range(vk::WHOLE_SIZE)];
-    let bone_info = [vk::DescriptorBufferInfo::default()
-        .buffer(bone_buffer.handle())
-        .offset(0)
-        .range(vk::WHOLE_SIZE)];
-    let writes = [
-        vk::WriteDescriptorSet::default()
-            .dst_set(camera_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .buffer_info(&camera_info),
-        vk::WriteDescriptorSet::default()
-            .dst_set(instance_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .buffer_info(&instance_info),
-        vk::WriteDescriptorSet::default()
-            .dst_set(instance_set)
-            .dst_binding(1)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .buffer_info(&bone_info),
-    ];
-    // SAFETY: both descriptor sets were allocated from a compatible pool and the buffer
-    // info entries reference live buffers.
-    unsafe { device.update_descriptor_sets(&writes, &[]) };
-}
-
-#[allow(clippy::too_many_arguments)]
-fn transition_image(
-    device: &DeviceContext,
-    command_buffer: vk::CommandBuffer,
-    image: vk::Image,
-    aspect: vk::ImageAspectFlags,
-    old_layout: vk::ImageLayout,
-    new_layout: vk::ImageLayout,
-    src_stage: vk::PipelineStageFlags2,
-    src_access: vk::AccessFlags2,
-    dst_stage: vk::PipelineStageFlags2,
-    dst_access: vk::AccessFlags2,
-) {
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(src_stage)
-        .src_access_mask(src_access)
-        .dst_stage_mask(dst_stage)
-        .dst_access_mask(dst_access)
-        .old_layout(old_layout)
-        .new_layout(new_layout)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(aspect)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        );
-    let dependency =
-        vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&barrier));
-    device.cmd_pipeline_barrier2(command_buffer, &dependency);
-}
-
-fn transition_color(
-    device: &DeviceContext,
-    command_buffer: vk::CommandBuffer,
-    image: vk::Image,
-    old_layout: vk::ImageLayout,
-    new_layout: vk::ImageLayout,
-) {
-    let (src_stage, src_access, dst_stage, dst_access) = if old_layout == vk::ImageLayout::UNDEFINED
-    {
-        (
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags2::NONE,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-        )
-    } else {
-        (
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-        )
-    };
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(src_stage)
-        .src_access_mask(src_access)
-        .dst_stage_mask(dst_stage)
-        .dst_access_mask(dst_access)
-        .old_layout(old_layout)
-        .new_layout(new_layout)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        );
-    let dependency =
-        vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&barrier));
-    device.cmd_pipeline_barrier2(command_buffer, &dependency);
-}
-
-fn depth_attachment_layout(aspect: vk::ImageAspectFlags) -> vk::ImageLayout {
-    if aspect.contains(vk::ImageAspectFlags::STENCIL) {
-        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    } else {
-        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
-    }
-}
-
-fn transition_depth(
-    device: &DeviceContext,
-    command_buffer: vk::CommandBuffer,
-    image: vk::Image,
-    old_layout: vk::ImageLayout,
-    aspect: vk::ImageAspectFlags,
-) {
-    let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
-        (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE)
-    } else {
-        (
-            vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )
-    };
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(src_stage)
-        .src_access_mask(src_access)
-        .dst_stage_mask(
-            vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-        .old_layout(old_layout)
-        .new_layout(depth_attachment_layout(aspect))
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(aspect)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        );
-    let dependency =
-        vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&barrier));
-    device.cmd_pipeline_barrier2(command_buffer, &dependency);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MAX_MESHES, SkinPush, SkinnedDraw, bucket_by_mesh, skinned_draw};
-    use crate::{BoneRange, MeshId, UnitInstance};
-
-    #[test]
-    fn skin_push_is_16_bytes() {
-        assert_eq!(core::mem::size_of::<SkinPush>(), 16);
-    }
-
-    #[test]
-    fn skinned_draws_stay_inside_the_uploaded_bones() {
-        let draw = skinned_draw(BoneRange::new(64, 64), 7, 128, 3, 9).expect("in range");
-        assert_eq!(
-            draw,
-            SkinnedDraw {
-                slot: 3,
-                instance: 9,
-                first_bone: 64,
-                // Never more than the mesh's joints.
-                joint_count: 7,
-            }
-        );
-        assert_eq!(skinned_draw(BoneRange::NONE, 7, 128, 3, 9), None);
-        assert_eq!(skinned_draw(BoneRange::new(122, 7), 7, 128, 3, 9), None);
-        assert_eq!(
-            skinned_draw(BoneRange::new(u32::MAX, 2), 7, 128, 3, 9),
-            None
-        );
-        assert_eq!(skinned_draw(BoneRange::new(0, 7), 0, 128, 3, 9), None);
-        let partial = skinned_draw(BoneRange::new(0, 3), 7, 3, 1, 0).expect("short range");
-        assert_eq!(partial.joint_count, 3);
-    }
-    use moba_core::math::{Mat4, Vec4};
-
-    fn unit(mesh: u16) -> UnitInstance {
-        UnitInstance::new(Mat4::IDENTITY, Vec4::ONE).with_mesh(MeshId::from_index(mesh))
-    }
-
-    #[test]
-    fn buckets_are_contiguous_and_unknown_meshes_draw_as_cubes() {
-        let units = [unit(2), unit(0), unit(1), unit(2), unit(9), unit(0)];
-        let mut counts = [0; MAX_MESHES];
-        let mut starts = [0; MAX_MESHES];
-        let mut cursors = [0; MAX_MESHES];
-        bucket_by_mesh(&units, 3, &mut counts, &mut starts, &mut cursors);
-        // Mesh 9 is not registered (3 meshes), so it joins the cube bucket.
-        assert_eq!(&counts[..4], &[3, 1, 2, 0]);
-        assert_eq!(&starts[..4], &[0, 3, 4, 6]);
-        assert_eq!(cursors, starts);
-        assert_eq!(starts[MAX_MESHES - 1], 6);
-    }
-
-    #[test]
-    fn cube_only_scenes_keep_one_run_in_scene_order() {
-        let units = [unit(0); 5];
-        let mut counts = [7; MAX_MESHES];
-        let mut starts = [7; MAX_MESHES];
-        let mut cursors = [7; MAX_MESHES];
-        bucket_by_mesh(&units, 1, &mut counts, &mut starts, &mut cursors);
-        assert_eq!(counts[0], 5);
-        assert_eq!(starts[0], 0);
-        assert!(counts[1..].iter().all(|&count| count == 0));
     }
 }
