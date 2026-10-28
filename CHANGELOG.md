@@ -99,6 +99,57 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Materials, textures, pipeline cache and shader tooling (AAA roadmap R1b, ADR-0010):**
+  - **Materials:** a model named `<m>` picks up a client-local descriptor
+    `<MOBA_ASSET_ROOT>/materials/<m>.toml` (`moba_assets::MaterialDesc`, ≤ 4 KiB, range-checked):
+    a shader permutation (`vertex-color` or `textured`), a parameter block (base colour factor,
+    metallic, roughness, normal scale, team tint, emissive) and a texture set (base colour,
+    normal, metallic-roughness, team-colour mask) at `textures/<name>.ktx2`. Each textured
+    material gets its own descriptor set (set 2), from one pool sized for exactly the materials
+    of a content load (ADR-0009); nothing is allocated per frame. The `MATERIAL_TEXTURED`
+    permutation samples base colour, tints it by the unit colour through the mask and applies
+    the normal map (derivative tangent frame); metallic/roughness are bound for R2. Any problem
+    is logged once and keeps the vertex-colour look. Ships `content/materials/sentinel.toml`
+    with self-generated textures on the static `sentinel` model. Not hashed, not on the wire.
+  - **Textures:** a bounded KTX 2.0 loader (`moba_assets::load_ktx2`: ≤ 4096², ≤ 13 levels,
+    ≤ 64 MiB, checked before allocating; data-format-descriptor transfer function must match
+    the format's sRGB-ness; fuzz target `ktx2` with a corpus) and writer; BC7/BC5/BC4 upload
+    as is where `textureCompressionBC` is supported, and are decoded on the CPU at load
+    otherwise (`bc-decode` feature, `bcdec_rs`) or with `MOBA_COMPRESSED_TEXTURES=0`. Each slot
+    accepts only its formats (sRGB colour, linear data).
+  - **`moba-tools texture-bake`:** PNG → KTX2 with mips filtered per kind (linear-light colour,
+    renormalised normals), an in-house BC7 (mode 6), BC5 and BC4 encoder (51–54 dB on the
+    sample set), `info` (with the CPU-decode cost) and `generate sentinel` (the procedural
+    sample set; `scripts/bake-sample-textures.sh`).
+  - **UVs:** `MeshData::with_uvs`/`uvs`, `TEXCOORD_0` in the `.glb` loader, box-projected UVs on
+    the generated static samples (`sentinel`, `crystal`, `rampart`; the skinned sample is
+    unchanged). Static vertices are 32 bytes and skinned ones 40.
+  - **Pipeline cache:** every pipeline and permutation is built at renderer creation through a
+    persistent `VkPipelineCache` (`MOBA_PIPELINE_CACHE`, default a per-user cache file; `off`
+    disables). The file is checksummed and its vendor, device and `pipelineCacheUUID` are
+    checked before the driver sees it; a corrupt or foreign file is a cold start, and a
+    driver blob that would not be reusable is not saved. RTX 5070 Ti: 7 pipelines in 90–98 ms
+    cold, 0.5 ms warm (driver disk cache off); renderer ready in about 175 ms vs 84 ms. The
+    startup log and `MOBA_FRAME_LOG` report `pipelines`, `pipeline_build_ms`,
+    `pipeline_cache` and `startup_ms`.
+  - **Shader tooling:** GLSL `#include` files (`crates/shaders/shaders/include/`: the camera
+    block that was duplicated in five shaders, the instance buffer, lighting and the material
+    set), a build-time permutation table (`MATERIAL_TEXTURED` → `unit_textured.frag.spv`,
+    `unit_textured.vert.spv`, `skinned_textured.vert.spv`), `spirv-val` on every module as
+    before, and dev hot reload: `MOBA_SHADER_DIR` holds SPIR-V overrides that are re-read when a
+    `.spv` changes (scene and composite pipelines; `Renderer::reload_shaders`).
+  - **R1a review fixes:** the normal and capture graph variants must agree on each transient
+    slot's cross-frame start `(stage, access)`, not only the slot list; read-before-write is
+    also enforced for imports with discarded contents (the swapchain), final accesses
+    included; `QualityTier::ALL` is a `&'static [QualityTier]` (semver-safe for the
+    `#[non_exhaustive]` enum); `GpuTimings::frame` numbers each sample and the frame log
+    records each GPU sample once instead of repeating stale ones; and the scene pass is
+    submitted in a batch that does not wait on the acquire semaphore, so its GPU time cannot
+    include that wait.
+  - **New public API (additive):** see ADR-0010 "Consequences" and
+    [docs/api-1.0.md](docs/api-1.0.md). Golden captures are byte-identical to `main`
+    (lavapipe, validation + sync validation, 0 messages); evidence in
+    `docs/perf/0013-materials.md`. No wire, replay, logic or content-hash change.
 - **Render graph, HDR and tonemap (AAA roadmap R1a, ADR-0008/ADR-0009):** the frame is now a
   small in-house render graph (`moba-render` `graph`). Passes declare image and buffer
   accesses, and compiling the graph derives `vkCmdPipelineBarrier2` barriers and layout

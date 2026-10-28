@@ -35,6 +35,8 @@ use moba_assets::{AnimationGraph, AnimationSet, Skeleton};
 use moba_core::math::{Mat4, Vec3};
 use moba_render::{MeshData, MeshId};
 
+use crate::app::materials::{MaterialLibrary, MaterialSink, ModelMeshes};
+
 /// Environment variable naming the client-local asset root.
 pub(crate) const ASSET_ROOT_ENV: &str = "MOBA_ASSET_ROOT";
 /// Environment variable mapping hero names to model names (dev override of the catalogue).
@@ -180,6 +182,8 @@ pub(crate) struct ModelLibrary {
     animation_sets: bool,
     /// Whether to upload skinned variants at all.
     skinning: bool,
+    /// Client-local materials of the loaded models (`materials/<model>.toml`, ADR-0010).
+    materials: MaterialLibrary,
 }
 
 impl ModelLibrary {
@@ -197,6 +201,7 @@ impl ModelLibrary {
 
     pub(crate) fn new(root: PathBuf, bindings: ModelBindings) -> Self {
         Self {
+            materials: MaterialLibrary::new(root.clone()),
             root,
             bindings,
             loaded: Vec::new(),
@@ -239,10 +244,28 @@ impl ModelLibrary {
     /// only the cube, so cached `MeshId`s would be stale). Cached failures are kept: the same
     /// files would fail again and were already logged.
     pub(crate) fn renderer_recreated(&mut self) {
+        self.materials.renderer_recreated();
         self.loaded.retain(|(_, model)| model.is_none());
         self.heroes.clear();
         self.rigs.clear();
         self.graphs.clear();
+    }
+
+    /// Applies the materials of every loaded model not handled yet (one registration call;
+    /// see [`MaterialLibrary::bind`]). Load time only.
+    pub(crate) fn bind_materials(&mut self, sink: &mut impl MaterialSink) {
+        let Self {
+            loaded, materials, ..
+        } = self;
+        materials.bind(
+            sink,
+            loaded.iter().filter_map(|(name, model)| {
+                model.map(|model| ModelMeshes {
+                    name,
+                    meshes: [Some(model.mesh), model.skin.map(|skin| skin.mesh)],
+                })
+            }),
+        );
     }
 
     /// The dev-override name mapping (see [`hero_model`]).
@@ -391,6 +414,7 @@ pub(crate) fn bind_hero_models<'a>(
         }
         .map_err(|error| error.to_string())
     });
+    models.bind_materials(renderer);
 }
 
 #[cfg(test)]

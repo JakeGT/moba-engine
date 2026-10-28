@@ -1,14 +1,18 @@
 //! Physical/logical device selection, queues and the GPU allocator.
 
+use core::cell::Cell;
 use core::ffi::{CStr, c_char};
 use core::fmt::Write as _;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ash::{Instance, vk};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
 use crate::error::{RenderError, RenderResult};
 use crate::instance::InstanceContext;
+use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
 
 const SWAPCHAIN: &CStr = c"VK_KHR_swapchain";
 const PORTABILITY_SUBSET: &CStr = c"VK_KHR_portability_subset";
@@ -32,6 +36,19 @@ pub(crate) struct DeviceContext {
     pub(crate) timestamp_period: f32,
     /// `timestampValidBits` of the graphics queue family; `0` means no timestamps.
     pub(crate) timestamp_valid_bits: u32,
+    /// `textureCompressionBC` is supported and enabled: BC7/BC5/BC4 upload as is.
+    pub(crate) texture_compression_bc: bool,
+    /// `maxSamplerAnisotropy` when `samplerAnisotropy` is supported and enabled.
+    pub(crate) max_anisotropy: Option<f32>,
+    /// `minUniformBufferOffsetAlignment`.
+    pub(crate) min_uniform_offset_alignment: u64,
+    /// Identity a saved pipeline cache must match.
+    pub(crate) cache_identity: CacheIdentity,
+    /// The pipeline cache every pipeline is built through (null until
+    /// [`Self::init_pipeline_cache`]); destroyed in `Drop` before the device.
+    pipeline_cache: vk::PipelineCache,
+    /// Pipelines built so far and the time spent in `vkCreateGraphicsPipelines`.
+    pipeline_builds: Cell<(u32, Duration)>,
 }
 
 struct Candidate {
@@ -162,10 +179,21 @@ impl DeviceContext {
         let instance = &context.instance;
         let physical = candidate.physical;
 
+        // Optional core features, enabled when present: BC textures (ADR-0010) and
+        // anisotropic filtering (High/Ultra). Their absence has a fallback each.
+        // SAFETY: `physical` came from this instance.
+        let supported = unsafe { instance.get_physical_device_features(physical) };
+        let texture_compression_bc = supported.texture_compression_bc == vk::TRUE;
+        let sampler_anisotropy = supported.sampler_anisotropy == vk::TRUE;
+        let base_features = vk::PhysicalDeviceFeatures::default()
+            .texture_compression_bc(texture_compression_bc)
+            .sampler_anisotropy(sampler_anisotropy);
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features_13);
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default()
+            .features(base_features)
+            .push_next(&mut features_13);
 
         let priorities = [1.0f32];
         let mut queue_infos = vec![
@@ -233,7 +261,108 @@ impl DeviceContext {
             max_storage_buffer_range: candidate.properties.limits.max_storage_buffer_range,
             timestamp_period: candidate.properties.limits.timestamp_period,
             timestamp_valid_bits,
+            texture_compression_bc,
+            max_anisotropy: sampler_anisotropy
+                .then_some(candidate.properties.limits.max_sampler_anisotropy),
+            min_uniform_offset_alignment: candidate
+                .properties
+                .limits
+                .min_uniform_buffer_offset_alignment
+                .max(1),
+            cache_identity: CacheIdentity::of(&candidate.properties),
+            pipeline_cache: vk::PipelineCache::null(),
+            pipeline_builds: Cell::new((0, Duration::ZERO)),
         })
+    }
+
+    /// Creates the pipeline cache, seeded from `path` when it holds a valid cache for this
+    /// device (see [`crate::pipeline_cache`]). Call once, before building any pipeline.
+    pub(crate) fn init_pipeline_cache(
+        &mut self,
+        path: Option<&Path>,
+    ) -> RenderResult<PipelineCacheState> {
+        let (data, state) = match path.map(pipeline_cache::read) {
+            None => (None, PipelineCacheState::Disabled),
+            Some(Ok(None)) => (None, PipelineCacheState::Cold),
+            Some(Ok(Some(file))) => match pipeline_cache::validate(&file, self.cache_identity) {
+                Ok(payload) => (Some(payload.to_vec()), PipelineCacheState::Warm),
+                Err(reason) => (None, PipelineCacheState::Rejected(reason)),
+            },
+            Some(Err(reason)) => (None, PipelineCacheState::Rejected(reason)),
+        };
+        let mut info = vk::PipelineCacheCreateInfo::default();
+        if let Some(data) = data.as_deref() {
+            info = info.initial_data(data);
+        }
+        // SAFETY: the device is live; the initial data, if any, passed the header checks
+        // above and outlives the call.
+        let created = unsafe { self.device.create_pipeline_cache(&info, None) };
+        let cache = match created {
+            Ok(cache) => cache,
+            // A driver that still refuses the data gets an empty cache instead.
+            Err(_) if data.is_some() => {
+                let empty = vk::PipelineCacheCreateInfo::default();
+                // SAFETY: as above, with no initial data.
+                unsafe { self.device.create_pipeline_cache(&empty, None) }?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        self.pipeline_cache = cache;
+        Ok(state)
+    }
+
+    /// Writes the pipeline cache to `path` (atomically). Errors are returned for logging;
+    /// a failed save only costs the next start its warm cache.
+    pub(crate) fn save_pipeline_cache(&self, path: &Path) -> Result<usize, String> {
+        if self.pipeline_cache == vk::PipelineCache::null() {
+            return Err(String::from("no pipeline cache"));
+        }
+        // SAFETY: the cache belongs to this device and no pipeline is being built.
+        let data = unsafe { self.device.get_pipeline_cache_data(self.pipeline_cache) }
+            .map_err(|error| format!("{error:?}"))?;
+        // Only save what the next start would accept: some drivers (lavapipe) return a
+        // header-only or truncated blob that carries nothing worth keeping.
+        pipeline_cache::validate(&pipeline_cache::wrap(&data), self.cache_identity).map_err(
+            |reason| {
+                format!(
+                    "the driver's cache data ({} bytes) is not reusable: {reason:?}",
+                    data.len()
+                )
+            },
+        )?;
+        pipeline_cache::write(path, &data).map_err(|error| error.to_string())?;
+        Ok(data.len())
+    }
+
+    /// Builds one graphics pipeline through the pipeline cache, timing the driver call.
+    pub(crate) fn create_graphics_pipeline(
+        &self,
+        create_info: &vk::GraphicsPipelineCreateInfo<'_>,
+    ) -> RenderResult<vk::Pipeline> {
+        let started = Instant::now();
+        // SAFETY: the caller's create info and everything it points to outlive the call; the
+        // cache (possibly null) belongs to this device.
+        let pipelines = unsafe {
+            self.device.create_graphics_pipelines(
+                self.pipeline_cache,
+                core::slice::from_ref(create_info),
+                None,
+            )
+        };
+        let (count, time) = self.pipeline_builds.get();
+        self.pipeline_builds
+            .set((count + 1, time + started.elapsed()));
+        match pipelines {
+            Ok(mut pipelines) => pipelines
+                .pop()
+                .ok_or(RenderError::Shader("no pipeline returned")),
+            Err((_, error)) => Err(error.into()),
+        }
+    }
+
+    /// Pipelines built so far and the total driver time.
+    pub(crate) fn pipeline_builds(&self) -> (u32, Duration) {
+        self.pipeline_builds.get()
     }
 
     /// Starts dynamic rendering (core Vulkan 1.3).
@@ -284,6 +413,14 @@ impl Drop for DeviceContext {
     fn drop(&mut self) {
         // SAFETY: this waits for all queues of a live device to go idle.
         let _ = unsafe { self.device.device_wait_idle() };
+        if self.pipeline_cache != vk::PipelineCache::null() {
+            // SAFETY: the cache belongs to this device, no pipeline build is in progress and
+            // it is destroyed once.
+            unsafe {
+                self.device
+                    .destroy_pipeline_cache(self.pipeline_cache, None);
+            }
+        }
         // Free GPU memory before destroying the device. Every `GpuBuffer`/`GpuImage` is
         // dropped before the device context by `Renderer`'s field order, so the allocator
         // should have no other owners left.

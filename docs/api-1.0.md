@@ -148,16 +148,28 @@ matrices).
 `Camera`, `UnitInstance`, `MeshId`, `BoneRange`, `VisionCircles`, `UiDrawList`/`UiVertex`,
 `CapturedFrame`, `probe_vulkan`/`VulkanProbe`, the UI atlas builder and the diagnostics counters.
 R1a (ADR-0008) added `QualityTier`, `GpuTimings`/`PassTiming` (`Renderer::gpu_timings`) and
-`RenderError::RenderGraph`.
+`RenderError::RenderGraph`. R1b (ADR-0010) added materials and textures
+(`Renderer::register_texture`, `register_materials`, `set_mesh_material`, `material_stats`,
+`compressed_textures_supported`; `MaterialData`, `MaterialId`, `TextureId`, `MaterialStats`,
+re-exported `TextureData`/`TextureFormat`/`MaterialShader`/`TextureSlot`), the pipeline cache
+(`Renderer::pipeline_stats`, `PipelineStats`, `PipelineCacheState`, `PipelineCacheRejection`,
+`RenderConfig::with_pipeline_cache`), dev shader overrides (`RenderConfig::with_shader_dir`,
+`Renderer::reload_shaders`), `RenderConfig::with_compressed_textures`, `GpuTimings::frame`
+and `RenderError::{TooManyTextures, TooManyMaterials, InvalidMaterial}`. `QualityTier::ALL` is
+now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
+- `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
-  `CapturedFrame`, `VulkanProbe`, `GpuTimings` and `PassTiming` (read-only stats), and the
-  frame inputs that already had constructors:
+  `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
+  `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
+  `with_base_color_factor`, `with_team_tint`), and the frame inputs that already had
+  constructors:
   `Scene` (`new`, `empty`, `with_*`), `UnitInstance` (`new`, `at`, `with_mesh`, `with_bones`),
   `Camera` (`perspective`, `orbit`).
-- Exhaustive by design: `BoneRange`, `MeshId`, `UiVertex` (GPU vertex layout),
-  `VisionCircles` (uniform layout), `ValidationMode` (a closed policy).
+- Exhaustive by design: `BoneRange`, `MeshId`, `MaterialId`, `TextureId` (opaque ids, checked
+  where used), `UiVertex` (GPU vertex layout), `VisionCircles` (uniform layout),
+  `ValidationMode` (a closed policy).
 - Public but unstable: `bones_truncated`, `skinned_instances_dropped`,
   `ui_vertices_truncated` (diagnostic counters) and `build_atlas`/`ATLAS_*`.
 
@@ -171,13 +183,18 @@ R1a (ADR-0008) added `QualityTier`, `GpuTimings`/`PassTiming` (`Renderer::gpu_ti
 `load_glb_file`), `MeshData`, skinning (`Skeleton`, `AnimationClip`, `Track`, `MeshSkin`,
 `JointTransform`), map visuals (`MapVisuals`, `MapProp`) and the animation runtime of
 ADR-0012 (`Pose`, `BoneMask`, `BlendSpace1d`, `AnimationSet`, `AnimationGraph`, `Animator`,
-`AnimationScratch`, `StateId`, `SocketId`).
+`AnimationScratch`, `StateId`, `SocketId`), and R1b's textures and materials (ADR-0010:
+`TextureData`, `TextureFormat`, `load_ktx2`/`load_ktx2_file`/`write_ktx2`, `MaterialDesc`,
+`MaterialShader`, `TextureSlot`, `MaterialReport`, `MeshData::with_uvs`/`uvs`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,
   `AssetList`, `MeshError`, `GlbError`, `SkinError`, `MapVisualsError`, `TrackPath`,
   `Interpolation`, `AnimationSetError`, `AnimationEvent`, `PlayMode`, `Layer`, `ClipWrap`,
-  `BlendSpaceError`; struct `AnimatorReport` (read-only). The other animation types have
+  `BlendSpaceError`, `TextureFormat`, `TextureError`, `MaterialShader`, `MaterialError`,
+  `TextureSlot`; structs `AnimatorReport` and `MaterialReport` (read-only) and `MaterialDesc`
+  (validated, built by `parse`/`load_file`). `TextureData` has private fields and the
+  validating `TextureData::new`. The other animation types have
   private fields and constructors (`Pose::rest`, `BlendSpace1d::new`, `AnimationSet::parse`,
   `AnimationGraph::bind`, `Animator::new`).
 - `#[non_exhaustive]` structs: `AssetManifest`, `AssetEntry` (new `AssetEntry::new` +

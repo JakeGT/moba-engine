@@ -23,8 +23,9 @@ pub enum QualityTier {
 }
 
 impl QualityTier {
-    /// Every tier, lowest first.
-    pub const ALL: [Self; 4] = [Self::Low, Self::Medium, Self::High, Self::Ultra];
+    /// Every tier, lowest first. A slice rather than an array so a later tier is not a
+    /// breaking change for this `#[non_exhaustive]` enum.
+    pub const ALL: &'static [Self] = &[Self::Low, Self::Medium, Self::High, Self::Ultra];
 
     /// Lower-case name, as accepted by [`Self::from_name`] (`"low"`, `"medium"`, ...).
     #[must_use]
@@ -42,8 +43,20 @@ impl QualityTier {
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.trim();
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|tier| tier.name().eq_ignore_ascii_case(name))
+    }
+
+    /// Maximum sampler anisotropy for material textures (`None` = off), clamped to the
+    /// device limit; `Low` keeps plain trilinear filtering for min-spec bandwidth.
+    pub(crate) const fn max_anisotropy(self) -> Option<f32> {
+        match self {
+            Self::Low => None,
+            Self::Medium => Some(4.0),
+            Self::High => Some(8.0),
+            Self::Ultra => Some(16.0),
+        }
     }
 
     /// Preferred HDR scene colour format for this tier.
@@ -68,7 +81,7 @@ mod tests {
 
     #[test]
     fn tiers_round_trip_by_name_and_pick_hdr_formats() {
-        for tier in QualityTier::ALL {
+        for &tier in QualityTier::ALL {
             assert_eq!(QualityTier::from_name(tier.name()), Some(tier));
         }
         assert_eq!(QualityTier::from_name(" ULTRA "), Some(QualityTier::Ultra));

@@ -110,7 +110,7 @@ impl UiPass {
         let pipeline = GraphicsPipeline::from_raw(
             device.device.clone(),
             pipeline::create_ui(
-                &device.device,
+                device,
                 pipeline_layout.handle(),
                 vertex.handle(),
                 fragment.handle(),

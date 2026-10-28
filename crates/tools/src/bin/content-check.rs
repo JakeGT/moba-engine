@@ -84,6 +84,9 @@ fn main() {
         eprintln!("error: {error}");
     }
     let valid = errors.is_empty();
+    // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
+    // would load. One descriptor set per textured material; the pool is sized from this.
+    let materials = content.assets.material_report(pack_dir);
     let attested = moba_net::crypto::verify_pack(&content);
     let publisher_hex = content
         .attestation
@@ -147,7 +150,7 @@ fn main() {
     if json {
         let error_list: Vec<String> = errors.iter().map(|error| json_string(error)).collect();
         println!(
-            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"errors\":[{}]}}",
+            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"materials\":{},\"textured_materials\":{},\"textures\":{},\"texture_bytes\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"errors\":[{}]}}",
             json_string(&path),
             json_string(&content.manifest.name),
             json_string(&content.manifest.version),
@@ -158,6 +161,10 @@ fn main() {
             content.map.lanes.len(),
             content.map.structures.len(),
             content.assets.len(),
+            materials.materials,
+            materials.textured,
+            materials.textures,
+            materials.texture_bytes,
             content.hash(),
             attested,
             json_string(publisher_hex.as_deref().unwrap_or("")),
@@ -178,6 +185,16 @@ fn main() {
         println!("lanes      {}", content.map.lanes.len());
         println!("structures {}", content.map.structures.len());
         println!("assets     {}", content.assets.len());
+        println!(
+            "materials  {} ({} textured, {} descriptor sets)",
+            materials.materials, materials.textured, materials.textured
+        );
+        println!(
+            "textures   {} ({} bindings, {} KiB)",
+            materials.textures,
+            materials.bound_textures,
+            materials.texture_bytes.div_ceil(1024)
+        );
         println!("hash       {:#018x}", content.hash());
         println!("valid      {valid}");
     }

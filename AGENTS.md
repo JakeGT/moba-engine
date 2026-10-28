@@ -54,15 +54,17 @@ crates/sim        deterministic simulation, status effects, bots, replay
 crates/net        UDP transport, protocol, crypto, snapshots, prediction, server/client
 crates/netsim     lossy-link conditioner
 crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader (ADR-0007),
-                  animation sampling/blending/state machine (ADR-0012)
+                  animation sampling/blending/state machine (ADR-0012), bounded KTX2
+                  textures and material descriptors (ADR-0010)
 crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, terrain/fog, UI atlas,
-                  animated rig, GPU skinning, per-pass GPU timestamps
-crates/shaders    GLSL -> SPIR-V build
+                  animated rig, GPU skinning, materials, pipeline cache, per-pass GPU timestamps
+crates/shaders    GLSL -> SPIR-V build (shared #include files, enumerated permutations)
 crates/platform   winit window/input/fixed step
 crates/client     playable client, HUD, spectator, settings, audio, capture modes
 crates/server     headless dedicated server
 crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wire,
-                  state-hash, image-check, vulkan-probe, bake-ui-atlas
+                  state-hash, image-check, vulkan-probe, bake-ui-atlas, sample-mesh,
+                  texture-bake
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
 docs/             architecture, status, tasks, ADRs, perf logs, screenshots, agent guide
@@ -143,6 +145,8 @@ cargo run --release -p moba-tools --bin match-soak -- --content content/aram.tom
 cargo run --release -p moba-tools --bin soak -- --seconds 300
 cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 60
 cargo run -p moba-tools --bin bake-ui-atlas -- crates/render/assets/ui-atlas.rgba
+cargo run --release -p moba-tools --bin texture-bake -- bake in.png out.ktx2 --kind color
+scripts/bake-sample-textures.sh                       # regenerate content/textures/
 cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/render-fingerprint.rgb
 cargo run -p moba-tools --bin vulkan-probe
 ```
@@ -155,6 +159,8 @@ cargo install cargo-fuzz --locked
 cargo +nightly fuzz run wire -- -max_total_time=60
 cargo +nightly fuzz run replay -- -max_total_time=60
 cargo +nightly fuzz run content -- -max_total_time=60
+cargo +nightly fuzz run glb -- -max_total_time=60
+cargo +nightly fuzz run ktx2 -- -max_total_time=60
 RUSTFLAGS="--cfg loom" cargo test -p moba-jobs --lib loom -- --test-threads=1
 ```
 

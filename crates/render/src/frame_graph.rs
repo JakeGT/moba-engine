@@ -44,6 +44,9 @@ pub(crate) struct FrameResources {
 pub(crate) struct FramePlan {
     pub(crate) graph: CompiledGraph<PassKind>,
     pub(crate) resources: FrameResources,
+    /// Index of the first pass that touches the swapchain image. Passes before it go in a
+    /// first batch that does not wait on the acquire semaphore; the rest wait on it.
+    pub(crate) acquire_split: usize,
 }
 
 /// Builds and compiles the frame graph.
@@ -110,8 +113,11 @@ pub(crate) fn build(
             .access(swapchain, Access::TransferRead)
             .access(buffer, Access::TransferWrite);
     }
+    let graph = graph.compile()?;
+    let acquire_split = graph.first_use(swapchain);
     Ok(FramePlan {
-        graph: graph.compile()?,
+        graph,
+        acquire_split,
         resources: FrameResources {
             swapchain,
             hdr,
@@ -243,6 +249,9 @@ mod tests {
         let frame = plan(false);
         let kinds: Vec<_> = frame.graph.passes().iter().map(|pass| pass.tag).collect();
         assert_eq!(kinds, [PassKind::Scene, PassKind::Composite, PassKind::Ui]);
+        // The scene is submitted ahead of the acquire wait; the composite waits for it.
+        assert_eq!(frame.acquire_split, 1);
+        assert_eq!(plan(true).acquire_split, 1);
         assert_eq!(frame.graph.culled(), [] as [&str; 0]);
         // HDR colour and depth overlap in the scene pass, so they get separate slots.
         assert_eq!(frame.graph.slots().len(), 2);
@@ -272,7 +281,7 @@ mod tests {
     fn capture_variant_copies_after_ui_and_shares_transient_slots() {
         let normal = plan(false);
         let capture = plan(true);
-        assert_eq!(capture.graph.slots(), normal.graph.slots());
+        assert!(capture.graph.shares_transients_with(&normal.graph));
         let last = capture.graph.passes().last().expect("capture pass");
         assert_eq!(last.tag, PassKind::Capture);
         assert_eq!(last.barriers[0].new_layout, L::TRANSFER_SRC_OPTIMAL);

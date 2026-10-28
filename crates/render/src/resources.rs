@@ -183,7 +183,23 @@ impl GpuImage {
         usage: vk::ImageUsageFlags,
         aspect: vk::ImageAspectFlags,
     ) -> RenderResult<Self> {
+        Self::with_mips(device, allocator, name, extent, format, usage, aspect, 1)
+    }
+
+    /// An image with `mip_levels` levels (at least 1); the view covers every level.
+    #[allow(clippy::too_many_arguments)] // The create info, flattened.
+    pub(crate) fn with_mips(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+        mip_levels: u32,
+    ) -> RenderResult<Self> {
         assert!(extent.width > 0 && extent.height > 0);
+        assert!(mip_levels > 0);
         let create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -192,7 +208,7 @@ impl GpuImage {
                 height: extent.height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -233,7 +249,7 @@ impl GpuImage {
             return Err(error.into());
         }
 
-        let view = match create_image_view(&device, image, format, aspect) {
+        let view = match create_image_view_levels(&device, image, format, aspect, mip_levels) {
             Ok(view) => view,
             Err(error) => {
                 drop_allocator_free(&allocator, allocation);
@@ -281,6 +297,17 @@ pub(crate) fn create_image_view(
     format: vk::Format,
     aspect: vk::ImageAspectFlags,
 ) -> RenderResult<vk::ImageView> {
+    create_image_view_levels(device, image, format, aspect, 1)
+}
+
+/// A 2D view of mip levels `0..levels`.
+pub(crate) fn create_image_view_levels(
+    device: &ash::Device,
+    image: vk::Image,
+    format: vk::Format,
+    aspect: vk::ImageAspectFlags,
+    levels: u32,
+) -> RenderResult<vk::ImageView> {
     let create_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
@@ -290,7 +317,7 @@ pub(crate) fn create_image_view(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(aspect)
                 .base_mip_level(0)
-                .level_count(1)
+                .level_count(levels)
                 .base_array_layer(0)
                 .layer_count(1),
         );

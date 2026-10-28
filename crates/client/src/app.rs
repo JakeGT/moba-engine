@@ -123,13 +123,20 @@ struct ClientApp {
     quality: moba_render::QualityTier,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
+    /// `MOBA_SHADER_DIR` (dev): SPIR-V overrides, hot-reloaded when a `.spv` changes.
+    shader_dir: Option<PathBuf>,
+    /// Newest override modification time seen, for the hot-reload poll.
+    shader_stamp: Option<std::time::SystemTime>,
     frame_log: Option<Vec<f32>>,
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
     /// Per-frame GPU times `[scene, composite, ui, total, span]` while logging, from the
-    /// renderer's timestamp queries (empty on devices without timestamp support).
+    /// renderer's timestamp queries (empty on devices without timestamp support). One entry
+    /// per measured GPU frame: a sample whose frame number was already logged is skipped.
     gpu_log: Option<Vec<[f32; 5]>>,
+    /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
+    gpu_logged_frame: Option<u64>,
     frame_log_path: Option<PathBuf>,
     /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
     network_warmup: Option<u32>,
@@ -217,9 +224,12 @@ impl ClientApp {
             quality,
             bindings,
             camera_sensitivity,
+            shader_dir: launch::shader_dir(),
+            shader_stamp: None,
             frame_log,
             work_log,
             gpu_log,
+            gpu_logged_frame: None,
             frame_log_path,
             // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
             network_warmup: std::env::var("MOBA_SERVER")
@@ -328,6 +338,41 @@ impl ClientApp {
     }
 }
 
+impl ClientApp {
+    /// Dev shader hot reload: with `MOBA_SHADER_DIR` set, checks the overrides' newest
+    /// modification time every 30 frames and rebuilds the pipelines when it moves. Without
+    /// the variable this is one branch per frame and never touches the file system.
+    fn poll_shader_reload(&mut self) {
+        let (Some(dir), Some(renderer)) = (self.shader_dir.as_deref(), self.renderer.as_mut())
+        else {
+            return;
+        };
+        if !self.frames.is_multiple_of(30) {
+            return;
+        }
+        let stamp = launch::newest_shader_change(dir);
+        if stamp.is_none() || stamp == self.shader_stamp {
+            return;
+        }
+        let first = self.shader_stamp.is_none();
+        self.shader_stamp = stamp;
+        if first {
+            return; // The renderer was built from these files already.
+        }
+        let started = Instant::now();
+        match renderer.reload_shaders() {
+            Ok(_) => eprintln!(
+                "[render] shaders reloaded from {} in {:.1} ms",
+                dir.display(),
+                started.elapsed().as_secs_f32() * 1_000.0
+            ),
+            Err(error) => {
+                eprintln!("[render] shader reload failed ({error}); keeping the old pipelines");
+            }
+        }
+    }
+}
+
 impl App for ClientApp {
     fn on_start(&mut self, window: &Window) {
         let validation = match std::env::var("MOBA_VULKAN_VALIDATION").as_deref() {
@@ -342,9 +387,26 @@ impl App for ClientApp {
             .with_ui_scale(self.ui_scale)
             .with_quality_tier(self.quality)
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
-            .with_skinning(self.models.skinning());
+            .with_skinning(self.models.skinning())
+            .with_pipeline_cache(launch::pipeline_cache_path())
+            .with_shader_dir(self.shader_dir.clone())
+            .with_compressed_textures(launch::compressed_textures());
         match Renderer::new(window, config) {
             Ok(mut renderer) => {
+                let pipelines = renderer.pipeline_stats();
+                eprintln!(
+                    "[render] {} pipelines built in {:.1} ms (pipeline cache {}), renderer ready in \
+                     {:.1} ms; BC textures {}",
+                    pipelines.pipelines,
+                    pipelines.build_ms,
+                    pipelines.cache,
+                    pipelines.startup_ms,
+                    if renderer.compressed_textures_supported() {
+                        "native"
+                    } else {
+                        "CPU-decoded"
+                    }
+                );
                 // `on_start` may run again after a resume with a fresh mesh table.
                 self.models.renderer_recreated();
                 self.map_visuals.renderer_recreated();
@@ -412,6 +474,7 @@ impl App for ClientApp {
             audio.poll();
         }
         self.frames += 1;
+        self.poll_shader_reload();
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
         self.last_frame = now;
@@ -867,7 +930,11 @@ impl App for ClientApp {
                     .as_ref()
                     .and_then(moba_render::Renderer::gpu_timings),
             ) && gpu.len() < 10_000
+                && self.gpu_logged_frame != Some(timings.frame)
             {
+                // Only fresh samples: when no newer frame completed since the last call, the
+                // renderer returns the same timings again.
+                self.gpu_logged_frame = Some(timings.frame);
                 let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
                 gpu.push([
                     pass("scene"),
@@ -897,6 +964,7 @@ impl App for ClientApp {
 mod animation;
 mod launch;
 mod map_visuals;
+mod materials;
 mod models;
 mod scene_build;
 mod skinning;

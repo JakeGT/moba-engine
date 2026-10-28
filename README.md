@@ -64,7 +64,14 @@ target format (Low uses the packed 32-bit format). `audio_volume` (0–1), `audi
 `MOBA_FRAME_LOG=/tmp/frames.log MOBA_VSYNC=0` records raw frame intervals and writes
 p50/p95/p99/max on exit, plus per-pass GPU times from timestamp queries (`gpu_scene_*`,
 `gpu_composite_*`, `gpu_ui_*`, `gpu_total_*`; see `docs/perf/0007-real-hardware.md` and
-`docs/perf/0011-render-graph.md`).
+`docs/perf/0011-render-graph.md`) and how the pipelines were built (`pipelines`,
+`pipeline_build_ms`, `pipeline_cache=cold|warm|...`). Pipelines are cached per user
+(`MOBA_PIPELINE_CACHE=<file>` or `off`; default under the platform cache directory).
+`MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU (the path for GPUs without BC
+support). Dev builds: `MOBA_SHADER_DIR=<dir>` loads SPIR-V overrides (`<module>.spv`, e.g.
+`unit_textured.frag.spv`, built with `glslc --target-env=vulkan1.3 -I
+crates/shaders/shaders/include [-DMATERIAL_TEXTURED]`) and rebuilds the scene and composite
+pipelines when one changes. Materials and textures: `docs/content-authoring.md`.
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can

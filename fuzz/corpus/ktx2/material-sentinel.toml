@@ -1,0 +1,18 @@
+# Sample material for models/sentinel.glb (ADR-0010; docs/content-authoring.md#materials).
+#
+# Client-local and cosmetic, like models and map visuals: it never reaches the simulation,
+# the wire or the content hash. The textures are self-generated (texture-bake's `sentinel`
+# set, regenerate with scripts/bake-sample-textures.sh) and live in textures/<name>.ktx2.
+#
+#   MOBA_CONTENT=content/sentinel-pack.toml cargo run -p moba-client
+#
+# A model without a file here keeps the vertex-colour look.
+shader = "textured"
+base_color = "sentinel-base"          # BC7 sRGB: pale painted plates, bronze seams
+normal = "sentinel-normal"            # BC5: seam bevels and rivets
+metallic_roughness = "sentinel-mr"    # BC5: read by R2's PBR
+mask = "sentinel-mask"                # BC4: the painted plates take the team colour
+base_color_factor = [1.0, 1.0, 1.0, 1.0]
+roughness = 1.0
+normal_scale = 1.0
+team_tint = 1.0

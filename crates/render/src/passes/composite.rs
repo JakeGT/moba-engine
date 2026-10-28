@@ -7,8 +7,9 @@ use crate::device::DeviceContext;
 use crate::error::RenderResult;
 use crate::pipeline;
 use crate::resources::{
-    DescriptorPool, DescriptorSetLayout, GraphicsPipeline, PipelineLayout, Sampler, ShaderModule,
+    DescriptorPool, DescriptorSetLayout, GraphicsPipeline, PipelineLayout, Sampler,
 };
+use crate::shaders::ShaderSource;
 
 /// Push-constant block of `composite.frag` (16 bytes, fragment stage).
 #[repr(C)]
@@ -32,17 +33,17 @@ pub(crate) struct CompositePass {
     sampler: Sampler,
     pipeline_layout: PipelineLayout,
     pipeline: GraphicsPipeline,
+    swapchain_format: vk::Format,
     push: CompositePush,
 }
 
 impl CompositePass {
     pub(crate) fn new(
         device: &DeviceContext,
+        shaders: &ShaderSource,
         swapchain_format: vk::Format,
         exposure: f32,
     ) -> RenderResult<Self> {
-        let vertex = ShaderModule::new(device.device.clone(), moba_shaders::FULLSCREEN_VERT)?;
-        let fragment = ShaderModule::new(device.device.clone(), moba_shaders::COMPOSITE_FRAG)?;
         let binding = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -73,16 +74,7 @@ impl CompositePass {
             &[set_layout.handle()],
             &push_range,
         )?;
-        let pipeline = GraphicsPipeline::from_raw(
-            device.device.clone(),
-            pipeline::create_fullscreen(
-                &device.device,
-                pipeline_layout.handle(),
-                vertex.handle(),
-                fragment.handle(),
-                swapchain_format,
-            )?,
-        );
+        let pipeline = build_pipeline(device, shaders, pipeline_layout.handle(), swapchain_format)?;
         let exposure = if exposure.is_finite() && exposure > 0.0 {
             exposure
         } else {
@@ -95,6 +87,7 @@ impl CompositePass {
             sampler,
             pipeline_layout,
             pipeline,
+            swapchain_format,
             push: CompositePush {
                 exposure,
                 saturation: TONEMAP_SATURATION,
@@ -102,6 +95,21 @@ impl CompositePass {
                 reserved: 0,
             },
         })
+    }
+
+    /// Rebuilds the pipeline from `shaders` (dev shader reload); the device must be idle.
+    pub(crate) fn rebuild_pipeline(
+        &mut self,
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+    ) -> RenderResult<()> {
+        self.pipeline = build_pipeline(
+            device,
+            shaders,
+            self.pipeline_layout.handle(),
+            self.swapchain_format,
+        )?;
+        Ok(())
     }
 
     /// Points the descriptor set at the HDR target. Only call while no submitted frame
@@ -176,6 +184,24 @@ impl CompositePass {
         unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
         device.cmd_end_rendering(command_buffer);
     }
+}
+
+fn build_pipeline(
+    device: &DeviceContext,
+    shaders: &ShaderSource,
+    layout: vk::PipelineLayout,
+    swapchain_format: vk::Format,
+) -> RenderResult<GraphicsPipeline> {
+    let vertex = shaders.module(device, "fullscreen.vert")?;
+    let fragment = shaders.module(device, "composite.frag")?;
+    let handle = pipeline::create_fullscreen(
+        device,
+        layout,
+        vertex.handle(),
+        fragment.handle(),
+        swapchain_format,
+    )?;
+    Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
 }
 
 /// Whether stores to `format` are sRGB-encoded by the hardware.

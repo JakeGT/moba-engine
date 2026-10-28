@@ -12,6 +12,11 @@
 //! [rampart.glb]]]]`
 //!
 //! Conventions (glTF): metres, +Y up, the model faces +Z, feet at `y = 0`.
+//!
+//! The static samples also carry `TEXCOORD_0` (ADR-0010): a box projection along each face's
+//! dominant axis at [`UV_PER_METRE`], `v` running down, so a tiling material (the sentinel's
+//! `materials/sentinel.toml`) wraps them without a UV-unwrapping tool. The skinned sample keeps
+//! its R4a layout (no UVs) so the networked golden's model is unchanged.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -30,6 +35,24 @@ const OCTAGON: [(f32, f32); 8] = [
 ];
 
 type V3 = [f32; 3];
+
+/// Texture repeats per metre of the box-projected UVs (one 256-texel tile per 2 m).
+const UV_PER_METRE: f32 = 0.5;
+
+/// Box-projected UV of `position` on a face with `normal`: drop the dominant axis, `v` down
+/// the model so textures stay upright on the sides. Uses only comparisons, `*` and unary `-`.
+fn box_uv(position: V3, normal: V3) -> [f32; 2] {
+    let [x, y, z] = position;
+    let (ax, ay, az) = (normal[0].abs(), normal[1].abs(), normal[2].abs());
+    let uv = if ay >= ax && ay >= az {
+        [x, z]
+    } else if ax >= az {
+        [if normal[0] >= 0.0 { -z } else { z }, -y]
+    } else {
+        [if normal[2] >= 0.0 { x } else { -x }, -y]
+    };
+    [uv[0] * UV_PER_METRE, uv[1] * UV_PER_METRE]
+}
 
 /// Which joint(s) drive a vertex of the skinned sample.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,6 +98,8 @@ fn dot(a: V3, b: V3) -> f32 {
 struct Model {
     positions: Vec<V3>,
     normals: Vec<V3>,
+    /// Box-projected texture coordinates, one per vertex (see [`box_uv`]).
+    uvs: Vec<[f32; 2]>,
     indices: Vec<u16>,
     /// Body part of each vertex (see [`Part`]); only the skinned encoding uses it.
     parts: Vec<Part>,
@@ -107,6 +132,7 @@ impl Model {
         for corner in &ordered {
             self.positions.push(*corner);
             self.normals.push(normal);
+            self.uvs.push(box_uv(*corner, normal));
             self.parts.push(self.part);
         }
         for index in 1..u16::try_from(ordered.len() - 1).expect("polygon size") {
@@ -378,6 +404,12 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
     while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
+    let uvs_offset = bin.len();
+    for uv in &model.uvs {
+        for value in uv {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     let (min, max) = bounds(&model.positions);
     let count = model.positions.len();
     let mut json = String::new();
@@ -388,16 +420,18 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
             r#""copyright":"MOBA Engine contributors, MIT OR Apache-2.0"}},"#,
             r#""scene":0,"scenes":[{{"nodes":[0]}}],"#,
             r#""nodes":[{{"name":"{}","mesh":0}}],"#,
-            r#""meshes":[{{"name":"{}","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1}},"indices":2}}]}}],"#,
+            r#""meshes":[{{"name":"{}","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3}},"indices":2}}]}}],"#,
             r#""buffers":[{{"byteLength":{}}}],"#,
             r#""bufferViews":["#,
             r#"{{"buffer":0,"byteOffset":0,"byteLength":{},"target":34962}},"#,
             r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}},"#,
-            r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34963}}],"#,
+            r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34963}},"#,
+            r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}}],"#,
             r#""accessors":["#,
             r#"{{"bufferView":0,"componentType":5126,"count":{},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}},"#,
             r#"{{"bufferView":1,"componentType":5126,"count":{},"type":"VEC3"}},"#,
-            r#"{{"bufferView":2,"componentType":5123,"count":{},"type":"SCALAR"}}]}}"#
+            r#"{{"bufferView":2,"componentType":5123,"count":{},"type":"SCALAR"}},"#,
+            r#"{{"bufferView":3,"componentType":5126,"count":{},"type":"VEC2"}}]}}"#
         ),
         name,
         name,
@@ -407,6 +441,8 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
         indices_offset - normals_offset,
         indices_offset,
         indices_length,
+        uvs_offset,
+        bin.len() - uvs_offset,
         count,
         min[0],
         min[1],
@@ -416,6 +452,7 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
         max[2],
         count,
         model.indices.len(),
+        count,
     )
     .expect("write to string");
     let mut json = json.into_bytes();
@@ -890,6 +927,13 @@ mod tests {
         assert!(max[1] > 3.7 && max[1] < 3.8, "height: {max:?}");
         assert!(max[2] > 0.5, "shield faces +Z: {max:?}");
         assert!(mesh.skin().is_none());
+        // Box-projected UVs for the sample material (materials/sentinel.toml).
+        let uvs = mesh.uvs().expect("TEXCOORD_0");
+        assert_eq!(uvs.len(), mesh.vertex_count());
+        assert!(
+            uvs.iter().flatten().all(|value| value.abs() <= 2.0),
+            "within a few tiles"
+        );
     }
 
     #[test]

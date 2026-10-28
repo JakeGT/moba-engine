@@ -13,7 +13,9 @@
 //!
 //! The fields are private so a mesh that violates them cannot be built outside this module.
 //! A mesh may also carry a [`MeshSkin`] (WP-4.1): per-vertex joints and weights, one per
-//! position, attached through [`MeshData::with_skin`], which checks the count.
+//! position, attached through [`MeshData::with_skin`], which checks the count; and texture
+//! coordinates (`TEXCOORD_0`, ADR-0010), one finite pair per position, attached through
+//! [`MeshData::with_uvs`].
 
 use crate::skin::{MeshSkin, SkinError};
 
@@ -63,12 +65,14 @@ impl From<SkinError> for MeshError {
     }
 }
 
-/// A validated triangle mesh: positions, normals, `u32` indices and an optional skin.
+/// A validated triangle mesh: positions, normals, `u32` indices, and optional texture
+/// coordinates and skin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    uvs: Option<Vec<[f32; 2]>>,
     skin: Option<MeshSkin>,
 }
 
@@ -120,8 +124,32 @@ impl MeshData {
             positions,
             normals,
             indices,
+            uvs: None,
             skin: None,
         })
+    }
+
+    /// Attaches texture coordinates (glTF `TEXCOORD_0`: `u` right, `v` down the image), one
+    /// pair per vertex. Values outside `0..=1` repeat.
+    ///
+    /// # Errors
+    /// [`MeshError::LengthMismatch`] unless there is exactly one pair per vertex,
+    /// [`MeshError::NonFinite`] for a NaN or infinite coordinate.
+    pub fn with_uvs(mut self, uvs: Vec<[f32; 2]>) -> Result<Self, MeshError> {
+        if uvs.len() != self.positions.len() {
+            return Err(MeshError::LengthMismatch);
+        }
+        if uvs.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(MeshError::NonFinite);
+        }
+        self.uvs = Some(uvs);
+        Ok(self)
+    }
+
+    /// Texture coordinates, one per position, if the mesh has them.
+    #[must_use]
+    pub fn uvs(&self) -> Option<&[[f32; 2]]> {
+        self.uvs.as_deref()
     }
 
     /// Attaches skinning streams. Positions and normals are then the bind pose.
@@ -207,6 +235,24 @@ mod tests {
         assert_eq!(mesh.vertex_count(), 3);
         assert_eq!(mesh.triangle_count(), 1);
         assert_eq!(mesh.bounds(), ([0.0, 0.0, 0.0], [1.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn uvs_need_one_finite_pair_per_vertex() {
+        let (positions, normals, indices) = triangle();
+        let mesh = MeshData::new(positions, normals, indices).expect("valid");
+        assert_eq!(mesh.uvs(), None);
+        assert_eq!(
+            mesh.clone().with_uvs(vec![[0.0, 0.0]; 2]),
+            Err(MeshError::LengthMismatch)
+        );
+        assert_eq!(
+            mesh.clone().with_uvs(vec![[0.0, f32::NAN]; 3]),
+            Err(MeshError::NonFinite)
+        );
+        let uvs = vec![[0.0, 0.0], [2.5, 0.0], [0.0, -1.0]];
+        let textured = mesh.with_uvs(uvs.clone()).expect("valid uvs");
+        assert_eq!(textured.uvs(), Some(&uvs[..]));
     }
 
     #[test]

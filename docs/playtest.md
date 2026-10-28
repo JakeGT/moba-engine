@@ -166,6 +166,7 @@ $env:MOBA_FRAME_LOG="frames-<name>.log"; .\moba-client.exe
 | `MOBA_VSYNC=0` | Uncapped present mode, so the frame log measures the frame cost rather than the display refresh. |
 | `MOBA_SETTINGS=<path>` | Settings file (default `moba-settings.toml`): key bindings, UI scale and rendering `quality`. |
 | `MOBA_QUALITY=low\|medium\|high\|ultra` | Rendering quality tier for this run (overrides the `quality` setting). |
+| `MOBA_PIPELINE_CACHE=<file>\|off` | Where the GPU pipeline cache is kept (default: a per-user cache directory). A stale or corrupt file is ignored and rewritten. |
 
 The three key variables **fail closed**. If one is set but isn't exactly 64 hex characters, or
 the public key is malformed or weak, the client exits with an error instead of connecting
