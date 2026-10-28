@@ -46,6 +46,10 @@ impl NetServer {
         self.simulation.tick(&inputs);
         for event in self.simulation.events() {
             if let Some(raw) = RawEvent::from_sim(event, &self.simulation) {
+                if raw.is_attack() {
+                    push_attack(&mut self.pending_attacks, raw);
+                    continue;
+                }
                 if self.pending_events.len() >= MAX_SNAPSHOT_EVENTS * 4 {
                     self.pending_events.pop_front();
                 }
@@ -276,4 +280,22 @@ pub(super) fn slot_team(slot: usize, team_size: usize) -> moba_game::Team {
     } else {
         moba_game::Team::Red
     }
+}
+
+/// Queues a basic attack, bounded at `MAX_SNAPSHOT_EVENTS * 4`. When full, the oldest
+/// non-hero attack makes room; if every queued attack is a hero's, a non-hero attack is
+/// dropped instead and a hero attack evicts the oldest one. Never allocates past the
+/// preallocated capacity.
+pub(super) fn push_attack(queue: &mut std::collections::VecDeque<RawEvent>, raw: RawEvent) {
+    const LOW: u8 = 3;
+    if queue.len() >= MAX_SNAPSHOT_EVENTS * 4 {
+        if let Some(index) = queue.iter().position(|queued| queued.priority() == LOW) {
+            queue.remove(index);
+        } else if raw.priority() == LOW {
+            return;
+        } else {
+            queue.pop_front();
+        }
+    }
+    queue.push_back(raw);
 }

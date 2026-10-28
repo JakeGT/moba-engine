@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use moba_net::protocol::{
-    EVENT_CAST, MAX_SNAPSHOT_EVENTS, NetEntity, NetEvent, NetProgress, SnapshotDelta,
+    EVENT_ATTACK, EVENT_CAST, MAX_SNAPSHOT_EVENTS, NetEntity, NetEvent, NetProgress, SnapshotDelta,
     build_delta_into, encode_snapshot,
 };
 
@@ -120,4 +120,43 @@ fn event_overhead_stays_within_snapshot_budget() {
         overhead <= MAX_SNAPSHOT_EVENTS * 28 + 8,
         "event overhead {overhead} bytes exceeds 16-event budget"
     );
+}
+
+#[test]
+fn encoding_a_full_event_list_with_attacks_allocates_nothing() {
+    let baseline: Vec<_> = (1..=100).map(entity).collect();
+    let current = baseline.clone();
+    let mut delta = SnapshotDelta::default();
+    let mut payload = Vec::with_capacity(16 * 1024);
+    build_delta_into(&current, Some(&baseline), 1, 0, 1, &mut delta);
+    // A teamfight snapshot: the 16-event cap full, mostly compact attacks.
+    delta.events = (0..MAX_SNAPSHOT_EVENTS)
+        .map(|index| NetEvent {
+            kind: if index % 4 == 0 {
+                EVENT_CAST
+            } else {
+                EVENT_ATTACK
+            },
+            source: index as u16,
+            target: 100 - index as u16,
+            value: 30,
+            aux: 1,
+            ..NetEvent::default()
+        })
+        .collect();
+    encode_snapshot(&delta, &mut payload).expect("encode");
+    reset_counters();
+    for tick in 2..=301 {
+        delta.tick = tick;
+        encode_snapshot(&delta, &mut payload).expect("encode");
+    }
+    let (allocations, bytes) = counters();
+    assert_eq!((allocations, bytes), (0, 0));
+    // 4 full events and 12 compact attacks.
+    let mut without = Vec::with_capacity(16 * 1024);
+    let events = core::mem::take(&mut delta.events);
+    encode_snapshot(&delta, &mut without).expect("encode");
+    delta.events = events;
+    encode_snapshot(&delta, &mut payload).expect("encode");
+    assert_eq!(payload.len() - without.len(), 4 * 26 + 12 * 12);
 }

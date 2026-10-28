@@ -157,6 +157,13 @@ impl Simulation {
             if let Some(stats) = self.world.get_mut::<AttackStats>(snapshot.attacker) {
                 stats.cooldown = snapshot.interval;
             }
+            // Presentation only (animation hit frames): events are outputs, never state.
+            self.push_event(SimEvent::BasicAttack {
+                attacker: snapshot.attacker,
+                team: attacker_team,
+                target: snapshot.target,
+                interval_ticks: snapshot.interval,
+            });
         }
         self.attackers = attackers;
     }

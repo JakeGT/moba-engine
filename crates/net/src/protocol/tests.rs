@@ -1196,3 +1196,62 @@ fn observed_unit_conversion() {
     assert!(entity.status_bits & STATUS_BURN != 0);
     assert!(entity.status_bits & STATUS_HASTE != 0);
 }
+
+#[test]
+fn attack_events_round_trip_compactly_next_to_full_events() {
+    let attack = NetEvent {
+        kind: EVENT_ATTACK,
+        team: 1,
+        source: 7,
+        target: 0x1234,
+        source_slot: 6,
+        target_slot: 0xFF,
+        value: 34,
+        aux: 2,
+        ..NetEvent::default()
+    };
+    let cast = NetEvent {
+        kind: EVENT_CAST,
+        team: 0,
+        source: 3,
+        target: 0xFFFF,
+        source_slot: 0,
+        target_slot: 0xFF,
+        x: 10,
+        y: 20,
+        x2: 30,
+        y2: 40,
+        value: 1,
+        aux: 9,
+        dx: -5,
+        dy: 6,
+        arc: 7,
+    };
+    let mut delta = SnapshotDelta {
+        tick: 9,
+        ..SnapshotDelta::default()
+    };
+    let mut payload = Vec::new();
+    encode_snapshot(&delta, &mut payload).expect("encode");
+    let empty = payload.len();
+    delta.events = vec![attack, cast, attack];
+    encode_snapshot(&delta, &mut payload).expect("encode");
+    // Two 12-byte attacks and one 26-byte event.
+    assert_eq!(payload.len() - empty, 2 * 12 + 26);
+    let decoded = decode_snapshot(&payload).expect("decode");
+    assert_eq!(decoded.events, delta.events);
+    // The fields an attack does not carry are not sent: they decode as zero.
+    let mut positioned = attack;
+    positioned.x = 99;
+    positioned.arc = -3;
+    delta.events = vec![positioned];
+    encode_snapshot(&delta, &mut payload).expect("encode");
+    assert_eq!(decode_snapshot(&payload).expect("decode").events, [attack]);
+    // A truncated attack record is an error, never a panic.
+    for cut in 1..12 {
+        delta.events = vec![attack];
+        encode_snapshot(&delta, &mut payload).expect("encode");
+        payload.truncate(payload.len() - cut);
+        assert!(decode_snapshot(&payload).is_err(), "cut {cut}");
+    }
+}

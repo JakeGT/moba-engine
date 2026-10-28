@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use libfuzzer_sys::fuzz_target;
 use moba_net::protocol::{
     WireCatalog, decode_content_update, decode_hello, decode_input, decode_packet, decode_snapshot,
-    decode_welcome, encode_content_update,
+    decode_welcome, encode_content_update, encode_snapshot,
 };
 
 /// A valid `ContentUpdate` for the built-in catalogue, encoded once.
@@ -30,7 +30,13 @@ fn fixture() -> &'static Vec<u8> {
 
 fuzz_target!(|data: &[u8]| {
     let _ = decode_packet(data);
-    let _ = decode_snapshot(data);
+    if let Ok(snapshot) = decode_snapshot(data) {
+        // Whatever decodes re-encodes to the same snapshot, including the compact
+        // `EVENT_ATTACK` records (v41) mixed with full-size events.
+        let mut payload = Vec::new();
+        encode_snapshot(&snapshot, &mut payload).expect("a decoded snapshot re-encodes");
+        assert_eq!(decode_snapshot(&payload), Ok(snapshot));
+    }
     let _ = decode_input(data);
     let _ = decode_hello(data);
     let _ = decode_welcome(data);

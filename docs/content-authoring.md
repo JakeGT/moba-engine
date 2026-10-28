@@ -562,9 +562,11 @@ TOML puts every key after a `[[table]]` header into that table, so keep `move_sp
 - **What triggers what.** Casts come from the server's cast events (by slot, or by ability
   name with `[[abilities]]`), deaths from death events or the dead flag, respawns from the dead
   flag clearing, hit reactions from the hero's health dropping (at most every 0.3 s). Basic
-  attacks are **inferred** from health changes near a standing hero,
-  because the wire carries no attack event yet (see ADR-0012's "Gaps"), so occasional extra or
-  missed swings are expected. The simulation has no recall, so `recall` is reserved.
+  attacks come from the server's attack events (protocol v41): the `attack` state's `release`
+  lands on the tick the hit landed, and the next swing is started one attack interval ahead
+  so its wind-up plays in full (it fades out if the hero stops attacking). An attack faster
+  than the clip speeds the clip up to fit. The simulation has no recall, so `recall` is
+  reserved.
 - **Limits.** A set is at most 16 KiB. Unknown keys, wrong types, out-of-range or non-finite
   numbers and names that the model does not have are errors.
 

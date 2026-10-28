@@ -33,6 +33,10 @@ pub const MAX_PROJECTILES: usize = 64;
 pub const MAX_ZONES: usize = 16;
 /// Hard cap on queued events; events beyond this are dropped, never allocated.
 pub const MAX_EVENTS: usize = 256;
+/// Most [`SimEvent::BasicAttack`] events in the queue at once. Basic attacks are frequent
+/// presentation-only events, so they may fill at most half of [`MAX_EVENTS`]; the rest is
+/// kept for casts, deaths and the other events, which a busy tick never crowds out.
+pub const MAX_ATTACK_EVENTS: usize = MAX_EVENTS / 2;
 /// Ticks between minion waves (30 seconds at 30 Hz).
 pub const WAVE_INTERVAL_TICKS: u32 = 900;
 /// First wave delay (1 second).
@@ -288,6 +292,24 @@ pub enum SimEvent {
         /// Lifetime in ticks.
         duration_ticks: u32,
     },
+    /// A basic attack landed. Presentation only (animation hit frames, combat text): it
+    /// never feeds the simulation, the state hash or replays.
+    ///
+    /// Basic attacks resolve instantly in the tick their attacker's cooldown reaches zero,
+    /// so this tick is both the release and the hit; the damage is visible in the state
+    /// after this tick (`current_tick()` once [`Simulation::tick`] returns). The attacker
+    /// cannot attack again for `interval_ticks`. At most [`MAX_ATTACK_EVENTS`] are queued
+    /// between clears.
+    BasicAttack {
+        /// Attacking entity.
+        attacker: Entity,
+        /// Attacking team.
+        team: Team,
+        /// Attacked entity.
+        target: Entity,
+        /// Ticks until the attacker's next attack (its attack interval).
+        interval_ticks: u32,
+    },
     /// The match ended (nexus destroyed, score limit reached or surrender).
     MatchEnded {
         /// Winning team, or `None` when the match ended in a draw.
@@ -496,6 +518,8 @@ pub struct Simulation {
     projectiles: Vec<Projectile>,
     zones: Vec<Zone>,
     events: Vec<SimEvent>,
+    /// [`SimEvent::BasicAttack`] entries in `events` (bounded by [`MAX_ATTACK_EVENTS`]).
+    attack_events: usize,
     grid: SpatialGrid<TargetRef>,
     vision_grid: Option<SpatialGrid<VisionSource>>,
     hero_views: Vec<HeroView>,
@@ -543,6 +567,7 @@ impl Simulation {
             projectiles: Vec::with_capacity(MAX_PROJECTILES),
             zones: Vec::with_capacity(MAX_ZONES),
             events: Vec::with_capacity(MAX_EVENTS),
+            attack_events: 0,
             grid: SpatialGrid::new(FixVec2::ZERO, FixVec2::splat(extent), Fix::from_i32(8)),
             vision_grid: Some(SpatialGrid::new(
                 FixVec2::ZERO,
@@ -690,6 +715,7 @@ impl Simulation {
     /// Clears the event queue.
     pub fn clear_events(&mut self) {
         self.events.clear();
+        self.attack_events = 0;
     }
 
     /// Advances the simulation by one tick using the supplied inputs.
@@ -787,11 +813,22 @@ impl Simulation {
     }
 
     fn push_event(&mut self, event: SimEvent) {
+        if matches!(event, SimEvent::BasicAttack { .. }) {
+            // Low priority: attacks never take the slots kept for the other events.
+            if self.attack_events < MAX_ATTACK_EVENTS && self.events.len() < MAX_EVENTS {
+                self.events.push(event);
+                self.attack_events += 1;
+            }
+            return;
+        }
         if self.events.len() < MAX_EVENTS {
             self.events.push(event);
         } else if matches!(event, SimEvent::MatchEnded { .. }) {
             // Match end is a terminal event; it must not be lost when the bounded queue is
             // full of routine combat events.
+            if matches!(self.events[MAX_EVENTS - 1], SimEvent::BasicAttack { .. }) {
+                self.attack_events -= 1;
+            }
             self.events[MAX_EVENTS - 1] = event;
         }
     }

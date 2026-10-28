@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 
 use moba_core::Rng;
 use moba_net::protocol::{
-    Header, Hello, InputMessage, NetEntity, PacketKind, SnapshotDelta, Welcome, WireCatalog,
-    WireCommand, decode_content_update, decode_hello, decode_input, decode_packet, decode_snapshot,
-    decode_welcome, encode_content_update, encode_hello, encode_input, encode_packet,
-    encode_snapshot, encode_welcome,
+    EVENT_ATTACK, Header, Hello, InputMessage, MAX_SNAPSHOT_EVENTS, NetEntity, NetEvent,
+    PacketKind, SnapshotDelta, Welcome, WireCatalog, WireCommand, decode_content_update,
+    decode_hello, decode_input, decode_packet, decode_snapshot, decode_welcome,
+    encode_content_update, encode_hello, encode_input, encode_packet, encode_snapshot,
+    encode_welcome,
 };
 
 fn main() {
@@ -78,6 +79,12 @@ fn fuzz_once(rng: &mut Rng, catalog: &WireCatalog) {
 
     let mut snapshot = valid_snapshot(rng);
     mutate(rng, &mut snapshot);
+    if let Ok(decoded) = decode_snapshot(&snapshot) {
+        // Whatever decodes re-encodes to the same snapshot (compact attacks included).
+        let mut payload = Vec::new();
+        encode_snapshot(&decoded, &mut payload).expect("a decoded snapshot re-encodes");
+        assert_eq!(decode_snapshot(&payload), Ok(decoded), "snapshot re-encode");
+    }
     let mut counted = valid_snapshot(rng);
     let extreme = [u16::MAX, 0x7FFF, 0x00FF, 1, 0][rng.gen_range_u32(5) as usize];
     counted[28..30].copy_from_slice(&extreme.to_le_bytes());
@@ -184,9 +191,48 @@ fn valid_snapshot(rng: &mut Rng) -> Vec<u8> {
             .despawns
             .push(rng.gen_range_u32(u32::from(delta.spawns[0].net_id) + 1) as u16);
     }
+    // Presentation events of every kind, the compact EVENT_ATTACK (v41) among them.
+    for _ in 0..rng.gen_range_u32(MAX_SNAPSHOT_EVENTS as u32 + 1) {
+        delta.events.push(random_event(rng));
+    }
     let mut payload = Vec::new();
     encode_snapshot(&delta, &mut payload).expect("valid snapshot");
+    // A clean snapshot round-trips exactly (only mutated bytes may fail to decode).
+    match decode_snapshot(&payload) {
+        Ok(decoded) => assert_eq!(decoded, delta, "clean snapshot round trip"),
+        Err(error) => panic!("freshly encoded snapshot must decode: {error:?}"),
+    }
     payload
+}
+
+/// A random event; an attack leaves the fields its compact form does not carry at zero.
+fn random_event(rng: &mut Rng) -> NetEvent {
+    let kind = if rng.next_bool() {
+        EVENT_ATTACK
+    } else {
+        rng.gen_range_u32(10) as u8
+    };
+    let mut event = NetEvent {
+        kind,
+        team: rng.gen_range_u32(2) as u8,
+        source: rng.next_u32() as u16,
+        target: rng.next_u32() as u16,
+        source_slot: rng.next_u32() as u8,
+        target_slot: rng.next_u32() as u8,
+        value: rng.next_u32() as u16,
+        aux: rng.next_u32() as u16,
+        ..NetEvent::default()
+    };
+    if kind != EVENT_ATTACK {
+        event.x = rng.next_u32() as u16;
+        event.y = rng.next_u32() as u16;
+        event.x2 = rng.next_u32() as u16;
+        event.y2 = rng.next_u32() as u16;
+        event.dx = rng.next_u32() as i16;
+        event.dy = rng.next_u32() as i16;
+        event.arc = rng.next_u32() as i16;
+    }
+    event
 }
 
 fn random_command(rng: &mut Rng) -> WireCommand {

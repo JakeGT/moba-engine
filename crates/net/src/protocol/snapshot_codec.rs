@@ -3,7 +3,7 @@
 use super::WireError;
 use super::bytes::{Reader, count_u16, put_u16, put_u32};
 use super::snapshot::{
-    MAX_SNAPSHOT_EVENTS, NetEntity, NetEvent, NetProgress, NetUpdate, SnapshotDelta,
+    EVENT_ATTACK, MAX_SNAPSHOT_EVENTS, NetEntity, NetEvent, NetProgress, NetUpdate, SnapshotDelta,
 };
 
 /// Minimum encoded bytes for one spawn record.
@@ -134,6 +134,12 @@ pub fn encode_snapshot(delta: &SnapshotDelta, out: &mut Vec<u8>) -> Result<(), W
         put_u16(out, event.target);
         out.push(event.source_slot);
         out.push(event.target_slot);
+        if event.kind == EVENT_ATTACK {
+            // Compact: an attack has no position, direction or arc of its own (12 bytes, not 26).
+            put_u16(out, event.value);
+            put_u16(out, event.aux);
+            continue;
+        }
         put_u16(out, event.x);
         put_u16(out, event.y);
         put_u16(out, event.x2);
@@ -282,8 +288,23 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotDelta, WireError> {
     }
     let mut events = Vec::with_capacity(event_count);
     for _ in 0..event_count {
+        let kind = reader.u8()?;
+        if kind == EVENT_ATTACK {
+            events.push(NetEvent {
+                kind,
+                team: reader.u8()?,
+                source: reader.u16()?,
+                target: reader.u16()?,
+                source_slot: reader.u8()?,
+                target_slot: reader.u8()?,
+                value: reader.u16()?,
+                aux: reader.u16()?,
+                ..NetEvent::default()
+            });
+            continue;
+        }
         events.push(NetEvent {
-            kind: reader.u8()?,
+            kind,
             team: reader.u8()?,
             source: reader.u16()?,
             target: reader.u16()?,

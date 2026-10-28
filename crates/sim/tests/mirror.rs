@@ -282,6 +282,12 @@ enum Key {
         target: Option<u8>,
     },
     ZoneSpawned(Option<u8>),
+    Attack {
+        attacker: Option<u8>,
+        target: Option<u8>,
+        team: u8,
+        interval_ticks: u32,
+    },
     MatchEnded(Option<u8>),
     WaveSpawned,
 }
@@ -344,6 +350,17 @@ impl Frame<'_> {
                 target: self.entity(target),
             },
             SimEvent::ZoneSpawned { owner, .. } => Key::ZoneSpawned(self.entity(owner)),
+            SimEvent::BasicAttack {
+                attacker,
+                team,
+                target,
+                interval_ticks,
+            } => Key::Attack {
+                attacker: self.entity(attacker),
+                target: self.entity(target),
+                team: self.team(team),
+                interval_ticks,
+            },
             SimEvent::MatchEnded { winner } => {
                 Key::MatchEnded(winner.map(|winner| self.team(winner)))
             }
