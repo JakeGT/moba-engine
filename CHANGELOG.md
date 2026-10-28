@@ -167,7 +167,7 @@ the semver check):
   now plays the clip named `run` or `walk` (else the first, as before). The regenerated
   `content/models/sentinel-skinned.glb` has 10 joints (a 3-joint spring cape) and idle, run,
   attack, cast1–3, death, recall and hit clips, with `content/animations/sentinel-skinned.toml`.
-  200 animated units cost 0.12 ms of CPU per frame (`docs/perf/0011-animation-runtime.md`). No
+  200 animated units cost 0.12 ms of CPU per frame (`docs/perf/0012-animation-runtime.md`). No
   wire, hash, replay or logic change; the networked golden still matches (mean diff 0.014).
 
 ### Determinism and balance

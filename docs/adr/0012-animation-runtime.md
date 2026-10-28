@@ -157,7 +157,7 @@ animator's last matrices. `MOBA_ANIM_LOD=off` evaluates everything. A pinned cap
 the LOD. Bone-count LOD needs per-LOD skins and is R4b.
 
 ### Cost
-[perf/0011](../perf/0011-animation-runtime.md): one sample-shaped unit (10 joints, locomotion
+[perf/0012](../perf/0012-animation-runtime.md): one sample-shaped unit (10 joints, locomotion
 blend, upper-body action, additive hit, 3 spring joints, a socket) evaluates in ~0.6 µs; 200
 units take ~116 µs per frame, ~31 µs with a quarter of them evaluated per frame, against a
 1 ms animation budget. The steady state allocates nothing (`moba-assets` test
