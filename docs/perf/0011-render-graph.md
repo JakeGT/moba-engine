@@ -116,3 +116,8 @@ GPUs at their real clocks. Low/min-spec numbers (UHD 620, MoltenVK) do not exist
   messages. A 200-frame Low run and a 200-frame High run also reported 0.
 - NVIDIA 615.78.08 with the Khronos validation layer and synchronisation validation: the default
   capture, the networked capture and a 600-frame Low-tier run each reported 0 messages.
+- **The local layer missed one hazard.** The bundled layer (1.4.363) did not report it, but the
+  CI `renderer-gate` layer (Ubuntu `vulkan-validationlayers`) did:
+  `SYNC-HAZARD-PRESENT-AFTER-WRITE`, from the present transition with dst stage `NONE`. It is
+  fixed (dst `ALL_COMMANDS`), and the local runs were repeated after the fix with 0 messages and
+  identical pixels. The CI gate remains the reference.
