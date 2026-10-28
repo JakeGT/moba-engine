@@ -32,6 +32,8 @@ pub const MAX_WIRE_EFFECTS: usize = 3;
 pub const MAX_WIRE_AREA_EFFECTS: usize = 3;
 /// Fixed manifest-field bytes on the wire.
 pub const WIRE_MANIFEST_FIELD: usize = 32;
+/// Fixed visual-asset-name bytes on the wire (`WireHero::model`, `WireMap::visuals`).
+pub const WIRE_VISUAL_NAME: usize = 16;
 
 const _: () = {
     assert!(MAX_WIRE_ITEMS == moba_game::MAX_CONTENT_ITEMS);
@@ -50,6 +52,7 @@ const _: () = {
     assert!(WIRE_ITEM_NAME == moba_game::MAX_ITEM_NAME);
     assert!(WIRE_HERO_NAME == moba_game::MAX_HERO_NAME);
     assert!(WIRE_ABILITY_NAME == moba_game::MAX_ABILITY_NAME);
+    assert!(WIRE_VISUAL_NAME == moba_game::MAX_VISUAL_NAME);
 };
 
 /// One runtime item definition carried in the handshake.
@@ -153,6 +156,10 @@ pub struct WireHero {
     pub armor_per_level: i32,
     /// Magic resistance gained per level.
     pub magic_resist_per_level: i32,
+    /// Model name bytes, padded with zeroes (a name, never a path; protocol v40).
+    pub model: [u8; WIRE_VISUAL_NAME],
+    /// Used bytes in `model`; 0 means no model (procedural rig).
+    pub model_len: u8,
 }
 
 impl Default for WireHero {
@@ -177,6 +184,8 @@ impl Default for WireHero {
             attack_damage_per_level: 0,
             armor_per_level: 0,
             magic_resist_per_level: 0,
+            model: [0; WIRE_VISUAL_NAME],
+            model_len: 0,
         }
     }
 }
@@ -187,6 +196,15 @@ impl WireHero {
     pub fn name_str(&self) -> &str {
         let end = usize::from(self.name_len).min(WIRE_HERO_NAME);
         core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+
+    /// The model name, or `None` for the procedural rig (or undecodable bytes).
+    #[must_use]
+    pub fn model_str(&self) -> Option<&str> {
+        let end = usize::from(self.model_len).min(WIRE_VISUAL_NAME);
+        core::str::from_utf8(&self.model[..end])
+            .ok()
+            .filter(|name| !name.is_empty())
     }
 }
 
@@ -336,6 +354,10 @@ pub struct WireMap {
     pub name_len: u8,
     /// Visual theme id.
     pub theme: u8,
+    /// Explicit visuals-name bytes, padded with zeroes (protocol v40).
+    pub visuals: [u8; WIRE_VISUAL_NAME],
+    /// Used bytes in `visuals`; 0 means the theme's default visuals.
+    pub visuals_len: u8,
     /// Square world extent in world units.
     pub extent: u16,
     /// Number of valid lanes.
@@ -376,6 +398,15 @@ impl WireMap {
         let end = usize::from(self.name_len).min(self.name.len());
         core::str::from_utf8(&self.name[..end]).unwrap_or("Map")
     }
+
+    /// The explicit visuals name, or `None` for the theme default (or undecodable bytes).
+    #[must_use]
+    pub fn visuals_str(&self) -> Option<&str> {
+        let end = usize::from(self.visuals_len).min(WIRE_VISUAL_NAME);
+        core::str::from_utf8(&self.visuals[..end])
+            .ok()
+            .filter(|name| !name.is_empty())
+    }
 }
 
 impl Default for WireMap {
@@ -384,6 +415,8 @@ impl Default for WireMap {
             name: [0; WIRE_MANIFEST_FIELD],
             name_len: 0,
             theme: 0,
+            visuals: [0; WIRE_VISUAL_NAME],
+            visuals_len: 0,
             extent: 256,
             lane_count: 0,
             lanes: [WireLane::default(); MAX_WIRE_LANES],

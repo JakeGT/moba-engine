@@ -1,4 +1,4 @@
-//! Regenerate the checked-in v7 replay fixture.
+//! Regenerate the checked-in v8 replay fixture.
 #![allow(clippy::print_stdout)]
 
 use moba_sim::{Replay, SimConfig, Simulation};
@@ -17,6 +17,6 @@ fn main() {
         .checkpoints
         .push((simulation.current_tick().get(), simulation.state_hash()));
     let bytes = replay.encode();
-    std::fs::write("crates/sim/tests/fixtures/seed-v7.mbr", bytes).expect("write fixture");
+    std::fs::write("crates/sim/tests/fixtures/seed-v8.mbr", bytes).expect("write fixture");
     println!("wrote fixture: {:#018x}", simulation.state_hash());
 }

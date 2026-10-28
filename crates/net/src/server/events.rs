@@ -2,7 +2,8 @@
 
 use crate::protocol::{
     EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN,
-    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, NetEvent, quantize_position,
+    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, MATCH_ENDED_DRAW, NetEvent,
+    quantize_position,
 };
 
 use super::clients::ClientConn;
@@ -140,7 +141,8 @@ impl RawEvent {
             },
             moba_sim::SimEvent::MatchEnded { winner } => Self {
                 kind: EVENT_MATCH_ENDED,
-                team: winner,
+                // A draw has no winner; `value` carries `MATCH_ENDED_DRAW` and `team` is unused.
+                team: winner.unwrap_or(moba_game::Team::Blue),
                 source: None,
                 target: None,
                 source_slot: 0xFF,
@@ -148,7 +150,7 @@ impl RawEvent {
                 position: moba_core::FixVec2::ZERO,
                 end: moba_core::FixVec2::ZERO,
                 direction: moba_core::FixVec2::ZERO,
-                value: winner.index() as u16,
+                value: winner.map_or(MATCH_ENDED_DRAW, |team| team.index() as u16),
                 aux: 0,
                 arc: moba_core::Fix::ZERO,
             },

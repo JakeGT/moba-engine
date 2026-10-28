@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use moba_game::{Team, load_content_toml};
-use moba_sim::{SimConfig, Simulation, TickInputs, UnitKind};
+use moba_sim::{MatchOutcome, SimConfig, Simulation, TickInputs, UnitKind};
 
-fn run(pack: &str, ticks: u32) -> (u64, usize, usize, Option<Team>) {
+fn run(pack: &str, ticks: u32) -> (u64, usize, usize, Option<MatchOutcome>) {
     let content = Arc::new(load_content_toml(pack).expect("valid pack"));
     let mut simulation = Simulation::new_with_content(SimConfig::default(), Arc::clone(&content));
     for _ in 0..ticks {

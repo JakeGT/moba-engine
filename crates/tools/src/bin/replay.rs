@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use moba_game::GameContent;
-use moba_sim::Replay;
+use moba_sim::{MatchOutcome, Replay};
 
 fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
@@ -79,8 +79,9 @@ fn main() {
         Ok(result) => {
             if json {
                 let outcome = match result.outcome {
-                    Some(moba_game::Team::Blue) => "\"blue\"".to_string(),
-                    Some(moba_game::Team::Red) => "\"red\"".to_string(),
+                    Some(MatchOutcome::Winner(moba_game::Team::Blue)) => "\"blue\"".to_string(),
+                    Some(MatchOutcome::Winner(moba_game::Team::Red)) => "\"red\"".to_string(),
+                    Some(MatchOutcome::Draw) => "\"draw\"".to_string(),
                     None => String::from("null"),
                 };
                 let checkpoints: Vec<String> = replay

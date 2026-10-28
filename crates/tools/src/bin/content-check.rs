@@ -8,6 +8,11 @@ fn json_string(value: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            // Loader errors (TOML snippets, I/O messages) can contain any control character.
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", u32::from(character));
+            }
             character => out.push(character),
         }
     }
@@ -50,11 +55,35 @@ fn main() {
         eprintln!("usage: content-check [--json] <pack.toml>");
         std::process::exit(2);
     };
-    let content =
-        moba_game::load_content_file(std::path::Path::new(&path)).unwrap_or_else(|error| {
-            eprintln!("invalid content {path}: {error}");
-            std::process::exit(1);
-        });
+    let pack = std::path::Path::new(&path);
+    let content = moba_game::load_content_file(pack).unwrap_or_else(|error| {
+        if json {
+            println!(
+                "{{\"file\":{},\"valid\":false,\"errors\":[{}]}}",
+                json_string(&path),
+                json_string(&error.to_string())
+            );
+        }
+        eprintln!("invalid content {path}: {error}");
+        std::process::exit(1);
+    });
+    // `[assets]` paths are relative to the pack file's directory; check every file exists
+    // there (and, for unit models, parses). Unknown names, bad paths and fallback cycles were
+    // already rejected by the loader above.
+    let pack_dir = pack
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let errors: Vec<String> = content
+        .assets
+        .check_files(pack_dir)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    for error in &errors {
+        eprintln!("error: {error}");
+    }
+    let valid = errors.is_empty();
     let attested = moba_net::crypto::verify_pack(&content);
     let publisher_hex = content
         .attestation
@@ -116,8 +145,9 @@ fn main() {
         eprintln!("warning: {warning}");
     }
     if json {
+        let error_list: Vec<String> = errors.iter().map(|error| json_string(error)).collect();
         println!(
-            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":true,\"warnings\":{}}}",
+            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"errors\":[{}]}}",
             json_string(&path),
             json_string(&content.manifest.name),
             json_string(&content.manifest.version),
@@ -127,26 +157,33 @@ fn main() {
             content.abilities.len(),
             content.map.lanes.len(),
             content.map.structures.len(),
+            content.assets.len(),
             content.hash(),
             attested,
             json_string(publisher_hex.as_deref().unwrap_or("")),
-            warnings.len()
+            valid,
+            warnings.len(),
+            error_list.join(",")
         );
-        return;
+    } else {
+        println!("file       {path}");
+        println!(
+            "pack       {} {}",
+            content.manifest.name, content.manifest.version
+        );
+        println!("author     {}", content.manifest.author);
+        println!("items      {}", content.items.len());
+        println!("heroes     {}", content.heroes.len());
+        println!("abilities  {}", content.abilities.len());
+        println!("lanes      {}", content.map.lanes.len());
+        println!("structures {}", content.map.structures.len());
+        println!("assets     {}", content.assets.len());
+        println!("hash       {:#018x}", content.hash());
+        println!("valid      {valid}");
     }
-    println!("file       {path}");
-    println!(
-        "pack       {} {}",
-        content.manifest.name, content.manifest.version
-    );
-    println!("author     {}", content.manifest.author);
-    println!("items      {}", content.items.len());
-    println!("heroes     {}", content.heroes.len());
-    println!("abilities  {}", content.abilities.len());
-    println!("lanes      {}", content.map.lanes.len());
-    println!("structures {}", content.map.structures.len());
-    println!("hash       {:#018x}", content.hash());
-    println!("valid      true");
+    if !valid {
+        std::process::exit(1);
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

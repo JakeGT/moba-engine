@@ -12,9 +12,9 @@ use super::{
     MAX_CONTENT_HEROES, MAX_CONTENT_ITEMS, MAX_CONTENT_LANES, MAX_CONTENT_MODIFIERS,
     MAX_CONTENT_STRUCTURES, MAX_CONTENT_WALLS, MAX_COOLDOWN_TICKS, MAX_DURATION_TICKS,
     MAX_HASTE_FACTOR, MAX_HERO_NAME, MAX_ITEM_NAME, MAX_ITEM_STAT, MAX_LANE_NAME, MAX_LANE_POINTS,
-    MAX_MANIFEST_FIELD, MAX_MAP_COORD, MAX_RANGE, MAX_RESIST, MAX_SPEED_PER_SEC, MAX_STAT, MapSpec,
-    MinionStatsSpec, ModifierDef, ModifierKind, RulesSpec, StructureSpec, StructureStatsSpec,
-    WallSpec,
+    MAX_MANIFEST_FIELD, MAX_MAP_COORD, MAX_RANGE, MAX_RESIST, MAX_SPEED_PER_SEC, MAX_STAT,
+    MAX_VISUAL_NAME, MapSpec, MinionStatsSpec, ModifierDef, ModifierKind, RulesSpec, StructureSpec,
+    StructureStatsSpec, WallSpec,
 };
 
 fn area_effect_valid(effect: &AreaEffect, modifiers: &[ModifierDef]) -> bool {
@@ -107,6 +107,19 @@ fn effect_valid(effect: &Effect, modifiers: &[ModifierDef]) -> bool {
     }
 }
 
+/// `true` for a wire-safe visual asset name: 1..=[`MAX_VISUAL_NAME`] of `[A-Za-z0-9_-]`.
+///
+/// Checked by [`GameContent::validate`], so it also guards wire-reconstructed content: a
+/// client never resolves a name containing a separator, dot or drive colon.
+#[must_use]
+pub fn valid_visual_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_VISUAL_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 /// Validates map limits, names and geometry.
 ///
 /// Structural guard: every map struct is destructured without `..`, so adding map geometry
@@ -125,7 +138,14 @@ fn validate_map(map: &MapSpec) -> Result<(), ContentError> {
         walls,
         blue_spawn,
         red_spawn,
+        visuals,
     } = map;
+    if visuals
+        .as_deref()
+        .is_some_and(|name| !valid_visual_name(name))
+    {
+        return Err(ContentError::BadVisualName("map.visuals"));
+    }
     let point = |field: &'static str, point: FixVec2| {
         MapSpec::wire_point(point)
             .map(|_| ())
@@ -451,6 +471,13 @@ impl GameContent {
                 .any(|other| other.name == hero.name)
             {
                 return Err(ContentError::DuplicateHeroName);
+            }
+            if hero
+                .model
+                .as_deref()
+                .is_some_and(|name| !valid_visual_name(name))
+            {
+                return Err(ContentError::BadVisualName("heroes.model"));
             }
             if hero
                 .abilities

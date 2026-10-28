@@ -127,6 +127,28 @@ impl TickInputs {
     }
 }
 
+/// How a finished match ended.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MatchOutcome {
+    /// One team won.
+    Winner(Team),
+    /// Both teams met a win condition in the same tick (for example both nexuses fell, or
+    /// both teams reached the score limit), so neither side wins.
+    Draw,
+}
+
+impl MatchOutcome {
+    /// The winning team, or `None` for a draw.
+    #[inline]
+    #[must_use]
+    pub const fn winner(self) -> Option<Team> {
+        match self {
+            Self::Winner(team) => Some(team),
+            Self::Draw => None,
+        }
+    }
+}
+
 /// Something observable that happened during a tick.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SimEvent {
@@ -220,10 +242,10 @@ pub enum SimEvent {
         /// Lifetime in ticks.
         duration_ticks: u32,
     },
-    /// A nexus fell and the match ended.
+    /// The match ended (nexus destroyed, score limit reached or surrender).
     MatchEnded {
-        /// Winning team.
-        winner: Team,
+        /// Winning team, or `None` when the match ended in a draw.
+        winner: Option<Team>,
     },
 }
 
@@ -379,7 +401,11 @@ pub struct Simulation {
     hero_entities: [Entity; MAX_PLAYERS],
     wave: u32,
     next_wave_tick: u32,
-    outcome: Option<Team>,
+    outcome: Option<MatchOutcome>,
+    /// Win conditions met during the current tick, indexed by the team they favour. They are
+    /// resolved together at the end of the tick so the result never depends on processing
+    /// order; always `[false; 2]` between ticks, so it is not part of the state hash.
+    pending_wins: [bool; 2],
     blue_score: u32,
     red_score: u32,
     projectiles: Vec<Projectile>,
@@ -426,6 +452,7 @@ impl Simulation {
             wave: 0,
             next_wave_tick: rules.first_wave_ticks,
             outcome: None,
+            pending_wins: [false; 2],
             blue_score: 0,
             red_score: 0,
             projectiles: Vec::with_capacity(MAX_PROJECTILES),
@@ -478,10 +505,10 @@ impl Simulation {
         self.tick
     }
 
-    /// Winning team once a nexus falls.
+    /// How the match ended, once it has (`None` while it is still running).
     #[inline]
     #[must_use]
-    pub const fn outcome(&self) -> Option<Team> {
+    pub const fn outcome(&self) -> Option<MatchOutcome> {
         self.outcome
     }
 
@@ -613,6 +640,7 @@ impl Simulation {
         self.update_projectiles();
         self.tick_zones();
         self.resolve_deaths();
+        self.resolve_outcome();
         if self.tick.get() >= self.next_wave_tick && self.config.spawn_waves {
             self.spawn_wave();
             self.next_wave_tick = self
@@ -647,6 +675,30 @@ impl Simulation {
                 },
             );
         }
+    }
+
+    /// Records that `team` met a win condition this tick.
+    fn queue_win(&mut self, team: Team) {
+        self.pending_wins[team.index()] = true;
+    }
+
+    /// Resolves the win conditions met this tick. If both teams met one in the same tick
+    /// the match is a draw, so the result does not depend on processing order.
+    fn resolve_outcome(&mut self) {
+        let [blue, red] = core::mem::take(&mut self.pending_wins);
+        if self.outcome.is_some() {
+            return;
+        }
+        let outcome = match (blue, red) {
+            (true, true) => MatchOutcome::Draw,
+            (true, false) => MatchOutcome::Winner(Team::Blue),
+            (false, true) => MatchOutcome::Winner(Team::Red),
+            (false, false) => return,
+        };
+        self.outcome = Some(outcome);
+        self.push_event(SimEvent::MatchEnded {
+            winner: outcome.winner(),
+        });
     }
 
     fn push_event(&mut self, event: SimEvent) {

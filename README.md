@@ -4,7 +4,7 @@
 [![Issues](https://img.shields.io/github/issues/JakeGT/moba-engine)](https://github.com/JakeGT/moba-engine/issues)
 
 A server-authoritative multiplayer MOBA engine written in Rust and Vulkan. Current contract:
-wire protocol **v38**, replay format **v5** (simulation logic **v7**), workspace **0.4.0**.
+wire protocol **v40**, replay format **v5** (simulation logic **v8**), workspace **0.4.0**.
 
 > **Status: preview (0.4.0).** The engine is playable end-to-end — dedicated server, UDP
 > netcode, deterministic simulation, Vulkan client with HUD and fog of war — but the public
@@ -22,7 +22,7 @@ spectator camera, status effects and runtime-content examples.
 | Area | Capability |
 |---|---|
 | Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, rules, levels/XP, gold, items and shop |
-| Networking | Custom UDP protocol (v38): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
+| Networking | Custom UDP protocol (v40): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
 | Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 324 tests, golden-image CI and a 5-minute 10-client soak |
@@ -183,10 +183,11 @@ Replays store the seed/config, content manifest, exact per-tick inputs and perio
 checkpoints; the verifier reports the first divergent tick and reproduces the final state
 hash. Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,
-`MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>`; hero models: `MOBA_ASSET_ROOT=<dir>`
-(default `content`) and `MOBA_HERO_MODELS=<hero>=<model>,...` load `<dir>/models/<model>.glb`
-(a model with a skin is GPU-skinned and walks with the hero; `MOBA_NO_SKINNING=1` draws it
-static).
+`MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>`; hero models: a pack's
+`heroes.model` names load `<MOBA_ASSET_ROOT>/models/<model>.glb` (default root `content`, see
+`content/sentinel-pack.toml`; `MOBA_HERO_MODELS=<hero>=<model>,...` overrides per hero), and
+`MOBA_CONTENT=<pack.toml>` plays a pack in the local preview or `MOBA_SERVER=local`. A model
+with a skin is GPU-skinned and walks with the hero; `MOBA_NO_SKINNING=1` draws it static.
 
 ## Architecture
 

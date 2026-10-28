@@ -70,9 +70,10 @@ content hash.
   name is loaded once. Any failure (bad name, missing or malformed file, upload error, slot
   exhaustion) is logged once and that hero keeps the procedural rig; a missing asset never
   fails a match. The model is fitted to the rig's height (3.6 m), standing on the ground and
-  centred, and it faces +Z (the glTF convention), rotated to the movement direction. Until
-  packs name a model per hero (#285), `MOBA_HERO_MODELS=hero=model,...` (or a bare model name
-  for every hero) provides the names.
+  centred, and it faces +Z (the glTF convention), rotated to the movement direction. The names
+  come from the catalogue's per-hero `model` (#285, `[assets]` in the pack); the dev override
+  `MOBA_HERO_MODELS=hero=model,...` (or a bare model name for every hero) wins for the heroes it
+  matches.
 
 ## Rejected
 - **Text `.gltf` or URI buffers:** the loader would need file-system or URI access driven by

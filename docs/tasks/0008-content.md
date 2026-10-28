@@ -61,8 +61,16 @@ Rules hash/validation/per-kind defaults, finite parsing, client/sim vision agree
 explicit modifier-kind validation (no silent id-0 fallback) and reviewed ability-pack radii
 are complete.
 
+## #285 asset references
+
+Packs declare an optional `[assets]` manifest and name a hero `model` / map `visuals` from it.
+The loader rejects unknown names, unsafe paths and fallback cycles. `content-check` also checks
+the files (text and `--json`). The names are hashed, signed and carried in the catalogue
+(protocol v40), but the paths never are; packs without names keep their hashes. See
+[content authoring](../content-authoring.md#assets).
+
 ## Future work (not blocking M8)
-- Real asset meshes/materials and GPU skinning assets.
+- Per-map visuals from manifests (#287), GPU skinning assets (#288) and materials.
 - Scripting hooks and more code-driven behaviours (summons, auras, complex triggers).
 - Larger content-pack compatibility/version-migration fixtures.
 

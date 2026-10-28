@@ -84,13 +84,133 @@ fn destroying_a_nexus_ends_the_match() {
     let nexus = find_unit(&sim, UnitKind::Nexus, Team::Red);
     sim.world.get_mut::<Health>(nexus).expect("health").current = 0;
     sim.tick(&TickInputs::new());
-    assert_eq!(sim.outcome(), Some(Team::Blue));
-    assert!(
-        sim.events()
-            .iter()
-            .any(|event| matches!(event, SimEvent::MatchEnded { winner: Team::Blue }))
-    );
+    assert_eq!(sim.outcome(), Some(MatchOutcome::Winner(Team::Blue)));
+    assert_eq!(match_ended_events(&sim), [Some(Team::Blue)]);
     assert!(!sim.world.entities().any(|entity| entity == nexus));
+}
+
+fn match_ended_events(sim: &Simulation) -> Vec<Option<Team>> {
+    sim.events()
+        .iter()
+        .filter_map(|event| match event {
+            SimEvent::MatchEnded { winner } => Some(*winner),
+            _ => None,
+        })
+        .collect()
+}
+
+fn score_limit_one() -> Simulation {
+    let mut content = GameContent::default();
+    content.rules.score_limit = 1;
+    Simulation::new_with_content(
+        SimConfig {
+            bot_mask: 0,
+            spawn_waves: false,
+            ..SimConfig::default()
+        },
+        Arc::new(content),
+    )
+}
+
+fn kill_with_credit(sim: &mut Simulation, victim: Entity, killer: Entity, killer_team: Team) {
+    sim.world.get_mut::<Health>(victim).expect("health").current = 0;
+    let _ = sim.world.insert(
+        victim,
+        LastHitBy {
+            team: killer_team,
+            entity: killer,
+        },
+    );
+}
+
+#[test]
+fn both_nexuses_falling_in_one_tick_is_a_draw() {
+    // Before logic v8 the nexus processed first decided the match (#290).
+    let mut sim = idle(SimConfig::default().hero_picks);
+    for team in [Team::Blue, Team::Red] {
+        let nexus = find_unit(&sim, UnitKind::Nexus, team);
+        sim.world.get_mut::<Health>(nexus).expect("health").current = 0;
+    }
+    sim.tick(&TickInputs::new());
+    assert_eq!(sim.outcome(), Some(MatchOutcome::Draw));
+    assert_eq!(match_ended_events(&sim), [None]);
+    let hash = sim.state_hash();
+    sim.tick(&TickInputs::new());
+    assert_eq!(sim.state_hash(), hash, "a drawn match stops ticking");
+}
+
+#[test]
+fn both_teams_reaching_the_score_limit_in_one_tick_is_a_draw() {
+    let mut sim = score_limit_one();
+    let blue = sim.hero_entities[0];
+    let red = sim.hero_entities[5];
+    kill_with_credit(&mut sim, blue, red, Team::Red);
+    kill_with_credit(&mut sim, red, blue, Team::Blue);
+    sim.tick(&TickInputs::new());
+    assert_eq!(sim.score(), (1, 1));
+    assert_eq!(sim.outcome(), Some(MatchOutcome::Draw));
+    assert_eq!(match_ended_events(&sim), [None]);
+}
+
+#[test]
+fn one_team_reaching_the_score_limit_wins() {
+    let mut sim = score_limit_one();
+    let blue = sim.hero_entities[0];
+    let red = sim.hero_entities[5];
+    kill_with_credit(&mut sim, red, blue, Team::Blue);
+    sim.tick(&TickInputs::new());
+    assert_eq!(sim.outcome(), Some(MatchOutcome::Winner(Team::Blue)));
+    assert_eq!(match_ended_events(&sim), [Some(Team::Blue)]);
+}
+
+#[test]
+fn both_teams_surrendering_in_one_tick_is_a_draw() {
+    let mut sim = idle(SimConfig::default().hero_picks);
+    let mut inputs = TickInputs::new();
+    inputs.set(0, PlayerCommand::Surrender);
+    inputs.set(5, PlayerCommand::Surrender);
+    sim.tick(&inputs);
+    assert_eq!(sim.outcome(), Some(MatchOutcome::Draw));
+}
+
+#[test]
+fn wave_formations_are_x_mirrored_between_teams() {
+    // Waves must mirror like hero spawns (x -> extent - x). Before logic v8 red's formation
+    // was the point reflection of blue's, so in the top lane blue's ranged minion spawned
+    // ahead of the lane start and red's behind it (#290).
+    let mut sim = idle(SimConfig::default().hero_picks);
+    sim.spawn_wave();
+    let extent = sim.content.map.extent;
+    let mut units: [Vec<(u8, u8, FixVec2)>; 2] = [Vec::new(), Vec::new()];
+    for (_, (kind, team, walker, position)) in sim
+        .world
+        .query::<(&UnitKind, &Team, &LaneWalker, &Position)>()
+    {
+        units[team.index()].push((walker.lane, *kind as u8, position.0));
+    }
+    let [mut blue, mut red] = units;
+    // Sort by lane, kind and the side-independent y coordinate.
+    let key = |unit: &(u8, u8, FixVec2)| (unit.0, unit.1, unit.2.y.to_bits());
+    blue.sort_by_key(key);
+    red.sort_by_key(key);
+    assert_eq!(blue.len(), 12);
+    assert_eq!(red.len(), 12);
+    // `normalize_or_zero` rounds toward negative infinity, so mirrored lane directions can
+    // differ by a few ULP; allow a hundredth of a world unit.
+    let tolerance = Fix::from_i32(1) / Fix::from_i32(100);
+    for (blue, red) in blue.iter().zip(&red) {
+        let mirrored = FixVec2::new(extent - red.2.x, red.2.y);
+        assert_eq!((blue.0, blue.1), (red.0, red.1));
+        assert!(
+            (blue.2.x - mirrored.x).abs() <= tolerance
+                && (blue.2.y - mirrored.y).abs() <= tolerance,
+            "lane {} kind {}: blue {:?} vs mirrored red {:?}",
+            blue.0,
+            blue.1,
+            blue.2,
+            mirrored
+        );
+    }
 }
 
 #[test]
@@ -516,6 +636,7 @@ fn custom_content_purchase_updates_observation() {
         abilities: GameContent::default().abilities,
         modifiers: GameContent::default().modifiers,
         map: GameContent::default().map,
+        assets: moba_game::AssetManifest::default(),
     };
     let mut sim = Simulation::new_with_content(SimConfig::default(), std::sync::Arc::new(content));
     assert!(sim.purchase(0, 0));
@@ -1853,7 +1974,7 @@ fn surrender_ends_the_match_for_the_enemy_team() {
     let mut inputs = TickInputs::new();
     inputs.set(0, PlayerCommand::Surrender);
     sim.tick(&inputs);
-    assert_eq!(sim.outcome(), Some(Team::Red));
+    assert_eq!(sim.outcome(), Some(MatchOutcome::Winner(Team::Red)));
 }
 
 #[test]
