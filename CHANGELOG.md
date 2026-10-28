@@ -21,6 +21,10 @@ breaking protocol, replay or content-schema changes.
   performance targets, ADRs to write and art-production requirements.
 - **GPU skinning (#288, ADR-0007):** the `.glb` loader reads `JOINTS_0`/`WEIGHTS_0`, the skin (≤ 64 joints, inverse bind matrices) and one animation clip under the same untrusted-input caps (fuzzed); `Renderer::register_skinned_mesh` draws skinned instances with `skinned.vert`, a per-frame bone SSBO (set 1 binding 1, default 16 × 64 joints) and a `{first_bone, joint_count}` push constant on the shared pipeline layout. The client poses heroes from facing/gait/render tick with a preallocated bone pool (no new wire fields; over-budget heroes draw static); `MOBA_NO_SKINNING=1`, a missing skin or a failed pipeline fall back to the static mesh or the procedural rig. Ships the generated `content/models/sentinel-skinned.glb`.
 - **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
+### Determinism and balance
+- Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.
+### Determinism and balance
+- `match-soak` now counts `unique_hashes` with `state_hash_normalized()`, and adds `--threads N` and a `balance:` line (draws, Wilson 95 % blue win rate over decided matches, resolution-tick percentiles). A 5,000-match, 60,000-tick sweep measured blue at 44.21 % (95 % CI 42.84–45.60 %), a red bias traced to the point-reflected wave formation (`docs/perf/0008-balance.md`, #290).
 
 ### Content and networking
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
@@ -37,6 +41,16 @@ breaking protocol, replay or content-schema changes.
   future hashed field cannot be added without being hashed and carried.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
+- Multi-match flood isolation (#292): datagrams are charged against the per-address, per-match and new optional host-wide (`--host-max-pps`, `HostBudget`) budgets before decoding, so undecodable junk counts too; `MatchHost` polls round-robin with a per-match cap of 64 datagrams / 500 µs per pass; `--reload-content` loads the pack once per host (`ContentWatch`) and shares it across matches; `load-test --flood-port K --flood-pps N` verifies the isolation. `--max-pps 0` now disables only the per-address budget, not the per-match one.
+- `GameContent::validate` now rejects map geometry the wire catalogue would silently truncate
+  (#296): a fractional or out-of-`i16`/`u16` extent, spawn, lane waypoint, structure position
+  or wall endpoint (new `ContentError::BadMapCoordinate(field)`; adding a variant is a breaking
+  change for exhaustive matches), more than 4 lanes / 16 waypoints / 32 structures, empty lane
+  paths (which panicked the wave spawner), and over-long or non-ASCII map/lane names.
+  `NetServer::bind_with_content` now validates its pack (`ErrorKind::InvalidInput`), and the
+  client validates the Welcome catalogue as it already did for `ContentUpdate`. No wire-format
+  change (still protocol v38); shipped pack hashes are unchanged. New `MapSpec::wire_point` /
+  `MapSpec::wire_extent` and `MAX_LANE_NAME` are shared by validation and the wire conversion.
 
 ### Internal
 - Split `crates/game/src/content.rs` into `content/{spec,schema,load,validate,hash,manifest,error}.rs`
@@ -45,6 +59,28 @@ breaking protocol, replay or content-schema changes.
 - Split `crates/sim/src/sim.rs` (4,846 lines) into a `sim/` module directory (spawn, status,
   inputs, abilities, movement, combat, deaths, items, bots, vision, hashing, tests); pure move,
   no behaviour, API or state-hash change.
+
+### Documentation
+- Added the [playtest runbook](docs/playtest.md) (WP-5.1): hosting, tokens/identity, firewall, bots and spectators, client join variables, ~100 ms RTT with `tc netem`, replay/results/frame-log collection and a feedback form.
+
+### CI
+- Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
+
+## [0.4.1] — 2026-10-27
+
+Security patch release cut from `v0.4.0` on the `release/0.4.x` branch. Protocol **v37**, replay
+**v5**, simulation logic **v7**: wire-, replay- and content-compatible with 0.4.0, and no public
+API change. Lockfile-only dependency updates.
+
+### Security
+- `ctutils` 0.4.3 → 0.4.6 ([RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385)).
+  Before 0.4.4, `ctutils::Choice` mask generation could compile to a branch on common targets,
+  and `u128` comparisons branched on 32-bit targets, which can leak secret values through timing.
+  `ctutils` is used by the RustCrypto stack under `moba-net`: `sha2`/`hmac`/`hkdf` (per-client
+  tokens, key derivation), `curve25519-dalek`/`ed25519-dalek` (server/client identity) and
+  `poly1305`/`chacha20poly1305` (session AEAD). Also updated in `fuzz/Cargo.lock`.
+- `tokio` 1.54.0 → 1.54.1 ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384);
+  1.54.0 was yanked). Only reached through `winit`'s wasm path; native builds do not run it.
 
 ## [0.4.0] — 2026-10-21
 

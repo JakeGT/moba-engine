@@ -522,9 +522,15 @@ impl NetClient {
                     if welcome.nonce != self.nonce {
                         continue;
                     }
-                    let Ok(content_hash) = welcome.catalog.content_hash() else {
+                    // Same acceptance rule as `ContentUpdate`: the catalogue must reconstruct,
+                    // pass `GameContent::validate` and hash to the advertised value (#296).
+                    let Ok(content) = welcome.catalog.to_content() else {
                         continue;
                     };
+                    if content.validate().is_err() {
+                        continue;
+                    }
+                    let content_hash = content.hash();
                     if content_hash != welcome.content_hash {
                         continue;
                     }

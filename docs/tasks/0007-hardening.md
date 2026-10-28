@@ -56,6 +56,10 @@ authenticated transport, reconnect, deterministic replays, load/soak gates and p
 
 - 50 concurrent matches per box: `MatchHost` + `moba-server --matches N`, verified by
   `load-test` (see [`docs/perf/0010-multi-match.md`](../perf/0010-multi-match.md), #291).
+- Host-wide hardening (#292): datagrams are charged against the per-address/per-match/host-wide
+  budgets before decode; per-match poll caps with round-robin polling isolate a flooded port
+  (`load-test --flood-port K --flood-pps N`); `--reload-content` loads once per host and shares
+  the pack across matches.
 
 ## Still open
 - Independent external review.

@@ -158,22 +158,29 @@ Ctrl-C/SIGINT, then flushes the recording before exiting.
 `MatchHost` (`crates/net/src/host.rs`) runs many `NetServer`s in one process (`moba-server --matches N`).
 - Each match keeps its own UDP socket on consecutive ports, so the protocol and client are unchanged.
 - Matches are split across long-lived worker threads. Each worker polls its sockets and ticks every due match on the shared 30 Hz schedule.
-- Workers record per-match tick durations in a fixed-size histogram, plus frame lateness and overruns.
-- `moba-tools load-test` drives N matches × C real clients and fails on budget misses ([perf note](perf/0010-multi-match.md)).
+- Polling is round-robin (the first socket rotates every pass) and capped per match at 64 datagrams or 500 µs per pass (`MatchHost::set_poll_budget`); excess datagrams stay in that socket's kernel queue, so a flooded port cannot starve its neighbours.
+- An optional `HostBudget` (`--host-max-pps`) is a lock-free token bucket shared by every match on every worker.
+- Workers record per-match tick durations in fixed-size histograms, plus frame lateness and overruns.
+- `moba-tools load-test` drives N matches × C real clients and fails on budget misses; `--flood-port K --flood-pps N` adds a junk flood against one match ([perf note](perf/0010-multi-match.md)).
 
 `NetServer` can watch a content file (`watch_content`/`--reload-content`) and swap it only
 in Lobby/Results (never `Playing`); the simulation is recreated and connected clients receive a
-full catalogue `ContentUpdate` for the next match.
+full catalogue `ContentUpdate` for the next match. In a `MatchHost`, a single `ContentWatch`
+loads and trust-checks the file once and every match adopts the same `Arc<GameContent>`
+(`MatchHost::watch_content`). Replace the file atomically (write a temporary file, then `rename`).
 
-`NetServer` applies a token-bucket rate limit per source address (default 120 pps) and a
-global packet budget (default 2000 pps) before message decoding; `0` disables either. Buckets are bounded and evicted LRU to cap
+`NetServer` applies a token-bucket rate limit per source address (default 120 pps), a
+per-match packet budget (default 2000 pps) and, when installed, the host-wide budget, in that
+order; `0` disables either of the first two. The check runs on the source address straight after
+`recv_from` (`UdpTransport::recv_admitted`), before header decode, AEAD open or reassembly, so
+undecodable datagrams are charged too. Buckets are bounded and evicted LRU to cap
 memory under spoofed-source floods. `ServerStats` exposes bytes, snapshots, rate-limited
-datagrams and average/max simulation tick nanoseconds for operators and the soak harness.
+datagrams, capped polls and average/max simulation tick nanoseconds for operators and the soak harness.
 
 ## Runtime content
 
 `GameContent` owns the runtime item, hero, ability and map catalogues; the simulation holds
-an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` accepts a validated pack;
+an `Arc<GameContent>` and reads purchases, hero stats/ability bindings and map geometry from it. `NetServer::bind_with_content` validates the pack (`InvalidInput` if `GameContent::validate` fails);
 the server publishes it in `Welcome`, and clients use the received `WireItem`, `WireHero`,
 `WireCatalog`/`WireAbility`/`WireEffect`/`WireModifier` and `WireMap` entries for shop, HUD,
 modifier names, effects, vision, range/radius overlays and minimap rendering. Abilities are

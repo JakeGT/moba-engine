@@ -16,6 +16,8 @@
 - [First audit remediation plan](plans/audit-remediation-2026-10.md) — the W0–W5 train that
   produced the 0.2 preview.
 - [Status](status.md) — milestone table, verification evidence and the external blockers.
+- [Playtest runbook](playtest.md) — hosting, joining, ~100 ms RTT shaping, evidence collection
+  and the feedback form for the M6 real-network playtest.
 - [Content pipeline task](tasks/0008-content.md), [Hardening task](tasks/0007-hardening.md), [Task specs](tasks/) — per-milestone scope, acceptance tests and review logs.
 - [Performance logs](perf/) — measured tick/frame/network numbers and budgets, including
   [snapshot/simulation profiling](perf/0007-profiling.md).

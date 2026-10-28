@@ -42,6 +42,7 @@ const _: () = {
     assert!(MAX_WIRE_WALLS == moba_game::MAX_CONTENT_WALLS);
     assert!(MAX_WIRE_STRUCTURES == moba_game::MAX_CONTENT_STRUCTURES);
     assert!(WIRE_MANIFEST_FIELD == moba_game::MAX_MANIFEST_FIELD);
+    assert!(WIRE_LANE_NAME == moba_game::MAX_LANE_NAME);
     assert!(MAX_WIRE_MODIFIERS == moba_game::MAX_CONTENT_MODIFIERS);
     assert!(WIRE_MODIFIER_NAME == moba_game::MAX_ITEM_NAME);
     assert!(MAX_WIRE_EFFECTS == moba_game::MAX_ABILITY_EFFECTS);

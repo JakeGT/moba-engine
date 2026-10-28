@@ -35,7 +35,7 @@ mismatched or missing pack is rejected.
 | Abilities | 24 |
 | Lanes | 4, 2..=16 waypoints each |
 | Structures/walls | 32 total |
-| Map | one blue and one red nexus; coordinates 0..=256 |
+| Map | one blue and one red nexus; `extent` 1..=256; every coordinate a whole number in 0..=`extent`; `name` ≤32 ASCII bytes, lane `name` 1..=16 ASCII bytes |
 | Stats | health/damage/gold ≤10,000,000; item bonuses ≤1,000,000; speed ≤100 u/s; ranges ≤1,000; resist ≤100,000 |
 
 Unknown fields and unknown enum values are **rejected** (no silent fallbacks). Use
@@ -323,6 +323,26 @@ b = [110, 156]
 Walls block line of sight, not movement. The server filters snapshots by vision; the terrain
 shader gets the same segments and clips vision circles; the client minimap draws the walls.
 
+### Map coordinate rules
+
+Map geometry crosses the network as whole world units (`extent` as `u16`; spawns, lane
+waypoints, structure positions and wall endpoints as `i16` pairs), and the client recomputes
+the content hash from what it receives. `GameContent::validate` therefore requires:
+
+- `extent` and every coordinate to be a whole number — `ContentError::BadMapCoordinate(field)`
+  names the offending field (`map.extent`, `map.blue_spawn`, `map.red_spawn`,
+  `map.lanes.path`, `map.structures.position`, `map.walls.a`, `map.walls.b`);
+- `extent` in 1..=256 (`BadMap`) and every point inside 0..=`extent` on both axes
+  (`BadMapData`, or `BadWalls` for wall endpoints);
+- at most 4 lanes with 1..=16 waypoints each and at most 32 structures (`BadMap`), and a map
+  `name` of ≤32 ASCII bytes and lane names of 1..=16 ASCII bytes (`BadMapData`), so nothing
+  is truncated on the wire.
+
+TOML packs can only express integer coordinates, so these rules matter mostly for content
+built in code (`MapSpec::wire_point` / `MapSpec::wire_extent` give the exact wire value).
+`NetServer::bind_with_content` validates its pack and returns `InvalidInput` for one that
+fails, and clients validate the catalogue in both the Welcome and `ContentUpdate`.
+
 ## Hot reload
 
 ```bash
@@ -331,9 +351,21 @@ cargo run -p moba-server -- \
   --items content/example-pack.toml --reload-content
 ```
 
-The pack is re-read at most once per second in Lobby/Results. Connected clients receive a
+The server checks the pack about once per second. It is loaded, validated and trust-checked
+**once per process**, and every match (`--matches N`) adopts the same pack in its next
+Lobby/Results phase. Connected clients receive a
 `ContentUpdate` packet with the full validated catalogue and replace catalogue-dependent state
 atomically; a live `Playing` match is never hot-swapped.
+
+Replace the pack atomically, so the server never reads a half-written file:
+
+```bash
+cp new-pack.toml content/.example-pack.toml.tmp   # same directory/filesystem
+mv content/.example-pack.toml.tmp content/example-pack.toml   # rename(2) is atomic
+```
+
+A pack that fails to load (for example a torn in-place write) is logged and ignored; the
+running pack stays in use until the file changes again.
 
 ## Replays
 
