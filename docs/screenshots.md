@@ -161,6 +161,52 @@ MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
 `MOBA_NO_SKINNING=1` draws the same model as a static mesh (stride bob only); a model without
 a skin is always static, and a missing model keeps the procedural rig.
 
+### Per-map visuals
+![Ember Crossing with its visuals descriptor](images/m8-map-visuals-ember.png)
+
+`content/ember-map.toml` in the local preview, styled by its descriptor
+`content/maps/ember.toml` (#287): scorched terrain tint, rust-red ramparts drawn with the
+generated `content/models/rampart.glb` along the pack's four vision walls, and ember
+`content/models/crystal.glb` props. Before #287 the local preview drew no walls at all. One
+1280×720 lavapipe run with validation and synchronization validation required: exit 0, zero
+validation messages, stderr only `[assets] map visuals 'ember' loaded (5 props)`.
+
+```bash
+MOBA_CONTENT=content/ember-map.toml MOBA_SMOKE_FRAMES=120 \
+MOBA_CAPTURE=/tmp/ember.ppm MOBA_CAPTURE_FRAME=90 \
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
+```
+
+![Two map packs back to back in one client session](images/m8-map-visuals-switch.png)
+
+Two map packs rendering back to back in **one** client session (both 1280×720 frames, scaled
+to half size). The server started on Ember Crossing with `--reload-content --ready`, the pack
+file was then replaced atomically with `content/frost-map.toml`, and the server broadcast a
+`ContentUpdate` in the lobby. The client rebound the map without restarting: left, Ember
+Crossing (`ember`); right, Frost Ring (`frost`: snow tint, 9 m glacier-blue walls, sentinel
+statues and ice pillars). Lavapipe with validation and synchronization validation required,
+zero validation messages. The client's stderr was exactly:
+
+```text
+[assets] map visuals 'ember' loaded (5 props)
+[assets] map capture written to /tmp/switch-1.ppm
+[assets] map visuals 'frost' loaded (5 props)
+[assets] map capture written to /tmp/switch-2.ppm
+```
+
+```bash
+cp content/ember-map.toml /tmp/live.toml
+cargo run --release -p moba-server -- --listen 127.0.0.1:7791 --seconds 150 \
+  --items /tmp/live.toml --reload-content --ready &
+MOBA_SERVER=127.0.0.1:7791 MOBA_CAPTURE_MAPS=/tmp/switch MOBA_CAPTURE_FRAME=40 \
+MOBA_CAMERA=overview MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client &
+# after /tmp/switch-1.ppm appears:
+cp content/frost-map.toml /tmp/.live.toml.tmp && mv /tmp/.live.toml.tmp /tmp/live.toml
+```
+
+Map rotation (`--items A --items B`) takes the same client path after each match. The default
+golden scene names no visuals and ships no `map-*` descriptor, so it is unchanged.
+
 ## Reproducing a capture
 
 The client supports headless readback without changing the renderer:

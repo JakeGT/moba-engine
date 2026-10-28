@@ -19,6 +19,22 @@ breaking protocol, replay or content-schema changes.
 ### Planning
 - Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,
   performance targets, ADRs to write and art-production requirements.
+- **Per-map visuals (#287, WP-3.3):** a map's `visuals` name resolves on each client to a
+  bounded TOML descriptor, `<MOBA_ASSET_ROOT>/maps/<name>.toml` (`moba_assets::MapVisuals`:
+  terrain tint, wall colour and height, an optional wall mesh and up to 32 props with optional
+  `.glb` meshes). It replaces the client's hard-coded `map_theme` table, which stays as the
+  fallback for a missing or invalid descriptor (a missing mesh falls back to the built-in block
+  for that part); each problem is logged once and never fails a match. The local preview now
+  draws the map's walls, from the same wall data the network path uses. Visuals rebind on
+  connect, `ContentUpdate` and map rotation without restarting the client.
+  `MOBA_CAPTURE_MAPS=<prefix>` writes one capture per map in a network session. Ships
+  `content/ember-map.toml` and `content/frost-map.toml` with descriptors in `content/maps/` and
+  the generated `content/models/crystal.glb` and `content/models/rampart.glb` (`sample-mesh`).
+  `AssetManifest::check_files` (content-check) now requires map entries to be `.toml`
+  descriptors and validates them and the meshes they name; unit entries stay `.glb` only.
+  No wire, hash, replay or logic change: only the visuals *name* is hashed and sent (#285);
+  descriptors are client-local and cosmetic. The default and networked golden scenes are
+  unchanged (no visuals name, no shipped `map-*` descriptor).
 - **GPU skinning (#288, ADR-0007):** the `.glb` loader reads `JOINTS_0`/`WEIGHTS_0`, the skin (≤ 64 joints, inverse bind matrices) and one animation clip under the same untrusted-input caps (fuzzed); `Renderer::register_skinned_mesh` draws skinned instances with `skinned.vert`, a per-frame bone SSBO (set 1 binding 1, default 16 × 64 joints) and a `{first_bone, joint_count}` push constant on the shared pipeline layout. The client poses heroes from facing/gait/render tick with a preallocated bone pool (no new wire fields; over-budget heroes draw static); `MOBA_NO_SKINNING=1`, a missing skin or a failed pipeline fall back to the static mesh or the procedural rig. Ships the generated `content/models/sentinel-skinned.glb` and `content/sentinel-skinned-pack.toml`, which names it for Blade and Guardian through the pack's `model` field.
 - **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
 ### Determinism and balance

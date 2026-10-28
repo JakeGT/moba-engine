@@ -98,6 +98,14 @@ impl HeroModel {
     }
 }
 
+/// The client-local asset root: [`ASSET_ROOT_ENV`], else `content`. Shared by hero models
+/// and map visuals.
+pub(crate) fn asset_root_from_env() -> PathBuf {
+    std::env::var_os(ASSET_ROOT_ENV)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from(DEFAULT_ASSET_ROOT), PathBuf::from)
+}
+
 /// `true` for 1–32 ASCII letters, digits, `_` or `-` (no separators, dots or drive colons,
 /// so a name can never escape `<root>/models/`).
 pub(crate) fn valid_model_name(name: &str) -> bool {
@@ -164,9 +172,7 @@ pub(crate) struct ModelLibrary {
 impl ModelLibrary {
     /// Builds an empty library from [`ASSET_ROOT_ENV`] and [`HERO_MODELS_ENV`]. No I/O.
     pub(crate) fn from_env() -> Self {
-        let root = std::env::var_os(ASSET_ROOT_ENV)
-            .filter(|value| !value.is_empty())
-            .map_or_else(|| PathBuf::from(DEFAULT_ASSET_ROOT), PathBuf::from);
+        let root = asset_root_from_env();
         let bindings = std::env::var(HERO_MODELS_ENV)
             .map(|spec| ModelBindings::parse(&spec))
             .unwrap_or_default();

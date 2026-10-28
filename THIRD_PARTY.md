@@ -38,8 +38,9 @@ POSSIBILITY OF SUCH DAMAGE.
 ## Sample hero model
 
 `content/models/sentinel.glb` and its rigged, animated variant
-`content/models/sentinel-skinned.glb` (and their copies in `fuzz/corpus/glb/`) are not
-third-party art. Both are generated from code in this repository by
+`content/models/sentinel-skinned.glb` (and their copies in `fuzz/corpus/glb/`), and the map
+meshes `content/models/crystal.glb` and `content/models/rampart.glb`, are not third-party
+art. All are generated from code in this repository by
 `cargo run -p moba-tools --bin sample-mesh` (`crates/tools/src/bin/sample-mesh.rs`), so they
 carry the repository's MIT OR Apache-2.0 licence. Unit tests check that the committed bytes
 match the generator.

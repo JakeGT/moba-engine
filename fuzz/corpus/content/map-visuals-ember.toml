@@ -1,0 +1,41 @@
+# Map visuals descriptor for `visuals = "ember"` (content/ember-map.toml), #287.
+# Client-local and cosmetic: never hashed or sent. See docs/content-authoring.md#map-visuals.
+terrain = [0.24, 0.09, 0.05]   # scorched ground (linear RGB, 0..=1)
+wall = [0.55, 0.20, 0.08]      # rust-red ramparts
+wall_height = 6.0
+wall_mesh = "rampart"          # models/rampart.glb, stretched along each wall
+
+# Ember crystals around the crossing.
+[[props]]
+position = [96, 72]
+color = [1.0, 0.42, 0.10]
+height = 11.0
+mesh = "crystal"
+
+[[props]]
+position = [160, 184]
+color = [1.0, 0.42, 0.10]
+height = 11.0
+yaw = 180.0
+mesh = "crystal"
+
+[[props]]
+position = [128, 128]
+color = [1.0, 0.62, 0.18]
+height = 16.0
+yaw = 45.0
+mesh = "crystal"
+
+[[props]]
+position = [52, 84]
+color = [0.85, 0.30, 0.08]
+height = 8.0
+yaw = 90.0
+mesh = "crystal"
+
+[[props]]
+position = [204, 172]
+color = [0.85, 0.30, 0.08]
+height = 8.0
+yaw = 270.0
+mesh = "crystal"

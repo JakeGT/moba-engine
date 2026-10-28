@@ -69,8 +69,16 @@ the files (text and `--json`). The names are hashed, signed and carried in the c
 (protocol v40), but the paths never are; packs without names keep their hashes. See
 [content authoring](../content-authoring.md#assets).
 
+## #287 per-map visuals
+
+A map's `visuals` name resolves on each client to `<asset root>/maps/<name>.toml`, a bounded
+descriptor with terrain tint, wall colour/height, an optional wall mesh and props. The
+built-in theme table is the fallback. The local preview draws walls. Visuals rebind on
+content updates and rotation, and `content-check` validates descriptors and their meshes. See
+[content authoring](../content-authoring.md#map-visuals).
+
 ## Future work (not blocking M8)
-- Per-map visuals from manifests (#287), GPU skinning assets (#288) and materials.
+- Materials and textures for map and hero assets (graphics roadmap R1–R3).
 - Scripting hooks and more code-driven behaviours (summons, auras, complex triggers).
 - Larger content-pack compatibility/version-migration fixtures.
 

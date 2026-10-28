@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use moba_core::FixVec2;
-use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use moba_core::math::{Mat4, Quat, Vec3, Vec4};
 use moba_game::Team;
 use moba_net::protocol::{
     STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE, STATUS_SLOW,
@@ -12,23 +12,15 @@ use moba_render::{Camera, UnitInstance};
 use moba_sim::UnitKind;
 
 use crate::app::NetworkView;
+use crate::app::map_visuals::MapLibrary;
 use crate::app::models::{HeroModel, ModelLibrary};
 use crate::app::skinning::BonePool;
 use crate::hud::{HudUnit, map_center, rendered_entity_position};
 
-pub(crate) fn map_theme(theme: u8) -> ([f32; 4], Vec4) {
-    match theme {
-        1 => ([0.20, 0.20, 0.19, 1.0], Vec4::new(0.34, 0.33, 0.30, 1.0)),
-        2 => ([0.48, 0.56, 0.68, 1.0], Vec4::new(0.62, 0.68, 0.76, 1.0)),
-        3 => ([0.34, 0.25, 0.14, 1.0], Vec4::new(0.48, 0.36, 0.22, 1.0)),
-        4 => ([0.15, 0.08, 0.26, 1.0], Vec4::new(0.32, 0.24, 0.44, 1.0)),
-        _ => ([0.10, 0.16, 0.11, 1.0], Vec4::new(0.24, 0.21, 0.16, 1.0)),
-    }
-}
-
 pub(crate) fn rebuild_network_units(
     network: &NetworkView,
     models: &ModelLibrary,
+    map: &MapLibrary,
     units: &mut Vec<UnitInstance>,
     bones: &mut BonePool,
 ) {
@@ -37,23 +29,9 @@ pub(crate) fn rebuild_network_units(
     let Some(latest) = network.interpolator.latest() else {
         return;
     };
-    let wire_map = network.client.map();
     let center = map_center(network);
-    let (_, wall_color) = map_theme(wire_map.theme);
-    for wall in wire_map.walls.iter().take(usize::from(wire_map.wall_count)) {
-        let a = Vec2::new(f32::from(wall.a[0]), f32::from(wall.a[1]));
-        let b = Vec2::new(f32::from(wall.b[0]), f32::from(wall.b[1]));
-        let direction = b - a;
-        let length = direction.length().max(0.5);
-        let angle = direction.y.atan2(direction.x);
-        let mid = (a + b) * 0.5;
-        let transform = Mat4::from_scale_rotation_translation(
-            Vec3::new(length, 4.0, 2.5),
-            Quat::from_rotation_y(-angle),
-            Vec3::new(mid.x - center, 2.0, mid.y - center),
-        );
-        units.push(UnitInstance::new(transform, wall_color));
-    }
+    // Walls and props were built from the wire map when it arrived (`MapLibrary::bind`).
+    map.push_instances(units);
     let render_tick = network.interpolator.render_tick(Instant::now());
     for entity in &latest.entities {
         if entity.is_dead() {

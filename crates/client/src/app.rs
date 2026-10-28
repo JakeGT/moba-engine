@@ -19,9 +19,14 @@
 //!   draw `<dir>/models/<model>.glb`; `MOBA_HERO_MODELS=<hero=model,...>` overrides that per
 //!   hero (dev only). Any failure falls back to the rig. A model with a skin is GPU-skinned
 //!   (walk clip driven by gait); `MOBA_NO_SKINNING=1` draws it static instead.
+//!   The map's visuals name resolves to the descriptor `<dir>/maps/<name>.toml` (terrain
+//!   tint, walls, props; #287), falling back to the built-in theme.
 //! - `MOBA_CONTENT=<pack.toml>` loads a content pack for the local preview and for the
 //!   `MOBA_SERVER=local` loopback server.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
+//! - `MOBA_CAPTURE_MAPS=<prefix>` (network mode, evidence for #287): after every map change
+//!   (connect, content reload, map rotation), capture `<prefix>-<n>.ppm` once
+//!   `MOBA_CAPTURE_FRAME` frames with snapshots have rendered on it, and keep playing.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -84,6 +89,8 @@ struct ClientApp {
     local_audio: Option<crate::audio::Audio>,
     units: Vec<UnitInstance>,
     models: models::ModelLibrary,
+    map_visuals: map_visuals::MapLibrary,
+    map_capture: Option<map_visuals::SwitchCapture>,
     bones: skinning::BonePool,
     ui: UiDrawList,
     scoreboard_visible: bool,
@@ -143,6 +150,8 @@ impl ClientApp {
             local_audio: None,
             units: Vec::with_capacity(moba_sim::MAX_UNITS),
             models: models::ModelLibrary::from_env(),
+            map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env()),
+            map_capture: map_visuals::SwitchCapture::from_env(),
             bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
@@ -272,7 +281,13 @@ impl App for ClientApp {
             Ok(mut renderer) => {
                 // `on_start` may run again after a resume with a fresh mesh table.
                 self.models.renderer_recreated();
+                self.map_visuals.renderer_recreated();
                 if let Some(network) = &self.network {
+                    map_visuals::bind_network_map(
+                        &mut self.map_visuals,
+                        &mut renderer,
+                        network.client.map(),
+                    );
                     models::bind_hero_models(
                         &mut self.models,
                         &mut renderer,
@@ -283,6 +298,11 @@ impl App for ClientApp {
                             .map(|hero| (hero.name_str(), hero.model_str())),
                     );
                 } else if let Some(simulation) = &self.simulation {
+                    map_visuals::bind_local_map(
+                        &mut self.map_visuals,
+                        &mut renderer,
+                        &simulation.content().map,
+                    );
                     models::bind_hero_models(
                         &mut self.models,
                         &mut renderer,
@@ -365,6 +385,8 @@ impl App for ClientApp {
                 simulation,
                 units,
                 models,
+                map_visuals,
+                map_capture,
                 bones,
                 ui,
                 scoreboard_visible,
@@ -413,9 +435,15 @@ impl App for ClientApp {
                                 network.last_snapshot_seq = 0;
                                 network.projectiles.clear();
                                 network.kill_feed.clear();
-                                // Content reload: rebind hero models (cached, so only new
-                                // names touch the disk or the GPU).
+                                // Content reload or map rotation: rebind the map visuals and
+                                // hero models (cached, so only new names touch the disk or
+                                // the GPU).
                                 if let Some(renderer) = renderer.as_mut() {
+                                    map_visuals::bind_network_map(
+                                        map_visuals,
+                                        renderer,
+                                        network.client.map(),
+                                    );
                                     models::bind_hero_models(
                                         models,
                                         renderer,
@@ -490,7 +518,7 @@ impl App for ClientApp {
                             network.prediction.step();
                         }
                     }
-                    rebuild_network_units(network, models, units, bones);
+                    rebuild_network_units(network, models, map_visuals, units, bones);
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
@@ -525,10 +553,15 @@ impl App for ClientApp {
                         );
                         network.update_effects(frame_ms);
                         let vision = build_vision(network);
-                        let tint = map_theme(network.client.map().theme).0;
                         let scene = Scene::with_vision(camera, units, vision)
-                            .with_terrain_tint(tint)
+                            .with_terrain_tint(map_visuals.terrain_tint())
                             .with_bones(bones.bones());
+                        let switch_capture = map_capture
+                            .as_mut()
+                            .filter(|_| network.interpolator.latest().is_some())
+                            .and_then(|capture| {
+                                capture.due(map_visuals.generation(), *capture_frame)
+                            });
                         if let Some(renderer) = renderer.as_mut() {
                             if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                                 capture_and_exit(
@@ -539,6 +572,9 @@ impl App for ClientApp {
                                     &mut failure,
                                 );
                                 exit_after_capture = true;
+                            } else if let Some(path) = switch_capture {
+                                capture_and_exit(renderer, &scene, ui, Some(&path), &mut failure);
+                                eprintln!("[assets] map capture written to {}", path.display());
                             } else if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }
@@ -565,6 +601,8 @@ impl App for ClientApp {
                 }
                 units.clear();
                 bones.clear();
+                // The same walls (and descriptor props) the network path draws.
+                map_visuals.push_instances(units);
                 let world = simulation.world();
                 for entity in world.entities() {
                     let (Some(position), Some(team), Some(kind), Some(health)) = (
@@ -621,9 +659,8 @@ impl App for ClientApp {
                         hit_rects,
                     );
                     let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
-                    let tint = map_theme(simulation.content().map.theme.id()).0;
                     let scene = Scene::new(camera, units)
-                        .with_terrain_tint(tint)
+                        .with_terrain_tint(map_visuals.terrain_tint())
                         .with_bones(bones.bones());
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
@@ -658,6 +695,7 @@ impl App for ClientApp {
 }
 
 mod launch;
+mod map_visuals;
 mod models;
 mod scene_build;
 mod skinning;
@@ -667,7 +705,7 @@ pub(crate) use launch::{
     run,
 };
 pub(crate) use scene_build::{
-    HeroPose, map_theme, network_camera, push_hero, push_unit, rebuild_network_units,
+    HeroPose, network_camera, push_hero, push_unit, rebuild_network_units,
 };
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
