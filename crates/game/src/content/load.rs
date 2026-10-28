@@ -139,6 +139,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                     magic_resist_per_level: hero
                         .magic_resist_per_level
                         .unwrap_or(crate::LEVEL_GROWTH.magic_resist),
+                    model: hero.model,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -362,6 +363,9 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
             .collect::<Result<Vec<_>, _>>()?,
         None => GameContent::default().abilities,
     };
+    // An explicit `map.visuals` must name a manifest entry even when it equals the theme
+    // default (which is then stored as `None`).
+    let mut explicit_visuals: Option<String> = None;
     let map = match file.map {
         Some(map) => {
             let MapEntry {
@@ -373,7 +377,10 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 structures,
                 walls,
                 extent,
+                visuals,
             } = map;
+            let theme =
+                MapTheme::from_name(&theme).ok_or_else(|| invalid_field("map.theme", &theme))?;
             let structures = structures
                 .into_iter()
                 .map(|structure| {
@@ -385,10 +392,13 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            explicit_visuals.clone_from(&visuals);
             MapSpec {
                 name,
-                theme: MapTheme::from_name(&theme)
-                    .ok_or_else(|| invalid_field("map.theme", &theme))?,
+                theme,
+                // Canonical form: naming the theme's own default is the same as omitting it,
+                // so it hashes (and crosses the wire) identically.
+                visuals: visuals.filter(|name| name != theme.asset_name()),
                 extent: Fix::from_i32(extent),
                 blue_spawn: FixVec2::from_ints(blue_spawn[0], blue_spawn[1]),
                 red_spawn: FixVec2::from_ints(red_spawn[0], red_spawn[1]),
@@ -522,6 +532,8 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         version: file.version.unwrap_or(defaults.version),
         author: file.author.unwrap_or(defaults.author),
     };
+    let assets = file.assets.unwrap_or_default();
+    assets.validate().map_err(ContentLoadError::Assets)?;
     let content = GameContent {
         manifest,
         items,
@@ -531,9 +543,41 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
         rules,
         map,
         attestation,
+        assets,
     };
     content.validate().map_err(ContentLoadError::Invalid)?;
+    check_asset_references(&content, explicit_visuals.as_deref())?;
     Ok(content)
+}
+
+/// Every visual name a pack declares must have an entry in its own `[assets]` manifest.
+///
+/// This is pack-local: a client reconstructing content from the wire has no manifest and
+/// resolves the names against its own asset root instead. The theme-default `map.visuals`
+/// (none given) needs no entry, because clients fall back to the built-in theme visuals.
+fn check_asset_references(
+    content: &GameContent,
+    explicit_visuals: Option<&str>,
+) -> Result<(), ContentLoadError> {
+    for hero in &content.heroes {
+        if let Some(model) = hero.model.as_deref()
+            && content.assets.unit(model).is_none()
+        {
+            return Err(ContentLoadError::UnknownAsset {
+                field: "heroes.model",
+                name: model.to_owned(),
+            });
+        }
+    }
+    if let Some(visuals) = explicit_visuals
+        && content.assets.map(visuals).is_none()
+    {
+        return Err(ContentLoadError::UnknownAsset {
+            field: "map.visuals",
+            name: visuals.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Reads, parses and validates a content pack.

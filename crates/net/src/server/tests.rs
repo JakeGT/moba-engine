@@ -3,12 +3,15 @@ use super::match_flow::slot_team;
 use super::results::result_json;
 use super::*;
 use crate::crypto::SessionCrypto;
-use crate::protocol::{EVENT_CAST, EVENT_PROJECTILE_HIT, EVENT_UNIT_DIED, Header, PacketKind};
+use crate::protocol::{
+    EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_UNIT_DIED, Header, MATCH_ENDED_DRAW,
+    OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED, PacketKind,
+};
 use crate::transport::ReceivedMessage;
 use std::path::Path;
 #[global_allocator]
 static TEST_ALLOC: moba_test_support::CountingAllocator = moba_test_support::CountingAllocator;
-use moba_sim::{Health, UnitKind};
+use moba_sim::{Health, MatchOutcome, UnitKind};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -376,7 +379,10 @@ fn match_flow_transitions_and_resets() {
         .current = 0;
     server.tick().expect("result");
     assert_eq!(server.phase(), (MatchPhase::Results, 3));
-    assert_eq!(server.simulation().outcome(), Some(moba_game::Team::Blue));
+    assert_eq!(
+        server.simulation().outcome(),
+        Some(MatchOutcome::Winner(moba_game::Team::Blue))
+    );
 
     for _ in 0..3 {
         server.tick().expect("results timer");
@@ -384,6 +390,88 @@ fn match_flow_transitions_and_resets() {
     assert_eq!(server.phase(), (MatchPhase::Lobby, 0));
     assert_eq!(server.match_number(), 1);
     assert_eq!(server.simulation().outcome(), None);
+}
+
+#[test]
+fn drawn_match_reaches_results_and_reports_a_draw() {
+    let path = std::env::temp_dir().join(format!(
+        "moba-results-draw-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    let config = ServerConfig {
+        bind: "127.0.0.1:0".parse().expect("address"),
+        sim: SimConfig::default(),
+        snapshot_interval: 1,
+        max_clients: 10,
+        countdown_ticks: 0,
+        results_ticks: 3,
+        client_timeout: Duration::from_millis(100),
+        reconnect_grace: Duration::from_secs(2),
+        pre_shared_key: None,
+        record: None,
+        max_spectators: 4,
+        max_packets_per_second: 120,
+        max_total_packets_per_second: 2_000,
+        require_ready: false,
+    };
+    let mut server = NetServer::bind(config).expect("bind");
+    server.set_results_log(path.clone());
+    server.phase = Phase::Playing;
+    let nexuses: Vec<_> = server
+        .simulation
+        .world()
+        .entities()
+        .filter(|entity| {
+            server.simulation.world().get::<UnitKind>(*entity) == Some(&UnitKind::Nexus)
+        })
+        .collect();
+    assert_eq!(nexuses.len(), 2);
+    for nexus in nexuses {
+        server
+            .simulation
+            .world_mut()
+            .get_mut::<Health>(nexus)
+            .expect("nexus health")
+            .current = 0;
+    }
+    server.tick().expect("result");
+    assert_eq!(server.phase(), (MatchPhase::Results, 3));
+    assert_eq!(server.simulation().outcome(), Some(MatchOutcome::Draw));
+    assert_eq!(
+        super::snapshot::outcome_code(server.simulation().outcome()),
+        OUTCOME_DRAW
+    );
+    let ended = super::events::RawEvent::from_sim(
+        &moba_sim::SimEvent::MatchEnded { winner: None },
+        &server.simulation,
+    )
+    .expect("match end is sent");
+    assert_eq!(
+        (ended.kind, ended.value),
+        (EVENT_MATCH_ENDED, MATCH_ENDED_DRAW)
+    );
+    let text = std::fs::read_to_string(&path).expect("results posted");
+    assert!(text.contains("\"outcome\":\"draw\""), "{text}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn outcome_codes_are_distinct() {
+    use super::snapshot::outcome_code;
+    use moba_game::Team;
+    assert_eq!(outcome_code(None), OUTCOME_NONE);
+    assert_eq!(
+        outcome_code(Some(MatchOutcome::Winner(Team::Blue))),
+        OUTCOME_BLUE
+    );
+    assert_eq!(
+        outcome_code(Some(MatchOutcome::Winner(Team::Red))),
+        OUTCOME_RED
+    );
+    assert_eq!(outcome_code(Some(MatchOutcome::Draw)), OUTCOME_DRAW);
 }
 
 #[test]

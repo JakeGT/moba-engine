@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{hud_fmt, hud_static};
 use moba_core::FixVec2;
-use moba_net::protocol::MatchPhase;
+use moba_net::protocol::{MatchPhase, OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_RED};
 
 /// Borrowed view of one network unit for HUD drawing.
 #[derive(Copy, Clone)]
@@ -584,18 +584,9 @@ pub(crate) fn build_network_hud(
             &footer,
         );
     }
-    if let Some(outcome) = snapshot
-        .map(|state| state.outcome)
-        .filter(|outcome| *outcome != 0)
+    if let Some((label, color)) =
+        snapshot.and_then(|state| outcome_banner(state.outcome, network.client.team()))
     {
-        let winner = if outcome == 1 { Team::Blue } else { Team::Red };
-        let victory = winner == network.client.team();
-        let label = if victory { "VICTORY" } else { "DEFEAT" };
-        let color = if victory {
-            theme::VICTORY
-        } else {
-            theme::DEFEAT
-        };
         ui.rect(0.0, 0.0, width_f, height_f, theme::OVERLAY);
         ui.panel(
             (width_f - 460.0) * 0.5,
@@ -635,6 +626,22 @@ pub(crate) fn build_network_hud(
             "RESPAWNING",
         );
     }
+}
+
+/// End-of-match banner text and colour for a snapshot outcome code, from `own`'s side.
+fn outcome_banner(outcome: u8, own: Team) -> Option<(&'static str, moba_core::math::Vec4)> {
+    let winner = match outcome {
+        OUTCOME_BLUE => Team::Blue,
+        OUTCOME_RED => Team::Red,
+        OUTCOME_DRAW => return Some(("DRAW", theme::TEXT)),
+        // `OUTCOME_NONE`, or a code this build does not know.
+        _ => return None,
+    };
+    Some(if winner == own {
+        ("VICTORY", theme::VICTORY)
+    } else {
+        ("DEFEAT", theme::DEFEAT)
+    })
 }
 
 pub(crate) fn item_summary(item: &moba_net::protocol::WireItem) -> HudString {
@@ -713,12 +720,24 @@ pub(crate) fn build_local_hud(
 #[cfg(test)]
 mod tests {
     use super::{
-        Camera, HitList, HudModel, InputState, MatchPhase, NetworkView, Simulation, UiDrawList,
-        build_local_hud, build_network_hud,
+        Camera, HitList, HudModel, InputState, MatchPhase, NetworkView, Simulation, Team,
+        UiDrawList, build_local_hud, build_network_hud, outcome_banner,
     };
     use crate::{hud_fmt, hud_static};
     use moba_core::math::Vec3;
     use moba_sim::SimConfig;
+
+    #[test]
+    fn outcome_banner_covers_wins_and_draws() {
+        use moba_net::protocol::{OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED};
+        let label = |outcome, own| outcome_banner(outcome, own).map(|(label, _)| label);
+        assert_eq!(label(OUTCOME_NONE, Team::Blue), None);
+        assert_eq!(label(OUTCOME_BLUE, Team::Blue), Some("VICTORY"));
+        assert_eq!(label(OUTCOME_BLUE, Team::Red), Some("DEFEAT"));
+        assert_eq!(label(OUTCOME_RED, Team::Red), Some("VICTORY"));
+        assert_eq!(label(OUTCOME_DRAW, Team::Blue), Some("DRAW"));
+        assert_eq!(label(OUTCOME_DRAW, Team::Red), Some("DRAW"));
+    }
 
     #[test]
     fn local_hud_builds_a_draw_list() {

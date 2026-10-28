@@ -1,6 +1,8 @@
 //! Validation ([`ContentError`]) and loading ([`ContentLoadError`]) errors.
 
-use super::{MAX_CONTENT_ABILITIES, MAX_CONTENT_HEROES, MAX_CONTENT_ITEMS};
+use super::{
+    AssetError, MAX_CONTENT_ABILITIES, MAX_CONTENT_HEROES, MAX_CONTENT_ITEMS, MAX_VISUAL_NAME,
+};
 
 /// Content validation errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +57,9 @@ pub enum ContentError {
     BadWalls,
     /// Manifest fields are empty, too long or non-ASCII.
     BadManifest,
+    /// A visual asset name (`heroes.model`, `map.visuals`) is not 1..=16 of
+    /// `[A-Za-z0-9_-]`; the name identifies the field.
+    BadVisualName(&'static str),
 }
 
 impl core::fmt::Display for ContentError {
@@ -93,6 +98,10 @@ impl core::fmt::Display for ContentError {
             }
             Self::BadWalls => f.write_str("map walls are invalid"),
             Self::BadManifest => f.write_str("manifest fields must be 1..=32 ASCII bytes"),
+            Self::BadVisualName(field) => write!(
+                f,
+                "{field} must be 1..={MAX_VISUAL_NAME} of [A-Za-z0-9_-] (an asset name, not a path)"
+            ),
         }
     }
 }
@@ -115,6 +124,15 @@ pub enum ContentLoadError {
         /// Rejected value.
         value: String,
     },
+    /// The `[assets]` manifest is invalid (name, path, duplicate or fallback chain).
+    Assets(AssetError),
+    /// A `heroes.model` / `map.visuals` name has no entry in the pack's `[assets]` manifest.
+    UnknownAsset {
+        /// Dotted field name.
+        field: &'static str,
+        /// Referenced asset name.
+        name: String,
+    },
 }
 
 impl core::fmt::Display for ContentLoadError {
@@ -125,6 +143,18 @@ impl core::fmt::Display for ContentLoadError {
             Self::Invalid(error) => write!(f, "invalid content: {error}"),
             Self::InvalidField { field, value } => {
                 write!(f, "invalid value {value:?} for {field}")
+            }
+            Self::Assets(error) => write!(f, "invalid [assets]: {error}"),
+            Self::UnknownAsset { field, name } => {
+                let list = if *field == "map.visuals" {
+                    "maps"
+                } else {
+                    "units"
+                };
+                write!(
+                    f,
+                    "{field} {name:?} has no [[assets.{list}]] entry in this pack"
+                )
             }
         }
     }

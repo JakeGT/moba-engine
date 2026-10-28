@@ -6,11 +6,12 @@
 //!
 //! - Asset root: `MOBA_ASSET_ROOT` (default `content`). A model named `sentinel` resolves to
 //!   `<root>/models/sentinel.glb`.
-//! - Hero → model: until packs name a model per hero (#285, `HeroSpec.model`),
-//!   `MOBA_HERO_MODELS` maps hero names to model names: `Ranger=sentinel,*=knight`, or a bare
-//!   `sentinel` for every hero. Unset means no models, i.e. today's procedural rig.
-//!   [`ModelLibrary::bind_heroes`] takes the per-hero model names, so switching to the
-//!   schema field only changes where those names come from.
+//! - Hero → model: the catalogue's per-hero model name (`HeroSpec::model` in a local match,
+//!   `WireHero::model` from a server; #285). `None` draws the procedural rig.
+//! - Dev override: `MOBA_HERO_MODELS` maps hero names to model names
+//!   (`Ranger=sentinel,*=knight`, or a bare `sentinel` for every hero). A rule that matches a
+//!   hero wins over the catalogue; heroes it does not match keep the catalogue's model. It is
+//!   local and cosmetic, like the asset root.
 //! - Any failure (bad name, missing/unreadable/malformed file, mesh-slot exhaustion) is
 //!   logged once per model and that hero keeps the procedural rig; a match never fails
 //!   because of an asset.
@@ -32,7 +33,7 @@ use moba_render::{MeshData, MeshId};
 
 /// Environment variable naming the client-local asset root.
 pub(crate) const ASSET_ROOT_ENV: &str = "MOBA_ASSET_ROOT";
-/// Environment variable mapping hero names to model names.
+/// Environment variable mapping hero names to model names (dev override of the catalogue).
 pub(crate) const HERO_MODELS_ENV: &str = "MOBA_HERO_MODELS";
 /// Environment variable that disables GPU skinning (`1`): skinned models draw static.
 pub(crate) const NO_SKINNING_ENV: &str = "MOBA_NO_SKINNING";
@@ -112,7 +113,7 @@ pub(crate) fn model_path(root: &Path, name: &str) -> Option<PathBuf> {
     valid_model_name(name).then(|| root.join("models").join(format!("{name}.glb")))
 }
 
-/// Interim hero → model mapping parsed from [`HERO_MODELS_ENV`].
+/// Dev-override hero → model mapping parsed from [`HERO_MODELS_ENV`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ModelBindings {
     rules: Vec<(String, String)>,
@@ -210,7 +211,7 @@ impl ModelLibrary {
         self.rigs.clear();
     }
 
-    /// The interim name mapping, used by callers until hero specs carry model names.
+    /// The dev-override name mapping (see [`hero_model`]).
     pub(crate) fn bindings(&self) -> &ModelBindings {
         &self.bindings
     }
@@ -300,18 +301,28 @@ impl ModelLibrary {
     }
 }
 
+/// The model to draw for one hero: a [`HERO_MODELS_ENV`] rule matching the hero (exact name
+/// or `*`) overrides the catalogue's `HeroSpec::model`; otherwise the catalogue name is used.
+pub(crate) fn hero_model<'a>(
+    bindings: &'a ModelBindings,
+    hero: &str,
+    catalogue: Option<&'a str>,
+) -> Option<&'a str> {
+    bindings.model_for(hero).or(catalogue)
+}
+
 /// Resolves each hero's model name and (re)binds the library at startup or content reload.
 ///
-/// Swap point for #285: once hero specs carry `model`, pass those names instead of the
-/// `MOBA_HERO_MODELS` mapping.
+/// `heroes` yields `(hero name, catalogue model)` in catalogue order; the model comes from
+/// `HeroSpec::model` (local match) or `WireHero::model` (network), see [`hero_model`].
 pub(crate) fn bind_hero_models<'a>(
     models: &mut ModelLibrary,
     renderer: &mut moba_render::Renderer,
-    hero_names: impl IntoIterator<Item = &'a str>,
+    heroes: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
 ) {
-    let wanted: Vec<Option<String>> = hero_names
+    let wanted: Vec<Option<String>> = heroes
         .into_iter()
-        .map(|hero| models.bindings().model_for(hero).map(str::to_owned))
+        .map(|(hero, model)| hero_model(models.bindings(), hero, model).map(str::to_owned))
         .collect();
     models.bind_heroes(wanted.iter().map(Option::as_deref), |data, upload| {
         match upload {
@@ -363,6 +374,32 @@ mod tests {
         );
         assert_eq!(ModelBindings::parse("").model_for("x"), None);
         assert_eq!(ModelBindings::parse("Ranger=archer").model_for("x"), None);
+    }
+
+    #[test]
+    fn catalogue_models_apply_unless_the_dev_override_matches() {
+        let none = ModelBindings::default();
+        assert_eq!(
+            hero_model(&none, "Guardian", Some("sentinel")),
+            Some("sentinel")
+        );
+        assert_eq!(hero_model(&none, "Blade", None), None);
+        let exact = ModelBindings::parse("Guardian=knight");
+        assert_eq!(
+            hero_model(&exact, "guardian", Some("sentinel")),
+            Some("knight")
+        );
+        assert_eq!(
+            hero_model(&exact, "Blade", Some("sentinel")),
+            Some("sentinel")
+        );
+        assert_eq!(hero_model(&exact, "Blade", None), None);
+        let wildcard = ModelBindings::parse("*=knight");
+        assert_eq!(hero_model(&wildcard, "Blade", None), Some("knight"));
+        assert_eq!(
+            hero_model(&wildcard, "Blade", Some("sentinel")),
+            Some("knight")
+        );
     }
 
     #[test]

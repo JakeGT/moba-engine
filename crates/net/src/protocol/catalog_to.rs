@@ -12,8 +12,8 @@ use super::catalog::{
     MAX_WIRE_ABILITIES, MAX_WIRE_AREA_EFFECTS, MAX_WIRE_EFFECTS, MAX_WIRE_HEROES, MAX_WIRE_ITEMS,
     MAX_WIRE_LANE_POINTS, MAX_WIRE_LANES, MAX_WIRE_MODIFIERS, MAX_WIRE_STRUCTURES, MAX_WIRE_WALLS,
     WIRE_ABILITY_NAME, WIRE_HERO_NAME, WIRE_ITEM_NAME, WIRE_LANE_NAME, WIRE_MANIFEST_FIELD,
-    WIRE_MODIFIER_NAME, WireCatalog, WireEffect, WireMinionStats, WireRewards, WireStructureStats,
-    WireUnitRewards,
+    WIRE_MODIFIER_NAME, WIRE_VISUAL_NAME, WireCatalog, WireEffect, WireMinionStats, WireRewards,
+    WireStructureStats, WireUnitRewards,
 };
 
 fn decode_area_effects(wire: &WireEffect) -> Result<AreaEffectList, WireError> {
@@ -195,6 +195,7 @@ impl WireCatalog {
                     attack_damage_per_level: hero.attack_damage_per_level,
                     armor_per_level: hero.armor_per_level,
                     magic_resist_per_level: hero.magic_resist_per_level,
+                    model: read_optional_name(&hero.model, hero.model_len)?,
                 })
             })
             .collect::<Result<Vec<_>, WireError>>()?;
@@ -346,9 +347,12 @@ impl WireCatalog {
                 score_limit: self.rules.score_limit,
             },
             attestation: None,
+            // Clients never receive pack files; visual names resolve against a local root.
+            assets: moba_game::AssetManifest::default(),
             map: MapSpec {
                 name: map.name_str().to_string(),
                 theme: moba_game::MapTheme::from_id(map.theme).ok_or(WireError::BadValue)?,
+                visuals: read_optional_name(&map.visuals, map.visuals_len)?,
                 extent: Fix::from_i32(i32::from(map.extent)),
                 lanes,
                 structures,
@@ -380,6 +384,18 @@ fn read_wire_name(bytes: &[u8], used: u8, capacity: usize) -> Result<String, Wir
         return Err(WireError::BadValue);
     }
     String::from_utf8(bytes[..used].to_vec()).map_err(|_| WireError::BadValue)
+}
+
+/// A visual name: length 0 is `None`. The name's syntax is checked by
+/// `GameContent::validate`, which every client runs on the reconstructed content.
+fn read_optional_name(
+    bytes: &[u8; WIRE_VISUAL_NAME],
+    used: u8,
+) -> Result<Option<String>, WireError> {
+    if used == 0 {
+        return Ok(None);
+    }
+    read_wire_name(bytes, used, WIRE_VISUAL_NAME).map(Some)
 }
 
 const fn damage_type_from_code(code: u8) -> Result<DamageType, WireError> {

@@ -16,6 +16,7 @@ mod mesh;
 mod skin;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -57,12 +58,102 @@ pub struct AssetManifest {
 pub enum AssetError {
     /// Empty or non-ASCII name.
     BadName,
-    /// Empty, non-ASCII, absolute or escaping path.
+    /// Empty, non-ASCII, absolute or escaping path, or one with `\`, `:` or control bytes.
     BadPath,
     /// Duplicate asset name in one list.
     Duplicate,
     /// Fallback chain is missing, cyclic or too deep.
     BadFallback,
+}
+
+impl core::fmt::Display for AssetError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::BadName => "asset names must be non-empty ASCII",
+            Self::BadPath => {
+                "asset paths must be relative ASCII without `.`/`..` components, `\\`, `:` or control bytes"
+            }
+            Self::Duplicate => "asset names must be unique within `units` and within `maps`",
+            Self::BadFallback => {
+                "asset fallback names a missing entry, or the chain is cyclic or deeper than 16"
+            }
+        })
+    }
+}
+
+impl std::error::Error for AssetError {}
+
+/// Which manifest list an entry belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetList {
+    /// `[[units]]` (hero models).
+    Units,
+    /// `[[maps]]` (per-map visuals).
+    Maps,
+}
+
+impl AssetList {
+    /// The TOML table name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Units => "units",
+            Self::Maps => "maps",
+        }
+    }
+}
+
+/// Why a manifest entry's file is unusable (see [`AssetManifest::check_files`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssetFileProblem {
+    /// The path does not end in `.glb`, the only format the engine loads (ADR-0007).
+    NotGlb,
+    /// The file does not exist or cannot be read; the text is the I/O error.
+    Missing(String),
+    /// The path names something other than a regular file.
+    NotAFile,
+    /// The path resolves (through a symlink) outside the pack directory.
+    OutsideRoot,
+    /// The file is not a mesh the bounded loader accepts; the text is the loader error.
+    Malformed(String),
+}
+
+impl core::fmt::Display for AssetFileProblem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotGlb => f.write_str("not a .glb file"),
+            Self::Missing(error) => write!(f, "missing or unreadable ({error})"),
+            Self::NotAFile => f.write_str("not a regular file"),
+            Self::OutsideRoot => f.write_str("resolves outside the pack directory"),
+            Self::Malformed(error) => write!(f, "malformed mesh ({error})"),
+        }
+    }
+}
+
+/// One unusable manifest entry found by [`AssetManifest::check_files`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetFileIssue {
+    /// List the entry is in.
+    pub list: AssetList,
+    /// Entry name.
+    pub name: String,
+    /// Entry path as written in the manifest.
+    pub path: String,
+    /// What is wrong with it.
+    pub problem: AssetFileProblem,
+}
+
+impl core::fmt::Display for AssetFileIssue {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "assets.{} '{}' ({}): {}",
+            self.list.as_str(),
+            self.name,
+            self.path,
+            self.problem
+        )
+    }
 }
 
 impl AssetManifest {
@@ -119,6 +210,60 @@ impl AssetManifest {
         Err(AssetError::BadFallback)
     }
 
+    /// Total number of entries in both lists.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.units.len() + self.maps.len()
+    }
+
+    /// `true` when the manifest has no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `[[units]]` entry with this exact name.
+    #[must_use]
+    pub fn unit(&self, name: &str) -> Option<&AssetEntry> {
+        self.units.iter().find(|entry| entry.name == name)
+    }
+
+    /// The `[[maps]]` entry with this exact name.
+    #[must_use]
+    pub fn map(&self, name: &str) -> Option<&AssetEntry> {
+        self.maps.iter().find(|entry| entry.name == name)
+    }
+
+    /// Checks every entry's file under `root` (the pack directory), in manifest order.
+    ///
+    /// Each path must end in `.glb`, exist as a regular file and stay inside `root` once
+    /// symlinks are resolved. With the `glb` feature, unit files are also parsed with the
+    /// bounded loader. Paths are assumed to have passed [`AssetManifest::validate`]. This is
+    /// an authoring check (`content-check`): the engine never fails a match on a missing
+    /// asset.
+    #[must_use]
+    pub fn check_files(&self, root: &Path) -> Vec<AssetFileIssue> {
+        let canonical_root = root.canonicalize().ok();
+        let mut issues = Vec::new();
+        for (list, entries) in [
+            (AssetList::Units, &self.units),
+            (AssetList::Maps, &self.maps),
+        ] {
+            for entry in entries {
+                if let Err(problem) = check_file(list, root, canonical_root.as_deref(), &entry.path)
+                {
+                    issues.push(AssetFileIssue {
+                        list,
+                        name: entry.name.clone(),
+                        path: entry.path.clone(),
+                        problem,
+                    });
+                }
+            }
+        }
+        issues
+    }
+
     /// Resolves an asset through its fallback chain.
     #[must_use]
     pub fn resolve(&self, name: &str) -> Option<&AssetEntry> {
@@ -157,18 +302,57 @@ impl core::fmt::Display for AssetManifestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Toml(error) => write!(f, "asset manifest TOML: {error}"),
-            Self::Asset(error) => write!(f, "asset manifest: {error:?}"),
+            Self::Asset(error) => write!(f, "asset manifest: {error}"),
         }
     }
 }
 
 impl std::error::Error for AssetManifestError {}
 
+fn check_file(
+    list: AssetList,
+    root: &Path,
+    canonical_root: Option<&Path>,
+    path: &str,
+) -> Result<(), AssetFileProblem> {
+    if !path
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("glb"))
+    {
+        return Err(AssetFileProblem::NotGlb);
+    }
+    let canonical = root
+        .join(path)
+        .canonicalize()
+        .map_err(|error| AssetFileProblem::Missing(error.to_string()))?;
+    if canonical_root.is_some_and(|root| !canonical.starts_with(root)) {
+        return Err(AssetFileProblem::OutsideRoot);
+    }
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| AssetFileProblem::Missing(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(AssetFileProblem::NotAFile);
+    }
+    #[cfg(feature = "glb")]
+    if list == AssetList::Units {
+        load_glb_file(&canonical)
+            .map_err(|error| AssetFileProblem::Malformed(error.to_string()))?;
+    }
+    #[cfg(not(feature = "glb"))]
+    let _ = list;
+    Ok(())
+}
+
+/// Path rules: relative, ASCII, no `.`/`..` components, and no `\`, `:` (drive letters,
+/// alternate data streams) or control bytes, so a path means the same on every OS and cannot
+/// leave the pack directory.
 fn validate_path(path: &str) -> Result<(), AssetError> {
     if path.is_empty()
         || !path.is_ascii()
         || path.starts_with('/')
-        || path.starts_with('\\')
+        || path
+            .bytes()
+            .any(|byte| byte == b'\\' || byte == b':' || byte.is_ascii_control())
         || path.split('/').any(|part| part == ".." || part == ".")
     {
         return Err(AssetError::BadPath);
@@ -230,5 +414,112 @@ fallback = "a"
             AssetManifest::parse(cycle),
             Err(AssetManifestError::Asset(AssetError::BadFallback))
         ));
+    }
+
+    #[test]
+    fn paths_reject_backslashes_drive_colons_and_control_bytes() {
+        for bad in [
+            "",
+            "/abs.glb",
+            "\\abs.glb",
+            "models\\x.glb",
+            "C:x.glb",
+            "c:/x.glb",
+            "x.glb:stream",
+            "a/../x.glb",
+            "./x.glb",
+            "x\0.glb",
+            "x\n.glb",
+            "modèle.glb",
+        ] {
+            assert_eq!(validate_path(bad), Err(AssetError::BadPath), "{bad:?}");
+        }
+        for good in ["x.glb", "models/x.glb", "a/b/c-d_e.GLB"] {
+            assert_eq!(validate_path(good), Ok(()), "{good:?}");
+        }
+    }
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "moba-assets-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("models/dir.glb")).expect("temp dir");
+        root
+    }
+
+    #[test]
+    fn check_files_reports_each_unusable_entry() {
+        let root = temp_root("check");
+        std::fs::write(root.join("models/ok.glb"), b"x").expect("write");
+        std::fs::write(root.join("models/ok.png"), b"x").expect("write");
+        let manifest = AssetManifest {
+            units: vec![
+                AssetEntry {
+                    name: String::from("png"),
+                    path: String::from("models/ok.png"),
+                    fallback: None,
+                },
+                AssetEntry {
+                    name: String::from("missing"),
+                    path: String::from("models/missing.glb"),
+                    fallback: None,
+                },
+                AssetEntry {
+                    name: String::from("dir"),
+                    path: String::from("models/dir.glb"),
+                    fallback: None,
+                },
+            ],
+            maps: vec![AssetEntry {
+                name: String::from("ok"),
+                path: String::from("models/ok.glb"),
+                fallback: None,
+            }],
+        };
+        assert_eq!(manifest.len(), 4);
+        let issues = manifest.check_files(&root);
+        let problems: Vec<(&str, &AssetFileProblem)> = issues
+            .iter()
+            .map(|issue| (issue.name.as_str(), &issue.problem))
+            .collect();
+        assert_eq!(problems.len(), 3, "{issues:?}");
+        assert_eq!(problems[0], ("png", &AssetFileProblem::NotGlb));
+        assert!(matches!(
+            problems[1],
+            ("missing", AssetFileProblem::Missing(_))
+        ));
+        assert_eq!(problems[2], ("dir", &AssetFileProblem::NotAFile));
+        assert!(
+            issues[0]
+                .to_string()
+                .starts_with("assets.units 'png' (models/ok.png)")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_files_rejects_symlinks_out_of_the_pack() {
+        let root = temp_root("symlink");
+        let outside = temp_root("symlink-target");
+        std::fs::write(outside.join("secret.glb"), b"x").expect("write");
+        std::os::unix::fs::symlink(outside.join("secret.glb"), root.join("models/link.glb"))
+            .expect("symlink");
+        let manifest = AssetManifest {
+            units: Vec::new(),
+            maps: vec![AssetEntry {
+                name: String::from("link"),
+                path: String::from("models/link.glb"),
+                fallback: None,
+            }],
+        };
+        let issues = manifest.check_files(&root);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].problem, AssetFileProblem::OutsideRoot);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 }

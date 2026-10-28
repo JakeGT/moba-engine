@@ -11,12 +11,16 @@ use moba_net::protocol::{
 /// A valid `ContentUpdate` for the built-in catalogue, encoded once.
 ///
 /// The fuzzer mutates a copy of these bytes with its input, so `decode_content_update` sees a
-/// realistic catalogue — including every hashed `RulesSpec` field carried since v38 — rather
-/// than only random noise. Building the catalogue once keeps the per-input cost to decoding.
+/// realistic catalogue — including every hashed `RulesSpec` field carried since v38 and the
+/// hero model / map visuals names carried since v40 — rather than only random noise. Building
+/// the catalogue once keeps the per-input cost to decoding.
 fn fixture() -> &'static Vec<u8> {
     static FIXTURE: OnceLock<Vec<u8>> = OnceLock::new();
     FIXTURE.get_or_init(|| {
-        let catalog = WireCatalog::from(&moba_game::GameContent::default());
+        let mut content = moba_game::GameContent::default();
+        content.heroes[0].model = Some(String::from("sentinel"));
+        content.map.visuals = Some(String::from("map-lava"));
+        let catalog = WireCatalog::from(&content);
         let content_hash = catalog.content_hash().expect("built-in catalogue hashes");
         let mut content_update = Vec::with_capacity(8_192);
         encode_content_update(&catalog, content_hash, &mut content_update);

@@ -15,10 +15,12 @@
 //! - `MOBA_DEMO_MOVE=x,y` issues one move order after the first snapshot (capture demos).
 //! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
-//! - `MOBA_ASSET_ROOT=<dir>` (default `content`) and `MOBA_HERO_MODELS=<hero=model,...>`
-//!   draw heroes with `<dir>/models/<model>.glb`; any failure falls back to the rig. A
-//!   model with a skin is GPU-skinned (walk clip driven by gait); `MOBA_NO_SKINNING=1`
-//!   draws it static instead.
+//! - `MOBA_ASSET_ROOT=<dir>` (default `content`): heroes whose catalogue names a `model`
+//!   draw `<dir>/models/<model>.glb`; `MOBA_HERO_MODELS=<hero=model,...>` overrides that per
+//!   hero (dev only). Any failure falls back to the rig. A model with a skin is GPU-skinned
+//!   (walk clip driven by gait); `MOBA_NO_SKINNING=1` draws it static instead.
+//! - `MOBA_CONTENT=<pack.toml>` loads a content pack for the local preview and for the
+//!   `MOBA_SERVER=local` loopback server.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
@@ -307,7 +309,7 @@ impl App for ClientApp {
                             .client
                             .heroes()
                             .iter()
-                            .map(moba_net::protocol::WireHero::name_str),
+                            .map(|hero| (hero.name_str(), hero.model_str())),
                     );
                 } else if let Some(simulation) = &self.simulation {
                     models::bind_hero_models(
@@ -317,7 +319,7 @@ impl App for ClientApp {
                             .content()
                             .heroes
                             .iter()
-                            .map(|hero| hero.name.as_str()),
+                            .map(|hero| (hero.name.as_str(), hero.model.as_deref())),
                     );
                 }
                 let title = if let Some(network) = &self.network {
@@ -459,7 +461,7 @@ impl App for ClientApp {
                                             .client
                                             .heroes()
                                             .iter()
-                                            .map(moba_net::protocol::WireHero::name_str),
+                                            .map(|hero| (hero.name_str(), hero.model_str())),
                                     );
                                 }
                             }
@@ -841,7 +843,9 @@ mod tests {
     #[test]
     fn local_sim_events_map_to_audio() {
         assert_eq!(
-            super::local_sound(&moba_sim::SimEvent::MatchEnded { winner: Team::Blue }),
+            super::local_sound(&moba_sim::SimEvent::MatchEnded {
+                winner: Some(Team::Blue)
+            }),
             Some(crate::audio::Sound::Ui)
         );
     }
