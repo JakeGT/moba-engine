@@ -222,7 +222,15 @@ impl Simulation {
                 .collect();
             for (lane_index, (start, next)) in lanes.into_iter().enumerate() {
                 let direction = (next - start).normalize_or_zero();
-                let perpendicular = direction.perpendicular();
+                // The map is mirrored in x (as are hero spawns), so red's formation offset
+                // is the x-mirror of blue's. `perpendicular()` alone is a 90° rotation, which
+                // made the two formations point reflections of each other: in the top lane
+                // blue's ranged minion spawned ahead of the lane start and red's behind it
+                // (#290). Negating it for red restores the mirror.
+                let perpendicular = match team {
+                    Team::Blue => direction.perpendicular(),
+                    Team::Red => -direction.perpendicular(),
+                };
                 for index in 0..3i32 {
                     let offset = Fix::from_i32(index - 1);
                     let position = self.clamp_position(

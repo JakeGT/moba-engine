@@ -24,8 +24,31 @@ breaking protocol, replay or content-schema changes.
 - Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.
 ### Determinism and balance
 - `match-soak` now counts `unique_hashes` with `state_hash_normalized()`, and adds `--threads N` and a `balance:` line (draws, Wilson 95 % blue win rate over decided matches, resolution-tick percentiles). A 5,000-match, 60,000-tick sweep measured blue at 44.21 % (95 % CI 42.84–45.60 %), a red bias traced to the point-reflected wave formation (`docs/perf/0008-balance.md`, #290).
+- After the v8 fixes (below), the same sweep measures blue at **49.81 %** (95 % CI 48.42–51.20 %), so the bias is gone. `match-soak` now reports `cap_draws` and `same_tick_draws` separately (2 of 5,000 matches were same-tick draws) and `peak_units`. Peak units were 183 of `MAX_UNITS` 512, so wave starvation never occurs.
+
+### Simulation
+- **Simulation logic v8** (#290). Replays recorded with logic v7 are rejected by this build;
+  play them back with a logic-v7 build (0.4.0 or `main` before this change). The checked-in
+  replay fixture is now `crates/sim/tests/fixtures/seed-v8.mbr`. The golden state hash is
+  unchanged (`0x8db35a0f5aab5190`): its scenario runs without waves and never ends the match.
+  - Minion wave formations are x-mirrored between the teams, like hero spawns. Red's
+    formation offset used the same `perpendicular()` as blue's, which made the two formations
+    point reflections: in the top lane blue's ranged minion spawned ahead of the lane start and
+    red's behind it (the reverse in the bottom lane). This biased bot matches towards red.
+  - Win conditions met in the same tick (nexus destroyed, score limit reached, surrender) are
+    resolved together at the end of the tick. If both teams meet one, the match is a **draw**
+    instead of being decided by processing order (a same-tick double nexus used to go to red).
+  - API: new `moba_sim::MatchOutcome { Winner(Team), Draw }`. `Simulation::outcome()` and
+    `ReplayResult::outcome` return `Option<MatchOutcome>`, and `SimEvent::MatchEnded::winner`
+    is `Option<Team>` (`None` for a draw).
 
 ### Content and networking
+- **Protocol v39** (not wire-compatible with v38): the snapshot `outcome` byte gains
+  `3` = draw (`OUTCOME_DRAW`; `OUTCOME_NONE/BLUE/RED` name the existing codes) and
+  `EVENT_MATCH_ENDED` carries `value = MATCH_ENDED_DRAW` (2) for a draw. The byte layout is
+  unchanged, but a v38 client would have shown a draw as a defeat. The HUD shows **DRAW**, the
+  kill feed "Match drawn", and the results log, `replay --json` and `moba-server` report
+  `"draw"`.
 - **Protocol v38** (not wire-compatible with v37). The remaining hashed `[rules]` fields are now
   carried in the handshake: `starting_gold`, `gold_per_interval`, `gold_tick_interval`,
   `xp_radius`, `shop_radius`, `shared_xp_percent`, `[rules.rewards.*]`, `structure_heroes_first`,

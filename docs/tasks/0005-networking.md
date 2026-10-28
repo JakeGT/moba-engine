@@ -14,6 +14,9 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   - Since **v38** the handshake catalogue carries every hashed `RulesSpec` field (economy,
     rewards and win conditions), so any content pack can be joined and the client's rules match
     the server's; a per-field parity test and an exhaustiveness guard keep it complete.
+  - Since **v39** a match can end in a draw (both teams meet a win condition in one tick):
+    snapshot `outcome` 3 (`OUTCOME_DRAW`) and `EVENT_MATCH_ENDED` with `value`
+    `MATCH_ENDED_DRAW`.
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.
 - **Server**: handshake and slot assignment, session tokens, input sequencing, bot fill for

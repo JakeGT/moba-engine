@@ -759,7 +759,9 @@ mod tests {
     #[test]
     fn local_sim_events_map_to_audio() {
         assert_eq!(
-            super::local_sound(&moba_sim::SimEvent::MatchEnded { winner: Team::Blue }),
+            super::local_sound(&moba_sim::SimEvent::MatchEnded {
+                winner: Some(Team::Blue)
+            }),
             Some(crate::audio::Sound::Ui)
         );
     }

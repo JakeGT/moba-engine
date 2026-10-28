@@ -33,15 +33,18 @@
 //!   the 30-unit experience radius apart, so deaths in different duels never interact.
 //! - Tower targeting breaks ties by raw entity id. Duel arenas are at least 24 units from
 //!   every tower (tower range is 10), so structures never engage.
-//! - Waves use a point reflection rather than an x-mirror; they are disabled.
+//! - Waves are x-mirrored since sim logic v8, but the remaining entity-id tie-breaks and
+//!   processing-order asymmetries still split the runs within a few waves (first at tick
+//!   2,514 for the first seed pair when measured, against tick 738 before v8), so waves
+//!   stay disabled.
 //! - Bot RNG streams are per slot; the scripted policy draws no simulation randomness.
 
 use moba_core::{Fix, FixVec2};
 use moba_ecs::Entity;
 use moba_game::Team;
 use moba_sim::{
-    BotPolicy, Cooldowns, Dead, Health, Mana, PlayerCommand, Position, Progression, SimConfig,
-    SimEvent, Simulation, TickInputs,
+    BotPolicy, Cooldowns, Dead, Health, Mana, MatchOutcome, PlayerCommand, Position, Progression,
+    SimConfig, SimEvent, Simulation, TickInputs,
 };
 
 /// Ticks per run.
@@ -279,7 +282,7 @@ enum Key {
         target: Option<u8>,
     },
     ZoneSpawned(Option<u8>),
-    MatchEnded(u8),
+    MatchEnded(Option<u8>),
     WaveSpawned,
 }
 
@@ -341,7 +344,9 @@ impl Frame<'_> {
                 target: self.entity(target),
             },
             SimEvent::ZoneSpawned { owner, .. } => Key::ZoneSpawned(self.entity(owner)),
-            SimEvent::MatchEnded { winner } => Key::MatchEnded(self.team(winner)),
+            SimEvent::MatchEnded { winner } => {
+                Key::MatchEnded(winner.map(|winner| self.team(winner)))
+            }
         }
     }
 
@@ -486,7 +491,10 @@ fn run_mirror(match_seed: u64, script_seed: u64) -> Coverage {
         );
         assert_eq!(
             a.outcome(),
-            b.outcome().map(Team::enemy),
+            b.outcome().map(|outcome| match outcome {
+                MatchOutcome::Winner(team) => MatchOutcome::Winner(team.enemy()),
+                MatchOutcome::Draw => MatchOutcome::Draw,
+            }),
             "{context}: outcome diverges at tick {tick}"
         );
         a.clear_events();

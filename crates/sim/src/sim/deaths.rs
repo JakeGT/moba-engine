@@ -56,16 +56,6 @@ impl Simulation {
                         Team::Red => self.red_score = self.red_score.saturating_add(1),
                     }
                 }
-                let limit = u32::from(self.content.rules.score_limit);
-                if limit > 0 && self.outcome.is_none() {
-                    if self.blue_score >= limit {
-                        self.outcome = Some(Team::Blue);
-                        self.push_event(SimEvent::MatchEnded { winner: Team::Blue });
-                    } else if self.red_score >= limit {
-                        self.outcome = Some(Team::Red);
-                        self.push_event(SimEvent::MatchEnded { winner: Team::Red });
-                    }
-                }
                 self.award_bounty(team, kind, position, credit.map(|credit| credit.entity));
                 self.push_event(SimEvent::UnitDied {
                     entity,
@@ -100,16 +90,23 @@ impl Simulation {
                     kind,
                     position,
                 });
-                if kind == UnitKind::Nexus && self.content.rules.nexus_win && self.outcome.is_none()
-                {
-                    self.outcome = Some(team.enemy());
-                    self.push_event(SimEvent::MatchEnded {
-                        winner: team.enemy(),
-                    });
+                if kind == UnitKind::Nexus && self.content.rules.nexus_win {
+                    self.queue_win(team.enemy());
                 }
             }
         }
         self.deaths = deaths;
+        // Score-limit wins are checked once, after every death this tick, so two teams
+        // reaching the limit in the same tick draw instead of the first processed winning.
+        let limit = u32::from(self.content.rules.score_limit);
+        if limit > 0 {
+            if self.blue_score >= limit {
+                self.queue_win(Team::Blue);
+            }
+            if self.red_score >= limit {
+                self.queue_win(Team::Red);
+            }
+        }
     }
 
     fn award_bounty(
