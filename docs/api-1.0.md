@@ -50,11 +50,12 @@ content enums (`Targeting`, `Effect`, `AreaEffect`, `ModifierKind`, `MapTheme`, 
   `AbilitySpec { .. }`). Where a `Default` exists, prefer `..Default::default()` to keep the
   change small when the schema grows.
 
-**Decision for the maintainer before 1.0:** with this choice, a content-schema extension after
-1.0 needs a major version. The alternative is `#[non_exhaustive]` specs built through `Default`
-and field assignment, with the `moba-net` destructuring guard replaced by a round-trip test over a
-pack that sets every field. This review does not make that change; it would also change how the
-`moba-net` parity tests work.
+**Maintainer decision (2026-10-28): the content schema stays exhaustive.** The project is in early
+development and breaking changes are expected until 1.0, so the schema is not made
+`#[non_exhaustive]` now. With this choice, a content-schema extension after 1.0 needs a major
+version. The option considered was: `#[non_exhaustive]` specs built through `Default` and field
+assignment, with the `moba-net` destructuring guard replaced by a round-trip test over a pack
+that sets every field. It would also change how the `moba-net` parity tests work.
 
 ## Per-crate surface
 

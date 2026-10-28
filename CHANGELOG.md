@@ -88,6 +88,9 @@ the semver check):
 - Truth pass after the finish-plan work landed: test count 324 → 416 in the front-door docs,
   finished work packages marked done with their PRs (finish plan §2a), and `docs/status.md`
   and `AGENTS.md` no longer describe #276 work as pending.
+- Recorded maintainer decisions (2026-10-28): the content schema stays exhaustive (breaking
+  changes are fine until 1.0), and the playtest, external review, Windows/macOS GPU runs and
+  crates.io publication happen just before the 1.0 release.
 
 ### Planning
 - Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,

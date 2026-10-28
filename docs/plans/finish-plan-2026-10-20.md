@@ -80,8 +80,12 @@ state hash is unchanged (`0x8db35a0f5aab5190`). The next release from `main` mus
 | M7 Hardening | independent external review. 50 matches (#293) and host budgets (#315) are done | external (WP-6.3) |
 | M8 Content | done for heroes and maps (#317, #309, #319); items have no asset references yet | — |
 
-Open decision for the maintainer: whether the content schema (`HeroSpec`, `MapSpec`, ...) should
-also become `#[non_exhaustive]` before 1.0 (see [`docs/api-1.0.md`](../api-1.0.md)).
+**Maintainer decisions (2026-10-28):**
+- The content schema (`HeroSpec`, `MapSpec`, ...) stays exhaustive. Breaking changes are fine
+  until 1.0 because the project is in early development (see [`docs/api-1.0.md`](../api-1.0.md)).
+- The people- and hardware-bound items (WP-5.2 playtest, WP-6.1 Windows/macOS GPU, WP-6.2
+  crates.io, WP-6.3 external review) are done **just before the 1.0 release**, as part of WP-7.3.
+  They are not blockers for 0.x releases, and agents should not chase them before then.
 
 ## 3. Review protocol
 
@@ -357,7 +361,7 @@ Facts to use (all verified):
   - the frame log, written on client exit.
 - **Feedback:** a form with rubber-banding, input latency, desync/kicks and FPS per player, plus RTT/loss.
 
-#### WP-5.2 Run it (maintainer plus players): **ready to run**; phases 3–4 are complete (it was deferred until then, maintainer decision 2026-10-21)
+#### WP-5.2 Run it (maintainer plus players): **scheduled just before the 1.0 release** (maintainer decision 2026-10-28; phases 3–4 are complete)
 - **Setup:** ≥ 2 hosts on a real network at about 100 ms RTT (WAN, or `netsim`/tc netem), 10 clients (humans plus bots allowed).
 - **Record:**
   - the results log;
@@ -374,7 +378,7 @@ These are never closed with simulated or hosted-runner evidence.
   - **Decided (2026-10-21):** the maintainer will do the real Windows and macOS run by hand with `MOBA_FRAME_LOG`. Agents don't work on this; don't change the criteria.
   - **Note:** #9's comments suggest closing it as superseded by #127.
 - **WP-6.2** (#21): **the maintainer does this by hand.** Agents must not change `publish = false` (`Cargo.toml:17`), add a registry token or publish crates. WP-7.1 (semver CI against a git tag) is still agent work.
-- **WP-6.3:** an independent external security review (M7).
+- **WP-6.3:** an independent external security review (M7). Phase 6 is scheduled just before the 1.0 release (maintainer decision 2026-10-28).
 - **WP-6.4: DONE (2026-10-21).**
   - #295 merged and tagged `v0.4.0`; release run `39599870292` attached all artifacts.
   - GHSA-jw7c-q9x9-cgg3 is published (patched 0.4.0).
