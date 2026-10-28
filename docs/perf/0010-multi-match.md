@@ -77,6 +77,118 @@ cargo build --release -p moba-tools --bin load-test
 ./target/release/load-test --matches 50 --clients 10 --seconds 120 --rtt 150 --jitter 30 --loss 5
 ```
 
+## Flood isolation
+
+Measured 2026-10-27 on protocol v38, release build, branch `feat/292-host-budget` (#292), same box as above. Other agents' builds were running on the machine (load average 3–9), and the run was limited to 8 load-test threads: 4 host workers, 3 client drivers and 1 flood thread.
+
+**What changed (#292):**
+- Every datagram is charged against the per-address, per-match and optional host-wide budgets straight after `recv_from`, before header decode, AEAD open or reassembly. Undecodable junk now counts too.
+- Each worker polls its sockets round-robin and caps every match at 64 datagrams or 500 µs per pass. Anything unread stays in that socket's kernel queue, and the kernel sheds the excess.
+
+**Setup:** `load-test --flood-port 0 --flood-pps 300000` sends 300,000 undecodable datagrams/s (32–231 B, bad magic) at match 0. The flood starts 0.5 s before the 500 clients connect, so every handshake happens under it. Match 0 shares worker 0 with matches 1–12.
+
+The gate in flood mode:
+- every *other* match's tick p99 must be ≤ 2 ms (the worst one is gated);
+- **zero** dropped frames on any worker;
+- every other client must stay connected, within bandwidth and with no snapshot gap over 1 s.
+
+The flooded match is reported but not gated.
+
+| | Baseline (no flood, 60 s) | 1 junk source, 120 s | 64 junk sources + `--host-max-pps 30000`, 120 s |
+|---|---|---|---|
+| Worst per-match tick p99, other matches | — (all-match p99 0.17 ms) | **0.23 ms** | **0.15 ms** |
+| Other matches' tick p99 / p50 | 0.17 / 0.11 ms | 0.19 / 0.13 ms | 0.13 / 0.08 ms |
+| Same-worker neighbours (m1–m12), worst p99 | — | 0.23 ms | 0.13 ms |
+| Frames dropped | 0 / 7,205 | **0 / 14,704** | **0 / 14,822** |
+| Other clients connected | 500 / 500 | **490 / 490** | **490 / 490** |
+| Slowest handshake, other matches | — | 22 ms | 22 ms |
+| Slowest handshake, flooded match | — | 2,013 ms (10/10 connected) | 3,002 ms timeout (4/10 connected) |
+| Flooded match tick p99 (incl. its capped polling) | — | 0.66 ms | 0.51 ms |
+| Junk read and charged / sent | — | 6.96 M / 36.8 M | 6.85 M / 37.1 M |
+
+**Reading the numbers:**
+- **Neighbours are isolated.** With 300 k junk datagrams/s on one port, the other 49 matches stay within 0.1 ms of baseline p99, with no dropped frames and no client losses. Only about 19 % of the junk is ever read (≈ 57 k/s, i.e. 64 datagrams per ≈ 1.1 ms pass); the kernel drops the rest. Worker 0 spends about 1–2 percentage points more time busy than the other workers.
+- **Single-source flood: the flooded match keeps working.** The per-address bucket stops the junk without touching the per-match budget, so all 10 of the flooded match's clients connect (the slowest needed a few 250 ms Hello retries because the kernel queue overflowed) and play with snapshot gaps of 33 ms or less.
+- **Multi-source (spoofed) flood: new handshakes on the flooded port starve.** 64 sources each get their own 120 pps, which exhausts the 4,000 pps per-match budget, so most Hellos to *that* port are refused. 6 of 10 clients did not connect within the 3 s the tool allows. Clients that did connect kept playing (gap ≤ 33 ms). This is the documented limit of application-layer budgets: put public servers behind a DDoS/connection gateway.
+- **The host-wide budget was not exercised.** Each match's own 4,000 pps budget kept admitted junk below 30,000 pps host-wide, so `host_budget_rejected=0`. Its behaviour (shared across matches and workers, charged last, never more than the burst under 4-thread contention) is covered by unit tests in `crates/net/src/host.rs` and `server/rate_limit.rs`.
+- **One outlier run.** An earlier 64-source run, with load average ≈ 7–9 from concurrent builds, passed but had one neighbour (m12) at p99 1.79 ms. Two reruns at lower load gave m12 0.11–0.12 ms. That run's raw output is kept below.
+
+### Raw output: baseline, 50 × 10, 60 s
+```
+load-test: 50 matches x 10 clients for 60s at 10 commands/s, 4 host workers, 3 client threads, 16 logical cores, link direct loopback
+connected 500 clients in 0.0s
+host: matches=50 workers=4 frames=7205 overruns=0 (0.00%) match_ticks=90063 tick_p50_us=110 tick_p99_us=170 tick_max_us=3567
+  worker 0: matches=13 utilisation=4.4% max_lateness_us=6566 errors=0 p99_us=170
+  worker 1: matches=13 utilisation=4.4% max_lateness_us=2789 errors=0 p99_us=180
+  worker 2: matches=12 utilisation=4.0% max_lateness_us=4388 errors=0 p99_us=170
+  worker 3: matches=12 utilisation=4.0% max_lateness_us=4818 errors=0 p99_us=170
+clients: connected=500/500 down_mean=7.05 KB/s down_max=7.22 KB/s up_max=2.35 KB/s (incl. IP/UDP headers) max_snapshot_gap_ms=34
+server: worst match avg_tick_us=20 rate_limited=0
+load-test passed
+```
+
+### Raw output: 1 junk source at 300 k/s on match 0, 120 s
+```
+load-test: 50 matches x 10 clients for 120s at 10 commands/s, 4 host workers, 3 client threads, 16 logical cores, link direct loopback
+flood: 300000 junk datagrams/s to match 0 from 1 source(s); host budget off
+connected 500 clients in 2.0s
+handshake under flood: slowest connect flooded_match=2013 ms other_matches=22 ms flooded_match_connect_failures=0
+host: matches=50 workers=4 frames=14704 overruns=0 (0.00%) match_ticks=183800 tick_p50_us=130 tick_p99_us=510 tick_max_us=5340
+  worker 0: matches=13 utilisation=6.0% max_lateness_us=1639 errors=0 p99_us=540
+  worker 1: matches=13 utilisation=5.0% max_lateness_us=2633 errors=0 p99_us=200
+  worker 2: matches=12 utilisation=4.6% max_lateness_us=3699 errors=0 p99_us=190
+  worker 3: matches=12 utilisation=4.6% max_lateness_us=8504 errors=0 p99_us=200
+flood: flooded match clients connected=10/10 (plus 0 that never connected) max_snapshot_gap_ms=33
+clients: connected=490/490 down_mean=8.51 KB/s down_max=8.77 KB/s up_max=2.38 KB/s (incl. IP/UDP headers) max_snapshot_gap_ms=36
+server: worst match avg_tick_us=25 rate_limited=6959584
+flood: other matches tick_p50_us=130 tick_p99_us=190 worst_match_p99_us=230 (m12) same_worker_neighbours_p99_us=230
+flood: flooded match m0 (worker 0) tick_p99_us=660 tick_max_us=1893 rate_limited=6959584 poll_capped=109273 recv=896211 KiB host_budget_rejected=0
+flood: sent=36758305 datagrams in 122.5s (299996/s) send_errors=0
+load-test passed
+```
+
+### Raw output: 64 junk sources at 300 k/s on match 0, host budget 30,000 pps, 120 s
+```
+load-test: 50 matches x 10 clients for 120s at 10 commands/s, 4 host workers, 3 client threads, 16 logical cores, link direct loopback
+flood: 300000 junk datagrams/s to match 0 from 64 source(s); host budget 30000 pps
+connected 494 clients in 3.0s
+handshake under flood: slowest connect flooded_match=3002 ms other_matches=22 ms flooded_match_connect_failures=6
+host: matches=50 workers=4 frames=14822 overruns=0 (0.00%) match_ticks=185276 tick_p50_us=80 tick_p99_us=380 tick_max_us=1222
+  worker 0: matches=13 utilisation=3.9% max_lateness_us=320 errors=0 p99_us=400
+  worker 1: matches=13 utilisation=3.0% max_lateness_us=295 errors=0 p99_us=130
+  worker 2: matches=12 utilisation=2.8% max_lateness_us=359 errors=0 p99_us=130
+  worker 3: matches=12 utilisation=2.8% max_lateness_us=315 errors=0 p99_us=130
+flood: flooded match clients connected=4/4 (plus 6 that never connected) max_snapshot_gap_ms=33
+clients: connected=490/490 down_mean=8.69 KB/s down_max=9.03 KB/s up_max=2.38 KB/s (incl. IP/UDP headers) max_snapshot_gap_ms=33
+server: worst match avg_tick_us=15 rate_limited=6848864
+flood: other matches tick_p50_us=80 tick_p99_us=130 worst_match_p99_us=150 (m13)
+flood: same-worker neighbours p99_us m1:130 m2:130 m3:130 m4:130 m5:130 m6:130 m7:130 m8:130 m9:130 m10:120 m11:120 m12:120
+flood: flooded match m0 (worker 0) tick_p99_us=510 tick_max_us=626 rate_limited=6848864 poll_capped=114795 recv=942207 KiB host_budget_rejected=0
+flood: sent=37051673 datagrams in 123.5s (299996/s) send_errors=0
+load-test passed
+```
+
+### Raw output: the outlier run (64 sources, load average ≈ 7–9)
+```
+flood: 300000 junk datagrams/s to match 0 from 64 source(s); host budget 30000 pps
+connected 491 clients in 3.0s
+handshake under flood: slowest connect flooded_match=3001 ms other_matches=14 ms flooded_match_connect_failures=9
+host: matches=50 workers=4 frames=14822 overruns=0 (0.00%) match_ticks=185276 tick_p50_us=120 tick_p99_us=510 tick_max_us=12524
+flood: flooded match clients connected=1/1 (plus 9 that never connected) max_snapshot_gap_ms=34
+clients: connected=490/490 down_mean=8.75 KB/s down_max=9.21 KB/s up_max=2.38 KB/s (incl. IP/UDP headers) max_snapshot_gap_ms=45
+flood: other matches tick_p50_us=120 tick_p99_us=190 worst_match_p99_us=1790 (m12) same_worker_neighbours_p99_us=1790
+flood: flooded match m0 (worker 0) tick_p99_us=580 tick_max_us=2880 rate_limited=6582191 poll_capped=110606 recv=909001 KiB host_budget_rejected=0
+load-test passed
+```
+
+The single-source and outlier runs predate the final report format: the per-neighbour list replaced `same_worker_neighbours_p99_us` (the worst of them).
+
+Reproduce:
+```bash
+./target/release/load-test --matches 50 --clients 10 --workers 4 --client-threads 3 --seconds 120 --flood-port 0 --flood-pps 300000
+./target/release/load-test --matches 50 --clients 10 --workers 4 --client-threads 3 --seconds 120 --flood-port 0 --flood-pps 300000 --flood-sources 64 --host-max-pps 30000
+```
+
 ## Hosted runner (regression gate)
 
 Run [39504487980](https://github.com/JakeGT/moba-engine/actions/runs/39504487980) on a GitHub-hosted `ubuntu-latest` runner (4 vCPUs, virtualised and shared), 8 × 10 for 60 s:

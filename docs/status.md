@@ -18,7 +18,7 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 | M4 | Simulation | ✅ | [Deterministic 5v5](perf/0004-simulation.md), 3 lanes, towers/nexuses, minions, vision-respecting bots, respawns, XP/gold/items, modes/rules; measured ~26.3 µs/tick steady benchmark (7.876 ms/300 ticks, 2026-10-19). |
 | M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v38, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
 | M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
-| M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/global limits, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model, [50 concurrent matches per box](perf/0010-multi-match.md) (`MatchHost`, `moba-server --matches N`, #293). Independent external review remains open; host-wide datagram budget and flood fairness are tracked in #292. |
+| M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/per-match/host-wide datagram budgets charged before decode, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model, [50 concurrent matches per box](perf/0010-multi-match.md) (`MatchHost`, `moba-server --matches N`, #293) with per-port poll caps and [flood isolation](perf/0010-multi-match.md#flood-isolation) (#292). Independent external review remains open. |
 | M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Static `.glb` hero models load from a client-local asset root with procedural fallback (#286, ADR-0007) and are GPU-skinned when the file has a skin (#288); pack model references (#285) remain. |
 
 ## Core capabilities
@@ -68,8 +68,8 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 - Renderer: validation-required lavapipe capture passes with zero messages. Real NVIDIA
   RTX 5070 Ti at 1920×1080: p50 4.181 ms, p95 4.197 ms, p99 4.212 ms, max 4.538 ms (vsync off).
   macOS hosted runner recorded p95 16.945 ms; Windows hosted runner has no Vulkan GPU.
-- Release: `v0.1.0`–`v0.4.0` workflows build Linux/Windows/macOS archives;
-  [v0.4.0](https://github.com/JakeGT/moba-engine/releases/tag/v0.4.0) is the current preview.
+- Release: `v0.1.0`–`v0.4.1` workflows build Linux/Windows/macOS archives;
+  [v0.4.1](https://github.com/JakeGT/moba-engine/releases/tag/v0.4.1) (security patch from `release/0.4.x`) is the current preview; `main` targets 0.5.0.
   crates.io publication remains opt-in (`publish = false`, #21).
 - CI: Linux/Windows/macOS gates, Miri, cargo-deny, release tests/doctests, MSRV, no-op/real
   `renderer-gate`, docs link/contract check, golden/fuzz/Loom/platform workflows. Nightly
@@ -98,8 +98,10 @@ Second-audit plan: [`docs/plans/audit-remediation-2026-10-19.md`](plans/audit-re
   ownership plus `CARGO_REGISTRY_TOKEN` are required. `publish = false` remains intentional.
 - **#45** — extensibility roadmap map, not unfinished implementation work.
 - **#276** — post-1.0 asset-pipeline/GPU-skinning work and residual mirror/balance coverage.
-- **#292** — host-wide datagram budget, per-match poll fairness and shared content reload for
-  multi-match hosting.
+- Multi-match flood isolation (#292) is application-layer only: a spoofed multi-source flood
+  on one port can still starve new handshakes on that port (other matches are unaffected, see
+  [perf/0010](perf/0010-multi-match.md#flood-isolation)); public servers still need a
+  DDoS/connection gateway.
 - Future product work (not blocking the current preview): independent external review, larger
   balance sweeps.
 

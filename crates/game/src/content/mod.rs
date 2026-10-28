@@ -43,6 +43,8 @@ pub const MAX_ABILITY_NAME: usize = 16;
 pub const MAX_CONTENT_LANES: usize = 4;
 /// Maximum waypoints per lane.
 pub const MAX_LANE_POINTS: usize = 16;
+/// Maximum lane display-name length in bytes.
+pub const MAX_LANE_NAME: usize = 16;
 /// Maximum structures in a content pack.
 pub const MAX_CONTENT_STRUCTURES: usize = 32;
 /// Maximum vision-blocking wall segments.
