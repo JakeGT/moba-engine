@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene + networked skinned capture), lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **324 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **416 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -33,7 +33,8 @@ Re-run the commands before quoting these values; update this table when a contra
 
 1. [`README.md`](README.md) — quick start and feature overview.
 2. [`docs/plans/audit-remediation-2026-10-19.md`](docs/plans/audit-remediation-2026-10-19.md) —
-   completed remediation plan; post-1.0 asset/skinning work is tracked in #276.
+   completed remediation plan. [`docs/plans/finish-plan-2026-10-20.md`](docs/plans/finish-plan-2026-10-20.md)
+   is the current plan (all agent work packages done; see its §2a).
 3. [`docs/architecture.md`](docs/architecture.md) — layers, data flow, determinism, netcode.
 4. [`docs/status.md`](docs/status.md) — what is done, measured and still open.
 5. [`docs/agents.md`](docs/agents.md) — agent workflow and verification matrix.
@@ -250,7 +251,8 @@ gh workflow run loom.yml --repo JakeGT/moba-engine --ref main
   pass from a compile-only or probe-only job.
 - **#21:** crates.io publication needs registry ownership and `CARGO_REGISTRY_TOKEN`.
   `publish = false` is intentional; tagged GitHub releases are the distribution path.
-- **#276:** post-1.0 asset-pipeline/GPU-skinning work and residual mirror/balance coverage.
+- **#276:** asset pipeline, GPU skinning and mirror/balance work is done (#308–#319); items have
+  no asset references yet. The M6 playtest (WP-5.2) and the external review (WP-6.3) need people.
 - Product roadmap items may be opened for future work; do not close a tracking issue merely
   because its wave landed. Update `docs/status.md` and the plan instead.
 

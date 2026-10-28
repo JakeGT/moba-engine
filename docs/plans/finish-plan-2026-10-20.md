@@ -65,6 +65,24 @@ The repo-wide rules in [AGENTS.md](../../AGENTS.md) and the runbook [docs/agents
 | M7 Hardening | 50 concurrent matches (**done in #293**); independent external review | 6.3 |
 | M8 Content | packs reference real assets | 3.x |
 
+## 2a. State on 2026-10-28
+
+Every agent work package is merged. `main` is at `52d3685`: workspace 0.4.0 (0.4.1 was a
+security patch from `release/0.4.x`), protocol **v40**, replay v5, sim logic **v8**. The golden
+state hash is unchanged (`0x8db35a0f5aab5190`). The next release from `main` must be **0.5.0**
+(the semver check reports breaking API changes since v0.4.0).
+
+| Milestone | Still open | Owner |
+|---|---|---|
+| M2 Platform | real Windows/macOS GPU runtime (#9) | maintainer (WP-6.1) |
+| M3 Renderer | Windows/macOS frame budget (#127). Skinning is done (#316, #318) | maintainer (WP-6.1) |
+| M6 Vertical slice | recorded 10-client real-network playtest | maintainer plus players (WP-5.2) |
+| M7 Hardening | independent external review. 50 matches (#293) and host budgets (#315) are done | external (WP-6.3) |
+| M8 Content | done for heroes and maps (#317, #309, #319); items have no asset references yet | — |
+
+Open decision for the maintainer: whether the content schema (`HeroSpec`, `MapSpec`, ...) should
+also become `#[non_exhaustive]` before 1.0 (see [`docs/api-1.0.md`](../api-1.0.md)).
+
 ## 3. Review protocol
 
 The orchestrating agent reviews every PR before the maintainer merges it. The ruleset requires all review threads to be resolved before merge, so unresolved review comments block the merge.
@@ -137,7 +155,7 @@ Protocol **v38**. Evidence: `wire_rules_parity_covers_every_hashed_field` (one m
 - **Reviewers:** netcode-reviewer.
 - **Pitfall:** `MAX_DATAGRAM`/Welcome size. Check that the Welcome still fragments correctly, since it already fragments.
 
-#### WP-0.2 Stale docs (no code): **DONE 2026-10-27** except the `0008-balance.md` item, which ships with WP-2.3
+#### WP-0.2 Stale docs (no code): **DONE 2026-10-27**; the `0008-balance.md` item shipped with WP-2.3 (PR #311)
 - README "Server hardening" says rate limiting happens "before decoding". The code limits **after** `recv` → header decode → AEAD open → reassembly (`crates/net/src/server/ingress.rs` `poll`, `transport.rs` `recv`). Correct the wording, and note that WP-1.2 changes this.
 - `.claude/agents/gpu-safety-reviewer.md` still says "Vulkan 1.2 + descriptor indexing". Change it to Vulkan 1.3 core with dynamic rendering and sync2 (ADR-0002).
 - `docs/dev/software-vulkan.md` ~84 says the golden workflow sets `MOBA_IGNORE_KNOWN_PRESENT_HAZARD=1`. No workflow or code reads it (grep on 2026-10-21). Remove the claim, or re-validate the hazard under lavapipe and document the result.
@@ -151,7 +169,7 @@ Evidence is in [docs/perf/0010-multi-match.md](../perf/0010-multi-match.md): 50 
 
 The tightest margin is upstream under 5 % loss: 3.6 of the 4 KB/s budget.
 
-#### WP-1.2 Host-wide budget, poll fairness, shared reload (#292, P2)
+#### WP-1.2 Host-wide budget, poll fairness, shared reload (#292, P2): **DONE in PR #315**
 - **Facts:**
   - `RateLimiter` (`crates/net/src/server/rate_limit.rs`) is per `NetServer` and runs **after** `transport.recv()`.
   - `UdpTransport::recv` keeps draining undecodable datagrams for up to a 2 ms deadline per call, and `poll` calls it up to 512 times. So a flood on one port can stall every match on that worker (`host.rs` `run_worker`).
@@ -177,7 +195,7 @@ The tightest margin is upstream under 5 % loss: 3.6 of the 4 KB/s budget.
 - **Bot RNG differs per slot.** Seeds are `seed ^ (… | idx*φ)` (~479–483), and red's x-jitter isn't negated (~2744, 2756).
 - **`Fix` rounding isn't odd-symmetric.** `mul` uses `>>` and `div` floors (`crates/core/src/fix.rs` ~308, 334–339), so floor(−x) ≠ −floor(x).
 
-#### WP-2.1 Tolerance mirror test (no sim change)
+#### WP-2.1 Tolerance mirror test (no sim change): **DONE in PR #308**
 - **Test:** add `crates/sim/tests/mirror.rs`.
   - Two simulations on the default map with waves disabled (`SimConfig { spawn_waves: false, .. }`, which is what `match-soak --no-waves` sets).
   - Run B uses `seed ^ 1`, so the scheduling phase is flipped.
@@ -191,7 +209,7 @@ The tightest margin is upstream under 5 % loss: 3.6 of the 4 KB/s budget.
 - **Reviewers:** perf-reviewer, since `sim/` is touched by tests only. Also the orchestrator's determinism checklist.
 - **Pitfall:** `Attack(Entity)` commands need an entity map between the runs. Build it from the hero slot → entity tables (`hero_entity`).
 
-#### WP-2.2 [logic] Side-fairness fixes (descoped, conditional)
+#### WP-2.2 [logic] Side-fairness fixes (descoped, conditional): **DONE in PR #314** (WP-2.3 found a red bias; sim logic v8, protocol v39)
 **Maintainer decision (2026-10-21): the mirror may be asymmetric.** Don't pursue exact symmetry:
 - (a), (b), (c), (e) and the (f) rounding change are **out of scope**.
 - Keep floor rounding (Option A) and the WP-2.1 tolerance mirror.
@@ -227,7 +245,7 @@ Then:
 - **Reviewers:** perf-reviewer, netcode-reviewer (snapshot determinism), orchestrator.
 - **Pitfall:** `MAX_UNITS` cap starvation. Waves spawn blue first (`sim/spawn.rs` `spawn_wave` ~206), so the cap starves red. Spawn interleaved by serial, or reserve capacity per team.
 
-#### WP-2.3 Outcome-resolving balance sweep
+#### WP-2.3 Outcome-resolving balance sweep: **DONE in PR #311**, re-run in PR #314 (blue 49.81 %, 95 % CI 48.42–51.20 %)
 - **Fix `match-soak`** (`crates/tools/src/bin/match-soak.rs`): `unique_hashes` uses `state_hash()`, which mixes in the seed, so it proves nothing. Use `state_hash_normalized()`.
 - **Sweep:** 3,000-tick matches never resolve. Waves come at ticks 30/930/1,830/2,730, minions walk at 4 u/s, towers have 2,200 HP and the nexus 4,800 HP. Run with `--ticks 60000 --no-verify`, record resolution ticks, count unresolved matches as draws, and report blue/red with a **Wilson 95 % CI** over decided matches.
   - Roughly 1,000 s for 5,000 matches at ~10 µs/tick. Parallelising the soak across threads is allowed and welcome.
@@ -239,7 +257,7 @@ Then:
 
 `moba-assets` (`crates/assets/src/lib.rs`) has `AssetManifest { units, maps }`, `AssetEntry { name, path, fallback }`, `validate()`, `resolve()` and path rules. **No other crate uses it yet.**
 
-#### WP-3.1 [proto] Packs reference assets; content-check validates them (#285)
+#### WP-3.1 [proto] Packs reference assets; content-check validates them (#285): **DONE in PR #317** (protocol v40; item-level assets not covered)
 - **Schema:**
   - Optional `[assets]` in `ContentFile` (`crates/game/src/content/schema.rs`, `deny_unknown_fields`), with the same shape as `AssetManifest`.
   - `HeroEntry.model: Option<String>` (≤ 16 ASCII), stored in `HeroSpec`.
@@ -257,7 +275,7 @@ Then:
 - **Accept:** the #285 boxes are ticked, `docs/content-authoring.md` is updated, and there's an example pack.
 - **Reviewers:** netcode-reviewer.
 
-#### WP-3.2 Mesh loading with procedural fallback (#286)
+#### WP-3.2 Mesh loading with procedural fallback (#286): **DONE in PR #309**
 - **ADR:** write ADR-0007 on the mesh format.
   - Recommended: binary `.glb` only, through `gltf` with `default-features = false` (no `import`, image or base64). That handles static meshes with positions, normals and u32 indices, embedded buffers only.
   - Pin exact versions and run `cargo deny check` (the licences are expected to be MIT/Apache-2.0; verify them, don't assume).
@@ -277,7 +295,7 @@ Then:
   - The golden fingerprint is regenerated **only** if the default scene changed, and from the CI artifact.
 - **Reviewers:** gpu-safety-reviewer, perf-reviewer.
 
-#### WP-3.3 Per-map visuals from manifests (#287)
+#### WP-3.3 Per-map visuals from manifests (#287): **DONE in PR #319**
 - **Resolver:** `map_theme(u8)` (`crates/client/src/app/scene_build.rs` ~17) is hard-coded. Replace it with `resolve_map_visuals(theme/visuals, manifest)`, which reads a small descriptor (terrain tint, wall colour, optional wall/prop mesh names). Keep today's table as the fallback.
 - **Local walls:** the local-sim path draws no walls today, so add them.
 - **Wire:** no wire change while it stays keyed by theme id or name.
@@ -294,7 +312,7 @@ Then:
 - Per-frame data goes straight into host-coherent `CpuToGpu` memory, after the frame fence wait.
 - The hero rig is 6 cube instances posed on the CPU (`push_hero_rig`, `scene_build.rs` ~121). The network path derives facing and gait from interpolated positions.
 
-#### WP-4.1 GPU skinning (#288; depends on WP-3.2)
+#### WP-4.1 GPU skinning (#288; depends on WP-3.2): **DONE in PR #316**
 - **Bone buffer:** a per-frame `bone_buffer` SSBO in `FrameData` (`CpuToGpu`), with 3 × `vec4` rows per joint (avoid std430 `mat3`). The default cap is 16 skinned instances × 64 joints, about 48 KiB.
 - **Descriptor:** add binding 1 to the set-1 layout (vertex stage only), raise the pool's `STORAGE_BUFFER` count to `2 × FRAMES_IN_FLIGHT`, and write it at init.
 - **Push constants:** `{first_bone, joint_count}` (16 B, vertex stage) on the **shared** `pipeline_layout`. A separate layout would break descriptor-set compatibility.
@@ -305,7 +323,7 @@ Then:
 - **Accept:** validation and sync validation are clean, there's no per-frame allocation (add an `allocation_probe` test around the skinning path), and the fallback still works.
 - **Reviewers:** gpu-safety-reviewer (mandatory), perf-reviewer.
 
-#### WP-4.2 Networked animated golden and frame cost (#289)
+#### WP-4.2 Networked animated golden and frame cost (#289): **DONE in PR #318**
 - **Deterministic capture:** `render_tick` is wall-clock driven (`crates/net/src/interpolation.rs` ~68–74), so a networked capture isn't repeatable.
   - Add `MOBA_CAPTURE_TICK=N`: capture once the phase is Playing and the tick is ≥ N, with animation time pinned to N.
   - Hide the FPS text in capture mode.
@@ -318,7 +336,7 @@ Then:
 
 ### Phase 5: M6 playtest (needs people)
 
-#### WP-5.1 Playtest runbook ([`docs/playtest.md`](../playtest.md))
+#### WP-5.1 Playtest runbook ([`docs/playtest.md`](../playtest.md)): **DONE in PR #305**
 **Runbook written:** [docs/playtest.md](../playtest.md), with every command re-checked against the code and smoke-tested locally. One correction to the facts below: with `--matches N`, record and results paths also get a `-mNN` suffix (`match-m00.mbr`, `matches-m00.jsonl`); rematches within a match add `.matchN`.
 
 Facts to use (all verified):
@@ -339,7 +357,7 @@ Facts to use (all verified):
   - the frame log, written on client exit.
 - **Feedback:** a form with rubber-banding, input latency, desync/kicks and FPS per player, plus RTT/loss.
 
-#### WP-5.2 Run it (maintainer plus players): **deferred until phases 3–4 are complete** (maintainer decision 2026-10-21)
+#### WP-5.2 Run it (maintainer plus players): **ready to run**; phases 3–4 are complete (it was deferred until then, maintainer decision 2026-10-21)
 - **Setup:** ≥ 2 hosts on a real network at about 100 ms RTT (WAN, or `netsim`/tc netem), 10 clients (humans plus bots allowed).
 - **Record:**
   - the results log;
@@ -363,9 +381,9 @@ These are never closed with simulated or hosted-runner evidence.
   - GHSA-23q3, GHSA-vpcq, GHSA-9j54 and GHSA-v6g8 are published (patched 0.3.0).
 
 ### Phase 7: 1.0 release
-- **WP-7.1 Semver CI:** add `cargo-semver-checks` to CI/`release.yml` against the **git tag baseline** (`--baseline-rev v0.3.0`). This doesn't need crates.io, so it isn't blocked by #21.
+- **WP-7.1 Semver CI (DONE in PR #306):** add `cargo-semver-checks` to CI/`release.yml` against the **git tag baseline** (`--baseline-rev v0.3.0`). This doesn't need crates.io, so it isn't blocked by #21.
   - **Implemented** as the informational `semver (informational)` job in `ci.yml` via `scripts/semver-check.sh`. The baseline is the latest `v*` tag, now `v0.4.0`. The job isn't in `release.yml`, because a pushed tag is immutable and the verdict must be known before tagging (see `RELEASE.md` step 2).
-- **WP-7.2 API review:** go through `docs/API-STABILITY.md`'s tiers. Mark public enums and structs `#[non_exhaustive]` where the API promises extensibility, and document the 1.0 surface.
+- **WP-7.2 API review (DONE in PR #320):** go through `docs/API-STABILITY.md`'s tiers. Mark public enums and structs `#[non_exhaustive]` where the API promises extensibility, and document the 1.0 surface.
   - **Implemented:** the surface per crate and tier is in [`docs/api-1.0.md`](../api-1.0.md). Error, event, outcome and key enums, read-only stats/results and configs are `#[non_exhaustive]`; configs have `Default` plus `with_*` builders. Accidental public `moba-net` helpers were removed, and `moba-assets` joined the semver check. The content schema and wire messages stay exhaustive by design; whether the content schema should also become `#[non_exhaustive]` before 1.0 is left to the maintainer (see that document). The breaking changes versus `v0.4.0` are listed in `CHANGELOG.md`.
 - **WP-7.3 Release:** follow `RELEASE.md`: a final docs truth pass, CHANGELOG, `v1.0.0` tag, release artifacts (`release.yml`), and publish once WP-6.2 is resolved.
 - **Gate:** phases 0–5 done, and phase 6 resolved or explicitly waived by the maintainer **in writing on the issue**.

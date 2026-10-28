@@ -76,15 +76,27 @@ the semver check):
   branches). It sits under `sha2`/`hmac`/`hkdf`, `ed25519-dalek` and `poly1305`, i.e. the
   session AEAD, token HMAC and identity signatures in `moba-net`. Also updated in `fuzz/Cargo.lock`.
 - `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
+
 ### Build
 - Removed unused internal dependency edges (`sim`/`server`/`client` → `moba-jobs`; `server` → `moba-core`/`moba-ecs`; `client`/`game` → `moba-ecs`; `jobs` → `moba-core`). `moba-test-support` (a counting allocator) is now a dev-dependency only of `moba-net`. `cpal` and `loom` moved to workspace dependencies.
+
 ### Documentation
 - Corrected stale claims: README rate-limit placement (applied after decode, not before), the
   GPU reviewer's Vulkan target (1.3 core), a validation-hazard suppression variable that nothing
   reads, and `docs/status.md` still listing the 50-match load test as open (done in #293).
+- Added the [playtest runbook](docs/playtest.md) (WP-5.1): hosting, tokens/identity, firewall, bots and spectators, client join variables, ~100 ms RTT with `tc netem`, replay/results/frame-log collection and a feedback form.
+- Truth pass after the finish-plan work landed: test count 324 → 416 in the front-door docs,
+  finished work packages marked done with their PRs (finish plan §2a), and `docs/status.md`
+  and `AGENTS.md` no longer describe #276 work as pending.
+
 ### Planning
 - Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,
   performance targets, ADRs to write and art-production requirements.
+
+### Rendering and assets
+- **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
+- **GPU skinning (#288, ADR-0007):** the `.glb` loader reads `JOINTS_0`/`WEIGHTS_0`, the skin (≤ 64 joints, inverse bind matrices) and one animation clip under the same untrusted-input caps (fuzzed); `Renderer::register_skinned_mesh` draws skinned instances with `skinned.vert`, a per-frame bone SSBO (set 1 binding 1, default 16 × 64 joints) and a `{first_bone, joint_count}` push constant on the shared pipeline layout. The client poses heroes from facing/gait/render tick with a preallocated bone pool (no new wire fields; over-budget heroes draw static); `MOBA_NO_SKINNING=1`, a missing skin or a failed pipeline fall back to the static mesh or the procedural rig. Ships the generated `content/models/sentinel-skinned.glb` and `content/sentinel-skinned-pack.toml`, which names it for Blade and Guardian through the pack's `model` field.
+- **Networked animated golden and frame cost (#289):** `MOBA_CAPTURE_TICK` captures a networked frame at a pinned match tick, and a `MOBA_SERVER=local` server lock-steps to the client, so the frame is byte-repeatable. The HUD hides FPS, ping and packet counters in capture mode. `render-golden.yml` gains a second fingerprint, `tests/golden/render-network-fingerprint.rgb`, with skinned heroes. Also adds `MOBA_WINDOW_SIZE`, a network-mode `MOBA_WARMUP_TICKS`, and frame-log `cpu_*`/`render_*`/`extent`/`gpu` fields. `MOBA_CAMERA` is now read once. Fixes the UI vertex upload reading back from write-combined memory, which cost about 7 ms per frame with the networked HUD. RTX 5070 Ti at 1920×1080 with 10 skinned heroes: p95 4.192 ms (display-paced), against 8.3–8.5 ms before.
 - **Per-map visuals (#287, WP-3.3):** a map's `visuals` name resolves on each client to a
   bounded TOML descriptor, `<MOBA_ASSET_ROOT>/maps/<name>.toml` (`moba_assets::MapVisuals`:
   terrain tint, wall colour and height, an optional wall mesh and up to 32 props with optional
@@ -101,13 +113,9 @@ the semver check):
   No wire, hash, replay or logic change: only the visuals *name* is hashed and sent (#285);
   descriptors are client-local and cosmetic. The default and networked golden scenes are
   unchanged (no visuals name, no shipped `map-*` descriptor).
-- **Networked animated golden and frame cost (#289):** `MOBA_CAPTURE_TICK` captures a networked frame at a pinned match tick, and a `MOBA_SERVER=local` server lock-steps to the client, so the frame is byte-repeatable. The HUD hides FPS, ping and packet counters in capture mode. `render-golden.yml` gains a second fingerprint, `tests/golden/render-network-fingerprint.rgb`, with skinned heroes. Also adds `MOBA_WINDOW_SIZE`, a network-mode `MOBA_WARMUP_TICKS`, and frame-log `cpu_*`/`render_*`/`extent`/`gpu` fields. `MOBA_CAMERA` is now read once. Fixes the UI vertex upload reading back from write-combined memory, which cost about 7 ms per frame with the networked HUD. RTX 5070 Ti at 1920×1080 with 10 skinned heroes: p95 4.192 ms (display-paced), against 8.3–8.5 ms before.
-- **GPU skinning (#288, ADR-0007):** the `.glb` loader reads `JOINTS_0`/`WEIGHTS_0`, the skin (≤ 64 joints, inverse bind matrices) and one animation clip under the same untrusted-input caps (fuzzed); `Renderer::register_skinned_mesh` draws skinned instances with `skinned.vert`, a per-frame bone SSBO (set 1 binding 1, default 16 × 64 joints) and a `{first_bone, joint_count}` push constant on the shared pipeline layout. The client poses heroes from facing/gait/render tick with a preallocated bone pool (no new wire fields; over-budget heroes draw static); `MOBA_NO_SKINNING=1`, a missing skin or a failed pipeline fall back to the static mesh or the procedural rig. Ships the generated `content/models/sentinel-skinned.glb`.
-- **GPU skinning (#288, ADR-0007):** the `.glb` loader reads `JOINTS_0`/`WEIGHTS_0`, the skin (≤ 64 joints, inverse bind matrices) and one animation clip under the same untrusted-input caps (fuzzed); `Renderer::register_skinned_mesh` draws skinned instances with `skinned.vert`, a per-frame bone SSBO (set 1 binding 1, default 16 × 64 joints) and a `{first_bone, joint_count}` push constant on the shared pipeline layout. The client poses heroes from facing/gait/render tick with a preallocated bone pool (no new wire fields; over-budget heroes draw static); `MOBA_NO_SKINNING=1`, a missing skin or a failed pipeline fall back to the static mesh or the procedural rig. Ships the generated `content/models/sentinel-skinned.glb` and `content/sentinel-skinned-pack.toml`, which names it for Blade and Guardian through the pack's `model` field.
-- **Mesh loading (#286, ADR-0007):** bounded `.glb` loader (`moba-assets` feature `glb`, fuzzed), `Renderer::register_mesh` with per-mesh instanced draws (`UnitInstance.mesh`, `MeshId::CUBE` default), and client hero models from `MOBA_ASSET_ROOT`/`MOBA_HERO_MODELS` that fall back to the procedural rig on any failure; ships the generated `content/models/sentinel.glb`.
+
 ### Determinism and balance
 - Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.
-### Determinism and balance
 - `match-soak` now counts `unique_hashes` with `state_hash_normalized()`, and adds `--threads N` and a `balance:` line (draws, Wilson 95 % blue win rate over decided matches, resolution-tick percentiles). A 5,000-match, 60,000-tick sweep measured blue at 44.21 % (95 % CI 42.84–45.60 %), a red bias traced to the point-reflected wave formation (`docs/perf/0008-balance.md`, #290).
 - After the v8 fixes (below), the same sweep measures blue at **49.81 %** (95 % CI 48.42–51.20 %), so the bias is gone. `match-soak` now reports `cap_draws` and `same_tick_draws` separately (2 of 5,000 matches were same-tick draws) and `peak_units`. Peak units were 183 of `MAX_UNITS` 512, so wave starvation never occurs.
 
@@ -190,9 +198,6 @@ the semver check):
 - Split `crates/sim/src/sim.rs` (4,846 lines) into a `sim/` module directory (spawn, status,
   inputs, abilities, movement, combat, deaths, items, bots, vision, hashing, tests); pure move,
   no behaviour, API or state-hash change.
-
-### Documentation
-- Added the [playtest runbook](docs/playtest.md) (WP-5.1): hosting, tokens/identity, firewall, bots and spectators, client join variables, ~100 ms RTT with `tc netem`, replay/results/frame-log collection and a feedback form.
 
 ### CI
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.

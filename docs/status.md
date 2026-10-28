@@ -1,11 +1,14 @@
 # Engine status
 
-Last updated: **2026-10-21**. Workspace **0.4.0** preview; protocol **v40**; replay format **v5**;
+Last updated: **2026-10-28**. Workspace **0.4.0** preview; protocol **v40**; replay format **v5**;
 simulation logic **v8**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
 Two external-resource items remain open: real Windows/macOS GPU frame results (#9/#127) and
-crates.io publication enablement (#21). The 2026-10-19 audit remediation is complete; post-1.0 asset/skinning work is tracked in #276.
+crates.io publication enablement (#21). The 2026-10-19 audit remediation is complete, and every agent work package in the
+[finish plan](plans/finish-plan-2026-10-20.md) has landed (#297–#320), including the #276
+asset, skinning and mirror work. What is left needs people or hardware: the 10-client playtest,
+an external security review, real Windows/macOS GPU runs and crates.io ownership.
 
 ## Milestones
 
@@ -42,15 +45,15 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **324 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **416 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
 - Feature matrix (`moba-engine` no-default, `render`, all-features) and crate layering checks
   pass. `scripts/agent-verify.sh --full` runs these plus Loom/bench compile/soak/fuzz.
 - Deterministic cross-OS golden state hash: `0x8db35a0f5aab5190`.
-- Golden render workflow: 64×36 fingerprint on lavapipe with validation + sync validation;
-  latest rebaseline after the animated hero rig is green.
+- Golden render workflow: on lavapipe with validation + sync validation, the 64×36 default-scene
+  fingerprint and a networked fingerprint with skinned heroes at a pinned tick (#318) are green.
 - Deterministic wire fuzzer historical evidence: v11 **2,476,647,000** iterations clean and
   final v12 **2,384,035,000** clean. Current cargo-fuzz targets `wire`, `replay`, `content`
   run in the manual/nightly `fuzz` workflow; a 30 s-per-target run passed.
@@ -63,7 +66,7 @@ crates.io publication enablement (#21). The 2026-10-19 audit remediation is comp
   wave); snapshot build+encode allocates **0** in steady state.
 - Replay v5: round-trip, checkpoint, human-purchase, content-hash and unsupported-version
   tests pass; golden replay fixtures are checked in.
-- Content: all six `content/*.toml` packs validate; 1v1/ARAM packs replay deterministically;
+- Content: all eleven `content/*.toml` packs validate; 1v1/ARAM packs replay deterministically;
   signed-pack verify accepts valid signatures and rejects tampering/untrusted publishers.
 - Renderer: validation-required lavapipe capture passes with zero messages. Real NVIDIA
   RTX 5070 Ti at 1920×1080: p50 4.181 ms, p95 4.197 ms, p99 4.212 ms, max 4.538 ms (vsync off).
@@ -97,7 +100,8 @@ Second-audit plan: [`docs/plans/audit-remediation-2026-10-19.md`](plans/audit-re
 - **#21** — crates.io publication. Metadata, release artifacts and policy are ready; registry
   ownership plus `CARGO_REGISTRY_TOKEN` are required. `publish = false` remains intentional.
 - **#45** — extensibility roadmap map, not unfinished implementation work.
-- **#276** — post-1.0 asset-pipeline/GPU-skinning work and residual mirror/balance coverage.
+- **#276** — asset pipeline, GPU skinning and mirror/balance: done (#308, #309, #311, #314,
+  #316–#319). The epic and #286/#290 are still open on GitHub. Items have no asset references yet.
 - Multi-match flood isolation (#292) is application-layer only: a spoofed multi-source flood
   on one port can still starve new handshakes on that port (other matches are unaffected, see
   [perf/0010](perf/0010-multi-match.md#flood-isolation)); public servers still need a
