@@ -161,6 +161,25 @@ MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
 `MOBA_NO_SKINNING=1` draws the same model as a static mesh (stride bob only); a model without
 a skin is always static, and a missing model keeps the procedural rig.
 
+### Networked golden: skinned heroes at a pinned tick
+![Networked golden capture at tick 120](images/m3-network-skinned-golden.png)
+
+This is the frame behind the second render-golden fingerprint,
+`tests/golden/render-network-fingerprint.rgb` (WP-4.2, #289).
+- **Setup:** an in-process loopback server (`MOBA_SERVER=local`) with GPU-skinned heroes.
+- **Capture point:** `MOBA_CAPTURE_TICK=120`. The local server is lock-stepped to the client and
+  stops at tick 120, and interpolation and animation are pinned to that tick. The bots' heroes
+  walk (bottom of the frame) while the idle local hero stands in its rest pose at the centre.
+- **Capture mode:** the HUD leaves out the FPS, ping and packet counters.
+- **Repeatable:** two lavapipe runs at 1280×720 with validation and synchronization validation
+  required produced byte-identical PPMs, with zero validation messages.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 \
+MOBA_SMOKE_FRAMES=100000 MOBA_CAPTURE=/tmp/frame.ppm \
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
+```
+
 ### Per-map visuals
 ![Ember Crossing with its visuals descriptor](images/m8-map-visuals-ember.png)
 

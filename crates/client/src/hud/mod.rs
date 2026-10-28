@@ -19,7 +19,6 @@ pub(crate) use model::*;
 pub(crate) use status::*;
 
 use std::fmt::{self, Write as _};
-use std::time::Instant;
 
 use arrayvec::ArrayString;
 
