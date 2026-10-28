@@ -1221,6 +1221,7 @@ dependencies = [
  "criterion",
  "gltf",
  "moba-core",
+ "moba-test-support",
  "serde",
  "toml",
 ]

@@ -50,8 +50,10 @@ const LEG_NEG: u8 = 3;
 const LEG_POS: u8 = 4;
 const ARM_NEG: u8 = 5;
 const ARM_POS: u8 = 6;
+/// The cape: a three-joint spring chain hanging from the chest (ADR-0012).
+const CAPE: [u8; 3] = [7, 8, 9];
 /// `(name, parent, model-space bind position)` per joint.
-const JOINTS: [(&str, Option<u8>, V3); 7] = [
+const JOINTS: [(&str, Option<u8>, V3); 10] = [
     ("hips", None, [0.0, 1.05, 0.0]),
     ("chest", Some(HIPS), [0.0, 1.6, 0.0]),
     ("head", Some(CHEST), [0.0, 2.72, 0.0]),
@@ -59,6 +61,9 @@ const JOINTS: [(&str, Option<u8>, V3); 7] = [
     ("leg_r", Some(HIPS), [0.28, 1.1, 0.0]),
     ("arm_l", Some(CHEST), [-0.8, 2.4, 0.0]),
     ("arm_r", Some(CHEST), [0.8, 2.4, 0.0]),
+    ("cape_0", Some(CHEST), [0.0, 2.55, -0.47]),
+    ("cape_1", Some(CAPE[0]), [0.0, 2.1, -0.5]),
+    ("cape_2", Some(CAPE[1]), [0.0, 1.65, -0.53]),
 ];
 
 fn dot(a: V3, b: V3) -> f32 {
@@ -287,6 +292,19 @@ fn sentinel() -> Model {
     model
 }
 
+/// The skinned sentinel: the static sentinel's geometry (first, unchanged) plus a cape of
+/// three plates, each bound to one cape joint, hanging behind the shoulders.
+fn sentinel_skinned() -> Model {
+    let mut model = sentinel();
+    let bottoms = [2.1, 1.65, 1.2];
+    for (index, &joint) in CAPE.iter().enumerate() {
+        let (_, _, [_, top, z]) = JOINTS[usize::from(joint)];
+        model.part = Part::Joint(joint);
+        model.cuboid([-0.42, bottoms[index], z - 0.03], [0.42, top, z + 0.03]);
+    }
+    model
+}
+
 /// A crystal cluster prop about 3 m tall: one tall octagonal spire and two shorter ones.
 fn crystal() -> Model {
     let mut model = Model::default();
@@ -440,41 +458,152 @@ fn quat(axis: usize, s: f32) -> [f32; 4] {
     q
 }
 
-/// Key times of the walk cycle (seconds): contact, passing, contact, passing, loop.
-const WALK_TIMES: [f32; 5] = [0.0, 0.2, 0.4, 0.6, 0.8];
+/// Identity rotation key.
+const Q0: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// One animated joint property of the walk clip.
-struct WalkTrack {
+/// One animated joint property of a clip.
+struct ClipTrack {
     joint: u8,
     rotation: bool,
-    /// Rotation keys are `xyzw`, translation keys `xyz_`.
-    keys: [[f32; 4]; 5],
+    /// Rotation keys are `xyzw`, translation keys `xyz_`; one per clip time.
+    keys: Vec<[f32; 4]>,
 }
 
-/// The walk clip: legs and arms counter-swing, the chest twists, the hips bob.
-fn walk_tracks() -> [WalkTrack; 6] {
-    let swing = |joint: u8, axis: usize, s: f32| WalkTrack {
+/// One named clip: key times shared by all of its tracks.
+struct Clip {
+    name: &'static str,
+    times: Vec<f32>,
+    tracks: Vec<ClipTrack>,
+}
+
+fn rotate(joint: u8, keys: &[[f32; 4]]) -> ClipTrack {
+    ClipTrack {
         joint,
         rotation: true,
-        keys: [
-            quat(axis, s),
-            quat(axis, 0.0),
-            quat(axis, -s),
-            quat(axis, 0.0),
-            quat(axis, s),
-        ],
+        keys: keys.to_vec(),
+    }
+}
+
+/// Hip translation keys at these heights.
+fn hips_at(heights: &[f32]) -> ClipTrack {
+    ClipTrack {
+        joint: HIPS,
+        rotation: false,
+        keys: heights.iter().map(|&y| [0.0, y, 0.0, 0.0]).collect(),
+    }
+}
+
+/// The sample's clips (ADR-0012): idle, run (the WP-4.1 walk cycle), attack, three casts,
+/// death, recall and an additive hit reaction. Release frames (the descriptor's `release`)
+/// are noted per clip. The cape has no keys: it is a spring chain.
+#[allow(clippy::too_many_lines)] // One table of keyframes.
+fn clips() -> Vec<Clip> {
+    let swing = |joint: u8, axis: usize, s: f32| {
+        rotate(
+            joint,
+            &[
+                quat(axis, s),
+                quat(axis, 0.0),
+                quat(axis, -s),
+                quat(axis, 0.0),
+                quat(axis, s),
+            ],
+        )
     };
-    let (low, high) = ([0.0, 1.05, 0.0, 0.0], [0.0, 1.13, 0.0, 0.0]);
-    [
-        swing(LEG_NEG, 0, 0.3),
-        swing(LEG_POS, 0, -0.3),
-        swing(ARM_NEG, 0, -0.2),
-        swing(ARM_POS, 0, 0.2),
-        swing(CHEST, 1, 0.06),
-        WalkTrack {
-            joint: HIPS,
-            rotation: false,
-            keys: [low, high, low, high, low],
+    vec![
+        // A slow breath: chest and head nod, arms sway, hips settle.
+        Clip {
+            name: "idle",
+            times: vec![0.0, 0.8, 1.6],
+            tracks: vec![
+                rotate(CHEST, &[Q0, quat(0, 0.025), Q0]),
+                rotate(HEAD, &[Q0, quat(0, -0.03), Q0]),
+                rotate(ARM_NEG, &[Q0, quat(2, -0.03), Q0]),
+                rotate(ARM_POS, &[Q0, quat(2, 0.03), Q0]),
+                hips_at(&[1.05, 1.03, 1.05]),
+            ],
+        },
+        // Contact, passing, contact, passing, loop: legs and arms counter-swing, the chest
+        // twists, the hips bob. Unchanged from the WP-4.1 single-clip sample.
+        Clip {
+            name: "run",
+            times: vec![0.0, 0.2, 0.4, 0.6, 0.8],
+            tracks: vec![
+                swing(LEG_NEG, 0, 0.3),
+                swing(LEG_POS, 0, -0.3),
+                swing(ARM_NEG, 0, -0.2),
+                swing(ARM_POS, 0, 0.2),
+                swing(CHEST, 1, 0.06),
+                hips_at(&[1.05, 1.13, 1.05, 1.13, 1.05]),
+            ],
+        },
+        // Spear thrust: wind up back, thrust (release at 0.35 s), recover.
+        Clip {
+            name: "attack",
+            times: vec![0.0, 0.25, 0.35, 0.7],
+            tracks: vec![
+                rotate(ARM_POS, &[Q0, quat(0, 0.7), quat(0, -0.9), Q0]),
+                rotate(CHEST, &[Q0, quat(1, -0.15), quat(1, 0.2), Q0]),
+            ],
+        },
+        // Both arms raised to the sides (release at 0.3 s).
+        Clip {
+            name: "cast1",
+            times: vec![0.0, 0.3, 0.6, 0.9],
+            tracks: vec![
+                rotate(ARM_NEG, &[Q0, quat(2, -0.8), quat(2, -0.8), Q0]),
+                rotate(ARM_POS, &[Q0, quat(2, 0.8), quat(2, 0.8), Q0]),
+                rotate(CHEST, &[Q0, quat(0, -0.1), quat(0, -0.1), Q0]),
+            ],
+        },
+        // Shield bash forward (release at 0.2 s).
+        Clip {
+            name: "cast2",
+            times: vec![0.0, 0.2, 0.4, 0.7],
+            tracks: vec![
+                rotate(ARM_NEG, &[Q0, quat(0, -0.9), quat(0, -0.9), Q0]),
+                rotate(CHEST, &[Q0, quat(1, 0.2), quat(1, 0.2), Q0]),
+            ],
+        },
+        // Overhead slam: spear back over the head, down (release at 0.55 s), hips dip.
+        Clip {
+            name: "cast3",
+            times: vec![0.0, 0.4, 0.55, 1.0],
+            tracks: vec![
+                rotate(ARM_POS, &[Q0, quat(0, 2.0), quat(0, -0.6), Q0]),
+                hips_at(&[1.05, 1.05, 0.9, 1.05]),
+            ],
+        },
+        // Stagger, then fall onto the back and stay down.
+        Clip {
+            name: "death",
+            times: vec![0.0, 0.3, 0.8, 1.2],
+            tracks: vec![
+                rotate(HIPS, &[Q0, quat(0, -0.15), quat(0, -1.0), quat(0, -1.0)]),
+                rotate(ARM_NEG, &[Q0, quat(2, -0.2), quat(2, -0.5), quat(2, -0.5)]),
+                rotate(ARM_POS, &[Q0, quat(2, 0.2), quat(2, 0.5), quat(2, 0.5)]),
+                hips_at(&[1.05, 1.0, 0.5, 0.45]),
+            ],
+        },
+        // Recall: arms together in front, head bowed, a slow bob (loops).
+        Clip {
+            name: "recall",
+            times: vec![0.0, 0.5, 1.0, 1.5, 2.0],
+            tracks: vec![
+                rotate(ARM_NEG, &[quat(0, -0.5); 5]),
+                rotate(ARM_POS, &[quat(0, -0.5); 5]),
+                rotate(HEAD, &[quat(0, 0.15); 5]),
+                hips_at(&[1.05, 1.0, 1.05, 1.0, 1.05]),
+            ],
+        },
+        // Additive hit reaction: a short flinch back, relative to its first frame.
+        Clip {
+            name: "hit",
+            times: vec![0.0, 0.08, 0.3],
+            tracks: vec![
+                rotate(CHEST, &[Q0, quat(0, -0.18), Q0]),
+                rotate(HEAD, &[Q0, quat(0, -0.1), Q0]),
+            ],
         },
     ]
 }
@@ -513,8 +642,8 @@ fn f32_bytes<'a>(values: impl IntoIterator<Item = &'a f32>) -> Vec<u8> {
         .collect()
 }
 
-/// Serialises the model as a skinned, animated binary glTF 2.0 file: seven joints, the
-/// same geometry in bind pose and a looping 0.8 s walk clip.
+/// Serialises the model as a skinned, animated binary glTF 2.0 file: ten named joints (a
+/// three-joint cape among them), the geometry in bind pose and the nine clips of [`clips`].
 #[allow(clippy::too_many_lines)] // One linear GLB layout.
 fn encode_skinned_glb(model: &Model) -> Vec<u8> {
     const VERTEX: &str = r#","target":34962"#;
@@ -571,40 +700,50 @@ fn encode_skinned_glb(model: &Model) -> Vec<u8> {
             JOINTS.len()
         ),
     );
-    let times = chunks.accessor(
-        &f32_bytes(&WALK_TIMES),
-        "",
-        &format!(
-            r#""componentType":5126,"count":{},"type":"SCALAR","min":[{}],"max":[{}]"#,
-            WALK_TIMES.len(),
-            WALK_TIMES[0],
-            WALK_TIMES[WALK_TIMES.len() - 1]
-        ),
-    );
-    let mut samplers = Vec::new();
-    let mut channels = Vec::new();
-    for track in walk_tracks() {
-        let (kind, lanes, path) = if track.rotation {
-            ("VEC4", 4, "rotation")
-        } else {
-            ("VEC3", 3, "translation")
-        };
-        let values = f32_bytes(track.keys.iter().flat_map(|key| &key[..lanes]));
-        let output = chunks.accessor(
-            &values,
+    let mut animations = Vec::new();
+    for clip in clips() {
+        let times = chunks.accessor(
+            &f32_bytes(&clip.times),
             "",
             &format!(
-                r#""componentType":5126,"count":{},"type":"{kind}""#,
-                track.keys.len()
+                r#""componentType":5126,"count":{},"type":"SCALAR","min":[{}],"max":[{}]"#,
+                clip.times.len(),
+                clip.times[0],
+                clip.times[clip.times.len() - 1]
             ),
         );
-        channels.push(format!(
-            r#"{{"sampler":{},"target":{{"node":{},"path":"{path}"}}}}"#,
-            samplers.len(),
-            track.joint + 1
-        ));
-        samplers.push(format!(
-            r#"{{"input":{times},"output":{output},"interpolation":"LINEAR"}}"#
+        let mut samplers = Vec::new();
+        let mut channels = Vec::new();
+        for track in &clip.tracks {
+            assert_eq!(track.keys.len(), clip.times.len(), "{} keys", clip.name);
+            let (kind, lanes, path) = if track.rotation {
+                ("VEC4", 4, "rotation")
+            } else {
+                ("VEC3", 3, "translation")
+            };
+            let values = f32_bytes(track.keys.iter().flat_map(|key| &key[..lanes]));
+            let output = chunks.accessor(
+                &values,
+                "",
+                &format!(
+                    r#""componentType":5126,"count":{},"type":"{kind}""#,
+                    track.keys.len()
+                ),
+            );
+            channels.push(format!(
+                r#"{{"sampler":{},"target":{{"node":{},"path":"{path}"}}}}"#,
+                samplers.len(),
+                track.joint + 1
+            ));
+            samplers.push(format!(
+                r#"{{"input":{times},"output":{output},"interpolation":"LINEAR"}}"#
+            ));
+        }
+        animations.push(format!(
+            r#"{{"name":"{}","samplers":[{}],"channels":[{}]}}"#,
+            clip.name,
+            samplers.join(","),
+            channels.join(",")
         ));
     }
     let index_bytes: Vec<u8> = model
@@ -655,7 +794,7 @@ fn encode_skinned_glb(model: &Model) -> Vec<u8> {
             r#""meshes":[{{"name":"sentinel","primitives":[{{"attributes":"#,
             r#"{{"POSITION":{},"NORMAL":{},"JOINTS_0":{},"WEIGHTS_0":{}}},"indices":{}}}]}}],"#,
             r#""skins":[{{"name":"sentinel","skeleton":1,"joints":[{}],"inverseBindMatrices":{}}}],"#,
-            r#""animations":[{{"name":"walk","samplers":[{}],"channels":[{}]}}],"#,
+            r#""animations":[{}],"#,
             r#""buffers":[{{"byteLength":{}}}],"bufferViews":[{}],"accessors":[{}]}}"#
         ),
         nodes.join(","),
@@ -666,8 +805,7 @@ fn encode_skinned_glb(model: &Model) -> Vec<u8> {
         indices,
         joint_nodes.join(","),
         inverse_bind,
-        samplers.join(","),
-        channels.join(","),
+        animations.join(","),
         chunks.bin.len(),
         chunks.views.join(","),
         chunks.accessors.join(","),
@@ -728,7 +866,8 @@ fn main() {
     );
     let model = sentinel();
     write(&output, &encode_glb(&model, "sentinel"), &model);
-    write(&skinned_output, &encode_skinned_glb(&model), &model);
+    let skinned = sentinel_skinned();
+    write(&skinned_output, &encode_skinned_glb(&skinned), &skinned);
     let crystal = crystal();
     write(&crystal_output, &encode_glb(&crystal, "crystal"), &crystal);
     let rampart = rampart();
@@ -783,7 +922,7 @@ mod tests {
 
     #[test]
     fn committed_skinned_model_matches_the_generator_and_animates() {
-        let generated = super::encode_skinned_glb(&super::sentinel());
+        let generated = super::encode_skinned_glb(&super::sentinel_skinned());
         let committed = include_bytes!("../../../../content/models/sentinel-skinned.glb");
         assert!(
             generated == committed,
@@ -792,15 +931,30 @@ mod tests {
         let mesh = moba_assets::load_glb(&generated).expect("skinned model loads");
         let static_mesh = moba_assets::load_glb(&super::encode_glb(&super::sentinel(), "sentinel"))
             .expect("static model loads");
-        // Same bind-pose geometry as the static sample.
-        assert_eq!(mesh.positions(), static_mesh.positions());
-        assert_eq!(mesh.indices(), static_mesh.indices());
+        // The static sample's bind-pose geometry first, then the cape.
+        let body = static_mesh.vertex_count();
+        assert_eq!(&mesh.positions()[..body], static_mesh.positions());
+        assert_eq!(
+            &mesh.indices()[..static_mesh.indices().len()],
+            static_mesh.indices()
+        );
+        assert!(mesh.vertex_count() > body);
         let skin = mesh.skin().expect("skin");
         let skeleton = skin.skeleton();
         assert_eq!(skeleton.joint_count(), super::JOINTS.len());
-        let clip = skeleton.clip().expect("walk clip");
-        assert!((clip.duration() - 0.8).abs() < 1e-6);
-        assert_eq!(clip.tracks().len(), 6);
+        let names: Vec<_> = skeleton.clips().iter().map(|clip| clip.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "idle", "run", "attack", "cast1", "cast2", "cast3", "death", "recall", "hit"
+            ]
+            .map(Some)
+        );
+        assert_eq!(skeleton.joint_index("cape_2"), Some(9));
+        assert_eq!(skeleton.locomotion_clip(), Some(1));
+        let run = &skeleton.clips()[1];
+        assert!((run.duration() - 0.8).abs() < 1e-6);
+        assert_eq!(run.tracks().len(), 6);
         // Some torso vertices blend two joints.
         assert!(
             skin.weights()

@@ -1,8 +1,9 @@
-//! Skeletons, per-vertex skin weights and one animation clip for GPU skinning (WP-4.1).
+//! Skeletons, per-vertex skin weights and animation clips for GPU skinning (WP-4.1, ADR-0012).
 //!
 //! [`MeshSkin`] is the optional skinning half of a [`MeshData`](crate::MeshData): one
 //! `JOINTS_0`/`WEIGHTS_0` pair per vertex plus the [`Skeleton`] those joints index. The
-//! skeleton carries its rest pose, inverse bind matrices and at most one [`AnimationClip`].
+//! skeleton carries its rest pose, optional joint names, inverse bind matrices and up to
+//! [`MAX_CLIPS`] named [`AnimationClip`]s (`idle`, `run`, `attack`, ...).
 //!
 //! Like `MeshData`, every type here is built through a validating constructor and has private
 //! fields, so the renderer and the client can rely on these invariants without re-checking:
@@ -14,10 +15,13 @@
 //!   either all zero (the vertex stays in bind space) or sum to exactly 255;
 //! - clip tracks target existing joints, have 1..=[`MAX_TRACK_KEYS`] keys with finite,
 //!   non-decreasing times and finite values, and the clip has at most [`MAX_CLIP_KEYS`] keys
-//!   in total and lasts at most [`MAX_CLIP_SECONDS`].
+//!   in total and lasts at most [`MAX_CLIP_SECONDS`];
+//! - at most [`MAX_CLIPS`] clips and [`MAX_SKELETON_KEYS`] keys across all of them; clip and
+//!   joint names are 1..=[`MAX_ANIMATION_NAME`] of `[A-Za-z0-9_-]` (see [`valid_animation_name`]).
 //!
-//! [`Skeleton::sample`] is the per-frame entry point: it writes one [`JointMatrix`] per joint
-//! into a caller-provided slice using only stack scratch, so it never allocates.
+//! [`Skeleton::sample`] is the legacy single-clip entry point (rest pose blended to the
+//! locomotion clip); [`Skeleton::sample_clip`] and [`crate::Pose`] are the building blocks of
+//! the animation runtime ([`crate::Animator`]). None of them allocate.
 
 use moba_core::math::{Mat4, Quat, Vec3, Vec4};
 
@@ -29,6 +33,22 @@ pub const MAX_TRACK_KEYS: usize = 4_096;
 pub const MAX_CLIP_KEYS: usize = 65_536;
 /// Longest accepted clip, in seconds.
 pub const MAX_CLIP_SECONDS: f32 = 600.0;
+/// Most clips one skeleton may carry.
+pub const MAX_CLIPS: usize = 32;
+/// Most keyframes across every clip of one skeleton (about 5 MiB of key data).
+pub const MAX_SKELETON_KEYS: usize = 262_144;
+/// Longest clip or joint name, in bytes.
+pub const MAX_ANIMATION_NAME: usize = 32;
+
+/// `true` for 1..=[`MAX_ANIMATION_NAME`] ASCII letters, digits, `_` or `-`.
+#[must_use]
+pub fn valid_animation_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ANIMATION_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
 
 /// One joint's skinning matrix: the first three rows of a row-major affine 4×4 matrix.
 ///
@@ -54,8 +74,11 @@ pub enum SkinError {
     NonFinite,
     /// A track is empty, too long, targets a missing joint or has decreasing times.
     BadTrack,
-    /// The clip has too many keys in total or lasts too long.
+    /// The clip has too many keys in total or lasts too long, or the skeleton has more than
+    /// [`MAX_CLIPS`] clips or [`MAX_SKELETON_KEYS`] keys.
     ClipTooLarge,
+    /// A clip or joint name is not 1..=32 of `[A-Za-z0-9_-]`.
+    BadName,
 }
 
 impl core::fmt::Display for SkinError {
@@ -68,7 +91,8 @@ impl core::fmt::Display for SkinError {
             Self::BadWeights => "vertex weights must be all zero or sum to 255",
             Self::NonFinite => "non-finite or degenerate skin data",
             Self::BadTrack => "invalid animation track",
-            Self::ClipTooLarge => "animation clip exceeds its key or duration caps",
+            Self::ClipTooLarge => "animation clips exceed their count, key or duration caps",
+            Self::BadName => "clip and joint names must be 1-32 of [A-Za-z0-9_-]",
         };
         f.write_str(text)
     }
@@ -95,11 +119,13 @@ impl JointTransform {
         scale: Vec3::ONE,
     };
 
-    fn is_finite(&self) -> bool {
+    pub(crate) fn is_finite(&self) -> bool {
         self.translation.is_finite() && self.rotation.is_finite() && self.scale.is_finite()
     }
 
-    fn matrix(&self) -> Mat4 {
+    /// The local matrix `T * R * S`.
+    #[must_use]
+    pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 }
@@ -202,8 +228,14 @@ impl Track {
         self.times.is_empty()
     }
 
+    /// The animated property.
+    #[must_use]
+    pub fn path(&self) -> TrackPath {
+        self.path
+    }
+
     /// Samples the track at `time`, clamping outside the key range. Never allocates.
-    fn sample(&self, time: f32) -> Vec4 {
+    pub(crate) fn sample(&self, time: f32) -> Vec4 {
         let next = self.times.partition_point(|&key| key <= time);
         let last = self.values.len() - 1;
         if next == 0 {
@@ -235,11 +267,12 @@ impl Track {
     }
 }
 
-/// One looping animation clip.
+/// One animation clip, optionally named (`idle`, `run`, `attack`, ...).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationClip {
     duration: f32,
     tracks: Vec<Track>,
+    name: Option<Box<str>>,
 }
 
 impl AnimationClip {
@@ -257,7 +290,36 @@ impl AnimationClip {
         if keys > MAX_CLIP_KEYS || duration > MAX_CLIP_SECONDS {
             return Err(SkinError::ClipTooLarge);
         }
-        Ok(Self { duration, tracks })
+        Ok(Self {
+            duration,
+            tracks,
+            name: None,
+        })
+    }
+
+    /// Returns the clip with `name`.
+    ///
+    /// # Errors
+    /// [`SkinError::BadName`] unless the name is 1..=[`MAX_ANIMATION_NAME`] of
+    /// `[A-Za-z0-9_-]`.
+    pub fn with_name(mut self, name: &str) -> Result<Self, SkinError> {
+        if !valid_animation_name(name) {
+            return Err(SkinError::BadName);
+        }
+        self.name = Some(name.into());
+        Ok(self)
+    }
+
+    /// The clip's name, if it has a valid one.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Total keys across the clip's tracks.
+    #[must_use]
+    pub fn key_count(&self) -> usize {
+        self.tracks.iter().map(Track::len).sum()
     }
 
     /// Length in seconds (the latest key time; `0` for a single-pose clip).
@@ -282,7 +344,7 @@ impl AnimationClip {
     }
 }
 
-/// A joint hierarchy with its rest pose, inverse bind matrices and optional clip.
+/// A joint hierarchy with its rest pose, inverse bind matrices, joint names and clips.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Skeleton {
     parents: Vec<Option<u8>>,
@@ -290,7 +352,8 @@ pub struct Skeleton {
     rest: Vec<JointTransform>,
     base: Vec<Mat4>,
     inverse_bind: Vec<Mat4>,
-    clip: Option<AnimationClip>,
+    clips: Vec<AnimationClip>,
+    names: Vec<Option<Box<str>>>,
 }
 
 impl Skeleton {
@@ -300,7 +363,8 @@ impl Skeleton {
     /// - `rest[j]` is the joint's local transform when no clip drives it;
     /// - `base[j]` is the static transform above a root joint (the non-joint ancestors in
     ///   the source file); it is ignored for joints with a parent;
-    /// - `inverse_bind[j]` maps mesh (bind) space into joint `j`'s space.
+    /// - `inverse_bind[j]` maps mesh (bind) space into joint `j`'s space;
+    /// - `clip` is the single clip of a WP-4.1 file; [`Skeleton::with_clips`] sets several.
     ///
     /// # Errors
     /// The first violated invariant from the module docs.
@@ -335,19 +399,59 @@ impl Skeleton {
             joint.rotation = joint.rotation.normalize();
         }
         let order = evaluation_order(&parents).ok_or(SkinError::BadHierarchy)?;
-        if let Some(clip) = &clip
-            && clip.tracks.iter().any(|track| track.joint() >= count)
-        {
-            return Err(SkinError::BadTrack);
-        }
-        Ok(Self {
+        let skeleton = Self {
             parents,
             order,
             rest,
             base,
             inverse_bind,
-            clip,
-        })
+            clips: Vec::new(),
+            names: vec![None; count],
+        };
+        skeleton.with_clips(clip.into_iter().collect())
+    }
+
+    /// Returns the skeleton with `clips` replacing its clips (order is kept).
+    ///
+    /// # Errors
+    /// [`SkinError::ClipTooLarge`] past [`MAX_CLIPS`] clips or [`MAX_SKELETON_KEYS`] keys;
+    /// [`SkinError::BadTrack`] if a track targets a missing joint.
+    pub fn with_clips(mut self, clips: Vec<AnimationClip>) -> Result<Self, SkinError> {
+        if clips.len() > MAX_CLIPS
+            || clips.iter().map(AnimationClip::key_count).sum::<usize>() > MAX_SKELETON_KEYS
+        {
+            return Err(SkinError::ClipTooLarge);
+        }
+        let count = self.joint_count();
+        if clips
+            .iter()
+            .flat_map(|clip| &clip.tracks)
+            .any(|track| track.joint() >= count)
+        {
+            return Err(SkinError::BadTrack);
+        }
+        self.clips = clips;
+        Ok(self)
+    }
+
+    /// Returns the skeleton with one optional name per joint.
+    ///
+    /// # Errors
+    /// [`SkinError::LengthMismatch`] unless there is one entry per joint;
+    /// [`SkinError::BadName`] for a name that is not 1..=32 of `[A-Za-z0-9_-]`.
+    pub fn with_joint_names(mut self, names: Vec<Option<String>>) -> Result<Self, SkinError> {
+        if names.len() != self.joint_count() {
+            return Err(SkinError::LengthMismatch);
+        }
+        let mut checked = Vec::with_capacity(names.len());
+        for name in names {
+            match name {
+                Some(name) if !valid_animation_name(&name) => return Err(SkinError::BadName),
+                name => checked.push(name.map(String::into_boxed_str)),
+            }
+        }
+        self.names = checked;
+        Ok(self)
     }
 
     /// Number of joints (1..=[`MAX_JOINTS`]).
@@ -356,10 +460,34 @@ impl Skeleton {
         self.parents.len()
     }
 
-    /// The clip, if the file had one that drives this skeleton.
+    /// The first clip, if the file had one that drives this skeleton.
     #[must_use]
     pub fn clip(&self) -> Option<&AnimationClip> {
-        self.clip.as_ref()
+        self.clips.first()
+    }
+
+    /// Every clip, in file order.
+    #[must_use]
+    pub fn clips(&self) -> &[AnimationClip] {
+        &self.clips
+    }
+
+    /// Index of the first clip called `name` (ASCII case-insensitive). Never allocates.
+    #[must_use]
+    pub fn clip_index(&self, name: &str) -> Option<usize> {
+        self.clips.iter().position(|clip| {
+            clip.name()
+                .is_some_and(|clip| clip.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// The clip [`Skeleton::sample`] plays: the first one named `run` or `walk`, else the
+    /// first clip (a WP-4.1 single-clip file).
+    #[must_use]
+    pub fn locomotion_clip(&self) -> Option<usize> {
+        self.clip_index("run")
+            .or_else(|| self.clip_index("walk"))
+            .or_else(|| (!self.clips.is_empty()).then_some(0))
     }
 
     /// Parent of each joint.
@@ -368,10 +496,49 @@ impl Skeleton {
         &self.parents
     }
 
+    /// Joints in parents-first order.
+    #[must_use]
+    pub fn evaluation_order(&self) -> &[u8] {
+        &self.order
+    }
+
+    /// Rest (local) transform of each joint.
+    #[must_use]
+    pub fn rest(&self) -> &[JointTransform] {
+        &self.rest
+    }
+
+    /// The name of joint `joint`, if it has a valid one.
+    #[must_use]
+    pub fn joint_name(&self, joint: usize) -> Option<&str> {
+        self.names.get(joint).and_then(Option::as_deref)
+    }
+
+    /// Index of the first joint called `name` (ASCII case-insensitive). Never allocates.
+    #[must_use]
+    pub fn joint_index(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|joint| {
+            joint
+                .as_deref()
+                .is_some_and(|joint| joint.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// Static transform above a root joint (identity for joints with a parent).
+    pub(crate) fn base(&self, joint: usize) -> Mat4 {
+        self.base[joint]
+    }
+
+    /// Inverse bind matrix of `joint`.
+    pub(crate) fn inverse_bind(&self, joint: usize) -> Mat4 {
+        self.inverse_bind[joint]
+    }
+
     /// Writes one skinning matrix per joint into `out[..joint_count]`.
     ///
-    /// The pose blends from the rest pose (`blend = 0`) to the clip sampled at `time`
-    /// seconds, looped (`blend = 1`); without a clip it is the rest pose. Each matrix is
+    /// The pose blends from the rest pose (`blend = 0`) to the
+    /// [locomotion clip](Skeleton::locomotion_clip) sampled at `time` seconds, looped
+    /// (`blend = 1`); without a clip it is the rest pose. Each matrix is
     /// `global(joint) * inverse_bind(joint)`, so the bind pose maps every vertex to itself.
     ///
     /// Returns `false` (and writes nothing) if `out` is shorter than the joint count. Uses
@@ -388,7 +555,11 @@ impl Skeleton {
         };
         let mut locals = [JointTransform::IDENTITY; MAX_JOINTS];
         locals[..count].copy_from_slice(&self.rest);
-        if let Some(clip) = self.clip.as_ref().filter(|_| blend > 0.0) {
+        let clip = self
+            .locomotion_clip()
+            .and_then(|clip| self.clips.get(clip))
+            .filter(|_| blend > 0.0);
+        if let Some(clip) = clip {
             let time = clip.wrap(time);
             for track in &clip.tracks {
                 let joint = track.joint();

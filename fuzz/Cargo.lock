@@ -393,6 +393,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "moba-assets",
+ "moba-core",
  "moba-game",
  "moba-net",
  "moba-sim",

@@ -169,12 +169,17 @@ R1a (ADR-0008) added `QualityTier`, `GpuTimings`/`PassTiming` (`Renderer::gpu_ti
 
 **`moba-assets`** — `AssetManifest`/`AssetEntry`, the `.glb` loader (`load_glb`,
 `load_glb_file`), `MeshData`, skinning (`Skeleton`, `AnimationClip`, `Track`, `MeshSkin`,
-`JointTransform`) and map visuals (`MapVisuals`, `MapProp`).
+`JointTransform`), map visuals (`MapVisuals`, `MapProp`) and the animation runtime of
+ADR-0012 (`Pose`, `BoneMask`, `BlendSpace1d`, `AnimationSet`, `AnimationGraph`, `Animator`,
+`AnimationScratch`, `StateId`, `SocketId`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,
   `AssetList`, `MeshError`, `GlbError`, `SkinError`, `MapVisualsError`, `TrackPath`,
-  `Interpolation`.
+  `Interpolation`, `AnimationSetError`, `AnimationEvent`, `PlayMode`, `Layer`, `ClipWrap`,
+  `BlendSpaceError`; struct `AnimatorReport` (read-only). The other animation types have
+  private fields and constructors (`Pose::rest`, `BlendSpace1d::new`, `AnimationSet::parse`,
+  `AnimationGraph::bind`, `Animator::new`).
 - `#[non_exhaustive]` structs: `AssetManifest`, `AssetEntry` (new `AssetEntry::new` +
   `with_fallback`), `AssetFileIssue`, `MapVisuals`, `MapProp`.
 - Exhaustive by design: `JointTransform` (translation, rotation, scale).

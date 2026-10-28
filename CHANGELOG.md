@@ -68,7 +68,9 @@ the semver check):
     (new `AssetEntry::new(name, path)` + `with_fallback`). Types added since v0.4.0 are
     `#[non_exhaustive]` from the start: `AssetFileProblem`, `AssetList`, `AssetFileIssue`,
     `MeshError`, `GlbError`, `SkinError`, `MapVisualsError`, `TrackPath`, `Interpolation`,
-    `MapVisuals`, `MapProp`.
+    `MapVisuals`, `MapProp`, and the animation runtime's `AnimationSetError`,
+    `AnimationEvent`, `AnimatorReport`, `PlayMode`, `Layer`, `ClipWrap` and `BlendSpaceError`
+    (ADR-0012). `Skeleton::sample` now prefers a clip named `run` or `walk` over the first.
 - No breaking change in `moba-core`, `moba-ecs`, `moba-jobs`, `moba-nav` or `moba-engine`.
 
 ### Security
@@ -144,6 +146,27 @@ the semver check):
   No wire, hash, replay or logic change: only the visuals *name* is hashed and sent (#285);
   descriptors are client-local and cosmetic. The default and networked golden scenes are
   unchanged (no visuals name, no shipped `map-*` descriptor).
+- **Animation runtime (R4a, ADR-0012):** the `.glb` loader keeps every animation as a named
+  clip (≤ 32 clips, ≤ 262,144 keys per skeleton, joint names; `gltf`'s `names` feature, no new
+  dependency; the glb fuzz target samples every clip and drives the animator). New in
+  `moba-assets`, pure CPU and allocation-free: `Pose`, `BoneMask`, `Skeleton::sample_clip`
+  (loop/clamp; linear, slerp or step keys), `Pose::blend` (crossfade, shortest-path nlerp,
+  optional mask) and `Pose::add` (additive layers), `BlendSpace1d`, and a content-defined state
+  machine: the bounded client-local descriptor `<MOBA_ASSET_ROOT>/animations/<model>.toml`
+  (`AnimationSet`, bound to a skeleton as `AnimationGraph`) and the per-unit `Animator`
+  (release-aligned triggers on an absolute clock, crossfades, upper-body actions while moving,
+  additive hit reactions, death hold/respawn, fixed-step spring bones, sockets with
+  `Animator::socket_transform`). The network client drives one animator per hero from the
+  interpolated speed, `EVENT_CAST` (slot or catalogue ability name), `EVENT_UNIT_DIED`/the dead
+  flag, health drops (hit reactions) and inferred basic attacks (the wire has no attack event; documented gap), draws dead
+  heroes while their death clip plays, and reduces far heroes' update rate
+  (`MOBA_ANIM_LOD=off|<near>,<far>`, default `80,140`). A missing or invalid set keeps the
+  WP-4.1 pose, logged once; `MOBA_NO_ANIMATION_SETS=1` is the off switch. `Skeleton::sample`
+  now plays the clip named `run` or `walk` (else the first, as before). The regenerated
+  `content/models/sentinel-skinned.glb` has 10 joints (a 3-joint spring cape) and idle, run,
+  attack, cast1–3, death, recall and hit clips, with `content/animations/sentinel-skinned.toml`.
+  200 animated units cost 0.12 ms of CPU per frame (`docs/perf/0011-animation-runtime.md`). No
+  wire, hash, replay or logic change; the networked golden still matches (mean diff 0.014).
 
 ### Determinism and balance
 - Added `crates/sim/tests/mirror.rs`, a side-swap tolerance mirror (WP-2.1, #290): five scripted 1v1 duels run on `seed` and, x-mirrored with slots swapped, on `seed ^ 1`; per tick, hero positions match within 2,048 ULPs and health, mana, cooldowns, xp, gold, score and slot-keyed events match exactly.

@@ -1,0 +1,104 @@
+# Animation set for content/models/sentinel-skinned.glb (ADR-0012).
+#
+# Client-local and cosmetic: never hashed, signed or sent on the wire. A missing or invalid
+# file leaves the model on the WP-4.1 pose (rest pose blended to the `run` clip by gait).
+# Format: docs/content-authoring.md#animation-sets
+
+# Upper-body actions play over the run cycle once the unit moves this fast (m/s).
+move_speed = 1.5
+# The chest and everything above it is the upper body (casting while running).
+upper_body = "chest"
+
+# Locomotion blend space: idle at rest, run at full weight from 4 m/s.
+[[locomotion]]
+clip = "idle"
+speed = 0.0
+
+[[locomotion]]
+clip = "run"
+speed = 4.0
+
+[[states]]
+name = "attack"
+clip = "attack"
+layer = "upper"
+fade_in = 0.06
+fade_out = 0.15
+release = 0.35          # the thrust: lines up with the hit
+interrupt_on_move = true
+
+[[states]]
+name = "cast1"
+clip = "cast1"
+layer = "upper"
+fade_in = 0.08
+fade_out = 0.2
+release = 0.3
+
+[[states]]
+name = "cast2"
+clip = "cast2"
+layer = "upper"
+fade_in = 0.06
+fade_out = 0.2
+release = 0.2
+
+[[states]]
+name = "cast3"
+clip = "cast3"
+layer = "full"
+fade_in = 0.08
+fade_out = 0.25
+release = 0.55
+
+[[states]]
+name = "death"
+clip = "death"
+mode = "hold"
+fade_in = 0.1
+
+[[states]]
+name = "recall"
+clip = "recall"
+mode = "loop"
+fade_in = 0.3
+fade_out = 0.2
+interrupt_on_move = true
+
+[[states]]
+name = "hit"
+clip = "hit"
+layer = "additive"
+fade_in = 0.02
+fade_out = 0.1
+
+[triggers]
+attack = "attack"
+casts = ["cast1", "cast2", "cast3"]   # Q, W, E
+death = "death"
+death_linger = 1.5
+recall = "recall"
+hit = "hit"
+
+# The cape swings behind the chest.
+[[springs]]
+joints = ["cape_0", "cape_1", "cape_2"]
+stiffness = 0.25
+damping = 0.2
+gravity = 9.81
+
+# Attach points for weapon trails and VFX (R5).
+[[sockets]]
+name = "spear_tip"
+joint = "arm_r"
+offset = [0.09, 1.3, 0.21]
+
+[[sockets]]
+name = "shield"
+joint = "arm_l"
+offset = [0.05, -0.65, 0.47]
+
+[[sockets]]
+name = "head"
+joint = "head"
+offset = [0.0, 0.6, 0.0]

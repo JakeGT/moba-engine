@@ -108,9 +108,11 @@ Descriptors are plain per-pass sets, and materials will get one set each
 ([ADR-0009](adr/0009-descriptor-model.md)). The scene pass draws:
 
 - terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes
-  use a client-local `.glb` model when one is configured (GPU-skinned with a walk clip when
-  the file has a skin: a per-frame bone SSBO plus a push-constant bone range, ADR-0007) and
-  otherwise a deterministic multi-part animated rig; minions/structures use instanced cubes;
+  use a client-local `.glb` model when one is configured (GPU-skinned when the file has a
+  skin: a per-frame bone SSBO plus a push-constant bone range, ADR-0007; posed on the CPU by
+  the animation runtime of ADR-0012 when the model has an animation set, else by its run clip
+  and gait) and otherwise a deterministic multi-part animated rig; minions/structures use
+  instanced cubes;
 - up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
   darkens unseen ground.
 

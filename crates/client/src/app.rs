@@ -17,8 +17,11 @@
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
 //! - `MOBA_ASSET_ROOT=<dir>` (default `content`): heroes whose catalogue names a `model`
 //!   draw `<dir>/models/<model>.glb`; `MOBA_HERO_MODELS=<hero=model,...>` overrides that per
-//!   hero (dev only). Any failure falls back to the rig. A model with a skin is GPU-skinned
-//!   (walk clip driven by gait); `MOBA_NO_SKINNING=1` draws it static instead.
+//!   hero (dev only). Any failure falls back to the rig. A model with a skin is GPU-skinned;
+//!   with `<dir>/animations/<model>.toml` (ADR-0012) the network view animates it from
+//!   snapshots and presentation events (locomotion, attacks, casts, death, springs), else its
+//!   run clip follows gait. `MOBA_NO_SKINNING=1` draws it static, `MOBA_NO_ANIMATION_SETS=1`
+//!   ignores animation sets and `MOBA_ANIM_LOD=off|<near>,<far>` sets the animation LOD.
 //!   The map's visuals name resolves to the descriptor `<dir>/maps/<name>.toml` (terrain
 //!   tint, walls, props; #287), falling back to the built-in theme.
 //! - `MOBA_CONTENT=<pack.toml>` loads a content pack for the local preview and for the
@@ -101,6 +104,8 @@ struct ClientApp {
     map_visuals: map_visuals::MapLibrary,
     map_capture: Option<map_visuals::SwitchCapture>,
     bones: skinning::BonePool,
+    /// Per-hero animators for the network view (ADR-0012).
+    animation: animation::AnimationDriver,
     ui: UiDrawList,
     scoreboard_visible: bool,
     shop_visible: bool,
@@ -192,6 +197,7 @@ impl ClientApp {
             map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env()),
             map_capture: map_visuals::SwitchCapture::from_env(),
             bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
+            animation: animation::AnimationDriver::new(animation::AnimLod::from_env(), 30),
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
@@ -239,6 +245,10 @@ impl ClientApp {
                     let prediction = PredictionState::new(speed);
                     let interpolator =
                         Interpolator::new(SNAPSHOT_DELAY_TICKS, f32::from(client.tick_rate()));
+                    app.animation = animation::AnimationDriver::new(
+                        animation::AnimLod::from_env(),
+                        client.tick_rate(),
+                    );
                     app.network = Some(NetworkView {
                         client,
                         prediction,
@@ -453,6 +463,7 @@ impl App for ClientApp {
                 map_visuals,
                 map_capture,
                 bones,
+                animation,
                 ui,
                 scoreboard_visible,
                 shop_visible,
@@ -480,7 +491,36 @@ impl App for ClientApp {
                                 break;
                             }
                             ClientEvent::Connected { slot } => network.own_slot = slot,
-                            ClientEvent::GameEvent(event) => network.handle_game_event(event),
+                            ClientEvent::GameEvent(event) => {
+                                animation.queue_event(&event);
+                                network.handle_game_event(event);
+                            }
+                            // The events above belong to this snapshot: stamp them with its
+                            // tick for the animators.
+                            ClientEvent::Snapshot { tick, .. } => {
+                                let client = &network.client;
+                                let pick = |net_id: u16| {
+                                    client.entity(net_id).map(|entity| entity.hero_pick)
+                                };
+                                animation.flush_events(
+                                    tick,
+                                    |net_id| {
+                                        pick(net_id).and_then(|hero| {
+                                            animated_rig(models, models.hero(usize::from(hero)))
+                                        })
+                                    },
+                                    |net_id, slot| {
+                                        pick(net_id).and_then(|hero| {
+                                            animation::ability_name(
+                                                client.heroes(),
+                                                client.abilities(),
+                                                hero,
+                                                slot,
+                                            )
+                                        })
+                                    },
+                                );
+                            }
                             ClientEvent::ContentUpdated { .. } => {
                                 let hero = usize::from(network.client.hero_pick())
                                     % network.client.heroes().len().max(1);
@@ -500,6 +540,7 @@ impl App for ClientApp {
                                 network.last_snapshot_seq = 0;
                                 network.projectiles.clear();
                                 network.kill_feed.clear();
+                                animation.clear();
                                 // Content reload or map rotation: rebind the map visuals and
                                 // hero models (cached, so only new names touch the disk or
                                 // the GPU).
@@ -543,6 +584,7 @@ impl App for ClientApp {
                         if snapshot.tick < network.last_tick {
                             // Rematch: server restarted at tick zero with fresh net ids.
                             network.interpolator.clear();
+                            animation.clear();
                             network.own_net_id = None;
                             network.prediction.set_target(None);
                             network.client.clear_pending_input();
@@ -554,6 +596,12 @@ impl App for ClientApp {
                                 .store(snapshot.tick, std::sync::atomic::Ordering::Relaxed);
                         }
                         network.interpolator.push(snapshot.clone());
+                        let client = &network.client;
+                        animation.on_snapshot(
+                            &snapshot,
+                            |hero| animated_rig(models, models.hero(usize::from(hero))),
+                            |hero| client.heroes().get(usize::from(hero)),
+                        );
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
                             entity.hero_slot == network.own_slot
                                 && entity.team == network.client.team().index() as u8
@@ -590,7 +638,28 @@ impl App for ClientApp {
                             network.prediction.step();
                         }
                     }
-                    rebuild_network_units(network, models, map_visuals, units, bones);
+                    let lod_view = (width > 0 && height > 0).then(|| {
+                        let camera = network_camera(
+                            network,
+                            width as f32 / height as f32,
+                            frame.elapsed_secs() as f32,
+                        );
+                        animation::LodView {
+                            eye: camera.position,
+                            view_proj: camera.view_proj,
+                        }
+                    });
+                    rebuild_network_units(
+                        network,
+                        models,
+                        map_visuals,
+                        units,
+                        bones,
+                        scene_build::AnimationFrame {
+                            driver: animation,
+                            view: lod_view,
+                        },
+                    );
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
                         let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
@@ -737,6 +806,7 @@ impl App for ClientApp {
                                 facing: 0.0,
                                 gait: 1.0,
                             },
+                            None,
                         );
                     } else {
                         push_unit(units, position.0, *kind, *team, fraction, 0, center);
@@ -823,6 +893,7 @@ impl App for ClientApp {
     }
 }
 
+mod animation;
 mod launch;
 mod map_visuals;
 mod models;
@@ -834,7 +905,7 @@ pub(crate) use launch::{
     parse_follow_distance, run,
 };
 pub(crate) use scene_build::{
-    HeroPose, network_camera, push_hero, push_unit, rebuild_network_units,
+    HeroPose, animated_rig, network_camera, push_hero, push_unit, rebuild_network_units,
 };
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.

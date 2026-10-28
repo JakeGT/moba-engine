@@ -6,24 +6,46 @@ use moba_game::Team;
 use moba_net::protocol::{
     STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE, STATUS_SLOW,
 };
-use moba_render::{Camera, UnitInstance};
+use moba_render::{Camera, JointMatrix, UnitInstance};
 use moba_sim::UnitKind;
 
 use crate::app::NetworkView;
+use crate::app::animation::{AnimationDriver, LodView, RigRef};
 use crate::app::map_visuals::MapLibrary;
 use crate::app::models::{HeroModel, ModelLibrary};
 use crate::app::skinning::BonePool;
 use crate::hud::{HudUnit, map_center, rendered_entity_position};
 
+/// The animated rig of a skinned hero model with a bound animation set.
+pub(crate) fn animated_rig(models: &ModelLibrary, model: Option<HeroModel>) -> Option<RigRef<'_>> {
+    let skin = model?.skin?;
+    Some(RigRef {
+        index: skin.rig,
+        skeleton: models.rig(skin.rig)?,
+        graph: models.graph(skin.rig)?,
+    })
+}
+
+/// Per-frame animation inputs of the network view (ADR-0012).
+pub(crate) struct AnimationFrame<'a> {
+    pub(crate) driver: &'a mut AnimationDriver,
+    /// The camera, for the animation LOD (`None` evaluates every hero).
+    pub(crate) view: Option<LodView>,
+}
+
+#[allow(clippy::too_many_lines)] // One pass over the snapshot's entities.
 pub(crate) fn rebuild_network_units(
     network: &NetworkView,
     models: &ModelLibrary,
     map: &MapLibrary,
     units: &mut Vec<UnitInstance>,
     bones: &mut BonePool,
+    animation: AnimationFrame<'_>,
 ) {
     units.clear();
     bones.clear();
+    let AnimationFrame { driver, view } = animation;
+    driver.begin_frame();
     let Some(latest) = network.interpolator.latest() else {
         return;
     };
@@ -31,13 +53,23 @@ pub(crate) fn rebuild_network_units(
     // Walls and props were built from the wire map when it arrived (`MapLibrary::bind`).
     map.push_instances(units);
     let render_tick = network.render_tick();
+    let tick_rate = f32::from(network.client.tick_rate().max(1));
+    let now = render_tick / tick_rate;
+    let pinned = network.pinned_tick().is_some();
     for entity in &latest.entities {
-        if entity.is_dead() {
-            continue;
-        }
         let Some(kind) = kind_from_u8(entity.kind) else {
             continue;
         };
+        let model = (kind == UnitKind::Hero)
+            .then(|| models.hero(usize::from(entity.hero_pick)))
+            .flatten();
+        let rig = animated_rig(models, model);
+        // A dead hero is drawn only while its death clip (and linger) plays.
+        if entity.is_dead()
+            && !rig.is_some_and(|rig| driver.visible(entity.net_id, rig.graph, now, true))
+        {
+            continue;
+        }
         let Some(team) = team_from_u8(entity.team) else {
             continue;
         };
@@ -60,22 +92,38 @@ pub(crate) fn rebuild_network_units(
             } else {
                 (0.0, 0.0)
             };
-            push_hero(
-                units,
-                bones,
-                models,
-                models.hero(usize::from(entity.hero_pick)),
-                &HeroPose {
-                    position,
-                    team,
-                    health_fraction: fraction,
-                    center,
-                    time: render_tick / 30.0,
-                    phase_offset: f32::from(entity.net_id),
-                    facing,
-                    gait,
-                },
-            );
+            let pose = HeroPose {
+                position,
+                team,
+                health_fraction: fraction,
+                center,
+                time: render_tick / 30.0,
+                phase_offset: f32::from(entity.net_id),
+                facing,
+                gait,
+            };
+            // Speed for the locomotion blend: both ends interpolated (the own hero's drawn
+            // position is predicted ahead), so it depends only on the render tick.
+            let animated = match (rig, model) {
+                (Some(rig), Some(model)) => {
+                    let here = network
+                        .interpolator
+                        .position(entity.net_id, render_tick)
+                        .unwrap_or(position);
+                    let speed = here.distance(previous).to_f32() * tick_rate / 2.0;
+                    driver.animate(
+                        entity.net_id,
+                        rig,
+                        now,
+                        if entity.is_dead() { 0.0 } else { speed },
+                        hero_transform(&model, &pose),
+                        view.as_ref(),
+                        pinned,
+                    )
+                }
+                _ => None,
+            };
+            push_hero(units, bones, models, model, &pose, animated);
             continue;
         }
         push_unit(
@@ -139,9 +187,23 @@ pub(crate) struct HeroPose {
     pub(crate) gait: f32,
 }
 
+/// A model's model-to-world transform for `pose` (facing the movement direction, standing
+/// on the ground at the hero's position).
+pub(crate) fn hero_transform(model: &HeroModel, pose: &HeroPose) -> Mat4 {
+    // Models face +Z (glTF); `facing` is the movement angle in the map's (x, z) plane.
+    let rotation = Quat::from_rotation_y(core::f32::consts::FRAC_PI_2 - pose.facing);
+    let ground = Vec3::new(
+        pose.position.x.to_f32() - pose.center,
+        0.0,
+        pose.position.y.to_f32() - pose.center,
+    );
+    Mat4::from_rotation_translation(rotation, ground) * model.normalize
+}
+
 /// Pushes a hero as its loaded model when there is one, otherwise as the procedural rig.
 ///
-/// A skinned model is posed into `bones` (walk clip weighted by gait, rest pose when idle).
+/// A skinned model uses `animated` (an animator's matrices, ADR-0012) when given, else it is
+/// posed into `bones` by the WP-4.1 rule (run clip weighted by gait, rest pose when idle).
 /// When the bone budget is exhausted it is drawn with its static mesh for that frame. Never
 /// allocates when `units` has capacity.
 pub(crate) fn push_hero(
@@ -150,6 +212,7 @@ pub(crate) fn push_hero(
     models: &ModelLibrary,
     model: Option<HeroModel>,
     pose: &HeroPose,
+    animated: Option<&[JointMatrix]>,
 ) {
     let HeroPose {
         position,
@@ -185,10 +248,13 @@ pub(crate) fn push_hero(
     let color = hero_color(team, health_fraction);
     if let Some(skin) = model.skin
         && let Some(rig) = models.rig(skin.rig)
-        && let Some(range) = bones.pose(rig, time, phase_offset, gait)
+        && let Some(range) = match animated {
+            Some(matrices) => bones.push(matrices),
+            None => bones.pose(rig, time, phase_offset, gait),
+        }
     {
         // The clip animates the body (including the hip bob), so no procedural offset.
-        let transform = Mat4::from_rotation_translation(rotation, ground) * model.normalize;
+        let transform = hero_transform(&model, pose);
         units.push(
             UnitInstance::new(transform, color)
                 .with_mesh(skin.mesh)
@@ -423,7 +489,7 @@ mod tests {
         library.bind_heroes([Some("walker")], |_: &MeshData, _: Upload| Ok(MeshId::CUBE));
         let model = library.hero(0);
         assert!(model.is_some_and(|model| model.skin.is_some()));
-        let joints = 7;
+        let joints = 10;
         let budget_heroes = 16;
         let heroes = 20i32;
         let mut bones = BonePool::new(joints * budget_heroes);
@@ -447,6 +513,7 @@ mod tests {
                         facing: 0.3 * hero as f32,
                         gait: (hero % 2) as f32,
                     },
+                    None,
                 );
             }
         };
