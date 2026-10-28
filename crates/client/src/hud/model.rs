@@ -3,7 +3,8 @@
 use super::theme;
 use super::{
     Camera, Fix, HitList, HudAction, HudString, InputState, Key, NetworkView, Simulation, Team,
-    UiDrawList, draw_health_bars, draw_minimap, draw_perf, draw_world_circle, register,
+    UiDrawList, capture_active, draw_health_bars, draw_minimap, draw_perf, draw_world_circle,
+    register,
 };
 use crate::{hud_fmt, hud_static};
 use moba_core::FixVec2;
@@ -333,29 +334,22 @@ pub(crate) fn build_network_hud(
         },
     );
     let stats = network.client.stats();
-    let ping = stats.rtt_ms.unwrap_or(0);
-    ui.text(
-        30.0,
-        54.0,
-        2.0,
-        muted,
-        &hud_fmt!(
-            "SLOT {}   PING {} MS",
-            if network.spectator {
-                hud_static!("--")
-            } else {
-                hud_fmt!("{}", network.own_slot)
-            },
-            ping
-        ),
-    );
-    ui.text(
-        30.0,
-        74.0,
-        2.0,
-        muted,
-        &hud_fmt!("TICK {}   {} SNAPSHOTS", tick, stats.snapshots),
-    );
+    let slot = if network.spectator {
+        hud_static!("--")
+    } else {
+        hud_fmt!("{}", network.own_slot)
+    };
+    // Ping and packet counts are wall-clock dependent; captures leave them out.
+    let (slot_line, tick_line) = if capture_active() {
+        (hud_fmt!("SLOT {slot}"), hud_fmt!("TICK {tick}"))
+    } else {
+        (
+            hud_fmt!("SLOT {slot}   PING {} MS", stats.rtt_ms.unwrap_or(0)),
+            hud_fmt!("TICK {tick}   {} SNAPSHOTS", stats.snapshots),
+        )
+    };
+    ui.text(30.0, 54.0, 2.0, muted, &slot_line);
+    ui.text(30.0, 74.0, 2.0, muted, &tick_line);
 
     if !network.spectator {
         ui.text(30.0, 108.0, 1.8, muted, "R READY   F5 SURRENDER");

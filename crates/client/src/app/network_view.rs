@@ -63,6 +63,11 @@ pub(crate) struct NetworkView {
     pub(crate) spectator_zoom: f32,
     /// Player-camera orbit distance (`MOBA_CAMERA_DISTANCE`, default 46 m).
     pub(crate) follow_distance: f32,
+    /// `MOBA_CAMERA=overview`: a fixed whole-map camera (read once at startup).
+    pub(crate) overview_camera: bool,
+    /// `MOBA_CAPTURE_TICK`: capture once Playing reaches this snapshot tick, with the render
+    /// (interpolation and animation) tick pinned to it.
+    pub(crate) capture_tick: Option<u32>,
     pub(crate) kill_feed: VecDeque<KillFeedEntry>,
     pub(crate) projectiles: Vec<ProjectileFx>,
     pub(crate) audio: crate::audio::Audio,
@@ -95,10 +100,30 @@ impl NetworkView {
             spectator_yaw: -0.7,
             spectator_zoom: 1.0,
             follow_distance: 46.0,
+            overview_camera: false,
+            capture_tick: None,
             kill_feed: VecDeque::with_capacity(6),
             projectiles: Vec::with_capacity(32),
             audio: crate::audio::Audio::headless(),
         }
+    }
+
+    /// The tick units are interpolated and animated at this frame.
+    ///
+    /// Normally wall-clock driven ([`Interpolator::render_tick`]). With `MOBA_CAPTURE_TICK=N`
+    /// and the latest snapshot at or past `N` it is pinned to `N`, so a networked capture
+    /// does not depend on frame pacing.
+    pub(crate) fn render_tick(&self) -> f32 {
+        match self.pinned_tick() {
+            Some(tick) => tick as f32,
+            None => self.interpolator.render_tick(std::time::Instant::now()),
+        }
+    }
+
+    /// The capture tick once the match is Playing and the latest snapshot has reached it.
+    pub(crate) fn pinned_tick(&self) -> Option<u32> {
+        self.capture_tick
+            .filter(|&tick| self.phase == MatchPhase::Playing && self.last_tick >= tick)
     }
 
     #[allow(clippy::too_many_lines)] // Event-to-HUD/audio mapping is linear.

@@ -1,7 +1,5 @@
 //! Scene/unit instance construction for the network client.
 
-use std::time::Instant;
-
 use moba_core::FixVec2;
 use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_game::Team;
@@ -54,7 +52,7 @@ pub(crate) fn rebuild_network_units(
         );
         units.push(UnitInstance::new(transform, wall_color));
     }
-    let render_tick = network.interpolator.render_tick(Instant::now());
+    let render_tick = network.render_tick();
     for entity in &latest.entities {
         if entity.is_dead() {
             continue;
@@ -403,7 +401,7 @@ pub(crate) fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -
             aspect,
         );
     }
-    if std::env::var("MOBA_CAMERA").is_ok_and(|value| value == "overview") {
+    if network.overview_camera {
         return Camera::orbit(Vec3::ZERO, 240.0, -0.7, 0.92, aspect);
     }
     let predicted = network.prediction.position();

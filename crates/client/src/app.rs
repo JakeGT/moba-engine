@@ -20,6 +20,13 @@
 //!   model with a skin is GPU-skinned (walk clip driven by gait); `MOBA_NO_SKINNING=1`
 //!   draws it static instead.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
+//! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
+//!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
+//!   `MOBA_SERVER=local` server stops advancing at `n`, so the frame is repeatable.
+//! - `MOBA_WINDOW_SIZE=<w>x<h>`: logical window size (default 1280x720).
+//! - `MOBA_WARMUP_TICKS=<n>`: the local preview simulates `n` ticks before the first frame;
+//!   in network mode, frame logging and `MOBA_SMOKE_FRAMES` start once Playing reaches tick
+//!   `n`.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -101,6 +108,10 @@ struct ClientApp {
     camera_sensitivity: f32,
     frame_log: Option<Vec<f32>>,
     frame_log_path: Option<PathBuf>,
+    /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
+    network_warmup: Option<u32>,
+    /// Frames counted towards `MOBA_SMOKE_FRAMES` and logged (after any warm-up).
+    measured_frames: u64,
 }
 
 impl ClientApp {
@@ -162,6 +173,16 @@ impl ClientApp {
             camera_sensitivity,
             frame_log,
             frame_log_path,
+            // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
+            network_warmup: std::env::var("MOBA_SERVER")
+                .is_ok_and(|spec| !spec.is_empty())
+                .then(|| {
+                    std::env::var("MOBA_WARMUP_TICKS")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                })
+                .flatten(),
+            measured_frames: 0,
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -201,6 +222,9 @@ impl ClientApp {
                         spectator_yaw: -0.7,
                         spectator_zoom: camera_zoom,
                         follow_distance: parse_follow_distance(),
+                        overview_camera: std::env::var("MOBA_CAMERA")
+                            .is_ok_and(|value| value == "overview"),
+                        capture_tick: parse_capture_tick(),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
                         audio: crate::audio::Audio::new(audio_volume, audio_mute),
@@ -327,10 +351,18 @@ impl App for ClientApp {
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
         self.last_frame = now;
-        if let Some(samples) = self.frame_log.as_mut()
-            && samples.len() < 10_000
-        {
-            samples.push(raw_ms);
+        let measuring = self.network.as_ref().is_none_or(|network| {
+            self.network_warmup.is_none_or(|warmup| {
+                network.phase == MatchPhase::Playing && network.last_tick >= warmup
+            })
+        });
+        if measuring {
+            self.measured_frames += 1;
+            if let Some(samples) = self.frame_log.as_mut()
+                && samples.len() < 10_000
+            {
+                samples.push(raw_ms);
+            }
         }
         self.frame_ms = if self.frame_ms == 0.0 {
             raw_ms
@@ -527,8 +559,15 @@ impl App for ClientApp {
                         let scene = Scene::with_vision(camera, units, vision)
                             .with_terrain_tint(tint)
                             .with_bones(bones.bones());
+                        // With `MOBA_CAPTURE_TICK` the capture waits for the match tick, not
+                        // a frame count, so it does not depend on frame pacing.
+                        let capture_due = if network.capture_tick.is_some() {
+                            capture_path.is_some() && network.pinned_tick().is_some()
+                        } else {
+                            frames_is_capture(*frames, *capture_frame, capture_path.as_deref())
+                        };
                         if let Some(renderer) = renderer.as_mut() {
-                            if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
+                            if capture_due {
                                 capture_and_exit(
                                     renderer,
                                     &scene,
@@ -648,7 +687,9 @@ impl App for ClientApp {
         if exit_after_capture {
             return FrameOutcome::Exit;
         }
-        if frame.input().was_key_pressed(Key::Escape) || self.frames >= self.quit_after_frames {
+        if frame.input().was_key_pressed(Key::Escape)
+            || self.measured_frames >= self.quit_after_frames
+        {
             return FrameOutcome::Exit;
         }
         FrameOutcome::Continue
@@ -661,8 +702,8 @@ mod scene_build;
 mod skinning;
 
 pub(crate) use launch::{
-    capture_and_exit, connect_network, frames_is_capture, parse_demo_move, parse_follow_distance,
-    run,
+    capture_and_exit, connect_network, frames_is_capture, parse_capture_tick, parse_demo_move,
+    parse_follow_distance, run,
 };
 pub(crate) use scene_build::{
     HeroPose, map_theme, network_camera, push_hero, push_unit, rebuild_network_units,

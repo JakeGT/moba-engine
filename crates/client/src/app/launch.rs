@@ -4,10 +4,11 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moba_core::FixVec2;
-use moba_net::NetClient;
+use moba_net::protocol::MatchPhase;
+use moba_net::{NetClient, NetServer};
 use moba_platform::{WindowConfig, run as run_window};
 use moba_render::{CapturedFrame, Renderer, Scene, UiDrawList};
 use moba_sim::SimConfig;
@@ -62,6 +63,61 @@ pub(crate) fn parse_follow_distance() -> f32 {
         .map_or(46.0, |value| value.clamp(8.0, 120.0))
 }
 
+/// `MOBA_CAPTURE_TICK=<n>`: the network capture tick, read once at startup.
+pub(crate) fn parse_capture_tick() -> Option<u32> {
+    std::env::var("MOBA_CAPTURE_TICK")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// `MOBA_WINDOW_SIZE=<w>x<h>` (logical pixels, 320-7680 × 240-4320), else 1280×720.
+pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
+    value
+        .and_then(|value| {
+            let (width, height) = value.trim().split_once(['x', 'X'])?;
+            let width: u32 = width.trim().parse().ok()?;
+            let height: u32 = height.trim().parse().ok()?;
+            ((320..=7_680).contains(&width) && (240..=4_320).contains(&height))
+                .then_some((width, height))
+        })
+        .unwrap_or((1_280, 720))
+}
+
+/// Runs the in-process `MOBA_SERVER=local` server at 30 Hz.
+///
+/// With `stop_at = Some(n)` the match stops advancing once Playing has simulated `n` ticks:
+/// the server keeps polling (so the client stays connected) but sends nothing newer than
+/// the tick-`n` snapshot. A `MOBA_CAPTURE_TICK` capture then sees exactly that state no
+/// matter how slowly the client renders (lavapipe in CI).
+fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
+    let Some(stop_at) = stop_at else {
+        let _ = server.run_for(Duration::from_secs(3_600));
+        return;
+    };
+    let tick = Duration::from_secs_f64(1.0 / 30.0);
+    let started = Instant::now();
+    let mut next_tick = started;
+    let mut played = 0u32;
+    while started.elapsed() < Duration::from_secs(3_600) {
+        if server.poll().is_err() {
+            return;
+        }
+        let now = Instant::now();
+        if now >= next_tick {
+            // A Playing tick advances the simulation by one; Lobby/Countdown ticks do not.
+            let playing = server.phase().0 == MatchPhase::Playing;
+            if !playing || played < stop_at {
+                if server.tick().is_err() {
+                    return;
+                }
+                played += u32::from(playing);
+            }
+            next_tick = (next_tick + tick).max(now);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Parses an optional 32-byte hex value from an environment variable.
 ///
 /// Fails closed: a variable that is set but malformed is an error, never silently ignored,
@@ -112,7 +168,7 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
     let identity_seed = parse_identity_seed()?;
     let spectator = std::env::var("MOBA_SPECTATE").is_ok_and(|value| value == "1");
     if spec == "local" {
-        let mut server = moba_net::NetServer::bind(moba_net::ServerConfig {
+        let server = moba_net::NetServer::bind(moba_net::ServerConfig {
             bind: "127.0.0.1:0".parse().expect("loopback address"),
             sim: SimConfig::default(),
             snapshot_interval: 1,
@@ -132,9 +188,8 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
         let addr = server
             .local_addr()
             .map_err(|error| format!("local server address: {error}"))?;
-        std::thread::spawn(move || {
-            let _ = server.run_for(Duration::from_secs(3_600));
-        });
+        let stop_at = parse_capture_tick().filter(|_| std::env::var_os("MOBA_CAPTURE").is_some());
+        std::thread::spawn(move || run_local_server(server, stop_at));
         let auth = moba_net::client::ClientAuth {
             pre_shared_key: secret,
             expected_server: None,
@@ -175,7 +230,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         capture_frame,
         Arc::clone(&error),
     );
-    let config = WindowConfig::new("MOBA", 1280, 720);
+    let (width, height) = parse_window_size(std::env::var("MOBA_WINDOW_SIZE").ok().as_deref());
+    let config = WindowConfig::new("MOBA", width, height);
     run_window(config, app)?;
     if let Some(message) = error.lock().ok().and_then(|mut slot| slot.take()) {
         return Err(message.into());
@@ -211,8 +267,19 @@ impl Drop for ClientApp {
             samples[index]
         };
         let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+        // The physical extent and GPU make each report self-describing.
+        let (extent, gpu) = self.renderer.as_ref().map_or_else(
+            || (String::from("?"), String::from("?")),
+            |renderer| {
+                let [width, height] = renderer.extent();
+                (
+                    format!("{width}x{height}"),
+                    renderer.device_name().to_owned(),
+                )
+            },
+        );
         let report = format!(
-            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}\n",
+            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),
@@ -226,7 +293,17 @@ impl Drop for ClientApp {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hex32;
+    use super::{parse_hex32, parse_window_size};
+
+    #[test]
+    fn window_size_parses_or_falls_back() {
+        assert_eq!(parse_window_size(None), (1_280, 720));
+        assert_eq!(parse_window_size(Some("1920x1080")), (1_920, 1_080));
+        assert_eq!(parse_window_size(Some(" 2560 X 1440 ")), (2_560, 1_440));
+        for bad in ["", "1920", "0x0", "99999x1080", "axb", "1920x1080x2"] {
+            assert_eq!(parse_window_size(Some(bad)), (1_280, 720), "{bad}");
+        }
+    }
 
     #[test]
     fn hex32_accepts_only_exact_hex_keys() {
