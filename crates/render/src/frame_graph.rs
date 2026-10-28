@@ -11,6 +11,8 @@
 //! fixed-size [`Bindings`] table with this frame's handles and records the precompiled
 //! barriers, so nothing here allocates on the frame path.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use ash::vk;
 
 use crate::device::DeviceContext;
@@ -145,6 +147,8 @@ impl Bindings {
     }
 }
 
+static BINDING_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// Records `barriers` as one `vkCmdPipelineBarrier2`, without allocating.
 pub(crate) fn record_barriers(
     device: &DeviceContext,
@@ -195,11 +199,21 @@ pub(crate) fn record_barriers(
                     .size(vk::WHOLE_SIZE);
                 buffer_count += 1;
             }
-            binding => debug_assert!(
-                false,
-                "resource {:?} bound as {binding:?} for barrier {barrier:?}",
-                barrier.resource
-            ),
+            binding => {
+                // A renderer bug: the barrier cannot be recorded. Fail loudly in debug builds
+                // and log once in release (validation then reports the missing sync).
+                debug_assert!(
+                    false,
+                    "resource {:?} bound as {binding:?} for barrier {barrier:?}",
+                    barrier.resource
+                );
+                if !BINDING_MISMATCH_LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[render] graph barrier dropped: resource {:?} bound as {binding:?}",
+                        barrier.resource
+                    );
+                }
+            }
         }
     }
     let dependency = vk::DependencyInfo::default()

@@ -52,7 +52,10 @@ scale, and a wrong barrier is a silent GPU race that only sync validation catche
   `GraphError::TooLarge` past them, rather than growing at run time.
 - **Per-pass GPU timing.** Each pass writes two `vkCmdWriteTimestamp2(ALL_COMMANDS)` queries:
   one after its barriers and one after its commands. They go into a query pool per frame in
-  flight, created at renderer creation. Results are read after that frame's fence with no
+  flight, created at renderer creation. A pass's time excludes waits on earlier commands but
+  can include the acquire-semaphore wait, because the submit waits on it at
+  `COLOR_ATTACHMENT_OUTPUT` and the scene pass writes colour too. Measure with vsync off; a
+  later split into a no-wait scene submit and a waiting composite submit removes this. Results are read after that frame's fence with no
   wait. If the graphics queue reports `timestampValidBits == 0` or `timestampPeriod` is zero,
   no pools are created and `Renderer::gpu_timings()` returns `None`.
 

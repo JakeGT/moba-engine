@@ -2,8 +2,11 @@
 //!
 //! One query pool per frame in flight, created with the renderer (never per frame). Each
 //! pass writes a timestamp after its barriers and another after its commands, both at
-//! `ALL_COMMANDS`, so a pass's time is its own GPU work and excludes waits on earlier work
-//! (including the swapchain-acquire semaphore). Results are read back without waiting, after
+//! `ALL_COMMANDS`, so a pass's time excludes waits on *earlier commands*. It can still
+//! include the swapchain-acquire semaphore wait: the submit waits on it at
+//! `COLOR_ATTACHMENT_OUTPUT`, which every colour-writing pass (the scene included) reaches.
+//! With vsync off the image is usually free at once; with FIFO the first colour pass may
+//! absorb the wait. Results are read back without waiting, after
 //! that frame slot's fence has been waited on, so they lag the current frame by
 //! `FRAMES_IN_FLIGHT` frames. Devices whose graphics queue reports `timestampValidBits == 0`
 //! (or a zero `timestampPeriod`) get no pools and [`GpuTimings`] is never produced.

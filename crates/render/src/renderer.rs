@@ -767,9 +767,12 @@ impl Renderer {
             self.config.vsync,
             Some(self.swapchain.handle()),
         )?;
+        // Build the new targets before replacing anything, so a failed allocation cannot
+        // pair the new extent with old-size transients.
+        let transients =
+            TransientPool::new(&self.device, self.plan.graph.slots(), swapchain.extent)?;
         self.swapchain = swapchain;
-        self.transients =
-            TransientPool::new(&self.device, self.plan.graph.slots(), self.swapchain.extent)?;
+        self.transients = transients;
         self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
         self.frame_index = 0;
@@ -819,7 +822,15 @@ impl Renderer {
         // device below before reading it, so no earlier submission still touches it.
         self.capture_ready = false;
         self.capture_pending = true;
-        self.render_internal(scene, ui)?;
+        if let Err(error) = self.render_internal(scene, ui) {
+            // A capture copy may already be submitted (for example when present fails after
+            // the submit); keep the "idle" import true for the next capture.
+            self.capture_pending = false;
+            // SAFETY: waiting for the device to idle has no preconditions beyond a live
+            // device; its own error is secondary to the one being returned.
+            let _ = unsafe { self.device.device.device_wait_idle() };
+            return Err(error);
+        }
         if !self.capture_ready {
             self.capture_pending = false;
             return Err(RenderError::NoSuitableDevice(String::from(

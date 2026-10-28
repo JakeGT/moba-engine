@@ -489,15 +489,20 @@ impl<T> CompiledGraph<T> {
     }
 }
 
+/// Distinct read (stage, access) pairs tracked per write; see `Track::visible`.
+const MAX_VISIBLE: usize = 4;
+
 /// Hazard-tracking state of one physical resource (an import or a transient slot).
 #[derive(Clone, Copy, Debug)]
 struct Track {
     layout: vk::ImageLayout,
     /// Last write (stage, write access) not yet followed by a full barrier to a writer.
     write: Option<(vk::PipelineStageFlags2, vk::AccessFlags2)>,
-    /// Stages/accesses the last write has been made visible to.
-    visible_stage: vk::PipelineStageFlags2,
-    visible_access: vk::AccessFlags2,
+    /// (stage, access) pairs the last write has been made visible to, one per barrier. A
+    /// union of stages and a union of accesses would wrongly cover a pair that no barrier
+    /// named. When full, later reads always get a barrier (conservative).
+    visible: [(vk::PipelineStageFlags2, vk::AccessFlags2); MAX_VISIBLE],
+    visible_len: usize,
     /// Stages that read since the last write or layout transition.
     readers: vk::PipelineStageFlags2,
     image: bool,
@@ -508,10 +513,33 @@ impl Track {
         Self {
             layout: initial.layout,
             write: Some((initial.stage, initial.access)),
-            visible_stage: vk::PipelineStageFlags2::NONE,
-            visible_access: vk::AccessFlags2::NONE,
+            visible: [(vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE); MAX_VISIBLE],
+            visible_len: 0,
             readers: vk::PipelineStageFlags2::NONE,
             image,
+        }
+    }
+
+    /// Whether one earlier barrier already made the last write visible to this read.
+    fn is_visible(&self, stage: vk::PipelineStageFlags2, access: vk::AccessFlags2) -> bool {
+        self.visible[..self.visible_len]
+            .iter()
+            .any(|&(seen_stage, seen_access)| {
+                seen_stage.contains(stage) && seen_access.contains(access)
+            })
+    }
+
+    fn set_visible(&mut self, pairs: &[(vk::PipelineStageFlags2, vk::AccessFlags2)]) {
+        self.visible_len = 0;
+        for &(stage, access) in pairs {
+            self.mark_visible(stage, access);
+        }
+    }
+
+    fn mark_visible(&mut self, stage: vk::PipelineStageFlags2, access: vk::AccessFlags2) {
+        if self.visible_len < MAX_VISIBLE {
+            self.visible[self.visible_len] = (stage, access);
+            self.visible_len += 1;
         }
     }
 
@@ -524,12 +552,10 @@ impl Track {
             // destination stage/access.
             self.readers |= info.stage;
             let (stage, access_mask) = self.write?;
-            if self.visible_stage.contains(info.stage) && self.visible_access.contains(info.access)
-            {
+            if self.is_visible(info.stage, info.access) {
                 return None;
             }
-            self.visible_stage |= info.stage;
-            self.visible_access |= info.access;
+            self.mark_visible(info.stage, info.access);
             return Some(Barrier {
                 resource,
                 src_stage: stage,
@@ -559,15 +585,13 @@ impl Track {
         self.layout = new_layout;
         if info.writes() {
             self.write = Some((info.stage, info.write_access));
-            self.visible_stage = vk::PipelineStageFlags2::NONE;
-            self.visible_access = vk::AccessFlags2::NONE;
+            self.set_visible(&[]);
             self.readers = vk::PipelineStageFlags2::NONE;
         } else {
             // The transition is visible to this reader; later readers in other stages chain
             // from it.
             self.write = Some((info.stage, vk::AccessFlags2::NONE));
-            self.visible_stage = info.stage;
-            self.visible_access = info.access;
+            self.set_visible(&[(info.stage, info.access)]);
             self.readers = info.stage;
         }
         Some(Barrier {

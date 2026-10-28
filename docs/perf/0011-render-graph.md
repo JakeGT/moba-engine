@@ -16,7 +16,9 @@ Captured 2026-10-28 on the development workstation, not a CI runner.
 - **After:** this branch. The `MOBA_FRAME_LOG` report now has per-pass GPU columns from
   timestamp queries (`gpu_scene`, `gpu_composite`, `gpu_ui`, `gpu_total`, `gpu_span`, each as
   p50/p95). Each pass writes a timestamp after its barriers and another after its commands, both
-  at `ALL_COMMANDS`. `total` is the sum of the passes. `span` runs from the first pass's start
+  at `ALL_COMMANDS`. A pass's time excludes waits on earlier commands, but the first colour
+  pass can include the swapchain-acquire wait. That is why every run here has vsync off; the
+  steady 0.027 ms scene p50/p95 shows no such wait. `total` is the sum of the passes. `span` runs from the first pass's start
   to the last pass's end, so `span − total` is the time spent in the barriers between passes.
 - **Before:** `origin/main` at `d9f279b`, plus a measurement-only patch that was never
   committed. It writes one timestamp pair the same way around today's single forward pass:

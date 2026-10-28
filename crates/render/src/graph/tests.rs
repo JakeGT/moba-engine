@@ -5,7 +5,7 @@ use vk::AccessFlags2 as A;
 use vk::ImageLayout as L;
 use vk::PipelineStageFlags2 as S;
 
-use super::{Access, GraphBuilder, GraphError, ImageDesc, ImageSize, ImportState};
+use super::{Access, GraphBuilder, GraphError, ImageDesc, ImageSize, ImportState, Track};
 
 const HDR: ImageDesc = ImageDesc {
     format: vk::Format::R16G16B16A16_SFLOAT,
@@ -136,6 +136,14 @@ fn write_after_write_and_repeated_reads() {
         A::COLOR_ATTACHMENT_READ | A::COLOR_ATTACHMENT_WRITE
     );
     assert_eq!(ui[0].old_layout, ui[0].new_layout);
+
+    // Visibility is tracked per (stage, access) pair: reads at (X, a) and (Y, b) do not cover
+    // a later read at (X, b), which no barrier named.
+    let mut track = Track::new(ImportState::host_written(), false);
+    track.mark_visible(S::FRAGMENT_SHADER, A::SHADER_SAMPLED_READ);
+    track.mark_visible(S::VERTEX_SHADER, A::SHADER_STORAGE_READ);
+    assert!(track.is_visible(S::VERTEX_SHADER, A::SHADER_STORAGE_READ));
+    assert!(!track.is_visible(S::FRAGMENT_SHADER, A::SHADER_STORAGE_READ));
 }
 
 #[test]
