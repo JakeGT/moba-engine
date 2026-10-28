@@ -4,7 +4,7 @@
 [![Issues](https://img.shields.io/github/issues/JakeGT/moba-engine)](https://github.com/JakeGT/moba-engine/issues)
 
 A server-authoritative multiplayer MOBA engine written in Rust and Vulkan. Current contract:
-wire protocol **v40**, replay format **v5** (simulation logic **v7**), workspace **0.4.0**.
+wire protocol **v40**, replay format **v5** (simulation logic **v8**), workspace **0.4.0**.
 
 > **Status: preview (0.4.0).** The engine is playable end-to-end — dedicated server, UDP
 > netcode, deterministic simulation, Vulkan client with HUD and fog of war — but the public

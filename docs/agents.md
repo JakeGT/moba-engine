@@ -12,7 +12,7 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 |---|---|---|
 | Workspace version | `0.4.0` pre-1.0 | `Cargo.toml` |
 | Wire protocol | **v40** | `crates/net/src/protocol/mod.rs` |
-| Replay format | **v5**, simulation logic **v7** | `crates/sim/src/replay.rs` |
+| Replay format | **v5**, simulation logic **v8** | `crates/sim/src/replay.rs` |
 | Content | runtime TOML, hashed; signed packs optional | `crates/game/src/content/` |
 | Toolchain | Rust MSRV **1.88**, Vulkan **1.3** minimum | `Cargo.toml`, ADR-0002 |
 | Tests | **324 passed**, 3 ignored | `cargo test --workspace --locked` |

@@ -1,7 +1,7 @@
 # Engine status
 
 Last updated: **2026-10-21**. Workspace **0.4.0** preview; protocol **v40**; replay format **v5**;
-simulation logic **v7**; content packs are validated runtime TOML.
+simulation logic **v8**; content packs are validated runtime TOML.
 
 The engine is playable end-to-end and has a stable internal contract, but it is pre-1.0.
 Two external-resource items remain open: real Windows/macOS GPU frame results (#9/#127) and

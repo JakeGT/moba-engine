@@ -23,10 +23,13 @@ impl NetServer {
             return;
         };
         self.results_logged = true;
-        let outcome = self.simulation.outcome().map_or("draw", |team| match team {
-            moba_game::Team::Blue => "blue",
-            moba_game::Team::Red => "red",
-        });
+        let outcome = match self.simulation.outcome() {
+            Some(moba_sim::MatchOutcome::Winner(moba_game::Team::Blue)) => "blue",
+            Some(moba_sim::MatchOutcome::Winner(moba_game::Team::Red)) => "red",
+            Some(moba_sim::MatchOutcome::Draw) => "draw",
+            // Only completed matches are logged; keep a defined value regardless.
+            None => "unfinished",
+        };
         let (blue, red) = self.simulation.score();
         let replay = self
             .config

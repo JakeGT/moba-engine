@@ -6,7 +6,8 @@
 95 % interval of **42.84–45.60 %**. The interval excludes 50 %, so this is a measured side
 bias of about 5.8 points in red's favour. The diagnosis below traces it to the minion-wave
 formation, which is point-reflected rather than x-mirrored. Fixing it is WP-2.2 (a logic
-bump, which needs a maintainer decision), so it is not done here.
+bump, which needs a maintainer decision), so it is not done here. Sim logic v8 fixed it;
+see [the post-fix sweep](#post-fix-sweep-sim-logic-v8-2026-10-27-wp-22-290).
 
 ### Method
 
@@ -110,9 +111,80 @@ sweep.
   - `apply_inputs` and `resolve_attacks` reverse the whole slot list on the other ticks.
   - Wave spawn order alternates by wave number.
 
+## Post-fix sweep, sim logic v8 (2026-10-27, WP-2.2, #290)
+
+**Result: no measurable side bias.** Over 4,981 decided matches blue won **49.81 %**, with a
+Wilson 95 % interval of **48.42–51.20 %**. The interval includes 50 %, which meets the WP-2.2
+acceptance. Before the fix (logic v7, above), blue won 44.21 % (42.84–45.60 %).
+
+### What changed in v8
+
+- **Wave formations are x-mirrored.** `spawn_wave` (`crates/sim/src/sim/spawn.rs`) now
+  offsets red's formation along `-direction.perpendicular()`. Each team's wave is the x-mirror
+  of the other's, as hero spawns already were. This is the one-line change the diagnosis
+  above tested.
+- **Same-tick wins are draws.** Nexus, score-limit and surrender wins met in one tick are
+  resolved together at the end of the tick. If both teams meet one, the match is a draw
+  (`MatchOutcome::Draw`) rather than going to whichever side was processed first.
+- **`MAX_UNITS` starvation does not occur, so it is not changed.** The largest live entity
+  count after any tick was **183** of 512 (`peak_units`). `spawn_minion` refuses only at the
+  cap, so no wave unit was ever dropped.
+
+### Method
+
+Same as the v7 sweep: same seeds, picks, tick cap and host, with sim logic **v8**.
+`match-soak` reports two kinds of draw:
+
+- `cap_draws`: matches with no winner at the tick cap.
+- `same_tick_draws`: `MatchOutcome::Draw` results.
+
+Both count as draws, and the win rate is computed over decided matches only. The machine was
+shared with builds, so timings are indicative only.
+
+```bash
+cargo build --release -p moba-tools --bin match-soak
+./target/release/match-soak --matches 5000 --ticks 60000 --no-verify --threads 8
+./target/release/match-soak --matches 500 --ticks 60000 --threads 8   # determinism check
+```
+
+### Raw output
+
+```text
+match-soak: 5000 matches, max 60000 ticks, bot_mask=0x3ff, verify=false, seed=0x5eed1234abcd0001, threads=8
+  ...
+  5000/5000 matches, 466 s
+matches=5000 ticks=108336841 avg_tick_us=14 max_tick_us=16258 max_tick_at=17396 wall_s=465.56 unique_hashes=5000 outcome_none=17 blue=2481 red=2500 draw=2 peak_units=183 determinism=ok
+balance: decided=4981 draws=19 cap_draws=17 same_tick_draws=2 blue_win_rate=49.81% wilson95=48.42%..51.20% resolve_tick_p10=9049 median=15232 p90=42003 max=59913
+```
+
+The determinism run replays every match twice and compares outcome, tick count and
+normalized state hash:
+
+```text
+matches=500 ticks=10831911 avg_tick_us=11 max_tick_us=1272 max_tick_at=29534 wall_s=74.15 unique_hashes=500 outcome_none=3 blue=234 red=263 draw=0 peak_units=180 determinism=ok
+balance: decided=497 draws=3 cap_draws=3 same_tick_draws=0 blue_win_rate=47.08% wilson95=42.73%..51.48% resolve_tick_p10=9055 median=14649 p90=43306 max=57877
+```
+
+| Logic | N | Blue | Red | Draws (cap + same tick) | Blue win rate (decided) | Wilson 95 % | Resolution tick p10 / median / p90 / max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v7 | 5,000 | 2,201 | 2,777 | 22 + n/a | 44.21 % | 42.84–45.60 % | 8,975 / 15,153 / 32,897 / 59,806 |
+| **v8** | 5,000 | 2,481 | 2,500 | 17 + 2 | **49.81 %** | **48.42–51.20 %** | 9,049 / 15,232 / 42,003 / 59,913 |
+
+- **Same-tick draws are real but rare.** Two of the 5,000 v8 matches ended with both teams
+  meeting a win condition in one tick. Under v7 those two would have gone to whichever side
+  was processed first.
+- **Matches run longer.** The p90 resolution tick rose from 32,897 to 42,003. A plausible
+  reason, not investigated, is that a wave no longer starts with a positional edge, so pushes
+  stall more often.
+- **Waves-on mirror is still not exact.** A waves-on variant of the side-swap mirror test
+  (`crates/sim/tests/mirror.rs`, which runs with waves off) first diverges at tick 2,514 on
+  v8, against tick 738 on v7. The remaining causes are the entity-id tie-breaks and
+  processing-order asymmetries listed in the finish plan. The maintainer accepted an
+  asymmetric mirror, so they are out of scope.
+
 ## Earlier fixed-composition mirrors (2026-10-18)
 
-These were measured when they were written (sim logic v4) and have not been re-run on v7.
+These were measured when they were written (sim logic v4) and have not been re-run on v7 or v8.
 They are kept as history.
 
 ```bash

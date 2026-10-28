@@ -4,7 +4,7 @@ use moba_game::{ModifierKind, Team};
 
 use crate::components::{AttackTarget, Dead, Modifiers, MoveTarget};
 
-use super::{MAX_PLAYERS, PlayerCommand, SimEvent, Simulation, TickInputs};
+use super::{MAX_PLAYERS, PlayerCommand, Simulation, TickInputs};
 
 impl Simulation {
     /// Deterministic scheduling phase: half the seeds resolve blue first, half red first.
@@ -76,12 +76,8 @@ impl Simulation {
                     self.use_item(entity, slot);
                 }
                 PlayerCommand::Surrender => {
-                    if self.outcome.is_none()
-                        && let Some(team) = self.world.get::<Team>(entity).copied()
-                    {
-                        let winner = team.enemy();
-                        self.outcome = Some(winner);
-                        self.push_event(SimEvent::MatchEnded { winner });
+                    if let Some(team) = self.world.get::<Team>(entity).copied() {
+                        self.queue_win(team.enemy());
                     }
                 }
             }

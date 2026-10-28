@@ -6,8 +6,10 @@
 //! streams and the initial scheduling phase, so each seed is an independent match.
 //!
 //! Balance sweep: `--matches 5000 --ticks 60000 --no-verify --threads 8`. Matches that hit
-//! the tick cap without a winner count as draws; the blue win rate and its Wilson 95 %
-//! interval are computed over decided matches only. `--threads` spreads seeds across
+//! the tick cap without a winner, and matches drawn because both teams met a win condition
+//! in the same tick (sim logic v8), count as draws; the blue win rate and its Wilson 95 %
+//! interval are computed over decided matches only. `peak_units` is the largest live entity
+//! count seen after any tick, to show whether waves ever reach `MAX_UNITS`. `--threads` spreads seeds across
 //! worker threads; results are merged in seed order, so the report does not depend on
 //! the thread count (apart from timings, which share cores).
 #![allow(clippy::print_stdout)]
@@ -17,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use moba_game::{GameContent, Team};
-use moba_sim::{SimConfig, Simulation, TickInputs};
+use moba_sim::{MatchOutcome, SimConfig, Simulation, TickInputs};
 
 /// Two-sided 95 % normal quantile.
 const Z_95: f64 = 1.959_963_984_540_054;
@@ -25,8 +27,9 @@ const Z_95: f64 = 1.959_963_984_540_054;
 struct MatchResult {
     /// Seed-independent state hash, so distinct seeds that play out identically collide.
     hash: u64,
-    outcome: Option<Team>,
+    outcome: Option<MatchOutcome>,
     ticks: u32,
+    peak_units: usize,
     tick_nanos: u64,
     max_tick_nanos: u64,
     max_tick_at: u32,
@@ -80,6 +83,7 @@ impl Settings {
         let mut max_tick_nanos = 0u64;
         let mut max_tick_at = 0u32;
         let mut ticks = 0u32;
+        let mut peak_units = simulation.unit_count();
         for _ in 0..self.max_ticks {
             let inputs: TickInputs = simulation.bot_inputs();
             let tick_start = Instant::now();
@@ -92,6 +96,7 @@ impl Settings {
                 max_tick_at = ticks;
             }
             ticks += 1;
+            peak_units = peak_units.max(simulation.unit_count());
             if simulation.outcome().is_some() {
                 break;
             }
@@ -100,6 +105,7 @@ impl Settings {
             hash: simulation.state_hash_normalized(),
             outcome: simulation.outcome(),
             ticks,
+            peak_units,
             tick_nanos,
             max_tick_nanos,
             max_tick_at,
@@ -267,7 +273,9 @@ fn main() {
     });
     results.sort_unstable_by_key(|(index, _, _)| *index);
 
-    let mut outcomes = [0u32; 3];
+    // Unresolved at the tick cap, blue, red, same-tick draw.
+    let mut outcomes = [0u32; 4];
+    let mut peak_units = 0usize;
     let mut hashes = Vec::with_capacity(results.len());
     let mut resolve_ticks = Vec::with_capacity(results.len());
     let mut total_ticks = 0u64;
@@ -277,10 +285,12 @@ fn main() {
     let mut mismatches = 0u32;
     for (_, result, mismatch) in &results {
         mismatches += u32::from(*mismatch);
+        peak_units = peak_units.max(result.peak_units);
         let outcome_index = match result.outcome {
             None => 0,
-            Some(Team::Blue) => 1,
-            Some(Team::Red) => 2,
+            Some(MatchOutcome::Winner(Team::Blue)) => 1,
+            Some(MatchOutcome::Winner(Team::Red)) => 2,
+            Some(MatchOutcome::Draw) => 3,
         };
         outcomes[outcome_index] += 1;
         if result.outcome.is_some() {
@@ -298,7 +308,7 @@ fn main() {
     hashes.dedup();
     resolve_ticks.sort_unstable();
     println!(
-        "matches={} ticks={} avg_tick_us={} max_tick_us={} max_tick_at={} wall_s={:.2} unique_hashes={} outcome_none={} blue={} red={} determinism={}",
+        "matches={} ticks={} avg_tick_us={} max_tick_us={} max_tick_at={} wall_s={:.2} unique_hashes={} outcome_none={} blue={} red={} draw={} peak_units={} determinism={}",
         matches,
         total_ticks,
         total_tick_nanos
@@ -312,6 +322,8 @@ fn main() {
         outcomes[0],
         outcomes[1],
         outcomes[2],
+        outcomes[3],
+        peak_units,
         if mismatches == 0 { "ok" } else { "FAILED" }
     );
     let decided = outcomes[1] + outcomes[2];
@@ -328,8 +340,10 @@ fn main() {
         },
     );
     println!(
-        "balance: decided={decided} draws={} blue_win_rate={rate} wilson95={interval} resolve_tick_p10={} median={} p90={} max={}",
+        "balance: decided={decided} draws={} cap_draws={} same_tick_draws={} blue_win_rate={rate} wilson95={interval} resolve_tick_p10={} median={} p90={} max={}",
+        outcomes[0] + outcomes[3],
         outcomes[0],
+        outcomes[3],
         percentile(&resolve_ticks, 10),
         percentile(&resolve_ticks, 50),
         percentile(&resolve_ticks, 90),

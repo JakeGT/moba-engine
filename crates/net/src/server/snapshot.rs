@@ -3,10 +3,23 @@
 use std::net::SocketAddr;
 
 use crate::protocol::{
-    Header, MAX_SNAPSHOT_EVENTS, NetEntity, PacketKind, build_delta_into, encode_snapshot,
+    Header, MAX_SNAPSHOT_EVENTS, NetEntity, OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED,
+    PacketKind, build_delta_into, encode_snapshot,
 };
 
+use moba_sim::MatchOutcome;
+
 use super::NetServer;
+
+/// Snapshot `outcome` code (`OUTCOME_*`) for a simulation outcome.
+pub(super) const fn outcome_code(outcome: Option<MatchOutcome>) -> u8 {
+    match outcome {
+        None => OUTCOME_NONE,
+        Some(MatchOutcome::Winner(moba_game::Team::Blue)) => OUTCOME_BLUE,
+        Some(MatchOutcome::Winner(moba_game::Team::Red)) => OUTCOME_RED,
+        Some(MatchOutcome::Draw) => OUTCOME_DRAW,
+    }
+}
 
 impl NetServer {
     #[allow(clippy::too_many_lines)] // Snapshot fan-out is one ordered pass.
@@ -89,11 +102,7 @@ impl NetServer {
             let (blue_score, red_score) = self.simulation.score();
             delta.blue_score = blue_score;
             delta.red_score = red_score;
-            delta.outcome = match self.simulation.outcome() {
-                None => 0,
-                Some(moba_game::Team::Blue) => 1,
-                Some(moba_game::Team::Red) => 2,
-            };
+            delta.outcome = outcome_code(self.simulation.outcome());
             delta.phase = phase_code as u8;
             delta.countdown = countdown;
             delta.ready_mask = ready_mask;

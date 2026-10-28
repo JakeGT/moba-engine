@@ -27,7 +27,7 @@ const MAGIC: &[u8; 8] = b"MOBARPL1";
 const VERSION: u8 = 5;
 /// Simulation logic contract. Bump when tick behaviour changes enough that old inputs no
 /// longer reproduce the recorded state.
-pub const SIM_LOGIC_VERSION: u8 = 7;
+pub const SIM_LOGIC_VERSION: u8 = 8;
 /// Minimum bytes per frame on the wire (`present` bitmask, no commands).
 const MIN_FRAME_BYTES: usize = 4;
 /// Upper bound on decoded frame memory (64 MiB).
@@ -153,8 +153,8 @@ pub struct ReplayResult {
     pub ticks: u32,
     /// Final simulation state hash.
     pub state_hash: u64,
-    /// Match outcome (winner), if any.
-    pub outcome: Option<moba_game::Team>,
+    /// Match outcome, if the match ended.
+    pub outcome: Option<crate::MatchOutcome>,
 }
 
 impl Replay {
@@ -661,7 +661,10 @@ mod tests {
         let result = decoded.play().expect("replay verifies");
         assert_eq!(result.ticks, 300);
         assert_eq!(result.state_hash, simulation.state_hash());
-        assert_eq!(result.outcome, Some(moba_game::Team::Red));
+        assert_eq!(
+            result.outcome,
+            Some(crate::MatchOutcome::Winner(moba_game::Team::Red))
+        );
 
         let mut corrupt = decoded.clone();
         corrupt.expected_hash = Some(corrupt.expected_hash.unwrap_or(0) ^ 0x40);
