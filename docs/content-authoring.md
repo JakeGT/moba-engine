@@ -453,7 +453,9 @@ mesh = "crystal"               # optional: <root>/models/crystal.glb, else a bui
   prop mesh is scaled uniformly to `height`, standing on the ground and centred on `position`.
   Meshes are static (a skin is ignored).
 - **Mesh names** are 1..=32 of `[A-Za-z0-9_-]`, and a descriptor may reference at most 4
-  distinct meshes (wall and props together).
+  distinct meshes (wall and props together). A client uploads at most 16 distinct map meshes
+  per session (renderer mesh slots are shared with hero models and never freed); later ones
+  draw the built-in block.
 - **Limits.** A descriptor is at most 16 KiB. Unknown keys, wrong types and out-of-range or
   non-finite numbers are errors. The client reads it with a bounded read and never panics on
   it.

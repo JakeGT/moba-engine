@@ -148,7 +148,15 @@ impl ClientApp {
             simulation: None,
             network: None,
             local_audio: None,
-            units: Vec::with_capacity(moba_sim::MAX_UNITS),
+            // Every entity, five extra rig parts per hero, map walls/props and projectiles,
+            // so the frame loop never grows the buffer.
+            units: Vec::with_capacity(
+                moba_sim::MAX_UNITS
+                    + 5 * 10
+                    + moba_game::MAX_CONTENT_WALLS
+                    + moba_assets::MAX_MAP_PROPS
+                    + 64,
+            ),
             models: models::ModelLibrary::from_env(),
             map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env()),
             map_capture: map_visuals::SwitchCapture::from_env(),
@@ -573,8 +581,26 @@ impl App for ClientApp {
                                 );
                                 exit_after_capture = true;
                             } else if let Some(path) = switch_capture {
-                                capture_and_exit(renderer, &scene, ui, Some(&path), &mut failure);
-                                eprintln!("[assets] map capture written to {}", path.display());
+                                // Mid-session: a failed capture (minimised window, resize,
+                                // validation message) is reported, not fatal.
+                                let mut capture_failure = None;
+                                capture_and_exit(
+                                    renderer,
+                                    &scene,
+                                    ui,
+                                    Some(&path),
+                                    &mut capture_failure,
+                                );
+                                match capture_failure {
+                                    None => eprintln!(
+                                        "[assets] map capture written to {}",
+                                        path.display()
+                                    ),
+                                    Some(error) => eprintln!(
+                                        "[assets] map capture {} failed: {error}",
+                                        path.display()
+                                    ),
+                                }
                             } else if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }

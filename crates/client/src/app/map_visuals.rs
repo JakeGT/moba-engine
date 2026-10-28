@@ -34,6 +34,9 @@ const WALL_THICKNESS: f32 = 2.5;
 /// Descriptor and mesh caches are cleared past this many names (each content update can add
 /// at most one descriptor and four meshes, so this only bounds a pathological server).
 const MAX_CACHED: usize = 64;
+/// Most renderer mesh slots (of 64, never freed) map meshes may take in one session, so a
+/// server cycling through many maps cannot starve hero models.
+const MAX_MAP_MESH_SLOTS: usize = 16;
 /// Most wall instances built (the content and wire limit).
 const MAX_WALLS: usize = moba_game::MAX_CONTENT_WALLS;
 
@@ -343,13 +346,29 @@ impl MapLibrary {
         if self.meshes.len() >= MAX_CACHED {
             self.meshes.retain(|(_, mesh)| mesh.is_some());
         }
+        let uploaded = self
+            .meshes
+            .iter()
+            .filter(|(_, mesh)| mesh.is_some())
+            .count();
         let result = model_path(&self.root, name)
             .ok_or_else(|| String::from("invalid mesh name"))
+            .and_then(|path| {
+                // Mesh slots are never freed and are shared with hero models.
+                if uploaded >= MAX_MAP_MESH_SLOTS {
+                    Err(format!("map mesh budget ({MAX_MAP_MESH_SLOTS}) used"))
+                } else {
+                    Ok(path)
+                }
+            })
             .and_then(|path| {
                 moba_assets::load_glb_file(&path)
                     .map_err(|error| format!("{}: {error}", path.display()))
             })
             .and_then(|data| {
+                // Check the extent first: an upload takes a slot that is never freed.
+                FittedMesh::new(MeshId::CUBE, &data)
+                    .ok_or_else(|| String::from("mesh has no extent"))?;
                 let mesh = register(&data).map_err(|error| format!("upload failed: {error}"))?;
                 FittedMesh::new(mesh, &data).ok_or_else(|| String::from("mesh has no extent"))
             });
@@ -616,6 +635,25 @@ mod tests {
         assert_eq!(local_key.visuals, wire_key.visuals);
         assert_eq!(local_key.theme, wire_key.theme);
         assert_eq!(local_key.center, wire_key.center);
+    }
+
+    #[test]
+    fn map_meshes_have_a_slot_budget() {
+        let root = temp_root("budget");
+        let mut library = MapLibrary::new(root.clone());
+        let mut uploads = 0;
+        let mut register = |_: &MeshData| {
+            uploads += 1;
+            Ok(MeshId::CUBE)
+        };
+        for index in 0..=MAX_MAP_MESH_SLOTS {
+            let name = format!("m{index}");
+            std::fs::write(root.join(format!("models/{name}.glb")), CRYSTAL).expect("write");
+            let fitted = library.mesh(&name, &mut register);
+            assert_eq!(fitted.is_some(), index < MAX_MAP_MESH_SLOTS, "{name}");
+        }
+        assert_eq!(uploads, MAX_MAP_MESH_SLOTS);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
