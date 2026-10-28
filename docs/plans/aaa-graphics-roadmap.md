@@ -23,6 +23,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Terrain | A flat plane with a procedural grid and per-map tint. Walls are only drawn on the network path. |
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
 | Materials and textures | Vertex colour only. Textures exist only in the UI atlas. |
+| Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. VAT minions and bone LOD (R4b) are open. |
 | VFX | None beyond unit tinting. Presentation events (cast, projectile spawn/hit, death, zone) already reach the client ([perf/0009](../perf/0009-presentation-events.md)). |
 | Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
 | UI | Baked bitmap font and RGBA atlas, with UI scale. |
@@ -131,6 +132,10 @@ Today's single pass can't hold shadows, post-processing or VFX. Rebuild the fram
 - Golden images cover the map at several camera positions.
 
 ### R4 — Animation runtime (M–L, after WP-4.1)
+**Status:** R4a (items 1–4, with a 1D blend space, and the update-rate half of 5) is done in
+[ADR-0012](../adr/0012-animation-runtime.md); exact attack sync needs a replicated attack event
+(a protocol follow-up). R4b — VAT minions and renderer bone LOD — waits for R1.
+
 1. **Clips and blending.** Multiple clips per hero, 1D/2D blend spaces for locomotion, crossfades, additive hit reactions and an upper/lower-body mask (cast while moving).
 2. **Animation state machine** defined in content, driven by snapshot state and presentation events:
    - idle and run come from interpolated velocity;
@@ -196,7 +201,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0009 | Descriptor model | **Accepted** (R1a): per-material plain sets now; bindless deferred until measured on MoltenVK + UHD 620 |
 | ADR-0010 | Texture pipeline | Offline baker → KTX2 (BC7/BC5/BC4), mips, sRGB rules |
 | ADR-0011 | Art style | Stylised PBR with a painterly layer; readability rules as acceptance criteria |
-| ADR-0012 | Animation runtime | In-house sampler + content-defined state machine; VAT for minions |
+| ADR-0012 | Animation runtime | **Accepted** ([ADR-0012](../adr/0012-animation-runtime.md)): in-house sampler + content-defined state machine; VAT for minions in R4b |
 | ADR-0013 | VFX runtime | GPU compute particles; content-defined effects bound to presentation events |
 | — | Quality tiers | Low = min-spec 1080p/60; High = mid-range 1440p/144 |
 

@@ -1,7 +1,8 @@
 # ADR-0007: Mesh asset format
 
 **Status:** accepted 2026-10-27 (WP-3.2, #286); amended 2026-10-27 for GPU skinning (WP-4.1,
-#288; see [Skinning](#skinning-wp-41)).
+#288; see [Skinning](#skinning-wp-41)); amended 2026-10-28 for multiple named clips and joint
+names (R4a, [ADR-0012](0012-animation-runtime.md)).
 
 ## Context
 The renderer drew only procedural shapes: instanced cubes and the six-cube hero rig. M8 needs
@@ -38,13 +39,14 @@ content hash.
   and optional `u8`/`u16`/`u32` indices, all widened to `u32`. Node transforms of the default
   scene are baked into the vertices, and all primitives merge into one mesh. Missing normals
   become flat face normals, as the glTF specification requires. Materials, textures and
-  morph targets are ignored; skins and one animation clip are read since WP-4.1 (see
+  morph targets are ignored; skins and animation clips are read since WP-4.1 (see
   [Skinning](#skinning-wp-41)). Sparse accessors and any `extensionsRequired`
   entry (for example Draco or meshopt compression) are rejected.
 - **Untrusted-input limits** (`moba-assets`, feature `glb`):
-  - file ≤ 16 MiB (checked from metadata before reading) and JSON chunk ≤ 256 KiB. A hostile
-    chunk of empty objects still expands to tens of MiB of parsed structs, but only
-    transiently and only at load time;
+  - file ≤ 16 MiB (checked from metadata before reading) and JSON chunk ≤ 256 KiB (1 MiB
+    since R4a, so a rig with 32 full clips fits; see ADR-0012). A hostile chunk of empty
+    objects still expands to tens of MiB of parsed structs (on the order of 100 MiB at the
+    1 MiB cap), but only transiently and only at load time;
   - ≤ 65,536 vertices and ≤ 393,216 indices (128 Ki triangles), checked *before* reserving;
   - node walk ≤ 1,024 visits and depth ≤ 32 (cycles fail), ≤ 4,096 primitives inspected;
   - every offset, stride (≤ 252) and count is checked arithmetic; all indices must be in
@@ -99,17 +101,19 @@ content hash.
   and quantised to `R8G8B8A8_UNORM` summing to exactly 255, or all zero) per vertex, plus a
   `Skeleton`: ≤ 64 joints, parent links (any order; a parents-first order is computed),
   rest TRS, the static transform of non-joint ancestors, inverse bind matrices (identity if
-  absent) and at most one `AnimationClip`. Everything is built through validating
+  absent) and its clips (one until R4a; up to 32 named clips since
+  [ADR-0012](0012-animation-runtime.md)). Everything is built through validating
   constructors, like `MeshData`.
 - **Loader.** All mesh nodes must share one skin (or none); skinned vertices stay in bind
-  space (the skinned node's transform is ignored, per glTF). The clip is the first animation
-  that drives a joint: translation/rotation/scale, `f32` keys, `LINEAR`/`STEP`
+  space (the skinned node's transform is ignored, per glTF). The clip was the first animation
+  that drives a joint (R4a reads every one, see ADR-0012): translation/rotation/scale, `f32` keys, `LINEAR`/`STEP`
   (`CUBICSPLINE` keeps only its values and plays linearly). Caps: 64 joints, 4,096 keys per
   track and 65,536 per clip (checked before reserving), 600 s, finite non-decreasing times.
   Animation channels count against the 4,096-entry inspection cap. `JOINTS_1`/`WEIGHTS_1`,
   morph targets and joints below a non-joint node inside the skeleton are not supported.
-  Animation names are not read (`gltf`'s `names` feature stays off), so the first clip is
-  treated as locomotion.
+  WP-4.1 did not read animation names (`gltf`'s `names` feature was off) and treated the first
+  clip as locomotion. R4a turns `names` on (no new dependency) to find clips and joints by
+  name; the WP-4.1 pose now prefers a clip named `run` or `walk`.
 - **Renderer.** `register_skinned_mesh` uploads the 32-byte `SkinnedVertex`
   `{pos, normal, joints, weights}` through the same staging path. `skinned.vert` reuses
   `unit.frag`; `pipeline::create` takes a vertex layout. Set 1 gains binding 1, a per-frame
@@ -135,7 +139,8 @@ content hash.
   counted and drawn static for that frame. `MOBA_NO_SKINNING=1` skips the skinned upload.
 - **Sample.** `sample-mesh` also writes `content/models/sentinel-skinned.glb`: the sentinel's
   geometry bound to a 7-joint skeleton with a 0.8 s walk clip, generated from `+ - * / sqrt`
-  only and byte-compared by a test.
+  only and byte-compared by a test. Since R4a it has 10 joints (a 3-joint cape) and nine named
+  clips, the walk cycle among them as `run` ([ADR-0012](0012-animation-runtime.md)).
 
 ## Consequences
 - Mesh slots are never freed. A future unload path needs deferred deletion keyed by frame

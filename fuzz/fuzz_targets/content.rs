@@ -28,6 +28,12 @@ fuzz_target!(|data: &[u8]| {
             assert!(visuals.props.len() <= moba_assets::MAX_MAP_PROPS);
             assert!(visuals.mesh_names().count() <= moba_assets::MAX_MAP_MESHES);
         }
+        // So are animation sets (ADR-0012): parsing stays within its caps.
+        if let Ok(set) = moba_assets::AnimationSet::parse(text) {
+            assert!(set.state_count() <= moba_assets::MAX_ANIMATION_STATES);
+            assert!(set.spring_joint_count() <= moba_assets::MAX_SPRING_JOINTS);
+            assert!(set.socket_count() <= moba_assets::MAX_SOCKETS);
+        }
         if let Ok(content) = moba_game::load_content_toml(&format!("{ASSET_SEED}\n{text}")) {
             // Anything that loads must have resolvable, wire-safe visual names.
             for hero in &content.heroes {

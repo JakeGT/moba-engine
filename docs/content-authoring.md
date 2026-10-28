@@ -485,6 +485,101 @@ restyled. To see two maps back to back in one client session, rotate packs on th
 Descriptors are client-local and cosmetic like models: two players with different files see
 different colours and props in the same match.
 
+### Animation sets
+
+A skinned model can have an **animation set**: a small TOML descriptor at
+`<root>/animations/<model>.toml` that names the model's clips, how they blend and which
+events play them ([ADR-0012](adr/0012-animation-runtime.md)).
+[`content/animations/sentinel-skinned.toml`](../content/animations/sentinel-skinned.toml) is
+the example for `content/models/sentinel-skinned.glb`. Like map visuals it is client-local and
+cosmetic: never hashed, signed, sent or replayed.
+
+**Clips** come from the `.glb`: every glTF animation that drives a joint is one clip, named by
+the animation's `name` (at most 32 clips, 4,096 keys per track, 65,536 per clip, 262,144 per
+model and 8,192 animation channels per file, enough for 64 joints × translation, rotation and
+scale × 32 clips). Joints are named by their nodes' `name`s. Names the descriptor uses are 1..=32 of
+`[A-Za-z0-9_-]`, matched ignoring ASCII case; other names in the file are ignored. Export one
+named glTF animation per action.
+
+```toml
+move_speed = 1.5           # optional: m/s above which upper-body actions leave the legs to
+                           #   locomotion (0.05..=100, default 1.5)
+upper_body = "chest"       # optional: this joint and everything below it is the upper body
+
+[[locomotion]]             # optional blend space, 1..=8 points, speeds increasing (0..=100 m/s)
+clip = "idle"
+speed = 0.0
+
+[[locomotion]]
+clip = "run"
+speed = 4.0                # the run clip has full weight from 4 m/s
+
+[[states]]                 # at most 16 action states
+name = "attack"            # required, unique
+clip = "attack"            # required: a clip of the model
+mode = "once"              # once (default) | loop | hold (stays until respawn: death)
+layer = "upper"            # full (default) | upper (upper_body only while moving) | additive
+fade_in = 0.06             # seconds, 0..=2 (default 0.1)
+fade_out = 0.15            # seconds, 0..=2 (default 0.15)
+speed = 1.0                # playback rate, 0.1..=4 (default 1)
+release = 0.35             # seconds into the clip that the trigger marks: the hit or the
+                           #   release of a cast (0..=10, default 0)
+interrupt_on_move = true   # stop (fade out) when the unit moves faster than move_speed
+
+[triggers]                 # which state each event plays (all optional)
+attack = "attack"          # basic attacks
+casts = ["cast1", "cast2", "cast3"]   # ability slots Q, W, E
+death = "death"
+death_linger = 1.5         # seconds the body stays after the death clip (0..=30, default 1.5)
+recall = "recall"
+hit = "hit"                # taking a hit (use an additive state)
+
+[[abilities]]              # optional, at most 16: by catalogue ability name, wins over the slot
+name = "Fireball"
+state = "cast2"
+
+[[springs]]                # optional secondary motion, at most 4 chains / 16 joints
+joints = ["cape_0", "cape_1", "cape_2"]   # each the child of the previous, at most 8
+stiffness = 0.25           # 0..=1 pull towards the animated pose per 1/60 s step (default 0.2)
+damping = 0.2              # 0..=1 velocity loss per step (default 0.15)
+gravity = 9.81             # m/s², 0..=50 (default 9.81)
+
+[[sockets]]                # optional attach points for weapons and VFX, at most 8
+name = "spear_tip"         # unique
+joint = "arm_r"
+offset = [0.09, 1.3, 0.21] # metres in the joint's frame (-100..=100)
+rotation = [0.0, 0.0, 0.0] # degrees about X, Y, Z (-360..=360)
+```
+
+TOML puts every key after a `[[table]]` header into that table, so keep `move_speed` and
+`upper_body` above the first header.
+
+- **Timing.** A trigger is stamped with the server tick it happened on, and the state starts
+  `release` seconds before it, so the hit frame of an attack lands on the hit and a cast's
+  release on the cast. Crossfades use `fade_in` of the new state; the previous one fades out
+  underneath. An `upper` state plays on the whole body while the unit stands and only on
+  `upper_body` while it moves, so a hero casts while running.
+- **What triggers what.** Casts come from the server's cast events (by slot, or by ability
+  name with `[[abilities]]`), deaths from death events or the dead flag, respawns from the dead
+  flag clearing, hit reactions from the hero's health dropping (at most every 0.3 s). Basic
+  attacks are **inferred** from health changes near a standing hero,
+  because the wire carries no attack event yet (see ADR-0012's "Gaps"), so occasional extra or
+  missed swings are expected. The simulation has no recall, so `recall` is reserved.
+- **Limits.** A set is at most 16 KiB. Unknown keys, wrong types, out-of-range or non-finite
+  numbers and names that the model does not have are errors.
+
+**Fallback.** Any problem is logged once per model and never fails a match:
+
+| Problem | What the client plays |
+|---|---|
+| no `animations/<model>.toml` | the WP-4.1 pose: rest pose blended to the clip named `run` (or `walk`, else the first clip) by gait |
+| an oversized or invalid set, or one naming a missing clip, joint or state | the same WP-4.1 pose |
+| `MOBA_NO_ANIMATION_SETS=1` | the same, for every model |
+
+`MOBA_ANIM_LOD` reduces how often far heroes animate: `<near>,<far>` metres from the camera
+(default `80,140`: every frame within 80 m, every 2nd frame to 140 m, every 4th beyond or off
+screen), or `off`.
+
 ## Hot reload
 
 ```bash

@@ -6,15 +6,23 @@
 //!
 //! [`MeshData`] is the validated hand-off type between loaders and the renderer. The `glb`
 //! feature adds [`load_glb`], a bounded binary-glTF loader for untrusted files (ADR-0007);
-//! [`MeshSkin`]/[`Skeleton`] carry skinning data and [`Skeleton::sample`] poses it.
+//! [`MeshSkin`]/[`Skeleton`] carry skinning data and named clips.
 //! [`MapVisuals`] is the bounded per-map visuals descriptor (`maps/<name>.toml`, #287).
+//!
+//! The animation runtime (ADR-0012) is pure CPU code with no GPU dependency: [`Pose`],
+//! [`BoneMask`] and [`BlendSpace1d`] sample and blend clips; [`AnimationSet`] is the bounded
+//! client-local state-machine descriptor (`animations/<model>.toml`), [`AnimationGraph`]
+//! binds it to a skeleton and [`Animator`] runs it per unit (actions, crossfades, upper-body
+//! masks, additive reactions, spring bones and sockets) without allocating.
 
 #![forbid(unsafe_code)]
 
+mod animation;
 #[cfg(feature = "glb")]
 mod glb;
 mod map_visuals;
 mod mesh;
+mod pose;
 mod skin;
 
 use std::collections::BTreeMap;
@@ -22,6 +30,12 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub use animation::{
+    AnimationEvent, AnimationGraph, AnimationScratch, AnimationSet, AnimationSetError, Animator,
+    AnimatorReport, Layer, MAX_ABILITY_BINDINGS, MAX_ANIMATION_SET_BYTES, MAX_ANIMATION_STATES,
+    MAX_SOCKETS, MAX_SPRING_CHAINS, MAX_SPRING_JOINTS, MAX_SPRING_STEPS, PlayMode, SPRING_STEP,
+    SocketId, StateId, pose_matrices,
+};
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
 pub use map_visuals::{
@@ -29,9 +43,14 @@ pub use map_visuals::{
     MAX_MESH_NAME, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
 };
 pub use mesh::{MeshData, MeshError};
+pub use pose::{
+    BlendSpace1d, BlendSpaceError, BoneMask, ClipWrap, MAX_BLEND_POINTS, Pose, joint_matrix,
+};
 pub use skin::{
-    AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_CLIP_KEYS, MAX_CLIP_SECONDS,
-    MAX_JOINTS, MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
+    AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_ANIMATION_CHANNELS,
+    MAX_ANIMATION_NAME, MAX_CLIP_KEYS, MAX_CLIP_SECONDS, MAX_CLIPS, MAX_JOINTS, MAX_SKELETON_KEYS,
+    MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
+    valid_animation_name,
 };
 
 /// One asset entry.

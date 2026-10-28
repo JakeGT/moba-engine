@@ -20,6 +20,10 @@
 //!   mesh (the fallback) and as a skinned mesh, and its [`Skeleton`] is kept for per-frame
 //!   posing. `MOBA_NO_SKINNING=1`, a renderer without the skinned pipeline or a failed
 //!   skinned upload leaves the hero on the static mesh.
+//! - Animation sets (ADR-0012): a skinned model `name` may have a client-local
+//!   `<root>/animations/<name>.toml` descriptor, bound to its skeleton at load. A missing or
+//!   invalid one is logged once and the hero keeps the WP-4.1 pose (rest pose blended to the
+//!   run clip by gait); `MOBA_NO_ANIMATION_SETS=1` skips them.
 //!
 //! Loading and GPU upload happen only in `bind_heroes` (startup and content reload). The
 //! per-frame lookup is a bounds-checked index into a preallocated table and never
@@ -27,7 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use moba_assets::Skeleton;
+use moba_assets::{AnimationGraph, AnimationSet, Skeleton};
 use moba_core::math::{Mat4, Vec3};
 use moba_render::{MeshData, MeshId};
 
@@ -121,6 +125,11 @@ pub(crate) fn model_path(root: &Path, name: &str) -> Option<PathBuf> {
     valid_model_name(name).then(|| root.join("models").join(format!("{name}.glb")))
 }
 
+/// Resolves a model name to its animation set, `<root>/animations/<name>.toml`.
+pub(crate) fn animation_set_path(root: &Path, name: &str) -> Option<PathBuf> {
+    valid_model_name(name).then(|| root.join("animations").join(format!("{name}.toml")))
+}
+
 /// Dev-override hero → model mapping parsed from [`HERO_MODELS_ENV`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ModelBindings {
@@ -165,6 +174,10 @@ pub(crate) struct ModelLibrary {
     heroes: Vec<Option<HeroModel>>,
     /// Skeletons of the skinned models, indexed by [`SkinnedModel::rig`].
     rigs: Vec<Skeleton>,
+    /// Bound animation sets, parallel to `rigs` (`None`: the WP-4.1 pose).
+    graphs: Vec<Option<AnimationGraph>>,
+    /// Whether to look for animation sets at all.
+    animation_sets: bool,
     /// Whether to upload skinned variants at all.
     skinning: bool,
 }
@@ -178,6 +191,7 @@ impl ModelLibrary {
             .unwrap_or_default();
         let mut library = Self::new(root, bindings);
         library.skinning = skinning_enabled_from_env();
+        library.animation_sets = crate::app::animation::animation_sets_enabled_from_env();
         library
     }
 
@@ -188,6 +202,8 @@ impl ModelLibrary {
             loaded: Vec::new(),
             heroes: Vec::with_capacity(MAX_HEROES),
             rigs: Vec::new(),
+            graphs: Vec::new(),
+            animation_sets: true,
             skinning: true,
         }
     }
@@ -208,6 +224,17 @@ impl ModelLibrary {
         self.rigs.get(index)
     }
 
+    /// The bound animation set of a skinned model, if it has a usable one. Never allocates.
+    pub(crate) fn graph(&self, index: usize) -> Option<&AnimationGraph> {
+        self.graphs.get(index).and_then(Option::as_ref)
+    }
+
+    /// Enables or disables animation sets for later binds (tests and the env opt-out).
+    #[cfg(test)]
+    pub(crate) fn set_animation_sets(&mut self, enabled: bool) {
+        self.animation_sets = enabled;
+    }
+
     /// Forgets every uploaded mesh. Call when a new renderer is created (its mesh table holds
     /// only the cube, so cached `MeshId`s would be stale). Cached failures are kept: the same
     /// files would fail again and were already logged.
@@ -215,6 +242,7 @@ impl ModelLibrary {
         self.loaded.retain(|(_, model)| model.is_none());
         self.heroes.clear();
         self.rigs.clear();
+        self.graphs.clear();
     }
 
     /// The dev-override name mapping (see [`hero_model`]).
@@ -290,6 +318,11 @@ impl ModelLibrary {
                         rig: self.rigs.len(),
                     });
                     self.rigs.push(skin.skeleton().clone());
+                    let graph = self
+                        .animation_sets
+                        .then(|| self.load_animation_set(name, skin.skeleton()))
+                        .flatten();
+                    self.graphs.push(graph);
                 }
                 Err(error) => {
                     eprintln!(
@@ -299,6 +332,27 @@ impl ModelLibrary {
             }
         }
         Ok(model)
+    }
+
+    /// Loads and binds `<root>/animations/<name>.toml`; any failure is logged once (models
+    /// are cached, so this runs once per model) and leaves the WP-4.1 pose.
+    fn load_animation_set(&self, name: &str, skeleton: &Skeleton) -> Option<AnimationGraph> {
+        let path = animation_set_path(&self.root, name)?;
+        let result =
+            AnimationSet::load_file(&path).and_then(|set| AnimationGraph::bind(&set, skeleton));
+        match result {
+            Ok(graph) => {
+                eprintln!("[anim] model '{name}': animation set {}", path.display());
+                Some(graph)
+            }
+            Err(error) => {
+                eprintln!(
+                    "[anim] model '{name}': {}: {error}; using the single-clip pose",
+                    path.display()
+                );
+                None
+            }
+        }
     }
 
     /// The model for a hero pick, or `None` to draw the procedural rig. Never allocates.
@@ -490,7 +544,7 @@ mod tests {
         assert_eq!(uploads, [Upload::Static, Upload::Skinned, Upload::Static]);
         let walker = library.hero(0).expect("walker");
         let skin = walker.skin.expect("skinned variant");
-        assert_eq!(library.rig(skin.rig).map(Skeleton::joint_count), Some(7));
+        assert_eq!(library.rig(skin.rig).map(Skeleton::joint_count), Some(10));
         assert!(library.hero(1).expect("statue").skin.is_none());
 
         // The skinned pipeline is missing: the hero keeps its static mesh.

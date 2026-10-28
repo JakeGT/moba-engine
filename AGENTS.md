@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene + networked skinned capture), lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **429 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **452 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -53,7 +53,8 @@ crates/game       defaults + runtime content, abilities, items, map, mitigation,
 crates/sim        deterministic simulation, status effects, bots, replay
 crates/net        UDP transport, protocol, crypto, snapshots, prediction, server/client
 crates/netsim     lossy-link conditioner
-crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader (ADR-0007)
+crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader (ADR-0007),
+                  animation sampling/blending/state machine (ADR-0012)
 crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, terrain/fog, UI atlas,
                   animated rig, GPU skinning, per-pass GPU timestamps
 crates/shaders    GLSL -> SPIR-V build
