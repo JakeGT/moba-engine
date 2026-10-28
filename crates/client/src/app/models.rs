@@ -16,12 +16,18 @@
 //!   logged once per model and that hero keeps the procedural rig; a match never fails
 //!   because of an asset.
 //!
+//! - Skinned models (WP-4.1): a model whose file has a skin is uploaded twice, as a static
+//!   mesh (the fallback) and as a skinned mesh, and its [`Skeleton`] is kept for per-frame
+//!   posing. `MOBA_NO_SKINNING=1`, a renderer without the skinned pipeline or a failed
+//!   skinned upload leaves the hero on the static mesh.
+//!
 //! Loading and GPU upload happen only in `bind_heroes` (startup and content reload). The
 //! per-frame lookup is a bounds-checked index into a preallocated table and never
 //! allocates.
 
 use std::path::{Path, PathBuf};
 
+use moba_assets::Skeleton;
 use moba_core::math::{Mat4, Vec3};
 use moba_render::{MeshData, MeshId};
 
@@ -29,6 +35,8 @@ use moba_render::{MeshData, MeshId};
 pub(crate) const ASSET_ROOT_ENV: &str = "MOBA_ASSET_ROOT";
 /// Environment variable mapping hero names to model names (dev override of the catalogue).
 pub(crate) const HERO_MODELS_ENV: &str = "MOBA_HERO_MODELS";
+/// Environment variable that disables GPU skinning (`1`): skinned models draw static.
+pub(crate) const NO_SKINNING_ENV: &str = "MOBA_NO_SKINNING";
 /// Default asset root, relative to the working directory.
 const DEFAULT_ASSET_ROOT: &str = "content";
 /// Height every hero model is normalised to, matching the procedural rig (metres).
@@ -42,8 +50,32 @@ const MAX_HEROES: usize = 256;
 /// [`HERO_MODEL_HEIGHT`], centred on the unit's position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HeroModel {
+    /// Static mesh: always present, and the fallback for a skinned model.
     pub(crate) mesh: MeshId,
     pub(crate) normalize: Mat4,
+    /// GPU-skinned variant, when the file has a skin and skinning is available.
+    pub(crate) skin: Option<SkinnedModel>,
+}
+
+/// The skinned upload of a model and its skeleton in [`ModelLibrary::rig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SkinnedModel {
+    pub(crate) mesh: MeshId,
+    pub(crate) rig: usize,
+}
+
+/// Which upload `bind_heroes` asks the renderer for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Upload {
+    /// `Renderer::register_mesh`.
+    Static,
+    /// `Renderer::register_skinned_mesh`.
+    Skinned,
+}
+
+/// `true` unless [`NO_SKINNING_ENV`] is set to `1`. Read once at startup.
+pub(crate) fn skinning_enabled_from_env() -> bool {
+    std::env::var(NO_SKINNING_ENV).map_or(true, |value| value.trim() != "1")
 }
 
 impl HeroModel {
@@ -61,6 +93,7 @@ impl HeroModel {
         Some(Self {
             mesh,
             normalize: Mat4::from_scale(Vec3::splat(scale)) * Mat4::from_translation(-center),
+            skin: None,
         })
     }
 }
@@ -122,6 +155,10 @@ pub(crate) struct ModelLibrary {
     loaded: Vec<(String, Option<HeroModel>)>,
     /// Indexed by hero pick (catalogue index).
     heroes: Vec<Option<HeroModel>>,
+    /// Skeletons of the skinned models, indexed by [`SkinnedModel::rig`].
+    rigs: Vec<Skeleton>,
+    /// Whether to upload skinned variants at all.
+    skinning: bool,
 }
 
 impl ModelLibrary {
@@ -133,7 +170,9 @@ impl ModelLibrary {
         let bindings = std::env::var(HERO_MODELS_ENV)
             .map(|spec| ModelBindings::parse(&spec))
             .unwrap_or_default();
-        Self::new(root, bindings)
+        let mut library = Self::new(root, bindings);
+        library.skinning = skinning_enabled_from_env();
+        library
     }
 
     pub(crate) fn new(root: PathBuf, bindings: ModelBindings) -> Self {
@@ -142,7 +181,25 @@ impl ModelLibrary {
             bindings,
             loaded: Vec::new(),
             heroes: Vec::with_capacity(MAX_HEROES),
+            rigs: Vec::new(),
+            skinning: true,
         }
+    }
+
+    /// Whether skinned models are uploaded skinned (false with `MOBA_NO_SKINNING=1`).
+    pub(crate) fn skinning(&self) -> bool {
+        self.skinning
+    }
+
+    /// Enables or disables skinned uploads for later binds (tests and the env opt-out).
+    #[cfg(test)]
+    pub(crate) fn set_skinning(&mut self, enabled: bool) {
+        self.skinning = enabled;
+    }
+
+    /// The skeleton of a skinned model. Never allocates.
+    pub(crate) fn rig(&self, index: usize) -> Option<&Skeleton> {
+        self.rigs.get(index)
     }
 
     /// Forgets every uploaded mesh. Call when a new renderer is created (its mesh table holds
@@ -151,6 +208,7 @@ impl ModelLibrary {
     pub(crate) fn renderer_recreated(&mut self) {
         self.loaded.retain(|(_, model)| model.is_none());
         self.heroes.clear();
+        self.rigs.clear();
     }
 
     /// The dev-override name mapping (see [`hero_model`]).
@@ -161,14 +219,16 @@ impl ModelLibrary {
     /// Rebuilds the hero table from one optional model name per hero (in catalogue order),
     /// loading and registering each distinct model once.
     ///
-    /// `register` uploads a mesh (normally [`moba_render::Renderer::register_mesh`]). Every
-    /// failure is logged once and leaves that hero on the procedural rig.
+    /// `register` uploads a mesh (normally [`moba_render::Renderer::register_mesh`], or
+    /// `register_skinned_mesh` for [`Upload::Skinned`]). Every failure is logged once and
+    /// leaves that hero on the procedural rig (or, for a failed skinned upload, on the
+    /// static mesh).
     pub(crate) fn bind_heroes<'a, R>(
         &mut self,
         models: impl IntoIterator<Item = Option<&'a str>>,
         mut register: R,
     ) where
-        R: FnMut(&MeshData) -> Result<MeshId, String>,
+        R: FnMut(&MeshData, Upload) -> Result<MeshId, String>,
     {
         self.heroes.clear();
         for model in models.into_iter().take(MAX_HEROES) {
@@ -179,7 +239,7 @@ impl ModelLibrary {
 
     fn load<R>(&mut self, name: &str, register: &mut R) -> Option<HeroModel>
     where
-        R: FnMut(&MeshData) -> Result<MeshId, String>,
+        R: FnMut(&MeshData, Upload) -> Result<MeshId, String>,
     {
         if let Some((_, cached)) = self.loaded.iter().find(|(loaded, _)| loaded == name) {
             return *cached;
@@ -187,7 +247,12 @@ impl ModelLibrary {
         let result = self.try_load(name, register);
         let model = match result {
             Ok(model) => {
-                eprintln!("[assets] model '{name}' loaded");
+                let kind = if model.skin.is_some() {
+                    "skinned"
+                } else {
+                    "static"
+                };
+                eprintln!("[assets] model '{name}' loaded ({kind})");
                 Some(model)
             }
             Err(reason) => {
@@ -199,16 +264,35 @@ impl ModelLibrary {
         model
     }
 
-    fn try_load<R>(&self, name: &str, register: &mut R) -> Result<HeroModel, String>
+    fn try_load<R>(&mut self, name: &str, register: &mut R) -> Result<HeroModel, String>
     where
-        R: FnMut(&MeshData) -> Result<MeshId, String>,
+        R: FnMut(&MeshData, Upload) -> Result<MeshId, String>,
     {
         let path = model_path(&self.root, name)
             .ok_or_else(|| String::from("invalid model name (use 1-32 of [A-Za-z0-9_-])"))?;
         let data = moba_assets::load_glb_file(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let mesh = register(&data).map_err(|error| format!("upload failed: {error}"))?;
-        HeroModel::fit(mesh, &data).ok_or_else(|| String::from("model has no height"))
+        let mesh =
+            register(&data, Upload::Static).map_err(|error| format!("upload failed: {error}"))?;
+        let mut model =
+            HeroModel::fit(mesh, &data).ok_or_else(|| String::from("model has no height"))?;
+        if let Some(skin) = data.skin().filter(|_| self.skinning) {
+            match register(&data, Upload::Skinned) {
+                Ok(skinned) => {
+                    model.skin = Some(SkinnedModel {
+                        mesh: skinned,
+                        rig: self.rigs.len(),
+                    });
+                    self.rigs.push(skin.skeleton().clone());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[assets] model '{name}': skinned upload failed ({error}); drawing it static"
+                    );
+                }
+            }
+        }
+        Ok(model)
     }
 
     /// The model for a hero pick, or `None` to draw the procedural rig. Never allocates.
@@ -240,10 +324,12 @@ pub(crate) fn bind_hero_models<'a>(
         .into_iter()
         .map(|(hero, model)| hero_model(models.bindings(), hero, model).map(str::to_owned))
         .collect();
-    models.bind_heroes(wanted.iter().map(Option::as_deref), |data| {
-        renderer
-            .register_mesh(data)
-            .map_err(|error| error.to_string())
+    models.bind_heroes(wanted.iter().map(Option::as_deref), |data, upload| {
+        match upload {
+            Upload::Static => renderer.register_mesh(data),
+            Upload::Skinned => renderer.register_skinned_mesh(data),
+        }
+        .map_err(|error| error.to_string())
     });
 }
 
@@ -252,6 +338,7 @@ mod tests {
     use super::*;
 
     const SAMPLE: &[u8] = include_bytes!("../../../../content/models/sentinel.glb");
+    const SKINNED_SAMPLE: &[u8] = include_bytes!("../../../../content/models/sentinel-skinned.glb");
 
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -322,7 +409,7 @@ mod tests {
         std::fs::write(root.join("models/bad.glb"), &SAMPLE[..100]).expect("write truncated");
         let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
         let mut uploads = 0u16;
-        let mut register = |_: &MeshData| {
+        let mut register = |_: &MeshData, _: Upload| {
             uploads += 1;
             Ok(MeshId::CUBE)
         };
@@ -358,7 +445,7 @@ mod tests {
         std::fs::write(root.join("models/good.glb"), SAMPLE).expect("write sample");
         let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
         let mut uploads = 0u16;
-        let mut register = |_: &MeshData| {
+        let mut register = |_: &MeshData, _: Upload| {
             uploads += 1;
             Ok(MeshId::CUBE)
         };
@@ -376,10 +463,53 @@ mod tests {
         let root = temp_root("upload");
         std::fs::write(root.join("models/good.glb"), SAMPLE).expect("write sample");
         let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
-        library.bind_heroes([Some("good")], |_: &MeshData| {
+        library.bind_heroes([Some("good")], |_: &MeshData, _: Upload| {
             Err(String::from("mesh limit reached"))
         });
         assert_eq!(library.hero(0), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skinned_models_upload_twice_and_fall_back_to_static() {
+        let root = temp_root("skinned");
+        std::fs::write(root.join("models/walker.glb"), SKINNED_SAMPLE).expect("write sample");
+        std::fs::write(root.join("models/statue.glb"), SAMPLE).expect("write sample");
+        let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
+        let mut uploads = Vec::new();
+        library.bind_heroes([Some("walker"), Some("statue")], |_: &MeshData, upload| {
+            uploads.push(upload);
+            Ok(MeshId::CUBE)
+        });
+        assert_eq!(uploads, [Upload::Static, Upload::Skinned, Upload::Static]);
+        let walker = library.hero(0).expect("walker");
+        let skin = walker.skin.expect("skinned variant");
+        assert_eq!(library.rig(skin.rig).map(Skeleton::joint_count), Some(7));
+        assert!(library.hero(1).expect("statue").skin.is_none());
+
+        // The skinned pipeline is missing: the hero keeps its static mesh.
+        library.renderer_recreated();
+        library.bind_heroes([Some("walker")], |_: &MeshData, upload| match upload {
+            Upload::Static => Ok(MeshId::CUBE),
+            Upload::Skinned => Err(String::from("GPU skinning is unavailable")),
+        });
+        let walker = library.hero(0).expect("static fallback");
+        assert!(walker.skin.is_none());
+        assert!(
+            library.rig(0).is_none(),
+            "rigs are cleared with the renderer"
+        );
+
+        // `MOBA_NO_SKINNING=1`: no skinned upload is attempted.
+        let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
+        library.set_skinning(false);
+        let mut skinned_requests = 0;
+        library.bind_heroes([Some("walker")], |_: &MeshData, upload| {
+            skinned_requests += usize::from(upload == Upload::Skinned);
+            Ok(MeshId::CUBE)
+        });
+        assert_eq!(skinned_requests, 0);
+        assert!(library.hero(0).expect("static").skin.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -388,7 +518,9 @@ mod tests {
         let root = temp_root("alloc");
         std::fs::write(root.join("models/good.glb"), SAMPLE).expect("write sample");
         let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
-        library.bind_heroes([Some("good"), None], |_: &MeshData| Ok(MeshId::CUBE));
+        library.bind_heroes([Some("good"), None], |_: &MeshData, _: Upload| {
+            Ok(MeshId::CUBE)
+        });
         let (found, allocations) = crate::app::allocation_probe::probe(|| {
             (0..1_000)
                 .filter(|pick| library.hero(pick % 3).is_some())

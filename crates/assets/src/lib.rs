@@ -1,17 +1,19 @@
-//! Validated asset manifests, fallback resolution and static meshes.
+//! Validated asset manifests, fallback resolution and (optionally skinned) meshes.
 //!
 //! Asset paths are relative, ASCII and must stay inside the pack. A missing named asset
 //! resolves through its declared fallback chain; the renderer can then use a procedural
 //! placeholder instead of failing a match.
 //!
 //! [`MeshData`] is the validated hand-off type between loaders and the renderer. The `glb`
-//! feature adds [`load_glb`], a bounded binary-glTF loader for untrusted files (ADR-0007).
+//! feature adds [`load_glb`], a bounded binary-glTF loader for untrusted files (ADR-0007);
+//! [`MeshSkin`]/[`Skeleton`] carry skinning data and [`Skeleton::sample`] poses it.
 
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "glb")]
 mod glb;
 mod mesh;
+mod skin;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,6 +23,10 @@ use serde::Deserialize;
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
 pub use mesh::{MeshData, MeshError};
+pub use skin::{
+    AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_CLIP_KEYS, MAX_CLIP_SECONDS,
+    MAX_JOINTS, MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
+};
 
 /// One asset entry.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

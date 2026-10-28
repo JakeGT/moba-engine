@@ -12,16 +12,18 @@ use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::instance::{InstanceContext, ValidationMode};
 use crate::mesh::{self, GpuMesh};
-use crate::pipeline::{self, PipelineSpec};
+use crate::pipeline::{self, PipelineSpec, VertexLayout};
 use crate::resources::{
     CommandPool, DescriptorPool, DescriptorSetLayout, Fence, GpuBuffer, GpuImage, GraphicsPipeline,
     PipelineLayout, Semaphore, ShaderModule,
 };
-use crate::scene::{CameraUniform, GpuInstance, MeshId, Scene};
+use crate::scene::{BoneRange, CameraUniform, GpuInstance, MeshId, Scene};
 use crate::swapchain::Swapchain;
 use crate::texture;
 use crate::ui::{UiDrawList, UiVertex};
+use bytemuck::{Pod, Zeroable};
 use gpu_allocator::MemoryLocation;
+use moba_assets::JointMatrix;
 
 const FRAMES_IN_FLIGHT: usize = 2;
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
@@ -29,6 +31,35 @@ pub(crate) const MAX_MESHES: usize = 64;
 const UI_ATLAS: &[u8] = include_bytes!("../assets/ui-atlas.rgba");
 static UI_VERTICES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
 static UI_TRUNCATION_LOGGED: AtomicBool = AtomicBool::new(false);
+static BONES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
+static SKINNED_DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
+pub const DEFAULT_MAX_BONES: usize = 16 * 64;
+/// Bytes per joint in the bone buffer: three `vec4` rows.
+const BONE_STRIDE: u64 = core::mem::size_of::<JointMatrix>() as u64;
+/// Push-constant block of `skinned.vert`: the draw's bone range (16 bytes, vertex stage).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct SkinPush {
+    first_bone: u32,
+    joint_count: u32,
+    reserved: [u32; 2],
+}
+const SKIN_PUSH_SIZE: u32 = core::mem::size_of::<SkinPush>() as u32;
+
+/// Joint matrices from [`Scene::bones`] dropped from the most recent frame because they
+/// exceeded [`RenderConfig::max_bones`].
+#[must_use]
+pub fn bones_truncated() -> u64 {
+    BONES_TRUNCATED.load(Ordering::Relaxed)
+}
+
+/// Skinned-mesh instances not drawn in the most recent frame: no bone range, a range past
+/// the uploaded bones, or more skinned draws than the per-frame budget.
+#[must_use]
+pub fn skinned_instances_dropped() -> u64 {
+    SKINNED_DROPPED.load(Ordering::Relaxed)
+}
 
 /// UI vertices dropped from the most recent submitted frame.
 #[must_use]
@@ -53,6 +84,12 @@ pub struct RenderConfig {
     pub max_ui_vertices: usize,
     /// HUD scale factor applied when uploading UI vertices.
     pub ui_scale: f32,
+    /// Joint matrices uploaded per frame for skinned meshes; [`Scene::bones`] past this are
+    /// dropped and counted ([`bones_truncated`]). Default [`DEFAULT_MAX_BONES`].
+    pub max_bones: usize,
+    /// Build the GPU skinning pipeline. When `false` (or if the pipeline fails to build),
+    /// [`Renderer::register_skinned_mesh`] returns [`RenderError::SkinningUnavailable`].
+    pub skinning: bool,
 }
 
 impl Default for RenderConfig {
@@ -64,6 +101,8 @@ impl Default for RenderConfig {
             clear_color: [0.028, 0.035, 0.055, 1.0],
             max_ui_vertices: 65_536,
             ui_scale: 1.0,
+            max_bones: DEFAULT_MAX_BONES,
+            skinning: true,
         }
     }
 }
@@ -78,6 +117,17 @@ struct FrameData {
     camera_set: vk::DescriptorSet,
     instance_set: vk::DescriptorSet,
     ui_buffer: GpuBuffer,
+    /// Joint matrices for this frame's skinned draws (set 1, binding 1).
+    bone_buffer: GpuBuffer,
+}
+
+/// One skinned instance: drawn alone so its push constant can select its bones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SkinnedDraw {
+    slot: u32,
+    instance: u32,
+    first_bone: u32,
+    joint_count: u32,
 }
 
 struct Surface {
@@ -127,6 +177,8 @@ pub struct Renderer {
     mesh_counts: [u32; MAX_MESHES],
     mesh_starts: [u32; MAX_MESHES],
     mesh_cursors: [u32; MAX_MESHES],
+    /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
+    skinned_draws: Vec<SkinnedDraw>,
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
     _ui_layout: DescriptorSetLayout,
@@ -138,6 +190,8 @@ pub struct Renderer {
     pipeline_layout: PipelineLayout,
     unit_pipeline: GraphicsPipeline,
     terrain_pipeline: GraphicsPipeline,
+    /// `None` when skinning is disabled or the pipeline failed to build.
+    skinned_pipeline: Option<GraphicsPipeline>,
     ui_pipeline_layout: PipelineLayout,
     ui_pipeline: GraphicsPipeline,
     frames: Vec<FrameData>,
@@ -162,7 +216,7 @@ impl Renderer {
     /// Enables the Khronos validation layer according to `config.validation`; pass
     /// [`ValidationMode::Required`] in CI so a missing layer is a hard failure.
     #[allow(clippy::too_many_lines)] // Pipeline/descriptor/resource wiring belongs together.
-    pub fn new(window: &Window, config: RenderConfig) -> RenderResult<Self> {
+    pub fn new(window: &Window, mut config: RenderConfig) -> RenderResult<Self> {
         assert!(config.max_instances > 0, "max_instances must be positive");
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
@@ -228,11 +282,19 @@ impl Renderer {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
         let camera_layout = DescriptorSetLayout::new(device.device.clone(), &camera_binding)?;
-        let instance_binding = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)];
+        // Binding 0: instances; binding 1: joint matrices (read only by `skinned.vert`).
+        let instance_binding = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
+        ];
         let instance_layout = DescriptorSetLayout::new(device.device.clone(), &instance_binding)?;
         let ui_binding = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -262,7 +324,9 @@ impl Renderer {
                 .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
+                .descriptor_count(
+                    u32::try_from(2 * FRAMES_IN_FLIGHT).expect("descriptor count fits u32"),
+                ),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(u32::try_from(FRAMES_IN_FLIGHT).expect("frame count fits u32")),
@@ -274,7 +338,14 @@ impl Renderer {
         )?;
 
         let layouts = [camera_layout.handle(), instance_layout.handle()];
-        let pipeline_layout = PipelineLayout::new(device.device.clone(), &layouts)?;
+        // One layout for terrain, unit and skinned pipelines keeps the bound descriptor sets
+        // compatible across them; only `skinned.vert` reads the push constant.
+        let skin_push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .offset(0)
+            .size(SKIN_PUSH_SIZE)];
+        let pipeline_layout =
+            PipelineLayout::with_push_constants(device.device.clone(), &layouts, &skin_push)?;
 
         let unit_pipeline = GraphicsPipeline::from_raw(
             device.device.clone(),
@@ -282,6 +353,7 @@ impl Renderer {
                 &device.device,
                 &PipelineSpec {
                     layout: pipeline_layout.handle(),
+                    vertex_layout: VertexLayout::Static,
                     vertex: unit_vertex.handle(),
                     fragment: unit_fragment.handle(),
                     color_format: swapchain.format,
@@ -296,6 +368,7 @@ impl Renderer {
                 &device.device,
                 &PipelineSpec {
                     layout: pipeline_layout.handle(),
+                    vertex_layout: VertexLayout::Static,
                     vertex: terrain_vertex.handle(),
                     fragment: terrain_fragment.handle(),
                     color_format: swapchain.format,
@@ -304,6 +377,35 @@ impl Renderer {
                 },
             )?,
         );
+
+        let skinned_pipeline = if config.skinning {
+            let built = ShaderModule::new(device.device.clone(), moba_shaders::SKINNED_VERT)
+                .and_then(|skinned_vertex| {
+                    pipeline::create(
+                        &device.device,
+                        &PipelineSpec {
+                            layout: pipeline_layout.handle(),
+                            vertex_layout: VertexLayout::Skinned,
+                            vertex: skinned_vertex.handle(),
+                            fragment: unit_fragment.handle(),
+                            color_format: swapchain.format,
+                            depth_format: swapchain.depth_format,
+                            cull_mode: vk::CullModeFlags::NONE,
+                        },
+                    )
+                });
+            match built {
+                Ok(handle) => Some(GraphicsPipeline::from_raw(device.device.clone(), handle)),
+                Err(error) => {
+                    eprintln!(
+                        "[render] skinned pipeline unavailable ({error}); using static meshes"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let ui_push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -353,9 +455,32 @@ impl Renderer {
             .collect();
         // SAFETY: the sets, sampler and image view are live and the write describes them.
         unsafe { device.device.update_descriptor_sets(&writes, &[]) };
+        // Both SSBOs are bound with `WHOLE_SIZE`, so each must fit one storage-buffer range.
+        let range_limit = u64::from(device.max_storage_buffer_range);
         let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
-            .expect("instance size fits u64")
-            * u64::try_from(config.max_instances).expect("instance count fits u64");
+            .ok()
+            .zip(u64::try_from(config.max_instances).ok())
+            .and_then(|(size, count)| size.checked_mul(count))
+            .filter(|&bytes| bytes <= range_limit)
+            .ok_or_else(|| {
+                RenderError::NoSuitableDevice(format!(
+                    "max_instances {} exceeds the device's storage-buffer range ({range_limit} bytes)",
+                    config.max_instances
+                ))
+            })?;
+        // Clamping the bone budget to the range also keeps `(first_bone + joint) * 3` in
+        // skinned.vert far below `u32::MAX`.
+        let bones_that_fit = usize::try_from(range_limit / BONE_STRIDE).unwrap_or(usize::MAX);
+        if config.max_bones > bones_that_fit {
+            eprintln!(
+                "[render] max_bones {} exceeds the storage-buffer range; using {bones_that_fit}",
+                config.max_bones
+            );
+            config.max_bones = bones_that_fit;
+        }
+        // At least one joint so the descriptor always names a non-empty buffer.
+        let bone_buffer_size = BONE_STRIDE
+            * u64::try_from(config.max_bones.max(1)).expect("bounded by the range limit");
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for frame_index in 0..FRAMES_IN_FLIGHT {
             let command_pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
@@ -387,6 +512,14 @@ impl Renderer {
                 vk::BufferUsageFlags::VERTEX_BUFFER,
                 MemoryLocation::CpuToGpu,
             )?;
+            let bone_buffer = GpuBuffer::new(
+                device.device.clone(),
+                device.allocator(),
+                "skin-bones",
+                bone_buffer_size,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::CpuToGpu,
+            )?;
             let camera_set = sets[frame_index * 2];
             let instance_set = sets[frame_index * 2 + 1];
             write_descriptors(
@@ -395,6 +528,7 @@ impl Renderer {
                 instance_set,
                 &camera_buffer,
                 &instance_buffer,
+                &bone_buffer,
             );
             frames.push(FrameData {
                 command_pool,
@@ -406,6 +540,7 @@ impl Renderer {
                 camera_set,
                 instance_set,
                 ui_buffer,
+                bone_buffer,
             });
         }
 
@@ -419,6 +554,7 @@ impl Renderer {
             mesh_counts: [0; MAX_MESHES],
             mesh_starts: [0; MAX_MESHES],
             mesh_cursors: [0; MAX_MESHES],
+            skinned_draws: Vec::with_capacity(config.max_instances.min(config.max_bones)),
             _camera_layout: camera_layout,
             _instance_layout: instance_layout,
             _ui_layout: ui_layout,
@@ -429,6 +565,7 @@ impl Renderer {
             pipeline_layout,
             unit_pipeline,
             terrain_pipeline,
+            skinned_pipeline,
             ui_pipeline_layout,
             ui_pipeline,
             frames,
@@ -484,6 +621,37 @@ impl Renderer {
         let gpu = mesh::upload(&self.device, &cpu)?;
         self.meshes.push(gpu);
         Ok(MeshId::from_index(id))
+    }
+
+    /// Uploads a skinned mesh (its [`MeshSkin`](moba_assets::MeshSkin) joints and weights in
+    /// the 32-byte skinned vertex layout) and returns its id. Draw it with a
+    /// [`UnitInstance`](crate::UnitInstance) whose [`BoneRange`] names one joint matrix per
+    /// joint in [`Scene::bones`]; instances without a valid range are skipped and counted.
+    ///
+    /// Load-time only, like [`Self::register_mesh`], and shares its 64 slots.
+    ///
+    /// # Errors
+    /// [`RenderError::SkinningUnavailable`] when skinning is disabled or its pipeline failed
+    /// to build (register the static mesh instead), [`RenderError::InvalidMesh`] when the mesh
+    /// has no valid skin, otherwise as [`Self::register_mesh`].
+    pub fn register_skinned_mesh(&mut self, data: &crate::MeshData) -> RenderResult<MeshId> {
+        if self.skinned_pipeline.is_none() {
+            return Err(RenderError::SkinningUnavailable);
+        }
+        if self.meshes.len() >= MAX_MESHES {
+            return Err(RenderError::TooManyMeshes);
+        }
+        let id = u16::try_from(self.meshes.len()).map_err(|_| RenderError::TooManyMeshes)?;
+        let cpu = mesh::CpuSkinnedMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
+        let gpu = mesh::upload_skinned(&self.device, &cpu)?;
+        self.meshes.push(gpu);
+        Ok(MeshId::from_index(id))
+    }
+
+    /// Whether [`Self::register_skinned_mesh`] can succeed (the skinned pipeline exists).
+    #[must_use]
+    pub fn skinning_available(&self) -> bool {
+        self.skinned_pipeline.is_some()
     }
 
     /// Number of registered meshes, including the built-in cube.
@@ -583,10 +751,30 @@ impl Renderer {
         self.images_in_flight[image_index as usize] = Some(frame_index);
 
         let unit_count = scene.units.len().min(self.config.max_instances);
+        let bone_count = scene.bones.len().min(self.config.max_bones);
+        BONES_TRUNCATED.store(
+            u64::try_from(scene.bones.len() - bone_count).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.skinned_draws.clear();
+        let mut skinned_dropped = 0u64;
         {
             let frame = &mut self.frames[frame_index];
             let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint);
             frame.camera_buffer.write_bytes(0, bytes_of(&uniform));
+            if bone_count > 0 {
+                let mapped = frame
+                    .bone_buffer
+                    .mapped_slice_mut::<JointMatrix>(bone_count)
+                    .ok_or_else(|| {
+                        RenderError::NoSuitableDevice(String::from(
+                            "bone buffer is not host visible",
+                        ))
+                    })?;
+                mapped.copy_from_slice(&scene.bones[..bone_count]);
+            }
+            // `bone_count <= max_bones`, which the bone buffer was sized from.
+            let uploaded_bones = u32::try_from(bone_count).unwrap_or(u32::MAX);
             if unit_count > 0 {
                 let units = &scene.units[..unit_count];
                 bucket_by_mesh(
@@ -609,8 +797,21 @@ impl Renderer {
                 for unit in units {
                     let slot = mesh_slot(unit.mesh, self.meshes.len());
                     let cursor = &mut self.mesh_cursors[slot];
-                    mapped[*cursor as usize] = GpuInstance::from(*unit);
+                    let instance = *cursor;
+                    mapped[instance as usize] = GpuInstance::from(*unit);
                     *cursor += 1;
+                    let joints = self.meshes[slot].joint_count;
+                    if joints == 0 {
+                        continue;
+                    }
+                    // A skinned mesh is only drawn with a bone range inside this frame's
+                    // upload; the capacity check keeps `push` from reallocating.
+                    match skinned_draw(unit.bones, joints, uploaded_bones, slot, instance) {
+                        Some(draw) if self.skinned_draws.len() < self.skinned_draws.capacity() => {
+                            self.skinned_draws.push(draw);
+                        }
+                        _ => skinned_dropped += 1,
+                    }
                 }
             }
             let ui_total = ui.map_or(0, |list| list.vertices().len());
@@ -645,6 +846,8 @@ impl Renderer {
                 }
             }
         }
+
+        SKINNED_DROPPED.store(skinned_dropped, Ordering::Relaxed);
 
         let command_buffer = self.frames[frame_index].command_buffer;
         let pool = self.frames[frame_index].command_pool.handle();
@@ -718,6 +921,26 @@ impl Renderer {
             .layer_count(1)
             .color_attachments(core::slice::from_ref(&color_attachment))
             .depth_attachment(&depth_attachment);
+        if !self.skinned_draws.is_empty() {
+            // Host writes to this frame's bone buffer → skinned vertex shader reads. The
+            // submit already makes host writes visible; the barrier states the dependency
+            // explicitly. The frame fence (waited above) covers write-after-read against the
+            // previous use of this buffer.
+            let barrier = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::HOST)
+                .src_access_mask(vk::AccessFlags2::HOST_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.frames[frame_index].bone_buffer.handle())
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+            let dependency = vk::DependencyInfo::default()
+                .buffer_memory_barriers(core::slice::from_ref(&barrier));
+            self.device
+                .cmd_pipeline_barrier2(command_buffer, &dependency);
+        }
         self.device
             .cmd_begin_rendering(command_buffer, &render_info);
 
@@ -814,7 +1037,8 @@ impl Renderer {
             }
             for (slot, mesh) in self.meshes.iter().enumerate() {
                 let count = self.mesh_counts[slot];
-                if count == 0 {
+                // Skinned meshes are drawn per instance below, with their own pipeline.
+                if count == 0 || mesh.joint_count > 0 {
                     continue;
                 }
                 // SAFETY: the mesh buffers live as long as the renderer and the bound unit
@@ -851,6 +1075,81 @@ impl Renderer {
                         0,
                         0,
                         self.mesh_starts[slot],
+                    );
+                }
+            }
+        }
+
+        if !self.skinned_draws.is_empty()
+            && let Some(skinned_pipeline) = &self.skinned_pipeline
+        {
+            // SAFETY: the pipeline was created with the shared layout the descriptor sets are
+            // bound with, so sets 0/1 stay valid for it.
+            unsafe {
+                self.device.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    skinned_pipeline.handle(),
+                );
+            }
+            let mut bound_slot = u32::MAX;
+            for draw in &self.skinned_draws {
+                let mesh = &self.meshes[draw.slot as usize];
+                if draw.slot != bound_slot {
+                    bound_slot = draw.slot;
+                    // SAFETY: the mesh buffers live as long as the renderer, and skinned
+                    // meshes (joint_count > 0) hold `SkinnedVertex` data, the layout of the
+                    // bound skinned pipeline.
+                    unsafe {
+                        self.device.device.cmd_bind_vertex_buffers(
+                            command_buffer,
+                            0,
+                            &[mesh.vertices.handle()],
+                            &[0],
+                        );
+                    }
+                    // SAFETY: the buffer is live, was created with INDEX_BUFFER usage and
+                    // holds `u32` indices.
+                    unsafe {
+                        self.device.device.cmd_bind_index_buffer(
+                            command_buffer,
+                            mesh.indices.handle(),
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                    }
+                }
+                let push = SkinPush {
+                    first_bone: draw.first_bone,
+                    joint_count: draw.joint_count,
+                    reserved: [0; 2],
+                };
+                // SAFETY: the shared pipeline layout declares exactly this 16-byte
+                // vertex-stage range at offset 0.
+                unsafe {
+                    self.device.device.cmd_push_constants(
+                        command_buffer,
+                        self.pipeline_layout.handle(),
+                        vk::ShaderStageFlags::VERTEX,
+                        0,
+                        bytes_of(&push),
+                    );
+                }
+                // SAFETY: indices are in range for the vertex buffer (re-checked in
+                // `CpuSkinnedMesh::from_asset`). `draw.instance < unit_count <= max_instances`
+                // (it is a bucketed instance slot). Bones: `skinned_draw` guarantees
+                // `joint_count >= 1` and `first_bone + joint_count <= bone_count <=
+                // max_bones`, the bone buffer's capacity, and the shader clamps each joint
+                // index below `joint_count`, so every bone read stays inside this frame's
+                // upload.
+                unsafe {
+                    self.device.device.cmd_draw_indexed(
+                        command_buffer,
+                        mesh.index_count,
+                        1,
+                        0,
+                        0,
+                        draw.instance,
                     );
                 }
             }
@@ -1214,6 +1513,29 @@ fn mesh_slot(mesh: MeshId, mesh_count: usize) -> usize {
     if index < mesh_count { index } else { 0 }
 }
 
+/// The draw for one skinned instance, or `None` if its bone range is empty or reaches past
+/// the `uploaded` joint matrices. The pushed joint count is at most the mesh's.
+fn skinned_draw(
+    bones: BoneRange,
+    mesh_joints: u32,
+    uploaded: u32,
+    slot: usize,
+    instance: u32,
+) -> Option<SkinnedDraw> {
+    if bones.count == 0 || mesh_joints == 0 {
+        return None;
+    }
+    if bones.first.checked_add(bones.count)? > uploaded {
+        return None;
+    }
+    Some(SkinnedDraw {
+        slot: u32::try_from(slot).ok()?,
+        instance,
+        first_bone: bones.first,
+        joint_count: bones.count.min(mesh_joints),
+    })
+}
+
 /// Counting-sort bucketing of `units` by mesh, without allocating.
 ///
 /// On return `counts[m]` is the number of instances of mesh `m`, `starts[m]` the first
@@ -1245,6 +1567,7 @@ fn write_descriptors(
     instance_set: vk::DescriptorSet,
     camera_buffer: &GpuBuffer,
     instance_buffer: &GpuBuffer,
+    bone_buffer: &GpuBuffer,
 ) {
     let camera_info = [vk::DescriptorBufferInfo::default()
         .buffer(camera_buffer.handle())
@@ -1252,6 +1575,10 @@ fn write_descriptors(
         .range(CAMERA_UNIFORM_SIZE)];
     let instance_info = [vk::DescriptorBufferInfo::default()
         .buffer(instance_buffer.handle())
+        .offset(0)
+        .range(vk::WHOLE_SIZE)];
+    let bone_info = [vk::DescriptorBufferInfo::default()
+        .buffer(bone_buffer.handle())
         .offset(0)
         .range(vk::WHOLE_SIZE)];
     let writes = [
@@ -1267,6 +1594,12 @@ fn write_descriptors(
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
             .buffer_info(&instance_info),
+        vk::WriteDescriptorSet::default()
+            .dst_set(instance_set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .buffer_info(&bone_info),
     ];
     // SAFETY: both descriptor sets were allocated from a compatible pool and the buffer
     // info entries reference live buffers.
@@ -1406,8 +1739,37 @@ fn transition_depth(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_MESHES, bucket_by_mesh};
-    use crate::{MeshId, UnitInstance};
+    use super::{MAX_MESHES, SkinPush, SkinnedDraw, bucket_by_mesh, skinned_draw};
+    use crate::{BoneRange, MeshId, UnitInstance};
+
+    #[test]
+    fn skin_push_is_16_bytes() {
+        assert_eq!(core::mem::size_of::<SkinPush>(), 16);
+    }
+
+    #[test]
+    fn skinned_draws_stay_inside_the_uploaded_bones() {
+        let draw = skinned_draw(BoneRange::new(64, 64), 7, 128, 3, 9).expect("in range");
+        assert_eq!(
+            draw,
+            SkinnedDraw {
+                slot: 3,
+                instance: 9,
+                first_bone: 64,
+                // Never more than the mesh's joints.
+                joint_count: 7,
+            }
+        );
+        assert_eq!(skinned_draw(BoneRange::NONE, 7, 128, 3, 9), None);
+        assert_eq!(skinned_draw(BoneRange::new(122, 7), 7, 128, 3, 9), None);
+        assert_eq!(
+            skinned_draw(BoneRange::new(u32::MAX, 2), 7, 128, 3, 9),
+            None
+        );
+        assert_eq!(skinned_draw(BoneRange::new(0, 7), 0, 128, 3, 9), None);
+        let partial = skinned_draw(BoneRange::new(0, 3), 7, 3, 1, 0).expect("short range");
+        assert_eq!(partial.joint_count, 3);
+    }
     use moba_core::math::{Mat4, Vec4};
 
     fn unit(mesh: u16) -> UnitInstance {

@@ -139,6 +139,28 @@ MOBA_VULKAN_VALIDATION=required cargo run -p moba-client
 A missing, path-escaping or truncated model logs one `[assets]` line and that hero keeps the
 procedural rig.
 
+### GPU-skinned hero (walk cycle)
+![GPU-skinned hero walking](images/m3-skinned-hero.png)
+
+Three captures (frames 400, 404 and 408) of the own hero walking in a local networked match,
+drawn with the shipped `content/models/sentinel-skinned.glb` through
+`Renderer::register_skinned_mesh` (`skinned.vert`, per-frame bone buffer, push-constant bone
+range; WP-4.1, #288). The pose comes from the hero's interpolated movement (gait) and the render
+tick: arms, spear and legs counter-swing, the chest twists and the hips bob. Each crop is from a
+separate 1280×720 lavapipe run with validation and synchronization validation required: exit 0
+and zero validation messages (stderr is only `[assets] model 'sentinel-skinned' loaded
+(skinned)`). The default golden scene has no models and is unchanged.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAMERA_DISTANCE=10 \
+MOBA_DEMO_MOVE=200,200 MOBA_SMOKE_FRAMES=420 \
+MOBA_CAPTURE=/tmp/frame.ppm MOBA_CAPTURE_FRAME=400 \
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
+```
+
+`MOBA_NO_SKINNING=1` draws the same model as a static mesh (stride bob only); a model without
+a skin is always static, and a missing model keeps the procedural rig.
+
 ## Reproducing a capture
 
 The client supports headless readback without changing the renderer:

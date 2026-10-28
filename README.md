@@ -186,7 +186,8 @@ hash. Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>`; hero models: a pack's
 `heroes.model` names load `<MOBA_ASSET_ROOT>/models/<model>.glb` (default root `content`, see
 `content/sentinel-pack.toml`; `MOBA_HERO_MODELS=<hero>=<model>,...` overrides per hero), and
-`MOBA_CONTENT=<pack.toml>` plays a pack in the local preview or `MOBA_SERVER=local`.
+`MOBA_CONTENT=<pack.toml>` plays a pack in the local preview or `MOBA_SERVER=local`. A model
+with a skin is GPU-skinned and walks with the hero; `MOBA_NO_SKINNING=1` draws it static.
 
 ## Architecture
 

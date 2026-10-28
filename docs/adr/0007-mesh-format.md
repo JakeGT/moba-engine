@@ -1,6 +1,7 @@
 # ADR-0007: Mesh asset format
 
-**Status:** accepted 2026-10-27 (WP-3.2, #286).
+**Status:** accepted 2026-10-27 (WP-3.2, #286); amended 2026-10-27 for GPU skinning (WP-4.1,
+#288; see [Skinning](#skinning-wp-41)).
 
 ## Context
 The renderer drew only procedural shapes: instanced cubes and the six-cube hero rig. M8 needs
@@ -33,11 +34,12 @@ content hash.
   itself and reads accessors itself through bounds-checked slices, because `gltf`'s own GLB
   splitter computes `header.length - 12` unchecked (a debug-build overflow panic on a short
   length) and its accessor helpers `unwrap()` on validation assumptions.
-- **Scope:** static triangle meshes. `POSITION` (`f32` VEC3), optional `NORMAL` (`f32` VEC3)
+- **Scope:** triangle meshes, optionally skinned. `POSITION` (`f32` VEC3), optional `NORMAL` (`f32` VEC3)
   and optional `u8`/`u16`/`u32` indices, all widened to `u32`. Node transforms of the default
   scene are baked into the vertices, and all primitives merge into one mesh. Missing normals
-  become flat face normals, as the glTF specification requires. Materials, textures, skins,
-  animations and morph targets are ignored. Sparse accessors and any `extensionsRequired`
+  become flat face normals, as the glTF specification requires. Materials, textures and
+  morph targets are ignored; skins and one animation clip are read since WP-4.1 (see
+  [Skinning](#skinning-wp-41)). Sparse accessors and any `extensionsRequired`
   entry (for example Draco or meshopt compression) are rejected.
 - **Untrusted-input limits** (`moba-assets`, feature `glb`):
   - file ≤ 16 MiB (checked from metadata before reading) and JSON chunk ≤ 256 KiB. A hostile
@@ -85,13 +87,51 @@ content hash.
 - **Per-mesh instance buffers or indirect draws:** extra descriptor sets or buffers per mesh
   for no gain at this scale. One SSBO plus `firstInstance` keeps the descriptor layout fixed.
 
-## Consequences and the path to skinning (WP-4.1)
-- `MeshData` grows optional per-vertex streams (`JOINTS_0` as `R8G8B8A8_UINT`, `WEIGHTS_0` as
-  `R8G8B8A8_UNORM`) plus one skin and one clip. The loader reads them with the same accessor
-  helper and the same caps; joints get a cap (64) of their own.
-- Skinned meshes need a second vertex layout and `skinned.vert`. `pipeline::create` gains a
-  vertex-layout parameter. The bucketing stays the same, keyed by mesh, with a per-draw push
-  constant `{first_bone, joint_count}` on the shared pipeline layout.
+## Skinning (WP-4.1)
+- **Data.** `MeshData` carries an optional `MeshSkin`: `JOINTS_0` (`u8`/`u16` in the file,
+  stored as `R8G8B8A8_UINT`) and `WEIGHTS_0` (`f32` or normalised `u8`/`u16`, re-normalised
+  and quantised to `R8G8B8A8_UNORM` summing to exactly 255, or all zero) per vertex, plus a
+  `Skeleton`: ≤ 64 joints, parent links (any order; a parents-first order is computed),
+  rest TRS, the static transform of non-joint ancestors, inverse bind matrices (identity if
+  absent) and at most one `AnimationClip`. Everything is built through validating
+  constructors, like `MeshData`.
+- **Loader.** All mesh nodes must share one skin (or none); skinned vertices stay in bind
+  space (the skinned node's transform is ignored, per glTF). The clip is the first animation
+  that drives a joint: translation/rotation/scale, `f32` keys, `LINEAR`/`STEP`
+  (`CUBICSPLINE` keeps only its values and plays linearly). Caps: 64 joints, 4,096 keys per
+  track and 65,536 per clip (checked before reserving), 600 s, finite non-decreasing times.
+  Animation channels count against the 4,096-entry inspection cap. `JOINTS_1`/`WEIGHTS_1`,
+  morph targets and joints below a non-joint node inside the skeleton are not supported.
+  Animation names are not read (`gltf`'s `names` feature stays off), so the first clip is
+  treated as locomotion.
+- **Renderer.** `register_skinned_mesh` uploads the 32-byte `SkinnedVertex`
+  `{pos, normal, joints, weights}` through the same staging path. `skinned.vert` reuses
+  `unit.frag`; `pipeline::create` takes a vertex layout. Set 1 gains binding 1, a per-frame
+  `CpuToGpu` bone SSBO of three `vec4` rows per joint (default 16 instances × 64 joints =
+  48 KiB per frame); the pool's `STORAGE_BUFFER` count is `2 × FRAMES_IN_FLIGHT`. A 16-byte
+  vertex-stage push constant `{first_bone, joint_count}` lives on the **shared** pipeline
+  layout, so the bound descriptor sets stay compatible across terrain, unit and skinned
+  pipelines. Skinned instances still occupy their mesh's bucket in the instance SSBO but are
+  drawn one per draw (instance count 1, `firstInstance` = slot) so each can push its range.
+  An instance whose range is empty or reaches past this frame's bones is skipped and counted
+  (`skinned_instances_dropped`); bones past `max_bones` are counted (`bones_truncated`). The
+  shader clamps every joint index below `joint_count`, and the renderer guarantees
+  `joint_count ≥ 1` and `first_bone + joint_count ≤ uploaded`, so no bone read leaves the
+  frame's upload. One `BufferMemoryBarrier2` (HOST/HOST_WRITE → VERTEX_SHADER/
+  SHADER_STORAGE_READ) precedes `cmd_begin_rendering`; the frame fence covers
+  write-after-read. `RenderConfig::skinning = false`, or a skinned pipeline that fails to
+  build, makes `register_skinned_mesh` return `SkinningUnavailable`.
+- **Client.** A model with a skin is uploaded twice (static fallback + skinned, two of the
+  64 slots). The pose comes from presentation state the client already has (interpolated
+  movement → facing and gait, and the render tick): the clip at weight `gait`, the rest pose
+  when idle, with a per-unit phase offset. No wire fields change. A preallocated
+  `BonePool` (the renderer's bone budget) is cleared each frame; a hero that does not fit is
+  counted and drawn static for that frame. `MOBA_NO_SKINNING=1` skips the skinned upload.
+- **Sample.** `sample-mesh` also writes `content/models/sentinel-skinned.glb`: the sentinel's
+  geometry bound to a 7-joint skeleton with a 0.8 s walk clip, generated from `+ - * / sqrt`
+  only and byte-compared by a test.
+
+## Consequences
 - Mesh slots are never freed. A future unload path needs deferred deletion keyed by frame
   fence.
 - Model files are cosmetic and differ per client by design. They are not hashed, signed or

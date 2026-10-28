@@ -1,4 +1,4 @@
-//! Bounded binary glTF (`.glb`) static-mesh loader (ADR-0007).
+//! Bounded binary glTF (`.glb`) mesh loader (ADR-0007), with optional skinning (WP-4.1).
 //!
 //! Input is untrusted: a model file comes from a client-local asset directory that a player
 //! (or a downloaded mod) controls. The loader therefore:
@@ -18,19 +18,40 @@
 //! Supported: triangle-list primitives with `POSITION` (`f32` VEC3), optional `NORMAL`
 //! (`f32` VEC3) and optional `u8`/`u16`/`u32` indices in the embedded BIN chunk; node
 //! transforms of the default scene are baked into the vertices. Missing normals are replaced
-//! by flat face normals, as the glTF specification requires. Everything else (materials,
-//! textures, skins, animations, morph targets) is ignored; sparse accessors, external
-//! buffers and any `extensionsRequired` entry are rejected.
+//! by flat face normals, as the glTF specification requires. Sparse accessors, external
+//! buffers and any `extensionsRequired` entry are rejected; materials, textures and morph
+//! targets are ignored.
+//!
+//! **Skinning.** If the mesh nodes of the default scene use a skin, they must all use the
+//! *same* one (a file mixing skinned and static meshes, or two skins, is rejected). Skinned
+//! vertices stay in bind space (the skinned node's own transform is ignored, as glTF
+//! requires), and the loader also reads:
+//!
+//! - `JOINTS_0` (`u8`/`u16` VEC4) and `WEIGHTS_0` (`f32` or normalised `u8`/`u16` VEC4) on
+//!   every primitive. Weights are re-normalised and quantised to `UNORM8`, and a lane with
+//!   zero weight has its joint index cleared. Further influence sets (`JOINTS_1`, ...) are
+//!   ignored;
+//! - the skin's joints (at most [`MAX_JOINTS`]): parent links, rest transforms, the static
+//!   transform above each skeleton root, and `inverseBindMatrices` (identity if absent);
+//! - the first animation that drives any joint: translation/rotation/scale channels with
+//!   `f32` keys and `LINEAR`/`STEP` interpolation (`CUBICSPLINE` keeps only its values and
+//!   plays linearly), capped at [`MAX_TRACK_KEYS`] keys per track and [`MAX_CLIP_KEYS`] per
+//!   clip. Channels on non-joint nodes and morph weights are ignored.
 
 use std::io::Read;
 use std::path::Path;
 
 use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
+use gltf::json::animation::{Interpolation as GltfInterpolation, Property};
 use gltf::json::mesh::{Mode, Semantic};
 use gltf::json::validation::Checked;
 use moba_core::math::{Mat3, Mat4, Quat, Vec3};
 
 use crate::mesh::{MeshData, MeshError};
+use crate::skin::{
+    AnimationClip, Interpolation, JointTransform, MAX_CLIP_KEYS, MAX_JOINTS, MAX_TRACK_KEYS,
+    MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
+};
 
 /// Largest accepted `.glb` file (16 MiB).
 pub const MAX_GLB_BYTES: usize = 16 << 20;
@@ -104,6 +125,12 @@ impl From<MeshError> for GlbError {
     }
 }
 
+impl From<SkinError> for GlbError {
+    fn from(error: SkinError) -> Self {
+        Self::Mesh(MeshError::Skin(error))
+    }
+}
+
 /// Reads and parses a `.glb` file, refusing files larger than [`MAX_GLB_BYTES`] without
 /// reading them.
 ///
@@ -126,11 +153,11 @@ pub fn load_glb_file(path: &Path) -> Result<MeshData, GlbError> {
     load_glb(&bytes)
 }
 
-/// Parses a binary glTF file into one merged, validated static mesh.
+/// Parses a binary glTF file into one merged, validated mesh, skinned if it uses a skin.
 ///
 /// Never panics. Allocation is bounded by the caps: the parsed JSON document (see
-/// [`MAX_JSON_BYTES`]) plus at most [`MeshData::MAX_VERTICES`] vertices and
-/// [`MeshData::MAX_INDICES`] indices.
+/// [`MAX_JSON_BYTES`]) plus at most [`MeshData::MAX_VERTICES`] vertices,
+/// [`MeshData::MAX_INDICES`] indices, [`MAX_JOINTS`] joints and [`MAX_CLIP_KEYS`] keys.
 ///
 /// # Errors
 /// Returns a [`GlbError`] describing the first problem found.
@@ -160,7 +187,16 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
             let node = root.nodes.get(index).ok_or(GlbError::BadNodeGraph)?;
             let world = parent * node_matrix(node);
             if let Some(mesh) = node.mesh {
-                builder.append_mesh(&root, bin, mesh.value(), world)?;
+                let skin = node.skin.map(|skin| skin.value());
+                builder.set_skin(&root, skin)?;
+                // A skinned mesh is in bind space; its node transform is ignored (glTF 2.0)
+                // because the joints place it.
+                let transform = if skin.is_some() {
+                    Mat4::IDENTITY
+                } else {
+                    world
+                };
+                builder.append_mesh(&root, bin, mesh.value(), transform)?;
             }
             if let Some(children) = &node.children {
                 for child in children.iter().rev() {
@@ -177,11 +213,234 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
             builder.append_mesh(&root, bin, mesh, Mat4::IDENTITY)?;
         }
     }
-    Ok(MeshData::new(
-        builder.positions,
-        builder.normals,
-        builder.indices,
-    )?)
+    let skin = builder.skin;
+    let mesh = MeshData::new(builder.positions, builder.normals, builder.indices)?;
+    let SkinMode::Skinned(skin) = skin else {
+        return Ok(mesh);
+    };
+    let skeleton = read_skeleton(&root, bin, skin)?;
+    let skin = MeshSkin::new(builder.joints, builder.weights, skeleton)?;
+    Ok(mesh.with_skin(skin)?)
+}
+
+/// Node index → parent node index for every node, rejecting dangling or shared children.
+fn parent_map(root: &gltf::json::Root) -> Result<Vec<Option<usize>>, GlbError> {
+    let mut parents = vec![None; root.nodes.len()];
+    for (index, node) in root.nodes.iter().enumerate() {
+        for child in node.children.iter().flatten() {
+            let slot = parents
+                .get_mut(child.value())
+                .ok_or(GlbError::BadNodeGraph)?;
+            if slot.is_some() || child.value() == index {
+                return Err(GlbError::BadNodeGraph);
+            }
+            *slot = Some(index);
+        }
+    }
+    Ok(parents)
+}
+
+/// A node's local transform as translation/rotation/scale (decomposing a `matrix`).
+fn node_trs(node: &gltf::json::Node) -> Result<JointTransform, GlbError> {
+    if let Some(matrix) = node.matrix {
+        let matrix = Mat4::from_cols_array(&matrix);
+        if !matrix.is_finite() || matrix.determinant().abs() < 1e-12 {
+            return Err(SkinError::NonFinite.into());
+        }
+        let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
+        return Ok(JointTransform {
+            translation,
+            rotation,
+            scale,
+        });
+    }
+    Ok(JointTransform {
+        translation: Vec3::from_array(node.translation.unwrap_or([0.0; 3])),
+        rotation: node
+            .rotation
+            .map_or(Quat::IDENTITY, |rotation| Quat::from_array(rotation.0)),
+        scale: Vec3::from_array(node.scale.unwrap_or([1.0; 3])),
+    })
+}
+
+/// Reads skin `index`: hierarchy, rest pose, inverse bind matrices and one clip.
+fn read_skeleton(
+    root: &gltf::json::Root,
+    bin: Option<&[u8]>,
+    index: usize,
+) -> Result<Skeleton, GlbError> {
+    let skin = root.skins.get(index).ok_or(GlbError::BadNodeGraph)?;
+    if skin.joints.is_empty() || skin.joints.len() > MAX_JOINTS {
+        return Err(SkinError::JointCount.into());
+    }
+    let joints: Vec<usize> = skin.joints.iter().map(gltf::json::Index::value).collect();
+    for (position, joint) in joints.iter().enumerate() {
+        if *joint >= root.nodes.len() || joints[..position].contains(joint) {
+            return Err(GlbError::BadNodeGraph);
+        }
+    }
+    let joint_of = |node: usize| joints.iter().position(|&joint| joint == node);
+    let node_parents = parent_map(root)?;
+    let count = joints.len();
+    let mut parents = Vec::with_capacity(count);
+    let mut rest = Vec::with_capacity(count);
+    let mut base = Vec::with_capacity(count);
+    for &node in &joints {
+        rest.push(node_trs(&root.nodes[node])?);
+        let parent = node_parents[node];
+        match parent.map(|parent| (parent, joint_of(parent))) {
+            // `count <= MAX_JOINTS`, so every joint index fits `u8`.
+            Some((_, Some(joint))) => {
+                parents.push(Some(
+                    u8::try_from(joint).map_err(|_| SkinError::JointCount)?,
+                ));
+                base.push(Mat4::IDENTITY);
+            }
+            Some((parent, None)) => {
+                parents.push(None);
+                base.push(static_global(root, &node_parents, parent, &joint_of)?);
+            }
+            None => {
+                parents.push(None);
+                base.push(Mat4::IDENTITY);
+            }
+        }
+    }
+    let inverse_bind = match skin.inverse_bind_matrices {
+        Some(accessor_index) => {
+            let data = accessor(
+                root,
+                bin,
+                accessor_index.value(),
+                Type::Mat4,
+                &[ComponentType::F32],
+            )?;
+            if data.count != count {
+                return Err(GlbError::BadAccessor);
+            }
+            (0..count)
+                .map(|element| {
+                    data.f32s::<16>(element)
+                        .map(|values| Mat4::from_cols_array(&values))
+                        .ok_or(GlbError::BadAccessor)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        None => vec![Mat4::IDENTITY; count],
+    };
+    let clip = read_clip(root, bin, &joint_of)?;
+    Ok(Skeleton::new(parents, rest, base, inverse_bind, clip)?)
+}
+
+/// World transform of a non-joint node above a skeleton root. Its ancestors must not be
+/// joints of the skin (that would make it animated), and the walk is bounded.
+fn static_global(
+    root: &gltf::json::Root,
+    node_parents: &[Option<usize>],
+    node: usize,
+    joint_of: &impl Fn(usize) -> Option<usize>,
+) -> Result<Mat4, GlbError> {
+    let mut world = Mat4::IDENTITY;
+    let mut current = Some(node);
+    for _ in 0..=MAX_NODE_DEPTH {
+        let Some(index) = current else {
+            return Ok(world);
+        };
+        if joint_of(index).is_some() {
+            return Err(GlbError::Unsupported("skin joint below a non-joint node"));
+        }
+        let ancestor = root.nodes.get(index).ok_or(GlbError::BadNodeGraph)?;
+        world = node_matrix(ancestor) * world;
+        current = node_parents.get(index).copied().flatten();
+    }
+    Err(GlbError::BadNodeGraph)
+}
+
+/// The first animation that drives any joint, as a clip.
+fn read_clip(
+    root: &gltf::json::Root,
+    bin: Option<&[u8]>,
+    joint_of: &impl Fn(usize) -> Option<usize>,
+) -> Result<Option<AnimationClip>, GlbError> {
+    let mut inspected = 0usize;
+    let mut keys = 0usize;
+    for animation in &root.animations {
+        let mut tracks = Vec::new();
+        for channel in &animation.channels {
+            inspected += 1;
+            if inspected > MAX_PRIMITIVES {
+                return Err(GlbError::BadNodeGraph);
+            }
+            let Some(joint) = joint_of(channel.target.node.value()) else {
+                continue; // Not a joint of this skin.
+            };
+            let (path, kind) = match channel.target.path {
+                Checked::Valid(Property::Translation) => (TrackPath::Translation, Type::Vec3),
+                Checked::Valid(Property::Rotation) => (TrackPath::Rotation, Type::Vec4),
+                Checked::Valid(Property::Scale) => (TrackPath::Scale, Type::Vec3),
+                Checked::Valid(Property::MorphTargetWeights) => continue,
+                Checked::Invalid => return Err(GlbError::BadAccessor),
+            };
+            let sampler = animation
+                .samplers
+                .get(channel.sampler.value())
+                .ok_or(GlbError::BadNodeGraph)?;
+            let (interpolation, stride) = match sampler.interpolation {
+                Checked::Valid(GltfInterpolation::Linear) => (Interpolation::Linear, 1),
+                Checked::Valid(GltfInterpolation::Step) => (Interpolation::Step, 1),
+                // In-tangent, value, out-tangent per key: keep the values, play linearly.
+                Checked::Valid(GltfInterpolation::CubicSpline) => (Interpolation::Linear, 3),
+                Checked::Invalid => return Err(GlbError::BadAccessor),
+            };
+            let input = accessor(
+                root,
+                bin,
+                sampler.input.value(),
+                Type::Scalar,
+                &[ComponentType::F32],
+            )?;
+            let output = accessor(
+                root,
+                bin,
+                sampler.output.value(),
+                kind,
+                &[ComponentType::F32],
+            )?;
+            // Caps before reserving: per track, then for the whole clip.
+            if input.count > MAX_TRACK_KEYS {
+                return Err(SkinError::BadTrack.into());
+            }
+            keys = keys.saturating_add(input.count);
+            if keys > MAX_CLIP_KEYS {
+                return Err(SkinError::ClipTooLarge.into());
+            }
+            if input.count.checked_mul(stride) != Some(output.count) {
+                return Err(GlbError::BadAccessor);
+            }
+            let mut times = Vec::with_capacity(input.count);
+            let mut values = Vec::with_capacity(input.count);
+            for key in 0..input.count {
+                let [time] = input.f32s::<1>(key).ok_or(GlbError::BadAccessor)?;
+                // The value is the middle element of a cubic-spline triple.
+                let element = key * stride + stride / 2;
+                let value = if kind == Type::Vec4 {
+                    output.f32s::<4>(element)
+                } else {
+                    output.f32s::<3>(element).map(|[x, y, z]| [x, y, z, 0.0])
+                }
+                .ok_or(GlbError::BadAccessor)?;
+                times.push(time);
+                values.push(value);
+            }
+            // `joint < MAX_JOINTS`, so it fits `u8`.
+            let joint = u8::try_from(joint).map_err(|_| SkinError::JointCount)?;
+            tracks.push(Track::new(joint, path, interpolation, times, values)?);
+        }
+        if !tracks.is_empty() {
+            return Ok(Some(AnimationClip::new(tracks)?));
+        }
+    }
+    Ok(None)
 }
 
 fn push_node(
@@ -277,10 +536,55 @@ struct AccessorData<'a> {
 
 impl AccessorData<'_> {
     fn f32_vec3(&self, element: usize) -> Option<[f32; 3]> {
+        self.f32s::<3>(element)
+    }
+
+    /// `N` consecutive `f32` lanes of one element.
+    fn f32s<const N: usize>(&self, element: usize) -> Option<[f32; N]> {
         let base = element.checked_mul(self.stride)?;
-        let read =
-            |lane: usize| read_u32(self.bytes, base.checked_add(lane * 4)?).map(f32::from_bits);
-        Some([read(0)?, read(1)?, read(2)?])
+        let mut out = [0.0; N];
+        for (lane, value) in out.iter_mut().enumerate() {
+            *value = f32::from_bits(read_u32(self.bytes, base.checked_add(lane * 4)?)?);
+        }
+        Some(out)
+    }
+
+    /// Lane `lane` of an unsigned 8/16-bit element, widened.
+    fn small_uint(&self, element: usize, lane: usize) -> Option<u32> {
+        let size = component_size(self.component);
+        let offset = element
+            .checked_mul(self.stride)?
+            .checked_add(lane.checked_mul(size)?)?;
+        match self.component {
+            ComponentType::U8 => self.bytes.get(offset).copied().map(u32::from),
+            ComponentType::U16 => {
+                let end = offset.checked_add(2)?;
+                let pair: [u8; 2] = self.bytes.get(offset..end)?.try_into().ok()?;
+                Some(u32::from(u16::from_le_bytes(pair)))
+            }
+            _ => None,
+        }
+    }
+
+    /// A `u8`/`u16` VEC4 (`JOINTS_0`).
+    fn uint_vec4(&self, element: usize) -> Option<[u32; 4]> {
+        Some([
+            self.small_uint(element, 0)?,
+            self.small_uint(element, 1)?,
+            self.small_uint(element, 2)?,
+            self.small_uint(element, 3)?,
+        ])
+    }
+
+    /// An `f32` or normalised `u8`/`u16` VEC4 (`WEIGHTS_0`) as `f32`.
+    fn unorm_vec4(&self, element: usize) -> Option<[f32; 4]> {
+        let scale = match self.component {
+            ComponentType::F32 => return self.f32s::<4>(element),
+            ComponentType::U8 => 255.0,
+            ComponentType::U16 => 65_535.0,
+            _ => return None,
+        };
+        Some(self.uint_vec4(element)?.map(|value| value as f32 / scale))
     }
 
     fn index(&self, element: usize) -> Option<u32> {
@@ -366,16 +670,101 @@ fn accessor<'a>(
     })
 }
 
+/// One primitive's skinning attributes and the skin's joint count.
+struct SkinStreams<'a> {
+    joints: AccessorData<'a>,
+    weights: AccessorData<'a>,
+    joint_count: usize,
+}
+
+impl SkinStreams<'_> {
+    /// Joints and quantised weights of one vertex; zero-weight lanes get joint 0.
+    fn vertex(&self, element: usize) -> Result<([u8; 4], [u8; 4]), GlbError> {
+        let raw = self
+            .weights
+            .unorm_vec4(element)
+            .ok_or(GlbError::BadAccessor)?;
+        let weights = quantize_weights(raw).ok_or(GlbError::BadAccessor)?;
+        let indices = self
+            .joints
+            .uint_vec4(element)
+            .ok_or(GlbError::BadAccessor)?;
+        let mut joints = [0u8; 4];
+        for lane in 0..4 {
+            if weights[lane] == 0 {
+                continue;
+            }
+            joints[lane] = u8::try_from(indices[lane])
+                .ok()
+                .filter(|&joint| usize::from(joint) < self.joint_count)
+                .ok_or(SkinError::JointOutOfRange)?;
+        }
+        Ok((joints, weights))
+    }
+}
+
+/// Whether the mesh nodes seen so far are skinned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SkinMode {
+    /// No mesh node yet.
+    #[default]
+    Unset,
+    /// Static meshes, transforms baked in.
+    Static,
+    /// Every mesh node uses this skin.
+    Skinned(usize),
+}
+
+impl SkinMode {
+    fn of(skin: Option<usize>) -> Self {
+        skin.map_or(Self::Static, Self::Skinned)
+    }
+}
+
 /// Accumulates primitives into one mesh while enforcing the caps before allocating.
 #[derive(Default)]
 struct Builder {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    joints: Vec<[u8; 4]>,
+    weights: Vec<[u8; 4]>,
     primitives: usize,
+    skin: SkinMode,
+    joint_count: usize,
 }
 
 impl Builder {
+    /// Records the first mesh node's skin and rejects files that mix skins.
+    fn set_skin(&mut self, root: &gltf::json::Root, skin: Option<usize>) -> Result<(), GlbError> {
+        match self.skin {
+            SkinMode::Unset => {
+                if let Some(index) = skin {
+                    let joints = root
+                        .skins
+                        .get(index)
+                        .ok_or(GlbError::BadNodeGraph)?
+                        .joints
+                        .len();
+                    if joints == 0 || joints > MAX_JOINTS {
+                        return Err(SkinError::JointCount.into());
+                    }
+                    self.joint_count = joints;
+                }
+                self.skin = SkinMode::of(skin);
+                Ok(())
+            }
+            current if current == SkinMode::of(skin) => Ok(()),
+            _ => Err(GlbError::Unsupported(
+                "mesh nodes must all use the same skin (or none)",
+            )),
+        }
+    }
+
+    fn skinned(&self) -> bool {
+        matches!(self.skin, SkinMode::Skinned(_))
+    }
+
     fn reserve(&mut self, vertices: usize, indices: usize) -> Result<(), GlbError> {
         let total_vertices = self.positions.len().saturating_add(vertices);
         let total_indices = self.indices.len().saturating_add(indices);
@@ -388,7 +777,68 @@ impl Builder {
         self.positions.reserve(vertices);
         self.normals.reserve(vertices);
         self.indices.reserve(indices);
+        if self.skinned() {
+            self.joints.reserve(vertices);
+            self.weights.reserve(vertices);
+        }
         Ok(())
+    }
+
+    fn push_skin(
+        &mut self,
+        skin: Option<&SkinStreams<'_>>,
+        element: usize,
+    ) -> Result<(), GlbError> {
+        if let Some(skin) = skin {
+            let (joints, weights) = skin.vertex(element)?;
+            self.joints.push(joints);
+            self.weights.push(weights);
+        }
+        Ok(())
+    }
+
+    /// `JOINTS_0`/`WEIGHTS_0` of a primitive when the mesh is skinned.
+    fn skin_streams<'a>(
+        &self,
+        root: &gltf::json::Root,
+        bin: Option<&'a [u8]>,
+        primitive: &gltf::json::mesh::Primitive,
+        vertex_count: usize,
+    ) -> Result<Option<SkinStreams<'a>>, GlbError> {
+        if !self.skinned() {
+            return Ok(None);
+        }
+        let attributes = &primitive.attributes;
+        let (Some(joints), Some(weights)) = (
+            attributes.get(&Checked::Valid(Semantic::Joints(0))),
+            attributes.get(&Checked::Valid(Semantic::Weights(0))),
+        ) else {
+            return Err(GlbError::Unsupported(
+                "skinned primitive without JOINTS_0/WEIGHTS_0",
+            ));
+        };
+        let joints = accessor(
+            root,
+            bin,
+            joints.value(),
+            Type::Vec4,
+            &[ComponentType::U8, ComponentType::U16],
+        )?;
+        let weights = accessor(
+            root,
+            bin,
+            weights.value(),
+            Type::Vec4,
+            &[ComponentType::F32, ComponentType::U8, ComponentType::U16],
+        )?;
+        if joints.count != vertex_count || weights.count != vertex_count {
+            return Err(GlbError::BadAccessor);
+        }
+        Ok(Some(SkinStreams {
+            joints,
+            weights,
+            joint_count: self.joint_count,
+        }))
     }
 
     fn append_mesh(
@@ -454,6 +904,7 @@ impl Builder {
             if !index_count.is_multiple_of(3) {
                 return Err(MeshError::NotTriangles.into());
             }
+            let skin = self.skin_streams(root, bin, primitive, positions.count)?;
             match normals {
                 Some(normals) => self.append_indexed(
                     &positions,
@@ -462,13 +913,21 @@ impl Builder {
                     index_count,
                     world,
                     normal_matrix,
+                    skin.as_ref(),
                 )?,
-                None => self.append_flat(&positions, indices.as_ref(), index_count, world)?,
+                None => self.append_flat(
+                    &positions,
+                    indices.as_ref(),
+                    index_count,
+                    world,
+                    skin.as_ref(),
+                )?,
             }
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Accessor views plus the node transform.
     fn append_indexed(
         &mut self,
         positions: &AccessorData<'_>,
@@ -477,6 +936,7 @@ impl Builder {
         index_count: usize,
         world: Mat4,
         normal_matrix: Mat3,
+        skin: Option<&SkinStreams<'_>>,
     ) -> Result<(), GlbError> {
         self.reserve(positions.count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
@@ -487,6 +947,7 @@ impl Builder {
             let normal = (normal_matrix * Vec3::from_array(normal)).normalize_or(Vec3::Y);
             self.positions.push(position.to_array());
             self.normals.push(normal.to_array());
+            self.push_skin(skin, element)?;
         }
         let vertex_count = positions.count as u32; // <= MAX_VERTICES, checked by `reserve`.
         for element in 0..index_count {
@@ -509,10 +970,12 @@ impl Builder {
         indices: Option<&AccessorData<'_>>,
         index_count: usize,
         world: Mat4,
+        skin: Option<&SkinStreams<'_>>,
     ) -> Result<(), GlbError> {
         self.reserve(index_count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
         let mut corners = [Vec3::ZERO; 3];
+        let mut sources = [0usize; 3];
         for triangle in 0..index_count / 3 {
             for (corner, slot) in corners.iter_mut().enumerate() {
                 let element = triangle * 3 + corner;
@@ -525,13 +988,15 @@ impl Builder {
                 }
                 let position = positions.f32_vec3(index).ok_or(GlbError::BadAccessor)?;
                 *slot = world.transform_point3(Vec3::from_array(position));
+                sources[corner] = index;
             }
             let normal = (corners[1] - corners[0])
                 .cross(corners[2] - corners[0])
                 .normalize_or(Vec3::Y);
-            for corner in corners {
+            for (corner, source) in corners.iter().zip(sources) {
                 self.positions.push(corner.to_array());
                 self.normals.push(normal.to_array());
+                self.push_skin(skin, source)?;
             }
         }
         for element in 0..index_count {
@@ -783,21 +1248,138 @@ mod tests {
     }
 
     /// Deterministic stand-in for the cargo-fuzz target: every truncation and a sweep of
-    /// single-byte corruptions of the shipped model must return, not panic.
+    /// single-byte corruptions of the shipped models must return, not panic.
     #[test]
     fn truncations_and_byte_flips_never_panic() {
-        let bytes = include_bytes!("../../../content/models/sentinel.glb");
-        for length in 0..bytes.len().min(4_096) {
-            let _ = load_glb(&bytes[..length]);
-        }
-        let mut corrupt = bytes.to_vec();
-        for position in (0..corrupt.len()).step_by(11) {
-            for value in [0x00, 0xFF, b'9', b'"'] {
-                let original = corrupt[position];
-                corrupt[position] = value;
-                let _ = load_glb(&corrupt);
-                corrupt[position] = original;
+        // (model, byte-flip step): the skinned sweep is sparser to keep the test quick.
+        let models: [(&[u8], usize); 2] = [
+            (include_bytes!("../../../content/models/sentinel.glb"), 11),
+            (SKINNED, 29),
+        ];
+        let mut pose = [[[0.0; 4]; 3]; MAX_JOINTS];
+        for (bytes, step) in models {
+            for length in 0..bytes.len().min(4_096) {
+                let _ = load_glb(&bytes[..length]);
             }
+            let mut corrupt = bytes.to_vec();
+            for position in (0..corrupt.len()).step_by(step) {
+                for value in [0x00, 0xFF, b'9', b'"'] {
+                    let original = corrupt[position];
+                    corrupt[position] = value;
+                    // Whatever loads must also pose without panicking.
+                    if let Ok(mesh) = load_glb(&corrupt)
+                        && let Some(skin) = mesh.skin()
+                    {
+                        assert!(skin.skeleton().sample(0.37, 1.0, &mut pose));
+                    }
+                    corrupt[position] = original;
+                }
+            }
+        }
+    }
+
+    const SKINNED: &[u8] = include_bytes!("../../../content/models/sentinel-skinned.glb");
+
+    /// The skinned sample's JSON (as text) and BIN chunk, for targeted mutations.
+    fn skinned_parts() -> (String, Vec<u8>) {
+        let (json, bin) = split_chunks(SKINNED).expect("sample container");
+        (
+            String::from_utf8(json.to_vec()).expect("utf-8 JSON"),
+            bin.expect("BIN chunk").to_vec(),
+        )
+    }
+
+    #[test]
+    fn shipped_skinned_model_loads_with_skin_and_clip() {
+        let mesh = load_glb(SKINNED).expect("skinned sample");
+        let skin = mesh.skin().expect("skin");
+        assert_eq!(skin.joints().len(), mesh.vertex_count());
+        assert_eq!(skin.skeleton().joint_count(), 7);
+        assert_eq!(skin.skeleton().parents()[1], Some(0));
+        assert_eq!(skin.skeleton().clip().expect("clip").tracks().len(), 6);
+        // Bind-space vertices: the same geometry as the static sample.
+        let (min, max) = mesh.bounds();
+        assert!(min[1].abs() < 1e-4 && max[1] > 3.7, "{min:?} {max:?}");
+    }
+
+    #[test]
+    fn skinned_variants_and_rejections() {
+        let (json, bin) = skinned_parts();
+        let load = |json: &str| load_glb(&glb(json, Some(&bin)));
+        let skin_error = |result: Result<MeshData, GlbError>, expected: SkinError| matches!(result, Err(GlbError::Mesh(MeshError::Skin(error))) if error == expected);
+        // Fewer joints than the vertices reference.
+        let short = json.replace(r#""joints":[1,2,3,4,5,6,7]"#, r#""joints":[1,2,3]"#);
+        assert!(skin_error(load(&short), SkinError::JointOutOfRange));
+        // One inverse bind matrix per joint.
+        let ibm_count = json.replace(r#""count":7,"type":"MAT4""#, r#""count":6,"type":"MAT4""#);
+        assert!(matches!(load(&ibm_count), Err(GlbError::BadAccessor)));
+        // Duplicate joint nodes.
+        let duplicate = json.replace(r#""joints":[1,2,3,4,5,6,7]"#, r#""joints":[1,1,3,4,5,6,7]"#);
+        assert!(matches!(load(&duplicate), Err(GlbError::BadNodeGraph)));
+        // More than 64 joints.
+        let many = vec!["1"; MAX_JOINTS + 1].join(",");
+        let many = json.replace(
+            r#""joints":[1,2,3,4,5,6,7]"#,
+            &format!(r#""joints":[{many}]"#),
+        );
+        assert!(skin_error(load(&many), SkinError::JointCount));
+        // Missing weights on a skinned primitive.
+        let no_weights = json.replace(r#","WEIGHTS_0":3"#, "");
+        assert!(matches!(load(&no_weights), Err(GlbError::Unsupported(_))));
+        // A static mesh node next to the skinned one.
+        let mixed = json
+            .replace(r#""nodes":[0,1]"#, r#""nodes":[0,1,8]"#)
+            .replace(
+                r#"{"name":"arm_r","translation":[0.8,0.8000001,0]}]"#,
+                r#"{"name":"arm_r","translation":[0.8,0.8000001,0]},{"mesh":0}]"#,
+            );
+        assert!(matches!(load(&mixed), Err(GlbError::Unsupported(_))));
+        // Inverse bind matrices must be MAT4.
+        let bad_ibm = json.replace(r#""inverseBindMatrices":4"#, r#""inverseBindMatrices":5"#);
+        assert!(matches!(load(&bad_ibm), Err(GlbError::BadAccessor)));
+        // CUBICSPLINE needs three outputs per key.
+        let cubic = json.replacen(
+            r#""interpolation":"LINEAR""#,
+            r#""interpolation":"CUBICSPLINE""#,
+            1,
+        );
+        assert!(matches!(load(&cubic), Err(GlbError::BadAccessor)));
+        // STEP is accepted; channels on non-joint nodes are ignored (no clip at all here).
+        let step = json.replace(r#""interpolation":"LINEAR""#, r#""interpolation":"STEP""#);
+        assert!(load(&step).is_ok());
+        let off_skeleton = json.replace(r#""target":{"node":"#, r#""target":{"node":0,"x":"#);
+        let mesh = load(&off_skeleton).expect("channels on non-joint nodes are ignored");
+        assert!(mesh.skin().expect("skin").skeleton().clip().is_none());
+        // A joint parented under a non-joint node that is itself below a joint.
+        let detached = json
+            .replace(r#""children":[2,4,5]"#, r#""children":[2,4,8]"#)
+            .replace(
+                r#"{"name":"arm_r","translation":[0.8,0.8000001,0]}]"#,
+                r#"{"name":"arm_r","translation":[0.8,0.8000001,0]},{"children":[5]}]"#,
+            );
+        assert!(matches!(load(&detached), Err(GlbError::Unsupported(_))));
+        // A node listed as a child twice.
+        let shared = json.replace(r#""children":[3,6,7]"#, r#""children":[3,6,7,4]"#);
+        assert!(matches!(load(&shared), Err(GlbError::BadNodeGraph)));
+    }
+
+    #[test]
+    fn non_joint_ancestors_become_the_skeleton_base() {
+        let (json, bin) = skinned_parts();
+        // Put the hips under a non-joint "armature" node lifted by 2 m; the rest pose then
+        // lifts every joint, which the inverse bind matrices do not undo.
+        let lifted = json
+            .replace(r#""nodes":[0,1]"#, r#""nodes":[0,8]"#)
+            .replace(
+                r#"{"name":"arm_r","translation":[0.8,0.8000001,0]}]"#,
+                r#"{"name":"arm_r","translation":[0.8,0.8000001,0]},{"translation":[0,2,0],"children":[1]}]"#,
+            );
+        let mesh = load_glb(&glb(&lifted, Some(&bin))).expect("armature parent");
+        let skeleton = mesh.skin().expect("skin").skeleton();
+        let mut pose = [[[0.0; 4]; 3]; 7];
+        assert!(skeleton.sample(0.0, 0.0, &mut pose));
+        for joint in pose {
+            assert!((joint[1][3] - 2.0).abs() < 1e-5, "{joint:?}");
         }
     }
 }

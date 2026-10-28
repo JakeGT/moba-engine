@@ -23,6 +23,9 @@ pub(crate) struct DeviceContext {
     pub(crate) allocator: Option<Arc<Mutex<Allocator>>>,
     pub(crate) name: String,
     pub(crate) surface: ash::khr::surface::Instance,
+    /// `VkPhysicalDeviceLimits::maxStorageBufferRange`: the largest storage-buffer
+    /// descriptor range (bytes).
+    pub(crate) max_storage_buffer_range: u32,
 }
 
 struct Candidate {
@@ -214,6 +217,7 @@ impl DeviceContext {
             allocator: Some(Arc::new(Mutex::new(allocator))),
             name: device_name(&candidate.properties),
             surface,
+            max_storage_buffer_range: candidate.properties.limits.max_storage_buffer_range,
         })
     }
 

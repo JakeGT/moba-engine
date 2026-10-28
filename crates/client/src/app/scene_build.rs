@@ -13,6 +13,7 @@ use moba_sim::UnitKind;
 
 use crate::app::NetworkView;
 use crate::app::models::{HeroModel, ModelLibrary};
+use crate::app::skinning::BonePool;
 use crate::hud::{HudUnit, map_center, rendered_entity_position};
 
 pub(crate) fn map_theme(theme: u8) -> ([f32; 4], Vec4) {
@@ -29,8 +30,10 @@ pub(crate) fn rebuild_network_units(
     network: &NetworkView,
     models: &ModelLibrary,
     units: &mut Vec<UnitInstance>,
+    bones: &mut BonePool,
 ) {
     units.clear();
+    bones.clear();
     let Some(latest) = network.interpolator.latest() else {
         return;
     };
@@ -83,15 +86,19 @@ pub(crate) fn rebuild_network_units(
             };
             push_hero(
                 units,
+                bones,
+                models,
                 models.hero(usize::from(entity.hero_pick)),
-                position,
-                team,
-                fraction,
-                center,
-                render_tick / 30.0,
-                f32::from(entity.net_id),
-                facing,
-                gait,
+                &HeroPose {
+                    position,
+                    team,
+                    health_fraction: fraction,
+                    center,
+                    time: render_tick / 30.0,
+                    phase_offset: f32::from(entity.net_id),
+                    facing,
+                    gait,
+                },
             );
             continue;
         }
@@ -137,20 +144,47 @@ fn hero_color(team: Team, health_fraction: f32) -> Vec4 {
     )
 }
 
+/// Presentation inputs for one hero: everything is derived from replicated state the
+/// client already has (no wire fields of its own).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HeroPose {
+    pub(crate) position: FixVec2,
+    pub(crate) team: Team,
+    pub(crate) health_fraction: f32,
+    /// Half the map extent: world position minus this centres the map on the origin.
+    pub(crate) center: f32,
+    /// Animation time in seconds (render tick / 30).
+    pub(crate) time: f32,
+    /// Per-unit phase so heroes do not animate in lockstep.
+    pub(crate) phase_offset: f32,
+    /// Movement angle in the map's (x, z) plane.
+    pub(crate) facing: f32,
+    /// 0 idle .. 1 walking.
+    pub(crate) gait: f32,
+}
+
 /// Pushes a hero as its loaded model when there is one, otherwise as the procedural rig.
-#[allow(clippy::too_many_arguments)] // Rig pose inputs are explicit.
+///
+/// A skinned model is posed into `bones` (walk clip weighted by gait, rest pose when idle).
+/// When the bone budget is exhausted it is drawn with its static mesh for that frame. Never
+/// allocates when `units` has capacity.
 pub(crate) fn push_hero(
     units: &mut Vec<UnitInstance>,
+    bones: &mut BonePool,
+    models: &ModelLibrary,
     model: Option<HeroModel>,
-    position: FixVec2,
-    team: Team,
-    health_fraction: f32,
-    center: f32,
-    time: f32,
-    phase_offset: f32,
-    facing: f32,
-    gait: f32,
+    pose: &HeroPose,
 ) {
+    let HeroPose {
+        position,
+        team,
+        health_fraction,
+        center,
+        time,
+        phase_offset,
+        facing,
+        gait,
+    } = *pose;
     let Some(model) = model else {
         push_hero_rig(
             units,
@@ -165,20 +199,32 @@ pub(crate) fn push_hero(
         );
         return;
     };
-    // A static mesh has no joints (GPU skinning is WP-4.1); a small stride bob keeps
-    // moving heroes readable.
-    let bob = (time * 12.0 + phase_offset).sin().abs() * 0.12 * gait.clamp(0.0, 1.0);
-    let base = Vec3::new(
-        position.x.to_f32() - center,
-        bob,
-        position.y.to_f32() - center,
-    );
     // Models face +Z (glTF); `facing` is the movement angle in the map's (x, z) plane.
     let rotation = Quat::from_rotation_y(core::f32::consts::FRAC_PI_2 - facing);
-    let transform = Mat4::from_rotation_translation(rotation, base) * model.normalize;
-    units.push(
-        UnitInstance::new(transform, hero_color(team, health_fraction)).with_mesh(model.mesh),
+    let ground = Vec3::new(
+        position.x.to_f32() - center,
+        0.0,
+        position.y.to_f32() - center,
     );
+    let color = hero_color(team, health_fraction);
+    if let Some(skin) = model.skin
+        && let Some(rig) = models.rig(skin.rig)
+        && let Some(range) = bones.pose(rig, time, phase_offset, gait)
+    {
+        // The clip animates the body (including the hip bob), so no procedural offset.
+        let transform = Mat4::from_rotation_translation(rotation, ground) * model.normalize;
+        units.push(
+            UnitInstance::new(transform, color)
+                .with_mesh(skin.mesh)
+                .with_bones(range),
+        );
+        return;
+    }
+    // A static mesh has no joints; a small stride bob keeps moving heroes readable.
+    let bob = (time * 12.0 + phase_offset).sin().abs() * 0.12 * gait.clamp(0.0, 1.0);
+    let base = ground + Vec3::Y * bob;
+    let transform = Mat4::from_rotation_translation(rotation, base) * model.normalize;
+    units.push(UnitInstance::new(transform, color).with_mesh(model.mesh));
 }
 
 #[allow(clippy::too_many_arguments)] // Rig pose inputs are explicit.
@@ -368,4 +414,76 @@ pub(crate) fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -
         predicted.y.to_f32() - world_center,
     );
     Camera::orbit(center, network.follow_distance, -0.7, 0.95, aspect)
+}
+
+#[cfg(test)]
+mod tests {
+    use moba_core::FixVec2;
+    use moba_game::Team;
+    use moba_render::{MeshData, MeshId, UnitInstance};
+
+    use super::{HeroPose, push_hero};
+    use crate::app::models::{ModelBindings, ModelLibrary, Upload};
+    use crate::app::skinning::BonePool;
+
+    const SKINNED_SAMPLE: &[u8] = include_bytes!("../../../../content/models/sentinel-skinned.glb");
+
+    /// The whole per-frame skinning path (clear, pose, push, and truncation to the static
+    /// mesh) must not allocate once its buffers exist.
+    #[test]
+    fn skinned_hero_frames_do_not_allocate() {
+        let root = std::env::temp_dir().join(format!(
+            "moba-skinning-alloc-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("models")).expect("temp model dir");
+        std::fs::write(root.join("models/walker.glb"), SKINNED_SAMPLE).expect("write sample");
+        let mut library = ModelLibrary::new(root.clone(), ModelBindings::default());
+        library.bind_heroes([Some("walker")], |_: &MeshData, _: Upload| Ok(MeshId::CUBE));
+        let model = library.hero(0);
+        assert!(model.is_some_and(|model| model.skin.is_some()));
+        let joints = 7;
+        let budget_heroes = 16;
+        let heroes = 20i32;
+        let mut bones = BonePool::new(joints * budget_heroes);
+        let mut units: Vec<UnitInstance> = Vec::with_capacity(64);
+        let frame = |bones: &mut BonePool, units: &mut Vec<UnitInstance>, tick: u16| {
+            bones.clear();
+            units.clear();
+            for hero in 0..heroes {
+                push_hero(
+                    units,
+                    bones,
+                    &library,
+                    model,
+                    &HeroPose {
+                        position: FixVec2::from_ints(100 + hero, 120),
+                        team: if hero % 2 == 0 { Team::Blue } else { Team::Red },
+                        health_fraction: 0.8,
+                        center: 128.0,
+                        time: f32::from(tick) / 30.0,
+                        phase_offset: hero as f32,
+                        facing: 0.3 * hero as f32,
+                        gait: (hero % 2) as f32,
+                    },
+                );
+            }
+        };
+        // Warm-up frame: the first truncation logs once (stderr) before counting starts.
+        frame(&mut bones, &mut units, 0);
+        let ((), allocations) = crate::app::allocation_probe::probe(|| {
+            for tick in 1..=30 {
+                frame(&mut bones, &mut units, tick);
+            }
+        });
+        assert_eq!(allocations, 0, "per-frame skinning allocated");
+        let skinned = units.iter().filter(|unit| unit.bones.count > 0).count();
+        assert_eq!(skinned, budget_heroes);
+        assert_eq!(units.len(), 20, "over-budget heroes draw static");
+        assert_eq!(bones.truncated(), 4);
+        assert_eq!(bones.bones().len(), joints * budget_heroes);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

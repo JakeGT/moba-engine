@@ -10,6 +10,9 @@
 pub const UNIT_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unit.vert.spv"));
 /// Instanced unit fragment shader.
 pub const UNIT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unit.frag.spv"));
+/// Skinned unit vertex shader (bone buffer + push-constant bone range; pairs with
+/// [`UNIT_FRAG`]).
+pub const SKINNED_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/skinned.vert.spv"));
 /// Procedural terrain vertex shader.
 pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
 /// Procedural terrain fragment shader.
@@ -37,6 +40,10 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "unit.frag",
         spirv: UNIT_FRAG,
+    },
+    ShaderModule {
+        name: "skinned.vert",
+        spirv: SKINNED_VERT,
     },
     ShaderModule {
         name: "terrain.vert",
