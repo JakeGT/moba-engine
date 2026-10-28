@@ -91,17 +91,31 @@ No key material is logged. This is a private-server mode, not public identity; s
 
 ## Rendering
 
-`moba-render` owns a Vulkan 1.3 device with core dynamic rendering and synchronization2. One
-frame:
+`moba-render` owns a Vulkan 1.3 device with core dynamic rendering and synchronization2. A
+frame is a small render graph ([ADR-0008](adr/0008-render-graph.md)). Passes declare which
+images and buffers they read and write; the graph is compiled once at renderer creation, and
+compiling derives the `synchronization2` barriers and layout transitions, pools transients
+and culls unused passes. Each pass is timed with GPU timestamps (`Renderer::gpu_timings`). The
+passes run in this order:
+
+1. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
+   the `Low` quality tier) with a sampled-capable depth buffer;
+2. `composite` applies exposure and an AgX tonemap into the swapchain image;
+3. `ui` draws the HUD on top, so text is never tonemapped;
+4. `capture` copies the swapchain image for readback, in capture frames only.
+
+Descriptors are plain per-pass sets, and materials will get one set each
+([ADR-0009](adr/0009-descriptor-model.md)). The scene pass draws:
 
 - terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes
   use a client-local `.glb` model when one is configured (GPU-skinned with a walk clip when
   the file has a skin: a per-frame bone SSBO plus a push-constant bone range, ADR-0007) and
   otherwise a deterministic multi-part animated rig; minions/structures use instanced cubes;
 - up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
-  darkens unseen ground;
-- a screen-space UI batch (solid quads + textured glyph/icon atlas) drawn in the same pass;
-- optional GPU readback capture for deterministic screenshots.
+  darkens unseen ground.
+
+The UI pass draws a screen-space batch (solid quads + textured glyph/icon atlas), and the
+capture pass provides the GPU readback used for deterministic screenshots and goldens.
 
 No renderer types leak into simulation or networking. A different renderer only needs
 `Camera`, unit instances and a UI draw list (or can ignore the latter).

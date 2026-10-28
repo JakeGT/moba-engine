@@ -14,19 +14,19 @@ accounts and live operations are separate tracks (see [§9](#9-other-tracks-a-sh
 The engine has a solid base to build on, but today's picture is a prototype. Compare
 [the NVIDIA teamfight capture](../images/m8-nvidia-teamfight.png) with any commercial MOBA.
 
-| Area | Today (checked against `main` @ 9a251a1) |
+| Area | Today (checked against `main` @ 9a251a1; R1a rows updated 2026-10-28) |
 |---|---|
-| Frame structure | One forward pass straight into the swapchain image, with a per-image depth buffer. No offscreen/HDR targets, no render graph. `FRAMES_IN_FLIGHT = 2`. |
-| Shaders | 6 GLSL files, 231 lines total (`crates/shaders/shaders/`). |
+| Frame structure | **R1a:** a render graph ([ADR-0008](../adr/0008-render-graph.md)): `scene` → HDR colour (`R16G16B16A16_SFLOAT`, `B10G11R11_UFLOAT_PACK32` on Low) + sampled-capable depth, `composite` (tonemap) → swapchain, `ui` on top, with derived sync2 barriers, transient pooling and pass culling. `FRAMES_IN_FLIGHT = 2`. `QualityTier` exists (Low/Medium/High/Ultra). |
+| Shaders | 9 GLSL files (`crates/shaders/shaders/`), adding the fullscreen vertex shader and the composite. |
 | Lighting | One directional light (Lambert), hemispheric ambient and a rim term (`unit.frag`). No shadows, no specular, no PBR, no image-based lighting. |
 | Geometry | Instanced cubes. Heroes are a 6-cube rig posed on the CPU (`push_hero_rig`). The instance SSBO is capped at 4,096. Mesh loading is in progress (WP-3.2, #286). |
 | Terrain | A flat plane with a procedural grid and per-map tint. Walls are only drawn on the network path. |
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
 | Materials and textures | Vertex colour only. Textures exist only in the UI atlas. |
 | VFX | None beyond unit tinting. Presentation events (cast, projectile spawn/hit, death, zone) already reach the client ([perf/0009](../perf/0009-presentation-events.md)). |
-| Image quality | No anti-aliasing, tonemapping, bloom or colour grading. |
+| Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
 | UI | Baked bitmap font and RGBA atlas, with UI scale. |
-| Evidence | Golden 64×36 fingerprint on lavapipe with validation. Real-GPU timings exist only for an RTX 5070 Ti (p95 4.2 ms @1080p). |
+| Evidence | Golden 64×36 fingerprints on lavapipe with validation (rebaselined for the tonemap in R1a). Per-pass GPU timestamps in `MOBA_FRAME_LOG` (R1a); real-GPU timings exist only for an RTX 5070 Ti (p95 4.2 ms @1080p, GPU work 0.046 ms, [perf/0011](../perf/0011-render-graph.md)). |
 
 **What already helps:**
 - The simulation is deterministic, and **rendering is purely presentational**. Visuals can never desync a match, and fog-of-war visuals are cosmetic because the server already withholds unseen units.
@@ -192,8 +192,8 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | # | Decision | Recommended default |
 |---|---|---|
 | ADR-0007 | Mesh format | `.glb` via `gltf` (being written in WP-3.2) |
-| ADR-0008 | Render graph | In-house, small, compile-time pass list; transient aliasing |
-| ADR-0009 | Descriptor model | Bindless if MoltenVK + UHD 620 measurements are acceptable; else per-material sets |
+| ADR-0008 | Render graph | **Accepted** (R1a): in-house, small, compile-time pass list; transient pooling |
+| ADR-0009 | Descriptor model | **Accepted** (R1a): per-material plain sets now; bindless deferred until measured on MoltenVK + UHD 620 |
 | ADR-0010 | Texture pipeline | Offline baker → KTX2 (BC7/BC5/BC4), mips, sRGB rules |
 | ADR-0011 | Art style | Stylised PBR with a painterly layer; readability rules as acceptance criteria |
 | ADR-0012 | Animation runtime | In-house sampler + content-defined state machine; VAT for minions |

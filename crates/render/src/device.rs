@@ -15,6 +15,8 @@ const PORTABILITY_SUBSET: &CStr = c"VK_KHR_portability_subset";
 
 pub(crate) struct DeviceContext {
     pub(crate) device: ash::Device,
+    /// The instance's function table, for physical-device queries after creation.
+    pub(crate) instance: ash::Instance,
     pub(crate) physical: vk::PhysicalDevice,
     pub(crate) graphics_family: u32,
     pub(crate) present_family: u32,
@@ -26,6 +28,10 @@ pub(crate) struct DeviceContext {
     /// `VkPhysicalDeviceLimits::maxStorageBufferRange`: the largest storage-buffer
     /// descriptor range (bytes).
     pub(crate) max_storage_buffer_range: u32,
+    /// `VkPhysicalDeviceLimits::timestampPeriod`: nanoseconds per timestamp tick.
+    pub(crate) timestamp_period: f32,
+    /// `timestampValidBits` of the graphics queue family; `0` means no timestamps.
+    pub(crate) timestamp_valid_bits: u32,
 }
 
 struct Candidate {
@@ -190,6 +196,12 @@ impl DeviceContext {
         // valid for the duration of the call.
         let device = unsafe { instance.create_device(physical, &create_info, None) }?;
 
+        // SAFETY: `physical` came from this instance.
+        let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+        let timestamp_valid_bits = families
+            .get(candidate.graphics_family as usize)
+            .map_or(0, |family| family.timestamp_valid_bits);
+
         // SAFETY: the queues belong to this device and family 0 was created.
         let graphics_queue = unsafe { device.get_device_queue(candidate.graphics_family, 0) };
         // SAFETY: same as above for the present family.
@@ -209,6 +221,7 @@ impl DeviceContext {
 
         Ok(Self {
             device,
+            instance: instance.clone(),
             physical,
             graphics_family: candidate.graphics_family,
             present_family: candidate.present_family,
@@ -218,6 +231,8 @@ impl DeviceContext {
             name: device_name(&candidate.properties),
             surface,
             max_storage_buffer_range: candidate.properties.limits.max_storage_buffer_range,
+            timestamp_period: candidate.properties.limits.timestamp_period,
+            timestamp_valid_bits,
         })
     }
 

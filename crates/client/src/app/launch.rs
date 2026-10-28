@@ -337,11 +337,28 @@ impl Drop for ClientApp {
         };
         let (cpu_p50, cpu_p95) = split(0);
         let (render_p50, render_p95) = split(1);
+        // GPU pass times from timestamp queries, same warm-up skipped.
+        let gpu_samples = self.gpu_log.take().unwrap_or_default();
+        let gpu_columns = if gpu_samples.len() > warmup {
+            gpu_report(&gpu_samples[warmup..])
+        } else {
+            String::from("gpu_timing=unavailable ")
+        };
+        let quality = self.renderer.as_ref().map_or_else(
+            || String::from("?"),
+            |renderer| {
+                format!(
+                    "{} hdr={}",
+                    renderer.quality_tier(),
+                    renderer.hdr_format_name()
+                )
+            },
+        );
         let report = format!(
             "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
-             extent={extent} gpu=\"{gpu}\"\n",
+             {gpu_columns}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),
@@ -353,9 +370,53 @@ impl Drop for ClientApp {
     }
 }
 
+/// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[scene, composite, ui,
+/// total, span]` samples. `total` sums the passes; `span` runs from the first pass's start
+/// to the last pass's end, so `span - total` is the time spent in barriers between passes.
+fn gpu_report(samples: &[[f32; 5]]) -> String {
+    use core::fmt::Write as _;
+    let mut columns = String::new();
+    for (lane, name) in ["scene", "composite", "ui", "total", "span"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut values: Vec<f32> = samples.iter().map(|sample| sample[lane]).collect();
+        values.sort_by(f32::total_cmp);
+        let at = |fraction: f32| {
+            values
+                .get(((values.len().max(1) - 1) as f32 * fraction).round() as usize)
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let _ = write!(
+            columns,
+            "gpu_{name}_p50_ms={:.3} gpu_{name}_p95_ms={:.3} ",
+            at(0.50),
+            at(0.95)
+        );
+    }
+    columns
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_hex32, parse_window_size};
+    use super::{gpu_report, parse_hex32, parse_window_size};
+
+    #[test]
+    fn gpu_report_lists_each_pass_percentile() {
+        let samples: Vec<[f32; 5]> = (0..=100)
+            .map(|index| {
+                let ms = index as f32 / 100.0;
+                [ms, ms * 2.0, 0.5, ms * 3.0, ms * 4.0]
+            })
+            .collect();
+        let report = gpu_report(&samples);
+        assert!(report.starts_with("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
+        assert!(report.contains("gpu_composite_p95_ms=1.900 "));
+        assert!(report.contains("gpu_ui_p50_ms=0.500 gpu_ui_p95_ms=0.500 "));
+        assert!(report.contains("gpu_total_p50_ms=1.500 gpu_total_p95_ms=2.850 "));
+        assert!(report.ends_with("gpu_span_p50_ms=2.000 gpu_span_p95_ms=3.800 "));
+    }
 
     #[test]
     fn window_size_parses_or_falls_back() {

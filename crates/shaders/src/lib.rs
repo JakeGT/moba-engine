@@ -17,6 +17,10 @@ pub const SKINNED_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/skinne
 pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
 /// Procedural terrain fragment shader.
 pub const TERRAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.frag.spv"));
+/// Fullscreen-triangle vertex shader (no vertex buffer) for fullscreen passes.
+pub const FULLSCREEN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv"));
+/// Composite fragment shader: HDR scene colour, exposure and the `AgX` tonemap.
+pub const COMPOSITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composite.frag.spv"));
 /// Screen-space UI vertex shader.
 pub const UI_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.vert.spv"));
 /// Screen-space UI fragment shader.
@@ -52,6 +56,14 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "terrain.frag",
         spirv: TERRAIN_FRAG,
+    },
+    ShaderModule {
+        name: "fullscreen.vert",
+        spirv: FULLSCREEN_VERT,
+    },
+    ShaderModule {
+        name: "composite.frag",
+        spirv: COMPOSITE_FRAG,
     },
     ShaderModule {
         name: "ui.vert",

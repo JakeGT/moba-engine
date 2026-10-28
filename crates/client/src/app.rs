@@ -115,12 +115,16 @@ struct ClientApp {
     frame_ms: f32,
     fps: f32,
     ui_scale: f32,
+    quality: moba_render::QualityTier,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
     frame_log: Option<Vec<f32>>,
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
+    /// Per-frame GPU times `[scene, composite, ui, total, span]` while logging, from the
+    /// renderer's timestamp queries (empty on devices without timestamp support).
+    gpu_log: Option<Vec<[f32; 5]>>,
     frame_log_path: Option<PathBuf>,
     /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
     network_warmup: Option<u32>,
@@ -160,6 +164,16 @@ impl ClientApp {
         let frame_log_path = std::env::var("MOBA_FRAME_LOG").ok().map(PathBuf::from);
         let frame_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
         let work_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
+        let gpu_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
+        let quality = std::env::var("MOBA_QUALITY").ok().map_or_else(
+            || settings.quality_tier(),
+            |name| {
+                moba_render::QualityTier::from_name(&name).unwrap_or_else(|| {
+                    eprintln!("MOBA_QUALITY={name:?} is not low/medium/high/ultra; using settings");
+                    settings.quality_tier()
+                })
+            },
+        );
         let mut app = Self {
             renderer: None,
             simulation: None,
@@ -194,10 +208,12 @@ impl ClientApp {
             ui_scale: env_scale
                 .unwrap_or(settings.ui_scale)
                 .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
+            quality,
             bindings,
             camera_sensitivity,
             frame_log,
             work_log,
+            gpu_log,
             frame_log_path,
             // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
             network_warmup: std::env::var("MOBA_SERVER")
@@ -314,6 +330,7 @@ impl App for ClientApp {
             .with_max_instances(1_024)
             .with_vsync(std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"))
             .with_ui_scale(self.ui_scale)
+            .with_quality_tier(self.quality)
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning());
         match Renderer::new(window, config) {
@@ -773,6 +790,22 @@ impl App for ClientApp {
             let cpu_ms = started.duration_since(now).as_secs_f32() * 1_000.0;
             let render_ms = started.elapsed().as_secs_f32() * 1_000.0;
             work.push([cpu_ms, render_ms]);
+            if let (Some(gpu), Some(timings)) = (
+                self.gpu_log.as_mut(),
+                self.renderer
+                    .as_ref()
+                    .and_then(moba_render::Renderer::gpu_timings),
+            ) && gpu.len() < 10_000
+            {
+                let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
+                gpu.push([
+                    pass("scene"),
+                    pass("composite"),
+                    pass("ui"),
+                    timings.total_ms,
+                    timings.span_ms,
+                ]);
+            }
         }
         if let Some(message) = failure {
             self.fail(message);

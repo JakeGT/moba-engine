@@ -147,9 +147,13 @@ matrices).
 **`moba-render`** — `Renderer`, `RenderConfig`, `RenderError`/`RenderResult`, `Scene`,
 `Camera`, `UnitInstance`, `MeshId`, `BoneRange`, `VisionCircles`, `UiDrawList`/`UiVertex`,
 `CapturedFrame`, `probe_vulkan`/`VulkanProbe`, the UI atlas builder and the diagnostics counters.
-- `#[non_exhaustive]` enums: `RenderError`.
+R1a (ADR-0008) added `QualityTier`, `GpuTimings`/`PassTiming` (`Renderer::gpu_timings`) and
+`RenderError::RenderGraph`.
+- `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
+  `_` arm).
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
-  `CapturedFrame`, `VulkanProbe`, and the frame inputs that already had constructors:
+  `CapturedFrame`, `VulkanProbe`, `GpuTimings` and `PassTiming` (read-only stats), and the
+  frame inputs that already had constructors:
   `Scene` (`new`, `empty`, `with_*`), `UnitInstance` (`new`, `at`, `with_mesh`, `with_bones`),
   `Camera` (`perspective`, `orbit`).
 - Exhaustive by design: `BoneRange`, `MeshId`, `UiVertex` (GPU vertex layout),

@@ -180,6 +180,21 @@ MOBA_SMOKE_FRAMES=100000 MOBA_CAPTURE=/tmp/frame.ppm \
 MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
 ```
 
+### HDR target and AgX tonemap (R1a): before and after
+![Networked golden frame before (left) and after (right) the HDR tonemap](images/r1-hdr-tonemap-before-after.png)
+
+The same networked golden frame (tick 120, lavapipe, 1280×720), before and after R1a
+([ADR-0008](adr/0008-render-graph.md)).
+- **Left:** the old single forward pass straight into the swapchain.
+- **Right:** the render graph. The scene renders into an `R16G16B16A16_SFLOAT` target, a
+  composite pass applies exposure and AgX with a saturation look, and the HUD is drawn
+  afterwards.
+- **What changed:** shadows and mid-tones are almost unchanged. Highlights roll off (the lit
+  structures are dimmer), and team colours keep their hue. HUD pixels are identical, because the
+  UI is never tonemapped.
+- **Rebaseline:** this is the deliberate rebaseline of both golden fingerprints. Validation and
+  synchronisation validation reported zero messages, and two runs gave identical fingerprints.
+
 ### Per-map visuals
 ![Ember Crossing with its visuals descriptor](images/m8-map-visuals-ember.png)
 

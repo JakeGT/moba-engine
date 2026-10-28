@@ -334,6 +334,15 @@ raii_handle!(
     destroy_descriptor_set_layout
 );
 raii_handle!(DescriptorPool, vk::DescriptorPool, destroy_descriptor_pool);
+raii_handle!(Sampler, vk::Sampler, destroy_sampler);
+
+impl Sampler {
+    pub(crate) fn new(device: ash::Device, info: &vk::SamplerCreateInfo<'_>) -> RenderResult<Self> {
+        // SAFETY: the device is live and the create info is fully initialised.
+        let handle = unsafe { device.create_sampler(info, None) }?;
+        Ok(Self { device, handle })
+    }
+}
 
 impl DescriptorSetLayout {
     pub(crate) fn new(

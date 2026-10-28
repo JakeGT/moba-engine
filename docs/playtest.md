@@ -164,7 +164,8 @@ $env:MOBA_FRAME_LOG="frames-<name>.log"; .\moba-client.exe
 | `MOBA_SPECTATE=1` | Join as a spectator. |
 | `MOBA_FRAME_LOG=<path>` | Writes frame-time percentiles **when the client exits cleanly**. |
 | `MOBA_VSYNC=0` | Uncapped present mode, so the frame log measures the frame cost rather than the display refresh. |
-| `MOBA_SETTINGS=<path>` | Settings file (default `moba-settings.toml`): key bindings and UI scale. |
+| `MOBA_SETTINGS=<path>` | Settings file (default `moba-settings.toml`): key bindings, UI scale and rendering `quality`. |
+| `MOBA_QUALITY=low\|medium\|high\|ultra` | Rendering quality tier for this run (overrides the `quality` setting). |
 
 The three key variables **fail closed**. If one is set but isn't exactly 64 hex characters, or
 the public key is malformed or weak, the client exits with an error instead of connecting

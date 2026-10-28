@@ -17,7 +17,7 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 | M0 | Bootstrap | ✅ | Workspace, lints, CI, justfile, [agent instructions](../AGENTS.md), issue/PR templates. |
 | M1 | Core runtime | ✅ | Fixed-point core, SoA ECS, work stealing, arenas/bitsets; Miri and the [Loom job-scope model](../.github/workflows/loom.yml) are green in CI. |
 | M2 | Platform | 🟡 | Linux runtime verified; Windows/macOS compile and CI-checked, runtime GPU validation still open (#9). winit/input, 30 Hz step, settings and headless modes present. |
-| M3 | Renderer | 🟡 | Vulkan 1.3 device/swapchain/dynamic rendering, instanced units, terrain fog/LOS, textured UI atlas, animated hero rig, GPU skinning of `.glb` hero models (walk clip from facing/gait, rig fallback; #288, ADR-0007) with a [networked skinned-match frame cost](perf/0007-real-hardware.md#networked-match-with-skinned-heroes-wp-42-289) (RTX 5070 Ti, 1920×1080, p95 4.192 ms) and a deterministic networked golden (#289), map themes, [golden-image CI](../.github/workflows/render-golden.yml) and [NVIDIA timings](perf/0007-real-hardware.md). Windows/macOS real-GPU timing remains open (#127). |
+| M3 | Renderer | 🟡 | Vulkan 1.3 device/swapchain/dynamic rendering, a render graph with HDR target, AgX tonemap composite, quality tiers and per-pass GPU timestamps ([ADR-0008](adr/0008-render-graph.md), [perf/0011](perf/0011-render-graph.md)), instanced units, terrain fog/LOS, textured UI atlas, animated hero rig, GPU skinning of `.glb` hero models (walk clip from facing/gait, rig fallback; #288, ADR-0007) with a [networked skinned-match frame cost](perf/0007-real-hardware.md#networked-match-with-skinned-heroes-wp-42-289) (RTX 5070 Ti, 1920×1080, p95 4.192 ms) and a deterministic networked golden (#289), map themes, [golden-image CI](../.github/workflows/render-golden.yml) and [NVIDIA timings](perf/0007-real-hardware.md). Windows/macOS real-GPU timing remains open (#127). |
 | M4 | Simulation | ✅ | [Deterministic 5v5](perf/0004-simulation.md), 3 lanes, towers/nexuses, minions, vision-respecting bots, respawns, XP/gold/items, modes/rules; measured ~26.3 µs/tick steady benchmark (7.876 ms/300 ticks, 2026-10-19). |
 | M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v40, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
 | M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
@@ -45,7 +45,7 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **416 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **429 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
@@ -54,6 +54,8 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 - Deterministic cross-OS golden state hash: `0x8db35a0f5aab5190`.
 - Golden render workflow: on lavapipe with validation + sync validation, the 64×36 default-scene
   fingerprint and a networked fingerprint with skinned heroes at a pinned tick (#318) are green.
+  Both were rebaselined deliberately for the R1a HDR + AgX tonemap frame
+  ([ADR-0008](adr/0008-render-graph.md)); the graph's barrier plan is unit-tested headless.
 - Deterministic wire fuzzer historical evidence: v11 **2,476,647,000** iterations clean and
   final v12 **2,384,035,000** clean. Current cargo-fuzz targets `wire`, `replay`, `content`
   run in the manual/nightly `fuzz` workflow; a 30 s-per-target run passed.
