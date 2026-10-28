@@ -8,7 +8,9 @@ use crate::hud_fmt;
 
 static CAPTURE_ACTIVE: OnceLock<bool> = OnceLock::new();
 
-fn capture_active() -> bool {
+/// `MOBA_CAPTURE` is set: hide wall-clock HUD values (FPS, ping, packet counts) so captures
+/// and golden fingerprints do not depend on timing. Read once.
+pub(crate) fn capture_active() -> bool {
     *CAPTURE_ACTIVE.get_or_init(|| std::env::var_os("MOBA_CAPTURE").is_some())
 }
 

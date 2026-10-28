@@ -3,11 +3,13 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moba_core::FixVec2;
-use moba_net::NetClient;
+use moba_net::protocol::MatchPhase;
+use moba_net::{NetClient, NetServer};
 use moba_platform::{WindowConfig, run as run_window};
 use moba_render::{CapturedFrame, Renderer, Scene, UiDrawList};
 use moba_sim::SimConfig;
@@ -60,6 +62,98 @@ pub(crate) fn parse_follow_distance() -> f32 {
         .and_then(|value| value.trim().parse::<f32>().ok())
         .filter(|value| value.is_finite())
         .map_or(46.0, |value| value.clamp(8.0, 120.0))
+}
+
+/// `MOBA_CAPTURE_TICK=<n>`: the network capture tick, read once at startup.
+pub(crate) fn parse_capture_tick() -> Option<u32> {
+    std::env::var("MOBA_CAPTURE_TICK")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// `MOBA_WINDOW_SIZE=<w>x<h>` (logical pixels, 320-7680 × 240-4320), else 1280×720.
+pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
+    value
+        .and_then(|value| {
+            let (width, height) = value.trim().split_once(['x', 'X'])?;
+            let width: u32 = width.trim().parse().ok()?;
+            let height: u32 = height.trim().parse().ok()?;
+            ((320..=7_680).contains(&width) && (240..=4_320).contains(&height))
+                .then_some((width, height))
+        })
+        .unwrap_or((1_280, 720))
+}
+
+/// Latest snapshot tick the client has processed, published for the lock-stepped local
+/// capture server (see [`run_local_server`]). Unused otherwise.
+pub(crate) static LOCAL_CAPTURE_ACK: AtomicU32 = AtomicU32::new(0);
+
+/// How long the lock-stepped server waits for the client before ticking anyway, so a lost
+/// snapshot cannot stall a capture forever. Long enough that a slow software-rendered frame
+/// (lavapipe with validation) never triggers it; expiry is logged because the capture may
+/// then differ from run to run.
+const LOCKSTEP_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Runs the in-process `MOBA_SERVER=local` server at 30 Hz.
+///
+/// With `stop_at = Some(n)` (a `MOBA_CAPTURE_TICK` capture) the match is lock-stepped to the
+/// client and stops at tick `n`:
+///
+/// - Lobby and Countdown tick in real time (they do not advance the simulation);
+/// - a Playing tick only runs once the client has processed the previous tick's snapshot
+///   ([`LOCAL_CAPTURE_ACK`]), so the client buffers every snapshot `1..=n` however slowly it
+///   renders (lavapipe in CI), and interpolation sees the same history on every run;
+/// - after `n` Playing ticks the server keeps polling (the client stays connected) but sends
+///   nothing newer than the tick-`n` snapshot;
+/// - if the client does not acknowledge a tick within [`LOCKSTEP_PATIENCE`] (a lost
+///   datagram), the server logs it and ticks anyway, including once past `n`, so the client
+///   can still capture (`latest >= n`) instead of hanging;
+/// - a rematch (Lobby/Countdown again) restarts the count with the simulation tick.
+fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
+    let Some(stop_at) = stop_at else {
+        let _ = server.run_for(Duration::from_secs(3_600));
+        return;
+    };
+    let tick = Duration::from_secs_f64(1.0 / 30.0);
+    let started = Instant::now();
+    let mut next_tick = started;
+    let mut played = 0u32;
+    let mut waiting_since = started;
+    while started.elapsed() < Duration::from_secs(3_600) {
+        if server.poll().is_err() {
+            return;
+        }
+        let now = Instant::now();
+        if now >= next_tick {
+            // A Playing tick advances the simulation by one; Lobby/Countdown ticks do not.
+            let phase = server.phase().0;
+            let playing = phase == MatchPhase::Playing;
+            if matches!(phase, MatchPhase::Lobby | MatchPhase::Countdown) {
+                played = 0;
+            }
+            let acked = LOCAL_CAPTURE_ACK.load(Ordering::Relaxed);
+            let run = if !playing || (acked >= played && played < stop_at) {
+                true
+            } else if acked < played && now.duration_since(waiting_since) >= LOCKSTEP_PATIENCE {
+                eprintln!(
+                    "[capture] client has not processed tick {played} (latest {acked}) after \
+                     {LOCKSTEP_PATIENCE:?}; ticking anyway, so this capture may not repeat"
+                );
+                true
+            } else {
+                false
+            };
+            if run {
+                if server.tick().is_err() {
+                    return;
+                }
+                played += u32::from(playing);
+                waiting_since = now;
+            }
+            next_tick = (next_tick + tick).max(now);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Parses an optional 32-byte hex value from an environment variable.
@@ -135,14 +229,13 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
             max_total_packets_per_second: 2_000,
             require_ready: false,
         };
-        let mut server = moba_net::NetServer::bind_with_content(config, Arc::new(content))
+        let server = moba_net::NetServer::bind_with_content(config, Arc::new(content))
             .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
             .local_addr()
             .map_err(|error| format!("local server address: {error}"))?;
-        std::thread::spawn(move || {
-            let _ = server.run_for(Duration::from_secs(3_600));
-        });
+        let stop_at = parse_capture_tick().filter(|_| std::env::var_os("MOBA_CAPTURE").is_some());
+        std::thread::spawn(move || run_local_server(server, stop_at));
         let auth = moba_net::client::ClientAuth {
             pre_shared_key: secret,
             expected_server: None,
@@ -183,7 +276,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         capture_frame,
         Arc::clone(&error),
     );
-    let config = WindowConfig::new("MOBA", 1280, 720);
+    let (width, height) = parse_window_size(std::env::var("MOBA_WINDOW_SIZE").ok().as_deref());
+    let config = WindowConfig::new("MOBA", width, height);
     run_window(config, app)?;
     if let Some(message) = error.lock().ok().and_then(|mut slot| slot.take()) {
         return Err(message.into());
@@ -219,8 +313,38 @@ impl Drop for ClientApp {
             samples[index]
         };
         let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+        // The physical extent and GPU make each report self-describing.
+        let (extent, gpu) = self.renderer.as_ref().map_or_else(
+            || (String::from("?"), String::from("?")),
+            |renderer| {
+                let [width, height] = renderer.extent();
+                (
+                    format!("{width}x{height}"),
+                    renderer.device_name().to_owned(),
+                )
+            },
+        );
+        // CPU work before the render call vs time inside it, same warm-up skipped.
+        let work = self.work_log.take().unwrap_or_default();
+        let work = work.get(warmup.min(work.len())..).unwrap_or_default();
+        let split = |lane: usize| {
+            let mut values: Vec<f32> = work.iter().map(|sample| sample[lane]).collect();
+            values.sort_by(f32::total_cmp);
+            let at = |fraction: f32| {
+                values
+                    .get(((values.len().max(1) - 1) as f32 * fraction).round() as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            (at(0.50), at(0.95))
+        };
+        let (cpu_p50, cpu_p95) = split(0);
+        let (render_p50, render_p95) = split(1);
         let report = format!(
-            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}\n",
+            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
+             cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
+             render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
+             extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),
@@ -234,7 +358,17 @@ impl Drop for ClientApp {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hex32;
+    use super::{parse_hex32, parse_window_size};
+
+    #[test]
+    fn window_size_parses_or_falls_back() {
+        assert_eq!(parse_window_size(None), (1_280, 720));
+        assert_eq!(parse_window_size(Some("1920x1080")), (1_920, 1_080));
+        assert_eq!(parse_window_size(Some(" 2560 X 1440 ")), (2_560, 1_440));
+        for bad in ["", "1920", "0x0", "99999x1080", "axb", "1920x1080x2"] {
+            assert_eq!(parse_window_size(Some(bad)), (1_280, 720), "{bad}");
+        }
+    }
 
     #[test]
     fn hex32_accepts_only_exact_hex_keys() {

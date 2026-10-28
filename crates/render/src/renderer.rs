@@ -839,10 +839,11 @@ impl Renderer {
                         ))
                     })?;
                 let scale = self.config.ui_scale;
+                // Scale a local copy and store it once: `mapped` is write-combined host
+                // memory, where every read-back (`target.position[0] *= ...`) is an uncached
+                // load. With a few thousand HUD vertices that cost ~7 ms per frame.
                 for (target, source) in mapped.iter_mut().zip(&source.vertices()[..ui_count]) {
-                    *target = *source;
-                    target.position[0] *= scale;
-                    target.position[1] *= scale;
+                    *target = scaled_ui_vertex(*source, scale);
                 }
             }
         }
@@ -1511,6 +1512,13 @@ impl Drop for Renderer {
 fn mesh_slot(mesh: MeshId, mesh_count: usize) -> usize {
     let index = mesh.index();
     if index < mesh_count { index } else { 0 }
+}
+
+/// A UI vertex with its position scaled by the HUD scale, built off the mapped buffer.
+fn scaled_ui_vertex(mut vertex: UiVertex, scale: f32) -> UiVertex {
+    vertex.position[0] *= scale;
+    vertex.position[1] *= scale;
+    vertex
 }
 
 /// The draw for one skinned instance, or `None` if its bone range is empty or reaches past
