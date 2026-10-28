@@ -89,6 +89,10 @@ if [[ "$FULL" == "1" ]]; then
 
   section "multi-match load test"
   cargo run --release -p moba-tools --bin load-test -- --matches 4 --clients 10 --seconds 10
+
+  section "multi-match flood isolation"
+  cargo run --release -p moba-tools --bin load-test -- --matches 4 --clients 10 --seconds 10 \
+    --workers 2 --flood-port 0 --flood-pps 50000
 fi
 
 printf '\nagent-verify: ok\n'

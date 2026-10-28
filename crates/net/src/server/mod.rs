@@ -27,6 +27,7 @@ use crate::transport::UdpTransport;
 
 use clients::ClientConn;
 use content::ContentReload;
+pub(crate) use content::content_trusted;
 use events::RawEvent;
 use handshake::{ClientChallenge, NonceTracker};
 use rate_limit::RateLimiter;
@@ -143,8 +144,11 @@ pub struct ServerStats {
     pub bytes_sent: u64,
     /// UDP bytes received.
     pub bytes_received: u64,
-    /// Datagrams dropped by the per-address rate limiter.
+    /// Datagrams dropped by the per-address, per-match or host-wide budget. They are
+    /// charged before decoding, so undecodable junk is counted too.
     pub rate_limited: u64,
+    /// Polls that stopped at their datagram/time cap with datagrams still queued.
+    pub poll_budget_exhausted: u64,
     /// Hello packets rejected as cross-address replays.
     pub replayed_hellos: u64,
     /// Total nanoseconds spent inside simulation ticks.
