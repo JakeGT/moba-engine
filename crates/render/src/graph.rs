@@ -54,7 +54,8 @@ pub(crate) enum Access {
     VertexStorageRead,
     /// Host read after the submission completes (buffers only; final access).
     HostRead,
-    /// Presentation (swapchain images only; final access).
+    /// Presentation (swapchain images only; final access). Ordered before the submit's
+    /// semaphore signal, which the present operation waits on.
     Present,
 }
 
@@ -153,8 +154,11 @@ impl Access {
                 true,
                 U::empty(),
             ),
+            // ALL_COMMANDS, not NONE: the transition must happen-before the submission's
+            // semaphore signal (legacy `vkQueueSubmit` signals at ALL_COMMANDS), which the
+            // present waits on. With NONE, sync validation reports PRESENT_AFTER_WRITE.
             Self::Present => (
-                S::NONE,
+                S::ALL_COMMANDS,
                 A::NONE,
                 A::NONE,
                 L::PRESENT_SRC_KHR,

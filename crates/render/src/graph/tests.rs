@@ -241,7 +241,11 @@ fn swapchain_is_transitioned_for_present_after_the_last_writer() {
     assert_eq!(present[0].resource, target);
     assert_eq!(present[0].src_stage, S::COLOR_ATTACHMENT_OUTPUT);
     assert_eq!(present[0].src_access, A::COLOR_ATTACHMENT_WRITE);
-    assert_eq!(present[0].dst_stage, S::NONE);
+    assert_eq!(
+        present[0].dst_stage,
+        S::ALL_COMMANDS,
+        "before the semaphore signal"
+    );
     assert_eq!(present[0].dst_access, A::NONE);
     assert_eq!(present[0].old_layout, L::COLOR_ATTACHMENT_OPTIMAL);
     assert_eq!(present[0].new_layout, L::PRESENT_SRC_KHR);
