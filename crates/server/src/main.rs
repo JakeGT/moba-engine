@@ -37,6 +37,7 @@ fn main() {
     let mut require_ready = false;
     let mut max_packets_per_second = 120u32;
     let mut max_total_packets_per_second = 2_000u32;
+    let mut host_max_packets_per_second = 0u32;
     let mut match_count = 1usize;
     let mut workers: Option<usize> = None;
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -113,6 +114,9 @@ fn main() {
         if let Some(value) = file.max_total_pps {
             max_total_packets_per_second = value;
         }
+        if let Some(value) = file.host_max_pps {
+            host_max_packets_per_second = value;
+        }
         if let Some(value) = file.matches {
             match_count = value;
         }
@@ -179,6 +183,11 @@ fn main() {
                     max_total_packets_per_second = value;
                 }
             }
+            "--host-max-pps" => {
+                if let Some(value) = args.next().and_then(|value| value.parse().ok()) {
+                    host_max_packets_per_second = value;
+                }
+            }
             "--items" => {
                 if let Some(value) = args.next() {
                     items_paths.push(std::path::PathBuf::from(value));
@@ -228,7 +237,7 @@ fn main() {
             "--help" => {
                 eprintln!(
                     "usage: moba-server [--ticks N] [--seed N] \
-                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--matches N] [--workers K] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--rotate-client-key OLD:NEW] [--revoke-client-key HEX] [--config FILE]"
+                     [--listen ADDR --seconds N --countdown S --results S --secret HEX --record FILE] [--results-log FILE] [--ready] [--items FILE]... [--max-pps N] [--max-total-pps N] [--host-max-pps N] [--matches N] [--workers K] [--server-key FILE] [--reload-content] [--require-content-attestation] [--content-publisher HEX] [--allow-token HEX] [--allow-client-key HEX] [--rotate-client-key OLD:NEW] [--revoke-client-key HEX] [--config FILE]"
                 );
                 return;
             }
@@ -349,9 +358,6 @@ fn main() {
                 std::process::exit(2);
             });
             server.set_content_trust(require_attestation, content_publisher);
-            if reload_content && let Some(path) = items_paths.first().cloned() {
-                server.watch_content(path);
-            }
             if items_paths.len() > 1 {
                 server.watch_rotation(items_paths.clone());
             }
@@ -416,6 +422,18 @@ fn main() {
             std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
         });
         let mut host = moba_net::MatchHost::new(servers, worker_count);
+        if reload_content && let Some(path) = items_paths.first().cloned() {
+            // One loader for the whole process: every match adopts the same pack.
+            host.watch_content(Arc::new(moba_net::ContentWatch::new(
+                path,
+                require_attestation,
+                content_publisher,
+            )));
+        }
+        if host_max_packets_per_second > 0 {
+            host.set_host_packet_budget(host_max_packets_per_second);
+            eprintln!("host-wide datagram budget: {host_max_packets_per_second} packets/s");
+        }
         if multi {
             eprintln!(
                 "hosting {match_count} matches on {} worker thread(s)",
@@ -452,6 +470,12 @@ fn main() {
                 ticks.percentile_nanos(50.0) / 1_000,
                 ticks.percentile_nanos(99.0) / 1_000,
                 ticks.max_nanos() / 1_000
+            );
+        }
+        if host_max_packets_per_second > 0 {
+            eprintln!(
+                "host budget: rejected={} datagrams",
+                report.host_budget_rejected
             );
         }
         let errors: u64 = report.workers.iter().map(|worker| worker.errors).sum();
@@ -615,6 +639,7 @@ struct FileServerConfig {
     ready: Option<bool>,
     max_pps: Option<u32>,
     max_total_pps: Option<u32>,
+    host_max_pps: Option<u32>,
     matches: Option<usize>,
     workers: Option<usize>,
     client_tokens: Option<Vec<String>>,

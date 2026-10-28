@@ -16,7 +16,7 @@ pub mod transport;
 
 pub use client::{ClientEvent, ClientStats, NetClient};
 pub use crypto::{CryptoError, SessionCrypto};
-pub use host::{HostReport, MatchHost, TickHistogram, WorkerStats};
+pub use host::{ContentWatch, HostBudget, HostReport, MatchHost, TickHistogram, WorkerStats};
 pub use interpolation::Interpolator;
 pub use prediction::PredictionState;
 pub use protocol::{

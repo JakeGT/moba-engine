@@ -58,6 +58,14 @@ is opt-in until crate names/ownership are settled.
   GitHub release. The run was dispatched from `main` because the tag is immutable; the only
   difference from the tag is the release-workflow dependency fix.
 - `v0.4.0` (2026-10-21): security release for GHSA-jw7c-q9x9-cgg3 (published, patched 0.4.0). Workspace **0.4.0**, protocol **v37**, replay **v5**, simulation logic **v7**, 316 tests. `scripts/agent-verify.sh --full` passed locally (635 test runs). Release workflow run `39599870292` passed release tests, package metadata, Linux/Windows/macOS builds and asset attachment (`moba-linux-x86_64.tar.gz`, `moba-macos-aarch64.tar.gz`, `moba-windows-x86_64.zip`, `package-list.txt`). The 0.3.0 advisories GHSA-23q3, GHSA-vpcq, GHSA-9j54 and GHSA-v6g8 were published the same day with patched version 0.3.0.
+- `v0.4.1` (2026-10-27): security patch for RUSTSEC-2026-0385 (`ctutils` 0.4.6, under the
+  RustCrypto stack in `moba-net`) and RUSTSEC-2026-0384 (`tokio` 1.54.1, yanked). Cut from
+  `v0.4.0` on the `release/0.4.x` branch (PR #310) because `main` already carries protocol v38
+  and API additions that require 0.5.0. Workspace **0.4.1**, protocol **v37**, replay **v5**,
+  simulation logic **v7**, 316 tests. `scripts/agent-verify.sh --full` passed locally (635 test
+  runs, soak determinism ok, fuzz-wire 1,923,000 iterations clean). Release workflow run
+  `40585213348` passed release tests, package metadata, Linux/Windows/macOS builds and asset
+  attachment. Patch releases for 0.4.x come from `release/0.4.x`; `main` targets 0.5.0.
 - Remaining release blocker: **#21** registry publication (ownership + `CARGO_REGISTRY_TOKEN`);
   `publish = false` is intentional until that is approved. Real Windows/macOS GPU validation
   is tracked separately in **#9/#127**, and post-1.0 asset/skinning work in **#276**.

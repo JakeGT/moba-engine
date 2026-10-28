@@ -1179,3 +1179,49 @@ fn snapshot_send_allocations_stay_bounded_with_events() {
         "snapshot send allocated {allocations} times"
     );
 }
+
+#[test]
+fn shared_reload_retries_until_occupied_slots_fit() {
+    let dir = std::env::temp_dir().join(format!(
+        "moba-shared-retry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("pack.toml");
+    std::fs::write(&path, "[[items]]\nname = \"First\"\ncost = 1\n").expect("seed pack");
+    let mut server = NetServer::bind(ServerConfig {
+        bind: "127.0.0.1:0".parse().expect("address"),
+        ..ServerConfig::default()
+    })
+    .expect("bind");
+    let watch = Arc::new(crate::host::ContentWatch::new(path.clone(), false, None));
+    server.follow_content(Arc::clone(&watch));
+    let addr = server.local_addr().expect("addr");
+    // A player in slot 3 cannot be served by a 1v1 pack.
+    server.clients[3] = Some(test_client(addr, 3, moba_game::Team::Red));
+    std::thread::sleep(Duration::from_millis(20));
+    let staging = dir.join("pack.tmp");
+    let one_v_one = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/1v1-mid.toml");
+    std::fs::copy(&one_v_one, &staging).expect("stage pack");
+    std::fs::rename(&staging, &path).expect("atomic replace");
+    assert!(watch.poll());
+    for _ in 0..30 {
+        server.tick().expect("tick");
+    }
+    assert_eq!(
+        server.content.rules.team_size, 5,
+        "rejected while slot 3 is taken"
+    );
+    server.clients[3] = None;
+    for _ in 0..30 {
+        server.tick().expect("tick");
+    }
+    assert_eq!(
+        server.content.rules.team_size, 1,
+        "retried once the slot freed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

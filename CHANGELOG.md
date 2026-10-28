@@ -63,6 +63,7 @@ breaking protocol, replay or content-schema changes.
   future hashed field cannot be added without being hashed and carried.
 - The wire fuzzers now round-trip a full built-in catalogue and Welcome, covering every rules
   field's encoder/decoder path.
+- Multi-match flood isolation (#292): datagrams are charged against the per-address, per-match and new optional host-wide (`--host-max-pps`, `HostBudget`) budgets before decoding, so undecodable junk counts too; `MatchHost` polls round-robin with a per-match cap of 64 datagrams / 500 µs per pass; `--reload-content` loads the pack once per host (`ContentWatch`) and shares it across matches; `load-test --flood-port K --flood-pps N` verifies the isolation. `--max-pps 0` now disables only the per-address budget, not the per-match one.
 - `GameContent::validate` now rejects map geometry the wire catalogue would silently truncate
   (#296): a fractional or out-of-`i16`/`u16` extent, spawn, lane waypoint, structure position
   or wall endpoint (new `ContentError::BadMapCoordinate(field)`; adding a variant is a breaking
@@ -86,6 +87,22 @@ breaking protocol, replay or content-schema changes.
 
 ### CI
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
+
+## [0.4.1] — 2026-10-27
+
+Security patch release cut from `v0.4.0` on the `release/0.4.x` branch. Protocol **v37**, replay
+**v5**, simulation logic **v7**: wire-, replay- and content-compatible with 0.4.0, and no public
+API change. Lockfile-only dependency updates.
+
+### Security
+- `ctutils` 0.4.3 → 0.4.6 ([RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385)).
+  Before 0.4.4, `ctutils::Choice` mask generation could compile to a branch on common targets,
+  and `u128` comparisons branched on 32-bit targets, which can leak secret values through timing.
+  `ctutils` is used by the RustCrypto stack under `moba-net`: `sha2`/`hmac`/`hkdf` (per-client
+  tokens, key derivation), `curve25519-dalek`/`ed25519-dalek` (server/client identity) and
+  `poly1305`/`chacha20poly1305` (session AEAD). Also updated in `fuzz/Cargo.lock`.
+- `tokio` 1.54.0 → 1.54.1 ([RUSTSEC-2026-0384](https://rustsec.org/advisories/RUSTSEC-2026-0384);
+  1.54.0 was yanked). Only reached through `winit`'s wasm path; native builds do not run it.
 
 ## [0.4.0] — 2026-10-21
 
