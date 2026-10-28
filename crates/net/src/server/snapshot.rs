@@ -121,13 +121,16 @@ impl NetServer {
                 } else {
                     &pending_attacks
                 };
-                for event in queue
-                    .iter()
-                    .filter(|event| event.priority() == priority)
-                    .filter(|event| event.visible_to(viewer_team, spectator, units))
-                    .take(MAX_SNAPSHOT_EVENTS.saturating_sub(delta.events.len()))
-                {
-                    delta.events.push(event.to_net(client, tick));
+                for event in queue {
+                    if delta.events.len() >= MAX_SNAPSHOT_EVENTS {
+                        break;
+                    }
+                    if event.priority() == priority
+                        && event
+                            .visible_to(viewer_team, spectator, units, |entity| client.knew(entity))
+                    {
+                        delta.events.push(event.to_net(client, tick));
+                    }
                 }
             }
             // A failure for one client must not starve the clients after it (or drop the

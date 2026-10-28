@@ -132,9 +132,21 @@ On the wire (protocol v41) `EVENT_ATTACK` = 8 is a compact 12-byte record: kind,
 source and target net ids, their hero slots, `value` = the attack interval in ticks (the
 attacker's timer: when it can hit again) and `aux` = the hit's age in ticks relative to the
 carrying snapshot. It is filtered per viewer like the other events (both endpoints observed,
-or a spectator) and has the lowest priority under the 16-events-per-snapshot cap: deaths,
-structures and the match end, then the other events, then hero attacks, then the rest. The
-server keeps attacks in their own pending queue, so a burst never evicts other events.
+or a spectator), with one addition for attacks and deaths: an endpoint the viewer had in its
+previous snapshot also counts, because a killing blow's victim is despawned (a minion) or out
+of vision (a dead enemy hero) by the snapshot that carries it. Without that, last hits and
+kill-feed deaths never reached the killer. It has the lowest priority under the
+16-events-per-snapshot cap: deaths, structures and the match end, then the other events, then
+hero attacks, then the rest. The server keeps attacks in their own bounded pending queue, so
+a burst never evicts other events; when that queue is full a non-hero attack is evicted
+first. The client delivers a snapshot's events only if it is newer than the last one whose
+events it delivered (a duplicate or late datagram would replay them), and queues a
+snapshot's events together with its `ClientEvent::Snapshot` marker or not at all, dropping
+attacks first, so a stall never mis-stamps an event's tick.
+
+`value` is the attacker's static attack interval today (`AttackStats::interval` never
+changes during a match). If attack-speed modifiers are added it becomes cooldown
+information about enemy units and needs a visibility review.
 
 The client triggers `AnimationEvent::Attack` with its release on the hit tick and turns the
 hero to its target. Because the event arrives only `SNAPSHOT_DELAY_TICKS` before the view

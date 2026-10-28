@@ -56,7 +56,8 @@ Host: AMD Ryzen 7 9800X3D, Linux, release build, loopback through `moba-netsim`.
 target net ids, hero slots, attack interval, hit age); every other event is 26 bytes. It has
 the lowest priority under the 16-events-per-snapshot cap (deaths/structures/match end, then
 the other events, then hero attacks, then other attacks), and the server keeps attacks in their
-own pending queue, so a burst cannot evict a death or a cast. Worst case, a snapshot full of
+own bounded pending queue (a full one evicts a non-hero attack first), so a burst cannot
+evict a death or a cast. Worst case, a snapshot full of
 attacks adds 16 × 12 = 192 bytes, 5.6 KiB/s at 30 snapshots/s.
 
 Same commands on `main` before the change (`6e809f0`, v40) and on this branch (v41), 150 ms
@@ -71,6 +72,11 @@ Server totals: 3,640 → 3,684 KiB sent (+1.2%) in the 10-player run and 1,811 �
 (+2.0%) in the bot-fight run. Upstream is unchanged (1.16–1.20 KiB/s). The teamfight case
 stays far inside the ≤ 40 KB/s budget; even a permanently saturated event cap would add
 5.6 KiB/s.
+
+After the review fix that also sends attacks and deaths whose endpoint was in the viewer's
+previous snapshot (killing blows), the bot-fight run measured 7.2 KiB/s per client with
+1,708–1,715 events (1,429–1,436 attacks) per client: the kills that used to be filtered out
+now arrive, at no measurable bandwidth cost.
 
 ```bash
 cargo run --release -p moba-tools --bin soak -- --seconds 60

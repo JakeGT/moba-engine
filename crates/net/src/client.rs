@@ -22,6 +22,9 @@ const INPUT_RESEND: Duration = Duration::from_millis(33);
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const HISTORY_LIMIT: usize = 64;
+/// Queued [`ClientEvent`]s: four snapshots' worth of events plus their markers, so a frame
+/// that polls several snapshots at once (after a stall) still gets each one whole.
+const MAX_CLIENT_EVENTS: usize = 4 * (crate::protocol::MAX_SNAPSHOT_EVENTS + 1);
 
 /// Client connection state.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -191,6 +194,9 @@ pub struct NetClient {
     latest: Option<SnapshotState>,
     history: VecDeque<SnapshotState>,
     last_acked_snapshot: u32,
+    /// Newest snapshot sequence whose presentation events were delivered; a duplicate or
+    /// late snapshot's events are not delivered again.
+    last_event_seq: u32,
     events: VecDeque<ClientEvent>,
     last_hello: Instant,
     last_received: Instant,
@@ -306,7 +312,8 @@ impl NetClient {
             latest: None,
             history: VecDeque::with_capacity(HISTORY_LIMIT),
             last_acked_snapshot: 0,
-            events: VecDeque::with_capacity(16),
+            last_event_seq: 0,
+            events: VecDeque::with_capacity(MAX_CLIENT_EVENTS),
             last_hello: now,
             last_received: now,
             last_ping: now,
@@ -640,6 +647,8 @@ impl NetClient {
                     self.content_generation = 0;
                     self.state = ClientState::Connected;
                     self.last_received = Instant::now();
+                    // A new session numbers its snapshots from the start.
+                    self.last_event_seq = 0;
                     self.push_event(ClientEvent::Connected { slot: welcome.slot });
                 }
                 PacketKind::ContentUpdate => {
@@ -993,10 +1002,41 @@ impl NetClient {
             self.last_acked_snapshot = seq;
             self.send_ack(seq, false);
         }
-        for event in &delta.events {
-            self.push_event(ClientEvent::GameEvent(*event));
+        self.push_snapshot_events(seq, &delta);
+    }
+
+    /// Queues a snapshot's presentation events followed by its [`ClientEvent::Snapshot`]
+    /// marker, so a consumer can stamp the events with their snapshot's tick.
+    ///
+    /// - Only a snapshot newer than the last one whose events were delivered delivers
+    ///   events: a duplicate or late datagram would replay them (a late presentation event
+    ///   is dropped rather than shown out of order).
+    /// - The events are queued together with their marker or not at all, never split by a
+    ///   full queue. When they do not all fit, basic attacks (`EVENT_ATTACK`) are dropped
+    ///   first; if the rest still does not fit, only the marker is queued.
+    fn push_snapshot_events(&mut self, seq: u32, delta: &crate::protocol::SnapshotDelta) {
+        let fresh = sequence_after(seq, self.last_event_seq);
+        if fresh {
+            self.last_event_seq = seq;
         }
-        self.push_event(ClientEvent::Snapshot {
+        let room = MAX_CLIENT_EVENTS.saturating_sub(self.events.len());
+        if room == 0 {
+            return;
+        }
+        let events: &[crate::protocol::NetEvent] = if fresh { &delta.events } else { &[] };
+        let essential = events
+            .iter()
+            .filter(|event| event.kind != crate::protocol::EVENT_ATTACK)
+            .count();
+        let keep_attacks = events.len() < room;
+        if keep_attacks || essential < room {
+            for event in events {
+                if keep_attacks || event.kind != crate::protocol::EVENT_ATTACK {
+                    self.events.push_back(ClientEvent::GameEvent(*event));
+                }
+            }
+        }
+        self.events.push_back(ClientEvent::Snapshot {
             seq,
             tick: delta.tick,
         });
@@ -1112,7 +1152,7 @@ impl NetClient {
     }
 
     fn push_event(&mut self, event: ClientEvent) {
-        if self.events.len() < 32 {
+        if self.events.len() < MAX_CLIENT_EVENTS {
             self.events.push_back(event);
         }
     }
@@ -1120,7 +1160,130 @@ impl NetClient {
 
 #[cfg(test)]
 mod tests {
-    use super::accepts_content_generation;
+    use super::{ClientEvent, MAX_CLIENT_EVENTS, NetClient, accepts_content_generation};
+    use crate::protocol::{
+        EVENT_ATTACK, EVENT_UNIT_DIED, Header, NetEvent, PacketKind, SnapshotDelta, encode_snapshot,
+    };
+
+    /// A client that never connects; snapshots are fed to it directly.
+    fn offline_client() -> NetClient {
+        NetClient::start_with_options(
+            "127.0.0.1:9".parse().expect("address"),
+            0,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("client")
+    }
+
+    /// Feeds a full snapshot with `seq`, `tick` and `events`.
+    fn feed(client: &mut NetClient, seq: u32, tick: u32, events: &[NetEvent]) {
+        let delta = SnapshotDelta {
+            tick,
+            events: events.to_vec(),
+            ..SnapshotDelta::default()
+        };
+        let mut payload = Vec::new();
+        encode_snapshot(&delta, &mut payload).expect("encode");
+        let header = Header {
+            kind: PacketKind::Snapshot,
+            flags: 0,
+            session: 0,
+            seq,
+            ack: 0,
+            ack_bits: 0,
+        };
+        client.handle_snapshot(header, &payload);
+    }
+
+    fn drain(client: &mut NetClient) -> Vec<ClientEvent> {
+        core::iter::from_fn(|| client.next_event()).collect()
+    }
+
+    fn event(kind: u8, source: u16) -> NetEvent {
+        NetEvent {
+            kind,
+            source,
+            ..NetEvent::default()
+        }
+    }
+
+    #[test]
+    fn duplicate_and_late_snapshots_do_not_replay_their_events() {
+        let mut client = offline_client();
+        let _ = drain(&mut client);
+        let attack = event(EVENT_ATTACK, 3);
+        feed(&mut client, 5, 50, &[attack]);
+        // The same datagram again, then an older one that arrives late.
+        feed(&mut client, 5, 50, &[attack]);
+        feed(&mut client, 4, 49, &[event(EVENT_ATTACK, 4)]);
+        feed(&mut client, 6, 51, &[event(EVENT_UNIT_DIED, 7)]);
+        let events = drain(&mut client);
+        let game: Vec<u16> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::GameEvent(event) => Some(event.source),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(game, [3, 7], "each event once, none from the late snapshot");
+        // Every snapshot still has its marker.
+        let markers = events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::Snapshot { .. }))
+            .count();
+        assert_eq!(markers, 4);
+    }
+
+    #[test]
+    fn a_full_queue_never_splits_a_snapshot_from_its_marker() {
+        let mut client = offline_client();
+        let _ = drain(&mut client);
+        let full: Vec<NetEvent> = (0..16)
+            .map(|index| {
+                event(
+                    if index < 12 {
+                        EVENT_ATTACK
+                    } else {
+                        EVENT_UNIT_DIED
+                    },
+                    index,
+                )
+            })
+            .collect();
+        // A stall: snapshots pile up without the app draining them (one of 10 attacks,
+        // then full ones of 12 attacks and 4 deaths).
+        feed(&mut client, 1, 10, &full[..10]);
+        for seq in 2..=8u32 {
+            feed(&mut client, seq, seq * 10, &full);
+        }
+        let events = drain(&mut client);
+        assert_eq!(events.len(), MAX_CLIENT_EVENTS);
+        // Every snapshot's events end with its marker. Whole snapshots fit until the queue
+        // is nearly full; then the attacks go first (the deaths stay), then everything but
+        // the marker, then nothing.
+        let mut pending = Vec::new();
+        let mut per_snapshot = Vec::new();
+        for event in events {
+            match event {
+                ClientEvent::GameEvent(event) => pending.push(event),
+                ClientEvent::Snapshot { .. } => {
+                    per_snapshot.push(core::mem::take(&mut pending));
+                }
+                _ => {}
+            }
+        }
+        assert!(pending.is_empty(), "events after the last marker");
+        let counts: Vec<usize> = per_snapshot.iter().map(Vec::len).collect();
+        assert_eq!(counts, [10, 16, 16, 16, 4, 0]);
+        assert!(
+            per_snapshot[4]
+                .iter()
+                .all(|event| event.kind == EVENT_UNIT_DIED)
+        );
+    }
 
     #[test]
     fn content_generations_are_strictly_increasing_and_nonzero() {

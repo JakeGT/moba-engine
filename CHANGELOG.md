@@ -213,7 +213,15 @@ the semver check):
   direction or arc; those decode as zero) next to the 26-byte form of the other events,
   filtered per viewer like them, and has the lowest priority under the 16-event cap (deaths,
   structures and the match end; other events; hero attacks; other attacks). The server keeps
-  attacks in their own pending queue so a burst never evicts a death or a cast. Measured cost:
+  attacks in their own pending queue so a burst never evicts a death or a cast; when full, a
+  non-hero attack is evicted first. Attack and death events also reach a viewer whose
+  previous snapshot had the endpoint, so a killing blow on a minion (despawned that tick) or
+  an enemy hero (dead, so out of vision) is sent to the killer; before, last hits and
+  kill-feed deaths of those units were filtered out. The client no longer re-delivers the
+  events of a duplicate or late snapshot, and queues a snapshot's events with its
+  `ClientEvent::Snapshot` marker or not at all (attacks dropped first; the event queue grows
+  from 32 to 68 entries). `value` is static per unit today; attack-speed modifiers would make
+  it cooldown information needing a visibility review. Measured cost:
   +0.2 KiB/s per client in a bot teamfight soak (7.0–7.1 → 7.2–7.3 KiB/s) and within noise in
   the 10-player soak; worst case 5.6 KiB/s with every snapshot's cap full of attacks
   (`docs/perf/0009-presentation-events.md`). `fuzz-wire` and the cargo-fuzz `wire` target now

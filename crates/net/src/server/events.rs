@@ -218,11 +218,18 @@ impl RawEvent {
         __viewer: moba_game::Team,
         spectator: bool,
         units: &[moba_sim::ObservedUnit],
+        known: impl Fn(moba_ecs::Entity) -> bool,
     ) -> bool {
         if spectator || self.kind == EVENT_MATCH_ENDED {
             return true;
         }
-        let visible = |entity: moba_ecs::Entity| units.iter().any(|unit| unit.entity == entity);
+        // A basic attack or a death may name a unit the viewer saw in its previous snapshot
+        // but no longer sees: the victim of a killing blow is despawned (or, an enemy hero,
+        // hidden) in the same tick. Anything else needs an endpoint observed now.
+        let recent = matches!(self.kind, EVENT_ATTACK | EVENT_UNIT_DIED);
+        let visible = |entity: moba_ecs::Entity| {
+            units.iter().any(|unit| unit.entity == entity) || (recent && known(entity))
+        };
         // Never leak a hidden endpoint of an event. Dropping the event is safer than
         // encoding a hidden target id/position for the client.
         self.source.is_none_or(visible) && self.target.is_none_or(visible)

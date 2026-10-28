@@ -46,6 +46,16 @@ impl NetIdTable {
         id
     }
 
+    /// The net id `entity` already has, without assigning one.
+    pub(super) fn get(&self, entity: moba_ecs::Entity) -> Option<NetId> {
+        self.entries
+            .get(entity.index() as usize)
+            .copied()
+            .flatten()
+            .filter(|(known, _)| *known == entity)
+            .map(|(_, id)| id)
+    }
+
     pub(super) fn entity_for(&self, net_id: NetId) -> Option<moba_ecs::Entity> {
         self.entries
             .iter()
@@ -102,6 +112,21 @@ impl ClientConn {
 
     pub(super) fn entity_for(&self, net_id: NetId) -> Option<moba_ecs::Entity> {
         self.net_ids.entity_for(net_id)
+    }
+
+    /// Whether `entity` was in the last snapshot sent to this client. A unit killed this
+    /// tick is despawned (or, an enemy hero, no longer visible) before the snapshot that
+    /// carries its death, but the client knew it a snapshot ago. Never allocates.
+    pub(super) fn knew(&self, entity: moba_ecs::Entity) -> bool {
+        let Some(net_id) = self.net_ids.get(entity) else {
+            return false;
+        };
+        self.history.back().is_some_and(|record| {
+            record
+                .entities
+                .binary_search_by_key(&net_id, |entity| entity.net_id)
+                .is_ok()
+        })
     }
 
     pub(super) fn baseline(&self, seq: u32) -> Option<&[NetEntity]> {
