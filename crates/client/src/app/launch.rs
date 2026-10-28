@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -83,12 +84,25 @@ pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
         .unwrap_or((1_280, 720))
 }
 
+/// Latest snapshot tick the client has processed, published for the lock-stepped local
+/// capture server (see [`run_local_server`]). Unused otherwise.
+pub(crate) static LOCAL_CAPTURE_ACK: AtomicU32 = AtomicU32::new(0);
+
+/// How long the lock-stepped server waits for the client before ticking anyway, so a lost
+/// snapshot cannot stall a capture forever.
+const LOCKSTEP_PATIENCE: Duration = Duration::from_secs(1);
+
 /// Runs the in-process `MOBA_SERVER=local` server at 30 Hz.
 ///
-/// With `stop_at = Some(n)` the match stops advancing once Playing has simulated `n` ticks:
-/// the server keeps polling (so the client stays connected) but sends nothing newer than
-/// the tick-`n` snapshot. A `MOBA_CAPTURE_TICK` capture then sees exactly that state no
-/// matter how slowly the client renders (lavapipe in CI).
+/// With `stop_at = Some(n)` (a `MOBA_CAPTURE_TICK` capture) the match is lock-stepped to the
+/// client and stops at tick `n`:
+///
+/// - Lobby and Countdown tick in real time (they do not advance the simulation);
+/// - a Playing tick only runs once the client has processed the previous tick's snapshot
+///   ([`LOCAL_CAPTURE_ACK`]), so the client buffers every snapshot `1..=n` however slowly it
+///   renders (lavapipe in CI), and interpolation sees the same history on every run;
+/// - after `n` Playing ticks the server keeps polling (the client stays connected) but sends
+///   nothing newer than the tick-`n` snapshot.
 fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
     let Some(stop_at) = stop_at else {
         let _ = server.run_for(Duration::from_secs(3_600));
@@ -98,6 +112,7 @@ fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
     let started = Instant::now();
     let mut next_tick = started;
     let mut played = 0u32;
+    let mut waiting_since = started;
     while started.elapsed() < Duration::from_secs(3_600) {
         if server.poll().is_err() {
             return;
@@ -106,11 +121,14 @@ fn run_local_server(mut server: NetServer, stop_at: Option<u32>) {
         if now >= next_tick {
             // A Playing tick advances the simulation by one; Lobby/Countdown ticks do not.
             let playing = server.phase().0 == MatchPhase::Playing;
-            if !playing || played < stop_at {
+            let caught_up = LOCAL_CAPTURE_ACK.load(Ordering::Acquire) >= played
+                || now.duration_since(waiting_since) >= LOCKSTEP_PATIENCE;
+            if !playing || (played < stop_at && caught_up) {
                 if server.tick().is_err() {
                     return;
                 }
                 played += u32::from(playing);
+                waiting_since = now;
             }
             next_tick = (next_tick + tick).max(now);
         }
@@ -278,8 +296,27 @@ impl Drop for ClientApp {
                 )
             },
         );
+        // CPU work before the render call vs time inside it, same warm-up skipped.
+        let work = self.work_log.take().unwrap_or_default();
+        let work = work.get(warmup.min(work.len())..).unwrap_or_default();
+        let split = |lane: usize| {
+            let mut values: Vec<f32> = work.iter().map(|sample| sample[lane]).collect();
+            values.sort_by(f32::total_cmp);
+            let at = |fraction: f32| {
+                values
+                    .get(((values.len().max(1) - 1) as f32 * fraction).round() as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            (at(0.50), at(0.95))
+        };
+        let (cpu_p50, cpu_p95) = split(0);
+        let (render_p50, render_p95) = split(1);
         let report = format!(
-            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} extent={extent} gpu=\"{gpu}\"\n",
+            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
+             cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
+             render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
+             extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),

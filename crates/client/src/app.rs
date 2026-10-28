@@ -107,6 +107,9 @@ struct ClientApp {
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
     frame_log: Option<Vec<f32>>,
+    /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
+    /// call, and time inside it (fence wait, acquire, recording, submit, present).
+    work_log: Option<Vec<[f32; 2]>>,
     frame_log_path: Option<PathBuf>,
     /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
     network_warmup: Option<u32>,
@@ -145,6 +148,7 @@ impl ClientApp {
             .and_then(|value| value.parse::<f32>().ok());
         let frame_log_path = std::env::var("MOBA_FRAME_LOG").ok().map(PathBuf::from);
         let frame_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
+        let work_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
         let mut app = Self {
             renderer: None,
             simulation: None,
@@ -172,6 +176,7 @@ impl ClientApp {
             bindings,
             camera_sensitivity,
             frame_log,
+            work_log,
             frame_log_path,
             // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
             network_warmup: std::env::var("MOBA_SERVER")
@@ -386,6 +391,7 @@ impl App for ClientApp {
         }
 
         let mut failure: Option<String> = None;
+        let mut render_started: Option<Instant> = None;
         let mut exit_after_capture = false;
         let [width, height] = frame.window().size();
         let (frame_ms, fps) = (self.frame_ms, self.fps);
@@ -483,6 +489,11 @@ impl App for ClientApp {
                             network.client.clear_pending_input();
                         }
                         network.last_tick = snapshot.tick;
+                        if network.capture_tick.is_some() {
+                            // Lets a lock-stepped local capture server run the next tick.
+                            launch::LOCAL_CAPTURE_ACK
+                                .store(snapshot.tick, std::sync::atomic::Ordering::Release);
+                        }
                         network.interpolator.push(snapshot.clone());
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
                             entity.hero_slot == network.own_slot
@@ -576,8 +587,11 @@ impl App for ClientApp {
                                     &mut failure,
                                 );
                                 exit_after_capture = true;
-                            } else if let Err(error) = renderer.render_with_ui(&scene, ui) {
-                                failure = Some(format!("render failed: {error}"));
+                            } else {
+                                render_started = Some(Instant::now());
+                                if let Err(error) = renderer.render_with_ui(&scene, ui) {
+                                    failure = Some(format!("render failed: {error}"));
+                                }
                             }
                         }
                     }
@@ -672,14 +686,25 @@ impl App for ClientApp {
                                 &mut failure,
                             );
                             exit_after_capture = true;
-                        } else if let Err(error) = renderer.render_with_ui(&scene, ui) {
-                            failure = Some(format!("render failed: {error}"));
+                        } else {
+                            render_started = Some(Instant::now());
+                            if let Err(error) = renderer.render_with_ui(&scene, ui) {
+                                failure = Some(format!("render failed: {error}"));
+                            }
                         }
                     }
                 }
             }
         }
 
+        if measuring
+            && let (Some(started), Some(work)) = (render_started, self.work_log.as_mut())
+            && work.len() < 10_000
+        {
+            let cpu_ms = started.duration_since(now).as_secs_f32() * 1_000.0;
+            let render_ms = started.elapsed().as_secs_f32() * 1_000.0;
+            work.push([cpu_ms, render_ms]);
+        }
         if let Some(message) = failure {
             self.fail(message);
             return FrameOutcome::Exit;

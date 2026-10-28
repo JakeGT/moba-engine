@@ -183,7 +183,10 @@ Replays store the seed/config, content manifest, exact per-tick inputs and perio
 checkpoints; the verifier reports the first divergent tick and reproduces the final state
 hash. Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,
-`MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>`; hero models: `MOBA_ASSET_ROOT=<dir>`
+`MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>`,
+`MOBA_CAPTURE_TICK=N` (networked capture at match tick N, repeatable with `MOBA_SERVER=local`),
+`MOBA_WINDOW_SIZE=<w>x<h>`, `MOBA_WARMUP_TICKS=N` (network mode: frame log starts at tick N);
+hero models: `MOBA_ASSET_ROOT=<dir>`
 (default `content`) and `MOBA_HERO_MODELS=<hero>=<model>,...` load `<dir>/models/<model>.glb`
 (a model with a skin is GPU-skinned and walks with the hero; `MOBA_NO_SKINNING=1` draws it
 static).

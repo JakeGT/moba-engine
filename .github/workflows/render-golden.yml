@@ -31,6 +31,8 @@ jobs:
               - 'crates/shaders/**'
               - 'crates/platform/**'
               - 'crates/client/**'
+              - 'crates/assets/**'
+              - 'content/models/**'
               - 'tests/golden/**'
               - '.github/workflows/render-golden.yml'
       - uses: dtolnay/rust-toolchain@stable
@@ -72,6 +74,32 @@ jobs:
           status=$?
           cat fingerprint.log
           exit $status
+      # Networked golden: an in-process loopback server (MOBA_SERVER=local) with GPU-skinned
+      # heroes. MOBA_CAPTURE_TICK lock-steps the local server to the client and pins
+      # interpolation/animation to tick 120, so the frame does not depend on runner speed.
+      - name: Networked capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          timeout 300 xvfb-run -a ./target/release/moba-client \
+            > network-capture.log 2>&1 || { cat network-capture.log; exit 1; }
+          cat network-capture.log
+          test -s render-network-actual.ppm
+        env:
+          MOBA_SERVER: local
+          MOBA_HERO_MODELS: sentinel-skinned
+          MOBA_CAPTURE_TICK: "120"
+          MOBA_SMOKE_FRAMES: "100000"
+          MOBA_CAPTURE: render-network-actual.ppm
+      - name: Compare network fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          ./target/release/image-check render-network-actual.ppm \
+            --expected tests/golden/render-network-fingerprint.rgb \
+            --diff render-network-diff.ppm > network-fingerprint.log 2>&1
+          status=$?
+          cat network-fingerprint.log
+          exit $status
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -81,4 +109,8 @@ jobs:
             render-diff.ppm
             capture.log
             fingerprint.log
+            render-network-actual.ppm
+            render-network-diff.ppm
+            network-capture.log
+            network-fingerprint.log
           if-no-files-found: ignore
