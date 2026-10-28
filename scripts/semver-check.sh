@@ -19,10 +19,11 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-# Foundation, Engine and Embedding tiers from docs/API-STABILITY.md.
+# Foundation, Engine and Embedding tiers from docs/API-STABILITY.md. `moba-assets` is in the
+# Engine tier because `moba-game` and `moba-render` re-export its types.
 CRATES=(
   moba-core moba-ecs moba-jobs
-  moba-game moba-sim moba-net moba-nav moba-render moba-platform
+  moba-game moba-sim moba-net moba-nav moba-render moba-platform moba-assets
   moba-engine
 )
 

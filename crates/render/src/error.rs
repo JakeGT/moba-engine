@@ -4,6 +4,7 @@ use core::fmt;
 
 /// Errors raised while initialising or driving the renderer.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RenderError {
     /// The Vulkan loader could not be loaded.
     Loader(ash::LoadingError),

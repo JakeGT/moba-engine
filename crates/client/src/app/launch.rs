@@ -213,22 +213,21 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
                 .map_err(|error| format!("MOBA_CONTENT load failed: {error}"))?,
             None => moba_game::GameContent::default(),
         };
-        let config = moba_net::ServerConfig {
-            bind: "127.0.0.1:0".parse().expect("loopback address"),
-            sim: SimConfig::default(),
-            snapshot_interval: 1,
-            max_clients: 10,
-            countdown_ticks: 90,
-            results_ticks: 450,
-            client_timeout: Duration::from_secs(5),
-            reconnect_grace: Duration::from_secs(60),
-            pre_shared_key: secret,
-            record: None,
-            max_spectators: 8,
-            max_packets_per_second: 120,
-            max_total_packets_per_second: 2_000,
-            require_ready: false,
-        };
+        let config = moba_net::ServerConfig::default()
+            .with_bind("127.0.0.1:0".parse().expect("loopback address"))
+            .with_sim(SimConfig::default())
+            .with_snapshot_interval(1)
+            .with_max_clients(10)
+            .with_countdown_ticks(90)
+            .with_results_ticks(450)
+            .with_client_timeout(Duration::from_secs(5))
+            .with_reconnect_grace(Duration::from_secs(60))
+            .with_pre_shared_key(secret)
+            .with_record(None)
+            .with_max_spectators(8)
+            .with_max_packets_per_second(120)
+            .with_max_total_packets_per_second(2_000)
+            .with_require_ready(false);
         let server = moba_net::NetServer::bind_with_content(config, Arc::new(content))
             .map_err(|error| format!("local server failed: {error}"))?;
         let addr = server
@@ -236,24 +235,22 @@ pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
             .map_err(|error| format!("local server address: {error}"))?;
         let stop_at = parse_capture_tick().filter(|_| std::env::var_os("MOBA_CAPTURE").is_some());
         std::thread::spawn(move || run_local_server(server, stop_at));
-        let auth = moba_net::client::ClientAuth {
-            pre_shared_key: secret,
-            expected_server: None,
-            identity_seed,
-            spectator,
-        };
+        let auth = moba_net::client::ClientAuth::default()
+            .with_pre_shared_key(secret)
+            .with_expected_server(None)
+            .with_identity_seed(identity_seed)
+            .with_spectator(spectator);
         NetClient::connect_with_auth(addr, Duration::from_secs(5), auth)
             .map_err(|error| format!("local connection failed: {error}"))
     } else {
         let addr = spec
             .parse()
             .map_err(|error| format!("invalid MOBA_SERVER {spec}: {error}"))?;
-        let auth = moba_net::client::ClientAuth {
-            pre_shared_key: secret,
-            expected_server: server_public,
-            identity_seed,
-            spectator,
-        };
+        let auth = moba_net::client::ClientAuth::default()
+            .with_pre_shared_key(secret)
+            .with_expected_server(server_public)
+            .with_identity_seed(identity_seed)
+            .with_spectator(spectator);
         NetClient::connect_with_auth(addr, Duration::from_secs(5), auth)
             .map_err(|error| format!("connection to {spec} failed: {error}"))
     }

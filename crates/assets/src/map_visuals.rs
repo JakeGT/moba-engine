@@ -48,6 +48,7 @@ const POSITION_RANGE: (f32, f32) = (-65_536.0, 65_536.0);
 
 /// A validated map visuals descriptor.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct MapVisuals {
     /// Terrain tint, linear RGB in `0..=1`.
     pub terrain: [f32; 3],
@@ -63,6 +64,7 @@ pub struct MapVisuals {
 
 /// One decorative prop.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct MapProp {
     /// World position `[x, y]` (the pack's map coordinates).
     pub position: [f32; 2],
@@ -104,6 +106,7 @@ struct RawProp {
 
 /// Why a descriptor could not be used.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MapVisualsError {
     /// The file does not exist or cannot be read; the text is the I/O error.
     Io(String),

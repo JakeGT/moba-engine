@@ -13,11 +13,11 @@ struct AssistTracker {
 }
 
 fn main() {
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    );
     let hero = simulation.hero_entity(0).expect("blue hero");
     let _ = simulation
         .world_mut()

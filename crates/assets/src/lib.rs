@@ -37,6 +37,7 @@ pub use skin::{
 /// One asset entry.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct AssetEntry {
     /// Stable asset name.
     pub name: String,
@@ -47,9 +48,32 @@ pub struct AssetEntry {
     pub fallback: Option<String>,
 }
 
+impl AssetEntry {
+    /// An entry for `name` at the pack-relative `path`, without a fallback.
+    ///
+    /// `AssetEntry` is `#[non_exhaustive]`; build entries in code with this constructor
+    /// and [`AssetEntry::with_fallback`], then check them with [`AssetManifest::validate`].
+    #[must_use]
+    pub fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            fallback: None,
+        }
+    }
+
+    /// Returns this entry with `fallback` as its fallback asset name.
+    #[must_use]
+    pub fn with_fallback(mut self, fallback: impl Into<String>) -> Self {
+        self.fallback = Some(fallback.into());
+        self
+    }
+}
+
 /// Asset manifest split by consumer.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct AssetManifest {
     /// Unit meshes/rigs.
     #[serde(default)]
@@ -61,6 +85,7 @@ pub struct AssetManifest {
 
 /// Manifest validation failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AssetError {
     /// Empty or non-ASCII name.
     BadName,
@@ -91,6 +116,7 @@ impl std::error::Error for AssetError {}
 
 /// Which manifest list an entry belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AssetList {
     /// `[[units]]` (hero models).
     Units,
@@ -111,6 +137,7 @@ impl AssetList {
 
 /// Why a manifest entry's file is unusable (see [`AssetManifest::check_files`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AssetFileProblem {
     /// A unit path does not end in `.glb`, the only mesh format the engine loads (ADR-0007).
     NotGlb,
@@ -154,6 +181,7 @@ impl core::fmt::Display for AssetFileProblem {
 
 /// One unusable manifest entry found by [`AssetManifest::check_files`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AssetFileIssue {
     /// List the entry is in.
     pub list: AssetList,
@@ -315,6 +343,7 @@ impl AssetManifest {
 
 /// Combined parse/validation error.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AssetManifestError {
     /// TOML syntax/schema error.
     Toml(toml::de::Error),

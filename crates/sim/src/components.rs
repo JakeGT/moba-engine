@@ -11,6 +11,7 @@ use moba_game::{DamageType, HeroId, ModifierKind, Team};
 /// What kind of unit an entity is.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum UnitKind {
     /// A player-controlled hero.
     Hero,

@@ -19,6 +19,7 @@ use crate::skin::{MeshSkin, SkinError};
 
 /// Why a mesh was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MeshError {
     /// No vertices or no triangles.
     Empty,

@@ -15,6 +15,7 @@ use winit::keyboard::KeyCode;
 /// W on a QWERTY keyboard, which is what MOBA players expect for movement.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Key {
     /// Move up / W key.
     W,
@@ -103,6 +104,7 @@ impl Key {
 /// Mouse buttons the engine understands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum MouseButton {
     /// Primary mouse button (attack/select).
     Left,

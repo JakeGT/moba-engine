@@ -347,6 +347,7 @@ impl Frame<'_> {
             SimEvent::MatchEnded { winner } => {
                 Key::MatchEnded(winner.map(|winner| self.team(winner)))
             }
+            _ => unreachable!("mirror test has no key for {event:?}"),
         }
     }
 
@@ -411,20 +412,18 @@ struct Coverage {
 }
 
 fn run_mirror(match_seed: u64, script_seed: u64) -> Coverage {
-    let config = SimConfig {
-        seed: match_seed,
-        bot_mask: 0x03FF,
-        spawn_waves: false,
-        ..SimConfig::default()
-    };
+    let config = SimConfig::default()
+        .with_seed(match_seed)
+        .with_bot_mask(0x03FF)
+        .with_spawn_waves(false);
     // B slot i + 5 plays A slot i, so it also plays A slot i's hero.
     let picks = config.hero_picks;
     let mut a = Simulation::new(config);
-    let mut b = Simulation::new(SimConfig {
-        seed: match_seed ^ 1,
-        hero_picks: core::array::from_fn(|slot| picks[mirror_slot(slot)]),
-        ..config
-    });
+    let mut b = Simulation::new(
+        config
+            .with_seed(match_seed ^ 1)
+            .with_hero_picks(core::array::from_fn(|slot| picks[mirror_slot(slot)])),
+    );
     let script = build_script(script_seed);
     a.set_bot_policy(Some(Box::new(DuelPolicy {
         script: script.clone(),
@@ -494,6 +493,7 @@ fn run_mirror(match_seed: u64, script_seed: u64) -> Coverage {
             b.outcome().map(|outcome| match outcome {
                 MatchOutcome::Winner(team) => MatchOutcome::Winner(team.enemy()),
                 MatchOutcome::Draw => MatchOutcome::Draw,
+                other => unreachable!("mirror test cannot mirror {other:?}"),
             }),
             "{context}: outcome diverges at tick {tick}"
         );

@@ -74,6 +74,7 @@ const CHUNK_BIN: u32 = 0x004E_4942;
 
 /// Why a `.glb` file was rejected.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum GlbError {
     /// The file or its JSON chunk exceeds the size caps.
     TooLarge,

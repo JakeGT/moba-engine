@@ -6,6 +6,7 @@ use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, perspective_rh};
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Camera {
     /// Combined view-projection matrix.
     pub view_proj: Mat4,
@@ -112,6 +113,7 @@ impl BoneRange {
 
 /// One drawable unit: a model matrix, a colour and the mesh to draw.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct UnitInstance {
     /// Model-to-world transform.
     pub transform: Mat4,
@@ -168,6 +170,7 @@ impl UnitInstance {
 
 /// Everything the renderer draws in one frame.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Scene<'a> {
     /// Camera for this frame.
     pub camera: Camera,

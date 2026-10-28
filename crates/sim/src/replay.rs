@@ -37,6 +37,7 @@ const MIN_CHECKPOINT_BYTES: usize = 12;
 
 /// Replay encoding/decoding or verification errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReplayError {
     /// File is too short or a field is truncated.
     Truncated,
@@ -127,6 +128,7 @@ impl std::error::Error for ReplayError {}
 
 /// A recorded match.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Replay {
     /// Simulation configuration used for the match.
     pub config: SimConfig,
@@ -148,6 +150,7 @@ pub struct Replay {
 
 /// Result of replaying a match.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReplayResult {
     /// Number of replayed ticks.
     pub ticks: u32,
@@ -375,12 +378,11 @@ impl Replay {
             return Err(ReplayError::BadData);
         }
         Ok(Self {
-            config: SimConfig {
-                seed,
-                bot_mask,
-                hero_picks,
-                spawn_waves,
-            },
+            config: SimConfig::default()
+                .with_seed(seed)
+                .with_bot_mask(bot_mask)
+                .with_hero_picks(hero_picks)
+                .with_spawn_waves(spawn_waves),
             frames,
             sim_logic_version,
             expected_hash: has_hash.then_some(expected),
@@ -533,11 +535,9 @@ mod tests {
 
     #[test]
     fn replay_records_purchases_alongside_movement() {
-        let config = SimConfig {
-            bot_mask: 0,
-            spawn_waves: false,
-            ..SimConfig::default()
-        };
+        let config = SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false);
         let mut sim = Simulation::new(config);
         let mut replay = Replay::new(config);
         let mut frame = TickInputs::new();
@@ -633,12 +633,11 @@ mod tests {
 
     #[test]
     fn replay_round_trip_and_hash_verification() {
-        let config = SimConfig {
-            seed: 0x1234,
-            bot_mask: 0,
-            spawn_waves: false,
-            hero_picks: [0, 1, 2, 3, 4, 4, 3, 2, 1, 0],
-        };
+        let config = SimConfig::default()
+            .with_seed(0x1234)
+            .with_bot_mask(0)
+            .with_spawn_waves(false)
+            .with_hero_picks([0, 1, 2, 3, 4, 4, 3, 2, 1, 0]);
         let mut simulation = Simulation::new(config);
         let mut replay = Replay::new(config);
         for tick in 0..300u32 {

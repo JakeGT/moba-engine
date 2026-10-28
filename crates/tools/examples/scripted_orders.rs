@@ -7,11 +7,11 @@ use moba_core::FixVec2;
 use moba_sim::{PlayerCommand, SimConfig, Simulation, TickInputs};
 
 fn main() {
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    );
     let start = simulation.hero_position(0).expect("blue hero");
     let target = FixVec2::from_ints(100, 128);
 

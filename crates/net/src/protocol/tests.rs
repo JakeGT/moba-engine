@@ -1162,31 +1162,26 @@ fn serial_sequence_tolerates_wrap() {
 
 #[test]
 fn observed_unit_conversion() {
-    let unit = ObservedUnit {
-        entity: Entity::from_parts(3, 1),
-        kind: UnitKind::Hero,
-        team: Team::Red,
-        position: FixVec2::from_ints(120, 80),
-        health: 500,
-        max_health: 600,
-        mana: 200,
-        max_mana: 300,
-        dead: false,
-        hero_slot: Some(7),
-        hero_pick: 2,
-        cooldowns: [10, 20, 30],
-        level: 4,
-        xp: 120,
-        gold: 950,
-        items: [0, 1, 2, 0xFF, 0xFF, 0xFF],
-        shielded: true,
-        slowed: false,
-        rooted: false,
-        silenced: false,
-        burning: true,
-        hasted: true,
-        status_bits: 0,
-    };
+    let mut unit = ObservedUnit::new(
+        Entity::from_parts(3, 1),
+        UnitKind::Hero,
+        Team::Red,
+        FixVec2::from_ints(120, 80),
+    );
+    unit.health = 500;
+    unit.max_health = 600;
+    unit.mana = 200;
+    unit.max_mana = 300;
+    unit.hero_slot = Some(7);
+    unit.hero_pick = 2;
+    unit.cooldowns = [10, 20, 30];
+    unit.level = 4;
+    unit.xp = 120;
+    unit.gold = 950;
+    unit.items = [0, 1, 2, 0xFF, 0xFF, 0xFF];
+    unit.shielded = true;
+    unit.burning = true;
+    unit.hasted = true;
     let entity = NetEntity::from_observed(4, &unit);
     assert_eq!(entity.net_id, 4);
     assert_eq!(entity.position(), unit.position);

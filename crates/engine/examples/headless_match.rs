@@ -9,11 +9,7 @@
 use moba_engine::prelude::{FixVec2, PlayerCommand, SimConfig, Simulation, TickInputs};
 
 fn main() {
-    let mut simulation = Simulation::new(SimConfig {
-        seed: 7,
-        bot_mask: 0x03FF,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(SimConfig::default().with_seed(7).with_bot_mask(0x03FF));
     // Slot 0 is human-driven; every other slot is a bot.
     let mut inputs = TickInputs::new();
     inputs.set(0, PlayerCommand::MoveTo(FixVec2::from_ints(80, 128)));

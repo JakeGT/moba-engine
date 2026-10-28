@@ -33,6 +33,7 @@ pub const KEY_LEN: usize = 32;
 
 /// Encryption/decryption failure. Callers drop malformed or unauthenticated datagrams.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CryptoError {
     /// The payload could not be authenticated or decrypted.
     Decrypt,
@@ -240,7 +241,7 @@ pub fn verify_hello_tag(
 ///
 /// # Errors
 /// Returns an I/O error when the OS randomness source is unavailable.
-pub fn random_session() -> std::io::Result<u32> {
+pub(crate) fn random_session() -> std::io::Result<u32> {
     loop {
         let value = random_nonce()?;
         let session = (value as u32) ^ ((value >> 32) as u32);
@@ -297,7 +298,7 @@ pub fn verify_welcome_tag(
 ///
 /// # Errors
 /// Returns an I/O error when the OS randomness source is unavailable.
-pub fn random_nonce() -> std::io::Result<u64> {
+pub(crate) fn random_nonce() -> std::io::Result<u64> {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes)
         .map_err(|error| std::io::Error::other(format!("randomness: {error}")))?;

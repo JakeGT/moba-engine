@@ -45,7 +45,19 @@ pub const TICK_DURATION: Fix = Fix::from_bits(143_165_576);
 const ONE_TICK: Fix = TICK_DURATION;
 
 /// Simulation configuration.
+///
+/// `#[non_exhaustive]`: start from [`SimConfig::default()`] and adjust it with the
+/// `with_*` builders (or assign the public fields), so new options can be added without
+/// breaking callers:
+///
+/// ```
+/// use moba_sim::SimConfig;
+///
+/// let config = SimConfig::default().with_seed(7).with_bot_mask(0).with_spawn_waves(false);
+/// assert_eq!(config.seed, 7);
+/// ```
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct SimConfig {
     /// Seed mixed into the deterministic state hash.
     pub seed: u64,
@@ -68,8 +80,39 @@ impl Default for SimConfig {
     }
 }
 
+impl SimConfig {
+    /// Returns this config with [`SimConfig::seed`] set.
+    #[must_use]
+    pub const fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Returns this config with [`SimConfig::bot_mask`] set.
+    #[must_use]
+    pub const fn with_bot_mask(mut self, bot_mask: u16) -> Self {
+        self.bot_mask = bot_mask;
+        self
+    }
+
+    /// Returns this config with [`SimConfig::hero_picks`] set.
+    #[must_use]
+    pub const fn with_hero_picks(mut self, hero_picks: [u8; MAX_PLAYERS]) -> Self {
+        self.hero_picks = hero_picks;
+        self
+    }
+
+    /// Returns this config with [`SimConfig::spawn_waves`] set.
+    #[must_use]
+    pub const fn with_spawn_waves(mut self, spawn_waves: bool) -> Self {
+        self.spawn_waves = spawn_waves;
+        self
+    }
+}
+
 /// A command from one player for the current tick.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PlayerCommand {
     /// Clears movement and attack orders.
     Stop,
@@ -94,6 +137,7 @@ pub enum PlayerCommand {
 
 /// One tick of input for every player.
 #[derive(Copy, Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct TickInputs {
     /// Slot-indexed commands; `None` keeps the current order.
     pub players: [Option<PlayerCommand>; MAX_PLAYERS],
@@ -129,6 +173,7 @@ impl TickInputs {
 
 /// How a finished match ended.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MatchOutcome {
     /// One team won.
     Winner(Team),
@@ -151,6 +196,7 @@ impl MatchOutcome {
 
 /// Something observable that happened during a tick.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SimEvent {
     /// A minion wave spawned.
     WaveSpawned {
@@ -324,6 +370,7 @@ struct AttackerSnapshot {
 /// A unit as seen by one team's fog-of-war snapshot.
 #[derive(Copy, Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent per-entity status flags.
+#[non_exhaustive]
 pub struct ObservedUnit {
     /// Stable entity handle.
     pub entity: Entity,
@@ -371,6 +418,44 @@ pub struct ObservedUnit {
     pub hasted: bool,
     /// Generic replicated status bits from active modifiers.
     pub status_bits: u16,
+}
+
+impl ObservedUnit {
+    /// A unit with no health, mana, progression, items or status: `hero_slot` is `None`,
+    /// `hero_pick` and every item slot are `0xFF`, and every flag is clear.
+    ///
+    /// The simulation fills every field in [`Simulation::observed_units`]; this constructor
+    /// is for tests and custom snapshot producers, which then set the public fields they
+    /// need. `ObservedUnit` is `#[non_exhaustive]`, so it cannot be built with a struct
+    /// literal outside this crate.
+    #[must_use]
+    pub const fn new(entity: Entity, kind: UnitKind, team: Team, position: FixVec2) -> Self {
+        Self {
+            entity,
+            kind,
+            team,
+            position,
+            health: 0,
+            max_health: 0,
+            mana: 0,
+            max_mana: 0,
+            dead: false,
+            hero_slot: None,
+            hero_pick: 0xFF,
+            cooldowns: [0; 3],
+            level: 0,
+            xp: 0,
+            gold: 0,
+            items: [0xFF; 6],
+            shielded: false,
+            slowed: false,
+            rooted: false,
+            silenced: false,
+            burning: false,
+            hasted: false,
+            status_bits: 0,
+        }
+    }
 }
 
 /// Strategy that produces bot commands each tick.

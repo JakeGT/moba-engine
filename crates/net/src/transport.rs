@@ -1,6 +1,5 @@
 //! Non-blocking UDP transport with application-level fragmentation.
 
-use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -29,6 +28,7 @@ fn transient_udp_error(error: &io::Error) -> bool {
 
 /// A complete message received from a peer.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ReceivedMessage {
     /// Sender address.
     pub addr: SocketAddr,
@@ -458,9 +458,6 @@ impl AckTracker {
         }
     }
 }
-
-/// Small FIFO used for fixed-capacity event queues.
-pub type EventQueue<T> = VecDeque<T>;
 
 #[cfg(test)]
 mod transient_tests {

@@ -6,15 +6,25 @@ tiers make breakage predictable and reviews honest.
 | Tier | Crates | Promise |
 |---|---|---|
 | Foundation | `moba-core`, `moba-ecs`, `moba-jobs` | API is settling; breaking changes documented and deprecation preferred within a minor line |
-| Engine | `moba-game`, `moba-sim`, `moba-net`, `moba-nav`, `moba-render`, `moba-platform` | Preview: breaking changes allowed between minor versions; migration notes in `CHANGELOG.md` |
+| Engine | `moba-game`, `moba-sim`, `moba-net`, `moba-nav`, `moba-render`, `moba-platform`, `moba-assets` | Preview: breaking changes allowed between minor versions; migration notes in `CHANGELOG.md` |
 | Applications | `moba-client`, `moba-server`, `moba-tools`, `moba-netsim`, `moba-shaders` | Binaries/internal crates; no API promise |
 | Embedding | `moba-engine` | Umbrella facade for embedders; follows the Engine tier. Prefer feature-gated re-exports over new facade-only types. |
 
+The intended 1.0 surface of every crate above, and which types are `#[non_exhaustive]`, exhaustive
+by design or public but unstable, is listed in [api-1.0.md](api-1.0.md).
+
 ## Rules for changes
 
-1. Prefer additive changes: new types, new fields behind constructors, and new enum variants
-   only after marking the enum `#[non_exhaustive]` (most public enums are not yet marked, so
-   adding a variant is a breaking change today).
+1. Prefer additive changes: new types, new fields and new enum variants.
+   - Error, event, outcome, phase, command and key enums, read-only stats/report/result
+     structs, and configs are `#[non_exhaustive]`, so a new variant or field is not a breaking
+     change. Configs pair that with `Default` and one `with_*` builder per field; add a builder
+     with every new config field.
+   - A new public enum or struct in those categories must be `#[non_exhaustive]` from the start.
+   - The content schema (`GameContent`, `*Spec`, content enums), the wire message structs and
+     closed value types are exhaustive by design ([api-1.0.md](api-1.0.md#conventions)). A new
+     field or variant there is a breaking change; it also bumps the content hash or
+     `PROTOCOL_VERSION`.
 2. Renaming/removing public items requires a `CHANGELOG.md` entry and a deprecation where
    feasible.
 3. Wire protocol changes bump `PROTOCOL_VERSION`; never reinterpret an existing version.

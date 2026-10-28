@@ -5,12 +5,11 @@ use moba_core::FixVec2;
 use moba_sim::{PlayerCommand, SimConfig, Simulation, TickInputs};
 
 fn main() {
-    let config = SimConfig {
-        seed: 0x51A7_E5EED,
-        bot_mask: 0,
-        spawn_waves: false,
-        hero_picks: [0, 1, 2, 3, 4, 0, 1, 2, 3, 4],
-    };
+    let config = SimConfig::default()
+        .with_seed(0x51A7_E5EED)
+        .with_bot_mask(0)
+        .with_spawn_waves(false)
+        .with_hero_picks([0, 1, 2, 3, 4, 0, 1, 2, 3, 4]);
     let mut simulation = Simulation::new(config);
     for tick in 0..600u32 {
         let mut inputs = TickInputs::new();

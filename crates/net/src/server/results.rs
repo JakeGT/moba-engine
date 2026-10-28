@@ -27,6 +27,8 @@ impl NetServer {
             Some(moba_sim::MatchOutcome::Winner(moba_game::Team::Blue)) => "blue",
             Some(moba_sim::MatchOutcome::Winner(moba_game::Team::Red)) => "red",
             Some(moba_sim::MatchOutcome::Draw) => "draw",
+            // `MatchOutcome` is `#[non_exhaustive]`; a future outcome logs as unknown.
+            Some(_) => "unknown",
             // Only completed matches are logged; keep a defined value regardless.
             None => "unfinished",
         };
@@ -76,16 +78,16 @@ impl NetServer {
             return;
         };
         let state_hash = self.simulation.state_hash();
-        let replay = Replay {
-            config: self.simulation.config(),
-            frames: std::mem::take(&mut self.record_frames),
-            sim_logic_version: moba_sim::SIM_LOGIC_VERSION,
-            expected_hash: Some(state_hash),
-            content_hash: self.content.hash(),
-            content_name: self.content.manifest.name.clone(),
-            content_version: self.content.manifest.version.clone(),
-            checkpoints: std::mem::take(&mut self.record_checkpoints),
-        };
+        let mut replay = Replay::new(self.simulation.config());
+        replay.frames = std::mem::take(&mut self.record_frames);
+        replay.sim_logic_version = moba_sim::SIM_LOGIC_VERSION;
+        replay.expected_hash = Some(state_hash);
+        replay.content_hash = self.content.hash();
+        replay.content_name.clone_from(&self.content.manifest.name);
+        replay
+            .content_version
+            .clone_from(&self.content.manifest.version);
+        replay.checkpoints = std::mem::take(&mut self.record_checkpoints);
         let target = replay_path(&path, self.match_number);
         match std::fs::write(&target, replay.encode()) {
             Ok(()) => eprintln!(

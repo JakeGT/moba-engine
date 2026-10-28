@@ -11,22 +11,23 @@ use moba_sim::SimConfig;
 const SEED: [u8; 32] = [0x33; 32];
 
 fn spawn_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
-    let mut server = NetServer::bind(ServerConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 0,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    })
+    let mut server = NetServer::bind(
+        ServerConfig::default()
+            .with_bind("127.0.0.1:0".parse().unwrap())
+            .with_sim(SimConfig::default())
+            .with_snapshot_interval(1)
+            .with_max_clients(10)
+            .with_countdown_ticks(0)
+            .with_results_ticks(0)
+            .with_client_timeout(Duration::from_secs(3))
+            .with_reconnect_grace(Duration::from_secs(2))
+            .with_pre_shared_key(None)
+            .with_record(None)
+            .with_max_spectators(4)
+            .with_max_packets_per_second(120)
+            .with_max_total_packets_per_second(2_000)
+            .with_require_ready(false),
+    )
     .expect("bind");
     let public = identity_public_key(&SEED);
     server.require_client_identity([public]);
@@ -39,22 +40,23 @@ fn spawn_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
 
 fn spawn_combined_server() -> (SocketAddr, [u8; 32], std::thread::JoinHandle<()>) {
     let token = [0x55; 32];
-    let mut server = NetServer::bind(ServerConfig {
-        bind: "127.0.0.1:0".parse().unwrap(),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: 10,
-        countdown_ticks: 0,
-        results_ticks: 0,
-        client_timeout: Duration::from_secs(3),
-        reconnect_grace: Duration::from_secs(2),
-        pre_shared_key: None,
-        record: None,
-        max_spectators: 4,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    })
+    let mut server = NetServer::bind(
+        ServerConfig::default()
+            .with_bind("127.0.0.1:0".parse().unwrap())
+            .with_sim(SimConfig::default())
+            .with_snapshot_interval(1)
+            .with_max_clients(10)
+            .with_countdown_ticks(0)
+            .with_results_ticks(0)
+            .with_client_timeout(Duration::from_secs(3))
+            .with_reconnect_grace(Duration::from_secs(2))
+            .with_pre_shared_key(None)
+            .with_record(None)
+            .with_max_spectators(4)
+            .with_max_packets_per_second(120)
+            .with_max_total_packets_per_second(2_000)
+            .with_require_ready(false),
+    )
     .expect("bind");
     server.add_client_key(token);
     server.require_client_identity([identity_public_key(&SEED)]);
@@ -73,30 +75,22 @@ fn identity_and_token_modes_compose() {
     let both = NetClient::connect_with_auth(
         addr,
         Duration::from_secs(2),
-        ClientAuth {
-            pre_shared_key: Some(token),
-            expected_server: Some(server_public),
-            identity_seed: Some(SEED),
-            ..ClientAuth::default()
-        },
+        ClientAuth::default()
+            .with_pre_shared_key(Some(token))
+            .with_expected_server(Some(server_public))
+            .with_identity_seed(Some(SEED)),
     );
     assert!(both.is_ok(), "identity plus token connects");
     let identity_only = NetClient::connect_with_auth(
         addr,
         Duration::from_millis(500),
-        ClientAuth {
-            identity_seed: Some(SEED),
-            ..ClientAuth::default()
-        },
+        ClientAuth::default().with_identity_seed(Some(SEED)),
     );
     assert!(identity_only.is_err(), "configured token is still required");
     let token_only = NetClient::connect_with_auth(
         addr,
         Duration::from_millis(500),
-        ClientAuth {
-            pre_shared_key: Some(token),
-            ..ClientAuth::default()
-        },
+        ClientAuth::default().with_pre_shared_key(Some(token)),
     );
     assert!(token_only.is_err(), "required identity is still required");
     server.join().expect("server thread");
@@ -105,10 +99,7 @@ fn identity_and_token_modes_compose() {
 #[test]
 fn client_identity_challenge_accepts_allowlisted_key() {
     let (addr, public, server) = spawn_server();
-    let auth = ClientAuth {
-        identity_seed: Some(SEED),
-        ..ClientAuth::default()
-    };
+    let auth = ClientAuth::default().with_identity_seed(Some(SEED));
     let mut client = NetClient::connect_with_auth(addr, Duration::from_secs(2), auth)
         .expect("identity accepted");
     assert_eq!(client.client_public_key(), Some(public));
@@ -121,10 +112,7 @@ fn client_identity_challenge_accepts_allowlisted_key() {
     let wrong = NetClient::connect_with_auth(
         addr,
         Duration::from_millis(500),
-        ClientAuth {
-            identity_seed: Some([0x44; 32]),
-            ..ClientAuth::default()
-        },
+        ClientAuth::default().with_identity_seed(Some([0x44; 32])),
     );
     assert!(wrong.is_err(), "unlisted identity is rejected");
     server.join().expect("server thread");

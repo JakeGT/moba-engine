@@ -309,15 +309,13 @@ impl App for ClientApp {
             Ok("off") => ValidationMode::Off,
             _ => ValidationMode::IfAvailable,
         };
-        let config = RenderConfig {
-            validation,
-            max_instances: 1_024,
-            vsync: std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"),
-            ui_scale: self.ui_scale,
-            max_bones: moba_render::DEFAULT_MAX_BONES,
-            skinning: self.models.skinning(),
-            ..RenderConfig::default()
-        };
+        let config = RenderConfig::default()
+            .with_validation(validation)
+            .with_max_instances(1_024)
+            .with_vsync(std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"))
+            .with_ui_scale(self.ui_scale)
+            .with_max_bones(moba_render::DEFAULT_MAX_BONES)
+            .with_skinning(self.models.skinning());
         match Renderer::new(window, config) {
             Ok(mut renderer) => {
                 // `on_start` may run again after a resume with a fresh mesh table.
@@ -505,7 +503,9 @@ impl App for ClientApp {
                                     );
                                 }
                             }
-                            ClientEvent::Snapshot { .. } => {}
+                            // `Snapshot` is consumed below through `snapshot()`; later
+                            // (`#[non_exhaustive]`) events are ignored by this client.
+                            _ => {}
                         }
                     }
                 }

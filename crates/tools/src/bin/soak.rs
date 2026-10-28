@@ -62,22 +62,23 @@ fn main() {
         options.clients, options.seconds, options.rtt_ms, options.jitter_ms, options.loss_percent
     );
 
-    let mut server = match NetServer::bind(ServerConfig {
-        bind: "127.0.0.1:0".parse().expect("bind address"),
-        sim: SimConfig::default(),
-        snapshot_interval: 1,
-        max_clients: options.clients.min(10),
-        countdown_ticks: 0,
-        results_ticks: 0,
-        client_timeout: Duration::from_secs(5),
-        reconnect_grace: Duration::from_secs(60),
-        pre_shared_key: options.secret,
-        record: None,
-        max_spectators: 8,
-        max_packets_per_second: 120,
-        max_total_packets_per_second: 2_000,
-        require_ready: false,
-    }) {
+    let mut server = match NetServer::bind(
+        ServerConfig::default()
+            .with_bind("127.0.0.1:0".parse().expect("bind address"))
+            .with_sim(SimConfig::default())
+            .with_snapshot_interval(1)
+            .with_max_clients(options.clients.min(10))
+            .with_countdown_ticks(0)
+            .with_results_ticks(0)
+            .with_client_timeout(Duration::from_secs(5))
+            .with_reconnect_grace(Duration::from_secs(60))
+            .with_pre_shared_key(options.secret)
+            .with_record(None)
+            .with_max_spectators(8)
+            .with_max_packets_per_second(120)
+            .with_max_total_packets_per_second(2_000)
+            .with_require_ready(false),
+    ) {
         Ok(server) => server,
         Err(error) => fail(&format!("cannot bind server: {error}")),
     };

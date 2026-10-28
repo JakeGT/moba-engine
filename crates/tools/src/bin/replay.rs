@@ -82,6 +82,7 @@ fn main() {
                     Some(MatchOutcome::Winner(moba_game::Team::Blue)) => "\"blue\"".to_string(),
                     Some(MatchOutcome::Winner(moba_game::Team::Red)) => "\"red\"".to_string(),
                     Some(MatchOutcome::Draw) => "\"draw\"".to_string(),
+                    Some(_) => "\"unknown\"".to_string(),
                     None => String::from("null"),
                 };
                 let checkpoints: Vec<String> = replay

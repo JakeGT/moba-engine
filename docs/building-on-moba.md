@@ -35,6 +35,31 @@ cargo run -p moba-engine --example headless_match
 cargo run -p moba-engine --example custom_content
 ```
 
+### Configs, events and errors
+
+Configs (`SimConfig`, `ServerConfig`, `ClientAuth`, `RenderConfig`, `WindowConfig`) are
+`#[non_exhaustive]`: start from `Default` and use the `with_*` builders (or assign fields on a
+`let mut` binding). Event, outcome and error enums (`SimEvent`, `MatchOutcome`, `ClientEvent`,
+`ContentError`, …) are `#[non_exhaustive]` too, so a `match` needs a `_` arm. New options and
+variants can then ship in a minor release without breaking your code:
+
+```rust
+use moba_sim::{SimConfig, SimEvent, Simulation, TickInputs};
+
+let mut sim = Simulation::new(SimConfig::default().with_seed(7).with_bot_mask(0x03FF));
+sim.tick(&TickInputs::new());
+for event in sim.events() {
+    match event {
+        SimEvent::UnitDied { team, .. } => println!("a {team:?} unit died"),
+        SimEvent::MatchEnded { winner } => println!("winner: {winner:?}"),
+        _ => {} // other and future events
+    }
+}
+```
+
+Content specs (`GameContent`, `HeroSpec`, …) and wire messages stay exhaustive; see
+[api-1.0.md](api-1.0.md) for the full list and the reasons.
+
 Rules for anything that affects gameplay:
 
 - no wall-clock time, threads, hashing or floating-point in the tick;
@@ -116,7 +141,7 @@ new catalogue atomically. Live `Playing` matches are never hot-swapped.
 ```rust
 use moba_net::server::{NetServer, ServerConfig, ServerPhase};
 
-let mut server = NetServer::bind(ServerConfig::default())?
+let mut server = NetServer::bind(ServerConfig::default().with_max_clients(10))?
     .with_system(|simulation, phase| {
         // Runs after each tick, in registration order.
         if phase == ServerPhase::Playing {

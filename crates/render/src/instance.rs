@@ -20,6 +20,7 @@ pub enum ValidationMode {
 
 /// Result of a headless Vulkan instance/device probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VulkanProbe {
     /// Loader/instance API version.
     pub api_version: u32,

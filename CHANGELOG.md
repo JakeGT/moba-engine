@@ -5,6 +5,72 @@ breaking protocol, replay or content-schema changes.
 
 ## [Unreleased]
 
+### Breaking changes
+`scripts/semver-check.sh v0.4.0` reports that the next release must be **0.5.0**. The WP-7.2 API
+review ([docs/api-1.0.md](docs/api-1.0.md)) made the public surface extensible before 1.0: error,
+event, outcome and key enums, read-only stats/results and configs are now `#[non_exhaustive]`.
+Configs get `Default` plus one `with_*` builder per field. Behaviour, wire format, hashes and
+replays are unchanged. Breaking changes versus v0.4.0, by crate (`moba-assets` is now part of
+the semver check):
+
+- **`moba-game`**
+  - New public fields on exhaustively constructible structs (#296, #317): `HeroSpec::model`,
+    `MapSpec::visuals`, `GameContent::assets`. Struct literals must set them;
+    `..Default::default()` works where `Default` exists. The content schema stays exhaustive by
+    design ([api-1.0.md](docs/api-1.0.md#why-the-content-schema-stays-exhaustive)).
+  - `#[non_exhaustive]`: `ContentError` (which also gained `BadMapCoordinate` and
+    `BadVisualName`) and `ContentLoadError` (gained `Assets` and `UnknownAsset`). Add a `_` arm
+    to matches.
+- **`moba-sim`**
+  - `#[non_exhaustive]` enums: `SimEvent`, `PlayerCommand`, `UnitKind`, `ReplayError`; also
+    `MatchOutcome` (new since v0.4.0). Add a `_` arm to matches.
+  - `#[non_exhaustive]` structs: `SimConfig`. Replace `SimConfig { seed, ..SimConfig::default() }`
+    with `SimConfig::default().with_seed(seed)`; there are also `with_bot_mask`, `with_hero_picks`
+    and `with_spawn_waves`. Also `TickInputs` (use `TickInputs::new()`/`set`/`set_purchase`),
+    `Replay` (use `Replay::new(config)` and assign the public fields), `ReplayResult` and
+    `ObservedUnit` (new `ObservedUnit::new(entity, kind, team, position)`, then assign fields).
+- **`moba-net`**
+  - `#[non_exhaustive]` enums: `WireError`, `CryptoError`, `PacketKind`, `WireCommand`,
+    `MatchPhase`, `ClientEvent`, `ClientState`, `ServerPhase`. Add a `_` arm to matches.
+  - `#[non_exhaustive]` structs: `ServerConfig` and `ClientAuth`. Use
+    `ServerConfig::default().with_bind(addr).with_max_clients(4)` and
+    `ClientAuth::default().with_pre_shared_key(Some(key))`; every field has a `with_*` builder.
+    Read-only: `ServerStats` (gained `poll_budget_exhausted`/`snapshot_send_errors`),
+    `ClientStats` (gained `datagrams_received`/`datagrams_sent`), `SnapshotState`, `NetUpdate`,
+    `ReceivedMessage` and the wire catalogue, which only `moba-net` builds: `WireCatalog`,
+    `WireItem`, `WireHero` (gained `model`/`model_len`), `WireAbility`, `WireEffect`,
+    `WireAreaEffect`, `WireModifier`, `WireMap` (gained `visuals`/`visuals_len`), `WireLane`,
+    `WireStructure`, `WireWall`, `WireRules` (gained the economy/score fields, `rewards`,
+    `nexus_win` and `structure_heroes_first`), `WireMinionStats`, `WireStructureStats`.
+    `HostReport`, `WorkerStats`, `WireRewards` and `WireUnitRewards` (new since v0.4.0) are
+    `#[non_exhaustive]` as well.
+  - Removed accidental public helpers that wrapped `protocol` functions and were unused:
+    `client::{encode_raw, decode_raw, decode_welcome_payload, decode_hello_payload,
+    decode_snapshot_payload}` and `server::{decode_input_message, apply_delta}`. Use
+    `protocol::{encode_packet, decode_packet, decode_welcome, decode_hello, decode_snapshot,
+    decode_input}` and `SnapshotState::apply`. Also removed the unused
+    `transport::EventQueue` alias (`VecDeque`).
+  - `crypto::{random_session, random_nonce}` are now `pub(crate)`. They are handshake
+    internals; use `getrandom` for your own nonces.
+- **`moba-render`**
+  - `#[non_exhaustive]`: `RenderError` (which also gained `TooManyMeshes`, `InvalidMesh` and
+    `SkinningUnavailable`). Add a `_` arm to matches.
+  - `#[non_exhaustive]` structs: `RenderConfig` (gained `max_bones`/`skinning`; use
+    `RenderConfig::default().with_vsync(false)` etc.), `Scene` (gained `bones`; use
+    `Scene::new`/`Scene::empty` and the `with_*` methods), `UnitInstance` (gained `mesh`/`bones`;
+    use `UnitInstance::new`/`at` with `with_mesh`/`with_bones`), `Camera` (use `perspective`/
+    `orbit`), `CapturedFrame`, `VulkanProbe`.
+- **`moba-platform`**
+  - `#[non_exhaustive]`: `PlatformError`, `Key`, `MouseButton` (add a `_` arm) and
+    `WindowConfig` (use `WindowConfig::new(title, w, h)` or `Default` with `with_*` builders).
+- **`moba-assets`**
+  - `#[non_exhaustive]`: `AssetError`, `AssetManifestError`, `AssetManifest` and `AssetEntry`
+    (new `AssetEntry::new(name, path)` + `with_fallback`). Types added since v0.4.0 are
+    `#[non_exhaustive]` from the start: `AssetFileProblem`, `AssetList`, `AssetFileIssue`,
+    `MeshError`, `GlbError`, `SkinError`, `MapVisualsError`, `TrackPath`, `Interpolation`,
+    `MapVisuals`, `MapProp`.
+- No breaking change in `moba-core`, `moba-ecs`, `moba-jobs`, `moba-nav` or `moba-engine`.
+
 ### Security
 - `ctutils` 0.4.3 → 0.4.6 (RUSTSEC-2026-0385: constant-time mask generation could compile to
   branches). It sits under `sha2`/`hmac`/`hkdf`, `ed25519-dalek` and `poly1305`, i.e. the

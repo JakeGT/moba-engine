@@ -318,6 +318,9 @@ pub(crate) fn push_unit(
             ),
         ),
         UnitKind::Nexus => (15.0, Vec4::new(1.0, 0.76, 0.22, 1.0)),
+        // `UnitKind` is `#[non_exhaustive]`; an unknown kind draws as a plain team-coloured
+        // minion-sized box.
+        _ => (2.0, team_color),
     };
     let brightness = 0.55 + 0.45 * health_fraction.clamp(0.0, 1.0);
     color.x *= brightness;

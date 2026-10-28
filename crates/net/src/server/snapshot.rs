@@ -14,10 +14,12 @@ use super::NetServer;
 /// Snapshot `outcome` code (`OUTCOME_*`) for a simulation outcome.
 pub(super) const fn outcome_code(outcome: Option<MatchOutcome>) -> u8 {
     match outcome {
-        None => OUTCOME_NONE,
         Some(MatchOutcome::Winner(moba_game::Team::Blue)) => OUTCOME_BLUE,
         Some(MatchOutcome::Winner(moba_game::Team::Red)) => OUTCOME_RED,
         Some(MatchOutcome::Draw) => OUTCOME_DRAW,
+        // No outcome yet. `MatchOutcome` is `#[non_exhaustive]`; an outcome without a wire
+        // code would also report none (none exists today).
+        _ => OUTCOME_NONE,
     }
 }
 

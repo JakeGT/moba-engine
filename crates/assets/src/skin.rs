@@ -38,6 +38,7 @@ pub type JointMatrix = [[f32; 4]; 3];
 
 /// Why a skin, skeleton or clip was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SkinError {
     /// No joints, or more than [`MAX_JOINTS`].
     JointCount,
@@ -105,6 +106,7 @@ impl JointTransform {
 
 /// Which part of a joint transform a track animates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrackPath {
     /// Translation (`xyz` of each key).
     Translation,
@@ -116,6 +118,7 @@ pub enum TrackPath {
 
 /// Keyframe interpolation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Interpolation {
     /// Hold each key until the next.
     Step,

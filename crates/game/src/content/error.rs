@@ -6,6 +6,7 @@ use super::{
 
 /// Content validation errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContentError {
     /// No items were supplied.
     NoItems,
@@ -110,6 +111,7 @@ impl std::error::Error for ContentError {}
 
 /// Errors loading a content pack from TOML.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ContentLoadError {
     /// File could not be read.
     Io(std::io::Error),

@@ -92,11 +92,11 @@ fn steady_state_ticks_do_not_allocate_per_frame() {
 #[test]
 fn status_modifier_ticks_stay_within_budget() {
     let _guard = serial();
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    );
     for _ in 0..30 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
@@ -154,11 +154,8 @@ fn status_modifier_ticks_stay_within_budget() {
 #[test]
 fn wave_spawn_ticks_stay_within_budget() {
     let _guard = serial();
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: true,
-        ..SimConfig::default()
-    });
+    let mut simulation =
+        Simulation::new(SimConfig::default().with_bot_mask(0).with_spawn_waves(true));
     // Default first wave is at 2730 ticks; measure a window that crosses it.
     for _ in 0..2_700 {
         simulation.tick(&moba_sim::TickInputs::new());
@@ -199,11 +196,11 @@ fn teamfight_ticks_stay_within_budget() {
 #[test]
 fn respawn_ticks_stay_within_budget() {
     let _guard = serial();
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    );
     for _ in 0..30 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
@@ -237,11 +234,11 @@ fn respawn_ticks_stay_within_budget() {
 #[test]
 fn shop_ticks_stay_within_budget() {
     let _guard = serial();
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0,
-        spawn_waves: false,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
+    );
     for _ in 0..30 {
         simulation.tick(&moba_sim::TickInputs::new());
     }
@@ -270,12 +267,10 @@ fn ability_pack_ticks_stay_within_budget() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/ability-pack.toml");
     let content = moba_game::load_content_file(&path).expect("ability pack");
     let mut simulation = Simulation::new_with_content(
-        SimConfig {
-            hero_picks: [0; 10],
-            bot_mask: 0,
-            spawn_waves: false,
-            ..SimConfig::default()
-        },
+        SimConfig::default()
+            .with_hero_picks([0; 10])
+            .with_bot_mask(0)
+            .with_spawn_waves(false),
         std::sync::Arc::new(content),
     );
     for _ in 0..30 {
@@ -307,11 +302,11 @@ fn ability_pack_ticks_stay_within_budget() {
 #[test]
 fn bot_shop_ticks_stay_within_budget() {
     let _guard = serial();
-    let mut simulation = Simulation::new(SimConfig {
-        bot_mask: 0x03FF,
-        spawn_waves: false,
-        ..SimConfig::default()
-    });
+    let mut simulation = Simulation::new(
+        SimConfig::default()
+            .with_bot_mask(0x03FF)
+            .with_spawn_waves(false),
+    );
     for _ in 0..600 {
         simulation.tick_with_bots();
     }
