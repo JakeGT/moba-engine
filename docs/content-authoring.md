@@ -8,6 +8,9 @@ sections fall back to the engine's default pack. Example packs:
 - [`content/ability-pack.toml`](../content/ability-pack.toml) — all 10 ability kinds
 - [`content/map-pack.toml`](../content/map-pack.toml) — one-lane map + vision wall
 - [`content/sentinel-pack.toml`](../content/sentinel-pack.toml) — `[assets]` manifest and a hero `model`
+- [`content/ember-map.toml`](../content/ember-map.toml) and
+  [`content/frost-map.toml`](../content/frost-map.toml) — maps with their own
+  [visuals descriptors](#map-visuals)
 
 Validate and inspect a pack:
 
@@ -360,9 +363,9 @@ fallback = "sentinel"      # optional; another [[assets.units]] name
 name = "sentinel"
 path = "models/sentinel.glb"
 
-[[assets.maps]]            # per-map visuals
+[[assets.maps]]            # per-map visuals (a descriptor, see "Map visuals" below)
 name = "lava"
-path = "maps/lava.glb"
+path = "maps/lava.toml"
 
 [[heroes]]
 name = "Knight"
@@ -386,10 +389,13 @@ A `fallback` must name an entry in the same list, and chains may not loop or exc
 **Paths** are relative to the pack file's directory: ASCII, no leading `/`, no `.` or `..`
 component, and no `\`, `:` (drive letters, alternate streams) or control characters, so a path
 means the same thing on every OS and can never leave the pack. `content-check` also checks
-every manifest entry's file. It must end in `.glb` (the only format the engine loads, see
-[ADR-0007](adr/0007-mesh-format.md)), exist as a regular file and not resolve outside the pack
-directory through a symlink. Unit models must also parse with the bounded loader. Entries no
-hero references are checked too. The asset count and any errors appear in both outputs:
+every manifest entry's file. It must exist as a regular file and not resolve outside the pack
+directory through a symlink. A unit entry must end in `.glb` (the only mesh format the engine
+loads, see [ADR-0007](adr/0007-mesh-format.md)) and parse with the bounded loader. A map entry
+must end in `.toml` and be a valid [map visuals descriptor](#map-visuals), and every mesh the
+descriptor names must pass the unit checks at `models/<mesh>.glb` in the pack directory.
+Entries nothing references are checked too. The asset count and any errors appear in both
+outputs:
 
 ```text
 $ cargo run -p moba-tools --bin content-check -- --json content/sentinel-pack.toml
@@ -415,8 +421,69 @@ malformed file is logged once and that hero keeps the procedural rig; a missing 
 fails a match. Two players with different local files see different meshes and the same
 match. Visuals never affect the simulation, the state hash or server authority. The client
 override `MOBA_HERO_MODELS=hero=model,...` (dev only) replaces the catalogue's model for the
-heroes it matches. Map `visuals` are validated and carried now. Per-map rendering from them
-is #287.
+heroes it matches. Map visuals resolve the same way, to a descriptor (next section).
+
+### Map visuals
+
+A map's visuals name (its explicit `visuals`, else the theme's `map-<theme>`) resolves on each
+client to a small TOML **descriptor** at `<root>/maps/<name>.toml` (#287). Lay map entries out
+as `maps/<name>.toml` so the pack directory doubles as an asset root.
+[`content/maps/ember.toml`](../content/maps/ember.toml) and
+[`content/maps/frost.toml`](../content/maps/frost.toml) are the examples:
+
+```toml
+terrain = [0.24, 0.09, 0.05]   # required: terrain tint, linear RGB, each 0..=1
+wall = [0.55, 0.20, 0.08]      # required: wall colour
+wall_height = 6.0              # optional: metres, 0.5..=32 (default 4)
+wall_mesh = "rampart"          # optional: <root>/models/rampart.glb along every wall
+
+[[props]]                      # optional decoration, at most 32
+position = [96, 72]            # required: world units, the pack's map coordinates
+color = [1.0, 0.42, 0.10]      # required: linear RGB, each 0..=1
+height = 11.0                  # optional: metres, 0.1..=32 (default 3)
+yaw = 45.0                     # optional: degrees about the vertical axis, -360..=360
+mesh = "crystal"               # optional: <root>/models/crystal.glb, else a built-in block
+```
+
+- **Walls** are the map's `[[map.walls]]` segments, the same data the server sends, so the
+  local preview and a networked client draw the same walls. Each is the built-in block
+  (2.5 m thick, `wall_height` tall) or, with `wall_mesh`, that mesh fitted to the same box: a
+  wall mesh is authored along +X and stretched to the segment's length.
+- **Props** are cosmetic only. They never block movement or vision; walls do the gameplay. A
+  prop mesh is scaled uniformly to `height`, standing on the ground and centred on `position`.
+  Meshes are static (a skin is ignored).
+- **Mesh names** are 1..=32 of `[A-Za-z0-9_-]`, and a descriptor may reference at most 4
+  distinct meshes (wall and props together). A client uploads at most 16 distinct map meshes
+  per session (renderer mesh slots are shared with hero models and never freed); later ones
+  draw the built-in block.
+- **Limits.** A descriptor is at most 16 KiB. Unknown keys, wrong types and out-of-range or
+  non-finite numbers are errors. The client reads it with a bounded read and never panics on
+  it.
+
+**Fallback.** A client logs each problem once per name and never fails a match:
+
+| Problem | What the client draws |
+|---|---|
+| no descriptor for a theme's built-in name (`map-grass`, ...) | the built-in theme, silently (the default case) |
+| a missing, oversized or invalid descriptor | the built-in theme of the map's `theme`, exactly as before #287 |
+| a missing, malformed or unuploadable wall or prop mesh | the built-in block for that wall or prop, in the descriptor's colours |
+
+The default packs ship no `map-*` descriptors, so the built-in themes and the default golden
+image are unchanged. A shipped descriptor for a built-in name (for example
+`maps/map-stone.toml`) restyles every pack that uses that theme without a `visuals` name.
+
+**Switching maps.** Descriptors and meshes are read only when the map changes: at startup, on
+a `ContentUpdate` (hot reload) and on map rotation. Each name is loaded once per session, so
+rotating back to a map touches neither the disk nor the GPU. A live `Playing` match is never
+restyled. To see two maps back to back in one client session, rotate packs on the server
+(`--items content/ember-map.toml --items content/frost-map.toml`) or hot-reload one with
+`--reload-content`. `MOBA_CAPTURE_MAPS=<prefix>` (network mode) writes `<prefix>-<n>.ppm` after
+`MOBA_CAPTURE_FRAME` frames on each map and keeps playing; see
+[screenshots](screenshots.md#per-map-visuals).
+
+**Nothing about a descriptor is hashed or sent.** Only the `visuals` name is (see above).
+Descriptors are client-local and cosmetic like models: two players with different files see
+different colours and props in the same match.
 
 ## Hot reload
 

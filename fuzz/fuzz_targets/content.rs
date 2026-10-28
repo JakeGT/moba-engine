@@ -17,12 +17,17 @@ path = "models/sentinel.glb"
 
 [[assets.maps]]
 name = "lava"
-path = "maps/lava.glb"
+path = "maps/lava.toml"
 "#;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(text) = core::str::from_utf8(data) {
         let _ = moba_game::load_content_toml(text);
+        // Map visuals descriptors (#287) are untrusted client-local TOML too.
+        if let Ok(visuals) = moba_assets::MapVisuals::parse(text) {
+            assert!(visuals.props.len() <= moba_assets::MAX_MAP_PROPS);
+            assert!(visuals.mesh_names().count() <= moba_assets::MAX_MAP_MESHES);
+        }
         if let Ok(content) = moba_game::load_content_toml(&format!("{ASSET_SEED}\n{text}")) {
             // Anything that loads must have resolvable, wire-safe visual names.
             for hero in &content.heroes {

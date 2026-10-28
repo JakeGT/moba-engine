@@ -190,7 +190,11 @@ hero models: a pack's
 `heroes.model` names load `<MOBA_ASSET_ROOT>/models/<model>.glb` (default root `content`, see
 `content/sentinel-pack.toml`; `MOBA_HERO_MODELS=<hero>=<model>,...` overrides per hero), and
 `MOBA_CONTENT=<pack.toml>` plays a pack in the local preview or `MOBA_SERVER=local`. A model
-with a skin is GPU-skinned and walks with the hero; `MOBA_NO_SKINNING=1` draws it static.
+with a skin is GPU-skinned and walks with the hero; `MOBA_NO_SKINNING=1` draws it static. A
+map's `visuals` name loads the descriptor `<MOBA_ASSET_ROOT>/maps/<name>.toml` (terrain tint,
+walls, props; see `content/ember-map.toml` and
+[map visuals](docs/content-authoring.md#map-visuals)), and `MOBA_CAPTURE_MAPS=<prefix>` writes
+one capture per map in a network session.
 
 ## Architecture
 

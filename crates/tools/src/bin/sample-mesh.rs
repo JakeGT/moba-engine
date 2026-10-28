@@ -1,12 +1,15 @@
 #![allow(clippy::print_stdout)]
-//! Generate the sample "sentinel" hero model shipped as `content/models/sentinel.glb`.
+//! Generate the sample "sentinel" hero model shipped as `content/models/sentinel.glb`, and the
+//! sample map meshes `content/models/crystal.glb` (a prop) and `content/models/rampart.glb`
+//! (a wall section) used by the map visuals descriptors in `content/maps/` (#287).
 //!
 //! The model is built from code so its licence is the repository's own (no third-party art)
 //! and so the bytes are reproducible: only `+ - * /` and `sqrt` are used (no
 //! transcendental functions), which are correctly rounded IEEE operations on every platform.
 //! A unit test checks the committed file still matches this generator.
 //!
-//! Usage: `cargo run -p moba-tools --bin sample-mesh -- [out.glb]`
+//! Usage: `cargo run -p moba-tools --bin sample-mesh -- [sentinel.glb [skinned.glb [crystal.glb
+//! [rampart.glb]]]]`
 //!
 //! Conventions (glTF): metres, +Y up, the model faces +Z, feet at `y = 0`.
 
@@ -284,6 +287,45 @@ fn sentinel() -> Model {
     model
 }
 
+/// A crystal cluster prop about 3 m tall: one tall octagonal spire and two shorter ones.
+fn crystal() -> Model {
+    let mut model = Model::default();
+    model.lathe(
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        &[(0.0, 0.3), (0.35, 0.5), (2.2, 0.38), (3.0, 0.0)],
+    );
+    model.lathe(
+        0.62,
+        0.25,
+        1.0,
+        0.8,
+        &[(0.0, 0.18), (0.2, 0.28), (1.25, 0.22), (1.8, 0.0)],
+    );
+    model.lathe(
+        -0.5,
+        -0.35,
+        0.8,
+        1.0,
+        &[(0.0, 0.14), (0.15, 0.22), (0.85, 0.17), (1.3, 0.0)],
+    );
+    model
+}
+
+/// A crenellated wall section authored along +X (4 m long, 3 m tall, 1.2 m thick) on a wider
+/// footing. Map visuals stretch it along each wall segment.
+fn rampart() -> Model {
+    let mut model = Model::default();
+    model.cuboid([-2.0, 0.0, -0.75], [2.0, 0.4, 0.75]);
+    model.cuboid([-2.0, 0.4, -0.6], [2.0, 2.4, 0.6]);
+    for x in [-1.75, -0.75, 0.25, 1.25] {
+        model.cuboid([x, 2.4, -0.6], [x + 0.5, 3.0, 0.6]);
+    }
+    model
+}
+
 fn bounds(points: &[V3]) -> (V3, V3) {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
@@ -296,8 +338,8 @@ fn bounds(points: &[V3]) -> (V3, V3) {
     (min, max)
 }
 
-/// Serialises a model as a single-mesh binary glTF 2.0 file.
-fn encode_glb(model: &Model) -> Vec<u8> {
+/// Serialises a model as a single-mesh binary glTF 2.0 file whose node and mesh are `name`.
+fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
     let mut bin = Vec::new();
     for position in &model.positions {
         for value in position {
@@ -327,8 +369,8 @@ fn encode_glb(model: &Model) -> Vec<u8> {
             r#"{{"asset":{{"version":"2.0","generator":"moba-tools sample-mesh","#,
             r#""copyright":"MOBA Engine contributors, MIT OR Apache-2.0"}},"#,
             r#""scene":0,"scenes":[{{"nodes":[0]}}],"#,
-            r#""nodes":[{{"name":"sentinel","mesh":0}}],"#,
-            r#""meshes":[{{"name":"sentinel","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1}},"indices":2}}]}}],"#,
+            r#""nodes":[{{"name":"{}","mesh":0}}],"#,
+            r#""meshes":[{{"name":"{}","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1}},"indices":2}}]}}],"#,
             r#""buffers":[{{"byteLength":{}}}],"#,
             r#""bufferViews":["#,
             r#"{{"buffer":0,"byteOffset":0,"byteLength":{},"target":34962}},"#,
@@ -339,6 +381,8 @@ fn encode_glb(model: &Model) -> Vec<u8> {
             r#"{{"bufferView":1,"componentType":5126,"count":{},"type":"VEC3"}},"#,
             r#"{{"bufferView":2,"componentType":5123,"count":{},"type":"SCALAR"}}]}}"#
         ),
+        name,
+        name,
         bin.len(),
         normals_offset,
         normals_offset,
@@ -674,16 +718,28 @@ fn main() {
         || PathBuf::from("content/models/sentinel-skinned.glb"),
         PathBuf::from,
     );
+    let crystal_output = args.next().map_or_else(
+        || PathBuf::from("content/models/crystal.glb"),
+        PathBuf::from,
+    );
+    let rampart_output = args.next().map_or_else(
+        || PathBuf::from("content/models/rampart.glb"),
+        PathBuf::from,
+    );
     let model = sentinel();
-    write(&output, &encode_glb(&model), &model);
+    write(&output, &encode_glb(&model, "sentinel"), &model);
     write(&skinned_output, &encode_skinned_glb(&model), &model);
+    let crystal = crystal();
+    write(&crystal_output, &encode_glb(&crystal, "crystal"), &crystal);
+    let rampart = rampart();
+    write(&rampart_output, &encode_glb(&rampart, "rampart"), &rampart);
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn committed_model_matches_the_generator_and_loads() {
-        let generated = super::encode_glb(&super::sentinel());
+        let generated = super::encode_glb(&super::sentinel(), "sentinel");
         let committed = include_bytes!("../../../../content/models/sentinel.glb");
         assert!(
             generated == committed,
@@ -698,6 +754,34 @@ mod tests {
     }
 
     #[test]
+    fn committed_map_meshes_match_the_generator_and_load() {
+        for (name, model, committed, height) in [
+            (
+                "crystal",
+                super::crystal(),
+                &include_bytes!("../../../../content/models/crystal.glb")[..],
+                3.0f32,
+            ),
+            (
+                "rampart",
+                super::rampart(),
+                &include_bytes!("../../../../content/models/rampart.glb")[..],
+                3.0,
+            ),
+        ] {
+            let generated = super::encode_glb(&model, name);
+            assert!(
+                generated == committed,
+                "content/models/{name}.glb is stale; run `cargo run -p moba-tools --bin sample-mesh`"
+            );
+            let mesh = moba_assets::load_glb(&generated).expect("generated model loads");
+            let (min, max) = mesh.bounds();
+            assert!(min[1].abs() < 1e-6, "{name} stands on the ground: {min:?}");
+            assert!((max[1] - height).abs() < 1e-6, "{name} height: {max:?}");
+        }
+    }
+
+    #[test]
     fn committed_skinned_model_matches_the_generator_and_animates() {
         let generated = super::encode_skinned_glb(&super::sentinel());
         let committed = include_bytes!("../../../../content/models/sentinel-skinned.glb");
@@ -706,7 +790,7 @@ mod tests {
             "content/models/sentinel-skinned.glb is stale; run `cargo run -p moba-tools --bin sample-mesh`"
         );
         let mesh = moba_assets::load_glb(&generated).expect("skinned model loads");
-        let static_mesh = moba_assets::load_glb(&super::encode_glb(&super::sentinel()))
+        let static_mesh = moba_assets::load_glb(&super::encode_glb(&super::sentinel(), "sentinel"))
             .expect("static model loads");
         // Same bind-pose geometry as the static sample.
         assert_eq!(mesh.positions(), static_mesh.positions());

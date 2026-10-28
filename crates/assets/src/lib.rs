@@ -7,11 +7,13 @@
 //! [`MeshData`] is the validated hand-off type between loaders and the renderer. The `glb`
 //! feature adds [`load_glb`], a bounded binary-glTF loader for untrusted files (ADR-0007);
 //! [`MeshSkin`]/[`Skeleton`] carry skinning data and [`Skeleton::sample`] poses it.
+//! [`MapVisuals`] is the bounded per-map visuals descriptor (`maps/<name>.toml`, #287).
 
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "glb")]
 mod glb;
+mod map_visuals;
 mod mesh;
 mod skin;
 
@@ -22,6 +24,10 @@ use serde::Deserialize;
 
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
+pub use map_visuals::{
+    DEFAULT_PROP_HEIGHT, DEFAULT_WALL_HEIGHT, MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES,
+    MAX_MESH_NAME, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
+};
 pub use mesh::{MeshData, MeshError};
 pub use skin::{
     AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_CLIP_KEYS, MAX_CLIP_SECONDS,
@@ -106,8 +112,10 @@ impl AssetList {
 /// Why a manifest entry's file is unusable (see [`AssetManifest::check_files`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssetFileProblem {
-    /// The path does not end in `.glb`, the only format the engine loads (ADR-0007).
+    /// A unit path does not end in `.glb`, the only mesh format the engine loads (ADR-0007).
     NotGlb,
+    /// A map path does not end in `.toml` (a map visuals descriptor, #287).
+    NotToml,
     /// The file does not exist or cannot be read; the text is the I/O error.
     Missing(String),
     /// The path names something other than a regular file.
@@ -116,16 +124,30 @@ pub enum AssetFileProblem {
     OutsideRoot,
     /// The file is not a mesh the bounded loader accepts; the text is the loader error.
     Malformed(String),
+    /// The map visuals descriptor does not parse or validate; the text is the error.
+    BadDescriptor(String),
+    /// A mesh the map visuals descriptor names (`models/<mesh>.glb`) is unusable.
+    Mesh {
+        /// Mesh name from the descriptor.
+        name: String,
+        /// What is wrong with its file.
+        problem: Box<AssetFileProblem>,
+    },
 }
 
 impl core::fmt::Display for AssetFileProblem {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotGlb => f.write_str("not a .glb file"),
+            Self::NotToml => f.write_str("not a .toml map visuals descriptor"),
             Self::Missing(error) => write!(f, "missing or unreadable ({error})"),
             Self::NotAFile => f.write_str("not a regular file"),
             Self::OutsideRoot => f.write_str("resolves outside the pack directory"),
             Self::Malformed(error) => write!(f, "malformed mesh ({error})"),
+            Self::BadDescriptor(error) => write!(f, "invalid descriptor ({error})"),
+            Self::Mesh { name, problem } => {
+                write!(f, "mesh '{name}' (models/{name}.glb): {problem}")
+            }
         }
     }
 }
@@ -236,11 +258,13 @@ impl AssetManifest {
 
     /// Checks every entry's file under `root` (the pack directory), in manifest order.
     ///
-    /// Each path must end in `.glb`, exist as a regular file and stay inside `root` once
-    /// symlinks are resolved. With the `glb` feature, unit files are also parsed with the
-    /// bounded loader. Paths are assumed to have passed [`AssetManifest::validate`]. This is
-    /// an authoring check (`content-check`): the engine never fails a match on a missing
-    /// asset.
+    /// Every file must exist as a regular file and stay inside `root` once symlinks are
+    /// resolved. Unit paths must end in `.glb`; with the `glb` feature they are also parsed
+    /// with the bounded loader. Map paths must end in `.toml` and parse as a [`MapVisuals`]
+    /// descriptor, and every mesh it names must pass the unit checks at
+    /// `root/models/<mesh>.glb` (where a client resolves it). Paths are assumed to have
+    /// passed [`AssetManifest::validate`]. This is an authoring check (`content-check`): the
+    /// engine never fails a match on a missing asset.
     #[must_use]
     pub fn check_files(&self, root: &Path) -> Vec<AssetFileIssue> {
         let canonical_root = root.canonicalize().ok();
@@ -315,11 +339,15 @@ fn check_file(
     canonical_root: Option<&Path>,
     path: &str,
 ) -> Result<(), AssetFileProblem> {
+    let (extension, wrong) = match list {
+        AssetList::Units => ("glb", AssetFileProblem::NotGlb),
+        AssetList::Maps => ("toml", AssetFileProblem::NotToml),
+    };
     if !path
         .rsplit_once('.')
-        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("glb"))
+        .is_some_and(|(_, found)| found.eq_ignore_ascii_case(extension))
     {
-        return Err(AssetFileProblem::NotGlb);
+        return Err(wrong);
     }
     let canonical = root
         .join(path)
@@ -333,13 +361,23 @@ fn check_file(
     if !metadata.is_file() {
         return Err(AssetFileProblem::NotAFile);
     }
-    #[cfg(feature = "glb")]
-    if list == AssetList::Units {
-        load_glb_file(&canonical)
-            .map_err(|error| AssetFileProblem::Malformed(error.to_string()))?;
+    if list == AssetList::Maps {
+        let visuals = MapVisuals::load_file(&canonical)
+            .map_err(|error| AssetFileProblem::BadDescriptor(error.to_string()))?;
+        for name in visuals.mesh_names() {
+            // `valid_mesh_name` already ruled out separators, dots and colons.
+            let mesh_path = format!("models/{name}.glb");
+            check_file(AssetList::Units, root, canonical_root, &mesh_path).map_err(|problem| {
+                AssetFileProblem::Mesh {
+                    name: name.to_owned(),
+                    problem: Box::new(problem),
+                }
+            })?;
+        }
+        return Ok(());
     }
-    #[cfg(not(feature = "glb"))]
-    let _ = list;
+    #[cfg(feature = "glb")]
+    load_glb_file(&canonical).map_err(|error| AssetFileProblem::Malformed(error.to_string()))?;
     Ok(())
 }
 
@@ -376,7 +414,7 @@ path = "units/fallback.glb"
 
 [[maps]]
 name = "blue"
-path = "maps/blue.png"
+path = "maps/blue.toml"
 "#;
 
     #[test]
@@ -473,30 +511,59 @@ fallback = "a"
                     fallback: None,
                 },
             ],
-            maps: vec![AssetEntry {
-                name: String::from("ok"),
-                path: String::from("models/ok.glb"),
-                fallback: None,
-            }],
+            maps: ["ok", "glb", "bad", "nomesh"]
+                .into_iter()
+                .map(|name| AssetEntry {
+                    name: String::from(name),
+                    path: if name == "glb" {
+                        String::from("models/ok.glb")
+                    } else {
+                        format!("maps/{name}.toml")
+                    },
+                    fallback: None,
+                })
+                .collect(),
         };
-        assert_eq!(manifest.len(), 4);
+        std::fs::create_dir_all(root.join("maps")).expect("maps dir");
+        let colors = "terrain = [0.1, 0.2, 0.3]\nwall = [0.4, 0.5, 0.6]\n";
+        std::fs::write(root.join("maps/ok.toml"), colors).expect("write");
+        std::fs::write(root.join("maps/bad.toml"), "terrain = [2, 0, 0]").expect("write");
+        std::fs::write(
+            root.join("maps/nomesh.toml"),
+            format!("{colors}wall_mesh = \"gone\""),
+        )
+        .expect("write");
+        assert_eq!(manifest.len(), 7);
         let issues = manifest.check_files(&root);
         let problems: Vec<(&str, &AssetFileProblem)> = issues
             .iter()
             .map(|issue| (issue.name.as_str(), &issue.problem))
             .collect();
-        assert_eq!(problems.len(), 3, "{issues:?}");
+        assert_eq!(problems.len(), 6, "{issues:?}");
         assert_eq!(problems[0], ("png", &AssetFileProblem::NotGlb));
         assert!(matches!(
             problems[1],
             ("missing", AssetFileProblem::Missing(_))
         ));
         assert_eq!(problems[2], ("dir", &AssetFileProblem::NotAFile));
+        assert_eq!(problems[3], ("glb", &AssetFileProblem::NotToml));
+        assert!(matches!(
+            problems[4],
+            ("bad", AssetFileProblem::BadDescriptor(_))
+        ));
+        assert!(matches!(
+            problems[5],
+            ("nomesh", AssetFileProblem::Mesh { name, problem })
+                if name == "gone" && matches!(**problem, AssetFileProblem::Missing(_))
+        ));
         assert!(
             issues[0]
                 .to_string()
                 .starts_with("assets.units 'png' (models/ok.png)")
         );
+        assert!(issues[5].to_string().starts_with(
+            "assets.maps 'nomesh' (maps/nomesh.toml): mesh 'gone' (models/gone.glb): missing"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -505,14 +572,15 @@ fallback = "a"
     fn check_files_rejects_symlinks_out_of_the_pack() {
         let root = temp_root("symlink");
         let outside = temp_root("symlink-target");
-        std::fs::write(outside.join("secret.glb"), b"x").expect("write");
-        std::os::unix::fs::symlink(outside.join("secret.glb"), root.join("models/link.glb"))
+        std::fs::write(outside.join("secret.toml"), b"x").expect("write");
+        std::fs::create_dir_all(root.join("maps")).expect("maps dir");
+        std::os::unix::fs::symlink(outside.join("secret.toml"), root.join("maps/link.toml"))
             .expect("symlink");
         let manifest = AssetManifest {
             units: Vec::new(),
             maps: vec![AssetEntry {
                 name: String::from("link"),
-                path: String::from("models/link.glb"),
+                path: String::from("maps/link.toml"),
                 fallback: None,
             }],
         };

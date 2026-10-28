@@ -1,0 +1,70 @@
+name = "Ember Crossing"
+version = "1.0.0"
+author = "MOBA Engine"
+
+# Example map pack with its own visuals (#287). Items, heroes and abilities are omitted, so
+# engine defaults apply.
+#
+#   cargo run -p moba-tools --bin content-check -- content/ember-map.toml
+#   MOBA_CONTENT=content/ember-map.toml cargo run -p moba-client
+#
+# `visuals = "ember"` is a *name*: it is hashed and sent in the catalogue, and each client
+# resolves it against its own asset root (`MOBA_ASSET_ROOT`, default `content`) as
+# `<root>/maps/ember.toml`, a descriptor with the terrain tint, wall colour, wall mesh and
+# props (see docs/content-authoring.md#map-visuals). Without the file, a client draws the
+# built-in `desert` theme instead. The `[[assets.maps]]` path is checked by content-check
+# only; keep it at `maps/<name>.toml` so the pack directory works as an asset root.
+
+[[assets.maps]]
+name = "ember"
+path = "maps/ember.toml"
+
+[map]
+name = "Ember Crossing"
+theme = "desert"
+visuals = "ember"
+blue_spawn = [32, 128]
+red_spawn = [224, 128]
+
+[[map.lanes]]
+name = "Mid"
+path = [[32, 128], [96, 104], [160, 152], [224, 128]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [20, 128]
+
+[[map.structures]]
+team = "blue"
+kind = "tower"
+position = [72, 112]
+lane = 0
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [236, 128]
+
+[[map.structures]]
+team = "red"
+kind = "tower"
+position = [184, 144]
+lane = 0
+
+# Vision-blocking ramparts (movement passes through; line of sight does not).
+[[map.walls]]
+a = [112, 60]
+b = [112, 100]
+
+[[map.walls]]
+a = [144, 156]
+b = [144, 196]
+
+[[map.walls]]
+a = [60, 168]
+b = [100, 188]
+
+[[map.walls]]
+a = [156, 68]
+b = [196, 88]

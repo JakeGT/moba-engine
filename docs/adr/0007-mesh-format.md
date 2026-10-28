@@ -74,6 +74,12 @@ content hash.
   come from the catalogue's per-hero `model` (#285, `[assets]` in the pack); the dev override
   `MOBA_HERO_MODELS=hero=model,...` (or a bare model name for every hero) wins for the heroes it
   matches.
+- **Map meshes (#287):** a map visuals descriptor (`<root>/maps/<name>.toml`, TOML rather than
+  glTF because it carries colours and placements, not geometry) names wall and prop meshes
+  that resolve the same way, `<root>/models/<mesh>.glb`, through the same loader and
+  `register_mesh`, at most 4 per descriptor. They are uploaded only when the map changes,
+  cached per name, and a failure draws the built-in block. See
+  [content authoring](../content-authoring.md#map-visuals).
 
 ## Rejected
 - **Text `.gltf` or URI buffers:** the loader would need file-system or URI access driven by

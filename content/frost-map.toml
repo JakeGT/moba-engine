@@ -1,0 +1,82 @@
+name = "Frost Ring"
+version = "1.0.0"
+author = "MOBA Engine"
+
+# Second example map pack with its own visuals (#287), styled unlike content/ember-map.toml.
+# Rotate the two in one server to see a client switch visuals between matches:
+#
+#   cargo run -p moba-server -- --listen 127.0.0.1:7777 --seconds 600 \
+#     --items content/ember-map.toml --items content/frost-map.toml
+#
+# `visuals = "frost"` resolves on each client to `<asset root>/maps/frost.toml`; without
+# that file a client draws the built-in `snow` theme.
+
+[[assets.maps]]
+name = "frost"
+path = "maps/frost.toml"
+
+[map]
+name = "Frost Ring"
+theme = "snow"
+visuals = "frost"
+blue_spawn = [40, 216]
+red_spawn = [216, 40]
+
+[[map.lanes]]
+name = "North"
+path = [[40, 216], [40, 40], [216, 40]]
+
+[[map.lanes]]
+name = "South"
+path = [[40, 216], [216, 216], [216, 40]]
+
+[[map.structures]]
+team = "blue"
+kind = "nexus"
+position = [28, 228]
+
+[[map.structures]]
+team = "blue"
+kind = "tower"
+position = [40, 150]
+lane = 0
+
+[[map.structures]]
+team = "blue"
+kind = "tower"
+position = [106, 216]
+lane = 1
+
+[[map.structures]]
+team = "red"
+kind = "nexus"
+position = [228, 28]
+
+[[map.structures]]
+team = "red"
+kind = "tower"
+position = [150, 40]
+lane = 0
+
+[[map.structures]]
+team = "red"
+kind = "tower"
+position = [216, 106]
+lane = 1
+
+# An ice ring in the jungle between the lanes.
+[[map.walls]]
+a = [96, 96]
+b = [160, 96]
+
+[[map.walls]]
+a = [160, 96]
+b = [160, 160]
+
+[[map.walls]]
+a = [160, 160]
+b = [96, 160]
+
+[[map.walls]]
+a = [96, 160]
+b = [96, 120]
