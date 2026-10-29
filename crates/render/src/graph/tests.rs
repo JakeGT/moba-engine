@@ -298,3 +298,83 @@ fn invalid_graphs_are_rejected() {
         Err(GraphError::DuplicateAccess { .. })
     ));
 }
+
+#[test]
+fn discarded_imports_must_be_written_before_they_are_read() {
+    // The swapchain starts UNDEFINED: blending over it (or presenting it) before any write
+    // reads garbage, so it is rejected like a transient.
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    let _ = graph.pass("ui", 0).access(target, Access::ColorReadWrite);
+    assert_eq!(
+        graph.compile().unwrap_err(),
+        GraphError::ReadBeforeWrite {
+            pass: "ui",
+            resource: "swapchain"
+        }
+    );
+
+    let mut graph = GraphBuilder::<u8>::new();
+    let _ = swapchain(&mut graph);
+    assert_eq!(
+        graph.compile().unwrap_err(),
+        GraphError::ReadBeforeWrite {
+            pass: "<final>",
+            resource: "swapchain"
+        }
+    );
+
+    // An import that keeps its contents (a defined layout) may be read first.
+    let mut graph = GraphBuilder::new();
+    let history = graph.import_image(
+        "history",
+        ImportState {
+            stage: S::COLOR_ATTACHMENT_OUTPUT,
+            access: A::COLOR_ATTACHMENT_WRITE,
+            layout: L::COLOR_ATTACHMENT_OPTIMAL,
+        },
+        None,
+    );
+    let _ = graph
+        .pass("blend", 0)
+        .access(history, Access::ColorReadWrite)
+        .side_effect();
+    assert!(graph.compile().is_ok());
+}
+
+#[test]
+fn variants_share_transients_only_with_the_same_start_state() {
+    let build = |capture: bool| {
+        let mut graph = GraphBuilder::new();
+        let target = swapchain(&mut graph);
+        let hdr = graph.transient_image("hdr", HDR);
+        let _ = graph.pass("scene", 0).access(hdr, Access::ColorWrite);
+        let _ = graph
+            .pass("composite", 1)
+            .access(hdr, Access::SampledFragment)
+            .access(target, Access::ColorWrite);
+        if capture {
+            // Extra work on an import only: the transient slots must still agree.
+            let _ = graph.pass("copy", 2).access(target, Access::TransferRead);
+        }
+        graph.compile().expect("valid graph")
+    };
+    let normal = build(false);
+    let capture = build(true);
+    assert!(normal.shares_transients_with(&capture));
+    assert_eq!(
+        normal.slots()[0].start_stage,
+        S::COLOR_ATTACHMENT_OUTPUT | S::FRAGMENT_SHADER
+    );
+    assert_eq!(normal.slots()[0].start_access, A::COLOR_ATTACHMENT_WRITE);
+
+    // Same description and usage, but the other variant touches the slot in a stage this one
+    // does not: its first barrier would not order against that work, so they must not share.
+    let mut other = build(false);
+    other.slots[0].start_stage |= S::VERTEX_SHADER;
+    assert_eq!(normal.slots()[0].usage, other.slots()[0].usage);
+    assert!(!normal.shares_transients_with(&other));
+    let mut other = build(false);
+    other.slots[0].start_access = A::NONE;
+    assert!(!normal.shares_transients_with(&other));
+}

@@ -51,6 +51,11 @@ toml = "1"
 glam = "0.34"
 # Binary glTF (.glb) parsing for the asset loader (ADR-0007). Exact pin; no import/image/base64.
 gltf = { version = "=1.4.1", default-features = false }
+# Safe, no_std, dependency-free BC1-BC7 block decoder: the CPU fallback for devices without
+# textureCompressionBC and the bake tool's quality check (ADR-0010). Exact pin.
+bcdec_rs = "=0.2.1"
+# PNG decode/encode for the offline texture baker (moba-tools only, ADR-0010).
+png = "0.18"
 gpu-allocator = "0.28"
 raw-window-handle = "0.6"
 cpal = "0.18"

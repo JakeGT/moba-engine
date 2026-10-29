@@ -44,6 +44,75 @@ pub(crate) fn capture_and_exit(
     }
 }
 
+/// Where the renderer keeps its `VkPipelineCache`: `MOBA_PIPELINE_CACHE` (a file path, or
+/// `off`), else a per-user cache file: `$XDG_CACHE_HOME` or `~/.cache` on Linux/BSD,
+/// `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows, each under
+/// `moba-engine/pipeline-cache.bin`. `None` when disabled or no such directory is known.
+/// Read once at startup.
+pub(crate) fn pipeline_cache_path() -> Option<PathBuf> {
+    pipeline_cache_path_from(|name| std::env::var_os(name))
+}
+
+fn pipeline_cache_path_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    if let Some(value) = set("MOBA_PIPELINE_CACHE") {
+        return (value != "off").then(|| PathBuf::from(value));
+    }
+    let base = if cfg!(windows) {
+        set("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        set("HOME").map(|home| PathBuf::from(home).join("Library/Caches"))
+    } else {
+        set("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".cache")))
+    }?;
+    Some(base.join("moba-engine").join("pipeline-cache.bin"))
+}
+
+/// `MOBA_SHADER_DIR`: SPIR-V overrides, hot-reloaded when a file changes. Debug builds only
+/// (a mismatched module is invalid Vulkan usage); release builds log once and ignore it.
+pub(crate) fn shader_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("MOBA_SHADER_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    if cfg!(debug_assertions) {
+        Some(dir)
+    } else {
+        eprintln!("[render] MOBA_SHADER_DIR is a debug-build feature; ignored");
+        None
+    }
+}
+
+/// `MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU even where the GPU samples
+/// them (to exercise the fallback path); anything else keeps the default.
+pub(crate) fn compressed_textures() -> bool {
+    std::env::var("MOBA_COMPRESSED_TEXTURES").map_or(true, |value| value.trim() != "0")
+}
+
+/// Number of `.spv` files in a shader override directory and their newest modification time.
+pub(crate) type ShaderStamp = (usize, Option<std::time::SystemTime>);
+
+/// The [`ShaderStamp`] of `dir` (dev shader hot reload), polled a few times a second at
+/// most; a missing directory is `(0, None)`. Allocates (directory listing); debug builds only.
+pub(crate) fn shader_stamp(dir: &Path) -> ShaderStamp {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, None);
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "spv")
+        })
+        .fold((0, None), |(count, newest), entry| {
+            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+            (count + 1, newest.max(modified))
+        })
+}
+
 pub(crate) fn parse_demo_move() -> Option<FixVec2> {
     let value = std::env::var("MOBA_DEMO_MOVE").ok()?;
     let (x, y) = value.split_once(',')?;
@@ -347,10 +416,16 @@ impl Drop for ClientApp {
         let quality = self.renderer.as_ref().map_or_else(
             || String::from("?"),
             |renderer| {
+                let pipelines = renderer.pipeline_stats();
                 format!(
-                    "{} hdr={}",
+                    "{} hdr={} pipelines={} pipeline_build_ms={:.3} pipeline_cache={} \
+                     startup_ms={:.1}",
                     renderer.quality_tier(),
-                    renderer.hdr_format_name()
+                    renderer.hdr_format_name(),
+                    pipelines.pipelines,
+                    pipelines.build_ms,
+                    pipelines.cache,
+                    pipelines.startup_ms,
                 )
             },
         );
@@ -400,7 +475,43 @@ fn gpu_report(samples: &[[f32; 5]]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_report, parse_hex32, parse_window_size};
+    use super::{gpu_report, parse_hex32, parse_window_size, pipeline_cache_path_from};
+
+    #[test]
+    fn pipeline_cache_path_follows_the_override_then_the_platform_cache_dir() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+        assert_eq!(
+            pipeline_cache_path_from(env(&[("MOBA_PIPELINE_CACHE", "off")])),
+            None
+        );
+        assert_eq!(
+            pipeline_cache_path_from(env(&[
+                ("MOBA_PIPELINE_CACHE", "/tmp/x.bin"),
+                ("HOME", "/h")
+            ])),
+            Some(PathBuf::from("/tmp/x.bin"))
+        );
+        assert_eq!(pipeline_cache_path_from(env(&[])), None);
+        if cfg!(all(unix, not(target_os = "macos"))) {
+            assert_eq!(
+                pipeline_cache_path_from(env(&[("HOME", "/h")])),
+                Some(PathBuf::from("/h/.cache/moba-engine/pipeline-cache.bin"))
+            );
+            assert_eq!(
+                pipeline_cache_path_from(env(&[("XDG_CACHE_HOME", "/c"), ("HOME", "/h")])),
+                Some(PathBuf::from("/c/moba-engine/pipeline-cache.bin"))
+            );
+        }
+    }
 
     #[test]
     fn gpu_report_lists_each_pass_percentile() {

@@ -14,15 +14,15 @@ accounts and live operations are separate tracks (see [§9](#9-other-tracks-a-sh
 The engine has a solid base to build on, but today's picture is a prototype. Compare
 [the NVIDIA teamfight capture](../images/m8-nvidia-teamfight.png) with any commercial MOBA.
 
-| Area | Today (checked against `main` @ 9a251a1; R1a rows updated 2026-10-28) |
+| Area | Today (checked against `main` @ 9a251a1; R1a/R1b rows updated 2026-10-28) |
 |---|---|
 | Frame structure | **R1a:** a render graph ([ADR-0008](../adr/0008-render-graph.md)): `scene` → HDR colour (`R16G16B16A16_SFLOAT`, `B10G11R11_UFLOAT_PACK32` on Low) + sampled-capable depth, `composite` (tonemap) → swapchain, `ui` on top, with derived sync2 barriers, transient pooling and pass culling. `FRAMES_IN_FLIGHT = 2`. `QualityTier` exists (Low/Medium/High/Ultra). |
-| Shaders | 9 GLSL files (`crates/shaders/shaders/`), adding the fullscreen vertex shader and the composite. |
+| Shaders | **R1b:** 9 GLSL sources sharing `#include` files (camera block, instance buffer, lighting, material set) plus three `MATERIAL_TEXTURED` permutations, 12 SPIR-V modules validated with `spirv-val`. Every pipeline is built at load through a persistent `VkPipelineCache` (7 pipelines: 90–98 ms cold, 0.5 ms warm on the RTX 5070 Ti). Hot reload of SPIR-V overrides in debug builds (`MOBA_SHADER_DIR`). |
 | Lighting | One directional light (Lambert), hemispheric ambient and a rim term (`unit.frag`). No shadows, no specular, no PBR, no image-based lighting. |
 | Geometry | Instanced cubes. Heroes are a 6-cube rig posed on the CPU (`push_hero_rig`). The instance SSBO is capped at 4,096. Mesh loading is in progress (WP-3.2, #286). |
 | Terrain | A flat plane with a procedural grid and per-map tint. Walls are only drawn on the network path. |
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
-| Materials and textures | Vertex colour only. Textures exist only in the UI atlas. |
+| Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). Lighting is still the R1a Lambert model; PBR is R2. |
 | Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. VAT minions and bone LOD (R4b) are open. |
 | VFX | None beyond unit tinting. Presentation events (cast, projectile spawn/hit, death, zone) already reach the client ([perf/0009](../perf/0009-presentation-events.md)). |
 | Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
@@ -102,6 +102,16 @@ Today's single pass can't hold shadows, post-processing or VFX. Rebuild the fram
 5. **Pipeline cache and precompilation.** Persist `VkPipelineCache`, build all permutations at load, and never compile mid-match.
 6. **GPU profiling.** Timestamp queries per pass, with a stats overlay and `MOBA_FRAME_LOG` columns per pass. Optional Tracy GPU zones.
 7. **Shader tooling.** Include files, permutation macros, hot reload in dev builds, and `spirv-val` in CI (already present).
+
+**Status (2026-10-28):** done. R1a (#323) delivered items 1–3 and 6
+([ADR-0008](../adr/0008-render-graph.md), [ADR-0009](../adr/0009-descriptor-model.md),
+[perf/0011](../perf/0011-render-graph.md)). R1b delivered items 4, 5 and 7
+([ADR-0010](../adr/0010-texture-pipeline.md), [perf/0013](../perf/0013-materials.md)) with
+two deliberate scope choices: materials are **client-local and not hashed** (like map visuals
+and animation sets, so no wire or replay change), not "defined in content and hashed"; and
+the GPU timings are in `MOBA_FRAME_LOG` but not yet in the HUD's stats line (the HUD is
+R7's area). The baker's BC7 encoder is single-mode (ADR-0010 follow-up). The exit's ≤ 5 %
+criterion is discussed in perf/0011.
 
 **Exit:**
 - The existing scene renders through the graph at ≤ 5 % GPU-time overhead versus today.
@@ -201,7 +211,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0007 | Mesh format | `.glb` via `gltf` (being written in WP-3.2) |
 | ADR-0008 | Render graph | **Accepted** (R1a): in-house, small, compile-time pass list; transient pooling |
 | ADR-0009 | Descriptor model | **Accepted** (R1a): per-material plain sets now; bindless deferred until measured on MoltenVK + UHD 620 |
-| ADR-0010 | Texture pipeline | Offline baker → KTX2 (BC7/BC5/BC4), mips, sRGB rules |
+| ADR-0010 | Texture pipeline | **Accepted** (R1b, [ADR-0010](../adr/0010-texture-pipeline.md)): offline baker → KTX2 (BC7/BC5/BC4), baked mips, sRGB/linear fixed by format and slot; CPU-decode fallback; client-local material descriptors |
 | ADR-0011 | Art style | Stylised PBR with a painterly layer; readability rules as acceptance criteria |
 | ADR-0012 | Animation runtime | **Accepted** ([ADR-0012](../adr/0012-animation-runtime.md)): in-house sampler + content-defined state machine; VAT for minions in R4b |
 | ADR-0013 | VFX runtime | GPU compute particles; content-defined effects bound to presentation events |

@@ -1,30 +1,41 @@
 //! Graphics pipeline construction for the scene, composite and UI passes.
+//!
+//! Every pipeline goes through [`DeviceContext::create_graphics_pipeline`], i.e. the
+//! persistent pipeline cache, and is built when the renderer is created.
 
 use ash::vk;
 
-use crate::error::{RenderError, RenderResult};
+use crate::device::DeviceContext;
+use crate::error::RenderResult;
 use crate::mesh::{SkinnedVertex, Vertex};
 
 /// Vertex buffer layout consumed by a scene pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VertexLayout {
-    /// [`Vertex`]: position and normal, stride 24 (unit and terrain).
+    /// [`Vertex`] (stride 32), position and normal only: the vertex-colour unit and terrain
+    /// shaders, which do not read the UV.
     Static,
-    /// [`SkinnedVertex`]: position, normal, `R8G8B8A8_UINT` joints, `R8G8B8A8_UNORM`
-    /// weights, stride 32 (`skinned.vert`).
+    /// [`Vertex`] with the UV at location 4: the `MATERIAL_TEXTURED` unit permutation.
+    StaticTextured,
+    /// [`SkinnedVertex`] (stride 40): position, normal, `R8G8B8A8_UINT` joints and
+    /// `R8G8B8A8_UNORM` weights (`skinned.vert`).
     Skinned,
+    /// [`SkinnedVertex`] with the UV at location 4 (`skinned_textured.vert`).
+    SkinnedTextured,
 }
 
 impl VertexLayout {
     fn stride(self) -> u32 {
         let size = match self {
-            Self::Static => core::mem::size_of::<Vertex>(),
-            Self::Skinned => core::mem::size_of::<SkinnedVertex>(),
+            Self::Static | Self::StaticTextured => core::mem::size_of::<Vertex>(),
+            Self::Skinned | Self::SkinnedTextured => core::mem::size_of::<SkinnedVertex>(),
         };
         u32::try_from(size).expect("vertex stride fits u32")
     }
 
-    /// Attribute descriptions; locations 0/1 are shared, 2/3 exist only when skinned.
+    /// Attribute descriptions: locations 0/1 (position, normal) always, 2/3 (joints, weights)
+    /// when skinned, 4 (UV) only for the textured permutations, so every declared attribute
+    /// is consumed by its shader. The stride is the same with or without the UV.
     fn attributes(self) -> &'static [vk::VertexInputAttributeDescription] {
         const fn attribute(
             location: u32,
@@ -38,19 +49,23 @@ impl VertexLayout {
                 offset,
             }
         }
-        const STATIC: [vk::VertexInputAttributeDescription; 2] = [
+        const STATIC: [vk::VertexInputAttributeDescription; 3] = [
             attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
             attribute(1, vk::Format::R32G32B32_SFLOAT, 12),
+            attribute(4, vk::Format::R32G32_SFLOAT, 24),
         ];
-        const SKINNED: [vk::VertexInputAttributeDescription; 4] = [
+        const SKINNED: [vk::VertexInputAttributeDescription; 5] = [
             attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
             attribute(1, vk::Format::R32G32B32_SFLOAT, 12),
             attribute(2, vk::Format::R8G8B8A8_UINT, 24),
             attribute(3, vk::Format::R8G8B8A8_UNORM, 28),
+            attribute(4, vk::Format::R32G32_SFLOAT, 32),
         ];
         match self {
-            Self::Static => &STATIC,
-            Self::Skinned => &SKINNED,
+            Self::Static => &STATIC[..2],
+            Self::StaticTextured => &STATIC,
+            Self::Skinned => &SKINNED[..4],
+            Self::SkinnedTextured => &SKINNED,
         }
     }
 }
@@ -66,7 +81,7 @@ pub(crate) struct PipelineSpec {
     pub(crate) cull_mode: vk::CullModeFlags,
 }
 
-pub(crate) fn create(device: &ash::Device, spec: &PipelineSpec) -> RenderResult<vk::Pipeline> {
+pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResult<vk::Pipeline> {
     let entry_point = c"main";
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
@@ -142,26 +157,13 @@ pub(crate) fn create(device: &ash::Device, spec: &PipelineSpec) -> RenderResult<
         .layout(spec.layout)
         .push_next(&mut rendering);
 
-    // SAFETY: every referenced struct outlives the call, the shader modules are live, and
-    // the pipeline layout matches the shader descriptor sets.
-    let pipelines = unsafe {
-        device.create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            core::slice::from_ref(&create_info),
-            None,
-        )
-    };
-    match pipelines {
-        Ok(mut pipelines) => pipelines
-            .pop()
-            .ok_or(RenderError::Shader("no pipeline returned")),
-        Err((_, error)) => Err(error.into()),
-    }
+    // Every referenced struct outlives the call; the layout matches the shaders.
+    device.create_graphics_pipeline(&create_info)
 }
 
 /// Creates the screen-space UI pipeline: no depth attachment, alpha blending, the atlas set.
 pub(crate) fn create_ui(
-    device: &ash::Device,
+    device: &DeviceContext,
     layout: vk::PipelineLayout,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
@@ -255,25 +257,13 @@ pub(crate) fn create_ui(
         .dynamic_state(&dynamic)
         .layout(layout)
         .push_next(&mut rendering);
-    // SAFETY: all referenced state outlives the call and the layout matches the UI shaders.
-    let pipelines = unsafe {
-        device.create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            core::slice::from_ref(&create_info),
-            None,
-        )
-    };
-    match pipelines {
-        Ok(mut pipelines) => pipelines
-            .pop()
-            .ok_or(RenderError::Shader("no UI pipeline returned")),
-        Err((_, error)) => Err(error.into()),
-    }
+    // Every referenced struct outlives the call; the layout matches the shaders.
+    device.create_graphics_pipeline(&create_info)
 }
 
 /// Creates a fullscreen-triangle pipeline: no vertex input, no depth, no blending.
 pub(crate) fn create_fullscreen(
-    device: &ash::Device,
+    device: &DeviceContext,
     layout: vk::PipelineLayout,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
@@ -332,20 +322,8 @@ pub(crate) fn create_fullscreen(
         .dynamic_state(&dynamic)
         .layout(layout)
         .push_next(&mut rendering);
-    // SAFETY: all referenced state outlives the call and the layout matches the shaders.
-    let pipelines = unsafe {
-        device.create_graphics_pipelines(
-            vk::PipelineCache::null(),
-            core::slice::from_ref(&create_info),
-            None,
-        )
-    };
-    match pipelines {
-        Ok(mut pipelines) => pipelines
-            .pop()
-            .ok_or(RenderError::Shader("no fullscreen pipeline returned")),
-        Err((_, error)) => Err(error.into()),
-    }
+    // Every referenced struct outlives the call; the layout matches the shaders.
+    device.create_graphics_pipeline(&create_info)
 }
 
 #[cfg(test)]
@@ -355,9 +333,11 @@ mod tests {
 
     #[test]
     fn skinned_attributes_match_the_vertex_struct() {
-        let attributes = VertexLayout::Skinned.attributes();
-        assert_eq!(VertexLayout::Skinned.stride(), 32);
-        assert_eq!(VertexLayout::Static.stride(), 24);
+        let attributes = VertexLayout::SkinnedTextured.attributes();
+        assert_eq!(VertexLayout::Skinned.stride(), 40);
+        assert_eq!(VertexLayout::SkinnedTextured.stride(), 40);
+        assert_eq!(VertexLayout::Static.stride(), 32);
+        assert_eq!(VertexLayout::Skinned.attributes().len(), 4);
         assert_eq!(
             attributes[2].offset as usize,
             core::mem::offset_of!(SkinnedVertex, joints)
@@ -366,6 +346,14 @@ mod tests {
             attributes[3].offset as usize,
             core::mem::offset_of!(SkinnedVertex, weights)
         );
+        assert_eq!(
+            attributes[4].offset as usize,
+            core::mem::offset_of!(SkinnedVertex, uv)
+        );
         assert_eq!(VertexLayout::Static.attributes().len(), 2);
+        assert_eq!(
+            VertexLayout::StaticTextured.attributes()[2].offset as usize,
+            core::mem::offset_of!(crate::mesh::Vertex, uv)
+        );
     }
 }

@@ -18,7 +18,7 @@ workspace = true
 
 [dependencies]
 moba-core.workspace = true
-moba-assets.workspace = true
+moba-assets = { workspace = true, features = ["bc-decode"] }
 ash.workspace = true
 ash-window.workspace = true
 bytemuck.workspace = true

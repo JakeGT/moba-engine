@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-moba-assets = { path = "../crates/assets", features = ["glb"] }
+moba-assets = { path = "../crates/assets", features = ["glb", "bc-decode"] }
 moba-core = { path = "../crates/core" }
 moba-game = { path = "../crates/game" }
 moba-net = { path = "../crates/net" }
@@ -39,6 +39,13 @@ bench = false
 [[bin]]
 name = "glb"
 path = "fuzz_targets/glb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ktx2"
+path = "fuzz_targets/ktx2.rs"
 test = false
 doc = false
 bench = false

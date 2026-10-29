@@ -53,6 +53,16 @@ pub enum RenderError {
     SkinningUnavailable,
     /// The frame's render graph failed to compile (an internal invariant; ADR-0008).
     RenderGraph(String),
+    /// [`Renderer::register_texture`](crate::Renderer::register_texture) was called with
+    /// every texture slot ([`MAX_TEXTURES`](crate::MAX_TEXTURES)) in use.
+    TooManyTextures,
+    /// [`Renderer::register_materials`](crate::Renderer::register_materials) would exceed
+    /// [`MAX_MATERIALS`](crate::MAX_MATERIALS).
+    TooManyMaterials,
+    /// A material is inconsistent (unknown texture or mesh, a texture format its slot does
+    /// not allow, a textured material without a base colour or on a mesh without UVs); the
+    /// text says which.
+    InvalidMaterial(&'static str),
 }
 
 impl fmt::Display for RenderError {
@@ -78,6 +88,9 @@ impl fmt::Display for RenderError {
             Self::SwapchainOutOfDate => f.write_str("swapchain out of date"),
             Self::SwapchainSuboptimal => f.write_str("swapchain suboptimal"),
             Self::DeviceLost => f.write_str("device lost"),
+            Self::TooManyTextures => f.write_str("texture limit reached"),
+            Self::TooManyMaterials => f.write_str("material limit reached"),
+            Self::InvalidMaterial(reason) => write!(f, "invalid material: {reason}"),
             Self::InvalidTexture => f.write_str("invalid texture dimensions"),
             Self::TooManyMeshes => write!(
                 f,

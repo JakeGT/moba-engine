@@ -7,7 +7,7 @@ sections fall back to the engine's default pack. Example packs:
 - [`content/example-pack.toml`](../content/example-pack.toml) — items + one hero
 - [`content/ability-pack.toml`](../content/ability-pack.toml) — all 10 ability kinds
 - [`content/map-pack.toml`](../content/map-pack.toml) — one-lane map + vision wall
-- [`content/sentinel-pack.toml`](../content/sentinel-pack.toml) — `[assets]` manifest and a hero `model`
+- [`content/sentinel-pack.toml`](../content/sentinel-pack.toml) — `[assets]` manifest and a hero `model` with a [material](#materials-and-textures)
 - [`content/ember-map.toml`](../content/ember-map.toml) and
   [`content/frost-map.toml`](../content/frost-map.toml) — maps with their own
   [visuals descriptors](#map-visuals)
@@ -581,6 +581,85 @@ TOML puts every key after a `[[table]]` header into that table, so keep `move_sp
 `MOBA_ANIM_LOD` reduces how often far heroes animate: `<near>,<far>` metres from the camera
 (default `80,140`: every frame within 80 m, every 2nd frame to 140 m, every 4th beyond or off
 screen), or `off`.
+
+### Materials and textures
+
+A hero model can have a **material** (ADR-0010): a shader permutation, a parameter block and a
+texture set. A model named `sentinel` uses `<root>/materials/sentinel.toml` if the file
+exists; without one it keeps the vertex-colour look. Like map visuals and animation sets,
+materials are client-local and cosmetic: they are not part of the content hash, the signature
+or the wire, and two players with different files see different shading in the same match.
+[`content/materials/sentinel.toml`](../content/materials/sentinel.toml) is the example:
+
+```toml
+shader = "textured"                  # "vertex-color" (the default look) or "textured"
+base_color = "sentinel-base"         # <root>/textures/sentinel-base.ktx2
+normal = "sentinel-normal"           # optional
+metallic_roughness = "sentinel-mr"   # optional (read by R2's PBR)
+mask = "sentinel-mask"               # optional: where the unit's team colour tints
+base_color_factor = [1.0, 1.0, 1.0, 1.0]   # optional, linear RGBA, 0..=1 (default 1)
+metallic = 0.0                       # optional, 0..=1 (default 0)
+roughness = 1.0                      # optional, 0..=1 (default 1)
+normal_scale = 1.0                   # optional, 0..=2 (default 1)
+team_tint = 1.0                      # optional, 0..=1 (default 1)
+emissive = [0.0, 0.0, 0.0]           # optional, linear RGB, 0..=16 (default 0; R2)
+```
+
+The textured permutation draws `base colour × base_color_factor`, multiplied by the unit's
+team colour where the mask is set (scaled by `team_tint`), with the normal map applied. Keep
+team-coloured areas large and readable: the mask is how a textured hero still reads as blue
+or red at gameplay zoom. A `vertex-color` material takes no textures. A textured one needs a
+`base_color`, and the model needs texture coordinates (`TEXCOORD_0` in the `.glb`).
+
+**Textures** are KTX 2.0 files at `<root>/textures/<name>.ktx2`; names follow the model-name
+rules (1..=32 of `[A-Za-z0-9_-]`). Each slot takes only its own formats, so sRGB and linear
+data cannot be mixed up:
+
+| Slot | Bake with | Format (8-bit fallback) | Encoding |
+|---|---|---|---|
+| `base_color` | `--kind color` | `bc7-srgb` (`rgba8-srgb`) | sRGB |
+| `normal` | `--kind normal` | `bc5` (`rg8`) | linear tangent-space X/Y, +Y up |
+| `metallic_roughness` | `--kind data` | `bc5` (`rg8`) | linear, R metallic, G roughness |
+| `mask` | `--kind mask` | `bc4` (`r8`) | linear, R |
+
+Bake them from PNG with mips:
+
+```bash
+cargo run --release -p moba-tools --bin texture-bake -- \
+  bake art/knight-base.png content/textures/knight-base.ktx2 --kind color
+cargo run --release -p moba-tools --bin texture-bake -- \
+  bake art/knight-normal.png content/textures/knight-normal.ktx2 --kind normal
+cargo run --release -p moba-tools --bin texture-bake -- info content/textures/knight-base.ktx2
+```
+
+`--format` picks the 8-bit fallback instead (`--format rg8`), and `--no-mips` writes level 0
+only. The baker filters colour mips in linear light and renormalises normal mips, reports the
+level-0 PSNR of BC output, and reloads every file through the runtime loader before writing
+it. Its BC7 encoder is a fast single-mode one, fine for engine development; a production
+encoder is an ADR-0010 follow-up. `scripts/bake-sample-textures.sh` regenerates the shipped,
+self-generated sample set.
+
+**Limits.** A descriptor is at most 4 KiB; unknown keys, wrong types and out-of-range or
+non-finite numbers are errors. A texture is at most 4096×4096, 13 mip levels and 64 MiB,
+one 2D image, no supercompression. A renderer holds 64 materials and 256 textures.
+
+**Checks.** `content-check` loads the material next to every `[[assets.units]]` model
+(`materials/<stem>.toml`, where `models/<stem>.glb` is the unit path) and every texture it
+names, enforces the slot formats, reports each problem as an error, and prints the counts (one
+descriptor set per textured material):
+
+```text
+materials  1 (1 textured, 1 descriptor sets)
+textures   4 (4 bindings, 299 KiB)
+```
+
+The JSON output adds `materials`, `textured_materials`, `textures` and `texture_bytes`.
+
+**Fallback.** Any problem logs one `[assets] material for model '<name>': ...` line and keeps
+that model on the vertex-colour look: a missing, oversized or invalid descriptor, a missing or
+malformed texture, a texture in the wrong slot, a model without UVs, or a renderer limit. A
+match never fails because of a material. On GPUs without BC support (or with
+`MOBA_COMPRESSED_TEXTURES=0`) BC textures are decoded on the CPU at load and look the same.
 
 ## Hot reload
 

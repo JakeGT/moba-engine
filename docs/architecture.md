@@ -104,8 +104,16 @@ passes run in this order:
 3. `ui` draws the HUD on top, so text is never tonemapped;
 4. `capture` copies the swapchain image for readback, in capture frames only.
 
-Descriptors are plain per-pass sets, and materials will get one set each
-([ADR-0009](adr/0009-descriptor-model.md)). The scene pass draws:
+The scene pass is submitted ahead of the acquire-semaphore wait (it never touches the
+swapchain), and the passes from `composite` on wait for the acquired image, in one
+`vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
+load from a pool sized by the registered content
+([ADR-0009](adr/0009-descriptor-model.md), [ADR-0010](adr/0010-texture-pipeline.md)). Every
+pipeline, each shader permutation included, is built at renderer creation through a
+persistent `VkPipelineCache` (a per-user file, validated before use), so nothing compiles
+mid-match. GLSL shares declarations through `#include` files and a small, enumerated set of
+permutations (`MATERIAL_TEXTURED`) is compiled to separate SPIR-V at build time; debug builds
+can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
 
 - terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes
   use a client-local `.glb` model when one is configured (GPU-skinned when the file has a
@@ -113,6 +121,11 @@ Descriptors are plain per-pass sets, and materials will get one set each
   the animation runtime of ADR-0012 when the model has an animation set, else by its run clip
   and gait) and otherwise a deterministic multi-part animated rig; minions/structures use
   instanced cubes;
+- a model with a client-local material (`materials/<model>.toml`, KTX2 textures in BC7/BC5/
+  BC4 with mips, ADR-0010) draws with the `MATERIAL_TEXTURED` permutation and its material
+  set (base colour tinted by the team colour through a mask, normal map; metallic/roughness
+  bound for R2); everything else keeps the lit vertex colour. BC textures are decoded on the
+  CPU at load on devices without `textureCompressionBC`;
 - up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
   darkens unseen ground.
 

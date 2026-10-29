@@ -280,7 +280,9 @@ pub(crate) enum GraphError {
         pass: &'static str,
         resource: &'static str,
     },
-    /// A live pass reads a transient that no earlier live pass wrote.
+    /// A live pass (or a final access) reads a transient, or an imported image whose start
+    /// layout is `UNDEFINED` (discarded contents, such as the swapchain), that no earlier live
+    /// pass wrote.
     ReadBeforeWrite {
         pass: &'static str,
         resource: &'static str,
@@ -304,10 +306,7 @@ impl core::fmt::Display for GraphError {
                 write!(f, "pass {pass} declares {resource} twice")
             }
             Self::ReadBeforeWrite { pass, resource } => {
-                write!(
-                    f,
-                    "pass {pass} reads transient {resource} before any pass writes it"
-                )
+                write!(f, "pass {pass} reads {resource} before any pass writes it")
             }
             Self::TooLarge(what) => write!(f, "render graph has too many {what}"),
         }
@@ -432,14 +431,33 @@ pub(crate) struct CompiledPass<T> {
     pub(crate) name: &'static str,
     pub(crate) tag: T,
     pub(crate) barriers: Vec<Barrier>,
+    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 16).
+    uses: u16,
+}
+
+impl<T> CompiledPass<T> {
+    /// Whether the pass accesses `resource`.
+    pub(crate) fn uses(&self, resource: ResourceId) -> bool {
+        resource.index() < MAX_RESOURCES && self.uses & (1 << resource.index()) != 0
+    }
 }
 
 /// A physical transient image shared by one or more transient resources.
+///
+/// Equality covers the cross-frame start state too: two compiled variants that the renderer
+/// alternates between (the normal and the capture frame) may share physical images only if
+/// every slot also starts from the same `(stage, access)`, because a slot's first barrier
+/// orders against whatever the *previous* frame's variant did with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PhysicalImage {
     pub(crate) desc: ImageDesc,
     /// Union of every aliased resource's usage plus `extra_usage`.
     pub(crate) usage: vk::ImageUsageFlags,
+    /// Every stage that touches the slot during a frame: the source stages of the slot's
+    /// first barrier in the next frame.
+    pub(crate) start_stage: vk::PipelineStageFlags2,
+    /// Every write to the slot during a frame: the source access of that first barrier.
+    pub(crate) start_access: vk::AccessFlags2,
 }
 
 /// The executable plan produced by [`GraphBuilder::compile`].
@@ -459,14 +477,31 @@ impl<T> CompiledGraph<T> {
         &self.passes
     }
 
+    /// Index of the first live pass that accesses `resource`, or the pass count if none
+    /// does. The renderer submits the passes before it without waiting on the acquire
+    /// semaphore when `resource` is the swapchain image.
+    pub(crate) fn first_use(&self, resource: ResourceId) -> usize {
+        self.passes
+            .iter()
+            .position(|pass| pass.uses(resource))
+            .unwrap_or(self.passes.len())
+    }
+
     /// Barriers recorded after the last pass (final transitions of imported resources).
     pub(crate) fn final_barriers(&self) -> &[Barrier] {
         &self.final_barriers
     }
 
-    /// Physical transient images to allocate.
+    /// Physical transient images to allocate, with each slot's cross-frame start state.
     pub(crate) fn slots(&self) -> &[PhysicalImage] {
         &self.slots
+    }
+
+    /// Whether `other` can run on the same physical transients, in any interleaving with
+    /// this graph: the same slots, descriptions and usages, and the same per-slot start
+    /// `(stage, access)` (see [`PhysicalImage`]).
+    pub(crate) fn shares_transients_with<U>(&self, other: &CompiledGraph<U>) -> bool {
+        self.slots == other.slots
     }
 
     /// Physical slot of a transient resource, or `None` for imports and culled transients.
@@ -699,7 +734,14 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         }
     }
 
-    // 3. Transient lifetimes over live passes, and read-before-write checks.
+    // 3. Transient lifetimes over live passes, and read-before-write checks. Transients and
+    // imported images that start with discarded contents (`UNDEFINED`, such as the acquired
+    // swapchain image) must be written before anything, including a final access, reads them.
+    let discards = |decl: &ResourceDecl| match decl.kind {
+        Kind::Transient(_) => true,
+        Kind::ImportedImage => decl.initial.layout == vk::ImageLayout::UNDEFINED,
+        Kind::ImportedBuffer => false,
+    };
     let mut first_use: Vec<Option<usize>> = vec![None; resources.len()];
     let mut last_use: Vec<usize> = vec![0; resources.len()];
     let mut written = vec![false; resources.len()];
@@ -710,11 +752,8 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         }
         for &(resource, access) in &pass.accesses {
             let decl = &resources[resource.index()];
-            if !matches!(decl.kind, Kind::Transient(_)) {
-                continue;
-            }
             let info = access.info();
-            if info.reads_previous && !written[resource.index()] {
+            if discards(decl) && info.reads_previous && !written[resource.index()] {
                 return Err(GraphError::ReadBeforeWrite {
                     pass: pass.name,
                     resource: decl.name,
@@ -723,10 +762,25 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
             if info.writes() {
                 written[resource.index()] = true;
             }
+            if !matches!(decl.kind, Kind::Transient(_)) {
+                continue;
+            }
             first_use[resource.index()].get_or_insert(order);
             last_use[resource.index()] = order;
         }
         order += 1;
+    }
+    for (index, decl) in resources.iter().enumerate() {
+        if let Some(access) = decl.final_access
+            && discards(decl)
+            && access.info().reads_previous
+            && !written[index]
+        {
+            return Err(GraphError::ReadBeforeWrite {
+                pass: "<final>",
+                resource: decl.name,
+            });
+        }
     }
 
     // 4. Assign physical slots greedily in first-use order; a slot is reused when its
@@ -749,6 +803,8 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
             slots.push(PhysicalImage {
                 desc,
                 usage: desc.extra_usage,
+                start_stage: vk::PipelineStageFlags2::NONE,
+                start_access: vk::AccessFlags2::NONE,
             });
             slot_last.push(0);
             slots.len() - 1
@@ -759,8 +815,6 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
     // Usage and the cross-frame start state of each slot: every stage that touches the slot
     // and every write to it, so the first barrier of the next frame orders against this
     // frame's work on the same queue.
-    let mut slot_stage = vec![vk::PipelineStageFlags2::NONE; slots.len()];
-    let mut slot_writes = vec![vk::AccessFlags2::NONE; slots.len()];
     for (index, pass) in passes.iter().enumerate() {
         if !live[index] {
             continue;
@@ -768,10 +822,10 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         for &(resource, access) in &pass.accesses {
             if let Some(slot) = slot_of[resource.index()] {
                 let info = access.info();
-                let slot = usize::from(slot);
-                slots[slot].usage |= info.usage;
-                slot_stage[slot] |= info.stage;
-                slot_writes[slot] |= info.write_access;
+                let slot = &mut slots[usize::from(slot)];
+                slot.usage |= info.usage;
+                slot.start_stage |= info.stage;
+                slot.start_access |= info.write_access;
             }
         }
     }
@@ -782,11 +836,11 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         .map(|decl| Track::new(decl.initial, !matches!(decl.kind, Kind::ImportedBuffer)))
         .collect();
     let slot_track_base = tracks.len();
-    for slot in 0..slots.len() {
+    for slot in &slots {
         tracks.push(Track::new(
             ImportState {
-                stage: slot_stage[slot],
-                access: slot_writes[slot],
+                stage: slot.start_stage,
+                access: slot.start_access,
                 layout: vk::ImageLayout::UNDEFINED,
             },
             true,
@@ -819,10 +873,15 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         if barriers.len() > MAX_BARRIERS {
             return Err(GraphError::TooLarge("barriers"));
         }
+        let uses = pass
+            .accesses
+            .iter()
+            .fold(0u16, |mask, &(resource, _)| mask | (1 << resource.index()));
         compiled.push(CompiledPass {
             name: pass.name,
             tag: pass.tag,
             barriers,
+            uses,
         });
     }
     let mut final_barriers = Vec::new();

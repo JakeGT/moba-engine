@@ -3,6 +3,11 @@
 //! The build script uses `glslc` (or `glslangValidator`) and validates every module with
 //! `spirv-val` when it is installed. The renderer consumes the byte slices below and never
 //! ships source code to the driver.
+//!
+//! Sources share declarations through `#include` files in `shaders/include/` (camera block,
+//! instance buffer, lighting, material set). A few sources are also built as **permutations**
+//! with preprocessor defines, each its own module: the `*_TEXTURED` modules are the
+//! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010).
 
 #![forbid(unsafe_code)]
 
@@ -10,6 +15,16 @@
 pub const UNIT_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unit.vert.spv"));
 /// Instanced unit fragment shader.
 pub const UNIT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unit.frag.spv"));
+/// Instanced unit vertex shader, `MATERIAL_TEXTURED` permutation (also passes UVs).
+pub const UNIT_TEXTURED_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured.vert.spv"));
+/// Unit fragment shader, `MATERIAL_TEXTURED` permutation: samples the material set (set 2).
+pub const UNIT_TEXTURED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_textured.frag.spv"));
+/// Skinned unit vertex shader, `MATERIAL_TEXTURED` permutation (also passes UVs; pairs with
+/// [`UNIT_TEXTURED_FRAG`]).
+pub const SKINNED_TEXTURED_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/skinned_textured.vert.spv"));
 /// Skinned unit vertex shader (bone buffer + push-constant bone range; pairs with
 /// [`UNIT_FRAG`]).
 pub const SKINNED_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/skinned.vert.spv"));
@@ -46,8 +61,20 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: UNIT_FRAG,
     },
     ShaderModule {
+        name: "unit_textured.vert",
+        spirv: UNIT_TEXTURED_VERT,
+    },
+    ShaderModule {
+        name: "unit_textured.frag",
+        spirv: UNIT_TEXTURED_FRAG,
+    },
+    ShaderModule {
         name: "skinned.vert",
         spirv: SKINNED_VERT,
+    },
+    ShaderModule {
+        name: "skinned_textured.vert",
+        spirv: SKINNED_TEXTURED_VERT,
     },
     ShaderModule {
         name: "terrain.vert",
@@ -75,6 +102,15 @@ pub const MODULES: &[ShaderModule] = &[
     },
 ];
 
+/// The module called `name` (for example `"unit_textured.frag"`), if it exists.
+#[must_use]
+pub fn module(name: &str) -> Option<&'static [u8]> {
+    MODULES
+        .iter()
+        .find(|module| module.name == name)
+        .map(|module| module.spirv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +130,19 @@ mod tests {
             let magic = u32::from_le_bytes(module.spirv[..4].try_into().unwrap());
             assert_eq!(magic, SPIRV_MAGIC, "{} has a bad magic number", module.name);
         }
+    }
+
+    #[test]
+    fn permutations_are_distinct_modules() {
+        assert_eq!(module("unit.frag"), Some(UNIT_FRAG));
+        assert_eq!(module("unit_textured.frag"), Some(UNIT_TEXTURED_FRAG));
+        assert_eq!(module("missing.frag"), None);
+        assert_ne!(UNIT_FRAG, UNIT_TEXTURED_FRAG);
+        assert_ne!(UNIT_VERT, UNIT_TEXTURED_VERT);
+        assert_ne!(SKINNED_VERT, SKINNED_TEXTURED_VERT);
+        let mut names: Vec<_> = MODULES.iter().map(|module| module.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), MODULES.len(), "module names are unique");
     }
 }

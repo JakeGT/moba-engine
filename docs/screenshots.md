@@ -139,6 +139,24 @@ MOBA_VULKAN_VALIDATION=required cargo run -p moba-client
 A missing, path-escaping or truncated model logs one `[assets]` line and that hero keeps the
 procedural rig.
 
+### Textured material (R1b)
+![Sentinel before and after its material](images/r1b-textured-sentinel.png)
+
+The same networked frame (tick 120, `MOBA_CAPTURE_TICK`) without and with the sample material
+`content/materials/sentinel.toml` (ADR-0010): left, `main` at `6e809f0` (vertex colour); right,
+this build drawing the static `sentinel.glb` with the `MATERIAL_TEXTURED` permutation, a BC7
+base colour, a BC5 normal map and a BC4 team mask (the painted plates take the blue team colour,
+the bronze seams and rivets do not). All textures are self-generated (`texture-bake generate
+sentinel`). Lavapipe, 1280×720, validation and synchronization validation required, zero
+messages; 400×300 crops around the hero. Decoding the BC textures on the CPU instead
+(`MOBA_COMPRESSED_TEXTURES=0`) changes no channel by more than one 8-bit step.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=Blade=sentinel,Guardian=sentinel,Mage=sentinel \
+MOBA_CAMERA_DISTANCE=10 MOBA_CAPTURE_TICK=120 MOBA_SMOKE_FRAMES=100000 \
+MOBA_CAPTURE=/tmp/frame.ppm MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
+```
+
 ### GPU-skinned hero (walk cycle)
 ![GPU-skinned hero walking](images/m3-skinned-hero.png)
 

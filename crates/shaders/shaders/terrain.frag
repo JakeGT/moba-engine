@@ -1,16 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
-layout(set = 0, binding = 0) uniform CameraBlock {
-    mat4 view_proj;
-    vec4 camera_pos;
-    vec4 light_direction;
-    vec4 ambient;
-    vec4 terrain;
-    vec4 vision_circles[16];
-    uvec4 vision_count;
-    vec4 vision_walls[32];
-    uvec4 wall_count;
-} camera;
+#include "camera.glsl"
 
 layout(location = 0) in vec3 in_normal;
 layout(location = 1) in vec3 in_world_pos;
@@ -38,7 +29,7 @@ void main() {
     // Fog of war: darken terrain outside the allied vision circles. Server snapshots
     // already withhold unseen units; this makes the visibility boundary legible.
     float visibility = 0.0;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < MOBA_VISION_CIRCLES; i++) {
         if (i >= int(camera.vision_count.x)) {
             break;
         }
@@ -48,7 +39,7 @@ void main() {
             continue;
         }
         bool blocked = false;
-        for (int wall_index = 0; wall_index < 32; wall_index++) {
+        for (int wall_index = 0; wall_index < MOBA_VISION_WALLS; wall_index++) {
             if (wall_index >= int(camera.wall_count.x)) {
                 break;
             }

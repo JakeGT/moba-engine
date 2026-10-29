@@ -23,7 +23,9 @@ scale, and a wrong barrier is a silent GPU race that only sync validation catche
   image, per-frame host-written buffers, the capture buffer) also declare their state at graph
   start and an optional final access (`Present`, `HostRead`).
 - **`compile` derives the plan.** Compilation is pure logic over `ash::vk` flag types. It never
-  touches a device, so it is unit-tested headless (`graph/tests.rs`, `frame_graph.rs`). It:
+  touches a device, so it is unit-tested headless (`graph/tests.rs`, `frame_graph.rs`). It
+  rejects a read before any write of a transient **or** of an import whose start layout is
+  `UNDEFINED` (the swapchain image), including through a final access (since R1b). It:
   1. **Culls** passes whose outputs no later live pass, final access or side-effect pass
      consumes. It walks the list backwards, so a write that is overwritten before it is read
      is dead.
@@ -44,7 +46,10 @@ scale, and a wrong barrier is a silent GPU race that only sync validation catche
      same queue. One HDR target and one depth buffer are therefore shared by both frames in
      flight, with no per-frame copies.
 - **Compile once, record many.** The renderer compiles its graph variants at creation: the
-  normal frame and the capture frame (which adds a copy pass). Physical images are created at
+  normal frame and the capture frame (which adds a copy pass). Because the variants alternate
+  on the same physical transients, creation checks that they agree on every slot's
+  description, usage **and** cross-frame start `(stage, access)` (`PhysicalImage` equality,
+  since R1b), not just the slot list. Physical images are created at
   creation and on resize. Per frame, the renderer fills a fixed-size binding table
   (`Bindings`, 16 entries) with this frame's handles. It then records the precompiled barriers
   from stack arrays (at most 16 barriers per pass). **Nothing on the frame path allocates.**
@@ -52,12 +57,16 @@ scale, and a wrong barrier is a silent GPU race that only sync validation catche
   `GraphError::TooLarge` past them, rather than growing at run time.
 - **Per-pass GPU timing.** Each pass writes two `vkCmdWriteTimestamp2(ALL_COMMANDS)` queries:
   one after its barriers and one after its commands. They go into a query pool per frame in
-  flight, created at renderer creation. A pass's time excludes waits on earlier commands but
-  can include the acquire-semaphore wait, because the submit waits on it at
-  `COLOR_ATTACHMENT_OUTPUT` and the scene pass writes colour too. Measure with vsync off; a
-  later split into a no-wait scene submit and a waiting composite submit removes this. Results are read after that frame's fence with no
-  wait. If the graphics queue reports `timestampValidBits == 0` or `timestampPeriod` is zero,
-  no pools are created and `Renderer::gpu_timings()` returns `None`.
+  flight, created at renderer creation. A pass's time excludes waits on earlier commands.
+  **Since R1b** the frame is two batches in one `vkQueueSubmit`: the passes before the first
+  swapchain access (the scene) go in a batch with no semaphore wait, and the rest wait on the
+  acquire semaphore at `COLOR_ATTACHMENT_OUTPUT`, so the scene's time can no longer include
+  that wait (the composite's still can when the presentation engine holds the image; measure
+  with vsync off). Results are read after that frame's fence with no wait, and carry the
+  measured frame's sequence number (`GpuTimings::frame`) so a caller polling every frame logs
+  each sample once. If the graphics queue reports `timestampValidBits == 0` or
+  `timestampPeriod` is zero, no pools are created and `Renderer::gpu_timings()` returns
+  `None`.
 
 ### The R1a frame
 

@@ -1,27 +1,16 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Skinned unit rendering (WP-4.1). Same camera and instance data as unit.vert, plus the
 // per-frame bone buffer: three vec4 rows (a row-major affine 3x4 matrix) per joint. The push
 // constant selects this draw's bone range. The renderer guarantees joint_count >= 1 and
 // first_bone + joint_count <= the bones uploaded this frame; joint indices are clamped to
 // the range, so no read can leave it. The output matches unit.vert, so unit.frag is reused.
+//
+// Permutations (crates/shaders/build.rs): `MATERIAL_TEXTURED` also passes the mesh UVs.
 
-layout(set = 0, binding = 0) uniform CameraBlock {
-    mat4 view_proj;
-    vec4 camera_pos;
-    vec4 light_direction; // xyz direction *towards* the light, w = intensity
-    vec4 ambient;
-    vec4 terrain;
-} camera;
-
-struct Instance {
-    mat4 model;
-    vec4 color;
-};
-
-layout(set = 1, binding = 0) readonly buffer InstanceBlock {
-    Instance instances[];
-} instance_data;
+#include "camera.glsl"
+#include "instance.glsl"
 
 layout(set = 1, binding = 1) readonly buffer BoneBlock {
     vec4 rows[];
@@ -38,10 +27,16 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in uvec4 in_joints;  // R8G8B8A8_UINT
 layout(location = 3) in vec4 in_weights;  // R8G8B8A8_UNORM, sum 1 or all zero
+#ifdef MATERIAL_TEXTURED
+layout(location = 4) in vec2 in_uv;
+#endif
 
 layout(location = 0) out vec3 out_world_normal;
 layout(location = 1) out vec3 out_color;
 layout(location = 2) out vec3 out_world_pos;
+#ifdef MATERIAL_TEXTURED
+layout(location = 3) out vec2 out_uv;
+#endif
 
 mat4 bone(uint joint) {
     uint base = (skin.first_bone + min(joint, skin.joint_count - 1u)) * 3u;
@@ -73,4 +68,7 @@ void main() {
     out_world_normal = normalize(transpose(inverse(mat3(model))) * in_normal);
     out_color = instance.color.rgb;
     out_world_pos = world.xyz;
+#ifdef MATERIAL_TEXTURED
+    out_uv = in_uv;
+#endif
 }

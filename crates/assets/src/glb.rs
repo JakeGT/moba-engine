@@ -16,11 +16,13 @@
 //!   looping or exhausting the stack.
 //!
 //! Supported: triangle-list primitives with `POSITION` (`f32` VEC3), optional `NORMAL`
-//! (`f32` VEC3) and optional `u8`/`u16`/`u32` indices in the embedded BIN chunk; node
-//! transforms of the default scene are baked into the vertices. Missing normals are replaced
-//! by flat face normals, as the glTF specification requires. Sparse accessors, external
-//! buffers and any `extensionsRequired` entry are rejected; materials, textures and morph
-//! targets are ignored.
+//! (`f32` VEC3), optional `TEXCOORD_0` (`f32` or normalised `u8`/`u16` VEC2) and optional
+//! `u8`/`u16`/`u32` indices in the embedded BIN chunk; node transforms of the default scene
+//! are baked into the vertices. Missing normals are replaced by flat face normals, as the glTF
+//! specification requires. When any primitive has `TEXCOORD_0`, primitives without it get
+//! `(0, 0)`. Sparse accessors, external buffers and any `extensionsRequired` entry are
+//! rejected; glTF materials, images and morph targets are ignored (materials come from a
+//! client-local descriptor, ADR-0010).
 //!
 //! **Skinning.** If the mesh nodes of the default scene use a skin, they must all use the
 //! *same* one (a file mixing skinned and static meshes, or two skins, is rejected). Skinned
@@ -225,7 +227,11 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
         }
     }
     let skin = builder.skin;
-    let mesh = MeshData::new(builder.positions, builder.normals, builder.indices)?;
+    let uvs = builder.has_uvs.then_some(builder.uvs);
+    let mut mesh = MeshData::new(builder.positions, builder.normals, builder.indices)?;
+    if let Some(uvs) = uvs {
+        mesh = mesh.with_uvs(uvs)?;
+    }
     let SkinMode::Skinned(skin) = skin else {
         return Ok(mesh);
     };
@@ -612,6 +618,20 @@ impl AccessorData<'_> {
         ])
     }
 
+    /// An `f32` or normalised `u8`/`u16` VEC2 (`TEXCOORD_0`) as `f32`.
+    fn unorm_vec2(&self, element: usize) -> Option<[f32; 2]> {
+        let scale = match self.component {
+            ComponentType::F32 => return self.f32s::<2>(element),
+            ComponentType::U8 => 255.0,
+            ComponentType::U16 => 65_535.0,
+            _ => return None,
+        };
+        Some([
+            self.small_uint(element, 0)? as f32 / scale,
+            self.small_uint(element, 1)? as f32 / scale,
+        ])
+    }
+
     /// An `f32` or normalised `u8`/`u16` VEC4 (`WEIGHTS_0`) as `f32`.
     fn unorm_vec4(&self, element: usize) -> Option<[f32; 4]> {
         let scale = match self.component {
@@ -757,12 +777,22 @@ impl SkinMode {
     }
 }
 
+/// One primitive's optional per-vertex streams.
+struct VertexStreams<'s, 'a> {
+    uvs: Option<&'s AccessorData<'a>>,
+    skin: Option<&'s SkinStreams<'a>>,
+}
+
 /// Accumulates primitives into one mesh while enforcing the caps before allocating.
 #[derive(Default)]
 struct Builder {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    /// One pair per vertex, `(0, 0)` where a primitive has no `TEXCOORD_0`.
+    uvs: Vec<[f32; 2]>,
+    /// Whether any primitive so far had `TEXCOORD_0`.
+    has_uvs: bool,
     joints: Vec<[u8; 4]>,
     weights: Vec<[u8; 4]>,
     primitives: usize,
@@ -812,6 +842,7 @@ impl Builder {
         }
         self.positions.reserve(vertices);
         self.normals.reserve(vertices);
+        self.uvs.reserve(vertices);
         self.indices.reserve(indices);
         if self.skinned() {
             self.joints.reserve(vertices);
@@ -820,12 +851,18 @@ impl Builder {
         Ok(())
     }
 
-    fn push_skin(
+    /// Pushes vertex `element`'s optional streams: its UV (or `(0, 0)`) and skin.
+    fn push_streams(
         &mut self,
-        skin: Option<&SkinStreams<'_>>,
+        streams: &VertexStreams<'_, '_>,
         element: usize,
     ) -> Result<(), GlbError> {
-        if let Some(skin) = skin {
+        let uv = match streams.uvs {
+            Some(uvs) => uvs.unorm_vec2(element).ok_or(GlbError::BadAccessor)?,
+            None => [0.0, 0.0],
+        };
+        self.uvs.push(uv);
+        if let Some(skin) = streams.skin {
             let (joints, weights) = skin.vertex(element)?;
             self.joints.push(joints);
             self.weights.push(weights);
@@ -924,6 +961,27 @@ impl Builder {
             {
                 return Err(GlbError::BadAccessor);
             }
+            let uvs = primitive
+                .attributes
+                .get(&Checked::Valid(Semantic::TexCoords(0)))
+                .map(|index| {
+                    accessor(
+                        root,
+                        bin,
+                        index.value(),
+                        Type::Vec2,
+                        &[ComponentType::F32, ComponentType::U8, ComponentType::U16],
+                    )
+                })
+                .transpose()?;
+            if uvs.as_ref().is_some_and(|uvs| uvs.count != positions.count) {
+                return Err(GlbError::BadAccessor);
+            }
+            self.has_uvs |= uvs.is_some();
+            let streams = VertexStreams {
+                uvs: uvs.as_ref(),
+                skin: None,
+            };
             let indices = primitive
                 .indices
                 .map(|index| {
@@ -941,6 +999,10 @@ impl Builder {
                 return Err(MeshError::NotTriangles.into());
             }
             let skin = self.skin_streams(root, bin, primitive, positions.count)?;
+            let streams = VertexStreams {
+                skin: skin.as_ref(),
+                ..streams
+            };
             match normals {
                 Some(normals) => self.append_indexed(
                     &positions,
@@ -949,15 +1011,11 @@ impl Builder {
                     index_count,
                     world,
                     normal_matrix,
-                    skin.as_ref(),
+                    &streams,
                 )?,
-                None => self.append_flat(
-                    &positions,
-                    indices.as_ref(),
-                    index_count,
-                    world,
-                    skin.as_ref(),
-                )?,
+                None => {
+                    self.append_flat(&positions, indices.as_ref(), index_count, world, &streams)?;
+                }
             }
         }
         Ok(())
@@ -972,7 +1030,7 @@ impl Builder {
         index_count: usize,
         world: Mat4,
         normal_matrix: Mat3,
-        skin: Option<&SkinStreams<'_>>,
+        streams: &VertexStreams<'_, '_>,
     ) -> Result<(), GlbError> {
         self.reserve(positions.count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
@@ -983,7 +1041,7 @@ impl Builder {
             let normal = (normal_matrix * Vec3::from_array(normal)).normalize_or(Vec3::Y);
             self.positions.push(position.to_array());
             self.normals.push(normal.to_array());
-            self.push_skin(skin, element)?;
+            self.push_streams(streams, element)?;
         }
         let vertex_count = positions.count as u32; // <= MAX_VERTICES, checked by `reserve`.
         for element in 0..index_count {
@@ -1006,7 +1064,7 @@ impl Builder {
         indices: Option<&AccessorData<'_>>,
         index_count: usize,
         world: Mat4,
-        skin: Option<&SkinStreams<'_>>,
+        streams: &VertexStreams<'_, '_>,
     ) -> Result<(), GlbError> {
         self.reserve(index_count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
@@ -1032,7 +1090,7 @@ impl Builder {
             for (corner, source) in corners.iter().zip(sources) {
                 self.positions.push(corner.to_array());
                 self.normals.push(normal.to_array());
-                self.push_skin(skin, source)?;
+                self.push_streams(streams, source)?;
             }
         }
         for element in 0..index_count {
@@ -1114,6 +1172,44 @@ mod tests {
         assert_eq!(mesh.indices(), &[0, 1, 2]);
         assert_eq!(mesh.positions()[1], [1.0, 2.0, 0.0]);
         assert_eq!(mesh.normals()[0], [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn texcoords_are_read_as_float_or_normalised_ints() {
+        let with_uvs = |component: u32, data: Vec<u8>| {
+            let json = triangle_json("", POSITION_ACCESSOR)
+                .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TEXCOORD_0":3}"#)
+                .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+                .replace(
+                    r#""byteLength":6}],"#,
+                    r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
+                )
+                .replace(
+                    r#""type":"SCALAR"}]"#,
+                    &format!(
+                        r#""type":"SCALAR"}},{{"bufferView":3,"componentType":{component},"normalized":true,"count":3,"type":"VEC2"}}]"#
+                    ),
+                );
+            let mut bin = triangle_bin();
+            bin.extend([0, 0]); // pad the u16 indices to 80 bytes
+            bin.extend(data);
+            load_glb(&glb(&json, Some(&bin)))
+        };
+        let mesh = with_uvs(5126, floats(&[0.0, 0.0, 2.0, 0.0, 0.0, 1.0])).expect("f32 uvs");
+        assert_eq!(mesh.uvs(), Some(&[[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]][..]));
+        let mut bytes = vec![0, 0, 255, 0, 0, 255];
+        bytes.resize(24, 0); // the buffer view is 24 bytes long
+        let mesh = with_uvs(5121, bytes).expect("u8 uvs");
+        assert_eq!(mesh.uvs(), Some(&[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]][..]));
+        let nan = with_uvs(5126, floats(&[0.0, 0.0, f32::NAN, 0.0, 0.0, 1.0]));
+        assert!(matches!(nan, Err(GlbError::Mesh(MeshError::NonFinite))));
+        let json = triangle_json("", POSITION_ACCESSOR);
+        assert!(
+            load_glb(&glb(&json, Some(&triangle_bin())))
+                .expect("no uvs")
+                .uvs()
+                .is_none()
+        );
     }
 
     #[test]

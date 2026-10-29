@@ -16,14 +16,17 @@ mod font_data;
 mod frame_graph;
 mod graph;
 mod instance;
+mod material;
 mod mesh;
 mod passes;
 mod pipeline;
+mod pipeline_cache;
 mod profiler;
 mod quality;
 mod renderer;
 mod resources;
 mod scene;
+mod shaders;
 mod swapchain;
 mod targets;
 mod texture;
@@ -31,11 +34,15 @@ mod ui;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
+pub use material::{
+    MAX_MATERIALS, MAX_TEXTURES, MaterialData, MaterialId, MaterialStats, TextureId,
+};
 pub use passes::overlay::ui_vertices_truncated;
 pub use passes::scene::{bones_truncated, skinned_instances_dropped};
+pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;
-pub use renderer::{CapturedFrame, DEFAULT_MAX_BONES, RenderConfig, Renderer};
+pub use renderer::{CapturedFrame, DEFAULT_MAX_BONES, PipelineStats, RenderConfig, Renderer};
 pub use scene::{
     BoneRange, Camera, MeshId, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
@@ -45,4 +52,8 @@ pub use moba_assets::JointMatrix;
 /// Validated mesh accepted by [`Renderer::register_mesh`] and, when it carries a skin,
 /// [`Renderer::register_skinned_mesh`].
 pub use moba_assets::MeshData;
+/// Material shader permutation and texture slots ([`MaterialData`]).
+pub use moba_assets::{MaterialShader, TextureSlot};
+/// Validated texture accepted by [`Renderer::register_texture`].
+pub use moba_assets::{TextureData, TextureFormat};
 pub use ui::{ATLAS_HEIGHT, ATLAS_WIDTH, UiDrawList, UiVertex, build_atlas};

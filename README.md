@@ -25,7 +25,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol (v41): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 463 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 498 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -64,7 +64,14 @@ target format (Low uses the packed 32-bit format). `audio_volume` (0–1), `audi
 `MOBA_FRAME_LOG=/tmp/frames.log MOBA_VSYNC=0` records raw frame intervals and writes
 p50/p95/p99/max on exit, plus per-pass GPU times from timestamp queries (`gpu_scene_*`,
 `gpu_composite_*`, `gpu_ui_*`, `gpu_total_*`; see `docs/perf/0007-real-hardware.md` and
-`docs/perf/0011-render-graph.md`).
+`docs/perf/0011-render-graph.md`) and how the pipelines were built (`pipelines`,
+`pipeline_build_ms`, `pipeline_cache=cold|warm|...`). Pipelines are cached per user
+(`MOBA_PIPELINE_CACHE=<file>` or `off`; default under the platform cache directory).
+`MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU (the path for GPUs without BC
+support). Debug builds only: `MOBA_SHADER_DIR=<dir>` loads SPIR-V overrides (`<module>.spv`, e.g.
+`unit_textured.frag.spv`, built with `glslc --target-env=vulkan1.3 -I
+crates/shaders/shaders/include [-DMATERIAL_TEXTURED]`) and rebuilds the scene and composite
+pipelines when one changes. Materials and textures: `docs/content-authoring.md`.
 
 Matches run a lobby → 3-second countdown → gameplay → results → automatic rematch loop.
 Disconnected players keep their slot for a 60-second grace period while a bot covers, and can

@@ -23,4 +23,6 @@ moba-game.workspace = true
 moba-net.workspace = true
 moba-netsim.workspace = true
 moba-render.workspace = true
-moba-assets = { workspace = true, features = ["glb"] }
+moba-assets = { workspace = true, features = ["glb", "bc-decode"] }
+bcdec_rs.workspace = true
+png.workspace = true

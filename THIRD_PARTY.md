@@ -48,4 +48,17 @@ match the generator.
 The `.glb` loader uses the `gltf` crate family (MIT OR Apache-2.0) with default features
 disabled; see [ADR-0007](docs/adr/0007-mesh-format.md).
 
+## Sample textures and material
+
+`content/textures/sentinel-{base,normal,mr,mask}.ktx2` (and the copy in `fuzz/corpus/ktx2/`)
+and `content/materials/sentinel.toml` are not third-party art. The textures are generated
+procedurally by `moba-tools texture-bake generate sentinel`
+(`crates/tools/src/bin/texture-bake/patterns.rs`) and baked by the same tool
+(`scripts/bake-sample-textures.sh`), so they carry the repository's MIT OR Apache-2.0 licence.
+A unit test checks that level 0 of each committed file matches the generator.
+
+The texture loader's CPU fallback and the baker's quality check decode BC blocks with
+`bcdec_rs` (MIT), a Rust port of `bcdec`; the baker reads and writes PNG with `png`
+(MIT OR Apache-2.0). See [ADR-0010](docs/adr/0010-texture-pipeline.md).
+
 The full repository license is dual MIT/Apache-2.0; see `LICENSE-MIT` and `LICENSE-APACHE`.

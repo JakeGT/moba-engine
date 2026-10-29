@@ -14,6 +14,12 @@
 //! client-local state-machine descriptor (`animations/<model>.toml`), [`AnimationGraph`]
 //! binds it to a skeleton and [`Animator`] runs it per unit (actions, crossfades, upper-body
 //! masks, additive reactions, spring bones and sockets) without allocating.
+//!
+//! Textures and materials (ADR-0010): [`load_ktx2`] parses untrusted KTX 2.0 files into a
+//! validated [`TextureData`] (BC7/BC5/BC4 or 8-bit formats with mips; the `bc-decode`
+//! feature adds the CPU fallback decode), and [`MaterialDesc`] is the bounded client-local
+//! material descriptor (`materials/<model>.toml`) naming a shader permutation, a parameter
+//! block and a texture set (`textures/<name>.ktx2`).
 
 #![forbid(unsafe_code)]
 
@@ -21,9 +27,11 @@ mod animation;
 #[cfg(feature = "glb")]
 mod glb;
 mod map_visuals;
+mod material;
 mod mesh;
 mod pose;
 mod skin;
+mod texture;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -42,6 +50,10 @@ pub use map_visuals::{
     DEFAULT_PROP_HEIGHT, DEFAULT_WALL_HEIGHT, MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES,
     MAX_MESH_NAME, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
 };
+pub use material::{
+    MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
+    texture_path,
+};
 pub use mesh::{MeshData, MeshError};
 pub use pose::{
     BlendSpace1d, BlendSpaceError, BoneMask, ClipWrap, MAX_BLEND_POINTS, Pose, joint_matrix,
@@ -51,6 +63,10 @@ pub use skin::{
     MAX_ANIMATION_NAME, MAX_CLIP_KEYS, MAX_CLIP_SECONDS, MAX_CLIPS, MAX_JOINTS, MAX_SKELETON_KEYS,
     MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
     valid_animation_name,
+};
+pub use texture::{
+    MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData, TextureError,
+    TextureFormat, full_mip_chain, load_ktx2, load_ktx2_file, mip_size, write_ktx2,
 };
 
 /// One asset entry.
@@ -172,6 +188,9 @@ pub enum AssetFileProblem {
     Malformed(String),
     /// The map visuals descriptor does not parse or validate; the text is the error.
     BadDescriptor(String),
+    /// The model's material descriptor (`materials/<model>.toml`) or one of its textures
+    /// (`textures/<name>.ktx2`) is unusable; the text says which and why.
+    Material(String),
     /// A mesh the map visuals descriptor names (`models/<mesh>.glb`) is unusable.
     Mesh {
         /// Mesh name from the descriptor.
@@ -191,6 +210,7 @@ impl core::fmt::Display for AssetFileProblem {
             Self::OutsideRoot => f.write_str("resolves outside the pack directory"),
             Self::Malformed(error) => write!(f, "malformed mesh ({error})"),
             Self::BadDescriptor(error) => write!(f, "invalid descriptor ({error})"),
+            Self::Material(error) => write!(f, "material: {error}"),
             Self::Mesh { name, problem } => {
                 write!(f, "mesh '{name}' (models/{name}.glb): {problem}")
             }
@@ -335,6 +355,36 @@ impl AssetManifest {
         issues
     }
 
+    /// Counts the materials and textures the unit models use under `root` (the pack
+    /// directory, laid out like an asset root): for each `[[units]]` entry whose
+    /// `materials/<model>.toml` exists and loads, its textures. Unusable materials are not
+    /// counted ([`Self::check_files`] reports them). A texture several materials share
+    /// counts once.
+    #[must_use]
+    pub fn material_report(&self, root: &Path) -> MaterialReport {
+        let mut report = MaterialReport::default();
+        let mut seen: Vec<String> = Vec::new();
+        for entry in &self.units {
+            let Some(model) = model_stem(&entry.path) else {
+                continue;
+            };
+            let Ok(Some(stats)) = check_material(root, None, model) else {
+                continue;
+            };
+            report.materials += 1;
+            report.textured += usize::from(stats.textured);
+            report.bound_textures += stats.textures.len();
+            for (name, bytes) in stats.textures {
+                if !seen.contains(&name) {
+                    report.texture_bytes += bytes;
+                    report.textures += 1;
+                    seen.push(name);
+                }
+            }
+        }
+        report
+    }
+
     /// Resolves an asset through its fallback chain.
     #[must_use]
     pub fn resolve(&self, name: &str) -> Option<&AssetEntry> {
@@ -358,6 +408,83 @@ impl AssetManifest {
         }
         None
     }
+}
+
+/// Material and texture counts for `content-check` (see
+/// [`AssetManifest::material_report`]). A client creates one descriptor set per material,
+/// so `materials` is also the descriptor pool's set count (ADR-0009).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MaterialReport {
+    /// Unit models with a usable material descriptor.
+    pub materials: usize,
+    /// Of those, materials drawn with the textured permutation.
+    pub textured: usize,
+    /// Distinct textures they reference.
+    pub textures: usize,
+    /// Texture bindings over all materials (a shared texture counts per material).
+    pub bound_textures: usize,
+    /// Texel bytes of the distinct textures, every mip level, as stored on disk.
+    pub texture_bytes: usize,
+}
+
+struct MaterialStats {
+    textured: bool,
+    /// `(texture name, texel bytes)` per bound texture.
+    textures: Vec<(String, usize)>,
+}
+
+/// `models/<stem>.glb` → `stem`, the model name a client resolves.
+fn model_stem(path: &str) -> Option<&str> {
+    let file = path.rsplit('/').next()?;
+    let (stem, extension) = file.rsplit_once('.')?;
+    (extension.eq_ignore_ascii_case("glb") && valid_mesh_name(stem)).then_some(stem)
+}
+
+/// Checks `root/materials/<model>.toml` and its textures, if the descriptor exists.
+fn check_material(
+    root: &Path,
+    canonical_root: Option<&Path>,
+    model: &str,
+) -> Result<Option<MaterialStats>, AssetFileProblem> {
+    let Some(path) = material_path(root, model) else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let inside = |path: &Path| -> Result<std::path::PathBuf, String> {
+        let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+        if canonical_root.is_some_and(|root| !canonical.starts_with(root)) {
+            return Err(String::from("resolves outside the pack directory"));
+        }
+        Ok(canonical)
+    };
+    let shown = format!("materials/{model}.toml");
+    let canonical =
+        inside(&path).map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
+    let material = MaterialDesc::load_file(&canonical)
+        .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
+    let mut textures = Vec::new();
+    for (slot, name) in material.bound_textures() {
+        let shown = format!("{shown}: {} texture textures/{name}.ktx2", slot.name());
+        let texture_file = texture_path(root, name).expect("validated by MaterialDesc");
+        let canonical = inside(&texture_file)
+            .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
+        let texture = load_ktx2_file(&canonical)
+            .map_err(|error| AssetFileProblem::Material(format!("{shown}: {error}")))?;
+        if !slot.accepts(texture.format()) {
+            return Err(AssetFileProblem::Material(format!(
+                "{shown}: format {} is not allowed for this slot",
+                texture.format()
+            )));
+        }
+        textures.push((name.to_owned(), texture.data().len()));
+    }
+    Ok(Some(MaterialStats {
+        textured: material.shader == MaterialShader::Textured,
+        textures,
+    }))
 }
 
 /// Combined parse/validation error.
@@ -426,6 +553,10 @@ fn check_file(
     }
     #[cfg(feature = "glb")]
     load_glb_file(&canonical).map_err(|error| AssetFileProblem::Malformed(error.to_string()))?;
+    // A material next to the model (`materials/<model>.toml`) must load, with its textures.
+    if let Some(model) = model_stem(path) {
+        check_material(root, canonical_root, model)?;
+    }
     Ok(())
 }
 
@@ -534,6 +665,69 @@ fallback = "a"
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("models/dir.glb")).expect("temp dir");
         root
+    }
+
+    #[cfg(feature = "glb")]
+    #[test]
+    fn unit_materials_and_their_textures_are_checked_and_counted() {
+        let root = temp_root("materials");
+        std::fs::create_dir_all(root.join("materials")).expect("dir");
+        std::fs::create_dir_all(root.join("textures")).expect("dir");
+        let model = include_bytes!("../../../content/models/sentinel.glb");
+        for name in ["good", "shared", "wrong", "broken", "plain"] {
+            std::fs::write(root.join(format!("models/{name}.glb")), model).expect("write");
+        }
+        let colour = write_ktx2(
+            &TextureData::new(TextureFormat::Rgba8Srgb, 1, 1, &[vec![255; 4]]).expect("texel"),
+            "test",
+        );
+        let mask = write_ktx2(
+            &TextureData::new(TextureFormat::R8Unorm, 1, 1, &[vec![255]]).expect("texel"),
+            "test",
+        );
+        std::fs::write(root.join("textures/colour.ktx2"), colour).expect("write");
+        std::fs::write(root.join("textures/mask.ktx2"), mask).expect("write");
+        let good = "shader = \"textured\"\nbase_color = \"colour\"\nmask = \"mask\"\n";
+        std::fs::write(root.join("materials/good.toml"), good).expect("write");
+        std::fs::write(root.join("materials/shared.toml"), good).expect("write");
+        // A linear mask in the sRGB base-colour slot.
+        std::fs::write(
+            root.join("materials/wrong.toml"),
+            "shader = \"textured\"\nbase_color = \"mask\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            root.join("materials/broken.toml"),
+            "shader = \"textured\"\nbase_color = \"missing\"\n",
+        )
+        .expect("write");
+        let units = ["good", "shared", "wrong", "broken", "plain"]
+            .map(|name| AssetEntry::new(name, format!("models/{name}.glb")))
+            .to_vec();
+        let manifest = AssetManifest {
+            units,
+            maps: Vec::new(),
+        };
+        let issues = manifest.check_files(&root);
+        let names: Vec<&str> = issues.iter().map(|issue| issue.name.as_str()).collect();
+        assert_eq!(names, ["wrong", "broken"]);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| matches!(issue.problem, AssetFileProblem::Material(_)))
+        );
+        assert!(
+            issues[0].to_string().contains("not allowed"),
+            "{}",
+            issues[0]
+        );
+        let report = manifest.material_report(&root);
+        assert_eq!(report.materials, 2);
+        assert_eq!(report.textured, 2);
+        assert_eq!(report.textures, 2, "shared textures count once");
+        assert_eq!(report.bound_textures, 4);
+        assert_eq!(report.texture_bytes, 5);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

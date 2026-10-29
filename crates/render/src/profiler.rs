@@ -2,13 +2,14 @@
 //!
 //! One query pool per frame in flight, created with the renderer (never per frame). Each
 //! pass writes a timestamp after its barriers and another after its commands, both at
-//! `ALL_COMMANDS`, so a pass's time excludes waits on *earlier commands*. It can still
-//! include the swapchain-acquire semaphore wait: the submit waits on it at
-//! `COLOR_ATTACHMENT_OUTPUT`, which every colour-writing pass (the scene included) reaches.
-//! With vsync off the image is usually free at once; with FIFO the first colour pass may
-//! absorb the wait. Results are read back without waiting, after
-//! that frame slot's fence has been waited on, so they lag the current frame by
-//! `FRAMES_IN_FLIGHT` frames. Devices whose graphics queue reports `timestampValidBits == 0`
+//! `ALL_COMMANDS`, so a pass's time excludes waits on *earlier commands*. Passes before the
+//! first one that touches the swapchain are submitted in a batch that does not wait on the
+//! acquire semaphore, so the scene pass never absorbs that wait; the first swapchain pass
+//! (the composite) can, when the presentation engine still holds the image. Results are read
+//! back without waiting, after that frame slot's fence has been waited on, so they lag the
+//! current frame by `FRAMES_IN_FLIGHT` frames. Each result carries the sequence number of
+//! the frame it measured ([`GpuTimings::frame`]), so a caller polling every frame can skip
+//! samples it has already seen. Devices whose graphics queue reports `timestampValidBits == 0`
 //! (or a zero `timestampPeriod`) get no pools and [`GpuTimings`] is never produced.
 
 use ash::vk;
@@ -38,6 +39,10 @@ pub struct GpuTimings {
     pub total_ms: f32,
     /// First pass start to last pass end, including barriers and any waits between passes.
     pub span_ms: f32,
+    /// Sequence number of the measured frame: `0` for the first frame the renderer
+    /// submitted, then one more per submitted frame. Unchanged between two calls means the
+    /// timings are the same sample (no newer frame completed in between).
+    pub frame: u64,
 }
 
 impl GpuTimings {
@@ -63,6 +68,8 @@ struct FrameQueries {
     count: usize,
     open: bool,
     submitted: bool,
+    /// Sequence number given at submission.
+    sequence: u64,
 }
 
 /// Timestamp query pools and the latest decoded timings.
@@ -75,6 +82,8 @@ pub(crate) struct GpuProfiler {
     valid_mask: u64,
     raw: [u64; QUERIES_PER_FRAME as usize],
     latest: Option<GpuTimings>,
+    /// Sequence number the next submitted frame gets.
+    next_sequence: u64,
 }
 
 impl GpuProfiler {
@@ -94,6 +103,7 @@ impl GpuProfiler {
                     count: 0,
                     open: false,
                     submitted: false,
+                    sequence: 0,
                 };
                 frames
             ],
@@ -105,6 +115,7 @@ impl GpuProfiler {
             },
             raw: [0; QUERIES_PER_FRAME as usize],
             latest: None,
+            next_sequence: 0,
         };
         if valid_bits == 0 || !(period_ns > 0.0 && period_ns.is_finite()) {
             return Ok(profiler);
@@ -159,6 +170,7 @@ impl GpuProfiler {
         }
         timings.count = u8::try_from(queries.count).unwrap_or(u8::MAX);
         timings.span_ms = ms(raw[2 * queries.count - 1].wrapping_sub(raw[0]) & self.valid_mask);
+        timings.frame = queries.sequence;
         self.latest = Some(timings);
     }
 
@@ -232,13 +244,17 @@ impl GpuProfiler {
         }
     }
 
-    /// Marks `frame`'s queries as submitted, so the next [`Self::collect`] reads them.
+    /// Marks `frame`'s queries as submitted, so the next [`Self::collect`] reads them, and
+    /// gives them the next sequence number.
     pub(crate) fn submitted(&mut self, frame: usize) {
         let enabled = self.enabled();
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
         if let Some(queries) = self.frames.get_mut(frame)
             && enabled
         {
             queries.submitted = !queries.open;
+            queries.sequence = sequence;
         }
     }
 

@@ -1,4 +1,10 @@
 //! Scene pass: terrain, instanced units and GPU-skinned meshes into the HDR target.
+//!
+//! Every pipeline, each material permutation included, is built in [`ScenePass::new`] (or
+//! [`ScenePass::rebuild_pipelines`] on a dev shader reload), never while drawing. A mesh
+//! with a textured material ([`ScenePass::set_mesh_material`]) draws with the
+//! `MATERIAL_TEXTURED` permutation and its material's descriptor set (set 2); every other
+//! mesh keeps the vertex-colour look.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,9 +18,10 @@ use crate::error::{RenderError, RenderResult};
 use crate::mesh::{self, GpuMesh};
 use crate::pipeline::{self, PipelineSpec, VertexLayout};
 use crate::resources::{
-    DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout, ShaderModule,
+    DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
 use crate::scene::{BoneRange, CameraUniform, GpuInstance, MeshId, Scene};
+use crate::shaders::ShaderSource;
 
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
 pub(crate) const MAX_MESHES: usize = 64;
@@ -75,12 +82,119 @@ pub(crate) struct SceneTargets {
     pub(crate) clear_color: [f32; 4],
 }
 
+/// Every scene pipeline: the vertex-colour set and the `MATERIAL_TEXTURED` permutations.
+pub(crate) struct ScenePipelines {
+    unit: GraphicsPipeline,
+    unit_textured: GraphicsPipeline,
+    terrain: GraphicsPipeline,
+    /// `None` when skinning is disabled or the pipeline failed to build.
+    skinned: Option<GraphicsPipeline>,
+    /// `None` with `skinned`, or if the textured skinned permutation failed to build (then
+    /// textured skinned meshes draw with `skinned`).
+    skinned_textured: Option<GraphicsPipeline>,
+}
+
+impl ScenePipelines {
+    fn build(
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+        layout: vk::PipelineLayout,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        skinning: bool,
+    ) -> RenderResult<Self> {
+        let module = |name| shaders.module(device, name);
+        let unit_vertex = module("unit.vert")?;
+        let unit_fragment = module("unit.frag")?;
+        let textured_vertex = module("unit_textured.vert")?;
+        let textured_fragment = module("unit_textured.frag")?;
+        let terrain_vertex = module("terrain.vert")?;
+        let terrain_fragment = module("terrain.frag")?;
+        let build = |vertex_layout, vertex: vk::ShaderModule, fragment: vk::ShaderModule| {
+            pipeline::create(
+                device,
+                &PipelineSpec {
+                    layout,
+                    vertex_layout,
+                    vertex,
+                    fragment,
+                    color_format,
+                    depth_format,
+                    cull_mode: vk::CullModeFlags::NONE,
+                },
+            )
+            .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+        };
+        let unit = build(
+            VertexLayout::Static,
+            unit_vertex.handle(),
+            unit_fragment.handle(),
+        )?;
+        let unit_textured = build(
+            VertexLayout::StaticTextured,
+            textured_vertex.handle(),
+            textured_fragment.handle(),
+        )?;
+        let terrain = build(
+            VertexLayout::Static,
+            terrain_vertex.handle(),
+            terrain_fragment.handle(),
+        )?;
+        let (skinned, skinned_textured) = if skinning {
+            let skinned = module("skinned.vert").and_then(|vertex| {
+                build(
+                    VertexLayout::Skinned,
+                    vertex.handle(),
+                    unit_fragment.handle(),
+                )
+            });
+            match skinned {
+                Ok(skinned) => {
+                    let textured = module("skinned_textured.vert").and_then(|vertex| {
+                        build(
+                            VertexLayout::SkinnedTextured,
+                            vertex.handle(),
+                            textured_fragment.handle(),
+                        )
+                    });
+                    let textured = textured
+                        .inspect_err(|error| {
+                            eprintln!(
+                                "[render] textured skinned pipeline unavailable ({error}); \
+                                 textured skinned meshes use the vertex-colour look"
+                            );
+                        })
+                        .ok();
+                    (Some(skinned), textured)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[render] skinned pipeline unavailable ({error}); using static meshes"
+                    );
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            unit,
+            unit_textured,
+            terrain,
+            skinned,
+            skinned_textured,
+        })
+    }
+}
+
 /// Pipelines, meshes and per-frame buffers of the scene pass.
 pub(crate) struct ScenePass {
     terrain_mesh: GpuMesh,
     /// Unit meshes: slot 0 is the cube, the rest come from `register_mesh`. Never shrinks,
     /// so a `MeshId` stays valid and no frame in flight can reference a freed mesh.
     meshes: Vec<GpuMesh>,
+    /// Per mesh slot: its material's descriptor set, or null for the vertex-colour look.
+    mesh_material_sets: [vk::DescriptorSet; MAX_MESHES],
     /// Per-frame bucketing scratch (instances per mesh, first instance, write cursor).
     mesh_counts: [u32; MAX_MESHES],
     mesh_starts: [u32; MAX_MESHES],
@@ -94,10 +208,10 @@ pub(crate) struct ScenePass {
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
     pipeline_layout: PipelineLayout,
-    unit_pipeline: GraphicsPipeline,
-    terrain_pipeline: GraphicsPipeline,
-    /// `None` when skinning is disabled or the pipeline failed to build.
-    skinned_pipeline: Option<GraphicsPipeline>,
+    pipelines: ScenePipelines,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    skinning: bool,
     max_instances: usize,
     max_bones: usize,
 }
@@ -105,23 +219,20 @@ pub(crate) struct ScenePass {
 impl ScenePass {
     /// Builds the scene pipelines for `color_format`/`depth_format` and `frames` sets of
     /// per-frame buffers. `max_bones` is clamped to the storage-buffer range and returned
-    /// through the pass (see [`Self::max_bones`]).
-    #[allow(clippy::too_many_lines)] // Pipeline/descriptor/resource wiring belongs together.
+    /// through the pass (see [`Self::max_bones`]). `material_layout` is set 2 of every scene
+    /// pipeline.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // Wiring belongs together.
     pub(crate) fn new(
         device: &DeviceContext,
+        shaders: &ShaderSource,
         frames: usize,
         color_format: vk::Format,
         depth_format: vk::Format,
+        material_layout: vk::DescriptorSetLayout,
         max_instances: usize,
         max_bones: usize,
         skinning: bool,
     ) -> RenderResult<Self> {
-        let unit_vertex = ShaderModule::new(device.device.clone(), moba_shaders::UNIT_VERT)?;
-        let unit_fragment = ShaderModule::new(device.device.clone(), moba_shaders::UNIT_FRAG)?;
-        let terrain_vertex = ShaderModule::new(device.device.clone(), moba_shaders::TERRAIN_VERT)?;
-        let terrain_fragment =
-            ShaderModule::new(device.device.clone(), moba_shaders::TERRAIN_FRAG)?;
-
         let camera_binding = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
@@ -154,58 +265,28 @@ impl ScenePass {
         let descriptor_pool =
             DescriptorPool::new(device.device.clone(), &pool_sizes, 2 * frame_count)?;
 
-        // One layout for terrain, unit and skinned pipelines keeps the bound descriptor sets
-        // compatible across them; only `skinned.vert` reads the push constant.
-        let layouts = [camera_layout.handle(), instance_layout.handle()];
+        // One layout for every scene pipeline keeps the bound descriptor sets compatible
+        // across them: sets 0/1 (camera, instances + bones) are bound once per pass and set 2
+        // (the material) per textured mesh. Only `skinned*.vert` reads the push constant.
+        let layouts = [
+            camera_layout.handle(),
+            instance_layout.handle(),
+            material_layout,
+        ];
         let skin_push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .offset(0)
             .size(SKIN_PUSH_SIZE)];
         let pipeline_layout =
             PipelineLayout::with_push_constants(device.device.clone(), &layouts, &skin_push)?;
-        let spec = |vertex_layout, vertex: &ShaderModule, fragment: &ShaderModule| PipelineSpec {
-            layout: pipeline_layout.handle(),
-            vertex_layout,
-            vertex: vertex.handle(),
-            fragment: fragment.handle(),
+        let pipelines = ScenePipelines::build(
+            device,
+            shaders,
+            pipeline_layout.handle(),
             color_format,
             depth_format,
-            cull_mode: vk::CullModeFlags::NONE,
-        };
-        let unit_pipeline = GraphicsPipeline::from_raw(
-            device.device.clone(),
-            pipeline::create(
-                &device.device,
-                &spec(VertexLayout::Static, &unit_vertex, &unit_fragment),
-            )?,
-        );
-        let terrain_pipeline = GraphicsPipeline::from_raw(
-            device.device.clone(),
-            pipeline::create(
-                &device.device,
-                &spec(VertexLayout::Static, &terrain_vertex, &terrain_fragment),
-            )?,
-        );
-        let skinned_pipeline = if skinning {
-            let built = ShaderModule::new(device.device.clone(), moba_shaders::SKINNED_VERT)
-                .and_then(|skinned_vertex| {
-                    pipeline::create(
-                        &device.device,
-                        &spec(VertexLayout::Skinned, &skinned_vertex, &unit_fragment),
-                    )
-                });
-            match built {
-                Ok(handle) => Some(GraphicsPipeline::from_raw(device.device.clone(), handle)),
-                Err(error) => {
-                    eprintln!(
-                        "[render] skinned pipeline unavailable ({error}); using static meshes"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
+            skinning,
+        )?;
 
         let terrain_mesh = mesh::upload(device, &mesh::CpuMesh::plane(300.0))?;
         let mut meshes = Vec::with_capacity(MAX_MESHES);
@@ -280,6 +361,7 @@ impl ScenePass {
         Ok(Self {
             terrain_mesh,
             meshes,
+            mesh_material_sets: [vk::DescriptorSet::null(); MAX_MESHES],
             mesh_counts: [0; MAX_MESHES],
             mesh_starts: [0; MAX_MESHES],
             mesh_cursors: [0; MAX_MESHES],
@@ -290,12 +372,67 @@ impl ScenePass {
             _camera_layout: camera_layout,
             _instance_layout: instance_layout,
             pipeline_layout,
-            unit_pipeline,
-            terrain_pipeline,
-            skinned_pipeline,
+            pipelines,
+            color_format,
+            depth_format,
+            skinning,
             max_instances,
             max_bones,
         })
+    }
+
+    /// Builds a replacement for every pipeline from `shaders` (dev shader reload) without
+    /// installing it, so the caller can swap all passes at once or none. A set that lost a
+    /// pipeline the current one has (a skinned permutation that no longer builds) is an
+    /// error, so a reload never silently drops skinning.
+    pub(crate) fn build_pipelines(
+        &self,
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+    ) -> RenderResult<ScenePipelines> {
+        let pipelines = ScenePipelines::build(
+            device,
+            shaders,
+            self.pipeline_layout.handle(),
+            self.color_format,
+            self.depth_format,
+            self.skinning,
+        )?;
+        if pipelines.skinned.is_some() != self.pipelines.skinned.is_some()
+            || pipelines.skinned_textured.is_some() != self.pipelines.skinned_textured.is_some()
+        {
+            return Err(RenderError::Shader("a skinned pipeline failed to rebuild"));
+        }
+        Ok(pipelines)
+    }
+
+    /// Installs pipelines from [`Self::build_pipelines`]. The device must be idle.
+    pub(crate) fn install_pipelines(&mut self, pipelines: ScenePipelines) {
+        self.pipelines = pipelines;
+    }
+
+    /// Draws `mesh` with the material whose descriptor set is `set` (null for the
+    /// vertex-colour look). Load time only.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidMaterial`] for an unknown mesh, or a textured material on a mesh
+    /// without texture coordinates.
+    pub(crate) fn set_mesh_material(
+        &mut self,
+        mesh: MeshId,
+        set: vk::DescriptorSet,
+    ) -> RenderResult<()> {
+        let gpu = self
+            .meshes
+            .get(mesh.index())
+            .ok_or(RenderError::InvalidMaterial("unknown mesh id"))?;
+        if set != vk::DescriptorSet::null() && !gpu.has_uvs {
+            return Err(RenderError::InvalidMaterial(
+                "a textured material needs a mesh with texture coordinates",
+            ));
+        }
+        self.mesh_material_sets[mesh.index()] = set;
+        Ok(())
     }
 
     /// The bone budget after clamping to the device's storage-buffer range.
@@ -305,7 +442,7 @@ impl ScenePass {
 
     /// Whether the skinned pipeline exists.
     pub(crate) fn skinning_available(&self) -> bool {
-        self.skinned_pipeline.is_some()
+        self.pipelines.skinned.is_some()
     }
 
     /// Number of registered meshes, including the built-in cube.
@@ -336,7 +473,7 @@ impl ScenePass {
         device: &DeviceContext,
         data: &crate::MeshData,
     ) -> RenderResult<MeshId> {
-        if self.skinned_pipeline.is_none() {
+        if self.pipelines.skinned.is_none() {
             return Err(RenderError::SkinningUnavailable);
         }
         let id = self.next_mesh_id()?;
@@ -422,8 +559,10 @@ impl ScenePass {
         Ok(())
     }
 
-    /// Records the pass: clear, terrain, static meshes (one instanced draw per mesh), then
-    /// one draw per skinned instance. The graph has already transitioned the targets.
+    /// Records the pass: clear, terrain, static meshes (one instanced draw per mesh:
+    /// vertex-colour meshes, then textured meshes with their material sets), then one draw per
+    /// skinned instance (vertex-colour, then textured). The graph has already transitioned
+    /// the targets.
     #[allow(clippy::too_many_lines)] // One explicit, ordered draw stream.
     pub(crate) fn record(
         &self,
@@ -487,14 +626,7 @@ impl ScenePass {
         }
 
         // Terrain.
-        // SAFETY: pipeline, buffers and descriptor sets are live and compatible.
-        unsafe {
-            device.device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.terrain_pipeline.handle(),
-            );
-        }
+        bind_pipeline(device, command_buffer, &self.pipelines.terrain);
         bind_mesh(device, command_buffer, &self.terrain_mesh);
         // SAFETY: the mesh is uploaded and drawable; its index buffer holds `index_count`
         // in-range `u32` indices.
@@ -510,19 +642,54 @@ impl ScenePass {
         }
 
         if self.unit_count > 0 {
-            // SAFETY: pipeline, buffers and descriptor sets are live and compatible.
-            unsafe {
-                device.device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.unit_pipeline.handle(),
-                );
+            for textured in [false, true] {
+                self.record_static(device, command_buffer, textured);
             }
+        }
+
+        if !self.skinned_draws.is_empty()
+            && let Some(skinned) = &self.pipelines.skinned
+        {
+            // Textured skinned meshes fall back to the vertex-colour pipeline if their
+            // permutation is missing.
+            let textured = self.pipelines.skinned_textured.as_ref();
+            self.record_skinned(device, command_buffer, skinned, false);
+            self.record_skinned(device, command_buffer, textured.unwrap_or(skinned), true);
+        }
+
+        device.cmd_end_rendering(command_buffer);
+    }
+
+    /// One instanced draw per static mesh whose material is (`textured`) or is not textured.
+    fn record_static(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        textured: bool,
+    ) {
+        let pipeline = if textured {
+            &self.pipelines.unit_textured
+        } else {
+            &self.pipelines.unit
+        };
+        let mut bound = false;
+        {
             for (slot, mesh) in self.meshes.iter().enumerate() {
                 let count = self.mesh_counts[slot];
+                let set = self.mesh_material_sets[slot];
                 // Skinned meshes are drawn per instance below, with their own pipeline.
-                if count == 0 || mesh.joint_count > 0 {
+                if count == 0
+                    || mesh.joint_count > 0
+                    || (set != vk::DescriptorSet::null()) != textured
+                {
                     continue;
+                }
+                if !bound {
+                    bind_pipeline(device, command_buffer, pipeline);
+                    bound = true;
+                }
+                if textured {
+                    bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
                 }
                 bind_mesh(device, command_buffer, mesh);
                 // SAFETY: indices: `index_count == indices.len()`, so firstIndex 0 +
@@ -543,24 +710,37 @@ impl ScenePass {
                 }
             }
         }
+    }
 
-        if !self.skinned_draws.is_empty()
-            && let Some(skinned_pipeline) = &self.skinned_pipeline
+    /// One draw per skinned instance whose mesh's material is (`textured`) or is not
+    /// textured, with `pipeline`.
+    fn record_skinned(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        pipeline: &GraphicsPipeline,
+        textured: bool,
+    ) {
         {
-            // SAFETY: the pipeline was created with the shared layout the descriptor sets are
-            // bound with, so sets 0/1 stay valid for it.
-            unsafe {
-                device.device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    skinned_pipeline.handle(),
-                );
-            }
+            let mut bound_pipeline = false;
             let mut bound_slot = u32::MAX;
             for draw in &self.skinned_draws {
                 let mesh = &self.meshes[draw.slot as usize];
+                let set = self.mesh_material_sets[draw.slot as usize];
+                if (set != vk::DescriptorSet::null()) != textured {
+                    continue;
+                }
+                if !bound_pipeline {
+                    // The pipeline was created with the shared layout the descriptor sets
+                    // are bound with, so sets 0/1 stay valid for it.
+                    bind_pipeline(device, command_buffer, pipeline);
+                    bound_pipeline = true;
+                }
                 if draw.slot != bound_slot {
                     bound_slot = draw.slot;
+                    if textured {
+                        bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
+                    }
                     // Skinned meshes (joint_count > 0) hold `SkinnedVertex` data, the layout
                     // of the bound skinned pipeline.
                     bind_mesh(device, command_buffer, mesh);
@@ -600,8 +780,45 @@ impl ScenePass {
                 }
             }
         }
+    }
+}
 
-        device.cmd_end_rendering(command_buffer);
+/// Binds a scene pipeline.
+fn bind_pipeline(
+    device: &DeviceContext,
+    command_buffer: vk::CommandBuffer,
+    pipeline: &GraphicsPipeline,
+) {
+    // SAFETY: the pipeline is live and was created with the scene pass's shared layout, so
+    // the descriptor sets bound with that layout stay valid for it.
+    unsafe {
+        device.device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline.handle(),
+        );
+    }
+}
+
+/// Binds a material's descriptor set at set 2.
+fn bind_material(
+    device: &DeviceContext,
+    command_buffer: vk::CommandBuffer,
+    layout: vk::PipelineLayout,
+    set: vk::DescriptorSet,
+) {
+    // SAFETY: `set` was allocated at load time with the material layout, which the shared
+    // pipeline layout declares at index 2; its buffer and views live as long as the
+    // renderer, and it is never updated after creation.
+    unsafe {
+        device.device.cmd_bind_descriptor_sets(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            layout,
+            2,
+            &[set],
+            &[],
+        );
     }
 }
 

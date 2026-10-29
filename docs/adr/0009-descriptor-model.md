@@ -74,7 +74,10 @@ Any of these happens:
 
 ## Consequences
 - R1b's material system is designed around per-material sets allocated at load time. The pool
-  is sized from the content and reported by `content-check`.
+  is sized from the content and reported by `content-check`. **Implemented in R1b**
+  ([ADR-0010](0010-texture-pipeline.md)): set 2 of the scene layout, one pool per
+  `register_materials` call sized for exactly its textured materials, bound once per textured
+  mesh per frame.
 - The descriptor set layouts stay small and per pass. Pipeline layouts do not reserve a
   bindless set.
 - When the maintainer runs the pre-1.0 hardware matrix, the bindless spike should be part of

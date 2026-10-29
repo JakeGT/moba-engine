@@ -8,16 +8,19 @@ use crate::device::DeviceContext;
 use crate::error::RenderResult;
 use crate::resources::{CommandPool, GpuBuffer};
 
-/// Vertex layout of the static scene pipelines (unit and terrain), stride 24.
+/// Vertex layout of the static scene pipelines (unit and terrain), stride 32. `uv` is
+/// `(0, 0)` for meshes without texture coordinates; only textured permutations read it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
+    pub(crate) uv: [f32; 2],
 }
 
-/// Vertex layout of the skinned pipeline (`skinned.vert`), stride 32: position and normal
-/// as in [`Vertex`], then four `R8G8B8A8_UINT` joints and four `R8G8B8A8_UNORM` weights.
+/// Vertex layout of the skinned pipeline (`skinned.vert`), stride 40: position and normal
+/// as in [`Vertex`], then four `R8G8B8A8_UINT` joints, four `R8G8B8A8_UNORM` weights and the
+/// UV.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct SkinnedVertex {
@@ -25,6 +28,7 @@ pub(crate) struct SkinnedVertex {
     pub(crate) normal: [f32; 3],
     pub(crate) joints: [u8; 4],
     pub(crate) weights: [u8; 4],
+    pub(crate) uv: [f32; 2],
 }
 
 /// CPU-side interleaved skinned mesh, ready for [`upload_bytes`].
@@ -32,6 +36,7 @@ pub(crate) struct CpuSkinnedMesh {
     pub(crate) vertices: Vec<SkinnedVertex>,
     pub(crate) indices: Vec<u32>,
     pub(crate) joint_count: u32,
+    pub(crate) has_uvs: bool,
 }
 
 impl CpuSkinnedMesh {
@@ -68,12 +73,14 @@ impl CpuSkinnedMesh {
                 normal: vertex.normal,
                 joints,
                 weights,
+                uv: vertex.uv,
             })
             .collect();
         Some(Self {
             vertices,
             indices: base.indices,
             joint_count: u32::try_from(joint_count).ok()?,
+            has_uvs: base.has_uvs,
         })
     }
 }
@@ -82,6 +89,8 @@ impl CpuSkinnedMesh {
 pub(crate) struct CpuMesh {
     pub(crate) vertices: Vec<Vertex>,
     pub(crate) indices: Vec<u32>,
+    /// Whether the UVs are real texture coordinates (a textured material needs them).
+    pub(crate) has_uvs: bool,
 }
 
 /// Device-local vertex/index buffers.
@@ -92,6 +101,8 @@ pub(crate) struct GpuMesh {
     /// `0` for a static [`Vertex`] mesh; otherwise the skin's joint count and the vertices
     /// are [`SkinnedVertex`].
     pub(crate) joint_count: u32,
+    /// Whether the mesh has texture coordinates.
+    pub(crate) has_uvs: bool,
 }
 
 impl CpuMesh {
@@ -155,42 +166,46 @@ impl CpuMesh {
                 ],
             ),
         ];
+        let corner_uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
         for (normal, corners) in faces {
             let base = u32::try_from(vertices.len()).expect("vertex count fits u32");
-            for corner in corners {
+            for (corner, uv) in corners.into_iter().zip(corner_uvs) {
                 vertices.push(Vertex {
                     position: corner,
                     normal,
+                    uv,
                 });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        Self { vertices, indices }
+        Self {
+            vertices,
+            indices,
+            has_uvs: true,
+        }
     }
 
     /// Ground plane of the given size, centred at the origin.
     pub(crate) fn plane(size: f32) -> Self {
         let half = size * 0.5;
+        // One UV unit per 8 m, for a later tiling terrain material.
+        let corner = |x: f32, z: f32| Vertex {
+            position: [x, 0.0, z],
+            normal: [0.0, 1.0, 0.0],
+            uv: [x / 8.0, z / 8.0],
+        };
         let vertices = vec![
-            Vertex {
-                position: [-half, 0.0, -half],
-                normal: [0.0, 1.0, 0.0],
-            },
-            Vertex {
-                position: [half, 0.0, -half],
-                normal: [0.0, 1.0, 0.0],
-            },
-            Vertex {
-                position: [half, 0.0, half],
-                normal: [0.0, 1.0, 0.0],
-            },
-            Vertex {
-                position: [-half, 0.0, half],
-                normal: [0.0, 1.0, 0.0],
-            },
+            corner(-half, -half),
+            corner(half, -half),
+            corner(half, half),
+            corner(-half, half),
         ];
         let indices = vec![0, 1, 2, 0, 2, 3];
-        Self { vertices, indices }
+        Self {
+            vertices,
+            indices,
+            has_uvs: true,
+        }
     }
 
     /// Interleaves a validated asset mesh into the shared `{position, normal}` layout.
@@ -212,15 +227,22 @@ impl CpuMesh {
         {
             return None;
         }
+        let uvs = data.uvs().filter(|uvs| uvs.len() == vertex_count);
         let vertices = data
             .positions()
             .iter()
             .zip(data.normals())
-            .map(|(&position, &normal)| Vertex { position, normal })
+            .enumerate()
+            .map(|(index, (&position, &normal))| Vertex {
+                position,
+                normal,
+                uv: uvs.map_or([0.0, 0.0], |uvs| uvs[index]),
+            })
             .collect();
         Some(Self {
             vertices,
             indices: data.indices().to_vec(),
+            has_uvs: uvs.is_some(),
         })
     }
 }
@@ -232,6 +254,7 @@ pub(crate) fn upload(device: &DeviceContext, data: &CpuMesh) -> RenderResult<Gpu
         bytemuck::cast_slice(&data.vertices),
         &data.indices,
         0,
+        data.has_uvs,
     )
 }
 
@@ -245,6 +268,7 @@ pub(crate) fn upload_skinned(
         bytemuck::cast_slice(&data.vertices),
         &data.indices,
         data.joint_count,
+        data.has_uvs,
     )
 }
 
@@ -255,6 +279,7 @@ fn upload_bytes(
     vertex_bytes: &[u8],
     indices_data: &[u32],
     joint_count: u32,
+    has_uvs: bool,
 ) -> RenderResult<GpuMesh> {
     let allocator = device.allocator();
     let index_bytes: &[u8] = bytemuck::cast_slice(indices_data);
@@ -392,6 +417,7 @@ fn upload_bytes(
         indices,
         index_count,
         joint_count,
+        has_uvs,
     })
 }
 
@@ -400,10 +426,12 @@ mod tests {
     use super::{CpuMesh, CpuSkinnedMesh, SkinnedVertex};
 
     #[test]
-    fn skinned_vertices_are_32_bytes_with_joints_then_weights() {
-        assert_eq!(core::mem::size_of::<SkinnedVertex>(), 32);
+    fn skinned_vertices_are_40_bytes_with_joints_weights_then_uv() {
+        assert_eq!(core::mem::size_of::<SkinnedVertex>(), 40);
         assert_eq!(core::mem::offset_of!(SkinnedVertex, joints), 24);
         assert_eq!(core::mem::offset_of!(SkinnedVertex, weights), 28);
+        assert_eq!(core::mem::offset_of!(SkinnedVertex, uv), 32);
+        assert_eq!(core::mem::size_of::<super::Vertex>(), 32);
     }
 
     #[test]
@@ -452,6 +480,14 @@ mod tests {
         assert_eq!(cpu.vertices.len(), 3);
         assert_eq!(cpu.vertices[1].position, [1.0, 0.0, 0.0]);
         assert_eq!(cpu.vertices[2].normal, [0.0, 0.0, 1.0]);
+        assert_eq!(cpu.vertices[2].uv, [0.0, 0.0]);
+        assert!(!cpu.has_uvs);
         assert_eq!(cpu.indices, vec![0, 1, 2]);
+        let textured = data
+            .with_uvs(vec![[0.0, 0.0], [1.0, 0.0], [0.5, 2.0]])
+            .expect("uvs");
+        let cpu = CpuMesh::from_asset(&textured).expect("re-check passes");
+        assert!(cpu.has_uvs);
+        assert_eq!(cpu.vertices[2].uv, [0.5, 2.0]);
     }
 }

@@ -6,6 +6,8 @@
 //! owns acquisition, submission, presentation, resize and the capture readback.
 
 use core::ffi::CStr;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ash::{khr, vk};
 use gpu_allocator::MemoryLocation;
@@ -16,13 +18,16 @@ use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::{self, Binding, Bindings, FramePlan, PassKind};
 use crate::instance::{InstanceContext, ValidationMode};
+use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::passes::composite::CompositePass;
 use crate::passes::overlay::UiPass;
 use crate::passes::scene::{ScenePass, SceneTargets};
+use crate::pipeline_cache::PipelineCacheState;
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
 use crate::scene::{MeshId, Scene};
+use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
 use crate::targets::{self, TransientPool};
 use crate::ui::UiDrawList;
@@ -61,6 +66,19 @@ pub struct RenderConfig {
     /// Linear exposure multiplier applied before the tonemap. Default `1.0`; a non-finite or
     /// non-positive value is treated as `1.0`.
     pub exposure: f32,
+    /// File the `VkPipelineCache` is loaded from at creation and saved to on drop. `None`
+    /// (the default) builds every pipeline from scratch and saves nothing. A missing, corrupt
+    /// or foreign file is a cold start, never an error ([`PipelineStats::cache`]).
+    pub pipeline_cache: Option<PathBuf>,
+    /// Debug builds (`debug_assertions`) only: a directory of SPIR-V overrides
+    /// (`<module>.spv`) used instead of the built-in modules, and re-read by
+    /// [`Renderer::reload_shaders`]. Release builds ignore it, because an override that does
+    /// not match its pipeline's interface is invalid Vulkan usage. Default `None`.
+    pub shader_dir: Option<PathBuf>,
+    /// Upload BC7/BC5/BC4 textures as is when the device supports them. When `false`, or on
+    /// devices without `textureCompressionBC`, they are decoded on the CPU at load. Default
+    /// `true`.
+    pub compressed_textures: bool,
 }
 
 impl Default for RenderConfig {
@@ -76,6 +94,9 @@ impl Default for RenderConfig {
             skinning: true,
             quality_tier: QualityTier::High,
             exposure: 1.0,
+            pipeline_cache: None,
+            shader_dir: None,
+            compressed_textures: true,
         }
     }
 }
@@ -150,12 +171,52 @@ impl RenderConfig {
         self.exposure = exposure;
         self
     }
+
+    /// Returns this config with [`RenderConfig::pipeline_cache`] set.
+    #[must_use]
+    pub fn with_pipeline_cache(mut self, path: Option<PathBuf>) -> Self {
+        self.pipeline_cache = path;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::shader_dir`] set.
+    #[must_use]
+    pub fn with_shader_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.shader_dir = dir;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::compressed_textures`] set.
+    #[must_use]
+    pub const fn with_compressed_textures(mut self, compressed: bool) -> Self {
+        self.compressed_textures = compressed;
+        self
+    }
+}
+
+/// How the renderer's pipelines were built ([`Renderer::pipeline_stats`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PipelineStats {
+    /// Graphics pipelines built at creation (every pass and permutation).
+    pub pipelines: u32,
+    /// Driver time spent in `vkCreateGraphicsPipelines`, milliseconds.
+    pub build_ms: f32,
+    /// Wall time of [`Renderer::new`], milliseconds (device, swapchain, pipelines, meshes).
+    pub startup_ms: f32,
+    /// Whether the pipeline cache started warm, cold or rejected.
+    pub cache: PipelineCacheState,
 }
 
 /// Per-frame-in-flight command recording and synchronisation.
+///
+/// Two command buffers per frame: `[0]` holds the passes that do not touch the swapchain
+/// (the scene) and is submitted without waiting on the acquire semaphore, so its GPU time
+/// never includes that wait; `[1]` holds the rest and waits on it. Both go in one
+/// `vkQueueSubmit`, so the frame fence covers both.
 struct FrameSync {
     command_pool: CommandPool,
-    command_buffer: vk::CommandBuffer,
+    command_buffers: [vk::CommandBuffer; 2],
     image_available: Semaphore,
     fence: Fence,
 }
@@ -183,6 +244,9 @@ pub struct Renderer {
     scene: ScenePass,
     composite: CompositePass,
     ui: UiPass,
+    materials: Materials,
+    shaders: ShaderSource,
+    pipeline_stats: PipelineStats,
     profiler: GpuProfiler,
     frames: Vec<FrameSync>,
     capture_buffer: Option<GpuBuffer>,
@@ -212,6 +276,7 @@ impl Renderer {
     #[allow(clippy::too_many_lines)] // Device, graph and pass wiring belongs together.
     pub fn new(window: &Window, mut config: RenderConfig) -> RenderResult<Self> {
         assert!(config.max_instances > 0, "max_instances must be positive");
+        let started = Instant::now();
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
         // SAFETY: ash-window returns the static list of surface extensions for this
@@ -244,7 +309,10 @@ impl Renderer {
             handle: surface_handle,
         };
 
-        let device = DeviceContext::new(&instance, surface_handle)?;
+        let mut device = DeviceContext::new(&instance, surface_handle)?;
+        // Every pipeline below is built through this cache, at creation only.
+        let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
+        let shaders = ShaderSource::new(config.shader_dir.clone());
         let size = window.size();
         if size[0] == 0 || size[1] == 0 {
             return Err(RenderError::SwapchainOutOfDate);
@@ -270,9 +338,12 @@ impl Renderer {
             .map_err(graph_error)?;
         let capture_plan = frame_graph::build(hdr_format, depth_format, depth_aspect, true)
             .map_err(graph_error)?;
-        if plan.graph.slots() != capture_plan.graph.slots() {
+        // The variants alternate on the same physical transients, so each slot must also
+        // start from the same (stage, access) in both: a slot's first barrier orders against
+        // whichever variant ran in the previous frame.
+        if !plan.graph.shares_transients_with(&capture_plan.graph) {
             return Err(RenderError::RenderGraph(String::from(
-                "the capture variant disagrees on transient slots",
+                "the capture variant disagrees on transient slots or their start state",
             )));
         }
         if !plan.graph.culled().is_empty() {
@@ -280,17 +351,24 @@ impl Renderer {
         }
         let transients = TransientPool::new(&device, plan.graph.slots(), swapchain.extent)?;
 
+        let materials = Materials::new(
+            &device,
+            config.compressed_textures,
+            config.quality_tier.max_anisotropy(),
+        )?;
         let scene = ScenePass::new(
             &device,
+            &shaders,
             FRAMES_IN_FLIGHT,
             hdr_format,
             depth_format,
+            materials.set_layout(),
             config.max_instances,
             config.max_bones,
             config.skinning,
         )?;
         config.max_bones = scene.max_bones();
-        let composite = CompositePass::new(&device, swapchain.format, config.exposure)?;
+        let composite = CompositePass::new(&device, &shaders, swapchain.format, config.exposure)?;
         let ui = UiPass::new(
             &device,
             FRAMES_IN_FLIGHT,
@@ -308,15 +386,33 @@ impl Renderer {
         let mut frames = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
             let command_pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
-            let command_buffer = command_pool.allocate_one()?;
+            let command_buffers = [command_pool.allocate_one()?, command_pool.allocate_one()?];
             frames.push(FrameSync {
                 command_pool,
-                command_buffer,
+                command_buffers,
                 image_available: Semaphore::new(device.device.clone())?,
                 fence: Fence::new(device.device.clone(), true)?,
             });
         }
         let images_in_flight = vec![None; swapchain.image_count()];
+
+        let (pipelines, build_time) = device.pipeline_builds();
+        let pipeline_stats = PipelineStats {
+            pipelines,
+            build_ms: duration_ms(build_time),
+            startup_ms: duration_ms(started.elapsed()),
+            cache,
+        };
+        // Save a cold or rejected cache at once, so a later crash still leaves a warm one.
+        if let Some(path) = &config.pipeline_cache
+            && cache != PipelineCacheState::Warm
+            && let Err(error) = device.save_pipeline_cache(path)
+        {
+            eprintln!(
+                "[render] pipeline cache {}: not saved ({error})",
+                path.display()
+            );
+        }
 
         let renderer = Self {
             window: window.clone(),
@@ -325,6 +421,9 @@ impl Renderer {
             scene,
             composite,
             ui,
+            materials,
+            shaders,
+            pipeline_stats,
             profiler,
             frames,
             capture_buffer: None,
@@ -424,6 +523,94 @@ impl Renderer {
     /// has no valid skin, otherwise as [`Self::register_mesh`].
     pub fn register_skinned_mesh(&mut self, data: &crate::MeshData) -> RenderResult<MeshId> {
         self.scene.register_skinned_mesh(&self.device, data)
+    }
+
+    /// Uploads a texture and returns its id for [`MaterialData::with_texture`].
+    ///
+    /// Load-time only (staging upload and a queue wait). BC textures are decoded to their
+    /// 8-bit equivalent on the CPU when the device cannot sample them or
+    /// [`RenderConfig::compressed_textures`] is off. Up to [`MAX_TEXTURES`](crate::MAX_TEXTURES).
+    ///
+    /// # Errors
+    /// [`RenderError::TooManyTextures`], [`RenderError::InvalidTexture`] when the format cannot
+    /// be sampled even after decoding, otherwise allocation or Vulkan errors.
+    pub fn register_texture(&mut self, data: &crate::TextureData) -> RenderResult<TextureId> {
+        self.materials.register_texture(&self.device, data)
+    }
+
+    /// Creates materials. The textured ones get a descriptor set each, from one descriptor
+    /// pool sized for exactly this call, and their parameter blocks one uniform buffer: call
+    /// it once per content load with every material, not once per material. Load-time only.
+    /// All-or-nothing: on error no material is created.
+    ///
+    /// # Errors
+    /// [`RenderError::TooManyMaterials`] past [`MAX_MATERIALS`](crate::MAX_MATERIALS),
+    /// [`RenderError::InvalidMaterial`] for an unknown texture, a texture format its slot
+    /// does not allow (sRGB colour, linear data) or a textured material without a base
+    /// colour, otherwise allocation or Vulkan errors.
+    pub fn register_materials(
+        &mut self,
+        materials: &[MaterialData],
+    ) -> RenderResult<Vec<MaterialId>> {
+        self.materials.register_materials(&self.device, materials)
+    }
+
+    /// Draws every instance of `mesh` with `material`. A textured material switches the mesh
+    /// to the `MATERIAL_TEXTURED` permutation; a vertex-colour one restores the default look.
+    /// Load-time only.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidMaterial`] for an unknown mesh or material, or a textured
+    /// material on a mesh without texture coordinates.
+    pub fn set_mesh_material(&mut self, mesh: MeshId, material: MaterialId) -> RenderResult<()> {
+        if !self.materials.contains(material) {
+            return Err(RenderError::InvalidMaterial("unknown material id"));
+        }
+        let set = self.materials.set(material);
+        self.scene.set_mesh_material(mesh, set)
+    }
+
+    /// Texture and material counts.
+    #[must_use]
+    pub fn material_stats(&self) -> MaterialStats {
+        self.materials.stats()
+    }
+
+    /// Whether BC textures upload without a CPU decode (device support and config).
+    #[must_use]
+    pub fn compressed_textures_supported(&self) -> bool {
+        self.materials.compressed()
+    }
+
+    /// How the pipelines were built: count, driver time and the cache state.
+    #[must_use]
+    pub fn pipeline_stats(&self) -> PipelineStats {
+        self.pipeline_stats
+    }
+
+    /// Dev builds: rebuilds the scene and composite pipelines (every permutation) from
+    /// [`RenderConfig::shader_dir`] overrides, falling back to built-in modules per file.
+    /// Waits for the device to idle first; a stall, so call it on a file change, not per
+    /// frame. The UI pipeline is not reloaded. Returns `Ok(false)` when no shader directory
+    /// is configured.
+    ///
+    /// # Errors
+    /// A pipeline that fails to build (or a skinned permutation that no longer builds); then
+    /// every pass keeps its previous pipelines.
+    pub fn reload_shaders(&mut self) -> RenderResult<bool> {
+        if !self.shaders.has_overrides() {
+            return Ok(false);
+        }
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses
+        // the pipelines being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        // Build everything first and swap only when every pass succeeded, so a failed reload
+        // never mixes new scene pipelines with an old composite (or drops one).
+        let scene = self.scene.build_pipelines(&self.device, &self.shaders)?;
+        let composite = self.composite.build_pipeline(&self.device, &self.shaders)?;
+        self.scene.install_pipelines(scene);
+        self.composite.install_pipeline(composite);
+        Ok(true)
     }
 
     /// Whether [`Self::register_skinned_mesh`] can succeed (the skinned pipeline exists).
@@ -556,7 +743,7 @@ impl Renderer {
         self.scene.prepare(frame_index, scene)?;
         self.ui.prepare(frame_index, ui)?;
 
-        let command_buffer = self.frames[frame_index].command_buffer;
+        let command_buffers = self.frames[frame_index].command_buffers;
         let pool = self.frames[frame_index].command_pool.handle();
         // SAFETY: the pool belongs to this device and no command buffer from it is pending
         // (the frame fence was just waited on).
@@ -566,37 +753,45 @@ impl Renderer {
                 .reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
         }?;
         let begin = vk::CommandBufferBeginInfo::default();
-        // SAFETY: the command buffer is allocated from the reset pool and not recording.
-        unsafe {
-            self.device
-                .device
-                .begin_command_buffer(command_buffer, &begin)
-        }?;
-        self.record_frame(command_buffer, frame_index, image_index)?;
-        // SAFETY: the command buffer is recording and is ended exactly once.
-        unsafe { self.device.device.end_command_buffer(command_buffer) }?;
+        for &command_buffer in &command_buffers {
+            // SAFETY: the command buffer is allocated from the reset pool and not recording.
+            unsafe {
+                self.device
+                    .device
+                    .begin_command_buffer(command_buffer, &begin)
+            }?;
+        }
+        self.record_frame(command_buffers, frame_index, image_index)?;
+        for &command_buffer in &command_buffers {
+            // SAFETY: the command buffer is recording and is ended exactly once.
+            unsafe { self.device.device.end_command_buffer(command_buffer) }?;
+        }
 
         let render_finished = self.swapchain.render_finished[image_index as usize].handle();
         let wait_semaphores = [image_available];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let signal_semaphores = [render_finished];
-        let command_buffers = [command_buffer];
-        let submit = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&command_buffers)
-            .signal_semaphores(&signal_semaphores);
+        // Batch 1: passes before the first swapchain access, with no wait. Batch 2: the rest,
+        // waiting for the acquired image at the stage its first barrier chains from. Graph
+        // barriers order the batches (submission order on one queue).
+        let submits = [
+            vk::SubmitInfo::default().command_buffers(&command_buffers[..1]),
+            vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&command_buffers[1..])
+                .signal_semaphores(&signal_semaphores),
+        ];
         // Reset as late as possible: every fallible recording step is complete, so a
         // failure before this point cannot leave an unsignalled fence for the next wait.
         // SAFETY: the fence was waited on above and is not in use by a submit.
         unsafe { self.device.device.reset_fences(&[fence]) }?;
-        // SAFETY: the command buffer is executable and the semaphores are live.
+        // SAFETY: both command buffers are executable and the semaphores are live. One
+        // submission command, so the fence signal covers both batches.
         unsafe {
-            self.device.device.queue_submit(
-                self.device.graphics_queue,
-                core::slice::from_ref(&submit),
-                fence,
-            )
+            self.device
+                .device
+                .queue_submit(self.device.graphics_queue, &submits, fence)
         }?;
         self.profiler.submitted(frame_index);
         if self.capture_pending {
@@ -620,10 +815,11 @@ impl Renderer {
     }
 
     /// Records the compiled frame graph: per pass, its barriers, a timestamp pair around the
-    /// pass's commands, then the final transitions.
+    /// pass's commands, then the final transitions. Passes before the plan's acquire split go
+    /// into `command_buffers[0]`, the rest (and the final transitions) into `[1]`.
     fn record_frame(
         &mut self,
-        command_buffer: vk::CommandBuffer,
+        command_buffers: [vk::CommandBuffer; 2],
         frame_index: usize,
         image_index: u32,
     ) -> RenderResult<()> {
@@ -657,8 +853,10 @@ impl Renderer {
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
-        self.profiler.begin_frame(command_buffer, frame_index);
-        for pass in plan.graph.passes() {
+        // Query resets run first in submission order, ahead of every timestamp write.
+        self.profiler.begin_frame(command_buffers[0], frame_index);
+        for (index, pass) in plan.graph.passes().iter().enumerate() {
+            let command_buffer = command_buffers[usize::from(index >= plan.acquire_split)];
             frame_graph::record_barriers(&self.device, command_buffer, &pass.barriers, &bindings);
             self.profiler
                 .begin_pass(command_buffer, frame_index, pass.name);
@@ -703,7 +901,7 @@ impl Renderer {
         }
         frame_graph::record_barriers(
             &self.device,
-            command_buffer,
+            command_buffers[1],
             plan.graph.final_barriers(),
             &bindings,
         );
@@ -919,5 +1117,17 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
+        if let Some(path) = &self.config.pipeline_cache
+            && let Err(error) = self.device.save_pipeline_cache(path)
+        {
+            eprintln!(
+                "[render] pipeline cache {}: not saved ({error})",
+                path.display()
+            );
+        }
     }
+}
+
+fn duration_ms(duration: Duration) -> f32 {
+    duration.as_secs_f32() * 1_000.0
 }

@@ -1,19 +1,10 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Terrain: a single large plane. The grid and lane markers are procedural in the fragment
 // shader, so the map needs no texture in the vertical-slice milestone.
 
-layout(set = 0, binding = 0) uniform CameraBlock {
-    mat4 view_proj;
-    vec4 camera_pos;
-    vec4 light_direction;
-    vec4 ambient;
-    vec4 terrain;
-    vec4 vision_circles[16];
-    uvec4 vision_count;
-    vec4 vision_walls[32];
-    uvec4 wall_count;
-} camera;
+#include "camera.glsl"
 
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
