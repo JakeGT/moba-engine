@@ -10,9 +10,10 @@
 shader = "textured"
 base_color = "sentinel-base"          # BC7 sRGB: pale painted plates, bronze seams
 normal = "sentinel-normal"            # BC5: seam bevels and rivets
-metallic_roughness = "sentinel-mr"    # BC5: read by R2's PBR
+metallic_roughness = "sentinel-mr"    # BC5: R metallic (the bronze trim), G roughness
 mask = "sentinel-mask"                # BC4: the painted plates take the team colour
 base_color_factor = [1.0, 1.0, 1.0, 1.0]
-roughness = 1.0
+metallic = 1.0                         # the texture's R decides (glTF convention)
+roughness = 1.0                        # times the texture's G (0.62-0.78 on the plates)
 normal_scale = 1.0
 team_tint = 1.0

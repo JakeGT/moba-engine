@@ -12,30 +12,42 @@ use crate::mesh::{SkinnedVertex, Vertex};
 /// Vertex buffer layout consumed by a scene pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VertexLayout {
-    /// [`Vertex`] (stride 32), position and normal only: the vertex-colour unit and terrain
-    /// shaders, which do not read the UV.
+    /// [`Vertex`] (stride 48), position and normal only: the vertex-colour unit and terrain
+    /// shaders, which do not read the UV or tangent.
     Static,
-    /// [`Vertex`] with the UV at location 4: the `MATERIAL_TEXTURED` unit permutation.
+    /// [`Vertex`] with the UV at location 4 and the tangent at 5: the `MATERIAL_TEXTURED`
+    /// unit permutation.
     StaticTextured,
-    /// [`SkinnedVertex`] (stride 40): position, normal, `R8G8B8A8_UINT` joints and
+    /// [`Vertex`], position only: the static shadow caster (`unit_shadow.vert`).
+    StaticShadow,
+    /// [`SkinnedVertex`] (stride 56): position, normal, `R8G8B8A8_UINT` joints and
     /// `R8G8B8A8_UNORM` weights (`skinned.vert`).
     Skinned,
-    /// [`SkinnedVertex`] with the UV at location 4 (`skinned_textured.vert`).
+    /// [`SkinnedVertex`] with the UV at location 4 and the tangent at 5
+    /// (`skinned_textured.vert`).
     SkinnedTextured,
+    /// [`SkinnedVertex`], position, joints and weights: the skinned shadow caster
+    /// (`skinned_shadow.vert`).
+    SkinnedShadow,
 }
 
 impl VertexLayout {
     fn stride(self) -> u32 {
         let size = match self {
-            Self::Static | Self::StaticTextured => core::mem::size_of::<Vertex>(),
-            Self::Skinned | Self::SkinnedTextured => core::mem::size_of::<SkinnedVertex>(),
+            Self::Static | Self::StaticTextured | Self::StaticShadow => {
+                core::mem::size_of::<Vertex>()
+            }
+            Self::Skinned | Self::SkinnedTextured | Self::SkinnedShadow => {
+                core::mem::size_of::<SkinnedVertex>()
+            }
         };
         u32::try_from(size).expect("vertex stride fits u32")
     }
 
-    /// Attribute descriptions: locations 0/1 (position, normal) always, 2/3 (joints, weights)
-    /// when skinned, 4 (UV) only for the textured permutations, so every declared attribute
-    /// is consumed by its shader. The stride is the same with or without the UV.
+    /// Attribute descriptions: locations 0/1 (position, normal), 2/3 (joints, weights) when
+    /// skinned, 4/5 (UV, tangent) only for the textured permutations and only 0 (+ 2/3) for
+    /// the shadow casters, so every declared attribute is consumed by its shader. The stride
+    /// is the same for every layout of one vertex type.
     fn attributes(self) -> &'static [vk::VertexInputAttributeDescription] {
         const fn attribute(
             location: u32,
@@ -49,23 +61,32 @@ impl VertexLayout {
                 offset,
             }
         }
-        const STATIC: [vk::VertexInputAttributeDescription; 3] = [
+        const STATIC: [vk::VertexInputAttributeDescription; 4] = [
             attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
             attribute(1, vk::Format::R32G32B32_SFLOAT, 12),
             attribute(4, vk::Format::R32G32_SFLOAT, 24),
+            attribute(5, vk::Format::R32G32B32A32_SFLOAT, 32),
         ];
-        const SKINNED: [vk::VertexInputAttributeDescription; 5] = [
+        const SKINNED: [vk::VertexInputAttributeDescription; 6] = [
             attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
             attribute(1, vk::Format::R32G32B32_SFLOAT, 12),
             attribute(2, vk::Format::R8G8B8A8_UINT, 24),
             attribute(3, vk::Format::R8G8B8A8_UNORM, 28),
             attribute(4, vk::Format::R32G32_SFLOAT, 32),
+            attribute(5, vk::Format::R32G32B32A32_SFLOAT, 40),
+        ];
+        const SKINNED_SHADOW: [vk::VertexInputAttributeDescription; 3] = [
+            attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
+            attribute(2, vk::Format::R8G8B8A8_UINT, 24),
+            attribute(3, vk::Format::R8G8B8A8_UNORM, 28),
         ];
         match self {
             Self::Static => &STATIC[..2],
             Self::StaticTextured => &STATIC,
+            Self::StaticShadow => &STATIC[..1],
             Self::Skinned => &SKINNED[..4],
             Self::SkinnedTextured => &SKINNED,
+            Self::SkinnedShadow => &SKINNED_SHADOW,
         }
     }
 }
@@ -158,6 +179,77 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
         .push_next(&mut rendering);
 
     // Every referenced struct outlives the call; the layout matches the shaders.
+    device.create_graphics_pipeline(&create_info)
+}
+
+/// Creates a depth-only shadow-caster pipeline: no fragment shader and no colour attachment,
+/// depth test/write `LESS_OR_EQUAL`, no culling (sample meshes are not all closed), a dynamic
+/// slope-scaled depth bias and, with `depth_clamp` (the device feature), depth clamping, so a
+/// caster nearer the light than the map's near plane is flattened onto it instead of clipped
+/// ("pancaking").
+pub(crate) fn create_depth_only(
+    device: &DeviceContext,
+    layout: vk::PipelineLayout,
+    vertex_layout: VertexLayout,
+    vertex: vk::ShaderModule,
+    depth_format: vk::Format,
+    depth_clamp: bool,
+) -> RenderResult<vk::Pipeline> {
+    let stages = [vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vertex)
+        .name(c"main")];
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(vertex_layout.stride())
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(vertex_layout.attributes());
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .primitive_restart_enable(false);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(depth_clamp)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .depth_bias_enable(true)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(true)
+        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_bounds_test_enable(false)
+        .stencil_test_enable(false);
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::default().logic_op_enable(false);
+    let dynamic_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::DEPTH_BIAS,
+    ];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let mut rendering =
+        vk::PipelineRenderingCreateInfo::default().depth_attachment_format(depth_format);
+    let create_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+    // Every referenced struct outlives the call; the layout matches the shader.
     device.create_graphics_pipeline(&create_info)
 }
 
@@ -352,9 +444,20 @@ mod tests {
     #[test]
     fn skinned_attributes_match_the_vertex_struct() {
         let attributes = VertexLayout::SkinnedTextured.attributes();
-        assert_eq!(VertexLayout::Skinned.stride(), 40);
-        assert_eq!(VertexLayout::SkinnedTextured.stride(), 40);
-        assert_eq!(VertexLayout::Static.stride(), 32);
+        assert_eq!(VertexLayout::Skinned.stride(), 56);
+        assert_eq!(VertexLayout::SkinnedTextured.stride(), 56);
+        assert_eq!(VertexLayout::SkinnedShadow.stride(), 56);
+        assert_eq!(VertexLayout::Static.stride(), 48);
+        assert_eq!(VertexLayout::StaticShadow.attributes().len(), 1);
+        assert_eq!(
+            attributes[5].offset as usize,
+            core::mem::offset_of!(SkinnedVertex, tangent)
+        );
+        let shadow = VertexLayout::SkinnedShadow.attributes();
+        assert_eq!(
+            shadow.iter().map(|a| a.location).collect::<Vec<_>>(),
+            [0, 2, 3]
+        );
         assert_eq!(VertexLayout::Skinned.attributes().len(), 4);
         assert_eq!(
             attributes[2].offset as usize,
@@ -372,6 +475,10 @@ mod tests {
         assert_eq!(
             VertexLayout::StaticTextured.attributes()[2].offset as usize,
             core::mem::offset_of!(crate::mesh::Vertex, uv)
+        );
+        assert_eq!(
+            VertexLayout::StaticTextured.attributes()[3].offset as usize,
+            core::mem::offset_of!(crate::mesh::Vertex, tangent)
         );
     }
 }

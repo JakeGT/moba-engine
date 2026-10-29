@@ -63,6 +63,10 @@ pub enum RenderError {
     /// not allow, a textured material without a base colour or on a mesh without UVs); the
     /// text says which.
     InvalidMaterial(&'static str),
+    /// An environment passed to [`Renderer::set_environment`](crate::Renderer::set_environment)
+    /// is unusable (not a linear cube map, or a format the device cannot sample); the text
+    /// says which.
+    InvalidEnvironment(&'static str),
 }
 
 impl fmt::Display for RenderError {
@@ -91,6 +95,7 @@ impl fmt::Display for RenderError {
             Self::TooManyTextures => f.write_str("texture limit reached"),
             Self::TooManyMaterials => f.write_str("material limit reached"),
             Self::InvalidMaterial(reason) => write!(f, "invalid material: {reason}"),
+            Self::InvalidEnvironment(reason) => write!(f, "invalid environment: {reason}"),
             Self::InvalidTexture => f.write_str("invalid texture dimensions"),
             Self::TooManyMeshes => write!(
                 f,

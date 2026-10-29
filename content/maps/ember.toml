@@ -39,3 +39,18 @@ color = [0.85, 0.30, 0.08]
 height = 8.0
 yaw = 270.0
 mesh = "crystal"
+
+# Lighting and art direction (R2a, ADR-0011): a low, hot sun through smoke, ember-orange
+# rims so units read against the scorched ground, warm painted specular.
+[lighting]
+environment = "ember"            # environments/ember.{toml,ktx2}: env-bake --preset ember
+sun_direction = [-0.6, 0.35, 0.45]  # the ember sky's sun glow direction
+sun_color = [1.0, 0.84, 0.70]    # warm, but not so orange that blue units turn grey (rule 1)
+sun_intensity = 1.4
+ibl_intensity = 0.3                # the smoky orange sky would grey out blue units (rule 1)
+shadow_strength = 0.8
+shadow_softness = 0.04
+wrap = 0.3
+rim = 0.45
+rim_color = [1.0, 0.75, 0.5]
+specular_tint = [1.0, 0.8, 0.6]

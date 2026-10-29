@@ -1,0 +1,24 @@
+# Environment baked by moba-tools env-bake 0.4.0 (R2a image-based lighting).
+# Client-local and cosmetic: never hashed or sent. Regenerate with
+# scripts/bake-sample-environments.sh; see docs/content-authoring.md.
+# preset = "frost", size = 64, samples = 256
+# zenith = [0.42, 0.58, 0.85]
+# horizon = [0.85, 0.9, 0.98]
+# ground = [0.55, 0.6, 0.68]
+# sun_dir = [0.3, 0.8, -0.5]
+# sun_color = [1.2, 1.3, 1.5]
+# sun_glow = 10.0
+# sh: cosine-convolved SH-L2 / pi, linear RGB, order Y00 Y1-1 Y10 Y11 Y2-2 Y2-1 Y20 Y21 Y22
+sh = [
+    [2.206301, 2.529693, 3.070114],
+    [0.11829884, 0.22213575, 0.40524966],
+    [-0.103329785, -0.11194059, -0.12916222],
+    [0.0619992, 0.0671658, 0.077499],
+    [0.03527192, 0.03821124, 0.0440899],
+    [-0.058785625, -0.063684426, -0.07348203],
+    [0.016009001, 0.010012762, -0.00056643673],
+    [-0.022027565, -0.023863195, -0.027534457],
+    [0.0042341426, -0.008109481, -0.030348862],
+]
+intensity = 1.0
+specular_mips = 7

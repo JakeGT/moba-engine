@@ -5,9 +5,11 @@ use ash::vk;
 /// Rendering quality tier. Every renderer feature keys off this; a feature without a `Low`
 /// path or an off switch does not merge.
 ///
-/// Today it selects only the HDR colour format: `Low` uses the 32-bit packed
-/// `B10G11R11_UFLOAT_PACK32` (half the bandwidth of the 64-bit target, no alpha), the others
-/// `R16G16B16A16_SFLOAT`. Later phases (shadows, post-processing, VFX budgets) add to it.
+/// It selects the HDR colour format (`Low` uses the 32-bit packed `B10G11R11_UFLOAT_PACK32`,
+/// half the bandwidth of the 64-bit target, no alpha; the others `R16G16B16A16_SFLOAT`), the
+/// material sampler's anisotropy, and the shadow filter, shadow-map size and specular IBL
+/// ([`LightingConfig::for_tier`](crate::LightingConfig::for_tier), ADR-0011). Later phases
+/// (post-processing, VFX budgets) add to it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum QualityTier {

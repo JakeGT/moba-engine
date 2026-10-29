@@ -15,7 +15,9 @@
 //!
 //! The static samples also carry `TEXCOORD_0` (ADR-0010): a box projection along each face's
 //! dominant axis at [`UV_PER_METRE`], `v` running down, so a tiling material (the sentinel's
-//! `materials/sentinel.toml`) wraps them without a UV-unwrapping tool. The skinned sample keeps
+//! `materials/sentinel.toml`) wraps them without a UV-unwrapping tool. They also carry
+//! `TANGENT` (R2a): `moba_assets::MeshData::generate_tangents` on those UVs (glTF convention,
+//! MikkTSpace-style), so the normal map needs no tangents generated at load. The skinned sample keeps
 //! its R4a layout (no UVs) so the networked golden's model is unchanged.
 
 use std::fmt::Write as _;
@@ -382,6 +384,23 @@ fn bounds(points: &[V3]) -> (V3, V3) {
     (min, max)
 }
 
+/// The model's tangents, generated exactly as a loader would generate them for its UVs.
+fn tangents(model: &Model) -> Vec<[f32; 4]> {
+    moba_assets::MeshData::new(
+        model.positions.clone(),
+        model.normals.clone(),
+        model
+            .indices
+            .iter()
+            .map(|&index| u32::from(index))
+            .collect(),
+    )
+    .and_then(|mesh| mesh.with_uvs(model.uvs.clone()))
+    .expect("sample model is a valid mesh")
+    .generate_tangents()
+    .expect("sample model has UVs")
+}
+
 /// Serialises a model as a single-mesh binary glTF 2.0 file whose node and mesh are `name`.
 fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
     let mut bin = Vec::new();
@@ -410,6 +429,12 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
             bin.extend_from_slice(&value.to_le_bytes());
         }
     }
+    let tangents_offset = bin.len();
+    for tangent in tangents(model) {
+        for value in tangent {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+    }
     let (min, max) = bounds(&model.positions);
     let count = model.positions.len();
     let mut json = String::new();
@@ -420,18 +445,20 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
             r#""copyright":"MOBA Engine contributors, MIT OR Apache-2.0"}},"#,
             r#""scene":0,"scenes":[{{"nodes":[0]}}],"#,
             r#""nodes":[{{"name":"{}","mesh":0}}],"#,
-            r#""meshes":[{{"name":"{}","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3}},"indices":2}}]}}],"#,
+            r#""meshes":[{{"name":"{}","primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":3,"TANGENT":4}},"indices":2}}]}}],"#,
             r#""buffers":[{{"byteLength":{}}}],"#,
             r#""bufferViews":["#,
             r#"{{"buffer":0,"byteOffset":0,"byteLength":{},"target":34962}},"#,
             r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}},"#,
             r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34963}},"#,
+            r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}},"#,
             r#"{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}}],"#,
             r#""accessors":["#,
             r#"{{"bufferView":0,"componentType":5126,"count":{},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}},"#,
             r#"{{"bufferView":1,"componentType":5126,"count":{},"type":"VEC3"}},"#,
             r#"{{"bufferView":2,"componentType":5123,"count":{},"type":"SCALAR"}},"#,
-            r#"{{"bufferView":3,"componentType":5126,"count":{},"type":"VEC2"}}]}}"#
+            r#"{{"bufferView":3,"componentType":5126,"count":{},"type":"VEC2"}},"#,
+            r#"{{"bufferView":4,"componentType":5126,"count":{},"type":"VEC4"}}]}}"#
         ),
         name,
         name,
@@ -442,7 +469,9 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
         indices_offset,
         indices_length,
         uvs_offset,
-        bin.len() - uvs_offset,
+        tangents_offset - uvs_offset,
+        tangents_offset,
+        bin.len() - tangents_offset,
         count,
         min[0],
         min[1],
@@ -452,6 +481,7 @@ fn encode_glb(model: &Model, name: &str) -> Vec<u8> {
         max[2],
         count,
         model.indices.len(),
+        count,
         count,
     )
     .expect("write to string");
@@ -913,6 +943,38 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// The file's tangents are unit length, orthogonal to the normals, `w = ±1`, and match
+    /// what the generator gives the loaded mesh's own streams.
+    fn check_tangents(mesh: &moba_assets::MeshData, name: &str) {
+        let tangents = mesh.tangents().expect("TANGENT");
+        assert_eq!(tangents.len(), mesh.vertex_count());
+        let regenerated = moba_assets::MeshData::new(
+            mesh.positions().to_vec(),
+            mesh.normals().to_vec(),
+            mesh.indices().to_vec(),
+        )
+        .and_then(|plain| plain.with_uvs(mesh.uvs().expect("uvs").to_vec()))
+        .expect("valid")
+        .generate_tangents()
+        .expect("uvs");
+        for ((tangent, normal), expected) in tangents.iter().zip(mesh.normals()).zip(&regenerated) {
+            let xyz = [tangent[0], tangent[1], tangent[2]];
+            assert!(
+                (super::dot(xyz, xyz) - 1.0).abs() < 1e-5,
+                "{name}: {tangent:?}"
+            );
+            assert!(super::dot(xyz, *normal).abs() < 1e-5, "{name}: {tangent:?}");
+            assert_eq!(tangent[3].abs(), 1.0, "{name}: {tangent:?}");
+            assert!(
+                tangent
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| (a - b).abs() < 1e-5),
+                "{name}: {tangent:?} vs {expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn committed_model_matches_the_generator_and_loads() {
         let generated = super::encode_glb(&super::sentinel(), "sentinel");
@@ -934,6 +996,7 @@ mod tests {
             uvs.iter().flatten().all(|value| value.abs() <= 2.0),
             "within a few tiles"
         );
+        check_tangents(&mesh, "sentinel");
     }
 
     #[test]
@@ -961,6 +1024,7 @@ mod tests {
             let (min, max) = mesh.bounds();
             assert!(min[1].abs() < 1e-6, "{name} stands on the ground: {min:?}");
             assert!((max[1] - height).abs() < 1e-6, "{name} height: {max:?}");
+            check_tangents(&mesh, name);
         }
     }
 
@@ -973,6 +1037,8 @@ mod tests {
             "content/models/sentinel-skinned.glb is stale; run `cargo run -p moba-tools --bin sample-mesh`"
         );
         let mesh = moba_assets::load_glb(&generated).expect("skinned model loads");
+        // No UVs, so no tangents: the networked golden's model is unchanged by R2a.
+        assert!(mesh.uvs().is_none() && mesh.tangents().is_none());
         let static_mesh = moba_assets::load_glb(&super::encode_glb(&super::sentinel(), "sentinel"))
             .expect("static model loads");
         // The static sample's bind-pose geometry first, then the cape.

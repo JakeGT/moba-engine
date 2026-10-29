@@ -2,6 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "camera.glsl"
+#include "lighting.glsl"
 
 layout(location = 0) in vec3 in_normal;
 layout(location = 1) in vec3 in_world_pos;
@@ -24,9 +25,11 @@ void main() {
     vec3 line = camera.terrain.rgb * 2.0;
     vec3 base = mix(grass, line, grid);
 
-    float diffuse = max(dot(normalize(in_normal), normalize(camera.light_direction.xyz)), 0.0)
-        * camera.light_direction.w;
-    vec3 lit = base * (camera.ambient.rgb + diffuse);
+    // Stylised PBR like the units (ADR-0011): a rough dielectric ground that receives the
+    // shadow map. No rim: the ground plane has no silhouette.
+    Surface surface = default_surface(base, normalize(in_normal), in_world_pos, camera.rim_color.w);
+    surface.rim = 0.0;
+    vec3 lit = shade(surface);
 
     // Fog of war: darken terrain outside the allied vision circles. Server snapshots
     // already withhold unseen units; this makes the visibility boundary legible.

@@ -10,7 +10,13 @@
 //! - no descriptor (or an invalid one): the built-in theme table ([`theme_visuals`]) for the
 //!   map's theme id, exactly as before #287;
 //! - a missing, malformed or unuploadable mesh: that wall or prop draws the built-in block
-//!   with the descriptor's colours.
+//!   with the descriptor's colours;
+//! - a missing or invalid environment (`[lighting] environment`, R2a/ADR-0011): the
+//!   hemispheric ambient; a missing ramp: no ramp.
+//!
+//! The descriptor's `[lighting]` table sets the sun, ambient and stylisation
+//! ([`MapLibrary::scene_lighting`], [`MapLibrary::light_camera`]); unset keys keep the
+//! renderer's defaults.
 //!
 //! Everything here is cosmetic and client-local: nothing feeds the simulation, the wire or
 //! the content hash. Files are read and meshes uploaded only in [`MapLibrary::bind`]
@@ -19,11 +25,11 @@
 
 use std::path::{Path, PathBuf};
 
-use moba_assets::{DEFAULT_WALL_HEIGHT, MapVisuals, valid_mesh_name};
+use moba_assets::{DEFAULT_WALL_HEIGHT, MapLighting, MapVisuals, valid_mesh_name};
 use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_game::{MapSpec, MapTheme};
 use moba_net::protocol::WireMap;
-use moba_render::{MeshData, MeshId, UnitInstance};
+use moba_render::{Camera, MeshData, MeshId, SceneLighting, TextureId, UnitInstance};
 
 use crate::app::models::model_path;
 
@@ -180,6 +186,13 @@ pub(crate) struct MapLibrary {
     active: Option<String>,
     /// Incremented by every `bind` (map changes are rare; wrapping is harmless).
     generation: u32,
+    /// The active descriptor's `[lighting]` table (defaults without one).
+    lighting: MapLighting,
+    /// Environment and ramp names last applied to the renderer; `None` until the first
+    /// [`MapLibrary::apply_lighting`] after a (re)created renderer.
+    applied: Option<(Option<String>, Option<String>)>,
+    /// Ramp textures uploaded to this renderer (texture slots are never freed).
+    ramps: Vec<(String, Option<TextureId>)>,
 }
 
 impl MapLibrary {
@@ -193,7 +206,101 @@ impl MapLibrary {
             instances: Vec::with_capacity(MAX_WALLS + moba_assets::MAX_MAP_PROPS),
             active: None,
             generation: 0,
+            lighting: MapLighting::default(),
+            applied: None,
+            ramps: Vec::new(),
         }
+    }
+
+    /// The scene lighting for the active map: the renderer's defaults with the descriptor's
+    /// `[lighting]` overrides. Never allocates.
+    pub(crate) fn scene_lighting(&self) -> SceneLighting {
+        scene_lighting(&self.lighting)
+    }
+
+    /// Applies the descriptor's sun direction, intensity and hemispheric ambient to `camera`.
+    pub(crate) fn light_camera(&self, camera: &mut Camera) {
+        let lighting = &self.lighting;
+        if let Some(direction) = lighting.sun_direction {
+            camera.light_direction = Vec3::from_array(direction);
+        }
+        if let Some(intensity) = lighting.sun_intensity {
+            camera.light_intensity = intensity;
+        }
+        if let Some(ambient) = lighting.ambient {
+            camera.ambient = Vec3::from_array(ambient);
+        }
+    }
+
+    /// Loads and binds the active map's environment and ramp on `renderer` when they changed
+    /// since the last call (load time: startup and content updates). Failures are logged
+    /// and fall back to the hemispheric ambient / no ramp.
+    pub(crate) fn apply_lighting(&mut self, renderer: &mut moba_render::Renderer) {
+        let wanted = (
+            self.lighting.environment.clone(),
+            self.lighting.ramp.clone(),
+        );
+        if self.applied.as_ref() == Some(&wanted) {
+            return;
+        }
+        let (environment, ramp) = &wanted;
+        let result = match environment {
+            Some(name) => load_environment(&self.root, name).and_then(|(desc, specular)| {
+                renderer
+                    .set_environment(&desc, Some(&specular))
+                    .map_err(|error| format!("renderer rejected it: {error}"))
+            }),
+            None => renderer
+                .clear_environment()
+                .map_err(|error| error.to_string()),
+        };
+        match (result, environment) {
+            (Ok(()), Some(name)) => eprintln!("[assets] environment '{name}' loaded (IBL)"),
+            (Ok(()), None) => {}
+            (Err(reason), name) => {
+                eprintln!(
+                    "[assets] environment '{}': {reason}; using the hemispheric ambient",
+                    name.as_deref().unwrap_or("")
+                );
+                let _ = renderer.clear_environment();
+            }
+        }
+        let texture = ramp.as_deref().and_then(|name| self.ramp(name, renderer));
+        if let Err(error) = renderer.set_lighting_ramp(texture) {
+            eprintln!("[assets] lighting ramp: {error}; no ramp");
+            let _ = renderer.set_lighting_ramp(None);
+        }
+        self.applied = Some(wanted);
+    }
+
+    /// The uploaded ramp texture for `name`, loading it the first time.
+    fn ramp(&mut self, name: &str, renderer: &mut moba_render::Renderer) -> Option<TextureId> {
+        if let Some((_, cached)) = self.ramps.iter().find(|(known, _)| known == name) {
+            return *cached;
+        }
+        if self.ramps.len() >= MAX_CACHED {
+            return None;
+        }
+        let uploaded = moba_assets::texture_path(&self.root, name)
+            .ok_or_else(|| String::from("invalid texture name"))
+            .and_then(|path| {
+                moba_assets::load_ktx2_file(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))
+            })
+            .and_then(|data| {
+                renderer
+                    .register_texture(&data)
+                    .map_err(|error| format!("upload failed: {error}"))
+            });
+        let texture = match uploaded {
+            Ok(texture) => Some(texture),
+            Err(reason) => {
+                eprintln!("[assets] lighting ramp '{name}': {reason}; no ramp");
+                None
+            }
+        };
+        self.ramps.push((name.to_owned(), texture));
+        texture
     }
 
     /// Counts binds, so a caller can tell that the map changed.
@@ -228,6 +335,8 @@ impl MapLibrary {
     pub(crate) fn renderer_recreated(&mut self) {
         self.meshes.retain(|(_, mesh)| mesh.is_none());
         self.instances.clear();
+        self.ramps.clear();
+        self.applied = None;
     }
 
     /// Resolves `key`'s visuals and rebuilds the walls and props (startup and content
@@ -255,6 +364,10 @@ impl MapLibrary {
             .and_then(|visuals| visuals.wall_mesh.as_deref())
             .and_then(|name| self.mesh(name, &mut register));
         self.terrain = terrain;
+        self.lighting = descriptor
+            .as_ref()
+            .map(|visuals| visuals.lighting.clone())
+            .unwrap_or_default();
         self.active = descriptor.as_ref().and(key.visuals.map(str::to_owned));
         self.generation = self.generation.wrapping_add(1);
         self.instances.clear();
@@ -442,6 +555,73 @@ fn theme_label(theme: MapTheme) -> &'static str {
     theme.asset_name().trim_start_matches("map-")
 }
 
+/// The renderer's default lighting with `map`'s overrides.
+pub(crate) fn scene_lighting(map: &MapLighting) -> SceneLighting {
+    let mut lighting = SceneLighting::DEFAULT;
+    let rgb = |value: [f32; 3]| Vec3::from_array(value);
+    if let Some(color) = map.sun_color {
+        lighting.sun_color = rgb(color);
+    }
+    if let Some(color) = map.ambient_ground {
+        lighting.ambient_ground = rgb(color);
+    } else if let Some(sky) = map.ambient {
+        // The pre-R2 ground/sky ratio of the hemispheric ambient.
+        lighting.ambient_ground = rgb(sky) * Vec3::new(0.55, 0.6, 0.7);
+    }
+    if let Some(value) = map.shadow_strength {
+        lighting.shadow_strength = value;
+    }
+    if let Some(value) = map.shadow_softness {
+        lighting.shadow_softness = value;
+    }
+    if let Some(value) = map.ibl_intensity {
+        lighting.ibl_intensity = value;
+    }
+    if let Some(value) = map.wrap {
+        lighting.wrap = value;
+    }
+    if let Some(value) = map.rim {
+        lighting.rim = value;
+    }
+    if let Some(color) = map.rim_color {
+        lighting.rim_color = rgb(color);
+    }
+    if let Some(value) = map.ramp_strength {
+        lighting.ramp = value;
+    }
+    if let Some(value) = map.specular {
+        lighting.specular = value;
+    }
+    if let Some(color) = map.specular_tint {
+        lighting.specular_tint = rgb(color);
+    }
+    if let Some(value) = map.unit_roughness {
+        lighting.unit_roughness = value;
+    }
+    if let Some(value) = map.terrain_roughness {
+        lighting.terrain_roughness = value;
+    }
+    lighting
+}
+
+/// Loads `<root>/environments/<name>.{toml,ktx2}`: the SH/intensity descriptor and the
+/// prefiltered specular cube.
+fn load_environment(
+    root: &Path,
+    name: &str,
+) -> Result<(moba_assets::EnvironmentDesc, moba_render::TextureData), String> {
+    let (toml, ktx2) = moba_assets::environment_paths(root, name)
+        .ok_or_else(|| String::from("invalid environment name (use 1-32 of [A-Za-z0-9_-])"))?;
+    let desc = moba_assets::EnvironmentDesc::load_file(&toml)
+        .map_err(|error| format!("{}: {error}", toml.display()))?;
+    let specular = moba_assets::load_ktx2_file(&ktx2)
+        .map_err(|error| format!("{}: {error}", ktx2.display()))?;
+    if !specular.is_cube() {
+        return Err(format!("{}: not a cube map", ktx2.display()));
+    }
+    Ok((desc, specular))
+}
+
 fn rgba(rgb: [f32; 3]) -> [f32; 4] {
     [rgb[0], rgb[1], rgb[2], 1.0]
 }
@@ -461,6 +641,7 @@ pub(crate) fn bind_network_map(
             .register_mesh(data)
             .map_err(|error| error.to_string())
     });
+    library.apply_lighting(renderer);
 }
 
 /// Binds a local preview's map.
@@ -474,6 +655,7 @@ pub(crate) fn bind_local_map(
             .register_mesh(data)
             .map_err(|error| error.to_string())
     });
+    library.apply_lighting(renderer);
 }
 
 #[cfg(test)]

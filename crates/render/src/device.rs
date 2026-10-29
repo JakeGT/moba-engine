@@ -42,6 +42,14 @@ pub(crate) struct DeviceContext {
     pub(crate) max_anisotropy: Option<f32>,
     /// `minUniformBufferOffsetAlignment`.
     pub(crate) min_uniform_offset_alignment: u64,
+    /// `maxImageDimension2D`: bounds the shadow-map resolution.
+    pub(crate) max_image_dimension_2d: u32,
+    /// `depthClamp` is supported and enabled: shadow casters nearer the light than the map's
+    /// near plane are clamped onto it ("pancaking") instead of clipped.
+    pub(crate) depth_clamp: bool,
+    /// Comparison samplers (hardware PCF) are usable: always on conformant drivers; on a
+    /// `VK_KHR_portability_subset` device only with `mutableComparisonSamplers`.
+    pub(crate) comparison_samplers: bool,
     /// Identity a saved pipeline cache must match.
     pub(crate) cache_identity: CacheIdentity,
     /// The pipeline cache every pipeline is built through (null until
@@ -185,15 +193,33 @@ impl DeviceContext {
         let supported = unsafe { instance.get_physical_device_features(physical) };
         let texture_compression_bc = supported.texture_compression_bc == vk::TRUE;
         let sampler_anisotropy = supported.sampler_anisotropy == vk::TRUE;
+        let depth_clamp = supported.depth_clamp == vk::TRUE;
         let base_features = vk::PhysicalDeviceFeatures::default()
             .texture_compression_bc(texture_compression_bc)
-            .sampler_anisotropy(sampler_anisotropy);
+            .sampler_anisotropy(sampler_anisotropy)
+            .depth_clamp(depth_clamp);
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
+        // Portability drivers (MoltenVK) may not support comparison samplers; query and
+        // enable `mutableComparisonSamplers`, which the shadow map's hardware PCF needs.
+        let portability = candidate.extensions.contains(&PORTABILITY_SUBSET);
+        let mut portability_features = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
+        if portability {
+            let mut query =
+                vk::PhysicalDeviceFeatures2::default().push_next(&mut portability_features);
+            // SAFETY: the physical device belongs to this instance, it exposes the
+            // portability-subset extension, and the chain is valid for the call.
+            unsafe { instance.get_physical_device_features2(physical, &mut query) };
+        }
+        let comparison_samplers =
+            !portability || portability_features.mutable_comparison_samplers == vk::TRUE;
         let mut features_2 = vk::PhysicalDeviceFeatures2::default()
             .features(base_features)
             .push_next(&mut features_13);
+        if portability {
+            features_2 = features_2.push_next(&mut portability_features);
+        }
 
         let priorities = [1.0f32];
         let mut queue_infos = vec![
@@ -269,6 +295,9 @@ impl DeviceContext {
                 .limits
                 .min_uniform_buffer_offset_alignment
                 .max(1),
+            max_image_dimension_2d: candidate.properties.limits.max_image_dimension2_d,
+            depth_clamp,
+            comparison_samplers,
             cache_identity: CacheIdentity::of(&candidate.properties),
             pipeline_cache: vk::PipelineCache::null(),
             pipeline_builds: Cell::new((0, Duration::ZERO)),

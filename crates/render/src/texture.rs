@@ -19,6 +19,7 @@ pub(crate) fn vk_format(format: TextureFormat) -> vk::Format {
         TextureFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
         TextureFormat::Bc7Unorm => vk::Format::BC7_UNORM_BLOCK,
         TextureFormat::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
+        TextureFormat::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
         // `TextureFormat` is non-exhaustive across crates; a new format must be mapped here.
         _ => vk::Format::UNDEFINED,
     }
@@ -53,9 +54,8 @@ pub(crate) fn upload_rgba(
     upload(device, name, &texture)
 }
 
-/// Uploads every mip level of `texture` into a sampled image in
-/// `SHADER_READ_ONLY_OPTIMAL`. Load-time only: it waits for the graphics queue.
-#[allow(clippy::too_many_lines)] // Upload/barrier/copy sequence is intentionally linear.
+/// Uploads every mip level (and, for a cube map, every face) of `texture` into a sampled
+/// image in `SHADER_READ_ONLY_OPTIMAL`. Load-time only: it waits for the graphics queue.
 pub(crate) fn upload(
     device: &DeviceContext,
     name: &str,
@@ -65,36 +65,102 @@ pub(crate) fn upload(
     if format == vk::Format::UNDEFINED {
         return Err(RenderError::InvalidTexture);
     }
-    let levels = texture.level_count();
-    let bytes = texture.data();
+    let mut levels = [(0usize, 0usize); moba_assets::MAX_MIP_LEVELS as usize];
+    let count = texture.level_count() as usize;
+    for (level, slot) in levels.iter_mut().enumerate().take(count) {
+        let level = u32::try_from(level).map_err(|_| RenderError::InvalidTexture)?;
+        let (_, _, bytes) = texture.level(level).ok_or(RenderError::InvalidTexture)?;
+        let offset = texture
+            .level_offset(level)
+            .ok_or(RenderError::InvalidTexture)?;
+        *slot = (offset, bytes.len());
+    }
+    upload_raw(
+        device,
+        name,
+        &RawImage {
+            format,
+            extent: vk::Extent2D {
+                width: texture.width(),
+                height: texture.height(),
+            },
+            cube: texture.is_cube(),
+            levels: &levels[..count],
+            bytes: texture.data(),
+        },
+    )
+}
+
+/// Texel data for [`upload_raw`]: every level's `(offset, length)` in `bytes`, largest level
+/// first; a cube level holds its six faces consecutively (+X, −X, +Y, −Y, +Z, −Z).
+pub(crate) struct RawImage<'a> {
+    pub(crate) format: vk::Format,
+    pub(crate) extent: vk::Extent2D,
+    pub(crate) cube: bool,
+    pub(crate) levels: &'a [(usize, usize)],
+    pub(crate) bytes: &'a [u8],
+}
+
+/// Uploads `raw` into a sampled image in `SHADER_READ_ONLY_OPTIMAL`. The caller guarantees
+/// each level range lies inside `bytes` and holds exactly that level's texels (every face
+/// for a cube); [`upload`] gets that from `TextureData`'s invariants, and the renderer's own
+/// images are built with exact sizes. Load-time only: it waits for the graphics queue.
+#[allow(clippy::too_many_lines)] // Upload/barrier/copy sequence is intentionally linear.
+pub(crate) fn upload_raw(
+    device: &DeviceContext,
+    name: &str,
+    raw: &RawImage<'_>,
+) -> RenderResult<GpuImage> {
+    let levels = u32::try_from(raw.levels.len()).map_err(|_| RenderError::InvalidTexture)?;
+    if levels == 0
+        || raw.bytes.is_empty()
+        || raw.levels.iter().any(|&(offset, len)| {
+            offset
+                .checked_add(len)
+                .is_none_or(|end| end > raw.bytes.len())
+        })
+    {
+        return Err(RenderError::InvalidTexture);
+    }
+    let layers = if raw.cube { 6 } else { 1 };
     let mut staging = GpuBuffer::new(
         device.device.clone(),
         device.allocator(),
         "texture-staging",
-        bytes.len() as u64,
+        raw.bytes.len() as u64,
         vk::BufferUsageFlags::TRANSFER_SRC,
         MemoryLocation::CpuToGpu,
     )?;
-    staging.write_bytes(0, bytes);
-    let image = GpuImage::with_mips(
-        device.device.clone(),
-        device.allocator(),
-        name,
-        vk::Extent2D {
-            width: texture.width(),
-            height: texture.height(),
-        },
-        format,
-        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-        vk::ImageAspectFlags::COLOR,
-        levels,
-    )?;
+    staging.write_bytes(0, raw.bytes);
+    let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
+    let image = if raw.cube {
+        GpuImage::cube_with_mips(
+            device.device.clone(),
+            device.allocator(),
+            name,
+            raw.extent.width,
+            raw.format,
+            usage,
+            levels,
+        )?
+    } else {
+        GpuImage::with_mips(
+            device.device.clone(),
+            device.allocator(),
+            name,
+            raw.extent,
+            raw.format,
+            usage,
+            vk::ImageAspectFlags::COLOR,
+            levels,
+        )?
+    };
     let all_levels = vk::ImageSubresourceRange {
         aspect_mask: vk::ImageAspectFlags::COLOR,
         base_mip_level: 0,
         level_count: levels,
         base_array_layer: 0,
-        layer_count: 1,
+        layer_count: layers,
     };
 
     let pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
@@ -119,14 +185,12 @@ pub(crate) fn upload(
         vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_transfer));
     device.cmd_pipeline_barrier2(command, &dependency);
 
-    // One region per level; `moba_assets::TextureData` guarantees each level holds exactly
-    // its size's bytes at `level_offset`, so no copy reads past the staging buffer.
-    let mut regions = Vec::with_capacity(levels as usize);
-    for level in 0..levels {
-        let (width, height, _) = texture.level(level).ok_or(RenderError::InvalidTexture)?;
-        let offset = texture
-            .level_offset(level)
-            .ok_or(RenderError::InvalidTexture)?;
+    // One region per level covering every layer: with zero row length and image height the
+    // faces are read tightly packed, one after another, from the level's offset.
+    let mut regions = Vec::with_capacity(raw.levels.len());
+    for (level, &(offset, _)) in (0u32..).zip(raw.levels) {
+        let width = (raw.extent.width >> level).max(1);
+        let height = (raw.extent.height >> level).max(1);
         regions.push(
             vk::BufferImageCopy::default()
                 .buffer_offset(offset as u64)
@@ -136,7 +200,7 @@ pub(crate) fn upload(
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: level,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count: layers,
                 })
                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .image_extent(vk::Extent3D {
@@ -146,8 +210,9 @@ pub(crate) fn upload(
                 }),
         );
     }
-    // SAFETY: the staging buffer holds every level and the image was created for transfer
-    // with `levels` mip levels.
+    // SAFETY: the staging buffer holds every level (checked above; exact sizes are the
+    // caller's contract) and the image was created for transfer with `levels` mip levels and
+    // `layers` layers.
     unsafe {
         device.device.cmd_copy_buffer_to_image(
             command,
@@ -175,29 +240,139 @@ pub(crate) fn upload(
 
     // SAFETY: the command buffer is recording and is ended once.
     unsafe { device.device.end_command_buffer(command) }?;
-    let commands = [command];
-    let submit = vk::SubmitInfo::default().command_buffers(&commands);
-    // SAFETY: the command buffer is executable on the graphics queue; submits to the queue
-    // happen only on the renderer's thread (see `mesh::upload_bytes`).
-    unsafe {
-        device
-            .device
-            .queue_submit(device.graphics_queue, &[submit], vk::Fence::null())
-    }?;
-    // SAFETY: waiting for our own load-time submission is valid.
-    if let Err(error) = unsafe { device.device.queue_wait_idle(device.graphics_queue) } {
-        // The copy may still be running: freeing the staging buffer, pool or image now could
-        // be a use-after-free. Wait for the device instead, or leak them.
-        // SAFETY: the device is live; waiting has no other preconditions.
-        if unsafe { device.device.device_wait_idle() }.is_err() {
+    if let Err(failure) = submit_and_wait(device, command) {
+        if !failure.idle {
             core::mem::forget(pool);
             core::mem::forget(staging);
             core::mem::forget(image);
         }
-        return Err(error.into());
+        return Err(failure.error);
     }
     drop(staging);
     Ok(image)
+}
+
+/// A 1×1 depth image cleared to 1.0 (fully lit) in `SHADER_READ_ONLY_OPTIMAL`: the shadow
+/// map bound when shadows are off. Load-time only.
+pub(crate) fn default_depth(device: &DeviceContext, format: vk::Format) -> RenderResult<GpuImage> {
+    let image = GpuImage::new(
+        device.device.clone(),
+        device.allocator(),
+        "default-shadow-map",
+        vk::Extent2D {
+            width: 1,
+            height: 1,
+        },
+        format,
+        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        vk::ImageAspectFlags::DEPTH,
+    )?;
+    let range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::DEPTH,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    let pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
+    let command = pool.allocate_one()?;
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    // SAFETY: the command buffer is allocated and not recording.
+    unsafe { device.device.begin_command_buffer(command, &begin) }?;
+    let to_transfer = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+        .dst_stage_mask(vk::PipelineStageFlags2::CLEAR)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image.image())
+        .subresource_range(range);
+    device.cmd_pipeline_barrier2(
+        command,
+        &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_transfer)),
+    );
+    let clear = vk::ClearDepthStencilValue {
+        depth: 1.0,
+        stencil: 0,
+    };
+    // SAFETY: the image was created with TRANSFER_DST and is in TRANSFER_DST_OPTIMAL; the
+    // range names its only level and layer of the depth aspect.
+    unsafe {
+        device.device.cmd_clear_depth_stencil_image(
+            command,
+            image.image(),
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &clear,
+            core::slice::from_ref(&range),
+        );
+    }
+    let to_shader = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::CLEAR)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image.image())
+        .subresource_range(range);
+    device.cmd_pipeline_barrier2(
+        command,
+        &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_shader)),
+    );
+    // SAFETY: the command buffer is recording and is ended once.
+    unsafe { device.device.end_command_buffer(command) }?;
+    if let Err(failure) = submit_and_wait(device, command) {
+        if !failure.idle {
+            core::mem::forget(pool);
+            core::mem::forget(image);
+        }
+        return Err(failure.error);
+    }
+    Ok(image)
+}
+
+/// A failed load-time submission: the error, and whether the device is known idle (if not,
+/// the caller must leak every resource the commands used rather than free it).
+struct WaitFailure {
+    error: RenderError,
+    idle: bool,
+}
+
+/// Submits a one-time command buffer and waits for the graphics queue to idle.
+fn submit_and_wait(device: &DeviceContext, command: vk::CommandBuffer) -> Result<(), WaitFailure> {
+    let commands = [command];
+    let submit = vk::SubmitInfo::default().command_buffers(&commands);
+    // SAFETY: the command buffer is executable on the graphics queue; submits to the queue
+    // happen only on the renderer's thread (see `mesh::upload_bytes`).
+    if let Err(error) = unsafe {
+        device
+            .device
+            .queue_submit(device.graphics_queue, &[submit], vk::Fence::null())
+    } {
+        // Nothing was submitted, so nothing is in use.
+        return Err(WaitFailure {
+            error: error.into(),
+            idle: true,
+        });
+    }
+    // SAFETY: waiting for our own load-time submission is valid.
+    if let Err(error) = unsafe { device.device.queue_wait_idle(device.graphics_queue) } {
+        // The commands may still be running: freeing the pool or the resources they use now
+        // could be a use-after-free. Wait for the whole device instead; if that fails too,
+        // the caller leaks them.
+        // SAFETY: the device is live; waiting has no other preconditions.
+        let idle = unsafe { device.device.device_wait_idle() }.is_ok();
+        return Err(WaitFailure {
+            error: error.into(),
+            idle,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

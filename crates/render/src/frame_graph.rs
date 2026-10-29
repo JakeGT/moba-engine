@@ -3,7 +3,10 @@
 //! ```text
 //! portraits  (R7b; frames that update them) hero models → portrait atlas (persistent)
 //! minimap    (R7b; frames that bake it) top-down map → minimap image (persistent)
-//! scene      terrain + units + skinned → hdr (colour, cleared) + depth (sampled-capable)
+//! shadow     (R2a; when shadows are on) the main view's units + skinned, depth only →
+//!            shadow map (fixed size)
+//! scene      terrain + units + skinned → hdr (colour, cleared) + depth (sampled-capable),
+//!            sampling the shadow map
 //! composite  hdr (sampled) → exposure + AgX tonemap → swapchain
 //! ui         HUD batch blended over the swapchain (not tonemapped); samples both
 //!            offscreen images
@@ -17,6 +20,10 @@
 //! them share the same transient slots. Per frame the renderer picks a variant, fills a
 //! fixed-size [`Bindings`] table with this frame's handles and records the precompiled
 //! barriers, so nothing here allocates on the frame path.
+//!
+//! The offscreen passes never sample the shadow map: their views bind a lighting set whose
+//! shadow binding is a persistent 1×1 default image, and their camera uniform turns shadows
+//! off (ADR-0011), so the shadow transient is only read by the scene, after the shadow pass.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,6 +47,7 @@ pub(crate) const OFFSCREEN_VARIANTS: usize = 1 << UI_IMAGE_SLOTS;
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PassKind {
+    Shadow,
     Scene,
     Composite,
     Ui,
@@ -65,6 +73,15 @@ pub(crate) struct FrameResources {
     pub(crate) bones: ResourceId,
     pub(crate) capture: Option<ResourceId>,
     pub(crate) offscreen: [OffscreenResources; UI_IMAGE_SLOTS],
+    /// The directional shadow map; `None` when shadows are off.
+    pub(crate) shadow: Option<ResourceId>,
+}
+
+/// The shadow map a frame renders, when shadows are on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ShadowSpec {
+    pub(crate) format: vk::Format,
+    pub(crate) size: u32,
 }
 
 /// A compiled frame variant and its resource ids.
@@ -77,7 +94,8 @@ pub(crate) struct FramePlan {
 }
 
 /// Builds and compiles the frame graph. Bit `s` of `offscreen` adds the pass that renders
-/// offscreen image `s` this frame.
+/// offscreen image `s` this frame; `shadow` adds the shadow pass and map (every variant of
+/// one renderer passes the same `shadow`, so they share transients).
 ///
 /// # Errors
 /// Only if the declaration below is inconsistent (covered by unit tests).
@@ -86,6 +104,7 @@ pub(crate) fn build(
     hdr_format: vk::Format,
     depth_format: vk::Format,
     depth_aspect: vk::ImageAspectFlags,
+    shadow: Option<ShadowSpec>,
     capture: bool,
     offscreen: usize,
 ) -> Result<FramePlan, GraphError> {
@@ -119,6 +138,22 @@ pub(crate) fn build(
             extra_usage: vk::ImageUsageFlags::SAMPLED,
         },
     );
+    // Depth only and fixed-size, so it never aliases the swapchain-sized targets. Written by
+    // the shadow pass, sampled (depth compare) by the scene's fragment shaders.
+    let shadow_map = shadow.map(|spec| {
+        graph.transient_image(
+            "shadow-map",
+            ImageDesc {
+                format: spec.format,
+                aspect: vk::ImageAspectFlags::DEPTH,
+                size: ImageSize::Fixed {
+                    width: spec.size,
+                    height: spec.size,
+                },
+                extra_usage: vk::ImageUsageFlags::empty(),
+            },
+        )
+    });
     let capture_buffer = capture.then(|| {
         // Every capture waits for the device to idle before reading the buffer back, so no
         // earlier submission still touches it when the next capture frame starts.
@@ -169,11 +204,20 @@ pub(crate) fn build(
             .access(resources.depth, Access::DepthWrite)
             .access(resources.bones, Access::VertexStorageRead);
     }
-    let _ = graph
+    if let Some(shadow_map) = shadow_map {
+        let _ = graph
+            .pass("shadow", PassKind::Shadow)
+            .access(shadow_map, Access::DepthWrite)
+            .access(bones, Access::VertexStorageRead);
+    }
+    let scene = graph
         .pass("scene", PassKind::Scene)
         .access(hdr, Access::ColorWrite)
         .access(depth, Access::DepthWrite)
         .access(bones, Access::VertexStorageRead);
+    if let Some(shadow_map) = shadow_map {
+        let _ = scene.access(shadow_map, Access::SampledFragment);
+    }
     let _ = graph
         .pass("composite", PassKind::Composite)
         .access(hdr, Access::SampledFragment)
@@ -205,6 +249,7 @@ pub(crate) fn build(
             bones,
             capture: capture_buffer,
             offscreen: offscreen_resources,
+            shadow: shadow_map,
         },
     })
 }
@@ -311,7 +356,7 @@ pub(crate) fn record_barriers(
 
 #[cfg(test)]
 mod tests {
-    use super::{OFFSCREEN_VARIANTS, PassKind, build};
+    use super::{OFFSCREEN_VARIANTS, PassKind, ShadowSpec, build};
     use ash::vk;
     use vk::ImageLayout as L;
 
@@ -320,10 +365,88 @@ mod tests {
             vk::Format::R16G16B16A16_SFLOAT,
             vk::Format::D32_SFLOAT,
             vk::ImageAspectFlags::DEPTH,
+            None,
             capture,
             offscreen,
         )
         .expect("the engine frame graph compiles")
+    }
+
+    fn shadowed(capture: bool, offscreen: usize) -> super::FramePlan {
+        build(
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::Format::D32_SFLOAT,
+            vk::ImageAspectFlags::DEPTH,
+            Some(ShadowSpec {
+                format: vk::Format::D32_SFLOAT,
+                size: 2048,
+            }),
+            capture,
+            offscreen,
+        )
+        .expect("the shadowed frame graph compiles")
+    }
+
+    #[test]
+    fn shadow_pass_writes_depth_then_the_scene_samples_it() {
+        let plain = shadowed(false, 0);
+        for capture in [false, true] {
+            for offscreen in 0..OFFSCREEN_VARIANTS {
+                let frame = shadowed(capture, offscreen);
+                // Every variant (capture x offscreen) runs on the same transients.
+                assert!(frame.graph.shares_transients_with(&plain.graph));
+                assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                let count = offscreen.count_ones() as usize;
+                let passes = frame.graph.passes();
+                assert_eq!(passes[count].tag, PassKind::Shadow);
+                assert_eq!(passes[count + 1].tag, PassKind::Scene);
+                // Offscreen, shadow and scene all go ahead of the acquire wait.
+                assert_eq!(frame.acquire_split, count + 2);
+                let shadow = frame.resources.shadow.expect("shadow map");
+                // Only the shadow and scene passes touch the map (never an offscreen view).
+                for (index, pass) in passes.iter().enumerate() {
+                    assert_eq!(pass.uses(shadow), index == count || index == count + 1);
+                }
+                assert!(passes[count].barriers.iter().any(|barrier| {
+                    barrier.resource == shadow
+                        && barrier.new_layout == L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                }));
+                // Scene: depth write -> fragment sampled read with the layout change; the
+                // bone buffer needs no second barrier.
+                let scene = &passes[count + 1].barriers;
+                let read = scene
+                    .iter()
+                    .find(|barrier| barrier.resource == shadow)
+                    .expect("shadow barrier before the scene");
+                assert_eq!(
+                    (read.old_layout, read.new_layout),
+                    (
+                        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        L::SHADER_READ_ONLY_OPTIMAL
+                    )
+                );
+                assert_eq!(
+                    read.src_access,
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+                );
+                assert_eq!(read.dst_stage, vk::PipelineStageFlags2::FRAGMENT_SHADER);
+                assert_eq!(read.dst_access, vk::AccessFlags2::SHADER_SAMPLED_READ);
+                assert!(
+                    !scene
+                        .iter()
+                        .any(|barrier| barrier.resource == frame.resources.bones)
+                );
+            }
+        }
+        // Its own slot: a fixed size never aliases the swapchain-sized depth.
+        assert_eq!(plain.graph.slots().len(), 3);
+        let slot = plain.graph.slots()[plain
+            .graph
+            .slot_of(plain.resources.shadow.unwrap())
+            .unwrap()];
+        assert!(slot.usage.contains(
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
+        ));
     }
 
     fn plan(capture: bool) -> super::FramePlan {

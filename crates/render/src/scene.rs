@@ -6,6 +6,8 @@ use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, persp
 
 use crate::ui::UiImage;
 
+use crate::lighting::{FrameLighting, SceneLighting};
+
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -14,11 +16,11 @@ pub struct Camera {
     pub view_proj: Mat4,
     /// Eye position in world space.
     pub position: Vec3,
-    /// Normalised direction towards the key light.
+    /// Normalised direction towards the key light (the sun; it also orients the shadow map).
     pub light_direction: Vec3,
-    /// Key-light intensity multiplier.
+    /// Key-light intensity multiplier (times [`SceneLighting::sun_color`]).
     pub light_intensity: f32,
-    /// Ambient light colour.
+    /// Hemispheric sky ambient, used without an environment, and the distance-fog colour.
     pub ambient: Vec3,
 }
 
@@ -219,6 +221,8 @@ pub struct Scene<'a> {
     /// Joint matrices for skinned instances, indexed by [`UnitInstance::bones`]. Up to
     /// [`RenderConfig::max_bones`](crate::RenderConfig::max_bones) are uploaded per frame.
     pub bones: &'a [JointMatrix],
+    /// Lighting art direction (ADR-0011); [`SceneLighting::DEFAULT`] unless set.
+    pub lighting: SceneLighting,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -366,6 +370,7 @@ impl<'a> Scene<'a> {
             },
             terrain_tint: [0.10, 0.16, 0.11, 1.0],
             bones: &[],
+            lighting: SceneLighting::DEFAULT,
         }
     }
 
@@ -382,7 +387,15 @@ impl<'a> Scene<'a> {
             vision,
             terrain_tint: [0.10, 0.16, 0.11, 1.0],
             bones: &[],
+            lighting: SceneLighting::DEFAULT,
         }
+    }
+
+    /// Sets the lighting art direction.
+    #[must_use]
+    pub const fn with_lighting(mut self, lighting: SceneLighting) -> Self {
+        self.lighting = lighting;
+        self
     }
 
     /// Sets the terrain tint.
@@ -406,7 +419,8 @@ impl<'a> Scene<'a> {
     }
 }
 
-/// GPU layout of the per-frame camera uniform. Must match `shaders/unit.vert`.
+/// GPU layout of the per-frame camera uniform. Must match `include/camera.glsl` (std140:
+/// every member is a `vec4`, `uvec4` or `mat4`, so there is no padding).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct CameraUniform {
@@ -419,10 +433,25 @@ pub(crate) struct CameraUniform {
     vision_count: [u32; 4],
     vision_walls: [[f32; 4]; VISION_WALLS],
     wall_count: [u32; 4],
+    light_view_proj: [[f32; 4]; 4],
+    sun_color: [f32; 4],
+    shadow_params: [f32; 4],
+    shadow_extra: [f32; 4],
+    ibl_params: [f32; 4],
+    style: [f32; 4],
+    rim_color: [f32; 4],
+    specular_tint: [f32; 4],
+    ambient_ground: [f32; 4],
+    sh: [[f32; 4]; 9],
 }
 
 impl CameraUniform {
-    pub(crate) fn new(camera: Camera, vision: &VisionCircles, terrain: [f32; 4]) -> Self {
+    pub(crate) fn new(
+        camera: Camera,
+        vision: &VisionCircles,
+        terrain: [f32; 4],
+        lighting: &FrameLighting,
+    ) -> Self {
         let mut circles = [[0.0; 4]; VISION_CIRCLES];
         for (destination, source) in circles.iter_mut().zip(vision.circles) {
             *destination = source.to_array();
@@ -442,6 +471,16 @@ impl CameraUniform {
             vision_count: [vision.count, 0, 0, 0],
             vision_walls: vision.walls.map(|wall| wall.to_array()),
             wall_count: [vision.wall_count, 0, 0, 0],
+            light_view_proj: lighting.light_view_proj,
+            sun_color: lighting.sun_color,
+            shadow_params: lighting.shadow_params,
+            shadow_extra: lighting.shadow_extra,
+            ibl_params: lighting.ibl_params,
+            style: lighting.style,
+            rim_color: lighting.rim_color,
+            specular_tint: lighting.specular_tint,
+            ambient_ground: lighting.ambient_ground,
+            sh: lighting.sh,
         }
     }
 }
@@ -460,5 +499,22 @@ impl From<UnitInstance> for GpuInstance {
             model: instance.transform.to_cols_array_2d(),
             color: instance.color.to_array(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CameraUniform;
+    use core::mem::{offset_of, size_of};
+
+    /// `CameraBlock` in `include/camera.glsl` is std140 with only 16-byte members, so the Rust
+    /// struct's offsets are the GLSL offsets.
+    #[test]
+    fn camera_uniform_matches_the_std140_block() {
+        assert_eq!(offset_of!(CameraUniform, wall_count), 912);
+        assert_eq!(offset_of!(CameraUniform, light_view_proj), 928);
+        assert_eq!(offset_of!(CameraUniform, ambient_ground), 1104);
+        assert_eq!(offset_of!(CameraUniform, sh), 1120);
+        assert_eq!(size_of::<CameraUniform>(), 1264);
     }
 }

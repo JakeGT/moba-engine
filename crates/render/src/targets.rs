@@ -21,25 +21,59 @@ impl TransientPool {
     ) -> RenderResult<Self> {
         let mut images = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            let size = match slot.desc.size {
-                ImageSize::Swapchain => extent,
-            };
-            images.push(GpuImage::new(
-                device.device.clone(),
-                device.allocator(),
-                &format!("graph-transient-{index}"),
-                size,
-                slot.desc.format,
-                slot.usage,
-                slot.desc.aspect,
-            )?);
+            images.push(create_slot(device, index, slot, extent)?);
         }
         Ok(Self { images })
+    }
+
+    /// Reallocates the swapchain-sized slots for `extent` (a resize) and keeps the
+    /// fixed-size ones (the shadow map: up to 64 MiB that a resize must not churn). Every new
+    /// image is created before any is replaced, so a failed allocation changes nothing.
+    pub(crate) fn resize(
+        &mut self,
+        device: &DeviceContext,
+        slots: &[PhysicalImage],
+        extent: vk::Extent2D,
+    ) -> RenderResult<()> {
+        let mut fresh = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.iter().enumerate() {
+            fresh.push(match slot.desc.size {
+                ImageSize::Swapchain => Some(create_slot(device, index, slot, extent)?),
+                ImageSize::Fixed { .. } => None,
+            });
+        }
+        for (image, fresh) in self.images.iter_mut().zip(fresh) {
+            if let Some(fresh) = fresh {
+                *image = fresh;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn image(&self, slot: usize) -> &GpuImage {
         &self.images[slot]
     }
+}
+
+fn create_slot(
+    device: &DeviceContext,
+    index: usize,
+    slot: &PhysicalImage,
+    extent: vk::Extent2D,
+) -> RenderResult<GpuImage> {
+    let size = match slot.desc.size {
+        ImageSize::Swapchain => extent,
+        ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
+    };
+    GpuImage::new(
+        device.device.clone(),
+        device.allocator(),
+        &format!("graph-transient-{index}"),
+        size,
+        slot.desc.format,
+        slot.usage,
+        slot.desc.aspect,
+    )
 }
 
 /// A fixed offscreen image (R7b): an HDR colour target that its graph pass renders into and
@@ -228,6 +262,52 @@ pub(crate) fn choose_hdr_format(device: &DeviceContext, tier: QualityTier) -> vk
     } else {
         vk::Format::R16G16B16A16_SFLOAT
     }
+}
+
+/// `VkFormatProperties3::optimalTilingFeatures` (Vulkan 1.3 core), which also reports depth
+/// comparison support.
+fn optimal_features_2(device: &DeviceContext, format: vk::Format) -> vk::FormatFeatureFlags2 {
+    let mut properties_3 = vk::FormatProperties3::default();
+    let mut properties = vk::FormatProperties2::default().push_next(&mut properties_3);
+    // SAFETY: the physical device belongs to the instance the device context was made from,
+    // and the output chain is valid for the call.
+    unsafe {
+        device.instance.get_physical_device_format_properties2(
+            device.physical,
+            format,
+            &mut properties,
+        );
+    }
+    properties_3.optimal_tiling_features
+}
+
+/// The shadow-map format and whether it filters linearly (hardware 2×2 PCF), or `None` when
+/// the device cannot do depth-compare shadow maps at all (shadows then turn off, logged).
+///
+/// The first of `D32_SFLOAT`, `D16_UNORM` that is an attachment, sampled, usable with a
+/// comparison sampler (`SAMPLED_IMAGE_DEPTH_COMPARISON`) and linearly filterable wins; else
+/// the first without linear filtering (PCF taps are then nearest). A portability-subset
+/// device without `mutableComparisonSamplers` gets `None`.
+pub(crate) fn choose_shadow_format(device: &DeviceContext) -> Option<(vk::Format, bool)> {
+    use vk::FormatFeatureFlags2 as F;
+    if !device.comparison_samplers {
+        return None;
+    }
+    let base = F::DEPTH_STENCIL_ATTACHMENT | F::SAMPLED_IMAGE | F::SAMPLED_IMAGE_DEPTH_COMPARISON;
+    let candidates = [vk::Format::D32_SFLOAT, vk::Format::D16_UNORM];
+    let supports = |format, wanted| optimal_features_2(device, format).contains(wanted);
+    candidates
+        .iter()
+        .copied()
+        .find(|&format| supports(format, base | F::SAMPLED_IMAGE_FILTER_LINEAR))
+        .map(|format| (format, true))
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|&format| supports(format, base))
+                .map(|format| (format, false))
+        })
 }
 
 /// A depth format usable as an attachment and sampled image.

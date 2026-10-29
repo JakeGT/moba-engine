@@ -15,6 +15,27 @@
 //! height = 5.0                   # optional, metres (0.1..=32, default 3)
 //! yaw = 30.0                     # optional, degrees (-360..=360, default 0)
 //! mesh = "crystal"               # optional: <root>/models/crystal.glb, else a block
+//!
+//! [lighting]                     # optional, every key optional (ADR-0011)
+//! environment = "ember"          # <root>/environments/ember.{toml,ktx2} (IBL), else the
+//!                                # hemispheric ambient below
+//! sun_direction = [0.3, 0.6, 0.5]  # towards the sun, normalised on load (y >= 0.2)
+//! sun_color = [1.0, 0.8, 0.6]    # linear RGB 0..=4, times sun_intensity
+//! sun_intensity = 1.2            # 0..=8
+//! ambient = [0.3, 0.2, 0.2]      # hemispheric sky ambient (no environment), 0..=4
+//! ambient_ground = [0.2, 0.1, 0.1]
+//! ibl_intensity = 1.0            # environment multiplier, 0..=8
+//! shadow_strength = 0.8          # 0 = no shadows .. 0.9 (shadow always keeps some sun)
+//! shadow_softness = 0.03         # sun angular radius in radians (PCSS penumbra), 0..=0.2
+//! wrap = 0.25                    # wrap lighting, 0..=1
+//! rim = 0.3                      # rim strength, 0..=2
+//! rim_color = [1.0, 0.7, 0.5]    # 0..=4
+//! ramp = "ember-ramp"            # <root>/textures/ember-ramp.ktx2: N.L ramp (sRGB colour)
+//! ramp_strength = 0.5            # 0..=1
+//! specular = 1.0                 # specular scale, 0..=2
+//! specular_tint = [1.0, 0.9, 0.8]  # painted-specular tint, 0..=1
+//! unit_roughness = 0.55          # roughness of vertex-colour units, 0..=1
+//! terrain_roughness = 0.9        # 0..=1
 //! ```
 //!
 //! Descriptors are untrusted, client-local and cosmetic: they never reach the simulation, the
@@ -39,6 +60,16 @@ pub const MAX_MESH_NAME: usize = 32;
 pub const DEFAULT_WALL_HEIGHT: f32 = 4.0;
 /// Prop height when a prop gives none, metres.
 pub const DEFAULT_PROP_HEIGHT: f32 = 3.0;
+/// Roughness of vertex-colour units when `[lighting]` sets none (the renderer's default).
+pub const DEFAULT_UNIT_ROUGHNESS: f32 = 0.55;
+/// Terrain roughness when `[lighting]` sets none (the renderer's default).
+pub const DEFAULT_TERRAIN_ROUGHNESS: f32 = 0.9;
+/// Highest accepted `shadow_strength`: shadow never removes all direct light, so units in
+/// shadow keep their team colour (ADR-0011 readability rule 2).
+pub const MAX_SHADOW_STRENGTH: f32 = 0.9;
+/// Lowest accepted sun elevation (`sun_direction.y` after normalising). Lower suns stretch
+/// shadows past what one fitted map covers well.
+pub const MIN_SUN_ELEVATION: f32 = 0.2;
 
 const WALL_HEIGHT_RANGE: (f32, f32) = (0.5, 32.0);
 const PROP_HEIGHT_RANGE: (f32, f32) = (0.1, 32.0);
@@ -60,6 +91,51 @@ pub struct MapVisuals {
     pub wall_mesh: Option<String>,
     /// Decorative props, in file order.
     pub props: Vec<MapProp>,
+    /// Lighting and art-style overrides (`[lighting]`); unset keys keep the engine defaults.
+    pub lighting: MapLighting,
+}
+
+/// The `[lighting]` table of a map visuals descriptor (ADR-0011). Every field is optional:
+/// `None` keeps the renderer's default for that parameter.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MapLighting {
+    /// Environment name: `<root>/environments/<name>.{toml,ktx2}` (image-based lighting).
+    pub environment: Option<String>,
+    /// Unit vector towards the sun (`y >=` [`MIN_SUN_ELEVATION`]).
+    pub sun_direction: Option<[f32; 3]>,
+    /// Linear RGB sun colour, `0..=4`.
+    pub sun_color: Option<[f32; 3]>,
+    /// Sun intensity, `0..=8`.
+    pub sun_intensity: Option<f32>,
+    /// Hemispheric sky ambient (used without an environment), linear RGB `0..=4`.
+    pub ambient: Option<[f32; 3]>,
+    /// Hemispheric ground ambient, linear RGB `0..=4`.
+    pub ambient_ground: Option<[f32; 3]>,
+    /// Environment intensity, `0..=8`.
+    pub ibl_intensity: Option<f32>,
+    /// How much shadow removes direct light, `0..=1`.
+    pub shadow_strength: Option<f32>,
+    /// Sun angular radius in radians for soft (PCSS) shadows, `0..=0.2`.
+    pub shadow_softness: Option<f32>,
+    /// Wrap lighting, `0..=1`.
+    pub wrap: Option<f32>,
+    /// Rim strength, `0..=2`.
+    pub rim: Option<f32>,
+    /// Rim colour, linear RGB `0..=4`.
+    pub rim_color: Option<[f32; 3]>,
+    /// Ramp texture name: `<root>/textures/<name>.ktx2`.
+    pub ramp: Option<String>,
+    /// Ramp strength, `0..=1`.
+    pub ramp_strength: Option<f32>,
+    /// Specular scale, `0..=2`.
+    pub specular: Option<f32>,
+    /// Painted-specular tint, linear RGB `0..=1`.
+    pub specular_tint: Option<[f32; 3]>,
+    /// Roughness of vertex-colour units, `0..=1`.
+    pub unit_roughness: Option<f32>,
+    /// Terrain roughness, `0..=1`.
+    pub terrain_roughness: Option<f32>,
 }
 
 /// One decorative prop.
@@ -89,6 +165,49 @@ struct RawMapVisuals {
     wall_mesh: Option<String>,
     #[serde(default)]
     props: Vec<RawProp>,
+    #[serde(default)]
+    lighting: Option<RawLighting>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLighting {
+    #[serde(default)]
+    environment: Option<String>,
+    #[serde(default)]
+    sun_direction: Option<[f32; 3]>,
+    #[serde(default)]
+    sun_color: Option<[f32; 3]>,
+    #[serde(default)]
+    sun_intensity: Option<f32>,
+    #[serde(default)]
+    ambient: Option<[f32; 3]>,
+    #[serde(default)]
+    ambient_ground: Option<[f32; 3]>,
+    #[serde(default)]
+    ibl_intensity: Option<f32>,
+    #[serde(default)]
+    shadow_strength: Option<f32>,
+    #[serde(default)]
+    shadow_softness: Option<f32>,
+    #[serde(default)]
+    wrap: Option<f32>,
+    #[serde(default)]
+    rim: Option<f32>,
+    #[serde(default)]
+    rim_color: Option<[f32; 3]>,
+    #[serde(default)]
+    ramp: Option<String>,
+    #[serde(default)]
+    ramp_strength: Option<f32>,
+    #[serde(default)]
+    specular: Option<f32>,
+    #[serde(default)]
+    specular_tint: Option<[f32; 3]>,
+    #[serde(default)]
+    unit_roughness: Option<f32>,
+    #[serde(default)]
+    terrain_roughness: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +287,128 @@ fn check_range(
     }
 }
 
+fn check_rgb(
+    color: Option<[f32; 3]>,
+    high: f32,
+    what: &'static str,
+) -> Result<Option<[f32; 3]>, MapVisualsError> {
+    match color {
+        Some(rgb)
+            if !rgb
+                .iter()
+                .all(|c| c.is_finite() && (0.0..=high).contains(c)) =>
+        {
+            Err(MapVisualsError::Invalid(what))
+        }
+        other => Ok(other),
+    }
+}
+
+fn check_scalar(
+    value: Option<f32>,
+    high: f32,
+    what: &'static str,
+) -> Result<Option<f32>, MapVisualsError> {
+    value
+        .map(|value| check_range(value, (0.0, high), what))
+        .transpose()
+}
+
+fn check_lighting(raw: Option<RawLighting>) -> Result<MapLighting, MapVisualsError> {
+    let Some(raw) = raw else {
+        return Ok(MapLighting::default());
+    };
+    let name = |name: Option<String>, what| match name {
+        Some(name) if !valid_mesh_name(&name) => Err(MapVisualsError::Invalid(what)),
+        other => Ok(other),
+    };
+    let sun_direction = match raw.sun_direction {
+        None => None,
+        Some(direction) => {
+            let length = direction.iter().map(|c| c * c).sum::<f32>().sqrt();
+            if !length.is_finite() || length < 1e-3 {
+                return Err(MapVisualsError::Invalid("sun_direction must be non-zero"));
+            }
+            let unit = direction.map(|c| c / length);
+            if unit[1] < MIN_SUN_ELEVATION {
+                return Err(MapVisualsError::Invalid(
+                    "sun_direction must be at least 0.2 above the horizon (normalised y >= 0.2)",
+                ));
+            }
+            Some(unit)
+        }
+    };
+    let lighting = MapLighting {
+        environment: name(
+            raw.environment,
+            "environment names must be 1-32 of [A-Za-z0-9_-]",
+        )?,
+        sun_direction,
+        sun_color: check_rgb(raw.sun_color, 4.0, "sun_color must be RGB in 0..=4")?,
+        sun_intensity: check_scalar(raw.sun_intensity, 8.0, "sun_intensity must be 0..=8")?,
+        ambient: check_rgb(raw.ambient, 4.0, "ambient must be RGB in 0..=4")?,
+        ambient_ground: check_rgb(
+            raw.ambient_ground,
+            4.0,
+            "ambient_ground must be RGB in 0..=4",
+        )?,
+        ibl_intensity: check_scalar(raw.ibl_intensity, 8.0, "ibl_intensity must be 0..=8")?,
+        shadow_strength: check_scalar(
+            raw.shadow_strength,
+            MAX_SHADOW_STRENGTH,
+            "shadow_strength must be 0..=0.9 (units in shadow keep some sun, ADR-0011 rule 2)",
+        )?,
+        shadow_softness: check_scalar(raw.shadow_softness, 0.2, "shadow_softness must be 0..=0.2")?,
+        wrap: check_scalar(raw.wrap, 1.0, "wrap must be 0..=1")?,
+        rim: check_scalar(raw.rim, 2.0, "rim must be 0..=2")?,
+        // Rule 3: silhouettes keep a rim.
+        rim_color: check_rgb(raw.rim_color, 4.0, "rim_color must be RGB in 0..=4")?,
+        ramp: name(raw.ramp, "ramp texture names must be 1-32 of [A-Za-z0-9_-]")?,
+        ramp_strength: check_scalar(raw.ramp_strength, 1.0, "ramp_strength must be 0..=1")?,
+        specular: check_scalar(raw.specular, 2.0, "specular must be 0..=2")?,
+        specular_tint: check_rgb(raw.specular_tint, 1.0, "specular_tint must be RGB in 0..=1")?,
+        unit_roughness: check_scalar(raw.unit_roughness, 1.0, "unit_roughness must be 0..=1")?,
+        terrain_roughness: check_scalar(
+            raw.terrain_roughness,
+            1.0,
+            "terrain_roughness must be 0..=1",
+        )?,
+    };
+    check_readability(&lighting)?;
+    Ok(lighting)
+}
+
+/// ADR-0011 readability rules 2 and 3 that a descriptor alone can break.
+fn check_readability(lighting: &MapLighting) -> Result<(), MapVisualsError> {
+    // Rule 3: units keep a rim and stay glossier than the matte ground.
+    if lighting.rim.is_some_and(|rim| rim <= 0.0) {
+        return Err(MapVisualsError::Invalid(
+            "rim must be above 0: units keep a silhouette rim (ADR-0011 rule 3)",
+        ));
+    }
+    let unit = lighting.unit_roughness.unwrap_or(DEFAULT_UNIT_ROUGHNESS);
+    let terrain = lighting
+        .terrain_roughness
+        .unwrap_or(DEFAULT_TERRAIN_ROUGHNESS);
+    if terrain <= unit {
+        return Err(MapVisualsError::Invalid(
+            "terrain_roughness must exceed unit_roughness: units read glossier than the ground \
+             (ADR-0011 rule 3)",
+        ));
+    }
+    // Rule 2: something lights the shadowed side. Without an environment (or with it at
+    // zero intensity) the hemispheric ambient is all there is.
+    let no_ibl = lighting.environment.is_none() || lighting.ibl_intensity == Some(0.0);
+    let dark = |rgb: Option<[f32; 3]>| rgb.is_some_and(|rgb| rgb.iter().all(|&c| c < 0.01));
+    if no_ibl && dark(lighting.ambient) && lighting.ambient_ground.is_none_or(|g| dark(Some(g))) {
+        return Err(MapVisualsError::Invalid(
+            "no ambient light: with ambient at zero and no environment, units in shadow go \
+             black (ADR-0011 rule 2)",
+        ));
+    }
+    Ok(())
+}
+
 fn check_mesh(name: Option<String>) -> Result<Option<String>, MapVisualsError> {
     match name {
         Some(name) if !valid_mesh_name(&name) => Err(MapVisualsError::Invalid(
@@ -230,6 +471,7 @@ impl MapVisuals {
             )?,
             wall_mesh: check_mesh(raw.wall_mesh)?,
             props,
+            lighting: check_lighting(raw.lighting)?,
         };
         if visuals.mesh_names().count() > MAX_MAP_MESHES {
             return Err(MapVisualsError::Invalid(
@@ -325,6 +567,53 @@ color = [0.2, 0.2, 0.2]
         let minimal = MapVisuals::parse("terrain = [0, 0, 0]\nwall = [1, 1, 1]").expect("min");
         assert_eq!(minimal.wall_height, DEFAULT_WALL_HEIGHT);
         assert!(minimal.props.is_empty() && minimal.wall_mesh.is_none());
+        assert_eq!(minimal.lighting, MapLighting::default());
+    }
+
+    #[test]
+    fn lighting_table_is_optional_validated_and_normalised() {
+        let base = "terrain = [0.1, 0.1, 0.1]\nwall = [0.2, 0.2, 0.2]\n[lighting]\n";
+        let visuals = MapVisuals::parse(&format!(
+            "{base}environment = \"ember\"\nsun_direction = [0, 2, 0]\nsun_color = [1, 0.5, 0.25]\n\
+             shadow_strength = 0.7\nwrap = 0.3\nramp = \"ember-ramp\"\nramp_strength = 0.5\n"
+        ))
+        .expect("lighting");
+        let lighting = &visuals.lighting;
+        assert_eq!(lighting.environment.as_deref(), Some("ember"));
+        assert_eq!(lighting.sun_direction, Some([0.0, 1.0, 0.0]));
+        assert_eq!(lighting.sun_color, Some([1.0, 0.5, 0.25]));
+        assert_eq!(lighting.shadow_strength, Some(0.7));
+        assert_eq!(lighting.ramp.as_deref(), Some("ember-ramp"));
+        assert_eq!(lighting.sun_intensity, None);
+        // Dark ambient is fine with an environment to light the shadowed side.
+        assert!(
+            MapVisuals::parse(&format!("{base}environment = \"e\"\nambient = [0, 0, 0]\n")).is_ok()
+        );
+        for bad in [
+            "environment = \"../sky\"",
+            "sun_direction = [0, 0, 0]",
+            "sun_direction = [1, 0, 0]",
+            "sun_direction = [1, 0.1, 0]",
+            "shadow_strength = 0.95",
+            "rim = 0",
+            "unit_roughness = 0.95",
+            "terrain_roughness = 0.5",
+            "unit_roughness = 0.6\nterrain_roughness = 0.6",
+            "ambient = [0, 0, 0]",
+            "sun_direction = [nan, 1, 0]",
+            "sun_color = [5, 0, 0]",
+            "sun_intensity = 9",
+            "shadow_strength = 1.5",
+            "shadow_softness = 0.5",
+            "wrap = -0.1",
+            "rim_color = [1, 1]",
+            "ramp = \"a/b\"",
+            "specular_tint = [1, 1, 2]",
+            "unit_roughness = inf",
+            "exposure = 1",
+        ] {
+            assert!(MapVisuals::parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod font_metrics;
 mod frame_graph;
 mod graph;
 mod instance;
+mod lighting;
 mod material;
 mod mesh;
 mod passes;
@@ -36,6 +37,9 @@ mod ui;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
+pub use lighting::{
+    LightingConfig, MAX_SHADOW_RESOLUTION, MIN_SHADOW_RESOLUTION, SceneLighting, ShadowFilter,
+};
 pub use material::{
     MAX_MATERIALS, MAX_TEXTURES, MaterialData, MaterialId, MaterialStats, TextureId,
 };
@@ -53,6 +57,8 @@ pub use scene::{
     OffscreenRender, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
 
+/// Environment descriptor (SH-L2 diffuse, intensity) accepted by [`Renderer::set_environment`].
+pub use moba_assets::EnvironmentDesc;
 /// One joint's skinning matrix (three `vec4` rows) as stored in [`Scene::bones`].
 pub use moba_assets::JointMatrix;
 /// Validated mesh accepted by [`Renderer::register_mesh`] and, when it carries a skin,
@@ -60,7 +66,8 @@ pub use moba_assets::JointMatrix;
 pub use moba_assets::MeshData;
 /// Material shader permutation and texture slots ([`MaterialData`]).
 pub use moba_assets::{MaterialShader, TextureSlot};
-/// Validated texture accepted by [`Renderer::register_texture`].
+/// Validated texture accepted by [`Renderer::register_texture`] (and, as a cube map, by
+/// [`Renderer::set_environment`]).
 pub use moba_assets::{TextureData, TextureFormat};
 pub use ui::{
     ATLAS_HEIGHT, ATLAS_WIDTH, TextStyle, UI_IMAGE_SLOTS, UiDrawList, UiImage, UiVertex,

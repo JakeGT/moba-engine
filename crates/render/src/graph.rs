@@ -193,6 +193,8 @@ impl Access {
 pub(crate) enum ImageSize {
     /// The swapchain extent.
     Swapchain,
+    /// A fixed extent (for example the shadow map), independent of the window.
+    Fixed { width: u32, height: u32 },
 }
 
 /// Description of a transient image; transients alias only when these are equal.

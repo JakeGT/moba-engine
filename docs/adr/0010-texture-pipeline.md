@@ -176,3 +176,29 @@ use the mesh-name rules, so a path can never leave the asset root.
   2. glTF material import into the descriptor (a `texture-bake`/`sample-mesh` tooling step).
   3. Per-primitive materials, tangents (`TANGENT` or MikkTSpace) and PBR (R2).
   4. Texture streaming and VRAM budgets per tier (R8).
+
+## Amendment 2026-10-29: cube maps and RGBA16F (R2a)
+Image-based lighting ([ADR-0011](0011-art-style-lighting.md)) needs a prefiltered HDR cube per
+map. The container and loader grow, the threat model does not:
+
+- **Cube maps.** `load_ktx2` also accepts `faceCount` 6 (`TextureData::new_cube`,
+  `is_cube`, `face_count`, `face`): square faces up to `MAX_CUBE_DIMENSION` (1024²), the six
+  faces stored back to back in each level in Vulkan order (+X, −X, +Y, −Y, +Z, −Z), each
+  level's length exactly 6 × the face size, checked before anything is allocated. Array
+  layers, 3D textures and any other face count are still rejected. The fuzz target checks the
+  cube invariants and has a cube seed (`fuzz/corpus/ktx2/cube-rgba16f.ktx2`); unit tests cover
+  every truncation and single-bit flip of a small cube.
+- **`TextureFormat::Rgba16Float`** (`VK_FORMAT_R16G16B16A16_SFLOAT`, vkFormat 97, linear,
+  8 bytes per texel; data-format descriptor with float, signed samples bounded at ±1.0f) for
+  HDR data such as the prefiltered environments. No material slot accepts it, and Vulkan
+  requires every device to sample it with linear filtering, so there is no fallback path.
+  `f16_from_f32`/`f32_from_f16` (round to nearest even, subnormals, ±inf, NaN) are public for
+  tools and the renderer's BRDF LUT.
+- **Renderer.** A cube uploads as one `CUBE_COMPATIBLE` six-layer image with a `CUBE` view, one
+  copy region per level covering all six layers. A cube can never be bound to a material slot
+  or as the lighting ramp (`RenderError::InvalidMaterial`).
+- **Why not BC6H (yet).** A 64² specular cube with its full chain is 256 KiB as RGBA16F, small
+  at map load. BC6H would need another in-house encoder (the pure-Rust crates cover BC1–BC3 or
+  BC7) and a CPU decode path for devices without BC, risks banding on smooth sky gradients,
+  and would save about 200 KiB per map. Revisit when environments grow to 256² or more, or
+  artists author HDRI skies.

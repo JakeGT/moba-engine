@@ -468,9 +468,10 @@ mesh = "crystal"               # optional: <root>/models/crystal.glb, else a bui
 | a missing, oversized or invalid descriptor | the built-in theme of the map's `theme`, exactly as before #287 |
 | a missing, malformed or unuploadable wall or prop mesh | the built-in block for that wall or prop, in the descriptor's colours |
 
-The default packs ship no `map-*` descriptors, so the built-in themes and the default golden
-image are unchanged. A shipped descriptor for a built-in name (for example
-`maps/map-stone.toml`) restyles every pack that uses that theme without a `visuals` name.
+A shipped descriptor for a built-in name restyles every pack that uses that theme without a
+`visuals` name. The repository ships one, [`content/maps/map-grass.toml`](../content/maps/map-grass.toml):
+the built-in grass colours plus a `[lighting]` table with the `meadow` environment, so the
+default map (and both golden images) are lit with IBL (R2a; see [Lighting](#lighting)).
 
 **Switching maps.** Descriptors and meshes are read only when the map changes: at startup, on
 a `ContentUpdate` (hot reload) and on map rotation. Each name is loaded once per session, so
@@ -595,18 +596,28 @@ or the wire, and two players with different files see different shading in the s
 shader = "textured"                  # "vertex-color" (the default look) or "textured"
 base_color = "sentinel-base"         # <root>/textures/sentinel-base.ktx2
 normal = "sentinel-normal"           # optional
-metallic_roughness = "sentinel-mr"   # optional (read by R2's PBR)
+metallic_roughness = "sentinel-mr"   # optional: R metallic, G roughness (times the factors)
 mask = "sentinel-mask"               # optional: where the unit's team colour tints
 base_color_factor = [1.0, 1.0, 1.0, 1.0]   # optional, linear RGBA, 0..=1 (default 1)
 metallic = 0.0                       # optional, 0..=1 (default 0)
 roughness = 1.0                      # optional, 0..=1 (default 1)
 normal_scale = 1.0                   # optional, 0..=2 (default 1)
 team_tint = 1.0                      # optional, 0..=1 (default 1)
-emissive = [0.0, 0.0, 0.0]           # optional, linear RGB, 0..=16 (default 0; R2)
+emissive = [0.0, 0.0, 0.0]           # optional, linear RGB, 0..=16 (default 0), added unlit
+# Stylisation (ADR-0011), all optional; they refine the map's [lighting] values:
+wrap = 0.3                           # 0..=1 wrap lighting (default: the map's)
+rim = 1.0                            # 0..=4, multiplies the map's rim strength (default 1)
+ramp = 1.0                           # 0..=1, multiplies the map's ramp strength (default 1)
+specular = 1.0                       # 0..=2 specular scale (default 1)
+specular_tint = [1.0, 1.0, 1.0]      # linear RGB 0..=1, painted-specular tint (default 1)
 ```
 
 The textured permutation draws `base colour × base_color_factor`, multiplied by the unit's
-team colour where the mask is set (scaled by `team_tint`), with the normal map applied. Keep
+team colour where the mask is set (scaled by `team_tint`), lit by the stylised PBR model of
+[ADR-0011](adr/0011-art-style-lighting.md): metallic and roughness are the
+`metallic_roughness` texture's R and G times `metallic` and `roughness`, and the normal map is
+applied in the mesh's tangent frame (`TANGENT` from the `.glb`, else generated from the UVs
+at load; `sample-mesh` writes them into the shipped samples). Keep
 team-coloured areas large and readable: the mask is how a textured hero still reads as blue
 or red at gameplay zoom. A `vertex-color` material takes no textures. A textured one needs a
 `base_color`, and the model needs texture coordinates (`TEXCOORD_0` in the `.glb`).
@@ -660,6 +671,90 @@ that model on the vertex-colour look: a missing, oversized or invalid descriptor
 malformed texture, a texture in the wrong slot, a model without UVs, or a renderer limit. A
 match never fails because of a material. On GPUs without BC support (or with
 `MOBA_COMPRESSED_TEXTURES=0`) BC textures are decoded on the CPU at load and look the same.
+
+### Lighting
+
+Lighting is art direction, set per map in the visuals descriptor's optional `[lighting]` table
+([ADR-0011](adr/0011-art-style-lighting.md)); every key is optional and unset keys keep the
+engine defaults. Like the rest of the descriptor it is client-local and never hashed or sent.
+[`content/maps/ember.toml`](../content/maps/ember.toml) (a low, hot sun with orange rims) and
+[`content/maps/frost.toml`](../content/maps/frost.toml) (a high, cold sun over snow) are the
+examples:
+
+```toml
+[lighting]
+environment = "ember"          # <root>/environments/ember.{toml,ktx2} (IBL); default: none
+sun_direction = [-0.6, 0.35, 0.45]  # towards the sun, normalised on load; y >= 0.2
+sun_color = [1.0, 0.84, 0.70]  # linear RGB 0..=4 (default [1.0, 0.97, 0.92])
+sun_intensity = 1.4            # 0..=8 (default 1.15)
+ambient = [0.32, 0.35, 0.42]   # hemispheric sky ambient without an environment, 0..=4
+ambient_ground = [0.2, 0.2, 0.3]  # hemispheric ground ambient (default: ambient x 0.55-0.7)
+ibl_intensity = 0.3            # environment multiplier, 0..=8 (default 1)
+shadow_strength = 0.8          # 0..=0.9: how much shadow removes the sun (default 0.78)
+shadow_softness = 0.04         # 0..=0.2: sun angular radius in radians, soft (PCSS) tiers
+wrap = 0.3                     # 0..=1 wrap lighting (default 0.2)
+rim = 0.45                     # above 0, at most 2: rim strength (default 0.25)
+rim_color = [1.0, 0.55, 0.25]  # 0..=4 (default white)
+ramp = "ember-ramp"            # optional <root>/textures/<name>.ktx2: an N.L colour ramp
+ramp_strength = 0.5            # 0..=1 (default 0: no ramp)
+specular = 1.0                 # 0..=2 specular scale
+specular_tint = [1.0, 0.8, 0.6]  # 0..=1 painted-specular tint (default white)
+unit_roughness = 0.55          # 0..=1, units without a material (default 0.55)
+terrain_roughness = 0.9        # 0..=1 (default 0.9)
+```
+
+The parser enforces the readability rules a descriptor alone can break, as errors: `rim` above
+0, `terrain_roughness` above `unit_roughness` (with the defaults filling in an unset one),
+`shadow_strength` at most 0.9, and some ambient light (an `ambient` of zero is rejected
+without an environment to light the shadowed side).
+
+**Readability rules** (ADR-0011 §6) are the review checklist for any lighting change: team
+colours stay readable in light, shadow and fog; `shadow_strength` stays below 1 so units in
+shadow keep their colour; units keep a rim and stay glossier than the terrain; tinted
+specular never washes a unit to white; and every quality tier passes the same checks.
+
+**Environments** come from `moba-tools env-bake`, which evaluates an analytic sky (a zenith,
+horizon and ground gradient plus a broad sun glow; no sun disk, since the map's sun gives the
+direct light and shadows) into a prefiltered specular cube and SH-L2 diffuse coefficients:
+
+```bash
+# writes content/environments/meadow.ktx2 and meadow.toml
+cargo run --release -p moba-tools --bin env-bake -- bake --preset meadow content/environments/meadow
+cargo run --release -p moba-tools --bin env-bake -- bake --preset ember \
+  --sun-dir -0.6,0.35,0.45 --horizon 1.0,0.4,0.12 content/environments/my-ember
+cargo run --release -p moba-tools --bin env-bake -- info content/environments/meadow.ktx2
+```
+
+Presets are `meadow`, `ember` and `frost`; `--zenith`, `--horizon`, `--ground`, `--sun-dir`,
+`--sun-color` (linear, may exceed 1) and `--sun-glow <exponent>` override any value, `--size`
+(default 64) and `--samples` (default 256) set the cube. The `.ktx2` is a 64² `rgba16f` cube
+with a full chain (mip `m` of `M` holds GGX roughness `m / (M - 1)`, 256 KiB); the `.toml`
+holds the nine SH coefficients (`sh`, cosine-convolved and divided by π), `intensity`
+(0..=16) and `specular_mips` (1..=11), at most 4 KiB with unknown keys rejected, and its
+header comments record every sky parameter so a bake is reproducible.
+`scripts/bake-sample-environments.sh` regenerates the shipped three. Environment names follow
+the model-name rules. No external HDRIs ship (an HDRI would need a CC0 licence and an entry
+in `THIRD_PARTY.md`).
+
+**Ramps** are optional 2D colour textures (`rgba8-srgb` or `bc7-srgb`, for example 256×1),
+looked up with `u = N·L` remapped from −1..1 to 0..1 and blended over the wrapped diffuse by
+`ramp_strength` (times the material's `ramp`): hard bands give a cel look, a warm-to-cool
+gradient a painterly terminator.
+
+**Quality tiers** (`quality` in the settings, `MOBA_QUALITY`) pick the shadow filter and size
+and whether the specular cube is sampled; `MOBA_SHADOWS=off|hard|pcf|pcss`,
+`MOBA_SHADOW_SIZE=<256..8192>`, `MOBA_IBL=0` and `MOBA_SPECULAR_IBL=0` override them:
+
+| Tier | Shadows | Shadow map | Specular IBL |
+|---|---|---|---|
+| low | hard (1 tap) | 1024² | off (SH ambient only; the cube is not uploaded) |
+| medium | 3×3 PCF | 2048² | on |
+| high | PCSS-lite (16 + 16 taps) | 2048² | on |
+| ultra | PCSS-lite (16 + 32 taps) | 4096² | on |
+
+**Fallback.** A missing or invalid environment logs `[assets] environment '<name>': ...` once
+and lights the map with the hemispheric ambient; a missing ramp logs once and draws without
+it. A match never fails because of lighting.
 
 ## Hot reload
 
