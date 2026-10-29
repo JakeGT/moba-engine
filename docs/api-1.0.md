@@ -180,7 +180,11 @@ clear_environment, has_environment, set_lighting_ramp}`, `MaterialData`'s stylis
 (`new` + `with_*`), `ParticleShape`, `ParticleBlend`, `ParticleRole`, `VfxFrame` (`new`,
 `EMPTY`, `with_ally_opacity`; `Scene::with_vfx`), `VfxBudget` (`QualityTier::vfx_budget`),
 `VfxStats`, `VFX_MESH_SLOTS`, `RenderConfig::with_vfx`, `Renderer::{vfx_available,
-vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`.
+vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`. R4b (ADR-0012
+amendment) added vertex-animation-texture meshes: `Renderer::{register_vat_mesh,
+vat_available, vat_mesh_count, mesh_capacity}`, `UnitInstance::with_vat` (and its `vat` field),
+`MAX_VAT_MESHES`, `RenderError::InvalidVat` and re-exports of `moba-assets`'
+`VatDescriptor`, `VatPose` and `VatSample`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
@@ -229,7 +233,18 @@ fields, `EnvironmentDesc`/`EnvironmentError`/`environment_paths`/`sh_basis`, cub
 descriptors (ADR-0013: `VfxEffect`, `VfxEmitter`, `VfxBindings`, `VfxAbilityBinding`,
 `VfxUnitEffects`, `VfxSprite`/`VFX_SPRITES`, `procedural_atlas`, `vfx_path`; the enums
 `VfxPrimitive`, `VfxBlend`, `VfxAnchor`, `VfxDirection`, `VfxShape`, `VfxImportance` and
-`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`).
+`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`),
+and R4b's additions (ADR-0012 amendment): vertex-animation textures (`VatDescriptor`
+(`parse`/`load_file`/`to_toml`/`clip`/`check_texture`/`check_mesh`), `VatClip`,
+`VatPlaybackParams` (`validated`), `VatBakeClip::new`, `bake_vat`, `mesh_hash`, `vat_extent`, `vat_paths`,
+`VatAnimation::bind`, `VatPlayer`, `VatPose`/`VatSample`/`VatQuality` (`FULL`,
+`INTERPOLATED`, `NEAREST`), `VatError` and the `MAX_VAT_*` (including `MAX_VAT_TEXELS`)/`DEFAULT_VAT_FPS`/
+`VAT_DEATH_LINGER`/`VAT_DIR` constants), bone-count LOD (`SkinLod::build`/`gather`), 2D blend
+spaces (`BlendSpace2d`, `BlendSpaceError::Coincident`, `Animator::evaluate_motion`) and socket
+attachments (`AnimationGraph::{attachment, attachments, socket_count, planar_locomotion,
+spring_joints}`, `AnimationSet::attachment_models`). `VatError` and every `Vat*` struct with
+public fields are `#[non_exhaustive]`; `VatAnimation`, `VatPlayer`, `SkinLod` and
+`BlendSpace2d` have private fields and constructors.
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,

@@ -63,10 +63,20 @@ void main() {
     float total = in_weights.x + in_weights.y + in_weights.z + in_weights.w;
     mat4 skinning = mat4(1.0);
     if (total > 0.0) {
-        skinning = (in_weights.x * bone(in_joints.x)
-                  + in_weights.y * bone(in_joints.y)
-                  + in_weights.z * bone(in_joints.z)
-                  + in_weights.w * bone(in_joints.w)) * (1.0 / total);
+        // Zero-weight influences are skipped (exact: they would add 0 * bone), so the
+        // reduced skins of the bone-count LOD (R4b: 1 or 2 influences, sorted largest
+        // first) fetch fewer bones.
+        skinning = in_weights.x * bone(in_joints.x);
+        if (in_weights.y > 0.0) {
+            skinning += in_weights.y * bone(in_joints.y);
+        }
+        if (in_weights.z > 0.0) {
+            skinning += in_weights.z * bone(in_joints.z);
+        }
+        if (in_weights.w > 0.0) {
+            skinning += in_weights.w * bone(in_joints.w);
+        }
+        skinning *= 1.0 / total;
     }
     mat4 model = instance.model * skinning;
     vec4 world = model * vec4(in_position, 1.0);

@@ -71,6 +71,11 @@ pub enum RenderError {
     /// unsupported, or a VFX binding is invalid (an unknown texture or mesh, a skinned mesh,
     /// a slot out of range); the text says which (ADR-0013).
     Vfx(&'static str),
+    /// A vertex-animation-texture mesh passed to
+    /// [`Renderer::register_vat_mesh`](crate::Renderer::register_vat_mesh) is unusable (its
+    /// texture or mesh does not match its descriptor, every VAT slot is used, or the VAT
+    /// pipeline failed to build); the text says which. Draw the unit another way.
+    InvalidVat(&'static str),
 }
 
 impl fmt::Display for RenderError {
@@ -100,6 +105,9 @@ impl fmt::Display for RenderError {
             Self::TooManyMaterials => f.write_str("material limit reached"),
             Self::InvalidMaterial(reason) => write!(f, "invalid material: {reason}"),
             Self::InvalidEnvironment(reason) => write!(f, "invalid environment: {reason}"),
+            Self::InvalidVat(reason) => {
+                write!(f, "invalid vertex-animation texture: {reason}")
+            }
             Self::InvalidTexture => f.write_str("invalid texture dimensions"),
             Self::TooManyMeshes => write!(
                 f,

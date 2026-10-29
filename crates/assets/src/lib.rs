@@ -10,7 +10,7 @@
 //! [`MapVisuals`] is the bounded per-map visuals descriptor (`maps/<name>.toml`, #287).
 //!
 //! The animation runtime (ADR-0012) is pure CPU code with no GPU dependency: [`Pose`],
-//! [`BoneMask`] and [`BlendSpace1d`] sample and blend clips; [`AnimationSet`] is the bounded
+//! [`BoneMask`], [`BlendSpace1d`] and [`BlendSpace2d`] sample and blend clips; [`AnimationSet`] is the bounded
 //! client-local state-machine descriptor (`animations/<model>.toml`), [`AnimationGraph`]
 //! binds it to a skeleton and [`Animator`] runs it per unit (actions, crossfades, upper-body
 //! masks, additive reactions, spring bones and sockets) without allocating.
@@ -40,7 +40,9 @@ mod material;
 mod mesh;
 mod pose;
 mod skin;
+mod skin_lod;
 mod texture;
+mod vat;
 mod vfx;
 
 use std::collections::BTreeMap;
@@ -71,7 +73,8 @@ pub use material::{
 };
 pub use mesh::{MeshData, MeshError};
 pub use pose::{
-    BlendSpace1d, BlendSpaceError, BoneMask, ClipWrap, MAX_BLEND_POINTS, Pose, joint_matrix,
+    BlendSpace1d, BlendSpace2d, BlendSpaceError, BoneMask, ClipWrap, MAX_BLEND_POINTS, Pose,
+    joint_matrix,
 };
 pub use skin::{
     AnimationClip, Interpolation, JointMatrix, JointTransform, MAX_ANIMATION_CHANNELS,
@@ -79,10 +82,17 @@ pub use skin::{
     MAX_TRACK_KEYS, MeshSkin, Skeleton, SkinError, Track, TrackPath, quantize_weights,
     valid_animation_name,
 };
+pub use skin_lod::SkinLod;
 pub use texture::{
     MAX_CUBE_DIMENSION, MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData,
     TextureError, TextureFormat, f16_from_f32, f32_from_f16, full_mip_chain, load_ktx2,
     load_ktx2_file, mip_size, write_ktx2,
+};
+pub use vat::{
+    DEFAULT_VAT_FPS, MAX_VAT_BYTES, MAX_VAT_CLIPS, MAX_VAT_FRAMES, MAX_VAT_TEXELS,
+    VAT_DEATH_LINGER, VAT_DIR, VatAnimation, VatBakeClip, VatClip, VatDescriptor, VatError,
+    VatPlaybackParams, VatPlayer, VatPose, VatQuality, VatSample, bake_vat, mesh_hash, vat_extent,
+    vat_paths,
 };
 pub use vfx::{
     MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS, MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES,

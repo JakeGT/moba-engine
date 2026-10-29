@@ -252,6 +252,16 @@ pub(crate) fn replay_focus(
     (focus, parse_follow_distance())
 }
 
+/// Local-preview camera orbit distance: `MOBA_LOCAL_CAMERA_DISTANCE` metres (clamped to 8–240)
+/// or the default overview of 235 m (close-ups of the R4b stress scene).
+pub(crate) fn local_camera_distance() -> f32 {
+    std::env::var("MOBA_LOCAL_CAMERA_DISTANCE")
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map_or(235.0, |value| value.clamp(8.0, 240.0))
+}
+
 /// `MOBA_CAPTURE_TICK=<n>`: the network capture tick, read once at startup.
 pub(crate) fn parse_capture_tick() -> Option<u32> {
     std::env::var("MOBA_CAPTURE_TICK")
@@ -483,6 +493,9 @@ pub(crate) fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<(
 
 impl Drop for ClientApp {
     fn drop(&mut self) {
+        if let Some(stress) = &self.stress {
+            stress.report();
+        }
         let (Some(mut samples), Some(path)) = (self.frame_log.take(), self.frame_log_path.take())
         else {
             return;
@@ -538,8 +551,8 @@ impl Drop for ClientApp {
                 let pipelines = renderer.pipeline_stats();
                 let lighting = renderer.lighting_config();
                 format!(
-                    "{} hdr={} shadows={} shadow_size={} ibl={} specular_ibl={} pipelines={} \
-                     pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
+                    "{} hdr={} shadows={} shadow_size={} ibl={} specular_ibl={} vat_meshes={} \
+                     pipelines={} pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
                     renderer.quality_tier(),
                     renderer.hdr_format_name(),
                     lighting.shadows,
@@ -550,6 +563,7 @@ impl Drop for ClientApp {
                         "off"
                     },
                     if lighting.specular_ibl { "on" } else { "off" },
+                    renderer.vat_mesh_count(),
                     pipelines.pipelines,
                     pipelines.build_ms,
                     pipelines.cache,
@@ -557,11 +571,23 @@ impl Drop for ClientApp {
                 )
             },
         );
+        let stress = self
+            .stress
+            .as_ref()
+            .and_then(|stress| {
+                stress.summary().map(|(mean, p95, _)| {
+                    format!(
+                        "stress_minions={} stress_cpu_mean_us={mean:.1} stress_cpu_p95_us={p95:.1} ",
+                        stress.count()
+                    )
+                })
+            })
+            .unwrap_or_default();
         let report = format!(
             "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
-             {gpu_columns}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
+             {gpu_columns}{stress}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),

@@ -10,11 +10,12 @@
 //!   optionally limited to a [`BoneMask`] such as the upper body;
 //! - [`Pose::add`] layers an additive pose (its difference from a reference pose, for example
 //!   a hit reaction relative to its first frame);
-//! - [`BlendSpace1d`] blends clips along one parameter (idle ↔ run by speed);
+//! - [`BlendSpace1d`] blends clips along one parameter (idle ↔ run by speed), and
+//!   [`BlendSpace2d`] over a plane (strafe × forward velocity, R4b);
 //! - [`Skeleton::model_transforms`] and [`Skeleton::skinning_matrices`] turn a pose into
 //!   model-space joint transforms and the GPU's [`JointMatrix`] rows.
 
-use moba_core::math::{Mat4, Quat, Vec3};
+use moba_core::math::{Mat4, Quat, Vec2, Vec3};
 
 use crate::skin::{JointMatrix, JointTransform, MAX_JOINTS, Skeleton, TrackPath};
 
@@ -298,6 +299,8 @@ pub enum BlendSpaceError {
     Unordered,
     /// A clip index does not fit `u8`.
     ClipIndex,
+    /// Two points of a [`BlendSpace2d`] coincide, or a coordinate is not finite.
+    Coincident,
 }
 
 impl core::fmt::Display for BlendSpaceError {
@@ -306,6 +309,7 @@ impl core::fmt::Display for BlendSpaceError {
             Self::PointCount => "blend spaces need 1 to 8 points",
             Self::Unordered => "blend space parameters must be finite and strictly increasing",
             Self::ClipIndex => "blend space clip index out of range",
+            Self::Coincident => "2D blend space points must be finite and distinct",
         })
     }
 }
@@ -388,6 +392,167 @@ impl BlendSpace1d {
         if weight > 0.0 && high != low {
             skeleton.sample_clip(high, time, ClipWrap::Loop, scratch);
             out.blend(scratch, weight, BoneMask::ALL);
+        }
+    }
+}
+
+/// Clips placed on a plane (R4b): for locomotion, `x` is the strafe and `y` the forward
+/// velocity in m/s in the unit's facing frame (idle at the origin, run forward at `(0, run)`).
+///
+/// Weights come from gradient-band interpolation (Johansen 2009): point `i`'s weight is the
+/// minimum over the other points `j` of `1 - ((p - p_i) · (p_j - p_i)) / |p_j - p_i|²`,
+/// clamped to `0..=1`, then all are normalised. It needs no triangulation, is exact at every
+/// sample point and continuous between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlendSpace2d {
+    points: [Vec2; MAX_BLEND_POINTS],
+    clips: [u8; MAX_BLEND_POINTS],
+    len: usize,
+}
+
+impl BlendSpace2d {
+    /// Builds a blend space from `([x, y], clip index)` points.
+    ///
+    /// # Errors
+    /// [`BlendSpaceError::PointCount`], [`BlendSpaceError::Coincident`] for non-finite or
+    /// repeated points, [`BlendSpaceError::ClipIndex`].
+    pub fn new(points: &[([f32; 2], usize)]) -> Result<Self, BlendSpaceError> {
+        if points.is_empty() || points.len() > MAX_BLEND_POINTS {
+            return Err(BlendSpaceError::PointCount);
+        }
+        let mut space = Self {
+            points: [Vec2::ZERO; MAX_BLEND_POINTS],
+            clips: [0; MAX_BLEND_POINTS],
+            len: points.len(),
+        };
+        for (index, &(point, clip)) in points.iter().enumerate() {
+            let point = Vec2::from_array(point);
+            if !point.is_finite()
+                || space.points[..index]
+                    .iter()
+                    .any(|other| other.distance_squared(point) < 1e-6)
+            {
+                return Err(BlendSpaceError::Coincident);
+            }
+            space.points[index] = point;
+            space.clips[index] = u8::try_from(clip).map_err(|_| BlendSpaceError::ClipIndex)?;
+        }
+        Ok(space)
+    }
+
+    /// Number of points.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the space has no points (never true for a built space).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The clip of point `index`.
+    #[must_use]
+    pub fn clip(&self, index: usize) -> Option<usize> {
+        (index < self.len).then(|| usize::from(self.clips[index]))
+    }
+
+    /// Normalised weights of every point at `param` (unused entries are 0).
+    #[must_use]
+    pub fn weights(&self, param: [f32; 2]) -> [f32; MAX_BLEND_POINTS] {
+        let mut weights = [0.0; MAX_BLEND_POINTS];
+        let param = Vec2::from_array(param);
+        let param = if param.is_finite() { param } else { Vec2::ZERO };
+        if self.len == 1 {
+            weights[0] = 1.0;
+            return weights;
+        }
+        let points = &self.points[..self.len];
+        let mut total = 0.0;
+        for (i, &point) in points.iter().enumerate() {
+            let mut weight = 1.0f32;
+            for (j, &other) in points.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let edge = other - point;
+                let band = 1.0 - (param - point).dot(edge) / edge.length_squared();
+                weight = weight.min(band);
+            }
+            let weight = weight.clamp(0.0, 1.0);
+            weights[i] = weight;
+            total += weight;
+        }
+        if total > 1e-6 {
+            for weight in &mut weights[..self.len] {
+                *weight /= total;
+            }
+        } else {
+            // Unreachable for distinct points (the nearest point always has weight > 0);
+            // fall back to the nearest one.
+            let nearest = (0..self.len)
+                .min_by(|&a, &b| {
+                    points[a]
+                        .distance_squared(param)
+                        .total_cmp(&points[b].distance_squared(param))
+                })
+                .unwrap_or(0);
+            weights[nearest] = 1.0;
+        }
+        weights
+    }
+
+    /// The two heaviest points' clips and the share of the second between them, for
+    /// reports: `(first clip, second clip, weight of second)`.
+    #[must_use]
+    pub fn dominant(&self, param: [f32; 2]) -> (usize, usize, f32) {
+        let weights = self.weights(param);
+        let mut order: [usize; MAX_BLEND_POINTS] = core::array::from_fn(|index| index);
+        let order = &mut order[..self.len];
+        order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]).then(a.cmp(&b)));
+        let first = order[0];
+        let second = order.get(1).copied().unwrap_or(first);
+        let pair = weights[first] + weights[second];
+        let share = if pair > 0.0 && second != first {
+            weights[second] / pair
+        } else {
+            0.0
+        };
+        (
+            usize::from(self.clips[first]),
+            usize::from(self.clips[second]),
+            share,
+        )
+    }
+
+    /// Samples the blend at `param` and `time` seconds (all clips looped at the same time)
+    /// into `out`, using `scratch` for the other clips. Never allocates.
+    pub fn sample(
+        &self,
+        skeleton: &Skeleton,
+        param: [f32; 2],
+        time: f32,
+        out: &mut Pose,
+        scratch: &mut Pose,
+    ) {
+        let weights = self.weights(param);
+        let mut accumulated = 0.0f32;
+        for (index, &weight) in weights[..self.len].iter().enumerate() {
+            if weight <= 1e-4 {
+                continue;
+            }
+            let clip = usize::from(self.clips[index]);
+            if accumulated == 0.0 {
+                skeleton.sample_clip(clip, time, ClipWrap::Loop, out);
+            } else {
+                skeleton.sample_clip(clip, time, ClipWrap::Loop, scratch);
+                out.blend(scratch, weight / (accumulated + weight), BoneMask::ALL);
+            }
+            accumulated += weight;
+        }
+        if accumulated == 0.0 {
+            out.set_rest(skeleton);
         }
     }
 }
@@ -615,5 +780,46 @@ mod tests {
         space.sample(&rig, 2.0, 1.0, &mut out, &mut scratch);
         // Half lift (clip 1 at 1 s = 1.0) and half spin (clip 0 at 1 s wraps to 0 = identity).
         assert!(close(out.joints()[0].translation.y, 0.5));
+    }
+
+    #[test]
+    fn blend_space_2d_is_exact_at_points_and_normalised_between() {
+        let space = BlendSpace2d::new(&[
+            ([0.0, 0.0], 0),
+            ([0.0, 4.0], 1),
+            ([4.0, 0.0], 2),
+            ([-4.0, 0.0], 3),
+        ])
+        .expect("space");
+        for (index, point) in [[0.0, 0.0], [0.0, 4.0], [4.0, 0.0], [-4.0, 0.0]]
+            .into_iter()
+            .enumerate()
+        {
+            let weights = space.weights(point);
+            assert!((weights[index] - 1.0).abs() < 1e-5, "{index}: {weights:?}");
+        }
+        let between = space.weights([1.0, 2.0]);
+        let total: f32 = between.iter().sum();
+        assert!((total - 1.0).abs() < 1e-5);
+        assert!(
+            between[1] > between[3] && between[2] > between[3],
+            "{between:?}"
+        );
+        let (first, second, share) = space.dominant([0.0, 3.0]);
+        assert_eq!((first, second), (1, 0));
+        assert!(share > 0.0 && share < 0.5);
+        assert_eq!(
+            BlendSpace2d::new(&[([0.0, 0.0], 0), ([0.0, 0.0], 1)]),
+            Err(BlendSpaceError::Coincident)
+        );
+        assert_eq!(BlendSpace2d::new(&[]), Err(BlendSpaceError::PointCount));
+        // Sampling exactly at the forward point is that clip.
+        let skeleton = rig();
+        let mut out = Pose::default();
+        let mut scratch = Pose::default();
+        space.sample(&skeleton, [0.0, 4.0], 0.5, &mut out, &mut scratch);
+        let mut expected = Pose::default();
+        skeleton.sample_clip(1, 0.5, ClipWrap::Loop, &mut expected);
+        assert_eq!(out, expected);
     }
 }

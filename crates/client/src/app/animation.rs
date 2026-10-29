@@ -138,7 +138,7 @@ pub(crate) struct LodView {
 }
 
 impl LodView {
-    fn classify(&self, position: Vec3) -> (f32, bool) {
+    pub(crate) fn classify(&self, position: Vec3) -> (f32, bool) {
         let clip = self.view_proj * Vec4::new(position.x, position.y + 1.8, position.z, 1.0);
         let on_screen = clip.w > 1e-4 && {
             let ndc = clip.truncate() / clip.w;
@@ -261,6 +261,8 @@ pub(crate) struct AnimationDriver {
     frame: u64,
     /// Seconds per tick (1 / the server tick rate).
     tick_seconds: f32,
+    /// `MOBA_ANIM_LOG` (R4b evidence): state transitions, written only on a change.
+    log: Option<crate::app::evidence::AnimLog>,
 }
 
 impl std::fmt::Debug for AnimationDriver {
@@ -291,7 +293,14 @@ impl AnimationDriver {
             lod,
             frame: 0,
             tick_seconds: 1.0 / f32::from(tick_rate.max(1)),
+            log: None,
         }
+    }
+
+    /// Returns the driver writing its transitions to `log` (`MOBA_ANIM_LOG`).
+    pub(crate) fn with_log(mut self, log: Option<crate::app::evidence::AnimLog>) -> Self {
+        self.log = log;
+        self
     }
 
     /// Forgets every hero (a rematch or a content reload renumbers net ids).
@@ -555,7 +564,37 @@ impl AnimationDriver {
             _ => 1,
         };
         let scratch = &mut *self.scratch;
+        let tick_rate = 1.0 / self.tick_seconds;
         let slot = Self::claim(&mut self.slots, net_id, rig.index)?;
+        if let Some(log) = self.log.as_mut() {
+            let report = slot.animator.report(rig.graph, now, speed);
+            let action = report.action.map(|state| {
+                (
+                    u8::try_from(state.index()).unwrap_or(u8::MAX),
+                    rig.graph.state_name(state),
+                    report.action_weight,
+                    report.action_time,
+                )
+            });
+            let (lower, upper, weight) = report.locomotion;
+            let dominant = if weight >= 0.5 { upper } else { lower };
+            let clip = rig
+                .skeleton
+                .clips()
+                .get(dominant)
+                .and_then(moba_assets::AnimationClip::name)
+                .unwrap_or("?");
+            // A fading-out action no longer counts as playing.
+            let action = action.filter(|&(_, _, weight, _)| weight > 0.05);
+            log.record(
+                net_id,
+                now,
+                tick_rate,
+                action,
+                (dominant, clip),
+                report.dead,
+            );
+        }
         let due = slot.evaluated.is_none_or(|last| {
             frame.wrapping_sub(last) >= interval
                 || (frame.wrapping_add(u64::from(net_id))).is_multiple_of(interval)

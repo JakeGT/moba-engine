@@ -550,7 +550,15 @@ name = "spear_tip"         # unique
 joint = "arm_r"
 offset = [0.09, 1.3, 0.21] # metres in the joint's frame (-100..=100)
 rotation = [0.0, 0.0, 0.0] # degrees about X, Y, Z (-360..=360)
+model = "crystal"          # optional (R4b): a static models/<name>.glb drawn at the socket
+scale = 0.1                # optional, 0.01..=10 (default 1); needs `model`
 ```
+
+A **2D locomotion** space (R4b) gives each `[[locomotion]]` point `x` (strafe) and `y`
+(forward), m/s in the unit's facing frame, instead of `speed`; the points must be distinct and
+all of one kind (1D or 2D, never mixed). The weights are gradient-band interpolation, exact at
+each point. Heroes face their movement, so a 2D space mostly matters for models that strafe;
+the shipped sets stay 1D.
 
 TOML puts every key after a `[[table]]` header into that table, so keep `move_speed` and
 `upper_body` above the first header.
@@ -582,6 +590,74 @@ TOML puts every key after a `[[table]]` header into that table, so keep `move_sp
 `MOBA_ANIM_LOD` reduces how often far heroes animate: `<near>,<far>` metres from the camera
 (default `80,140`: every frame within 80 m, every 2nd frame to 140 m, every 4th beyond or off
 screen), or `off`.
+
+**Attachments.** A socket with a `model` draws that static model (loaded from
+`<root>/models/<model>.glb` like a hero model, once per name) at the socket every frame, in
+a brightened tint of the hero's colour, scaled by `scale`. A missing or invalid model is
+logged once and the socket draws nothing. On `Low` attachments are skipped for heroes on bone
+LOD2 (beyond the far distance or off screen); `MOBA_ATTACHMENTS=off` hides them all.
+
+**Bone LOD** (R4b). Each skinned model also gets two reduced skins at load: LOD1 (at most 2
+influences per vertex and 75 % of the joints, spring-chain joints dropped first) and LOD2 (1
+influence, at most 4 joints). A dropped joint's vertices follow its nearest kept ancestor.
+Heroes beyond the tier's near distance draw LOD1, beyond the far distance or off screen LOD2
+(`Low` 40/80 m, `Medium` 60/110 m, `High` 80/140 m, `Ultra` 110/180 m). Pinned captures
+always draw LOD0. `MOBA_BONE_LOD=off` keeps the full skin; `MOBA_BONE_LOD=<near>,<far>`
+overrides the distances. Rigid parts lose nothing; soft parts (a cape) stiffen to their
+parent at distance, so author spring chains as leaves of the hierarchy.
+
+### Vertex animation textures
+
+Minions are drawn from a **vertex-animation texture** (VAT, R4b) when the client has one:
+the clips of a skinned model, skinned on the CPU at bake time and stored per vertex and frame,
+played in the vertex shader with no bones. A VAT is client-local and cosmetic like everything
+in this section. `content/vat/minion.toml` + `minion.ktx2` is the example, baked from
+`sentinel-skinned`:
+
+```bash
+cargo run -p moba-tools --bin vat-bake -- content/models/sentinel-skinned.glb content/vat/minion \
+  --clips idle:loop,run:loop,attack,death --fps 20
+```
+
+`--clips` lists the model's clips (`:loop` marks looping ones; at most 16, 4,096 frames in
+all); `--fps` (default 20, the shader interpolates between frames), `--model` (the model whose
+static mesh is drawn, default the file's stem), `--run-speed` (m/s at which the run clip plays
+at its authored rate, default 4), `--attack-release` (seconds into `attack` that land on the
+hit, default 0.35) and `--crossfade` (seconds, default 0.15) go into the descriptor.
+
+The baker writes `<out>.ktx2` (one `RGBA16F` level: positions, then normals, rows of at most
+4,096 texels) and `<out>.toml`:
+
+```toml
+model = "sentinel-skinned"     # models/<model>.glb is the mesh drawn
+vertex_count = 974
+frame_count = 88
+width = 4096
+height = 42
+fps = 20.0
+mesh_hash = "0x87565fec404bbb79"   # FNV-1a of the mesh's positions and indices
+
+[[clips]]                      # at most 16
+name = "idle"                  # the client uses idle, run (or walk), attack and death
+first = 0
+frames = 32
+loop = true
+
+[playback]                     # optional; defaults shown
+run_speed = 4.0
+attack_release = 0.35
+crossfade = 0.15
+```
+
+Melee minions use `vat/minion-melee`, else `vat/minion`; ranged minions `vat/minion-ranged`,
+else `vat/minion`. A descriptor over 8 KiB, with unknown keys, out-of-range values, a texture
+of the wrong size or format, or a `mesh_hash` that no longer matches the model (re-export
+without a re-bake) is logged once and that kind is drawn as a cube. **Re-bake whenever the
+model or its clips change.** Idle and run follow the interpolated speed (the run clip's rate
+scales with speed / `run_speed`), the attack's release lands on the server's attack hit and
+death plays on a corpse left where the minion died. Tiers: `Low` nearest frame, `Medium`
+interpolated frames, `High`/`Ultra` interpolated and crossfaded; all cast shadows.
+`MOBA_VAT=off` draws every minion as a cube.
 
 ### Materials and textures
 

@@ -28,10 +28,10 @@
 use std::io::Read;
 use std::path::Path;
 
-use moba_core::math::{Mat4, Quat, Vec3};
+use moba_core::math::{Mat4, Quat, Vec2, Vec3};
 use serde::Deserialize;
 
-use crate::pose::{BlendSpace1d, BoneMask, ClipWrap, Pose};
+use crate::pose::{BlendSpace1d, BlendSpace2d, BoneMask, ClipWrap, Pose};
 use crate::skin::{JointMatrix, MAX_JOINTS, Skeleton, valid_animation_name};
 
 /// Largest animation set file accepted, in bytes.
@@ -61,12 +61,14 @@ const FADE_RANGE: (f32, f32) = (0.0, 2.0);
 const SPEED_RANGE: (f32, f32) = (0.1, 4.0);
 const RELEASE_RANGE: (f32, f32) = (0.0, 10.0);
 const LOCOMOTION_SPEED_RANGE: (f32, f32) = (0.0, 100.0);
+const PLANE_RANGE: (f32, f32) = (-100.0, 100.0);
 const MOVE_SPEED_RANGE: (f32, f32) = (0.05, 100.0);
 const LINGER_RANGE: (f32, f32) = (0.0, 30.0);
 const UNIT_RANGE: (f32, f32) = (0.0, 1.0);
 const GRAVITY_RANGE: (f32, f32) = (0.0, 50.0);
 const OFFSET_RANGE: (f32, f32) = (-100.0, 100.0);
 const DEGREES_RANGE: (f32, f32) = (-360.0, 360.0);
+const ATTACHMENT_SCALE_RANGE: (f32, f32) = (0.01, 10.0);
 
 /// Why an animation set could not be used.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +156,12 @@ struct RawSet {
 #[serde(deny_unknown_fields)]
 struct RawLocomotion {
     clip: String,
-    speed: f32,
+    #[serde(default)]
+    speed: Option<f32>,
+    #[serde(default)]
+    x: Option<f32>,
+    #[serde(default)]
+    y: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -223,6 +230,10 @@ struct RawSocket {
     offset: Option<[f32; 3]>,
     #[serde(default)]
     rotation: Option<[f32; 3]>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    scale: Option<f32>,
 }
 
 /// One action state of an [`AnimationSet`].
@@ -253,13 +264,32 @@ struct SocketDef {
     joint: String,
     offset: [f32; 3],
     rotation: [f32; 3],
+    /// A visible static model drawn at the socket, and its scale (R4b).
+    attachment: Option<(String, f32)>,
+}
+
+/// Locomotion points of an animation set: along speed (1D) or on the strafe/forward plane
+/// (2D).
+#[derive(Clone, Debug, PartialEq)]
+enum LocomotionDef {
+    Speed(Vec<(String, f32)>),
+    Plane(Vec<(String, [f32; 2])>),
+}
+
+impl LocomotionDef {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Speed(points) => points.is_empty(),
+            Self::Plane(points) => points.is_empty(),
+        }
+    }
 }
 
 /// A parsed, range-checked animation set descriptor. Bind it to a skeleton with
 /// [`AnimationGraph::bind`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationSet {
-    locomotion: Vec<(String, f32)>,
+    locomotion: LocomotionDef,
     move_speed: f32,
     upper_body: Option<String>,
     states: Vec<StateDef>,
@@ -339,20 +369,54 @@ impl AnimationSet {
         if raw.sockets.len() > MAX_SOCKETS {
             return Err(AnimationSetError::Invalid("at most 8 sockets"));
         }
-        let mut locomotion = Vec::with_capacity(raw.locomotion.len());
-        for point in raw.locomotion {
-            let speed = check_range(
-                point.speed,
-                LOCOMOTION_SPEED_RANGE,
-                "locomotion speed must be 0..=100",
-            )?;
-            if locomotion.last().is_some_and(|(_, last)| speed <= *last) {
-                return Err(AnimationSetError::Invalid(
-                    "locomotion speeds must increase",
-                ));
+        let planar = raw
+            .locomotion
+            .first()
+            .is_some_and(|point| point.speed.is_none());
+        let locomotion = if planar {
+            let mut points: Vec<(String, [f32; 2])> = Vec::with_capacity(raw.locomotion.len());
+            for point in raw.locomotion {
+                let (Some(x), Some(y), None) = (point.x, point.y, point.speed) else {
+                    return Err(AnimationSetError::Invalid(
+                        "locomotion points give either speed (1D) or x and y (2D), not both",
+                    ));
+                };
+                let at = [
+                    check_range(x, PLANE_RANGE, "locomotion x must be -100..=100")?,
+                    check_range(y, PLANE_RANGE, "locomotion y must be -100..=100")?,
+                ];
+                if points.iter().any(|(_, other)| {
+                    (other[0] - at[0]).abs() < 1e-3 && (other[1] - at[1]).abs() < 1e-3
+                }) {
+                    return Err(AnimationSetError::Invalid(
+                        "2D locomotion points must be distinct",
+                    ));
+                }
+                points.push((check_name(point.clip)?, at));
             }
-            locomotion.push((check_name(point.clip)?, speed));
-        }
+            LocomotionDef::Plane(points)
+        } else {
+            let mut points: Vec<(String, f32)> = Vec::with_capacity(raw.locomotion.len());
+            for point in raw.locomotion {
+                let (Some(speed), None, None) = (point.speed, point.x, point.y) else {
+                    return Err(AnimationSetError::Invalid(
+                        "locomotion points give either speed (1D) or x and y (2D), not both",
+                    ));
+                };
+                let speed = check_range(
+                    speed,
+                    LOCOMOTION_SPEED_RANGE,
+                    "locomotion speed must be 0..=100",
+                )?;
+                if points.last().is_some_and(|(_, last)| speed <= *last) {
+                    return Err(AnimationSetError::Invalid(
+                        "locomotion speeds must increase",
+                    ));
+                }
+                points.push((check_name(point.clip)?, speed));
+            }
+            LocomotionDef::Speed(points)
+        };
         let mut states: Vec<StateDef> = Vec::with_capacity(raw.states.len());
         for state in raw.states {
             let name = check_name(state.name)?;
@@ -450,11 +514,33 @@ impl AnimationSet {
                     "socket rotation must be -360..=360 degrees",
                 )?;
             }
+            let attachment = match socket.model {
+                Some(model) => {
+                    if !crate::map_visuals::valid_mesh_name(&model) {
+                        return Err(AnimationSetError::Invalid(
+                            "attachment models must be 1-32 of [A-Za-z0-9_-]",
+                        ));
+                    }
+                    let scale = check_range(
+                        socket.scale.unwrap_or(1.0),
+                        ATTACHMENT_SCALE_RANGE,
+                        "attachment scale must be 0.01..=10",
+                    )?;
+                    Some((model, scale))
+                }
+                None if socket.scale.is_some() => {
+                    return Err(AnimationSetError::Invalid(
+                        "a socket scale needs an attachment model",
+                    ));
+                }
+                None => None,
+            };
             sockets.push(SocketDef {
                 name,
                 joint: check_name(socket.joint)?,
                 offset,
                 rotation,
+                attachment,
             });
         }
         let triggers = raw.triggers;
@@ -528,6 +614,13 @@ impl AnimationSet {
     pub fn socket_count(&self) -> usize {
         self.sockets.len()
     }
+
+    /// The attachment models the sockets name (R4b), in socket order, with duplicates.
+    pub fn attachment_models(&self) -> impl Iterator<Item = &str> {
+        self.sockets
+            .iter()
+            .filter_map(|socket| socket.attachment.as_ref().map(|(model, _)| model.as_str()))
+    }
 }
 
 /// A resolved action state.
@@ -562,6 +655,14 @@ struct Socket {
     name: Box<str>,
     joint: u8,
     offset: Mat4,
+    attachment: Option<(Box<str>, f32)>,
+}
+
+/// The bound locomotion blend.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Locomotion {
+    Speed(BlendSpace1d),
+    Plane(BlendSpace2d),
 }
 
 /// A socket of an [`AnimationGraph`], for [`Animator::socket_transform`].
@@ -584,7 +685,7 @@ impl StateId {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnimationGraph {
     joint_count: usize,
-    locomotion: Option<BlendSpace1d>,
+    locomotion: Option<Locomotion>,
     move_speed: f32,
     upper: BoneMask,
     states: Vec<State>,
@@ -621,17 +722,27 @@ impl AnimationGraph {
                 .and_then(|index| u8::try_from(index).ok())
                 .ok_or_else(|| AnimationSetError::Unresolved(format!("joint '{name}'")))
         };
-        let locomotion = if set.locomotion.is_empty() {
-            None
-        } else {
-            let mut points = Vec::with_capacity(set.locomotion.len());
-            for (name, speed) in &set.locomotion {
-                points.push((*speed, usize::from(clip(name)?)));
+        let invalid = |_| AnimationSetError::Invalid("locomotion blend space");
+        let locomotion = match &set.locomotion {
+            points if points.is_empty() => None,
+            LocomotionDef::Speed(points) => {
+                let mut resolved = Vec::with_capacity(points.len());
+                for (name, speed) in points {
+                    resolved.push((*speed, usize::from(clip(name)?)));
+                }
+                Some(Locomotion::Speed(
+                    BlendSpace1d::new(&resolved).map_err(invalid)?,
+                ))
             }
-            Some(
-                BlendSpace1d::new(&points)
-                    .map_err(|_| AnimationSetError::Invalid("locomotion blend space"))?,
-            )
+            LocomotionDef::Plane(points) => {
+                let mut resolved = Vec::with_capacity(points.len());
+                for (name, at) in points {
+                    resolved.push((*at, usize::from(clip(name)?)));
+                }
+                Some(Locomotion::Plane(
+                    BlendSpace2d::new(&resolved).map_err(invalid)?,
+                ))
+            }
         };
         let upper = match &set.upper_body {
             Some(name) => BoneMask::subtree(skeleton, usize::from(joint(name)?)),
@@ -719,6 +830,10 @@ impl AnimationGraph {
             let [x, y, z] = socket.rotation.map(f32::to_radians);
             sockets.push(Socket {
                 name: socket.name.as_str().into(),
+                attachment: socket
+                    .attachment
+                    .as_ref()
+                    .map(|(model, scale)| (model.as_str().into(), *scale)),
                 joint: joint(&socket.joint)?,
                 offset: Mat4::from_rotation_translation(
                     Quat::from_rotation_x(x) * Quat::from_rotation_y(y) * Quat::from_rotation_z(z),
@@ -783,6 +898,44 @@ impl AnimationGraph {
     #[must_use]
     pub fn spring_joint_count(&self) -> usize {
         self.springs.len()
+    }
+
+    /// Number of sockets.
+    #[must_use]
+    pub fn socket_count(&self) -> usize {
+        self.sockets.len()
+    }
+
+    /// The visible attachment of a socket (R4b): its static model's name and scale.
+    #[must_use]
+    pub fn attachment(&self, socket: SocketId) -> Option<(&str, f32)> {
+        self.sockets
+            .get(usize::from(socket.0))
+            .and_then(|socket| socket.attachment.as_ref())
+            .map(|(model, scale)| (&**model, *scale))
+    }
+
+    /// Every socket with a visible attachment, in socket order.
+    pub fn attachments(&self) -> impl Iterator<Item = (SocketId, &str, f32)> {
+        self.sockets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, socket)| {
+                let (model, scale) = socket.attachment.as_ref()?;
+                Some((SocketId(u8::try_from(index).ok()?), &**model, *scale))
+            })
+    }
+
+    /// The joints driven by spring chains (secondary motion), in chain order: the first
+    /// candidates to drop from a reduced skin (R4b bone LOD).
+    pub fn spring_joints(&self) -> impl Iterator<Item = usize> + '_ {
+        self.springs.iter().map(|spring| usize::from(spring.joint))
+    }
+
+    /// Whether the locomotion blend space is two-dimensional.
+    #[must_use]
+    pub fn planar_locomotion(&self) -> bool {
+        matches!(self.locomotion, Some(Locomotion::Plane(_)))
     }
 
     /// The state an event plays, if the set binds one.
@@ -1220,9 +1373,11 @@ impl Animator {
             additive_weight: copy
                 .additive
                 .map_or(0.0, |play| Self::weight(graph, &play, now)),
-            locomotion: graph
-                .locomotion
-                .map_or((0, 0, 0.0), |space| space.weights(speed)),
+            locomotion: match graph.locomotion {
+                None => (0, 0, 0.0),
+                Some(Locomotion::Speed(space)) => space.weights(speed),
+                Some(Locomotion::Plane(space)) => space.dominant([0.0, speed]),
+            },
             dead: copy.dead,
         }
     }
@@ -1276,6 +1431,35 @@ impl Animator {
         model_to_world: Mat4,
         scratch: &mut AnimationScratch,
     ) -> &[JointMatrix] {
+        self.evaluate_motion(
+            graph,
+            skeleton,
+            now,
+            // Negative or non-finite speeds stand still, as before.
+            Vec2::new(0.0, speed.max(0.0)),
+            model_to_world,
+            scratch,
+        )
+    }
+
+    /// [`Self::evaluate`] for a unit moving at `velocity` m/s in its own facing frame
+    /// (`x` strafe right, `y` forward): a 2D locomotion blend space reads both, a 1D one the
+    /// speed (its length). Never allocates.
+    pub fn evaluate_motion(
+        &mut self,
+        graph: &AnimationGraph,
+        skeleton: &Skeleton,
+        now: f32,
+        velocity: Vec2,
+        model_to_world: Mat4,
+        scratch: &mut AnimationScratch,
+    ) -> &[JointMatrix] {
+        let velocity = if velocity.is_finite() && !self.dead {
+            velocity
+        } else {
+            Vec2::ZERO
+        };
+        let speed = velocity.length();
         let count = skeleton.joint_count();
         self.joint_count = count;
         let now = if now.is_finite() { now } else { 0.0 };
@@ -1292,7 +1476,12 @@ impl Animator {
         }
         self.advance(graph, now, speed);
         match graph.locomotion {
-            Some(space) => space.sample(skeleton, speed, now + self.phase, base, layer),
+            Some(Locomotion::Speed(space)) => {
+                space.sample(skeleton, speed, now + self.phase, base, layer);
+            }
+            Some(Locomotion::Plane(space)) => {
+                space.sample(skeleton, velocity.to_array(), now + self.phase, base, layer);
+            }
             None => base.set_rest(skeleton),
         }
         let lower = graph.upper.complement();
@@ -2066,5 +2255,103 @@ rotation = [0.0, 90.0, 0.0]
         }
         assert_eq!(graph.spring_joint_count(), 3);
         assert!(graph.socket("spear_tip").is_some());
+    }
+
+    #[test]
+    fn planar_locomotion_sets_strafe_and_forward_clips() {
+        let set = AnimationSet::parse(
+            r#"
+[[locomotion]]
+clip = "idle"
+x = 0.0
+y = 0.0
+
+[[locomotion]]
+clip = "run"
+x = 0.0
+y = 4.0
+
+[[locomotion]]
+clip = "attack"
+x = 3.0
+y = 0.0
+"#,
+        )
+        .expect("2D set");
+        let skeleton = rig();
+        let graph = AnimationGraph::bind(&set, &skeleton).expect("binds");
+        assert!(graph.planar_locomotion());
+        let mut scratch = AnimationScratch::default();
+        let mut forward = Animator::new(0.0);
+        let mut strafe = Animator::new(0.0);
+        let ahead = forward
+            .evaluate_motion(
+                &graph,
+                &skeleton,
+                0.2,
+                Vec2::new(0.0, 4.0),
+                Mat4::IDENTITY,
+                &mut scratch,
+            )
+            .to_vec();
+        let side = strafe
+            .evaluate_motion(
+                &graph,
+                &skeleton,
+                0.2,
+                Vec2::new(3.0, 0.0),
+                Mat4::IDENTITY,
+                &mut scratch,
+            )
+            .to_vec();
+        assert_ne!(ahead, side, "strafing picks another clip");
+        // `evaluate` with a speed is forward motion.
+        let mut by_speed = Animator::new(0.0);
+        let speed = by_speed
+            .evaluate(&graph, &skeleton, 0.2, 4.0, Mat4::IDENTITY, &mut scratch)
+            .to_vec();
+        assert_eq!(speed, ahead);
+        assert_eq!(forward.report(&graph, 0.2, 4.0).locomotion.0, 1);
+        for bad in [
+            "[[locomotion]]\nclip = \"idle\"\nx = 0.0\n",
+            "[[locomotion]]\nclip = \"idle\"\nx = 0.0\ny = 0.0\n[[locomotion]]\nclip = \"run\"\nspeed = 1.0\n",
+            "[[locomotion]]\nclip = \"idle\"\nx = 0.0\ny = 0.0\n[[locomotion]]\nclip = \"run\"\nx = 0.0\ny = 0.0\n",
+            "[[locomotion]]\nclip = \"idle\"\nspeed = 0.0\nx = 1.0\n",
+        ] {
+            assert!(AnimationSet::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sockets_carry_visible_attachments() {
+        let set = AnimationSet::parse(
+            r#"
+[[sockets]]
+name = "hand"
+joint = "arm"
+offset = [0.0, 0.5, 0.0]
+model = "crystal"
+scale = 0.25
+
+[[sockets]]
+name = "head"
+joint = "chest"
+"#,
+        )
+        .expect("set");
+        assert_eq!(set.attachment_models().collect::<Vec<_>>(), ["crystal"]);
+        let graph = AnimationGraph::bind(&set, &rig()).expect("binds");
+        assert_eq!(graph.socket_count(), 2);
+        let hand = graph.socket("hand").expect("hand");
+        assert_eq!(graph.attachment(hand), Some(("crystal", 0.25)));
+        assert_eq!(graph.attachment(graph.socket("head").expect("head")), None);
+        assert_eq!(graph.attachments().count(), 1);
+        for bad in [
+            "[[sockets]]\nname = \"a\"\njoint = \"arm\"\nscale = 2.0\n",
+            "[[sockets]]\nname = \"a\"\njoint = \"arm\"\nmodel = \"../x\"\n",
+            "[[sockets]]\nname = \"a\"\njoint = \"arm\"\nmodel = \"x\"\nscale = 0.0\n",
+        ] {
+            assert!(AnimationSet::parse(bad).is_err(), "{bad}");
+        }
     }
 }
