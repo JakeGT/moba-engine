@@ -5,6 +5,12 @@
 //! with a textured material ([`ScenePass::set_mesh_material`]) draws with the
 //! `MATERIAL_TEXTURED` permutation and its material's descriptor set (set 2); every other
 //! mesh keeps the vertex-colour look.
+//!
+//! The pass draws one or more **views** (R7b): view 0 is the frame's main scene; the others
+//! are the offscreen images (portraits, the minimap) rendered with the same pipelines and
+//! meshes into their own targets. Each view owns its per-frame camera, instance and bone
+//! buffers and its bucketing scratch, all sized at creation, so preparing and recording
+//! several views in one frame allocates nothing.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,11 +26,14 @@ use crate::pipeline::{self, PipelineSpec, VertexLayout};
 use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
-use crate::scene::{BoneRange, CameraUniform, GpuInstance, MeshId, Scene};
+use crate::scene::{BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Scene};
 use crate::shaders::ShaderSource;
 
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
 pub(crate) const MAX_MESHES: usize = 64;
+/// Most backdrop rectangles one view clears ([`SceneTargets::clear_rects`]); later ones are
+/// ignored.
+pub(crate) const MAX_CLEAR_RECTS: usize = 32;
 /// Bytes per joint in the bone buffer: three `vec4` rows.
 const BONE_STRIDE: u64 = core::mem::size_of::<JointMatrix>() as u64;
 const CAMERA_UNIFORM_SIZE: u64 = core::mem::size_of::<CameraUniform>() as u64;
@@ -74,12 +83,38 @@ struct SceneFrame {
     instance_set: vk::DescriptorSet,
 }
 
-/// Attachments the scene pass renders into.
-pub(crate) struct SceneTargets {
+/// Attachments the scene pass renders into, and how one view is drawn.
+pub(crate) struct SceneTargets<'a> {
     pub(crate) color: vk::ImageView,
     pub(crate) depth: vk::ImageView,
     pub(crate) extent: vk::Extent2D,
     pub(crate) clear_color: [f32; 4],
+    /// Draw the terrain plane (the main view and the minimap; portraits do not).
+    pub(crate) terrain: bool,
+    /// Rectangles cleared to their own colour after the full clear (portrait backdrops).
+    pub(crate) clear_rects: &'a [ClearRect],
+}
+
+/// Per-view budget: the instance and joint-matrix capacity of its per-frame buffers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ViewBudget {
+    pub(crate) max_instances: usize,
+    pub(crate) max_bones: usize,
+}
+
+/// One view's per-frame buffers and its bucketing scratch.
+struct SceneView {
+    frames: Vec<SceneFrame>,
+    /// Per-frame bucketing scratch (instances per mesh, first instance, write cursor).
+    mesh_counts: [u32; MAX_MESHES],
+    mesh_starts: [u32; MAX_MESHES],
+    mesh_cursors: [u32; MAX_MESHES],
+    /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
+    skinned_draws: Vec<SkinnedDraw>,
+    /// Units uploaded for the frame being recorded.
+    unit_count: usize,
+    max_instances: usize,
+    max_bones: usize,
 }
 
 /// Every scene pipeline: the vertex-colour set and the `MATERIAL_TEXTURED` permutations.
@@ -195,15 +230,8 @@ pub(crate) struct ScenePass {
     meshes: Vec<GpuMesh>,
     /// Per mesh slot: its material's descriptor set, or null for the vertex-colour look.
     mesh_material_sets: [vk::DescriptorSet; MAX_MESHES],
-    /// Per-frame bucketing scratch (instances per mesh, first instance, write cursor).
-    mesh_counts: [u32; MAX_MESHES],
-    mesh_starts: [u32; MAX_MESHES],
-    mesh_cursors: [u32; MAX_MESHES],
-    /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
-    skinned_draws: Vec<SkinnedDraw>,
-    /// Units uploaded for the frame being recorded.
-    unit_count: usize,
-    frames: Vec<SceneFrame>,
+    /// View 0 is the main scene; the rest are offscreen views (R7b).
+    views: Vec<SceneView>,
     _descriptor_pool: DescriptorPool,
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
@@ -212,13 +240,12 @@ pub(crate) struct ScenePass {
     color_format: vk::Format,
     depth_format: vk::Format,
     skinning: bool,
-    max_instances: usize,
-    max_bones: usize,
 }
 
 impl ScenePass {
-    /// Builds the scene pipelines for `color_format`/`depth_format` and `frames` sets of
-    /// per-frame buffers. `max_bones` is clamped to the storage-buffer range and returned
+    /// Builds the scene pipelines for `color_format`/`depth_format` and, per view in `views`
+    /// (view 0 is the main scene), `frames` sets of per-frame buffers. Each view's
+    /// `max_bones` is clamped to the storage-buffer range; the main view's is returned
     /// through the pass (see [`Self::max_bones`]). `material_layout` is set 2 of every scene
     /// pipeline.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // Wiring belongs together.
@@ -229,8 +256,7 @@ impl ScenePass {
         color_format: vk::Format,
         depth_format: vk::Format,
         material_layout: vk::DescriptorSetLayout,
-        max_instances: usize,
-        max_bones: usize,
+        views: &[ViewBudget],
         skinning: bool,
     ) -> RenderResult<Self> {
         let camera_binding = [vk::DescriptorSetLayoutBinding::default()
@@ -253,7 +279,7 @@ impl ScenePass {
                 .stage_flags(vk::ShaderStageFlags::VERTEX),
         ];
         let instance_layout = DescriptorSetLayout::new(device.device.clone(), &instance_binding)?;
-        let frame_count = u32::try_from(frames).expect("frame count fits u32");
+        let frame_count = u32::try_from(frames * views.len()).expect("frame count fits u32");
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
@@ -292,82 +318,25 @@ impl ScenePass {
         let mut meshes = Vec::with_capacity(MAX_MESHES);
         meshes.push(mesh::upload(device, &mesh::CpuMesh::cube())?);
 
-        // Both SSBOs are bound with `WHOLE_SIZE`, so each must fit one storage-buffer range.
-        let range_limit = u64::from(device.max_storage_buffer_range);
-        let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
-            .ok()
-            .zip(u64::try_from(max_instances).ok())
-            .and_then(|(size, count)| size.checked_mul(count))
-            .filter(|&bytes| bytes <= range_limit)
-            .ok_or_else(|| {
-                RenderError::NoSuitableDevice(format!(
-                    "max_instances {max_instances} exceeds the device's storage-buffer range ({range_limit} bytes)"
-                ))
-            })?;
-        // Clamping the bone budget to the range also keeps `(first_bone + joint) * 3` in
-        // skinned.vert far below `u32::MAX`.
-        let bones_that_fit = usize::try_from(range_limit / BONE_STRIDE).unwrap_or(usize::MAX);
-        let max_bones = if max_bones > bones_that_fit {
-            eprintln!(
-                "[render] max_bones {max_bones} exceeds the storage-buffer range; using {bones_that_fit}"
-            );
-            bones_that_fit
-        } else {
-            max_bones
-        };
-        // At least one joint so the descriptor always names a non-empty buffer.
-        let bone_buffer_size =
-            BONE_STRIDE * u64::try_from(max_bones.max(1)).expect("bounded by the range limit");
-
-        let set_layouts: Vec<vk::DescriptorSetLayout> = (0..frames)
+        let set_layouts: Vec<vk::DescriptorSetLayout> = (0..frames * views.len())
             .flat_map(|_| [camera_layout.handle(), instance_layout.handle()])
             .collect();
         let sets = descriptor_pool.allocate(&device.device, &set_layouts)?;
-        let mut scene_frames = Vec::with_capacity(frames);
-        for frame in 0..frames {
-            let buffer = |name, size, usage| {
-                GpuBuffer::new(
-                    device.device.clone(),
-                    device.allocator(),
-                    name,
-                    size,
-                    usage,
-                    MemoryLocation::CpuToGpu,
-                )
-            };
-            let scene_frame = SceneFrame {
-                camera_buffer: buffer(
-                    "camera-uniform",
-                    CAMERA_UNIFORM_SIZE,
-                    vk::BufferUsageFlags::UNIFORM_BUFFER,
-                )?,
-                instance_buffer: buffer(
-                    "unit-instances",
-                    instance_buffer_size,
-                    vk::BufferUsageFlags::STORAGE_BUFFER,
-                )?,
-                bone_buffer: buffer(
-                    "skin-bones",
-                    bone_buffer_size,
-                    vk::BufferUsageFlags::STORAGE_BUFFER,
-                )?,
-                camera_set: sets[frame * 2],
-                instance_set: sets[frame * 2 + 1],
-            };
-            write_descriptors(&device.device, &scene_frame);
-            scene_frames.push(scene_frame);
+        let mut scene_views = Vec::with_capacity(views.len());
+        for (view, budget) in views.iter().enumerate() {
+            let first_set = view * frames * 2;
+            scene_views.push(SceneView::new(
+                device,
+                *budget,
+                &sets[first_set..first_set + frames * 2],
+            )?);
         }
 
         Ok(Self {
             terrain_mesh,
             meshes,
             mesh_material_sets: [vk::DescriptorSet::null(); MAX_MESHES],
-            mesh_counts: [0; MAX_MESHES],
-            mesh_starts: [0; MAX_MESHES],
-            mesh_cursors: [0; MAX_MESHES],
-            skinned_draws: Vec::with_capacity(max_instances.min(max_bones)),
-            unit_count: 0,
-            frames: scene_frames,
+            views: scene_views,
             _descriptor_pool: descriptor_pool,
             _camera_layout: camera_layout,
             _instance_layout: instance_layout,
@@ -376,8 +345,6 @@ impl ScenePass {
             color_format,
             depth_format,
             skinning,
-            max_instances,
-            max_bones,
         })
     }
 
@@ -435,9 +402,9 @@ impl ScenePass {
         Ok(())
     }
 
-    /// The bone budget after clamping to the device's storage-buffer range.
+    /// The main view's bone budget after clamping to the device's storage-buffer range.
     pub(crate) fn max_bones(&self) -> usize {
-        self.max_bones
+        self.views[0].max_bones
     }
 
     /// Whether the skinned pipeline exists.
@@ -450,9 +417,10 @@ impl ScenePass {
         self.meshes.len()
     }
 
-    /// This frame's bone buffer, for the render graph's host-write → vertex-read barrier.
-    pub(crate) fn bone_buffer(&self, frame: usize) -> vk::Buffer {
-        self.frames[frame].bone_buffer.handle()
+    /// A view's bone buffer for this frame, for the render graph's host-write → vertex-read
+    /// barrier.
+    pub(crate) fn bone_buffer(&self, view: usize, frame: usize) -> vk::Buffer {
+        self.views[view].frames[frame].bone_buffer.handle()
     }
 
     /// Uploads a static mesh into the next slot (load time only).
@@ -490,19 +458,30 @@ impl ScenePass {
         Ok(MeshId::from_index(id))
     }
 
-    /// Writes this frame's camera, instances and bones and buckets the draws. The frame's
-    /// fence must have been waited on.
-    pub(crate) fn prepare(&mut self, frame: usize, scene: &Scene<'_>) -> RenderResult<()> {
-        let unit_count = scene.units.len().min(self.max_instances);
-        let bone_count = scene.bones.len().min(self.max_bones);
-        BONES_TRUNCATED.store(
-            u64::try_from(scene.bones.len() - bone_count).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
-        self.skinned_draws.clear();
-        self.unit_count = unit_count;
+    /// Writes this frame's camera, instances and bones of `view` and buckets its draws. The
+    /// frame's fence must have been waited on. The truncation counters report the main view
+    /// (0) only.
+    pub(crate) fn prepare(
+        &mut self,
+        view: usize,
+        frame: usize,
+        scene: &Scene<'_>,
+    ) -> RenderResult<()> {
+        let mesh_count = self.meshes.len();
+        let Self { views, meshes, .. } = self;
+        let state = &mut views[view];
+        let unit_count = scene.units.len().min(state.max_instances);
+        let bone_count = scene.bones.len().min(state.max_bones);
+        if view == 0 {
+            BONES_TRUNCATED.store(
+                u64::try_from(scene.bones.len() - bone_count).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+        state.skinned_draws.clear();
+        state.unit_count = unit_count;
         let mut skinned_dropped = 0u64;
-        let target = &mut self.frames[frame];
+        let target = &mut state.frames[frame];
         let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint);
         target.camera_buffer.write_bytes(0, bytes_of(&uniform));
         if bone_count > 0 {
@@ -520,10 +499,10 @@ impl ScenePass {
             let units = &scene.units[..unit_count];
             bucket_by_mesh(
                 units,
-                self.meshes.len(),
-                &mut self.mesh_counts,
-                &mut self.mesh_starts,
-                &mut self.mesh_cursors,
+                mesh_count,
+                &mut state.mesh_counts,
+                &mut state.mesh_starts,
+                &mut state.mesh_cursors,
             );
             let mapped = target
                 .instance_buffer
@@ -536,41 +515,45 @@ impl ScenePass {
             // Each mesh's instances land contiguously at its `mesh_starts` slot, so one draw
             // per mesh reads them through `firstInstance` (gl_InstanceIndex).
             for unit in units {
-                let slot = mesh_slot(unit.mesh, self.meshes.len());
-                let cursor = &mut self.mesh_cursors[slot];
+                let slot = mesh_slot(unit.mesh, mesh_count);
+                let cursor = &mut state.mesh_cursors[slot];
                 let instance = *cursor;
                 mapped[instance as usize] = GpuInstance::from(*unit);
                 *cursor += 1;
-                let joints = self.meshes[slot].joint_count;
+                let joints = meshes[slot].joint_count;
                 if joints == 0 {
                     continue;
                 }
                 // A skinned mesh is only drawn with a bone range inside this frame's upload;
                 // the capacity check keeps `push` from reallocating.
                 match skinned_draw(unit.bones, joints, uploaded_bones, slot, instance) {
-                    Some(draw) if self.skinned_draws.len() < self.skinned_draws.capacity() => {
-                        self.skinned_draws.push(draw);
+                    Some(draw) if state.skinned_draws.len() < state.skinned_draws.capacity() => {
+                        state.skinned_draws.push(draw);
                     }
                     _ => skinned_dropped += 1,
                 }
             }
         }
-        SKINNED_DROPPED.store(skinned_dropped, Ordering::Relaxed);
+        if view == 0 {
+            SKINNED_DROPPED.store(skinned_dropped, Ordering::Relaxed);
+        }
         Ok(())
     }
 
-    /// Records the pass: clear, terrain, static meshes (one instanced draw per mesh:
-    /// vertex-colour meshes, then textured meshes with their material sets), then one draw per
-    /// skinned instance (vertex-colour, then textured). The graph has already transitioned
-    /// the targets.
+    /// Records `view`: clear (plus any backdrop rectangles), terrain (when asked), static
+    /// meshes (one instanced draw per mesh: vertex-colour meshes, then textured meshes with
+    /// their material sets), then one draw per skinned instance (vertex-colour, then
+    /// textured). The graph has already transitioned the targets.
     #[allow(clippy::too_many_lines)] // One explicit, ordered draw stream.
     pub(crate) fn record(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
+        view: usize,
         frame: usize,
-        targets: &SceneTargets,
+        targets: &SceneTargets<'_>,
     ) {
+        let state = &self.views[view];
         let extent = targets.extent;
         let color_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(targets.color)
@@ -609,8 +592,9 @@ impl ScenePass {
             super::flipped_viewport(extent),
             extent,
         );
+        clear_rects(device, command_buffer, targets);
 
-        let scene_frame = &self.frames[frame];
+        let scene_frame = &state.frames[frame];
         let descriptor_sets = [scene_frame.camera_set, scene_frame.instance_set];
         // SAFETY: both sets were allocated from this frame's layout and the pipeline layout
         // declares them at indices 0 and 1.
@@ -625,36 +609,43 @@ impl ScenePass {
             );
         }
 
-        // Terrain.
-        bind_pipeline(device, command_buffer, &self.pipelines.terrain);
-        bind_mesh(device, command_buffer, &self.terrain_mesh);
-        // SAFETY: the mesh is uploaded and drawable; its index buffer holds `index_count`
-        // in-range `u32` indices.
-        unsafe {
-            device.device.cmd_draw_indexed(
-                command_buffer,
-                self.terrain_mesh.index_count,
-                1,
-                0,
-                0,
-                0,
-            );
-        }
-
-        if self.unit_count > 0 {
-            for textured in [false, true] {
-                self.record_static(device, command_buffer, textured);
+        if targets.terrain {
+            bind_pipeline(device, command_buffer, &self.pipelines.terrain);
+            bind_mesh(device, command_buffer, &self.terrain_mesh);
+            // SAFETY: the mesh is uploaded and drawable; its index buffer holds `index_count`
+            // in-range `u32` indices.
+            unsafe {
+                device.device.cmd_draw_indexed(
+                    command_buffer,
+                    self.terrain_mesh.index_count,
+                    1,
+                    0,
+                    0,
+                    0,
+                );
             }
         }
 
-        if !self.skinned_draws.is_empty()
+        if state.unit_count > 0 {
+            for textured in [false, true] {
+                self.record_static(device, command_buffer, state, textured);
+            }
+        }
+
+        if !state.skinned_draws.is_empty()
             && let Some(skinned) = &self.pipelines.skinned
         {
             // Textured skinned meshes fall back to the vertex-colour pipeline if their
             // permutation is missing.
             let textured = self.pipelines.skinned_textured.as_ref();
-            self.record_skinned(device, command_buffer, skinned, false);
-            self.record_skinned(device, command_buffer, textured.unwrap_or(skinned), true);
+            self.record_skinned(device, command_buffer, state, skinned, false);
+            self.record_skinned(
+                device,
+                command_buffer,
+                state,
+                textured.unwrap_or(skinned),
+                true,
+            );
         }
 
         device.cmd_end_rendering(command_buffer);
@@ -665,6 +656,7 @@ impl ScenePass {
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
+        state: &SceneView,
         textured: bool,
     ) {
         let pipeline = if textured {
@@ -675,7 +667,7 @@ impl ScenePass {
         let mut bound = false;
         {
             for (slot, mesh) in self.meshes.iter().enumerate() {
-                let count = self.mesh_counts[slot];
+                let count = state.mesh_counts[slot];
                 let set = self.mesh_material_sets[slot];
                 // Skinned meshes are drawn per instance below, with their own pipeline.
                 if count == 0
@@ -697,7 +689,8 @@ impl ScenePass {
                 // count (cube by construction; registered meshes re-checked in
                 // `CpuMesh::from_asset`), so no vertex fetch leaves the vertex buffer.
                 // Instances: `mesh_starts[slot] + count <= unit_count <= max_instances`, the
-                // instance buffer's element capacity, by construction in `bucket_by_mesh`.
+                // view's instance buffer's element capacity, by construction in
+                // `bucket_by_mesh`.
                 unsafe {
                     device.device.cmd_draw_indexed(
                         command_buffer,
@@ -705,7 +698,7 @@ impl ScenePass {
                         count,
                         0,
                         0,
-                        self.mesh_starts[slot],
+                        state.mesh_starts[slot],
                     );
                 }
             }
@@ -718,13 +711,14 @@ impl ScenePass {
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
+        state: &SceneView,
         pipeline: &GraphicsPipeline,
         textured: bool,
     ) {
         {
             let mut bound_pipeline = false;
             let mut bound_slot = u32::MAX;
-            for draw in &self.skinned_draws {
+            for draw in &state.skinned_draws {
                 let mesh = &self.meshes[draw.slot as usize];
                 let set = self.mesh_material_sets[draw.slot as usize];
                 if (set != vk::DescriptorSet::null()) != textured {
@@ -780,6 +774,92 @@ impl ScenePass {
                 }
             }
         }
+    }
+}
+
+impl SceneView {
+    /// Creates `budget`'s per-frame buffers and writes `sets` (camera, instances: two per
+    /// frame) for them.
+    fn new(
+        device: &DeviceContext,
+        budget: ViewBudget,
+        sets: &[vk::DescriptorSet],
+    ) -> RenderResult<Self> {
+        let ViewBudget {
+            max_instances,
+            max_bones,
+        } = budget;
+        // Both SSBOs are bound with `WHOLE_SIZE`, so each must fit one storage-buffer range.
+        let range_limit = u64::from(device.max_storage_buffer_range);
+        let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
+            .ok()
+            .zip(u64::try_from(max_instances.max(1)).ok())
+            .and_then(|(size, count)| size.checked_mul(count))
+            .filter(|&bytes| bytes <= range_limit)
+            .ok_or_else(|| {
+                RenderError::NoSuitableDevice(format!(
+                    "max_instances {max_instances} exceeds the device's storage-buffer range ({range_limit} bytes)"
+                ))
+            })?;
+        // Clamping the bone budget to the range also keeps `(first_bone + joint) * 3` in
+        // skinned.vert far below `u32::MAX`.
+        let bones_that_fit = usize::try_from(range_limit / BONE_STRIDE).unwrap_or(usize::MAX);
+        let max_bones = if max_bones > bones_that_fit {
+            eprintln!(
+                "[render] max_bones {max_bones} exceeds the storage-buffer range; using {bones_that_fit}"
+            );
+            bones_that_fit
+        } else {
+            max_bones
+        };
+        // At least one joint so the descriptor always names a non-empty buffer.
+        let bone_buffer_size =
+            BONE_STRIDE * u64::try_from(max_bones.max(1)).expect("bounded by the range limit");
+        let frames = sets.len() / 2;
+        let mut scene_frames = Vec::with_capacity(frames);
+        for frame in 0..frames {
+            let buffer = |name, size, usage| {
+                GpuBuffer::new(
+                    device.device.clone(),
+                    device.allocator(),
+                    name,
+                    size,
+                    usage,
+                    MemoryLocation::CpuToGpu,
+                )
+            };
+            let scene_frame = SceneFrame {
+                camera_buffer: buffer(
+                    "camera-uniform",
+                    CAMERA_UNIFORM_SIZE,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                )?,
+                instance_buffer: buffer(
+                    "unit-instances",
+                    instance_buffer_size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                )?,
+                bone_buffer: buffer(
+                    "skin-bones",
+                    bone_buffer_size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                )?,
+                camera_set: sets[frame * 2],
+                instance_set: sets[frame * 2 + 1],
+            };
+            write_descriptors(&device.device, &scene_frame);
+            scene_frames.push(scene_frame);
+        }
+        Ok(Self {
+            frames: scene_frames,
+            mesh_counts: [0; MAX_MESHES],
+            mesh_starts: [0; MAX_MESHES],
+            mesh_cursors: [0; MAX_MESHES],
+            skinned_draws: Vec::with_capacity(max_instances.min(max_bones)),
+            unit_count: 0,
+            max_instances,
+            max_bones,
+        })
     }
 }
 
@@ -840,6 +920,60 @@ fn bind_mesh(device: &DeviceContext, command_buffer: vk::CommandBuffer, mesh: &G
             vk::IndexType::UINT32,
         );
     }
+}
+
+/// Clears each of `targets.clear_rects` (clamped to the target; empty ones skipped) to its
+/// colour inside the rendering scope begun by `record`.
+fn clear_rects(
+    device: &DeviceContext,
+    command_buffer: vk::CommandBuffer,
+    targets: &SceneTargets<'_>,
+) {
+    for clear in targets.clear_rects.iter().take(MAX_CLEAR_RECTS) {
+        let Some(rect) = clamp_rect(clear.rect, targets.extent) else {
+            continue;
+        };
+        let attachment = vk::ClearAttachment {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            color_attachment: 0,
+            clear_value: vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: clear.color,
+                },
+            },
+        };
+        let rect = vk::ClearRect {
+            rect,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        // SAFETY: recording inside a rendering scope with one colour attachment; `rect` lies
+        // inside the render area (the whole target) and names layer 0 of a single-layer
+        // attachment.
+        unsafe {
+            device
+                .device
+                .cmd_clear_attachments(command_buffer, &[attachment], &[rect]);
+        }
+    }
+}
+
+/// `[x, y, width, height]` clamped to `extent`, or `None` when nothing is left.
+fn clamp_rect([x, y, width, height]: [u32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> {
+    let x = x.min(extent.width);
+    let y = y.min(extent.height);
+    let width = width.min(extent.width - x);
+    let height = height.min(extent.height - y);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(vk::Rect2D {
+        offset: vk::Offset2D {
+            x: i32::try_from(x).ok()?,
+            y: i32::try_from(y).ok()?,
+        },
+        extent: vk::Extent2D { width, height },
+    })
 }
 
 fn write_descriptors(device: &ash::Device, frame: &SceneFrame) {
@@ -936,9 +1070,24 @@ fn bucket_by_mesh(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_MESHES, SkinPush, SkinnedDraw, bucket_by_mesh, skinned_draw};
+    use super::{MAX_MESHES, SkinPush, SkinnedDraw, bucket_by_mesh, clamp_rect, skinned_draw};
     use crate::{BoneRange, MeshId, UnitInstance};
     use moba_core::math::{Mat4, Vec4};
+
+    #[test]
+    fn clear_rects_are_clamped_to_the_target() {
+        let extent = ash::vk::Extent2D {
+            width: 256,
+            height: 128,
+        };
+        let inside = clamp_rect([128, 0, 128, 128], extent).expect("inside");
+        assert_eq!((inside.offset.x, inside.offset.y), (128, 0));
+        assert_eq!((inside.extent.width, inside.extent.height), (128, 128));
+        let clipped = clamp_rect([200, 100, 128, 128], extent).expect("partly inside");
+        assert_eq!((clipped.extent.width, clipped.extent.height), (56, 28));
+        assert!(clamp_rect([256, 0, 16, 16], extent).is_none());
+        assert!(clamp_rect([0, 0, 0, 16], extent).is_none());
+    }
 
     #[test]
     fn skin_push_is_16_bytes() {

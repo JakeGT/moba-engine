@@ -44,6 +44,27 @@ pub fn perspective_rh(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> M
     )
 }
 
+/// Right-handed orthographic projection with Vulkan clip-space depth in `[0, 1]`: view-space
+/// `x` in `[left, right]` and `y` in `[bottom, top]` map to NDC `[-1, 1]`, and `-z` in
+/// `[near, far]` to depth `[0, 1]`.
+#[must_use]
+pub fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
+    let width = right - left;
+    let height = top - bottom;
+    let depth = far - near;
+    Mat4::from_cols(
+        Vec4::new(2.0 / width, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 2.0 / height, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, -1.0 / depth, 0.0),
+        Vec4::new(
+            -(right + left) / width,
+            -(top + bottom) / height,
+            -near / depth,
+            1.0,
+        ),
+    )
+}
+
 /// Converts an authoritative ground-plane position to presentation space (X, 0, Z).
 #[inline]
 #[must_use]
@@ -280,6 +301,15 @@ mod tests {
         let far = projection * Vec4::new(0.0, 0.0, -100.0, 1.0);
         assert!((near.z / near.w).abs() < 1e-4);
         assert!((far.z / far.w - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn orthographic_maps_the_box_to_vulkan_clip_space() {
+        let projection = orthographic_rh(-4.0, 6.0, -1.0, 3.0, 2.0, 12.0);
+        let corner = projection * Vec4::new(-4.0, -1.0, -2.0, 1.0);
+        assert!((corner - Vec4::new(-1.0, -1.0, 0.0, 1.0)).length() < 1e-5);
+        let far = projection * Vec4::new(6.0, 3.0, -12.0, 1.0);
+        assert!((far - Vec4::new(1.0, 1.0, 1.0, 1.0)).length() < 1e-5);
     }
 
     #[test]

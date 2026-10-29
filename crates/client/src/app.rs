@@ -38,6 +38,12 @@
 //! - `MOBA_WARMUP_TICKS=<n>`: the local preview simulates `n` ticks before the first frame;
 //!   in network mode, frame logging and `MOBA_SMOKE_FRAMES` start once Playing reaches tick
 //!   `n` (a client that never reaches it, e.g. a lobby waiting for ready, does not exit).
+//! - `MOBA_PORTRAITS=off|static|animated|<hz>` (network mode): 3D hero portraits in the hero
+//!   panel and scoreboard (R7b). Default by quality tier: `low` static (rendered when the
+//!   heroes change), `medium` 5 Hz, `high`/`ultra` 10 Hz with each skinned hero's idle clip.
+//! - `MOBA_MINIMAP_BAKE=off|once|<frames>` (network mode): the minimap shows a top-down
+//!   render of the map baked at every map bind (R7b; default `once`; `<frames>` re-bakes
+//!   periodically for GPU-time measurement). `off` keeps the flat minimap.
 //! - `MOBA_CAPTURE_MAPS=<prefix>` (network mode, evidence for #287): after every map change
 //!   (connect, content reload, map rotation), capture `<prefix>-<n>.ppm` once
 //!   `MOBA_CAPTURE_FRAME` frames with snapshots have rendered on it, and keep playing.
@@ -55,7 +61,8 @@ use moba_net::protocol::{MatchPhase, SnapshotState, WireCommand, quantize_positi
 use moba_net::{ClientEvent, Interpolator, PredictionState};
 use moba_platform::{App, Frame, FrameOutcome, Key, Window};
 use moba_render::{
-    Camera, RenderConfig, Renderer, Scene, UiDrawList, UnitInstance, ValidationMode,
+    Camera, OffscreenRender, RenderConfig, Renderer, Scene, UiDrawList, UiImage, UnitInstance,
+    ValidationMode,
 };
 use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
@@ -114,6 +121,10 @@ struct ClientApp {
     hit_rects: HitList,
     /// Retained HUD presentation state: damage ghosts, combat text, screen fades (R7a).
     hud_fx: HudFx,
+    /// 3D hero portraits for the HUD (R7b).
+    portraits: offscreen::PortraitStudio,
+    /// The baked top-down minimap (R7b).
+    minimap: offscreen::MinimapBaker,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -136,10 +147,11 @@ struct ClientApp {
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
-    /// Per-frame GPU times `[scene, composite, ui, total, span]` while logging, from the
-    /// renderer's timestamp queries (empty on devices without timestamp support). One entry
-    /// per measured GPU frame: a sample whose frame number was already logged is skipped.
-    gpu_log: Option<Vec<[f32; 5]>>,
+    /// Per-frame GPU times `[scene, composite, ui, total, span, portraits, minimap]` while
+    /// logging, from the renderer's timestamp queries (empty on devices without timestamp
+    /// support; `0` for an offscreen pass that did not run). One entry per measured GPU
+    /// frame: a sample whose frame number was already logged is skipped.
+    gpu_log: Option<Vec<[f32; 7]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
     frame_log_path: Option<PathBuf>,
@@ -226,6 +238,8 @@ impl ClientApp {
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
             hit_rects: HitList::new(),
             hud_fx: HudFx::new(team_palette),
+            portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(quality)),
+            minimap: offscreen::MinimapBaker::new(offscreen::MinimapMode::from_env()),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -407,8 +421,23 @@ impl App for ClientApp {
             .with_pipeline_cache(launch::pipeline_cache_path())
             .with_shader_dir(self.shader_dir.clone())
             .with_compressed_textures(launch::compressed_textures());
+        // A switched-off offscreen image takes a 1x1 target instead of its full size.
+        let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
+            config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
+        } else {
+            config
+        };
+        let config = if self.minimap.mode() == offscreen::MinimapMode::Off {
+            config.with_ui_image_size(UiImage::MINIMAP, [1, 1])
+        } else {
+            config
+        };
         match Renderer::new(window, config) {
             Ok(mut renderer) => {
+                // A new renderer's offscreen images start black.
+                self.portraits
+                    .configure(renderer.ui_image_extent(UiImage::PORTRAITS));
+                self.minimap.invalidate();
                 let pipelines = renderer.pipeline_stats();
                 eprintln!(
                     "[render] {} pipelines built in {:.1} ms (pipeline cache {}), renderer ready in \
@@ -548,6 +577,8 @@ impl App for ClientApp {
                 shop_visible,
                 hit_rects,
                 hud_fx,
+                portraits,
+                minimap,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -627,6 +658,9 @@ impl App for ClientApp {
                                 animation.clear();
                                 hud_fx.reset();
                                 hud_fx.restart_splash();
+                                // Hero models may change; the map bind below re-bakes the
+                                // minimap by itself.
+                                portraits.invalidate();
                                 // Content reload or map rotation: rebind the map visuals and
                                 // hero models (cached, so only new names touch the disk or
                                 // the GPU).
@@ -782,6 +816,13 @@ impl App for ClientApp {
                         if frame.input().was_key_pressed(self.bindings.scoreboard) {
                             *scoreboard_visible = !*scoreboard_visible;
                         }
+                        // R7b: decide the offscreen renders first, so the HUD only draws
+                        // what the images will hold after this frame.
+                        let portraits_due = portraits.prepare(network, models);
+                        let minimap_due =
+                            minimap.prepare(map_visuals, crate::hud::map_extent(network));
+                        portraits.hud(&mut hud_fx.images);
+                        hud_fx.images.minimap = minimap.ready(map_visuals.generation());
                         build_network_hud(
                             ui,
                             network,
@@ -814,12 +855,22 @@ impl App for ClientApp {
                             .and_then(|capture| {
                                 capture.due(map_visuals.generation(), *capture_frame)
                             });
+                        let mut offscreen: arrayvec::ArrayVec<OffscreenRender<'_>, 2> =
+                            arrayvec::ArrayVec::new();
+                        if portraits_due {
+                            offscreen.push(portraits.render());
+                        }
+                        if minimap_due {
+                            offscreen.push(minimap.render());
+                        }
+                        let mut submitted = false;
                         if let Some(renderer) = renderer.as_mut() {
                             if capture_due {
-                                capture_and_exit(
+                                submitted = capture_and_exit(
                                     renderer,
                                     &scene,
                                     ui,
+                                    &offscreen,
                                     capture_path.as_deref(),
                                     &mut failure,
                                 );
@@ -828,10 +879,11 @@ impl App for ClientApp {
                                 // Mid-session: a failed capture (minimised window, resize,
                                 // validation message) is reported, not fatal.
                                 let mut capture_failure = None;
-                                capture_and_exit(
+                                submitted = capture_and_exit(
                                     renderer,
                                     &scene,
                                     ui,
+                                    &offscreen,
                                     Some(&path),
                                     &mut capture_failure,
                                 );
@@ -847,11 +899,19 @@ impl App for ClientApp {
                                 }
                             } else {
                                 render_started = Some(Instant::now());
-                                if let Err(error) = renderer.render_with_ui(&scene, ui) {
-                                    failure = Some(format!("render failed: {error}"));
+                                match renderer.render_with_offscreen(&scene, ui, &offscreen) {
+                                    Ok(done) => submitted = done,
+                                    Err(error) => {
+                                        // Presenting can fail after the submit.
+                                        submitted = renderer.last_frame_submitted();
+                                        failure = Some(format!("render failed: {error}"));
+                                    }
                                 }
                             }
                         }
+                        drop(offscreen);
+                        portraits.finish(submitted);
+                        minimap.finish(submitted);
                     }
                 }
             } else if let Some(simulation) = simulation {
@@ -942,6 +1002,7 @@ impl App for ClientApp {
                                 renderer,
                                 &scene,
                                 ui,
+                                &[],
                                 capture_path.as_deref(),
                                 &mut failure,
                             );
@@ -982,6 +1043,8 @@ impl App for ClientApp {
                     pass("ui"),
                     timings.total_ms,
                     timings.span_ms,
+                    pass("portraits"),
+                    pass("minimap"),
                 ]);
             }
         }
@@ -1006,6 +1069,7 @@ mod launch;
 mod map_visuals;
 mod materials;
 mod models;
+mod offscreen;
 mod scene_build;
 mod skinning;
 

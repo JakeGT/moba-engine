@@ -5,6 +5,7 @@ pub(crate) mod fx;
 mod geometry;
 mod healthbars;
 mod hit;
+pub(crate) mod images;
 mod minimap;
 mod model;
 mod scoreboard;

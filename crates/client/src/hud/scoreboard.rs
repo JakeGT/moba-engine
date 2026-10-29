@@ -8,7 +8,7 @@ use crate::app::NetworkView;
 use crate::hud::{HitList, HudAction, register};
 use crate::hud_fmt;
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One overlay, laid out in order.
 pub(crate) fn draw_scoreboard(
     ui: &mut crate::hud::UiDrawList,
     network: &NetworkView,
@@ -19,6 +19,7 @@ pub(crate) fn draw_scoreboard(
     muted: Vec4,
     border: Vec4,
     hits: &mut HitList,
+    images: crate::hud::images::HudImages,
 ) {
     let _ = width_f;
     let panel_width = 620.0;
@@ -65,8 +66,36 @@ pub(crate) fn draw_scoreboard(
         }
     }
     rows[..count].sort_unstable_by_key(|(team, slot, _, _, _, _)| (*team, *slot));
+    // R7b: a small 3D portrait leads each row when portraits are on.
+    let text_x = if images.portrait_cells > 0 {
+        sx + 58.0
+    } else {
+        sx + 32.0
+    };
     for (index, (team, slot, pick, hp, max_hp, level)) in rows[..count].iter().enumerate() {
         let y = sy + 64.0 + index as f32 * 24.0;
+        if images.portrait_cells > 0
+            && let Some(team) = *team
+        {
+            let drawn = crate::hud::images::draw_portrait(
+                ui,
+                images,
+                team,
+                *slot,
+                [sx + 30.0, y - 4.0, 21.0],
+                *hp == 0,
+                border,
+            );
+            if !drawn {
+                ui.rect(
+                    sx + 30.0,
+                    y - 4.0,
+                    21.0,
+                    21.0,
+                    crate::hud::images::portrait_placeholder(team),
+                );
+            }
+        }
         let color = if *team == Some(0) {
             theme::SCOREBOARD_BLUE
         } else {
@@ -81,7 +110,7 @@ pub(crate) fn draw_scoreboard(
                 if name.is_empty() { "UNKNOWN" } else { name }
             });
         ui.text(
-            sx + 32.0,
+            text_x,
             y,
             2.0,
             color,

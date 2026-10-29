@@ -68,7 +68,7 @@ logic). They are documented as such here rather than hidden with `#[doc(hidden)]
 
 **`moba-core`** — `Fix`, `FixVec2`, `Rng`, `StableHasher`/`fnv1a64`, `Tick`/`FixedStep`,
 `Arena`/`ArenaKey`, `BitSet`/`BitSet64`, `math` (`Aabb`, interpolation helpers, camera
-matrices).
+matrices; R7b added `orthographic_rh`, additive).
 - No change in this review. Every struct either has private fields (`Arena`, `Rng`,
   `FixedStep`, `BitSet`) or is a closed value type (`Fix`, `FixVec2 { x, y }`, `Aabb { min, max }`,
   `Tick`).
@@ -157,7 +157,17 @@ re-exported `TextureData`/`TextureFormat`/`MaterialShader`/`TextureSlot`), the p
 `Renderer::reload_shaders`), `RenderConfig::with_compressed_textures`, `GpuTimings::frame`
 and `RenderError::{TooManyTextures, TooManyMaterials, InvalidMaterial}`. `QualityTier::ALL` is
 now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change. R7a added `TextStyle` (MSDF text styling) and
-`pack_rgba8`.
+`pack_rgba8`. R7b added render-to-texture for the HUD: `UiImage` (offscreen image slots,
+`UI_IMAGE_SLOTS`), `OffscreenRender` and `ClearRect` (a frame's renders into them),
+`Renderer::{render_with_offscreen, capture_frame_with_offscreen, ui_image_extent,
+last_frame_submitted}`,
+`RenderConfig::ui_image_sizes`/`with_ui_image_size` (`DEFAULT_UI_IMAGE_SIZES`,
+`MAX_UI_IMAGE_SIZE`), `OFFSCREEN_MAX_INSTANCES`/`OFFSCREEN_MAX_BONES`, `Camera::orthographic`,
+`UiDrawList::image` and `UiVertex::MODE_IMAGE`. `render_with_offscreen` returns whether the
+frame was submitted (`RenderResult<bool>`), so a caller can re-send renders a skipped frame
+dropped; an error can still follow a submit (presentation), which `last_frame_submitted`
+reports. The alpha of `Scene::terrain_tint` now scales the terrain grid lines (every built-in
+tint already uses `1.0`, the old look).
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`.
@@ -169,12 +179,14 @@ now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change.
   inputs that already had
   constructors:
   `Scene` (`new`, `empty`, `with_*`), `UnitInstance` (`new`, `at`, `with_mesh`, `with_bones`),
-  `Camera` (`perspective`, `orbit`), and `TextStyle` (`new`/`Default` + `with_outline`,
-  `with_shadow`).
-- Exhaustive by design: `BoneRange`, `MeshId`, `MaterialId`, `TextureId` (opaque ids, checked
-  where used), `UiVertex` (GPU vertex layout; R7a renamed `atlas` to `mode` and added
-  `outline`/`params`, 48 bytes), `VisionCircles` (uniform layout),
-  `ValidationMode` (a closed policy).
+  `Camera` (`perspective`, `orbit`, R7b `orthographic`), `TextStyle` (`new`/`Default` +
+  `with_outline`, `with_shadow`), and R7b's `OffscreenRender` (`new` + `with_terrain`,
+  `with_clear_color`, `with_backdrops`).
+- Exhaustive by design: `BoneRange`, `MeshId`, `MaterialId`, `TextureId`, `UiImage` (opaque
+  ids, checked where used; `UiImage` slots are constants), `UiVertex` (GPU vertex layout; R7a
+  renamed `atlas` to `mode` and added `outline`/`params`, 48 bytes; R7b added `image`, the
+  offscreen image slot of `MODE_IMAGE`, 52 bytes), `ClearRect` (a closed rectangle + colour),
+  `VisionCircles` (uniform layout), `ValidationMode` (a closed policy).
 - Public but unstable: `bones_truncated`, `skinned_instances_dropped`,
   `ui_vertices_truncated` (diagnostic counters) and `build_atlas`/`ATLAS_*`.
 

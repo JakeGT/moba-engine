@@ -1,13 +1,20 @@
 //! The engine's frame, declared as a render graph, and barrier recording.
 //!
 //! ```text
+//! portraits  (R7b; frames that update them) hero models → portrait atlas (persistent)
+//! minimap    (R7b; frames that bake it) top-down map → minimap image (persistent)
 //! scene      terrain + units + skinned → hdr (colour, cleared) + depth (sampled-capable)
 //! composite  hdr (sampled) → exposure + AgX tonemap → swapchain
-//! ui         HUD batch blended over the swapchain (not tonemapped)
+//! ui         HUD batch blended over the swapchain (not tonemapped); samples both
+//!            offscreen images
 //! capture    swapchain → readback buffer (only in the capture variant)
 //! ```
 //!
-//! Both variants are compiled once at renderer creation. Per frame the renderer fills a
+//! The offscreen images are imports owned by the renderer, not transients: their contents
+//! survive the frame, they start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, and their
+//! passes appear only in the variants for frames that re-render them. Every combination
+//! (capture × which offscreen passes run) is compiled once at renderer creation, and all of
+//! them share the same transient slots. Per frame the renderer picks a variant, fills a
 //! fixed-size [`Bindings`] table with this frame's handles and records the precompiled
 //! barriers, so nothing here allocates on the frame path.
 
@@ -20,6 +27,15 @@ use crate::graph::{
     Access, Barrier, CompiledGraph, GraphBuilder, GraphError, ImageDesc, ImageSize, ImportState,
     MAX_BARRIERS, MAX_RESOURCES, ResourceId,
 };
+use crate::ui::UI_IMAGE_SLOTS;
+
+/// Pass name of each offscreen image's pass, by [`UiImage`](crate::UiImage) slot (also its
+/// GPU-timing name).
+pub(crate) const OFFSCREEN_PASS_NAMES: [&str; UI_IMAGE_SLOTS] = ["portraits", "minimap"];
+const OFFSCREEN_DEPTH_NAMES: [&str; UI_IMAGE_SLOTS] = ["portraits-depth", "minimap-depth"];
+const OFFSCREEN_BONE_NAMES: [&str; UI_IMAGE_SLOTS] = ["portraits-bones", "minimap-bones"];
+/// Number of offscreen-pass combinations (one bit per slot).
+pub(crate) const OFFSCREEN_VARIANTS: usize = 1 << UI_IMAGE_SLOTS;
 
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +44,16 @@ pub(crate) enum PassKind {
     Composite,
     Ui,
     Capture,
+    /// Renders the offscreen image of this [`UiImage`](crate::UiImage) slot.
+    Offscreen(u8),
+}
+
+/// Resource ids of one offscreen image: colour (sampled by the UI), depth and its bones.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OffscreenResources {
+    pub(crate) color: ResourceId,
+    pub(crate) depth: ResourceId,
+    pub(crate) bones: ResourceId,
 }
 
 /// Resource ids of the engine frame graph.
@@ -38,6 +64,7 @@ pub(crate) struct FrameResources {
     pub(crate) depth: ResourceId,
     pub(crate) bones: ResourceId,
     pub(crate) capture: Option<ResourceId>,
+    pub(crate) offscreen: [OffscreenResources; UI_IMAGE_SLOTS],
 }
 
 /// A compiled frame variant and its resource ids.
@@ -49,15 +76,18 @@ pub(crate) struct FramePlan {
     pub(crate) acquire_split: usize,
 }
 
-/// Builds and compiles the frame graph.
+/// Builds and compiles the frame graph. Bit `s` of `offscreen` adds the pass that renders
+/// offscreen image `s` this frame.
 ///
 /// # Errors
 /// Only if the declaration below is inconsistent (covered by unit tests).
+#[allow(clippy::too_many_lines)] // One declaration of the whole frame.
 pub(crate) fn build(
     hdr_format: vk::Format,
     depth_format: vk::Format,
     depth_aspect: vk::ImageAspectFlags,
     capture: bool,
+    offscreen: usize,
 ) -> Result<FramePlan, GraphError> {
     let mut graph = GraphBuilder::new();
     // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT; the composite writes
@@ -94,7 +124,51 @@ pub(crate) fn build(
         // earlier submission still touches it when the next capture frame starts.
         graph.import_buffer("capture", ImportState::idle(), Some(Access::HostRead))
     });
+    // R7b offscreen images. Colour: kept across frames, sampled by the previous frame's UI,
+    // and back in SHADER_READ_ONLY_OPTIMAL at the end of every frame (the UI read below
+    // transitions it after a write). Depth: discarded per use, but last written by an
+    // earlier frame's pass. Bones: written by the host, like the scene's.
+    let offscreen_resources: [OffscreenResources; UI_IMAGE_SLOTS] =
+        core::array::from_fn(|slot| OffscreenResources {
+            color: graph.import_image(
+                OFFSCREEN_PASS_NAMES[slot],
+                ImportState::persistent(
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                ),
+                Some(Access::SampledFragment),
+            ),
+            depth: graph.import_image(
+                OFFSCREEN_DEPTH_NAMES[slot],
+                ImportState::rewritten(
+                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                ),
+                None,
+            ),
+            bones: graph.import_buffer(
+                OFFSCREEN_BONE_NAMES[slot],
+                ImportState::host_written(),
+                None,
+            ),
+        });
 
+    // Offscreen passes first: they do not touch the swapchain, so they go in the batch that
+    // is submitted ahead of the acquire wait, with the scene.
+    for (slot, resources) in offscreen_resources.iter().enumerate() {
+        if offscreen & (1 << slot) == 0 {
+            continue;
+        }
+        let _ = graph
+            .pass(
+                OFFSCREEN_PASS_NAMES[slot],
+                PassKind::Offscreen(u8::try_from(slot).unwrap_or(u8::MAX)),
+            )
+            .access(resources.color, Access::ColorWrite)
+            .access(resources.depth, Access::DepthWrite)
+            .access(resources.bones, Access::VertexStorageRead);
+    }
     let _ = graph
         .pass("scene", PassKind::Scene)
         .access(hdr, Access::ColorWrite)
@@ -104,9 +178,15 @@ pub(crate) fn build(
         .pass("composite", PassKind::Composite)
         .access(hdr, Access::SampledFragment)
         .access(swapchain, Access::ColorWrite);
-    let _ = graph
+    // The UI samples every offscreen image in every variant (its descriptors always name
+    // them), so each read is ordered after this frame's write, if any.
+    let mut ui = graph
         .pass("ui", PassKind::Ui)
         .access(swapchain, Access::ColorReadWrite);
+    for resources in &offscreen_resources {
+        ui = ui.access(resources.color, Access::SampledFragment);
+    }
+    let _ = ui;
     if let Some(buffer) = capture_buffer {
         let _ = graph
             .pass("capture", PassKind::Capture)
@@ -124,6 +204,7 @@ pub(crate) fn build(
             depth,
             bones,
             capture: capture_buffer,
+            offscreen: offscreen_resources,
         },
     })
 }
@@ -230,18 +311,23 @@ pub(crate) fn record_barriers(
 
 #[cfg(test)]
 mod tests {
-    use super::{PassKind, build};
+    use super::{OFFSCREEN_VARIANTS, PassKind, build};
     use ash::vk;
     use vk::ImageLayout as L;
 
-    fn plan(capture: bool) -> super::FramePlan {
+    fn variant(capture: bool, offscreen: usize) -> super::FramePlan {
         build(
             vk::Format::R16G16B16A16_SFLOAT,
             vk::Format::D32_SFLOAT,
             vk::ImageAspectFlags::DEPTH,
             capture,
+            offscreen,
         )
         .expect("the engine frame graph compiles")
+    }
+
+    fn plan(capture: bool) -> super::FramePlan {
+        variant(capture, 0)
     }
 
     #[test]
@@ -297,5 +383,63 @@ mod tests {
                 && barrier.src_access == vk::AccessFlags2::TRANSFER_WRITE
                 && barrier.dst_access == vk::AccessFlags2::HOST_READ
         }));
+    }
+
+    #[test]
+    fn offscreen_passes_render_first_and_the_ui_samples_their_images() {
+        let normal = plan(false);
+        for capture in [false, true] {
+            for offscreen in 0..OFFSCREEN_VARIANTS {
+                let frame = variant(capture, offscreen);
+                // Every combination runs on the same transients as the plain frame.
+                assert!(frame.graph.shares_transients_with(&normal.graph));
+                assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                let passes = frame.graph.passes();
+                let count = offscreen.count_ones() as usize;
+                assert!(
+                    passes[..count]
+                        .iter()
+                        .all(|pass| matches!(pass.tag, PassKind::Offscreen(_)))
+                );
+                assert_eq!(passes[count].tag, PassKind::Scene);
+                // Offscreen passes join the scene's batch, ahead of the acquire wait.
+                assert_eq!(frame.acquire_split, count + 1);
+                let ui = passes
+                    .iter()
+                    .find(|pass| pass.tag == PassKind::Ui)
+                    .expect("ui pass");
+                for (slot, resources) in frame.resources.offscreen.iter().enumerate() {
+                    assert!(ui.uses(resources.color));
+                    let read = ui
+                        .barriers
+                        .iter()
+                        .find(|barrier| barrier.resource == resources.color)
+                        .expect("ui read barrier");
+                    assert_eq!(read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+                    assert_eq!(read.dst_access, vk::AccessFlags2::SHADER_SAMPLED_READ);
+                    if offscreen & (1 << slot) != 0 {
+                        assert_eq!(read.old_layout, L::COLOR_ATTACHMENT_OPTIMAL);
+                        assert_eq!(read.src_access, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
+                        let tag = PassKind::Offscreen(u8::try_from(slot).expect("slot"));
+                        let pass = passes
+                            .iter()
+                            .find(|pass| pass.tag == tag)
+                            .expect("offscreen pass");
+                        assert_eq!(pass.barriers.len(), 3, "colour, depth and bones");
+                        assert!(pass.barriers.iter().any(|barrier| {
+                            barrier.resource == resources.color
+                                && barrier.old_layout == L::SHADER_READ_ONLY_OPTIMAL
+                                && barrier.new_layout == L::COLOR_ATTACHMENT_OPTIMAL
+                        }));
+                    } else {
+                        assert_eq!(read.old_layout, L::SHADER_READ_ONLY_OPTIMAL);
+                        assert_eq!(read.src_access, vk::AccessFlags2::NONE);
+                    }
+                }
+                // Each image is back in SHADER_READ_ONLY_OPTIMAL after the UI: only the
+                // swapchain (and the capture buffer) need final barriers.
+                assert_eq!(frame.graph.final_barriers().len(), 1 + usize::from(capture));
+            }
+        }
     }
 }

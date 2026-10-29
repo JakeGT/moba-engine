@@ -293,6 +293,61 @@ this machine reproduced the old fingerprints with a difference of 0, and two run
 byte-identical PPMs. The images above were captured just before the rebase. R4a's animation
 moves a few hero pixels in them, but the HUD is the same.
 
+### Render-to-texture portraits and baked minimap (R7b): before and after
+![HUD with R7b switched off (top) and on (bottom)](images/r7b-hud-before-after.png)
+
+The networked golden frame (`MOBA_SERVER=local`, GPU-skinned heroes, pinned at tick 120),
+cropped from 1280×720 lavapipe captures of this branch. Top: `MOBA_PORTRAITS=off
+MOBA_MINIMAP_BAKE=off`, which reproduces the previous golden fingerprint exactly (difference
+0). Bottom: the defaults.
+- **Hero portrait:** a 3D render of the own hero's model (the skinned `sentinel` sample),
+  lit by a studio key light over a dark team-coloured backdrop, in a new portrait column of
+  the hero panel. It is one cell of a 2048×128 offscreen strip that the renderer's
+  `portraits` pass draws with the scene pipelines, and the UI samples and tonemaps it.
+- **Baked minimap:** the panel shows a top-down orthographic render of the map (terrain with
+  a faint grid, walls, props), baked once into a 512×512 offscreen image when the map is
+  bound. Outside allied vision it is darkened by a 24×24 grid built from the units the client
+  was sent; lanes, unit dots and the own-hero frame are drawn on top as before.
+
+![Full R7b HUD frame](images/r7b-hud-after.png)
+
+The full frame, which is the new networked golden.
+
+![Portrait cell at tick 120 and 135 (High) and on Low](images/r7b-portraits.png)
+
+The portrait cell magnified 2×: at tick 120 and tick 135 on `High` (10 Hz, the idle clip of
+the model's animation set plays through a per-cell animator: the spear and shoulders move),
+and on `Low`, where the portrait is rendered once at rest (and the offscreen images use the
+`B10G11R11_UFLOAT_PACK32` HDR format).
+
+![Ember Crossing with the scoreboard: portraits per row and baked walls and props](images/r7b-ember-scoreboard.png)
+
+`MOBA_CONTENT=content/ember-map.toml MOBA_SCOREBOARD=1`: every scoreboard row leads with its
+hero's portrait cell, and the baked minimap shows the map's rampart walls and crystal props
+(the flat minimap drew only wall lines). Enemy rows and their portraits appear only while the
+enemy is visible.
+
+All R7b captures: lavapipe, `MOBA_VULKAN_VALIDATION=required` (validation plus
+synchronisation validation), exit 0, zero validation messages, also at 2560×1440 with
+`MOBA_UI_SCALE=2.0` and the scoreboard, and on `MOBA_QUALITY=low`. On the RTX 5070 Ti,
+900 frames with the scoreboard open and a minimap re-bake every 20 frames
+(`MOBA_MINIMAP_BAKE=20`) also gave zero messages.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_SMOKE_FRAMES=100000 \
+MOBA_CAPTURE_TICK=120 MOBA_CAPTURE=/tmp/net.ppm MOBA_VULKAN_VALIDATION=required \
+cargo run --release -p moba-client
+# before: + MOBA_PORTRAITS=off MOBA_MINIMAP_BAKE=off; idle: MOBA_CAPTURE_TICK=135;
+# + MOBA_QUALITY=low; + MOBA_CONTENT=content/ember-map.toml MOBA_SCOREBOARD=1
+```
+
+**Golden rebaseline:** the networked fingerprint was **deliberately rebaselined** for R7b
+(the hero panel's portrait column and the baked minimap). It was made exactly as
+`render-golden.yml` makes it, on lavapipe with validation required; two runs gave
+byte-identical PPMs, which read mean 3.270 / max 99 against the old fingerprint. The
+default-scene golden is unchanged: the local preview's HUD has no portrait or minimap, and
+its capture matches the old fingerprint with a difference of 0.
+
 ### Per-map visuals
 ![Ember Crossing with its visuals descriptor](images/m8-map-visuals-ember.png)
 

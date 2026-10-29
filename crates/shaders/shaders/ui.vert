@@ -4,7 +4,11 @@
 layout(push_constant) uniform UiPush {
     vec2 viewport;
     float font_range_px;
-    float pad;
+    float exposure;
+    float saturation;
+    uint srgb_target;
+    uint reserved0;
+    uint reserved1;
 } push;
 
 layout(location = 0) in vec2 in_position;
@@ -13,12 +17,14 @@ layout(location = 2) in uint in_mode;
 layout(location = 3) in vec4 in_color;
 layout(location = 4) in uint in_outline;
 layout(location = 5) in vec2 in_params;
+layout(location = 6) in uint in_image;
 
 layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
 layout(location = 2) flat out uint out_mode;
 layout(location = 3) flat out vec4 out_outline;
 layout(location = 4) flat out vec2 out_params;
+layout(location = 5) flat out uint out_image;
 
 void main() {
     vec2 ndc = vec2(
@@ -31,4 +37,5 @@ void main() {
     out_mode = in_mode;
     out_outline = unpackUnorm4x8(in_outline);
     out_params = in_params;
+    out_image = in_image;
 }

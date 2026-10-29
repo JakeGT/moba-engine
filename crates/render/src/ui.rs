@@ -12,10 +12,48 @@ use moba_core::math::Vec4;
 use crate::font;
 use crate::font_data::FONT_5X7;
 
+/// Number of offscreen images the UI can sample besides its two atlases (R7b): the
+/// [`UiImage`] slots.
+pub const UI_IMAGE_SLOTS: usize = 2;
+// `shaders/ui.frag` declares `#define UI_IMAGE_SLOTS 2` and samples each slot in its own
+// constant-index branch (`ui_images[0]`, `ui_images[1]`): changing the count means changing
+// both, and `UiImage::ALL`.
+const _: () = assert!(
+    UI_IMAGE_SLOTS == 2,
+    "update ui.frag's UI_IMAGE_SLOTS and branches"
+);
+
+/// An offscreen image the renderer renders and the UI samples with
+/// [`UiDrawList::image`] (R7b).
+///
+/// Each slot is a fixed render target, created with the renderer (sized by
+/// [`RenderConfig::with_ui_image_size`](crate::RenderConfig::with_ui_image_size)) and
+/// filled by an [`OffscreenRender`](crate::OffscreenRender) in any frame. Its contents last
+/// until the next render into it. The slots are conventions, not special cases: the engine
+/// client puts hero portraits in [`UiImage::PORTRAITS`] and the baked map in
+/// [`UiImage::MINIMAP`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UiImage(u8);
+
+impl UiImage {
+    /// Slot 0: the hero-portrait atlas (default 2048x128, sixteen 128-pixel cells).
+    pub const PORTRAITS: Self = Self(0);
+    /// Slot 1: the baked top-down minimap (default 512x512).
+    pub const MINIMAP: Self = Self(1);
+    /// Every slot, in order.
+    pub const ALL: [Self; UI_IMAGE_SLOTS] = [Self::PORTRAITS, Self::MINIMAP];
+
+    /// The slot index (the value stored in [`UiVertex::image`]).
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// One UI vertex in logical pixels (top-left origin; the renderer applies the UI scale).
 ///
-/// A GPU vertex layout (48 bytes), exhaustive by design. `mode` selects how the fragment
-/// shader shades the triangle (`MODE_*`); `outline` and `params` are mode-specific.
+/// A GPU vertex layout (52 bytes), exhaustive by design. `mode` selects how the fragment
+/// shader shades the triangle (`MODE_*`); `outline`, `params` and `image` are mode-specific.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct UiVertex {
@@ -33,6 +71,8 @@ pub struct UiVertex {
     /// Mode parameters: text outline width / shadow dilation and softness, or the sweep
     /// fraction and ring radius.
     pub params: [f32; 2],
+    /// [`UiImage`] slot sampled by [`UiVertex::MODE_IMAGE`]; `0` for every other mode.
+    pub image: u32,
 }
 
 impl UiVertex {
@@ -46,6 +86,10 @@ impl UiVertex {
     pub const MODE_TEXT_SOFT: u32 = 3;
     /// Radial sweep over the quad (`params` = covered fraction, ring inner radius).
     pub const MODE_SWEEP: u32 = 4;
+    /// An offscreen HDR image (`image` = its [`UiImage`] slot, `uv` = image coordinates),
+    /// box-filtered over the pixel footprint, exposed and `AgX`-tonemapped like the scene,
+    /// then multiplied by `color` (R7b).
+    pub const MODE_IMAGE: u32 = 5;
 }
 
 /// Packs a linear RGBA colour into the vertex `outline` field (red in the low byte).
@@ -318,6 +362,20 @@ impl UiDrawList {
     #[allow(clippy::too_many_arguments)] // One quad is corners, UVs, mode and parameters.
     fn quad(
         &mut self,
+        corners: [f32; 4],
+        uv0: [f32; 2],
+        uv1: [f32; 2],
+        mode: u32,
+        colors: [Vec4; 4],
+        outline: u32,
+        params: [f32; 2],
+    ) {
+        self.quad_image(corners, uv0, uv1, mode, colors, outline, params, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)] // `quad` plus the image slot.
+    fn quad_image(
+        &mut self,
         [x0, y0, x1, y1]: [f32; 4],
         [u0, v0]: [f32; 2],
         [u1, v1]: [f32; 2],
@@ -325,6 +383,7 @@ impl UiDrawList {
         colors: [Vec4; 4],
         outline: u32,
         params: [f32; 2],
+        image: u32,
     ) {
         let vertex = |x: f32, y: f32, u: f32, v: f32, color: Vec4| UiVertex {
             position: [x, y],
@@ -333,6 +392,7 @@ impl UiDrawList {
             color: color.to_array(),
             outline,
             params,
+            image,
         };
         let top_left = vertex(x0, y0, u0, v0, colors[0]);
         let top_right = vertex(x1, y0, u1, v0, colors[1]);
@@ -405,6 +465,7 @@ impl UiDrawList {
             color: color.to_array(),
             outline: 0,
             params: [0.0; 2],
+            image: 0,
         };
         let a = vertex(x1 + nx, y1 + ny);
         let b = vertex(x2 + nx, y2 + ny);
@@ -648,6 +709,35 @@ impl UiDrawList {
         self.rect(x, y, width, height, fill);
         self.outline(x, y, width, height, 1.0, border);
     }
+
+    /// Adds a quad showing the `[u0, v0, u1, v1]` region of an offscreen [`UiImage`]
+    /// (`uv` in `0..1`, top-left origin), tonemapped like the scene and multiplied by
+    /// `tint` (R7b). Before the image is first rendered it reads as black.
+    #[allow(clippy::too_many_arguments)] // Geometry, image, region and tint.
+    pub fn image(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        image: UiImage,
+        uv: [f32; 4],
+        tint: Vec4,
+    ) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        self.quad_image(
+            [x, y, x + width, y + height],
+            [uv[0], uv[1]],
+            [uv[2], uv[3]],
+            UiVertex::MODE_IMAGE,
+            [tint; 4],
+            0,
+            [0.0; 2],
+            u32::from(image.0),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -664,11 +754,43 @@ mod tests {
 
     #[test]
     fn vertex_layout_matches_the_pipeline() {
-        assert_eq!(core::mem::size_of::<UiVertex>(), 48);
+        assert_eq!(core::mem::size_of::<UiVertex>(), 52);
         assert_eq!(core::mem::offset_of!(UiVertex, mode), 16);
         assert_eq!(core::mem::offset_of!(UiVertex, color), 20);
         assert_eq!(core::mem::offset_of!(UiVertex, outline), 36);
         assert_eq!(core::mem::offset_of!(UiVertex, params), 40);
+        assert_eq!(core::mem::offset_of!(UiVertex, image), 48);
+    }
+
+    #[test]
+    fn images_name_their_slot_and_region() {
+        let mut ui = UiDrawList::new();
+        ui.image(
+            4.0,
+            8.0,
+            64.0,
+            32.0,
+            UiImage::MINIMAP,
+            [0.25, 0.0, 0.5, 1.0],
+            Vec4::ONE,
+        );
+        ui.image(0.0, 0.0, 0.0, 8.0, UiImage::PORTRAITS, [0.0; 4], Vec4::ONE);
+        assert_eq!(ui.len(), 6, "an empty quad is skipped");
+        let vertices = ui.vertices();
+        assert!(vertices.iter().all(|vertex| {
+            vertex.mode == UiVertex::MODE_IMAGE && vertex.image as usize == UiImage::MINIMAP.index()
+        }));
+        assert_eq!(vertices[0].position, [4.0, 8.0]);
+        assert_eq!(vertices[0].uv, [0.25, 0.0]);
+        assert_eq!(vertices[2].position, [68.0, 40.0]);
+        assert_eq!(vertices[2].uv, [0.5, 1.0]);
+        // Every other primitive leaves the slot at zero.
+        ui.rect(0.0, 0.0, 2.0, 2.0, Vec4::ONE);
+        assert_eq!(ui.vertices()[6].image, 0);
+        assert_eq!(
+            UiImage::ALL.map(UiImage::index),
+            core::array::from_fn::<usize, UI_IMAGE_SLOTS, _>(|slot| slot)
+        );
     }
 
     #[test]

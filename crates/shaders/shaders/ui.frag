@@ -1,19 +1,36 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
-// HUD fragment shader (R7a). Modes match `UiVertex::MODE_*` in crates/render/src/ui.rs.
+// HUD fragment shader (R7a; offscreen images R7b). Modes match `UiVertex::MODE_*` in crates/render/src/ui.rs.
 //
 // The font atlas is an MTSDF: RGB is the multi-channel field (sharp corners), alpha the true
 // distance (soft shadows, wide outlines). Edges are anti-aliased from screen-space
 // derivatives, so text stays crisp at any UI scale. Every derivative is taken in uniform
 // control flow, before the mode branch.
+//
+// MODE_IMAGE samples one of the renderer's offscreen HDR images (binding 2, indexed by a
+// constant in each branch, so no descriptor-indexing feature is needed) and tonemaps it like
+// the scene, so a portrait or the minimap matches the world it shows.
+
+#include "tonemap.glsl"
+
+// Must equal `moba_render::UI_IMAGE_SLOTS` (crates/render/src/ui.rs asserts its value).
+#define UI_IMAGE_SLOTS 2
 
 layout(set = 0, binding = 0) uniform sampler2D ui_atlas;
 layout(set = 0, binding = 1) uniform sampler2D font_atlas;
+layout(set = 0, binding = 2) uniform sampler2D ui_images[UI_IMAGE_SLOTS];
 
 layout(push_constant) uniform UiPush {
     vec2 viewport;
     float font_range_px;
-    float pad;
+    // The composite's exposure and AgX look saturation, for MODE_IMAGE.
+    float exposure;
+    float saturation;
+    // 1 when the target is *_SRGB (outputs are display-linear).
+    uint srgb_target;
+    uint reserved0;
+    uint reserved1;
 } push;
 
 layout(location = 0) in vec2 in_uv;
@@ -21,6 +38,7 @@ layout(location = 1) in vec4 in_color;
 layout(location = 2) flat in uint in_mode;
 layout(location = 3) flat in vec4 in_outline;
 layout(location = 4) flat in vec2 in_params;
+layout(location = 5) flat in uint in_image;
 
 layout(location = 0) out vec4 out_color;
 
@@ -29,6 +47,7 @@ const uint MODE_SOLID = 1u;
 const uint MODE_TEXT = 2u;
 const uint MODE_TEXT_SOFT = 3u;
 const uint MODE_SWEEP = 4u;
+const uint MODE_IMAGE = 5u;
 
 const float TAU = 6.28318530718;
 
@@ -51,6 +70,24 @@ void main() {
 
     if (in_mode == MODE_SOLID) {
         out_color = in_color;
+        return;
+    }
+    if (in_mode == MODE_IMAGE) {
+        // A 2x2 box over the pixel footprint: the images have no mips and are usually drawn
+        // smaller than their size (a 512-pixel minimap in a 168-pixel panel).
+        vec2 offset = uv_width * 0.25;
+        vec3 hdr = vec3(0.0);
+        for (int tap = 0; tap < 4; tap++) {
+            vec2 uv = in_uv + offset * vec2((tap & 1) != 0 ? 1.0 : -1.0, (tap & 2) != 0 ? 1.0 : -1.0);
+            if (in_image == 0u) {
+                hdr += textureLod(ui_images[0], uv, 0.0).rgb;
+            } else {
+                hdr += textureLod(ui_images[1], uv, 0.0).rgb;
+            }
+        }
+        vec3 display = agx_tonemap(hdr * 0.25 * push.exposure, push.saturation);
+        vec3 color = push.srgb_target != 0u ? pow(display, vec3(2.2)) : display;
+        out_color = vec4(color * in_color.rgb, in_color.a);
         return;
     }
     if (in_mode == MODE_ATLAS) {

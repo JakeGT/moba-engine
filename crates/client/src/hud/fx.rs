@@ -331,6 +331,9 @@ pub(crate) struct HudFx {
     generation: u32,
     /// Seconds since connecting or the last map change: the splash timer and the spinner.
     pub(crate) clock: f32,
+    /// What the offscreen images hold this frame (R7b), set by the app before the HUD is
+    /// built.
+    pub(crate) images: super::images::HudImages,
 }
 
 impl HudFx {
@@ -343,6 +346,11 @@ impl HudFx {
             gold: None,
             generation: 0,
             clock: 0.0,
+            images: super::images::HudImages {
+                portraits: 0,
+                portrait_cells: 0,
+                minimap: false,
+            },
         }
     }
 

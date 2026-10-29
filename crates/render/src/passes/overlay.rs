@@ -1,4 +1,9 @@
 //! UI pass: the HUD batch blended over the tonemapped swapchain image (never tonemapped).
+//!
+//! Set 0 binds the pixel-art atlas, the MSDF font and (R7b) the renderer's offscreen images,
+//! one combined image sampler per [`UiImage`](crate::UiImage) slot. The offscreen images are
+//! fixed-size and never recreated, so the descriptors are written once at creation; the
+//! render graph keeps every frame's reads ordered after that frame's writes.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -14,7 +19,7 @@ use crate::resources::{
     Sampler, ShaderModule,
 };
 use crate::texture;
-use crate::ui::{UiDrawList, UiVertex};
+use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiVertex};
 
 const UI_ATLAS: &[u8] = include_bytes!("../../assets/ui-atlas.rgba");
 /// The baked MTSDF HUD font (`bake-ui-font`, R7a).
@@ -26,7 +31,12 @@ const UI_FONT: &[u8] = include_bytes!("../../assets/ui-font.rgba");
 struct UiPush {
     viewport: [f32; 2],
     font_range_px: f32,
-    pad: f32,
+    /// The composite's exposure and `AgX` look saturation, for `MODE_IMAGE` (R7b).
+    exposure: f32,
+    saturation: f32,
+    /// 1 when the target is `*_SRGB`.
+    srgb_target: u32,
+    reserved: [u32; 2],
 }
 
 const UI_PUSH_SIZE: u32 = core::mem::size_of::<UiPush>() as u32;
@@ -52,31 +62,46 @@ pub(crate) struct UiPass {
     _sampler: Sampler,
     _font_atlas: GpuImage,
     _font_sampler: Sampler,
+    _image_sampler: Sampler,
     pipeline_layout: PipelineLayout,
     pipeline: GraphicsPipeline,
     max_vertices: usize,
     scale: f32,
+    exposure: f32,
+    srgb_target: bool,
     /// Vertices uploaded for the frame being recorded.
     count: u32,
 }
 
+/// What the UI pass samples besides its own atlases (R7b).
+pub(crate) struct UiImages {
+    /// One view per [`UiImage`](crate::UiImage) slot, kept in `SHADER_READ_ONLY_OPTIMAL`
+    /// between frames and outliving the pass.
+    pub(crate) views: [vk::ImageView; UI_IMAGE_SLOTS],
+    /// Exposure applied before the tonemap (the composite's).
+    pub(crate) exposure: f32,
+}
+
 impl UiPass {
-    #[allow(clippy::too_many_lines)] // Linear resource setup: two textures, set, pipeline.
+    #[allow(clippy::too_many_lines)] // Linear resource setup: textures, set, pipeline.
     pub(crate) fn new(
         device: &DeviceContext,
         frames: usize,
         color_format: vk::Format,
         max_vertices: usize,
         scale: f32,
+        images: &UiImages,
     ) -> RenderResult<Self> {
         let vertex = ShaderModule::new(device.device.clone(), moba_shaders::UI_VERT)?;
         let fragment = ShaderModule::new(device.device.clone(), moba_shaders::UI_FRAG)?;
         // Binding 0: the RGBA pixel-art atlas (nearest). Binding 1: the MSDF font (linear).
-        let binding = [0, 1].map(|binding| {
+        // Binding 2: the offscreen images, an array with one element per slot (linear).
+        let image_slots = u32::try_from(UI_IMAGE_SLOTS).expect("slot count fits u32");
+        let binding = [(0, 1), (1, 1), (2, image_slots)].map(|(binding, count)| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(binding)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
+                .descriptor_count(count)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         });
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &binding)?;
@@ -109,10 +134,19 @@ impl UiPass {
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
         )?;
+        let image_sampler = Sampler::new(
+            device.device.clone(),
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+        )?;
         let frame_count = u32::try_from(frames).expect("frame count fits u32");
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(frame_count * 2)];
+            .descriptor_count(frame_count * (2 + image_slots))];
         let descriptor_pool = DescriptorPool::new(device.device.clone(), &pool_sizes, frame_count)?;
         let set_layouts = vec![set_layout.handle(); frames];
         let sets = descriptor_pool.allocate(&device.device, &set_layouts)?;
@@ -124,6 +158,12 @@ impl UiPass {
             .sampler(font_sampler.handle())
             .image_view(font_atlas.view())
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let offscreen_info = images.views.map(|view| {
+            vk::DescriptorImageInfo::default()
+                .sampler(image_sampler.handle())
+                .image_view(view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        });
         let writes: Vec<vk::WriteDescriptorSet<'_>> = sets
             .iter()
             .flat_map(|set| {
@@ -138,6 +178,12 @@ impl UiPass {
                         .dst_binding(1)
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(&font_info),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(2)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&offscreen_info),
                 ]
             })
             .collect();
@@ -186,10 +232,13 @@ impl UiPass {
             _sampler: sampler,
             _font_atlas: font_atlas,
             _font_sampler: font_sampler,
+            _image_sampler: image_sampler,
             pipeline_layout,
             pipeline,
             max_vertices,
             scale,
+            exposure: images.exposure,
+            srgb_target: crate::passes::composite::is_srgb(color_format),
             count: 0,
         })
     }
@@ -282,7 +331,10 @@ impl UiPass {
         let push = UiPush {
             viewport: [extent.width as f32, extent.height as f32],
             font_range_px: crate::font::RANGE_PX,
-            pad: 0.0,
+            exposure: self.exposure,
+            saturation: crate::passes::composite::TONEMAP_SATURATION,
+            srgb_target: u32::from(self.srgb_target),
+            reserved: [0; 2],
         };
         // SAFETY: the UI pipeline layout declares exactly this push constant range and stages.
         unsafe {

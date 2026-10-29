@@ -241,6 +241,36 @@ impl ImportState {
     pub(crate) const fn idle() -> Self {
         Self::discard(vk::PipelineStageFlags2::NONE)
     }
+
+    /// Contents kept across frames in `layout`, last touched at `stage` in an earlier frame
+    /// with every write already made visible there (R7b's offscreen targets: written by
+    /// their pass, sampled by the UI, and back in `SHADER_READ_ONLY_OPTIMAL` at the end of
+    /// every frame). A write in this frame waits for `stage` (write-after-read); a read in
+    /// the same layout only gets an execution dependency.
+    pub(crate) const fn persistent(
+        stage: vk::PipelineStageFlags2,
+        layout: vk::ImageLayout,
+    ) -> Self {
+        Self {
+            stage,
+            access: vk::AccessFlags2::NONE,
+            layout,
+        }
+    }
+
+    /// Contents discarded on first use, but last written at `stage` with `access` in an
+    /// earlier frame (a persistent depth buffer): the first barrier orders that write
+    /// before this frame's (write-after-write).
+    pub(crate) const fn rewritten(
+        stage: vk::PipelineStageFlags2,
+        access: vk::AccessFlags2,
+    ) -> Self {
+        Self {
+            stage,
+            access,
+            layout: vk::ImageLayout::UNDEFINED,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

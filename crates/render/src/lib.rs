@@ -44,9 +44,13 @@ pub use passes::scene::{bones_truncated, skinned_instances_dropped};
 pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;
-pub use renderer::{CapturedFrame, DEFAULT_MAX_BONES, PipelineStats, RenderConfig, Renderer};
+pub use renderer::{
+    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, MAX_UI_IMAGE_SIZE, PipelineStats,
+    RenderConfig, Renderer,
+};
 pub use scene::{
-    BoneRange, Camera, MeshId, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles,
+    BoneRange, Camera, ClearRect, MeshId, OFFSCREEN_MAX_BONES, OFFSCREEN_MAX_INSTANCES,
+    OffscreenRender, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
 
 /// One joint's skinning matrix (three `vec4` rows) as stored in [`Scene::bones`].
@@ -58,4 +62,7 @@ pub use moba_assets::MeshData;
 pub use moba_assets::{MaterialShader, TextureSlot};
 /// Validated texture accepted by [`Renderer::register_texture`].
 pub use moba_assets::{TextureData, TextureFormat};
-pub use ui::{ATLAS_HEIGHT, ATLAS_WIDTH, TextStyle, UiDrawList, UiVertex, build_atlas, pack_rgba8};
+pub use ui::{
+    ATLAS_HEIGHT, ATLAS_WIDTH, TextStyle, UI_IMAGE_SLOTS, UiDrawList, UiImage, UiVertex,
+    build_atlas, pack_rgba8,
+};

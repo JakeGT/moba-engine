@@ -63,6 +63,10 @@ the semver check):
   - `UiVertex` (R7a): `atlas` renamed to `mode`, new `outline` and `params` fields (48-byte
     layout). `UiDrawList::text` now uses the MSDF font, so `text_width` values change; the old
     5×7 font is `text_bitmap`/`bitmap_text_width`.
+  - `UiVertex` (R7b): new `image` field (the offscreen image slot of `MODE_IMAGE`; `0` for
+    every other mode), 52-byte layout. Struct literals must set it. The alpha channel of
+    `Scene::terrain_tint` now scales the terrain grid lines (`1.0` keeps the old look, and is
+    what every built-in tint and `Scene::new` use).
 - **`moba-platform`**
   - `#[non_exhaustive]`: `PlatformError`, `Key`, `MouseButton` (add a `_` arm) and
     `WindowConfig` (use `WindowConfig::new(title, w, h)` or `Default` with `with_*` builders).
@@ -155,6 +159,58 @@ the semver check):
     [docs/api-1.0.md](docs/api-1.0.md). Golden captures are byte-identical to `main`
     (lavapipe, validation + sync validation, 0 messages); evidence in
     `docs/perf/0013-materials.md`. No wire, replay, logic or content-hash change.
+- **Render-to-texture HUD images: 3D hero portraits and a baked minimap (AAA roadmap R7b):**
+  - **Offscreen targets through the graph:** the renderer owns fixed offscreen images, one
+    per `UiImage` slot (a 2048×128 portrait strip and a 512×512 minimap by default,
+    `RenderConfig::with_ui_image_size`; HDR format, each with a depth buffer), created with
+    the renderer and never resized or reallocated. A frame that re-renders one
+    (`Renderer::render_with_offscreen` with an `OffscreenRender`: a `Scene`, optional
+    terrain, a clear colour and backdrop rectangles) gets that image's graph pass ahead of
+    the scene, drawn with the scene pipelines, meshes and materials into per-image per-frame
+    buffers (`OFFSCREEN_MAX_INSTANCES` units, `OFFSCREEN_MAX_BONES` joints). The images are
+    persistent graph imports (`ImportState::persistent`): they start and end every frame in
+    `SHADER_READ_ONLY_OPTIMAL`, the UI pass declares a fragment sampled read of each, and the
+    graph derives the write-after-read, write-after-write and read-after-write barriers. The
+    eight capture × offscreen variants are compiled at creation and share the transients;
+    headless graph tests cover the barrier plan of every variant.
+  - **UI images:** `UiVertex::MODE_IMAGE` and `UiDrawList::image` sample an offscreen image
+    (binding 2 of the UI set: one combined image sampler per slot, indexed by a constant in
+    each shader branch, so no descriptor-indexing feature is needed) with a 2×2 box over the
+    pixel footprint, then apply the composite's exposure and AgX curve (now shared through
+    `include/tonemap.glsl`). The pixel-art atlas, MSDF text and sweep modes are unchanged.
+  - **Hero portraits:** the client renders one 128-pixel cell per `(team, hero slot)` into
+    the strip: an orthographic "studio" view, simple key and rim light, a team-coloured
+    backdrop per cell, each hero three-quarter turned. Skinned heroes with an animation set
+    play their idle clip through a per-cell R4a animator; others use the rest pose, the static
+    mesh or the procedural rig. Tiered: `Low` renders when the heroes change (static),
+    `Medium` 5 Hz, `High`/`Ultra` 10 Hz; `MOBA_PORTRAITS=off|static|animated|<hz>` overrides
+    it (`off` restores the text-only layout and allocates a 1×1 image). Shown in the hero
+    panel (a 104-pixel portrait column) and leading each scoreboard row; dead heroes are
+    dimmed.
+  - **Baked minimap:** at every map bind (startup, content update, map rotation) the client
+    renders the map's terrain, walls and props (`MapVisuals`) straight down, orthographic,
+    into the minimap image once (with a faint terrain grid); the HUD draws it under the
+    lanes, unit dots and the own-hero frame. Outside allied vision the image is darkened by a
+    24×24 grid computed from the units the client was sent (presentation only: it never
+    reveals a hidden unit, and like the markers it ignores vision-blocking walls).
+    `MOBA_MINIMAP_BAKE=off|once|<frames>` (`off`: the flat minimap; `<frames>` re-bakes
+    periodically to measure it).
+  - `render_with_offscreen` returns whether the frame was submitted, and
+    `Renderer::last_frame_submitted` also answers after an error (presentation can fail
+    after the submit), so a caller re-sends exactly the renders that did not land. A map
+    with more walls and props than one offscreen render takes (`OFFSCREEN_MAX_INSTANCES`)
+    bakes the first ones and logs once.
+  - **Frame log:** `MOBA_FRAME_LOG` gains `gpu_portraits_*`/`gpu_minimap_*` columns over the
+    frames those passes ran in, with a `_runs` count.
+  - **Cost:** RTX 5070 Ti at 1920×1080: the portrait pass takes 8–9 µs and a minimap bake
+    8–9 µs (in the frames that run them); the `ui` pass goes from 6 µs to 9 µs p50 with the
+    portrait, minimap image and fog. CPU portrait updates and the HUD stay allocation-free
+    (`docs/perf/0014-ui.md`).
+  - **Golden images:** the networked fingerprint was **deliberately rebaselined** (hero
+    panel portrait column and the baked minimap); the default-scene capture, whose local HUD
+    has neither, is byte-identical. Lavapipe, validation and sync validation required, 0
+    messages.
+  - No wire, replay, logic or content-hash change.
 - **UI, HUD and presentation polish (AAA roadmap R7a):**
   - **MSDF text:** HUD text is drawn from a multi-channel signed-distance-field atlas (an
     MTSDF: RGB for sharp corners, alpha for the true distance) of Open Sans Condensed SemiBold

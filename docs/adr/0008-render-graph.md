@@ -154,3 +154,27 @@ is `*_SRGB` and encodes on store.
   `gpu_timing_supported`, `quality_tier` and `hdr_format_name`. `GpuTimings`, `PassTiming` and
   `QualityTier` are new public types. `RenderError` gains `RenderGraph`. All changes are
   additive: the types are `#[non_exhaustive]`.
+
+## Amendment (R7b, 2026-10-29): persistent offscreen images
+
+R7b renders hero portraits and the minimap into images that the UI samples in later frames,
+so their contents must survive the frame. They are not transients:
+
+- Each offscreen image is an **imported** colour image plus an imported depth buffer and bone
+  buffer, owned by the renderer at a fixed size (never resized, never pooled).
+- The colour import starts in `SHADER_READ_ONLY_OPTIMAL`, last read at `FRAGMENT_SHADER`
+  (`ImportState::persistent`), and its final access is `SampledFragment`: every frame leaves it
+  where the next one expects it. Creation clears it and puts it in that layout. The depth
+  import discards its contents but orders against the previous frame's depth writes
+  (`ImportState::rewritten`).
+- A frame that re-renders an image runs that image's pass; one that does not just samples it.
+  Rather than a conditional pass inside one plan, every combination is its own variant
+  (capture × one bit per image: eight), compiled at creation. The renderer picks one per frame
+  by index, and all of them share the transient slots (checked at creation).
+- The UI pass declares a sampled read of every offscreen image in every variant, so its
+  descriptors (written once) are always covered by a barrier.
+
+Alternatives: a separate small graph recorded before the frame's (its final barriers would
+hand the image to the UI; rejected because the main graph would then not see the read), and
+transient images with a cross-frame "keep" flag (rejected: transients are sized to the
+swapchain, pooled and aliased, which is exactly what these images must not be).
