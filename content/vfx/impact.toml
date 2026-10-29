@@ -22,3 +22,11 @@ direction = "random"
 size = [0.6, 1]
 color = [2.0, 1.5, 0.9, 1.0]
 drag = 3
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [1.0, 0.7, 0.4]
+intensity = 5.0
+radius = 5.0
+duration = 0.05
+fade_out = 0.25

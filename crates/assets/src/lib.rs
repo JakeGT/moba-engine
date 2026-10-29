@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 mod animation;
+mod baked_ao;
 mod environment;
 #[cfg(feature = "glb")]
 mod glb;
@@ -53,6 +54,10 @@ pub use animation::{
     AnimatorReport, Layer, MAX_ABILITY_BINDINGS, MAX_ANIMATION_SET_BYTES, MAX_ANIMATION_STATES,
     MAX_SOCKETS, MAX_SPRING_CHAINS, MAX_SPRING_JOINTS, MAX_SPRING_STEPS, PlayMode, SPRING_STEP,
     SocketId, StateId, pose_matrices,
+};
+pub use baked_ao::{
+    BAKED_AO_DIR, BakedAoDesc, BakedAoError, DEFAULT_BAKED_AO_HEIGHT, MAX_BAKED_AO_BYTES,
+    MAX_BAKED_AO_TEXELS, ao_fingerprint, baked_ao_paths,
 };
 pub use environment::{
     ENVIRONMENTS_DIR, EnvironmentDesc, EnvironmentError, MAX_ENVIRONMENT_BYTES, MAX_SPECULAR_MIPS,
@@ -86,10 +91,11 @@ pub use texture::{
 };
 pub use vfx::{
     MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS, MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES,
-    MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_EMITTERS, MAX_VFX_NAME, MAX_VFX_RATE, VFX_ATLAS_CELL,
-    VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES, VfxAbilityBinding, VfxAnchor, VfxBindings,
-    VfxBlend, VfxDirection, VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxPrimitive, VfxShape,
-    VfxSprite, VfxUnitEffects, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
+    MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY, MAX_VFX_LIGHT_RADIUS,
+    MAX_VFX_NAME, MAX_VFX_RATE, VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES,
+    VfxAbilityBinding, VfxAnchor, VfxBindings, VfxBlend, VfxDirection, VfxEffect, VfxEmitter,
+    VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape, VfxSprite, VfxUnitEffects,
+    procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
 };
 
 /// One asset entry.

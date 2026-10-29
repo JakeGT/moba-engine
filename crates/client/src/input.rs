@@ -205,6 +205,7 @@ pub(crate) fn handle_network_input(
             .is_ok()
         {
             network.prediction.set_target(Some(ground));
+            network.attack_target = None;
         }
     }
     let attack_button = match bindings.attack_button {
@@ -213,10 +214,12 @@ pub(crate) fn handle_network_input(
     };
     if input.was_mouse_pressed(attack_button)
         && let Some(target) = nearest_enemy(network, ground)
-    {
-        let _ = network
+        && network
             .client
-            .send_command(WireCommand::Attack { net_id: target });
+            .send_command(WireCommand::Attack { net_id: target })
+            .is_ok()
+    {
+        network.attack_target = Some(target);
     }
     for (key, slot) in [
         (bindings.cast_q, 0u8),
@@ -233,7 +236,35 @@ pub(crate) fn handle_network_input(
     if input.was_key_pressed(bindings.stop) {
         let _ = network.client.send_command(WireCommand::Stop);
         network.prediction.set_target(None);
+        network.attack_target = None;
     }
+}
+
+/// The living unit nearest the cursor's ground point, within 4 world units, from the latest
+/// snapshot (so only units the client was sent), for the hover outline. `None` without a
+/// cursor or a ground hit.
+pub(crate) fn hovered_unit(
+    network: &NetworkView,
+    input: &InputState,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+) -> Option<u16> {
+    let ground = cursor_ground(camera, input.cursor()?, width, height, map_center(network))?;
+    let snapshot = network.client.snapshot()?;
+    let mut best: Option<(Fix, u16)> = None;
+    for entity in &snapshot.entities {
+        if entity.is_dead() {
+            continue;
+        }
+        let distance = dequantize_position(entity.x, entity.y).distance_sq(ground);
+        if distance <= Fix::from_i32(4) * Fix::from_i32(4)
+            && best.is_none_or(|(best_distance, _)| distance < best_distance)
+        {
+            best = Some((distance, entity.net_id));
+        }
+    }
+    best.map(|(_, id)| id)
 }
 
 fn nearest_enemy(network: &NetworkView, ground: FixVec2) -> Option<u16> {

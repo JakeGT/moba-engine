@@ -28,3 +28,10 @@ speed = [0, 0.5]
 gravity = -6
 size = [0.3, 0.5]
 color = [0.3, 0.9, 0.2, 0.7]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [0.3, 1.0, 0.2]
+intensity = 4.0
+radius = 4.0
+offset = [0, 0, 0]

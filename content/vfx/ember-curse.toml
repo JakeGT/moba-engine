@@ -26,3 +26,11 @@ size = [0.4, 0.7]
 size_end = 0.2
 color = [3.0, 1.2, 0.3, 1.0]
 color_end = [1.5, 0.3, 0.1, 0.0]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [1.0, 0.35, 0.1]
+intensity = 4.0
+radius = 5.0
+fade_out = 0.4
+flicker = 0.25

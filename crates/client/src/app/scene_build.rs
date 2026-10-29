@@ -13,6 +13,7 @@ use crate::app::NetworkView;
 use crate::app::animation::{AnimationDriver, LodView, RigRef};
 use crate::app::map_visuals::MapLibrary;
 use crate::app::models::{HeroModel, ModelLibrary};
+use crate::app::outlines;
 use crate::app::skinning::BonePool;
 use crate::app::vfx::{Anchors, UnitAnchor};
 use crate::hud::{HudUnit, map_center, rendered_entity_position};
@@ -74,6 +75,13 @@ pub(crate) fn rebuild_network_units(
     let tick_rate = f32::from(network.client.tick_rate().max(1));
     let now = render_tick / tick_rate;
     let pinned = network.pinned_tick().is_some();
+    // Outlines (ADR-0016): a spectator sees blue as the "ally" side and has no own hero.
+    let own_team = if network.spectator {
+        0
+    } else {
+        network.client.team().index() as u8
+    };
+    let own_id = network.own_net_id.filter(|_| !network.spectator);
     for entity in &latest.entities {
         let Some(kind) = kind_from_u8(entity.kind) else {
             continue;
@@ -91,6 +99,14 @@ pub(crate) fn rebuild_network_units(
         let Some(team) = team_from_u8(entity.team) else {
             continue;
         };
+        let outline = outlines::slot(outlines::OutlineUnit {
+            hero: kind == UnitKind::Hero,
+            own: own_id == Some(entity.net_id),
+            enemy: entity.team != own_team,
+            hovered: network.hover == Some(entity.net_id) && !entity.is_dead(),
+            target: network.attack_target == Some(entity.net_id) && !entity.is_dead(),
+        });
+        let first = units.len();
         let position = rendered_entity_position(network, HudUnit::new(entity), render_tick);
         let ground = Vec3::new(
             position.x.to_f32() - center,
@@ -158,6 +174,7 @@ pub(crate) fn rebuild_network_units(
                 _ => None,
             };
             push_hero(units, bones, models, model, &pose, animated);
+            outlines::mark(&mut units[first..], outline);
             continue;
         }
         anchors.push(UnitAnchor {
@@ -175,6 +192,7 @@ pub(crate) fn rebuild_network_units(
             entity.status_bits,
             center,
         );
+        outlines::mark(&mut units[first..], outline);
     }
     for projectile in network.projectiles.iter().filter(|_| projectile_cubes) {
         let color = if projectile.team == 0 {

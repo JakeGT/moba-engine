@@ -246,3 +246,4 @@ static samples. Static vertices grow from 32 to 48 bytes and skinned ones from 4
   `scene` reading `depth` (already sampled-capable) and a stencil/ID target; baked AO or
   lightmaps become a `Surface.occlusion` term multiplying the ambient (the hook is the ambient
   line in `shade()`); contact shadows need a depth pre-pass and a `contact` factor on `lit`.
+  *Done in R2b: [ADR-0016](0016-lights-outlines-ao.md).*

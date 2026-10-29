@@ -38,3 +38,12 @@ lifetime = [0.6, 0.6]
 size = [3.5, 3.5]
 size_end = 1.4
 color = [0.4, 1.2, 0.5, 0.6]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [0.3, 1.0, 0.4]
+intensity = 4.0
+radius = 5.0
+anchor = "source"
+fade_in = 0.1
+fade_out = 0.4

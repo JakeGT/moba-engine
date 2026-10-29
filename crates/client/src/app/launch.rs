@@ -99,7 +99,10 @@ pub(crate) fn compressed_textures() -> bool {
 }
 
 /// The lighting features for `tier` with the `MOBA_SHADOWS` (`off|hard|pcf|pcss`),
-/// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides.
+/// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides,
+/// and the R2b switches (ADR-0016): `MOBA_LIGHTS=off|<global cap>`,
+/// `MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and
+/// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
 pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
     lighting_config_from(tier, |name| std::env::var(name).ok())
 }
@@ -127,6 +130,32 @@ fn lighting_config_from(
     }
     if off("MOBA_SPECULAR_IBL") {
         config = config.with_specular_ibl(false);
+    }
+    let switched_off = |value: &str| matches!(value.trim(), "off" | "OFF" | "0");
+    if let Some(value) = var("MOBA_LIGHTS") {
+        match value.trim().parse::<u32>() {
+            _ if switched_off(&value) => config = config.with_max_lights(0),
+            Ok(cap) => config = config.with_max_lights(cap),
+            Err(_) => eprintln!("MOBA_LIGHTS={value:?} is not off or a count; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_OUTLINES") {
+        match moba_render::OutlineMode::from_name(&value) {
+            Some(mode) => config = config.with_outlines(mode),
+            None => eprintln!("MOBA_OUTLINES={value:?} is not off/hull/screen; using the tier's"),
+        }
+    }
+    if var("MOBA_BAKED_AO").is_some_and(|value| switched_off(&value)) {
+        config = config.with_baked_ao(false);
+    }
+    if let Some(value) = var("MOBA_CONTACT_SHADOWS") {
+        match value.trim().parse::<u32>() {
+            _ if switched_off(&value) => config = config.with_contact_shadow_steps(0),
+            Ok(steps) => config = config.with_contact_shadow_steps(steps),
+            Err(_) => eprintln!(
+                "MOBA_CONTACT_SHADOWS={value:?} is not off or a step count; using the tier's"
+            ),
+        }
     }
     config
 }
@@ -574,7 +603,7 @@ impl Drop for ClientApp {
 }
 
 /// Lanes of one GPU frame-log sample (see [`gpu_report`]).
-pub(crate) const GPU_LANES: usize = 13;
+pub(crate) const GPU_LANES: usize = 17;
 const GPU_LANE_NAMES: [&str; GPU_LANES] = [
     "shadow",
     "scene",
@@ -587,14 +616,21 @@ const GPU_LANE_NAMES: [&str; GPU_LANES] = [
     "vfx_simulate",
     "vfx_draw",
     "vfx_resolve",
+    "depth_prepass",
+    "contact_shadows",
+    "outline",
     "vfx_alive",
     "vfx_overdraw",
+    "lights",
 ];
+/// First lane that is a statistic rather than a pass time.
+const GPU_STAT_LANES: usize = 14;
 
 /// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[shadow, scene, composite,
-/// ui, total, span, portraits, minimap, vfx_simulate, vfx_draw, vfx_resolve]` pass times
-/// (`shadow` is 0 when shadows are off) plus the particle stats `vfx_alive` (live particles)
-/// and `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013), which get
+/// ui, total, span, portraits, minimap, vfx_simulate, vfx_draw, vfx_resolve, depth_prepass,
+/// contact_shadows, outline]` pass times (a pass that is off reads 0) plus the particle stats
+/// `vfx_alive` (live particles) and `vfx_overdraw` (projected particle pixels per screen
+/// pixel, ADR-0013) and `lights` (dynamic lights binned, ADR-0016), which get
 /// `_p50`/`_p95`/`_max` columns without the unit. `total` sums the passes; `span` runs from
 /// the first pass's start to the last pass's end, so `span - total` is the time spent in
 /// barriers between passes. The offscreen passes (R7b) run only in some frames, so their
@@ -623,7 +659,7 @@ fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
                 .copied()
                 .unwrap_or(0.0)
         };
-        if lane >= 11 {
+        if lane >= GPU_STAT_LANES {
             let _ = write!(
                 columns,
                 "{name}_p50={:.3} {name}_p95={:.3} {name}_max={:.3} ",
@@ -714,6 +750,35 @@ mod tests {
             env(&[("MOBA_SHADOWS", "vsm"), ("MOBA_SHADOW_SIZE", "big")]),
         );
         assert_eq!(bad, LightingConfig::for_tier(QualityTier::Low));
+        let r2b = lighting_config_from(
+            QualityTier::High,
+            env(&[
+                ("MOBA_LIGHTS", "off"),
+                ("MOBA_OUTLINES", "hull"),
+                ("MOBA_BAKED_AO", "off"),
+                ("MOBA_CONTACT_SHADOWS", "0"),
+            ]),
+        );
+        assert_eq!(r2b.max_lights, 0);
+        assert_eq!(r2b.outlines, moba_render::OutlineMode::Hull);
+        assert!(!r2b.baked_ao);
+        assert_eq!(r2b.contact_shadow_steps, 0);
+        let capped = lighting_config_from(
+            QualityTier::Low,
+            env(&[("MOBA_LIGHTS", "8"), ("MOBA_CONTACT_SHADOWS", "12")]),
+        );
+        assert_eq!(capped.max_lights, 8);
+        assert_eq!(capped.contact_shadow_steps, 12);
+        let ignored = lighting_config_from(
+            QualityTier::Ultra,
+            env(&[
+                ("MOBA_LIGHTS", "lots"),
+                ("MOBA_OUTLINES", "glow"),
+                ("MOBA_BAKED_AO", "1"),
+                ("MOBA_CONTACT_SHADOWS", "many"),
+            ]),
+        );
+        assert_eq!(ignored, LightingConfig::for_tier(QualityTier::Ultra));
     }
 
     #[test]
@@ -735,8 +800,12 @@ mod tests {
                     ms,
                     ms,
                     0.0,
+                    ms,
+                    0.0,
+                    ms,
                     index as f32,
                     ms,
+                    2.0,
                 ]
             })
             .collect();
@@ -753,9 +822,14 @@ mod tests {
         ));
         assert!(!report.contains("gpu_minimap"));
         assert!(report.contains("gpu_vfx_draw_p95_ms=0.950 "));
+        assert!(
+            report.contains("gpu_depth_prepass_p95_ms=0.950 gpu_contact_shadows_p50_ms=0.000 ")
+        );
+        assert!(report.contains("gpu_outline_p50_ms=0.500 "));
         assert!(report.ends_with(
             "vfx_alive_p50=50.000 vfx_alive_p95=95.000 vfx_alive_max=100.000 \
-             vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 "
+             vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 \
+             lights_p50=2.000 lights_p95=2.000 lights_max=2.000 "
         ));
     }
 

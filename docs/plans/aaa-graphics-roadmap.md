@@ -18,7 +18,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 |---|---|
 | Frame structure | **R1a:** a render graph ([ADR-0008](../adr/0008-render-graph.md)): `scene` → HDR colour (`R16G16B16A16_SFLOAT`, `B10G11R11_UFLOAT_PACK32` on Low) + sampled-capable depth, `composite` (tonemap) → swapchain, `ui` on top, with derived sync2 barriers, transient pooling and pass culling. `FRAMES_IN_FLIGHT = 2`. `QualityTier` exists (Low/Medium/High/Ultra). |
 | Shaders | **R1b:** 9 GLSL sources sharing `#include` files (camera block, instance buffer, lighting, material set) plus `MATERIAL_TEXTURED` permutations and (R2a) two `SHADOW_PASS` depth-only casters: 14 SPIR-V modules validated with `spirv-val`. Every pipeline is built at load through a persistent `VkPipelineCache` (9 with shadows on). Hot reload of SPIR-V overrides in debug builds (`MOBA_SHADER_DIR`). |
-| Lighting | **R2a** ([ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX, Smith-GGX, Schlick, energy-conserving diffuse) with wrap/ramp/painted-specular/rim set per map and material; per-map IBL (SH-L2 diffuse + prefiltered specular cube, split-sum LUT) from `env-bake`'s analytic skies; one fitted, texel-snapped directional shadow map with hard/PCF/PCSS-lite filtering by tier, skinned heroes casting. No dynamic point lights, outlines or baked AO yet (R2b). |
+| Lighting | **R2a** ([ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX, Smith-GGX, Schlick, energy-conserving diffuse) with wrap/ramp/painted-specular/rim set per map and material; per-map IBL (SH-L2 diffuse + prefiltered specular cube, split-sum LUT) from `env-bake`'s analytic skies; one fitted, texel-snapped directional shadow map with hard/PCF/PCSS-lite filtering by tier, skinned heroes casting. **R2b** ([ADR-0016](../adr/0016-lights-outlines-ao.md)): clustered forward point lights (ground-aligned 32×32 grid, per-tier caps) fed by effect `[light]` blocks, team/hover/target outlines (screen-space ID-buffer on High+, inverted hull on Low/Medium) in the colour-blind-capable team palette, baked top-down AO from `ao-bake` on the ambient line, and a depth pre-pass with screen-space contact shadows on High+. |
 | Geometry | Instanced cubes. Heroes are a 6-cube rig posed on the CPU (`push_hero_rig`). The instance SSBO is capped at 4,096. Mesh loading is in progress (WP-3.2, #286). |
 | Terrain | A flat plane with a procedural grid and per-map tint. Walls are only drawn on the network path. |
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
@@ -134,10 +134,19 @@ per-map IBL baked by `moba-tools env-bake`, and one fitted directional shadow ma
 cascades: the sphere fit gives 4–9 cm texels at the player cameras and stays readable at the
 overview) with hard/PCF/PCSS-lite by tier and off switches. Scope choices: screen-space
 contact shadows (item 3) need a depth pre-pass and move to R2b; BC6H for environments is
-deferred (ADR-0010 amendment). **R2b** (open): baked AO/lightmaps (item 4), clustered forward
-dynamic lights (item 5), team and selection outlines (item 6), contact shadows. The exit's
-"all three reference GPUs" and the art-direction sign-off still need hardware and an art
-director; the RTX 5070 Ti is the only measured GPU.
+deferred (ADR-0010 amendment). **R2b done (2026-10-29)** — items 3 (contact shadows), 4, 5
+and 6 ([ADR-0016](../adr/0016-lights-outlines-ao.md), [perf/0020](../perf/0020-lights-outlines-ao.md)):
+clustered forward dynamic lights on a ground-aligned grid with per-tier caps, driven by
+effect `[light]` blocks (enemy lights first); team, hover and attack-target outlines in the
+HUD team palette (colour-blind included), screen-space from a pre-pass ID target on High+
+and an inverted hull on Low/Medium, depth-tested so they never show hidden units; baked
+top-down AO for walls and props (`moba-tools ao-bake`, fingerprinted against the bound map)
+on the ambient line, composable with R6's SSAO; and a depth pre-pass with screen-space
+contact shadows on High+, reusable by R6's GTAO. Lightmaps were not needed (one sun, shadows
+on every tier). **R2 is done** as engineering work. The exit's "all three reference GPUs"
+and the **art-direction readability sign-off** remain maintainer items: the RTX 5070 Ti is
+the only measured GPU, and the review evidence (captures per tier, palette checks) is in
+perf/0020 for an art director to sign.
 
 ### R3 — Terrain and environment (L)
 1. **Terrain.** Heightfield or authored mesh with splat-map texturing (4–8 layers, triplanar on slopes), plus normal and AO maps. Walls and cliffs are props from the asset manifest. The simulation's map geometry stays authoritative and is validated against the visual mesh by content-check.
@@ -236,6 +245,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0010 | Texture pipeline | **Accepted** (R1b, [ADR-0010](../adr/0010-texture-pipeline.md)): offline baker → KTX2 (BC7/BC5/BC4), baked mips, sRGB/linear fixed by format and slot; CPU-decode fallback; client-local material descriptors |
 | ADR-0011 | Art style | **Accepted** (R2a, [ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX + wrap/ramp/painted specular/rim), per-map IBL, one fitted directional shadow map; readability rules as acceptance criteria |
 | ADR-0012 | Animation runtime | **Accepted** ([ADR-0012](../adr/0012-animation-runtime.md)): in-house sampler + content-defined state machine; VAT for minions in R4b |
+| ADR-0016 | Lights, outlines, baked AO | **Accepted** (R2b, [ADR-0016](../adr/0016-lights-outlines-ao.md)): clustered forward on a ground-aligned column grid with CPU binning; screen-space ID-buffer outlines (High+) and inverted hull (Low/Medium); baked height-field AO on the ambient line; a depth pre-pass shared by contact shadows and R6's GTAO |
 | ADR-0013 | VFX runtime | **Accepted** (R5, [ADR-0013](../adr/0013-vfx-runtime.md)): GPU compute particles over a fixed per-tier buffer with a CPU slot allocator; WBOIT with log revealage (no `independentBlend`); client-local effects bound to presentation events and sockets |
 | — | Quality tiers | Low = min-spec 1080p/60; High = mid-range 1440p/144 |
 

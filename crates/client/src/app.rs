@@ -33,6 +33,9 @@
 //!   `MOBA_SHADOWS=off|hard|pcf|pcss`, `MOBA_SHADOW_SIZE=<texels>` (256-8192) and
 //!   `MOBA_IBL=0` (hemispheric ambient only) / `MOBA_SPECULAR_IBL=0` (SH ambient only). The
 //!   map's `[lighting]` table (and its `environment`) sets the art direction.
+//! - R2b overrides (ADR-0016): `MOBA_LIGHTS=off|<global cap>` (effect point lights),
+//!   `MOBA_OUTLINES=off|hull|screen` (team outlines), `MOBA_BAKED_AO=off` and
+//!   `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
 //!   `MOBA_SERVER=local` server is lock-stepped to the client and stops at `n`, so the frame
@@ -362,6 +365,8 @@ impl ClientApp {
                         demo_bought: false,
                         demo_cast: parse_demo_cast(),
                         shop_page: 0,
+                        hover: None,
+                        attack_target: None,
                         spectator_pan: Vec3::ZERO,
                         spectator_yaw: -0.7,
                         spectator_zoom: camera_zoom,
@@ -929,6 +934,14 @@ impl App for ClientApp {
                             &self.bindings,
                             self.camera_sensitivity,
                         );
+                        // Used by the next frame's outlines (the units are already built).
+                        network.hover = crate::input::hovered_unit(
+                            network,
+                            frame.input(),
+                            &camera,
+                            width,
+                            height,
+                        );
                         if frame.input().was_key_pressed(self.bindings.scoreboard) {
                             *scoreboard_visible = !*scoreboard_visible;
                         }
@@ -978,7 +991,9 @@ impl App for ClientApp {
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
                             .with_bones(bones.bones())
-                            .with_vfx(vfx.frame());
+                            .with_vfx(vfx.frame())
+                            .with_lights(vfx.lights())
+                            .with_outlines(outlines::palette(hud_fx.palette));
                         // With `MOBA_CAPTURE_TICK` the capture waits for the match tick, not
                         // a frame count, so it does not depend on frame pacing.
                         let capture_due = if network.capture_tick.is_some() {
@@ -1110,6 +1125,7 @@ impl App for ClientApp {
                         height: scene_build::unit_height(*kind),
                         model: None,
                     });
+                    let first = units.len();
                     if *kind == UnitKind::Hero {
                         let model = world
                             .get::<moba_sim::HeroIdentity>(entity)
@@ -1134,6 +1150,16 @@ impl App for ClientApp {
                     } else {
                         push_unit(units, position.0, *kind, *team, fraction, 0, center);
                     }
+                    // The local preview watches from the blue side: heroes get their team's
+                    // outline (no own hero, no hover or target).
+                    let slot = outlines::slot(outlines::OutlineUnit {
+                        hero: *kind == UnitKind::Hero,
+                        own: false,
+                        enemy: *team != Team::Blue,
+                        hovered: false,
+                        target: false,
+                    });
+                    outlines::mark(&mut units[first..], slot);
                 }
                 if let Some(preview) = preview.as_mut() {
                     preview.frame(vfx, anchors, units, frame_ms);
@@ -1186,7 +1212,9 @@ impl App for ClientApp {
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
                         .with_bones(bones.bones())
-                        .with_vfx(vfx.frame());
+                        .with_vfx(vfx.frame())
+                        .with_lights(vfx.lights())
+                        .with_outlines(outlines::palette(self.hud_fx.palette));
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
@@ -1245,8 +1273,14 @@ impl App for ClientApp {
                     pass("vfx_simulate"),
                     pass("vfx_draw"),
                     pass("vfx_resolve"),
+                    pass("depth_prepass"),
+                    pass("contact_shadows"),
+                    pass("outline"),
                     stats.map_or(0.0, |stats| stats.alive as f32),
                     stats.map_or(0.0, |stats| stats.overdraw),
+                    self.renderer
+                        .as_ref()
+                        .map_or(0.0, |renderer| renderer.light_stats().binned as f32),
                 ]);
             }
         }
@@ -1272,6 +1306,7 @@ mod map_visuals;
 mod materials;
 mod models;
 mod offscreen;
+mod outlines;
 mod scene_build;
 mod skinning;
 mod vfx;

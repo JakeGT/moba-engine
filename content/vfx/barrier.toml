@@ -24,3 +24,12 @@ direction = "none"
 size = [0.6, 1]
 spin = [-180, 180]
 color = [0.8, 1.6, 3.0, 1.0]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [0.2, 0.5, 1.0]
+intensity = 3.0
+radius = 4.0
+anchor = "source"
+fade_in = 0.1
+fade_out = 0.3

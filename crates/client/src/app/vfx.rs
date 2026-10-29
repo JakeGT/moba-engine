@@ -29,7 +29,12 @@
 //!   pre-VFX cube ([`VfxSystem::placeholders`]), so it never becomes invisible;
 //! - **allied effects** (not the viewer's own) are scaled by the allied-VFX opacity setting,
 //!   and their alpha-blended particles are capped at [`ALLY_MAX_ALPHA`] so they never fully
-//!   hide an enemy behind them.
+//!   hide an enemy behind them;
+//! - **effect lights** (an effect's optional `[light]` block, ADR-0016) become
+//!   [`PointLight`]s for [`moba_render::Scene::with_lights`]: enemy and neutral lights first,
+//!   then the viewer's and allies' (scaled by the allied-VFX opacity), so the renderer's
+//!   per-tier cap drops allied lights before enemy ones. A light belongs to an effect
+//!   instance the client already plays, so it never shows anything the client was not sent.
 //!
 //! Every buffer is preallocated: steady-state frames do not allocate.
 
@@ -39,14 +44,15 @@ mod library;
 use moba_core::math::{Mat4, TAU, Vec3, Vec4};
 use moba_core::rng::Rng;
 use moba_render::{
-    ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, UnitInstance, VfxBudget, VfxFrame,
+    ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, PointLight, UnitInstance, VfxBudget,
+    VfxFrame,
 };
 
 pub(crate) use events::{Trigger, VfxEvent, from_net, from_sim, world};
 pub(crate) use library::{EffectId, VfxLibrary};
 
 use moba_assets::{
-    VfxAnchor, VfxBlend, VfxDirection, VfxEmitter, VfxImportance, VfxPrimitive, VfxShape,
+    VfxAnchor, VfxBlend, VfxDirection, VfxEmitter, VfxImportance, VfxLight, VfxPrimitive, VfxShape,
 };
 
 /// Most live effect instances.
@@ -376,6 +382,11 @@ pub(crate) struct VfxSystem {
     deferred: Vec<ParticleSpawn>,
     /// This frame's projectile fallback cubes: position, size and team.
     placeholders: Vec<(Vec3, f32, u8)>,
+    /// This frame's effect lights: enemy and neutral first, then (appended at the end of
+    /// `update`) `ally_lights`.
+    lights: Vec<PointLight>,
+    /// This frame's own and allied effect lights.
+    ally_lights: Vec<PointLight>,
     rng: Rng,
     time: f32,
     dt: f32,
@@ -411,6 +422,41 @@ fn cone(rng: &mut Rng, axis: Vec3, spread: f32) -> Vec3 {
     let u = axis.cross(helper).normalize();
     let v = axis.cross(u);
     (u * (r * angle.cos()) + v * (r * angle.sin()) + axis * z).normalize_or(axis)
+}
+
+/// The point light `light` casts at `age` seconds into `instance` (`None` while it is dark).
+/// Flicker is a fixed function of time and the instance's slot: presentation only, so it
+/// never touches the effect RNG stream.
+fn effect_light(
+    light: &VfxLight,
+    instance: &Instance,
+    age: f32,
+    time: f32,
+    slot: usize,
+) -> Option<PointLight> {
+    let envelope = light.envelope(age, instance.emit);
+    if envelope <= 0.0 {
+        return None;
+    }
+    let phase = slot as f32 * 1.618;
+    let wobble = 0.5 + 0.25 * ((time * 23.0 + phase).sin() + (time * 13.7 + phase * 2.3).sin());
+    let flicker = 1.0 - light.flicker * wobble.clamp(0.0, 1.0);
+    let color = Vec3::from_array(light.color).lerp(team_color(instance.team), light.team_tint)
+        * (light.intensity * envelope * flicker);
+    let anchor = match light.anchor {
+        VfxAnchor::Source => instance.source_position,
+        _ => instance.target,
+    };
+    let radius = if light.scale_with_radius {
+        light.radius * instance.radius.max(0.25)
+    } else {
+        light.radius
+    };
+    Some(PointLight::new(
+        anchor + Vec3::from_array(light.offset),
+        radius.min(moba_assets::MAX_VFX_LIGHT_RADIUS),
+        color,
+    ))
 }
 
 fn team_color(team: u8) -> Vec3 {
@@ -465,6 +511,8 @@ impl VfxSystem {
             spawns: Vec::with_capacity(MAX_FRAME_SPAWNS),
             deferred: Vec::with_capacity(MAX_FRAME_SPAWNS),
             placeholders: Vec::with_capacity(MAX_PLACEHOLDERS),
+            lights: Vec::with_capacity(moba_render::MAX_LIGHTS),
+            ally_lights: Vec::with_capacity(moba_render::MAX_LIGHTS),
             rng: Rng::from_seed(0x7f4a_7c15_9e37_79b9),
             time: 0.0,
             dt: 0.0,
@@ -566,6 +614,12 @@ impl VfxSystem {
         }
     }
 
+    /// This frame's effect lights, most important first, for
+    /// [`moba_render::Scene::with_lights`].
+    pub(crate) fn lights(&self) -> &[PointLight] {
+        &self.lights
+    }
+
     /// The particles to spawn this frame, for [`moba_render::Scene::with_vfx`].
     pub(crate) fn frame(&self) -> VfxFrame<'_> {
         VfxFrame::new(&self.spawns, self.dt).with_ally_opacity(self.ally_opacity)
@@ -584,6 +638,8 @@ impl VfxSystem {
         self.spawns.clear();
         self.deferred.clear();
         self.placeholders.clear();
+        self.lights.clear();
+        self.ally_lights.clear();
         self.counters.spawned = 0;
         let dt = if dt.is_finite() {
             dt.clamp(0.0, 0.1)
@@ -630,6 +686,9 @@ impl VfxSystem {
         let room = self.spawns.capacity() - self.spawns.len();
         let take = self.deferred.len().min(room);
         self.spawns.extend_from_slice(&self.deferred[..take]);
+        let room = self.lights.capacity() - self.lights.len();
+        let take = self.ally_lights.len().min(room);
+        self.lights.extend_from_slice(&self.ally_lights[..take]);
     }
 
     /// Starts the effects an event triggers.
@@ -906,6 +965,22 @@ impl VfxSystem {
             mesh_slot: None,
         };
         let emit_end = instance.emit;
+        if let Some(light) = loaded.effect.light
+            && distance <= limit
+            && let Some(point) = effect_light(&light, &instance, age, self.time, slot)
+        {
+            let (list, scale) = match instance.relation {
+                Relation::Enemy | Relation::Neutral => (&mut self.lights, 1.0),
+                Relation::Own | Relation::Ally => (&mut self.ally_lights, self.ally_opacity),
+            };
+            if list.len() < list.capacity() && scale > 0.0 {
+                list.push(PointLight::new(
+                    point.position,
+                    point.radius,
+                    point.color * scale,
+                ));
+            }
+        }
         let moved = instance
             .previous
             .is_none_or(|previous| previous.distance(anchor) >= TRAIL_STEP);

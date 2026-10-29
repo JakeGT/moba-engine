@@ -17,3 +17,13 @@ color = [1.5, 1.5, 1.5, 0.5]
 color_end = [1.5, 1.5, 1.5, 0.0]
 team_tint = 0.7
 telegraph = true
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [1.0, 1.0, 1.0]
+intensity = 2.0
+radius = 2.0
+scale_with_radius = true
+team_tint = 0.6
+fade_in = 0.2
+fade_out = 0.3

@@ -21,21 +21,30 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::{
-    self, Binding, Bindings, FramePlan, OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode,
+    self, Binding, Bindings, DepthFeatures, FramePlan, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
+    VfxMode,
 };
 use crate::instance::{InstanceContext, ValidationMode};
 use crate::lighting::{
-    self, EnvironmentState, FrameLighting, LightingConfig, LightingResources, ShadowFilter,
+    self, BakedAo, EnvironmentState, FrameLighting, LightingConfig, LightingResources, OutlineMode,
+    ShadowFilter,
 };
+use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::passes::composite::CompositePass;
+use crate::passes::contact::ContactPass;
+use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
-use crate::passes::scene::{ScenePass, SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget};
+use crate::passes::scene::{
+    PrepassPipelineSpec, PrepassTarget, ScenePass, SceneTargets, ShadowPipelineSpec, ShadowTarget,
+    ViewBudget,
+};
 use crate::passes::vfx::{VfxPass, VfxTargets};
 use crate::pipeline_cache::PipelineCacheState;
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
+use crate::scene::OutlinePalette;
 use crate::scene::{MeshId, OFFSCREEN_MAX_BONES, OFFSCREEN_MAX_INSTANCES, OffscreenRender, Scene};
 use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
@@ -312,6 +321,12 @@ pub struct Renderer {
     lighting: LightingResources,
     /// GPU particles; `None` when disabled or unsupported (the frame then has no VFX passes).
     vfx: Option<VfxPass>,
+    /// Screen-space contact shadows (R2b); `None` when off.
+    contact: Option<ContactPass>,
+    /// Screen-space outlines (R2b); `None` unless outlines are `screen`.
+    outline: Option<OutlinePass>,
+    /// This frame's outline palette, for the outline pass.
+    frame_outlines: OutlinePalette,
     materials: Materials,
     shaders: ShaderSource,
     pipeline_stats: PipelineStats,
@@ -468,6 +483,10 @@ impl Renderer {
             Some(_) if budget.oit => VfxMode::Oit,
             Some(_) => VfxMode::Unsorted,
         };
+        let depth_features = DepthFeatures {
+            outline_ids: lighting_config.outlines == OutlineMode::Screen,
+            contact: lighting_config.contact_steps() > 0,
+        };
         let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
         for capture in [false, true] {
             for offscreen in 0..OFFSCREEN_VARIANTS {
@@ -480,6 +499,7 @@ impl Renderer {
                         capture,
                         offscreen,
                         vfx_mode,
+                        depth_features,
                     )
                     .map_err(graph_error)?,
                 );
@@ -531,7 +551,12 @@ impl Renderer {
             max_bones: config.max_bones,
         };
         let (default_shadow_format, shadow_linear) = shadow_format.unwrap_or((depth_format, false));
-        let lighting = LightingResources::new(&device, default_shadow_format, shadow_linear)?;
+        let lighting = LightingResources::new(
+            &device,
+            FRAMES_IN_FLIGHT,
+            default_shadow_format,
+            shadow_linear,
+        )?;
         let scene = ScenePass::new(
             &device,
             &shaders,
@@ -546,8 +571,20 @@ impl Renderer {
             lighting.set_layout(),
             &views,
             config.skinning,
+            depth_features.prepass().then_some(PrepassPipelineSpec {
+                outline_ids: depth_features.outline_ids,
+            }),
+            lighting_config.outlines == OutlineMode::Hull,
         )?;
         config.max_bones = scene.max_bones();
+        let contact = depth_features
+            .contact
+            .then(|| ContactPass::new(&device, &shaders, scene.camera_set_layout()))
+            .transpose()?;
+        let outline = depth_features
+            .outline_ids
+            .then(|| OutlinePass::new(&device, &shaders, swapchain.format))
+            .transpose()?;
         let composite = CompositePass::new(&device, &shaders, swapchain.format, config.exposure)?;
         let ui = UiPass::new(
             &device,
@@ -607,6 +644,9 @@ impl Renderer {
             ui,
             lighting,
             vfx,
+            contact,
+            outline,
+            frame_outlines: OutlinePalette::NONE,
             materials,
             shaders,
             pipeline_stats,
@@ -710,6 +750,69 @@ impl Renderer {
     #[must_use]
     pub fn has_environment(&self) -> bool {
         self.lighting.state().intensity > 0.0
+    }
+
+    /// Sets the map's baked ambient occlusion (ADR-0016): `texture`, a 2D single-channel map
+    /// (`R8_UNORM` or BC4 from `moba-tools ao-bake`, 1 = open), placed over the world by
+    /// `placement`. It multiplies the ambient line of every lit surface unless
+    /// [`LightingConfig::baked_ao`] is off. Replaces the previous one. Load-time only: it
+    /// waits for the device to idle and uploads through a staging buffer.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidTexture`] for a cube, a format other than `R8Unorm`/`Bc4Unorm`
+    /// (or one the device cannot sample) or an unusable placement; allocation or Vulkan
+    /// errors from the upload. On error the previous AO stays.
+    pub fn set_baked_ao(
+        &mut self,
+        texture: &crate::TextureData,
+        placement: BakedAo,
+    ) -> RenderResult<()> {
+        let single_channel = matches!(
+            texture.format(),
+            crate::TextureFormat::R8Unorm | crate::TextureFormat::Bc4Unorm
+        );
+        if texture.is_cube()
+            || !single_channel
+            || placement.uniform().is_none()
+            || !crate::texture::sampleable(
+                &self.device,
+                crate::texture::vk_format(texture.format()),
+            )
+        {
+            return Err(RenderError::InvalidTexture);
+        }
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses the
+        // lighting sets or the AO image being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        let image = crate::texture::upload(&self.device, "baked-ao", texture)?;
+        self.lighting
+            .set_baked_ao(&self.device, Some((image, placement)));
+        Ok(())
+    }
+
+    /// Removes the baked AO. Waits for the device to idle.
+    ///
+    /// # Errors
+    /// Vulkan errors from the idle wait.
+    pub fn clear_baked_ao(&mut self) -> RenderResult<()> {
+        // SAFETY: as in `set_baked_ao`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.lighting.set_baked_ao(&self.device, None);
+        Ok(())
+    }
+
+    /// Whether a baked AO map is set (it is applied unless [`LightingConfig::baked_ao`] is
+    /// off).
+    #[must_use]
+    pub fn has_baked_ao(&self) -> bool {
+        self.lighting.baked_ao().is_some()
+    }
+
+    /// What happened to the most recent frame's [`Scene::lights`]: uploaded, dropped by the
+    /// tier's caps, culled (ADR-0016).
+    #[must_use]
+    pub fn light_stats(&self) -> LightStats {
+        self.lighting.light_stats()
     }
 
     /// Binds a registered 2D colour texture as the stylisation ramp (`None` removes it), used
@@ -970,8 +1073,24 @@ impl Renderer {
             .as_ref()
             .map(|vfx| vfx.build_pipelines(&self.device, &self.shaders))
             .transpose()?;
+        let contact = self
+            .contact
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
+        let outline = self
+            .outline
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
         self.scene.install_pipelines(scene);
         self.composite.install_pipeline(composite);
+        if let (Some(pass), Some(pipeline)) = (self.contact.as_mut(), contact) {
+            pass.install_pipeline(pipeline);
+        }
+        if let (Some(pass), Some(pipeline)) = (self.outline.as_mut(), outline) {
+            pass.install_pipeline(pipeline);
+        }
         if let (Some(pass), Some(pipelines)) = (self.vfx.as_mut(), vfx) {
             pass.install_pipelines(pipelines);
         }
@@ -1069,12 +1188,22 @@ impl Renderer {
             .expect("the composite keeps the HDR target live");
         self.composite
             .bind_hdr(&self.device, self.transients.image(hdr).view());
-        let shadow = plan
-            .resources
-            .shadow
-            .and_then(|resource| plan.graph.slot_of(resource))
-            .map(|slot| self.transients.image(slot).view());
-        self.lighting.bind_shadow(&self.device, shadow);
+        let transient_view = |resource: Option<crate::graph::ResourceId>| {
+            resource
+                .and_then(|resource| plan.graph.slot_of(resource))
+                .map(|slot| self.transients.image(slot).view())
+        };
+        let shadow = transient_view(plan.resources.shadow);
+        let contact = transient_view(plan.resources.contact);
+        let ids = transient_view(plan.resources.outline_ids);
+        let depth = transient_view(Some(plan.resources.depth));
+        self.lighting.bind_transients(&self.device, shadow, contact);
+        if let (Some(pass), Some(depth)) = (&self.contact, depth) {
+            pass.bind_depth(&self.device, depth);
+        }
+        if let (Some(pass), Some(ids)) = (&self.outline, ids) {
+            pass.bind_ids(&self.device, ids);
+        }
         if let (Some(vfx), Some(resources)) = (self.vfx.as_mut(), plan.resources.vfx) {
             let transients = &self.transients;
             let view = |resource: Option<crate::graph::ResourceId>| {
@@ -1202,8 +1331,28 @@ impl Renderer {
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
 
-        let frame_lighting = self.frame_lighting(scene);
-        self.scene.prepare(0, frame_index, scene, &frame_lighting)?;
+        // Lights are binned into this frame slot's buffers (its fence was waited on above).
+        let grid = self.lighting.upload_lights(
+            frame_index,
+            scene.lights,
+            scene.camera.view_proj,
+            self.lighting_config,
+        );
+        let mut frame_lighting = self
+            .frame_lighting(scene)
+            .with_lights(grid)
+            .with_baked_ao(self.lighting.baked_ao(), self.lighting_config);
+        if self.contact.is_some() {
+            frame_lighting = frame_lighting.with_contact_shadows(self.lighting_config);
+        }
+        self.frame_outlines = scene.outlines;
+        self.scene.prepare(
+            0,
+            frame_index,
+            scene,
+            &frame_lighting,
+            self.swapchain.extent,
+        )?;
         let mut offscreen_mask = 0usize;
         for render in offscreen {
             let slot = render.image.index();
@@ -1213,13 +1362,20 @@ impl Renderer {
             offscreen_mask |= 1 << slot;
             // Offscreen views never sample the shadow map (it is the main view's, and their
             // pass runs before the shadow pass): shadows off, the environment kept.
+            // No dynamic lights or contact shadows; the map's baked AO only where the map is
+            // drawn (the minimap), not in the portrait studio.
             let view_lighting = FrameLighting::offscreen(
                 &render.scene.lighting,
                 self.lighting_config,
                 self.lighting.state(),
+            )
+            .with_baked_ao(
+                self.lighting.baked_ao().filter(|_| render.terrain),
+                self.lighting_config,
             );
+            let extent = self.offscreen[slot].extent();
             self.scene
-                .prepare(1 + slot, frame_index, &render.scene, &view_lighting)?;
+                .prepare(1 + slot, frame_index, &render.scene, &view_lighting, extent)?;
         }
         self.ui.prepare(frame_index, ui)?;
         // Last of the uploads: its slot allocations are committed only when the frame is
@@ -1346,6 +1502,11 @@ impl Renderer {
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
         let shadow_view = resources.shadow.map(|shadow| self.transient(shadow).view());
+        let contact_view = resources
+            .contact
+            .map(|contact| self.transient(contact).view());
+        let ids_view = resources.outline_ids.map(|ids| self.transient(ids).view());
+        let hull_outlines = self.lighting_config.outlines == OutlineMode::Hull;
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);
@@ -1380,10 +1541,44 @@ impl Renderer {
                         clear_color: self.config.clear_color,
                         terrain: true,
                         clear_rects: &[],
-                        lighting: self.lighting.set(),
+                        lighting: self.lighting.set(frame_index),
                         store_depth: resources.vfx.is_some(),
+                        load_depth: resources.prepass,
+                        hull_outlines,
                     },
                 ),
+                PassKind::DepthPrepass => self.scene.record_prepass(
+                    &self.device,
+                    command_buffer,
+                    frame_index,
+                    &PrepassTarget {
+                        depth: depth_view,
+                        outline_ids: ids_view,
+                        extent,
+                    },
+                ),
+                PassKind::ContactShadows => {
+                    if let (Some(pass), Some(target)) = (&self.contact, contact_view) {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            self.scene.camera_set(frame_index),
+                            target,
+                            extent,
+                        );
+                    }
+                }
+                PassKind::Outline => {
+                    if let Some(pass) = &self.outline {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            swapchain_view,
+                            extent,
+                            &self.frame_outlines,
+                        );
+                    }
+                }
                 PassKind::VfxSimulate => {
                     if let Some(vfx) = &self.vfx {
                         vfx.record_simulate(&self.device, command_buffer, frame_index);
@@ -1433,8 +1628,10 @@ impl Renderer {
                                 clear_color: render.clear_color,
                                 terrain: render.terrain,
                                 clear_rects: render.backdrops,
-                                lighting: self.lighting.offscreen_set(),
+                                lighting: self.lighting.offscreen_set(frame_index),
                                 store_depth: false,
+                                load_depth: false,
+                                hull_outlines: false,
                             },
                         );
                     }
@@ -1504,8 +1701,11 @@ impl Renderer {
         );
         bindings.set(resources.hdr, image(resources.hdr));
         bindings.set(resources.depth, image(resources.depth));
-        if let Some(shadow) = resources.shadow {
-            bindings.set(shadow, image(shadow));
+        for resource in [resources.shadow, resources.contact, resources.outline_ids]
+            .into_iter()
+            .flatten()
+        {
+            bindings.set(resource, image(resource));
         }
         bindings.set(
             resources.bones,

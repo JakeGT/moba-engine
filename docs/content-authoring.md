@@ -701,6 +701,8 @@ specular = 1.0                 # 0..=2 specular scale
 specular_tint = [1.0, 0.8, 0.6]  # 0..=1 painted-specular tint (default white)
 unit_roughness = 0.55          # 0..=1, units without a material (default 0.55)
 terrain_roughness = 0.9        # 0..=1 (default 0.9)
+baked_ao = "ember-ao"          # optional <root>/maps/ao/<name>.{toml,ktx2} (below, ADR-0016)
+ao_strength = 0.85             # 0..=1 baked AO strength (default 1)
 ```
 
 The parser enforces the readability rules a descriptor alone can break, as errors: `rim` above
@@ -741,20 +743,62 @@ looked up with `u = N·L` remapped from −1..1 to 0..1 and blended over the wra
 `ramp_strength` (times the material's `ramp`): hard bands give a cel look, a warm-to-cool
 gradient a painterly terminator.
 
-**Quality tiers** (`quality` in the settings, `MOBA_QUALITY`) pick the shadow filter and size
-and whether the specular cube is sampled; `MOBA_SHADOWS=off|hard|pcf|pcss`,
-`MOBA_SHADOW_SIZE=<256..8192>`, `MOBA_IBL=0` and `MOBA_SPECULAR_IBL=0` override them:
+**Quality tiers** (`quality` in the settings, `MOBA_QUALITY`) pick the shadow filter and size,
+whether the specular cube is sampled and (R2b, [ADR-0016](adr/0016-lights-outlines-ao.md)) the
+dynamic-light caps, the outline method and contact shadows; `MOBA_SHADOWS=off|hard|pcf|pcss`,
+`MOBA_SHADOW_SIZE=<256..8192>`, `MOBA_IBL=0`, `MOBA_SPECULAR_IBL=0`, `MOBA_LIGHTS=off|<cap>`,
+`MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and `MOBA_CONTACT_SHADOWS=off|<steps>`
+override them:
 
-| Tier | Shadows | Shadow map | Specular IBL |
-|---|---|---|---|
-| low | hard (1 tap) | 1024² | off (SH ambient only; the cube is not uploaded) |
-| medium | 3×3 PCF | 2048² | on |
-| high | PCSS-lite (16 + 16 taps) | 2048² | on |
-| ultra | PCSS-lite (16 + 32 taps) | 4096² | on |
+| Tier | Shadows | Shadow map | Specular IBL | Lights (all / per column) | Outlines | Contact shadows |
+|---|---|---|---|---|---|---|
+| low | hard (1 tap) | 1024² | off (SH ambient only; the cube is not uploaded) | 16 / 4 | hull | off |
+| medium | 3×3 PCF | 2048² | on | 64 / 8 | hull | off |
+| high | PCSS-lite (16 + 16 taps) | 2048² | on | 128 / 16 | screen | 8 steps |
+| ultra | PCSS-lite (16 + 32 taps) | 4096² | on | 256 / 16 | screen | 16 steps |
+
+Baked AO is applied on every tier. Team outlines (allied, enemy and your own hero; a hovered
+unit; the unit you last ordered attacked) use the HUD's team palette, so the colour-blind
+palette (`team_palette = "colorblind"`) recolours them too. They are drawn only on units the
+client draws, and depth-tested: never through a wall, in fog or in brush.
 
 **Fallback.** A missing or invalid environment logs `[assets] environment '<name>': ...` once
 and lights the map with the hemispheric ambient; a missing ramp logs once and draws without
 it. A match never fails because of lighting.
+
+### Baked AO
+
+Static occluders darken the ambient light around them through a baked top-down ambient
+occlusion map ([ADR-0016](adr/0016-lights-outlines-ao.md)): the ground beside walls and props
+and the feet of units walking past them. `moba-tools ao-bake` bakes it from a pack's walls
+(as the 2.5 m-thick, `wall_height`-high boxes the client draws; a `wall_mesh` is fitted into
+the same box, so the box stands in for it) and the visuals descriptor's props (their meshes'
+triangles, or the built-in block). Structures are not baked, since they are destroyed in play.
+
+```bash
+# writes content/maps/ao/ember-ao.ktx2 and ember-ao.toml
+cargo run --release -p moba-tools --bin ao-bake -- bake --pack content/ember-map.toml \
+  --root content --visuals ember
+# options: --texel 0.5 (metres per texel), --height 3 (falloff), an explicit <out-stem>
+scripts/bake-map-ao.sh          # regenerates the shipped ember and frost bakes
+```
+
+The `.ktx2` is a square `r8` map of the map's `[0, extent]²` world square (0.5 m texels, at
+most 2048², 256 KiB for a 256-unit map; 1 = open), computed as height-field horizon AO (16
+directions, 12 m). The `.toml` sidecar records `extent`, `texels`, `height` (the falloff
+above the ground, 0.1..=64 m, default 3) and a `fingerprint` of the inputs; it is at most
+2 KiB with unknown keys rejected. Name it in the descriptor's `[lighting] baked_ao` (and
+optionally `ao_strength`). It multiplies only the ambient line (diffuse and specular
+ambient), faded out over `height` above the ground, so it never darkens direct sunlight or
+a team colour.
+
+**Re-bake after changing the occluders.** The client recomputes the fingerprint (the map
+extent, every wall segment, the wall height and each prop's position, height, yaw and mesh;
+not colours) for the map it actually binds, and ignores a bake that does not match with
+`[assets] baked AO '<name>': stale: ...; no baked AO`. A visuals name shared by two packs with
+different walls therefore never shows wrong occlusion; a test fails when the shipped bakes go
+stale. A missing or invalid bake logs once and draws without it; `MOBA_BAKED_AO=off` turns it
+off. The default grass map has no walls or props, so it ships no bake.
 
 ### VFX
 
@@ -830,6 +874,20 @@ width = 0.25              # trails and beams, metres
 fps = 0                   # flipbooks: frames per second (0 = spread over the lifetime)
 mesh = "crystal"          # mesh emitters: `cube` or <root>/models/<name>.glb
 telegraph = false         # an area telegraph (readability rules below)
+
+[light]                   # optional: one dynamic point light (ADR-0016)
+color = [1.0, 0.5, 0.2]   # required, linear RGB 0..=4
+intensity = 6.0           # 0..=64 multiplier (default 1)
+radius = 5.0              # required, 0.25..=24 m: the light reaches zero here
+anchor = "target"         # target | source (not line)
+offset = [0, 1, 0]        # metres from the anchor (default one metre up)
+delay = 0.0               # seconds before it switches on
+duration = 0.2            # seconds it stays on (default: while the effect emits)
+fade_in = 0.0             # seconds to ramp up
+fade_out = 0.2            # seconds to ramp down after it ends (default 0.2)
+flicker = 0.3             # 0..=1 random dimming
+team_tint = 0.0           # pull towards the team colour, 0..=1
+scale_with_radius = false # multiply radius by the event's radius (zones)
 ```
 
 - **Primitives.** `sprite` and `flipbook` are camera-facing quads (a flipbook plays a
@@ -863,6 +921,13 @@ telegraph = false         # an area telegraph (readability rules below)
 - **Allied** effects (a teammate's, not your own) are scaled by the `ally_vfx_opacity` setting
   (`MOBA_VFX_ALLY_OPACITY`, default `1`), and their `alpha` particles are capped at 75 %
   opacity so an ally's smoke never fully hides an enemy behind it.
+- **Lights.** An effect's `[light]` lights the ground and units around it (diffuse and
+  specular, no shadows; lights add light and never replace a team colour). Each tier caps the
+  lights in a frame (Low 16 … Ultra 256) and per 32×32 grid column (4 … 16); enemy and
+  neutral effects' lights are listed first, so a cap drops allied lights (scaled by
+  `ally_vfx_opacity`) before an enemy's. A light belongs to an effect the client already
+  plays, so it never reveals anything the client was not sent. `MOBA_LIGHTS=off` turns
+  them off.
 - **Budgets.** Each quality tier caps live particles (Low 4,096 … Ultra 49,152) and an overdraw
   estimate (particle pixels per screen pixel); as either fills, new `low` effects are dropped
   first (at 50 %), then `normal` (80 %), then `high` (95 %). Effects farther than the tier's

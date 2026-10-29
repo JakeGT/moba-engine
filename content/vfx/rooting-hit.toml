@@ -22,3 +22,11 @@ spread = 50
 gravity = -8
 size = [0.8, 1.2]
 color = [1.0, 2.0, 0.4, 1.0]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [0.6, 1.0, 0.2]
+intensity = 4.0
+radius = 4.0
+duration = 0.05
+fade_out = 0.3

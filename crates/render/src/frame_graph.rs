@@ -6,11 +6,16 @@
 //! vfx_simulate  compute: spawn, age, integrate and compact particles; indirect args (R5)
 //! shadow        (R2a; when shadows are on) the main view's units + skinned, depth only →
 //!               shadow map (fixed size)
-//! scene         terrain + units + skinned → hdr (colour, cleared) + depth (sampled-capable),
-//!               sampling the shadow map
+//! depth_prepass (R2b; High+, or screen outlines) terrain + units + skinned → depth
+//!               (+ the R8_UINT outline ID target with screen outlines)
+//! contact_shadows (R2b; with contact shadows) depth (sampled) → R8 contact visibility
+//! scene         terrain + units + skinned → hdr (colour, cleared) + depth (cleared, or
+//!               loaded after the pre-pass), sampling the shadow map and contact target
 //! vfx_draw      particles → hdr (+ OIT accum/reveal), depth read-only + sampled (soft)
 //! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
 //! composite     hdr (sampled) → exposure + AgX tonemap → swapchain
+//! outline       (R2b; screen outlines) ID target (sampled) → outlines blended over the
+//!               swapchain
 //! ui            HUD batch blended over the swapchain (not tonemapped); samples both
 //!               offscreen images
 //! capture       swapchain → readback buffer (only in the capture variant)
@@ -52,7 +57,13 @@ pub(crate) const OFFSCREEN_VARIANTS: usize = 1 << UI_IMAGE_SLOTS;
 pub(crate) enum PassKind {
     Shadow,
     VfxSimulate,
+    /// The main view's depth (and outline IDs) before shading (R2b).
+    DepthPrepass,
+    /// Screen-space contact shadows from the pre-pass depth (R2b).
+    ContactShadows,
     Scene,
+    /// Screen-space outlines over the tonemapped image (R2b).
+    Outline,
     VfxDraw,
     VfxResolve,
     Composite,
@@ -105,7 +116,41 @@ pub(crate) struct FrameResources {
     /// The directional shadow map; `None` when shadows are off.
     pub(crate) shadow: Option<ResourceId>,
     pub(crate) vfx: Option<VfxResources>,
+    /// The `R8_UINT` outline ID target; `None` without screen outlines.
+    pub(crate) outline_ids: Option<ResourceId>,
+    /// The `R8_UNORM` contact-shadow target; `None` without contact shadows.
+    pub(crate) contact: Option<ResourceId>,
+    /// Whether the depth pre-pass runs (the scene then loads its depth).
+    pub(crate) prepass: bool,
 }
+
+/// The depth pre-pass features of a renderer (the same for every variant, ADR-0016).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DepthFeatures {
+    /// Screen-space outlines: the pre-pass writes the ID target and the outline pass reads it.
+    pub(crate) outline_ids: bool,
+    /// Contact shadows: a pass between the pre-pass and the scene.
+    pub(crate) contact: bool,
+}
+
+impl DepthFeatures {
+    /// No pre-pass.
+    #[cfg(test)]
+    pub(crate) const NONE: Self = Self {
+        outline_ids: false,
+        contact: false,
+    };
+
+    /// Whether the depth pre-pass runs.
+    pub(crate) const fn prepass(self) -> bool {
+        self.outline_ids || self.contact
+    }
+}
+
+/// The outline ID target's format: a mandatory colour-attachment and sampled format.
+pub(crate) const OUTLINE_ID_FORMAT: vk::Format = vk::Format::R8_UINT;
+/// The contact-shadow target's format.
+pub(crate) const CONTACT_FORMAT: vk::Format = vk::Format::R8_UNORM;
 
 /// The shadow map a frame renders, when shadows are on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,12 +169,13 @@ pub(crate) struct FramePlan {
 }
 
 /// Builds and compiles the frame graph. Bit `s` of `offscreen` adds the pass that renders
-/// offscreen image `s` this frame; `shadow` adds the shadow pass and map (every variant of
-/// one renderer passes the same `shadow`, so they share transients).
+/// offscreen image `s` this frame; `shadow` adds the shadow pass and map and `depth` the
+/// depth pre-pass, contact shadows and screen outlines (every variant of one renderer passes
+/// the same `shadow`, `vfx_mode` and `depth`, so they share transients).
 ///
 /// # Errors
 /// Only if the declaration below is inconsistent (covered by unit tests).
-#[allow(clippy::too_many_lines)] // One declaration of the whole frame.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One declaration of the frame.
 pub(crate) fn build(
     hdr_format: vk::Format,
     depth_format: vk::Format,
@@ -138,6 +184,7 @@ pub(crate) fn build(
     capture: bool,
     offscreen: usize,
     vfx_mode: VfxMode,
+    depth_features: DepthFeatures,
 ) -> Result<FramePlan, GraphError> {
     let mut graph = GraphBuilder::new();
     // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT; the composite writes
@@ -185,6 +232,19 @@ pub(crate) fn build(
             },
         )
     });
+
+    let screen_target = |format| ImageDesc {
+        format,
+        aspect: vk::ImageAspectFlags::COLOR,
+        size: ImageSize::Swapchain,
+        extra_usage: vk::ImageUsageFlags::empty(),
+    };
+    let outline_ids = depth_features
+        .outline_ids
+        .then(|| graph.transient_image("outline-ids", screen_target(OUTLINE_ID_FORMAT)));
+    let contact = depth_features
+        .contact
+        .then(|| graph.transient_image("contact-shadows", screen_target(CONTACT_FORMAT)));
 
     let vfx = (vfx_mode != VfxMode::Off).then(|| {
         // The particle state, lists and arguments persist across frames on this queue: a
@@ -284,14 +344,42 @@ pub(crate) fn build(
             .access(shadow_map, Access::DepthWrite)
             .access(bones, Access::VertexStorageRead);
     }
-    let scene = graph
+    let prepass = depth_features.prepass();
+    if prepass {
+        let mut pass = graph
+            .pass("depth_prepass", PassKind::DepthPrepass)
+            .access(depth, Access::DepthWrite)
+            .access(bones, Access::VertexStorageRead);
+        if let Some(ids) = outline_ids {
+            pass = pass.access(ids, Access::ColorWrite);
+        }
+        let _ = pass;
+    }
+    if let Some(contact) = contact {
+        let _ = graph
+            .pass("contact_shadows", PassKind::ContactShadows)
+            .access(depth, Access::SampledFragment)
+            .access(contact, Access::ColorWrite);
+    }
+    let mut scene = graph
         .pass("scene", PassKind::Scene)
         .access(hdr, Access::ColorWrite)
-        .access(depth, Access::DepthWrite)
+        .access(
+            depth,
+            if prepass {
+                Access::DepthReadWrite
+            } else {
+                Access::DepthWrite
+            },
+        )
         .access(bones, Access::VertexStorageRead);
     if let Some(shadow_map) = shadow_map {
-        let _ = scene.access(shadow_map, Access::SampledFragment);
+        scene = scene.access(shadow_map, Access::SampledFragment);
     }
+    if let Some(contact) = contact {
+        scene = scene.access(contact, Access::SampledFragment);
+    }
+    let _ = scene;
     if let Some(vfx) = vfx {
         let mut pass = graph
             .pass("vfx_draw", PassKind::VfxDraw)
@@ -318,6 +406,12 @@ pub(crate) fn build(
         .pass("composite", PassKind::Composite)
         .access(hdr, Access::SampledFragment)
         .access(swapchain, Access::ColorWrite);
+    if let Some(ids) = outline_ids {
+        let _ = graph
+            .pass("outline", PassKind::Outline)
+            .access(ids, Access::SampledFragment)
+            .access(swapchain, Access::ColorReadWrite);
+    }
     // The UI samples every offscreen image in every variant (its descriptors always name
     // them), so each read is ordered after this frame's write, if any.
     let mut ui = graph
@@ -347,6 +441,9 @@ pub(crate) fn build(
             offscreen: offscreen_resources,
             shadow: shadow_map,
             vfx,
+            outline_ids,
+            contact,
+            prepass,
         },
     })
 }
@@ -453,7 +550,7 @@ pub(crate) fn record_barriers(
 
 #[cfg(test)]
 mod tests {
-    use super::{OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode, build};
+    use super::{DepthFeatures, OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode, build};
     use ash::vk;
     use vk::ImageLayout as L;
 
@@ -474,6 +571,7 @@ mod tests {
             capture,
             offscreen,
             vfx,
+            DepthFeatures::NONE,
         )
         .expect("the engine frame graph compiles")
     }
@@ -490,6 +588,7 @@ mod tests {
             capture,
             offscreen,
             VfxMode::Off,
+            DepthFeatures::NONE,
         )
         .expect("the shadowed frame graph compiles")
     }
@@ -731,6 +830,7 @@ mod tests {
                 capture,
                 offscreen,
                 VfxMode::Oit,
+                DepthFeatures::NONE,
             )
             .expect("the shadowed VFX frame graph compiles")
         };
@@ -768,5 +868,176 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn depth_plan(capture: bool, offscreen: usize, features: DepthFeatures) -> super::FramePlan {
+        build(
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::Format::D32_SFLOAT,
+            vk::ImageAspectFlags::DEPTH,
+            Some(ShadowSpec {
+                format: vk::Format::D32_SFLOAT,
+                size: 2048,
+            }),
+            capture,
+            offscreen,
+            VfxMode::Oit,
+            features,
+        )
+        .expect("the pre-pass frame graph compiles")
+    }
+
+    #[test]
+    fn the_prepass_feeds_contact_shadows_the_scene_and_the_outline_pass() {
+        let all = DepthFeatures {
+            outline_ids: true,
+            contact: true,
+        };
+        let plain = depth_plan(false, 0, all);
+        for capture in [false, true] {
+            for offscreen in 0..OFFSCREEN_VARIANTS {
+                let frame = depth_plan(capture, offscreen, all);
+                assert!(frame.graph.shares_transients_with(&plain.graph));
+                assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                let count = offscreen.count_ones() as usize;
+                let kinds: Vec<_> = frame.graph.passes().iter().map(|pass| pass.tag).collect();
+                let mut expected = vec![
+                    PassKind::VfxSimulate,
+                    PassKind::Shadow,
+                    PassKind::DepthPrepass,
+                    PassKind::ContactShadows,
+                    PassKind::Scene,
+                    PassKind::VfxDraw,
+                    PassKind::VfxResolve,
+                    PassKind::Composite,
+                    PassKind::Outline,
+                    PassKind::Ui,
+                ];
+                if capture {
+                    expected.push(PassKind::Capture);
+                }
+                assert_eq!(&kinds[count..], expected.as_slice());
+                assert!(kinds.len() <= crate::graph::MAX_PASSES);
+                // Everything up to the resolve is ahead of the acquire wait.
+                assert_eq!(frame.acquire_split, count + 7);
+            }
+        }
+        let resources = plain.resources;
+        let (depth, contact, ids) = (
+            resources.depth,
+            resources.contact.expect("contact target"),
+            resources.outline_ids.expect("ID target"),
+        );
+        let pass = |tag| {
+            plain
+                .graph
+                .passes()
+                .iter()
+                .find(|pass| pass.tag == tag)
+                .expect("pass")
+        };
+        let barrier = |tag, resource| {
+            *pass(tag)
+                .barriers
+                .iter()
+                .find(|barrier| barrier.resource == resource)
+                .expect("barrier")
+        };
+        // Pre-pass depth write -> sampled by the contact pass.
+        let sampled = barrier(PassKind::ContactShadows, depth);
+        assert_eq!(
+            (sampled.old_layout, sampled.new_layout),
+            (
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                L::SHADER_READ_ONLY_OPTIMAL
+            )
+        );
+        assert_eq!(
+            sampled.src_access,
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+        );
+        // -> loaded, tested and written by the scene: contents kept (not UNDEFINED).
+        let loaded = barrier(PassKind::Scene, depth);
+        assert_eq!(
+            (loaded.old_layout, loaded.new_layout),
+            (
+                L::SHADER_READ_ONLY_OPTIMAL,
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            )
+        );
+        assert!(
+            loaded
+                .dst_access
+                .contains(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ)
+        );
+        // The contact target: written, then sampled by the scene's fragment shaders.
+        let read = barrier(PassKind::Scene, contact);
+        assert_eq!(read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+        assert_eq!(read.src_access, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
+        // The ID target lives until the outline pass, after the composite.
+        let ids_read = barrier(PassKind::Outline, ids);
+        assert_eq!(ids_read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+        assert!(pass(PassKind::Outline).uses(plain.resources.swapchain));
+        // Their own slots (R8_UINT, R8_UNORM): no aliasing with HDR or the OIT targets.
+        for resource in [ids, contact] {
+            let slot = plain.graph.slots()[plain.graph.slot_of(resource).expect("slot")];
+            assert!(
+                slot.usage
+                    .contains(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            );
+        }
+    }
+
+    #[test]
+    fn a_prepass_for_one_feature_leaves_out_the_other() {
+        let contact_only = depth_plan(
+            false,
+            0,
+            DepthFeatures {
+                outline_ids: false,
+                contact: true,
+            },
+        );
+        assert!(contact_only.resources.outline_ids.is_none());
+        assert!(contact_only.resources.prepass);
+        assert!(
+            !contact_only
+                .graph
+                .passes()
+                .iter()
+                .any(|pass| pass.tag == PassKind::Outline)
+        );
+        let outlines_only = depth_plan(
+            false,
+            0,
+            DepthFeatures {
+                outline_ids: true,
+                contact: false,
+            },
+        );
+        assert!(outlines_only.resources.contact.is_none());
+        let kinds: Vec<_> = outlines_only
+            .graph
+            .passes()
+            .iter()
+            .map(|pass| pass.tag)
+            .collect();
+        assert!(kinds.contains(&PassKind::DepthPrepass));
+        assert!(!kinds.contains(&PassKind::ContactShadows));
+        // Pre-pass depth write -> scene load: a write-after-write in the same layout.
+        let scene = outlines_only
+            .graph
+            .passes()
+            .iter()
+            .find(|pass| pass.tag == PassKind::Scene)
+            .expect("scene");
+        let depth = scene
+            .barriers
+            .iter()
+            .find(|barrier| barrier.resource == outlines_only.resources.depth)
+            .expect("depth barrier");
+        assert_eq!(depth.old_layout, L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let none = depth_plan(false, 0, DepthFeatures::NONE);
+        assert!(!none.resources.prepass);
     }
 }

@@ -7,6 +7,7 @@ use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, persp
 use crate::ui::UiImage;
 
 use crate::lighting::{FrameLighting, SceneLighting};
+use crate::lights::PointLight;
 use crate::vfx::VfxFrame;
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
@@ -161,6 +162,9 @@ pub struct UnitInstance {
     pub mesh: MeshId,
     /// Joint matrices for a skinned mesh ([`BoneRange::NONE`] for static meshes).
     pub bones: BoneRange,
+    /// Outline palette slot ([`Scene::outlines`], ADR-0016): `0` (the default) draws no
+    /// outline; slots past `OUTLINE_SLOTS - 1` are treated as `0`.
+    pub outline: u8,
 }
 
 impl UnitInstance {
@@ -172,7 +176,15 @@ impl UnitInstance {
             color,
             mesh: MeshId::CUBE,
             bones: BoneRange::NONE,
+            outline: 0,
         }
+    }
+
+    /// Returns this instance outlined with palette slot `slot` (`0` = none).
+    #[must_use]
+    pub const fn with_outline(mut self, slot: u8) -> Self {
+        self.outline = slot;
+        self
     }
 
     /// Returns this instance drawn with `mesh` instead.
@@ -202,7 +214,75 @@ impl UnitInstance {
             color,
             mesh: MeshId::CUBE,
             bones: BoneRange::NONE,
+            outline: 0,
         }
+    }
+}
+
+/// Number of outline palette slots, including the unused slot 0.
+pub const OUTLINE_SLOTS: usize = 8;
+/// Widest outline the renderer draws, in pixels.
+pub const MAX_OUTLINE_WIDTH: f32 = 4.0;
+
+/// The outline colours and widths of one frame ([`Scene::outlines`], ADR-0016).
+///
+/// Slot 0 means "no outline" and is ignored. Each other slot holds a **linear display**
+/// colour (what should reach the screen: the screen-space path draws it after the tonemap,
+/// the inverted-hull path through it) and a width in pixels (`0` turns the slot off, at most
+/// [`MAX_OUTLINE_WIDTH`]). Where outlines touch, the higher slot wins. The renderer knows
+/// nothing about teams: the application assigns slots and colours (for example from a
+/// colour-blind palette).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct OutlinePalette {
+    /// Per slot: linear display RGB and, in `w`, the width in pixels.
+    pub slots: [Vec4; OUTLINE_SLOTS],
+}
+
+impl OutlinePalette {
+    /// Every slot off.
+    pub const NONE: Self = Self {
+        slots: [Vec4::ZERO; OUTLINE_SLOTS],
+    };
+
+    /// Returns this palette with `slot` drawn in `color` (linear display RGB) at `width`
+    /// pixels. Slot 0 and slots past the palette are ignored.
+    #[must_use]
+    pub fn with_slot(mut self, slot: u8, color: Vec3, width: f32) -> Self {
+        let index = usize::from(slot);
+        if index > 0 && index < OUTLINE_SLOTS {
+            self.slots[index] = color.extend(width);
+        }
+        self
+    }
+
+    /// The palette as uploaded: colours clamped to `0..=1`, widths to
+    /// `0..=`[`MAX_OUTLINE_WIDTH`] (non-finite values become 0), slot 0 zero.
+    pub(crate) fn sanitized(&self) -> [[f32; 4]; OUTLINE_SLOTS] {
+        let mut out = [[0.0; 4]; OUTLINE_SLOTS];
+        for (index, slot) in self.slots.iter().enumerate().skip(1) {
+            out[index] = [
+                crate::lighting::sanitize(slot.x, 0.0, 1.0),
+                crate::lighting::sanitize(slot.y, 0.0, 1.0),
+                crate::lighting::sanitize(slot.z, 0.0, 1.0),
+                crate::lighting::sanitize(slot.w, 0.0, MAX_OUTLINE_WIDTH),
+            ];
+        }
+        out
+    }
+
+    /// The widest slot, pixels.
+    pub(crate) fn max_width(&self) -> f32 {
+        self.sanitized()
+            .iter()
+            .map(|slot| slot[3])
+            .fold(0.0, f32::max)
+    }
+}
+
+impl Default for OutlinePalette {
+    fn default() -> Self {
+        Self::NONE
     }
 }
 
@@ -226,6 +306,11 @@ pub struct Scene<'a> {
     pub lighting: SceneLighting,
     /// Particles to spawn and the particle time step ([`VfxFrame::EMPTY`] by default).
     pub vfx: VfxFrame<'a>,
+    /// Dynamic point lights (ADR-0016), most important first: past the tier's caps they are
+    /// dropped in list order. Empty by default.
+    pub lights: &'a [PointLight],
+    /// Outline colours and widths by slot ([`UnitInstance::outline`]); none by default.
+    pub outlines: OutlinePalette,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -375,6 +460,8 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            lights: &[],
+            outlines: OutlinePalette::NONE,
         }
     }
 
@@ -393,7 +480,23 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            lights: &[],
+            outlines: OutlinePalette::NONE,
         }
+    }
+
+    /// Sets this frame's dynamic point lights, most important first (ADR-0016).
+    #[must_use]
+    pub const fn with_lights(mut self, lights: &'a [PointLight]) -> Self {
+        self.lights = lights;
+        self
+    }
+
+    /// Sets the outline palette.
+    #[must_use]
+    pub const fn with_outlines(mut self, outlines: OutlinePalette) -> Self {
+        self.outlines = outlines;
+        self
     }
 
     /// Sets the lighting art direction.
@@ -455,15 +558,35 @@ pub(crate) struct CameraUniform {
     specular_tint: [f32; 4],
     ambient_ground: [f32; 4],
     sh: [[f32; 4]; 9],
+    inv_view_proj: [[f32; 4]; 4],
+    viewport: [f32; 4],
+    light_grid: [f32; 4],
+    light_info: [u32; 4],
+    occlusion: [f32; 4],
+    baked_ao: [f32; 4],
+    contact: [f32; 4],
+    outline_palette: [[f32; 4]; OUTLINE_SLOTS],
 }
 
 impl CameraUniform {
+    /// The camera block of a view `extent` pixels large, with this frame's `lighting`
+    /// (shadows, IBL, lights, occlusion) and `outlines`.
     pub(crate) fn new(
         camera: Camera,
         vision: &VisionCircles,
         terrain: [f32; 4],
         lighting: &FrameLighting,
+        outlines: &OutlinePalette,
+        extent: [u32; 2],
     ) -> Self {
+        let width = extent[0].max(1) as f32;
+        let height = extent[1].max(1) as f32;
+        let inverse = camera.view_proj.inverse();
+        let inverse = if inverse.is_finite() {
+            inverse
+        } else {
+            Mat4::IDENTITY
+        };
         let mut circles = [[0.0; 4]; VISION_CIRCLES];
         for (destination, source) in circles.iter_mut().zip(vision.circles) {
             *destination = source.to_array();
@@ -493,6 +616,14 @@ impl CameraUniform {
             specular_tint: lighting.specular_tint,
             ambient_ground: lighting.ambient_ground,
             sh: lighting.sh,
+            inv_view_proj: inverse.to_cols_array_2d(),
+            viewport: [width, height, 1.0 / width, 1.0 / height],
+            light_grid: lighting.light_grid,
+            light_info: lighting.light_info,
+            occlusion: lighting.occlusion,
+            baked_ao: lighting.baked_ao,
+            contact: lighting.contact,
+            outline_palette: outlines.sanitized(),
         }
     }
 }
@@ -503,21 +634,35 @@ impl CameraUniform {
 pub(crate) struct GpuInstance {
     model: [[f32; 4]; 4],
     color: [f32; 4],
+    /// x: outline slot (0 when out of range); yzw reserved.
+    params: [u32; 4],
 }
 
 impl From<UnitInstance> for GpuInstance {
     fn from(instance: UnitInstance) -> Self {
+        let slot = usize::from(instance.outline);
         Self {
             model: instance.transform.to_cols_array_2d(),
             color: instance.color.to_array(),
+            params: [
+                if slot < OUTLINE_SLOTS {
+                    u32::from(instance.outline)
+                } else {
+                    0
+                },
+                0,
+                0,
+                0,
+            ],
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CameraUniform;
+    use super::{CameraUniform, GpuInstance, OutlinePalette, UnitInstance};
     use core::mem::{offset_of, size_of};
+    use moba_core::math::{Mat4, Vec3, Vec4};
 
     /// `CameraBlock` in `include/camera.glsl` is std140 with only 16-byte members, so the Rust
     /// struct's offsets are the GLSL offsets.
@@ -527,6 +672,27 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, light_view_proj), 928);
         assert_eq!(offset_of!(CameraUniform, ambient_ground), 1104);
         assert_eq!(offset_of!(CameraUniform, sh), 1120);
-        assert_eq!(size_of::<CameraUniform>(), 1264);
+        // R2b (ADR-0016) members follow the SH block.
+        assert_eq!(offset_of!(CameraUniform, inv_view_proj), 1264);
+        assert_eq!(offset_of!(CameraUniform, light_info), 1360);
+        assert_eq!(offset_of!(CameraUniform, contact), 1408);
+        assert_eq!(offset_of!(CameraUniform, outline_palette), 1424);
+        assert_eq!(size_of::<CameraUniform>(), 1552);
+    }
+
+    #[test]
+    fn instances_carry_a_clamped_outline_slot() {
+        assert_eq!(size_of::<GpuInstance>(), 96);
+        let unit = UnitInstance::new(Mat4::IDENTITY, Vec4::ONE);
+        assert_eq!(GpuInstance::from(unit.with_outline(3)).params[0], 3);
+        assert_eq!(GpuInstance::from(unit.with_outline(8)).params[0], 0);
+        let palette = OutlinePalette::NONE
+            .with_slot(0, Vec3::ONE, 2.0)
+            .with_slot(2, Vec3::new(2.0, f32::NAN, 0.5), 9.0)
+            .with_slot(9, Vec3::ONE, 1.0);
+        let uploaded = palette.sanitized();
+        assert_eq!(uploaded[0], [0.0; 4], "slot 0 is never drawn");
+        assert_eq!(uploaded[2], [1.0, 0.0, 0.5, super::MAX_OUTLINE_WIDTH]);
+        assert!((palette.max_width() - super::MAX_OUTLINE_WIDTH).abs() < 1e-6);
     }
 }

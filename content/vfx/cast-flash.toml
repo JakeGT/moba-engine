@@ -26,3 +26,12 @@ size_end = 0.2
 color = [1.6, 1.4, 1.0, 1.0]
 team_tint = 0.5
 drag = 3
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [1.0, 0.9, 0.7]
+intensity = 4.0
+radius = 5.0
+anchor = "source"
+duration = 0.1
+fade_out = 0.2

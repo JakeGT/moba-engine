@@ -6,6 +6,9 @@
 
 #include "camera.glsl"
 
+// Invariant like the unit shaders: the depth pre-pass draws the terrain with this shader.
+invariant gl_Position;
+
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 

@@ -180,15 +180,26 @@ clear_environment, has_environment, set_lighting_ramp}`, `MaterialData`'s stylis
 (`new` + `with_*`), `ParticleShape`, `ParticleBlend`, `ParticleRole`, `VfxFrame` (`new`,
 `EMPTY`, `with_ally_opacity`; `Scene::with_vfx`), `VfxBudget` (`QualityTier::vfx_budget`),
 `VfxStats`, `VFX_MESH_SLOTS`, `RenderConfig::with_vfx`, `Renderer::{vfx_available,
-vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`.
+vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`. R2b
+(ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `PointLight` (`new`;
+`Scene::lights`/`with_lights`), `LightStats` (`Renderer::light_stats`), `MAX_LIGHTS`,
+`MAX_LIGHTS_PER_CELL`, `OutlineMode` (`name`, `from_name`), `OutlinePalette` (`NONE`,
+`with_slot`; `Scene::outlines`/`with_outlines`), `OUTLINE_SLOTS`, `MAX_OUTLINE_WIDTH`,
+`UnitInstance::outline`/`with_outline`, `BakedAo` (`new`, `with_height`, `with_strength`;
+`Renderer::{set_baked_ao, clear_baked_ao, has_baked_ao}`), `MAX_CONTACT_SHADOW_STEPS` and
+`LightingConfig::{max_lights, lights_per_cell, outlines, baked_ao, contact_shadow_steps}`
+with a `with_*` each.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
-  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`.
+  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R2b): `OutlineMode`.
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
   `with_*`), `VfxFrame`, and the read-only `VfxBudget` and `VfxStats`.
+- `#[non_exhaustive]` structs (R2b): `PointLight` (public fields, `new`), `BakedAo` (`new` +
+  `with_*`), `OutlinePalette` (`NONE` + `with_slot`; public `slots`, the uniform layout) and
+  the read-only `LightStats`.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
@@ -229,7 +240,12 @@ fields, `EnvironmentDesc`/`EnvironmentError`/`environment_paths`/`sh_basis`, cub
 descriptors (ADR-0013: `VfxEffect`, `VfxEmitter`, `VfxBindings`, `VfxAbilityBinding`,
 `VfxUnitEffects`, `VfxSprite`/`VFX_SPRITES`, `procedural_atlas`, `vfx_path`; the enums
 `VfxPrimitive`, `VfxBlend`, `VfxAnchor`, `VfxDirection`, `VfxShape`, `VfxImportance` and
-`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`).
+`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`),
+and R2b's (ADR-0016) effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
+`end`), `MAX_VFX_LIGHT_INTENSITY`/`MAX_VFX_LIGHT_RADIUS`, `BakedAoDesc` (`new`, `with_height`,
+`to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`,
+`baked_ao_paths`, `BAKED_AO_DIR`, `MAX_BAKED_AO_BYTES`, `MAX_BAKED_AO_TEXELS`,
+`DEFAULT_BAKED_AO_HEIGHT` and `MapLighting::{baked_ao, ao_strength}`.
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,

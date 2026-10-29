@@ -48,3 +48,13 @@ size_end = 1.6
 color = [0.08, 0.06, 0.05, 0.6]
 color_end = [0.06, 0.05, 0.05, 0.0]
 offset = [0, 0.8, 0]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [1.0, 0.4, 0.1]
+intensity = 5.0
+radius = 3.0
+scale_with_radius = true
+fade_in = 0.2
+fade_out = 0.4
+flicker = 0.35

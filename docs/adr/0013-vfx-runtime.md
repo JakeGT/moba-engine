@@ -211,7 +211,8 @@ in the local view with every effect.
   post-processing. It needs a copy of the HDR target before the particle pass and a refraction
   permutation (another screen-sized target and pass), which belongs with R6's bloom chain and
   its own tier switch rather than inside R5's budget.
-- Lights from effects (fireball glow on the ground) belong to R2's clustered lights.
+- Lights from effects (fireball glow on the ground) belong to R2's clustered lights. *Done in
+  R2b: an effect's optional `[light]` table ([ADR-0016](0016-lights-outlines-ao.md)).*
 - Projected decals for telegraphs (R3) would replace ground quads on uneven terrain.
 - Per-viewer fog of war for effects: today the server already withholds hidden enemies'
   events, so an effect never reveals more than the event stream does.

@@ -6,6 +6,7 @@
 struct Instance {
     mat4 model;
     vec4 color;
+    uvec4 params; // x outline palette slot (0 = none, ADR-0016), yzw reserved
 };
 
 layout(set = 1, binding = 0) readonly buffer InstanceBlock {

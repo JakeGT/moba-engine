@@ -18,12 +18,13 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this).
-pub(crate) const MAX_PASSES: usize = 12;
-/// Most resources (imported + transient) one graph may declare (at most 32: a pass's
-/// resource set is a `u32` bit mask).
-pub(crate) const MAX_RESOURCES: usize = 24;
+pub(crate) const MAX_PASSES: usize = 32;
+/// Most resources (imported + transient) one graph may declare (at most 64: a pass's
+/// resource set is a `u64` bit mask).
+pub(crate) const MAX_RESOURCES: usize = 48;
 /// Most barriers emitted before one pass or at the end of the graph.
 pub(crate) const MAX_BARRIERS: usize = 16;
+const _: () = assert!(MAX_RESOURCES <= u64::BITS as usize);
 
 /// A resource declared on a [`GraphBuilder`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -45,6 +46,9 @@ pub(crate) enum Access {
     ColorReadWrite,
     /// Depth attachment, cleared, tested and written.
     DepthWrite,
+    /// Depth attachment that loads the previous contents (a depth pre-pass), then is tested
+    /// and written (R2b).
+    DepthReadWrite,
     /// Sampled from a fragment shader.
     SampledFragment,
     /// Copy source (image or buffer).
@@ -123,6 +127,14 @@ impl Access {
                 A::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 false,
+                U::DEPTH_STENCIL_ATTACHMENT,
+            ),
+            Self::DepthReadWrite => (
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
+                A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                true,
                 U::DEPTH_STENCIL_ATTACHMENT,
             ),
             Self::SampledFragment => (
@@ -534,8 +546,8 @@ pub(crate) struct CompiledPass<T> {
     pub(crate) name: &'static str,
     pub(crate) tag: T,
     pub(crate) barriers: Vec<Barrier>,
-    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 32).
-    uses: u32,
+    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 64).
+    uses: u64,
 }
 
 impl<T> CompiledPass<T> {
@@ -979,7 +991,7 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         let uses = pass
             .accesses
             .iter()
-            .fold(0u32, |mask, &(resource, _)| mask | (1 << resource.index()));
+            .fold(0u64, |mask, &(resource, _)| mask | (1 << resource.index()));
         compiled.push(CompiledPass {
             name: pass.name,
             tag: pass.tag,

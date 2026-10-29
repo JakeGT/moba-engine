@@ -109,15 +109,25 @@ passes run in this order:
    `SHADOW_PASS` permutation of the skinned vertex shader) depth-only into one directional
    shadow map fitted to the camera's view of the board and texel-snapped (1024²–4096² by
    tier; absent when shadows are off, ADR-0011);
-4. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
-   the `Low` quality tier) with a sampled-capable depth buffer, sampling the shadow map;
-5. `vfx_draw` draws the particles into the HDR target, testing the scene depth read-only and
+4. `depth_prepass` (High and Ultra, [ADR-0016](adr/0016-lights-outlines-ao.md)) draws the
+   terrain and units depth-only into the frame's depth (biased back, `invariant` positions)
+   plus, with screen-space outlines, an `R8_UINT` outline-slot ID target;
+5. `contact_shadows` (High and Ultra) ray-marches that depth towards the sun into an
+   `R8_UNORM` visibility target; the pre-pass depth is sampled-capable here, the slot meant
+   for R6's GTAO;
+6. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
+   the `Low` quality tier) with a sampled-capable depth buffer (loaded from the pre-pass with
+   `LESS_OR_EQUAL` when there is one, else cleared), sampling the shadow map, the contact
+   shadows and the light grid, and drawing inverted-hull outlines on Low and Medium;
+7. `vfx_draw` draws the particles into the HDR target, testing the scene depth read-only and
    sampling it for soft particles; alpha particles accumulate weighted blended OIT targets on
    Medium and up, which
-6. `vfx_resolve` composites over the HDR target;
-7. `composite` applies exposure and an AgX tonemap into the swapchain image;
-8. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images;
-9. `capture` copies the swapchain image for readback, in capture frames only.
+8. `vfx_resolve` composites over the HDR target;
+9. `composite` applies exposure and an AgX tonemap into the swapchain image;
+10. `outline` (screen-space outlines, High and Ultra) dilates the ID target's slots into
+    palette-coloured silhouettes on the swapchain image;
+11. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images;
+12. `capture` copies the swapchain image for readback, in capture frames only.
 
 The offscreen images are graph imports, not transients: they keep their contents across
 frames and start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, so a frame that does not
@@ -152,8 +162,18 @@ can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
   ambient (SH-L2 irradiance plus a prefiltered specular cube through a split-sum BRDF LUT,
   from the map's client-local environment; hemispheric ambient without one), the shadow map
   (hard, PCF or PCSS-lite by tier) and a stylisation layer (wrap, ramp, painted specular,
-  rim) set per map and per material. The lighting set (set 3: shadow map, environment cube,
-  BRDF LUT, ramp) is written at load and resize only;
+  rim) set per map and per material. R2b ([ADR-0016](adr/0016-lights-outlines-ao.md)) adds
+  dynamic point lights (clustered forward: the CPU bins the frame's `Scene::lights` into a
+  32×32 grid of columns over the camera's ground footprint, with per-tier caps), a baked
+  top-down AO map of the static occluders multiplying the ambient line (with a hook for
+  R6's SSAO) and the contact-shadow term multiplying the shadow map. The lighting set (set 3:
+  shadow map, environment cube, BRDF LUT, ramp, light list, light grid, baked AO, contact
+  shadows) is one set per frame in flight, written at load and resize only (the light
+  buffers' contents change per frame);
+- team readability outlines on the units the client marks (`UnitInstance::outline`, a slot of
+  the client's `OutlinePalette` in its team palette): screen-space from the pre-pass ID
+  target on High and Ultra, an inverted hull in this pass on Low and Medium, depth-tested
+  either way;
 - up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
   darkens unseen ground.
 

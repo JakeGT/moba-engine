@@ -14,6 +14,9 @@
 #define MOBA_SHADOW_PCF 2.0
 #define MOBA_SHADOW_PCSS 3.0
 
+// Outline palette slots (R2b, ADR-0016): slot 0 is "no outline".
+#define MOBA_OUTLINE_SLOTS 8
+
 layout(set = 0, binding = 0) uniform CameraBlock {
     mat4 view_proj;
     vec4 camera_pos;
@@ -38,6 +41,16 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 specular_tint;    // rgb painted-specular tint, w specular scale
     vec4 ambient_ground;   // rgb hemispheric ground ambient, w reserved
     vec4 sh[9];            // SH-L2 diffuse irradiance / pi (rgb), environment maps only
+    // R2b (ADR-0016): screen reconstruction, dynamic lights, occlusion and outlines.
+    mat4 inv_view_proj;    // clip -> world (contact shadows)
+    vec4 viewport;         // xy extent in pixels, zw 1 / extent
+    vec4 light_grid;       // xy grid minimum (world x, z), zw 1 / cell size (x, z)
+    uvec4 light_info;      // xy grid columns (x, z), z words per column, w lights (0 = none)
+    vec4 occlusion;        // x baked AO strength (0 = off), y 1 = contact shadows bound,
+                           // z SSAO strength (R6; 0 = none), w reserved
+    vec4 baked_ao;         // xy AO map origin (world x, z), z 1 / map size, w height falloff
+    vec4 contact;          // x ray steps, y ray length, z thickness, w fade-out distance
+    vec4 outline_palette[MOBA_OUTLINE_SLOTS]; // rgb linear display colour, w width (pixels)
 } camera;
 
 #endif
