@@ -1,0 +1,29 @@
+# Wind Rush: a gust swirling around the caster (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.6
+importance = "normal"
+
+[[emitters]]
+anchor = "source"
+primitive = "ring"
+sprite = "swirl"
+rate = 10
+lifetime = [0.4, 0.4]
+size = [3.0, 3.0]
+size_end = 1.8
+spin = [600, 600]
+color = [0.8, 1.6, 1.0, 0.8]
+
+[[emitters]]
+anchor = "source"
+sprite = "spark"
+rate = 40
+lifetime = [0.3, 0.5]
+speed = [3, 5]
+direction = "up"
+spread = 15
+shape = "circle"
+radius = 1.0
+size = [0.8, 1.2]
+color = [0.8, 1.8, 1.0, 1.0]
+offset = [0, -0.8, 0]

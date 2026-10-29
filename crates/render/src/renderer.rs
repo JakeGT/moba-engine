@@ -21,7 +21,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::{
-    self, Binding, Bindings, FramePlan, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
+    self, Binding, Bindings, FramePlan, OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode,
 };
 use crate::instance::{InstanceContext, ValidationMode};
 use crate::lighting::{
@@ -31,6 +31,7 @@ use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, Textur
 use crate::passes::composite::CompositePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::scene::{ScenePass, SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget};
+use crate::passes::vfx::{VfxPass, VfxTargets};
 use crate::pipeline_cache::PipelineCacheState;
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
@@ -40,6 +41,7 @@ use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
 use crate::targets::{self, OffscreenTarget, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
+use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 
 const FRAMES_IN_FLIGHT: usize = 2;
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
@@ -53,6 +55,7 @@ pub const DEFAULT_UI_IMAGE_SIZES: [[u32; 2]; UI_IMAGE_SLOTS] = [[2048, 128], [51
 /// Renderer configuration.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // Independent feature switches.
 pub struct RenderConfig {
     /// Validation layer policy.
     pub validation: ValidationMode,
@@ -93,6 +96,10 @@ pub struct RenderConfig {
     /// devices without `textureCompressionBC`, they are decoded on the CPU at load. Default
     /// `true`.
     pub compressed_textures: bool,
+    /// Build the GPU particle passes (ADR-0013) with the tier's [`VfxBudget`]. When `false`,
+    /// or on a device whose graphics queue has no compute, the frame has no VFX passes and
+    /// [`Scene::vfx`] spawns are ignored. Default `true`.
+    pub vfx: bool,
     /// Size of each offscreen [`UiImage`] (R7b), indexed by [`UiImage::index`]; default
     /// [`DEFAULT_UI_IMAGE_SIZES`]. Each side is clamped to `1..=`[`MAX_UI_IMAGE_SIZE`]; a
     /// 1x1 image is the cheapest way to switch a slot off. The images are allocated once
@@ -120,6 +127,7 @@ impl Default for RenderConfig {
             pipeline_cache: None,
             shader_dir: None,
             compressed_textures: true,
+            vfx: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
             lighting: None,
         }
@@ -235,6 +243,13 @@ impl RenderConfig {
         }
     }
 
+    /// Returns this config with [`RenderConfig::vfx`] set.
+    #[must_use]
+    pub const fn with_vfx(mut self, vfx: bool) -> Self {
+        self.vfx = vfx;
+        self
+    }
+
     /// Returns this config with the size of offscreen `image` set
     /// ([`RenderConfig::ui_image_sizes`]).
     #[must_use]
@@ -295,6 +310,8 @@ pub struct Renderer {
     composite: CompositePass,
     ui: UiPass,
     lighting: LightingResources,
+    /// GPU particles; `None` when disabled or unsupported (the frame then has no VFX passes).
+    vfx: Option<VfxPass>,
     materials: Materials,
     shaders: ShaderSource,
     pipeline_stats: PipelineStats,
@@ -418,6 +435,39 @@ impl Renderer {
         }
         let graph_error =
             |error: crate::graph::GraphError| RenderError::RenderGraph(error.to_string());
+        let mut budget = config.quality_tier.vfx_budget();
+        // MoltenVK: no sampling of a depth image that is also the (read-only) depth
+        // attachment of the same rendering; the particles are depth-tested only.
+        if device.portability_subset {
+            budget.soft_particles = false;
+        }
+        let vfx = if !config.vfx {
+            None
+        } else if !device.compute_supported {
+            eprintln!("[render] VFX off: the graphics queue has no compute");
+            None
+        } else {
+            match VfxPass::new(
+                &device,
+                &shaders,
+                FRAMES_IN_FLIGHT,
+                hdr_format,
+                depth_format,
+                budget,
+                budget.oit,
+            ) {
+                Ok(pass) => Some(pass),
+                Err(error) => {
+                    eprintln!("[render] VFX unavailable ({error}); drawing without particles");
+                    None
+                }
+            }
+        };
+        let vfx_mode = match &vfx {
+            None => VfxMode::Off,
+            Some(_) if budget.oit => VfxMode::Oit,
+            Some(_) => VfxMode::Unsorted,
+        };
         let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
         for capture in [false, true] {
             for offscreen in 0..OFFSCREEN_VARIANTS {
@@ -429,6 +479,7 @@ impl Renderer {
                         shadow,
                         capture,
                         offscreen,
+                        vfx_mode,
                     )
                     .map_err(graph_error)?,
                 );
@@ -555,6 +606,7 @@ impl Renderer {
             composite,
             ui,
             lighting,
+            vfx,
             materials,
             shaders,
             pipeline_stats,
@@ -719,6 +771,80 @@ impl Renderer {
         self.profiler.latest()
     }
 
+    /// Whether the GPU particle passes exist ([`RenderConfig::vfx`] and compute support).
+    #[must_use]
+    pub fn vfx_available(&self) -> bool {
+        self.vfx.is_some()
+    }
+
+    /// The VFX budget in use: the configured tier's ([`QualityTier::vfx_budget`]), with soft
+    /// particles off on portability-subset devices (`MoltenVK`).
+    #[must_use]
+    pub fn vfx_budget(&self) -> VfxBudget {
+        self.vfx
+            .as_ref()
+            .map_or_else(|| self.config.quality_tier.vfx_budget(), VfxPass::budget)
+    }
+
+    /// Particle statistics of the latest completed frame (lagging like [`Self::gpu_timings`]):
+    /// live particles, spawns, drops and the projected-pixel overdraw estimate. `None` until
+    /// the first frame completes, and when VFX are unavailable.
+    #[must_use]
+    pub fn vfx_stats(&self) -> Option<VfxStats> {
+        self.vfx.as_ref().and_then(VfxPass::latest)
+    }
+
+    /// Uses a registered texture as the particle atlas (an 8×8 grid of equal cells in the
+    /// [`moba_assets::VFX_SPRITES`] layout; R is coverage, G the hot core), or restores the
+    /// built-in procedural atlas with `None`. Load time only: waits for the device to idle.
+    ///
+    /// # Errors
+    /// [`RenderError::Vfx`] when VFX are unavailable or the texture id is unknown.
+    pub fn set_vfx_atlas(&mut self, texture: Option<TextureId>) -> RenderResult<()> {
+        let view = match texture {
+            Some(texture) => Some(
+                self.materials
+                    .texture_view(texture)
+                    .ok_or(RenderError::Vfx("unknown atlas texture id"))?,
+            ),
+            None => None,
+        };
+        let Some(vfx) = self.vfx.as_mut() else {
+            return Err(RenderError::Vfx("VFX are unavailable"));
+        };
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses
+        // the descriptor set being rewritten.
+        unsafe { self.device.device.device_wait_idle() }?;
+        vfx.set_atlas(&self.device, view);
+        Ok(())
+    }
+
+    /// Binds a registered static mesh to mesh-particle `slot` (`0..VFX_MESH_SLOTS`), or
+    /// unbinds it with `None` (its particles then draw as billboards). Load time only.
+    ///
+    /// # Errors
+    /// [`RenderError::Vfx`] when VFX are unavailable, the slot is out of range or the mesh is
+    /// unknown or skinned.
+    pub fn set_vfx_mesh(&mut self, slot: usize, mesh: Option<MeshId>) -> RenderResult<()> {
+        if slot >= VFX_MESH_SLOTS {
+            return Err(RenderError::Vfx("mesh slot out of range"));
+        }
+        let binding = match mesh {
+            Some(id) => {
+                let gpu = self
+                    .scene
+                    .mesh(id)
+                    .ok_or(RenderError::Vfx("unknown or skinned mesh"))?;
+                Some((id, gpu.index_count))
+            }
+            None => None,
+        };
+        let Some(vfx) = self.vfx.as_mut() else {
+            return Err(RenderError::Vfx("VFX are unavailable"));
+        };
+        vfx.set_mesh(slot, binding)
+    }
+
     /// Whether this device records per-pass GPU timestamps.
     #[must_use]
     pub fn gpu_timing_supported(&self) -> bool {
@@ -839,8 +965,16 @@ impl Renderer {
         // never mixes new scene pipelines with an old composite (or drops one).
         let scene = self.scene.build_pipelines(&self.device, &self.shaders)?;
         let composite = self.composite.build_pipeline(&self.device, &self.shaders)?;
+        let vfx = self
+            .vfx
+            .as_ref()
+            .map(|vfx| vfx.build_pipelines(&self.device, &self.shaders))
+            .transpose()?;
         self.scene.install_pipelines(scene);
         self.composite.install_pipeline(composite);
+        if let (Some(pass), Some(pipelines)) = (self.vfx.as_mut(), vfx) {
+            pass.install_pipelines(pipelines);
+        }
         Ok(true)
     }
 
@@ -941,6 +1075,21 @@ impl Renderer {
             .and_then(|resource| plan.graph.slot_of(resource))
             .map(|slot| self.transients.image(slot).view());
         self.lighting.bind_shadow(&self.device, shadow);
+        if let (Some(vfx), Some(resources)) = (self.vfx.as_mut(), plan.resources.vfx) {
+            let transients = &self.transients;
+            let view = |resource: Option<crate::graph::ResourceId>| {
+                resource
+                    .and_then(|resource| plan.graph.slot_of(resource))
+                    .map(|slot| transients.image(slot).view())
+            };
+            let depth = view(Some(plan.resources.depth)).expect("depth is live");
+            vfx.bind_targets(
+                &self.device,
+                depth,
+                view(resources.accum),
+                view(resources.reveal),
+            );
+        }
     }
 
     /// The main view's lighting uniform values: the shadow map fitted to the camera (when
@@ -1028,6 +1177,9 @@ impl Renderer {
         // infinite timeout. It is signalled or will be signalled by the frame's submit.
         unsafe { self.device.device.wait_for_fences(&[fence], true, u64::MAX) }?;
         self.profiler.collect(frame_index);
+        if let Some(vfx) = self.vfx.as_mut() {
+            vfx.collect(frame_index);
+        }
 
         let image_available = self.frames[frame_index].image_available.handle();
         let (image_index, suboptimal) = match self.swapchain.acquire(image_available) {
@@ -1070,6 +1222,11 @@ impl Renderer {
                 .prepare(1 + slot, frame_index, &render.scene, &view_lighting)?;
         }
         self.ui.prepare(frame_index, ui)?;
+        // Last of the uploads: its slot allocations are committed only when the frame is
+        // submitted (`VfxPass::submitted`), and rolled back if anything below fails.
+        if let Some(vfx) = self.vfx.as_mut() {
+            vfx.prepare(frame_index, scene, self.swapchain.extent);
+        }
 
         let command_buffers = self.frames[frame_index].command_buffers;
         let pool = self.frames[frame_index].command_pool.handle();
@@ -1128,6 +1285,9 @@ impl Renderer {
         }?;
         self.profiler.submitted(frame_index);
         self.last_submitted = true;
+        if let Some(vfx) = self.vfx.as_mut() {
+            vfx.submitted(frame_index);
+        }
         if self.capture_pending {
             self.capture_pending = false;
             self.capture_ready = true;
@@ -1221,8 +1381,39 @@ impl Renderer {
                         terrain: true,
                         clear_rects: &[],
                         lighting: self.lighting.set(),
+                        store_depth: resources.vfx.is_some(),
                     },
                 ),
+                PassKind::VfxSimulate => {
+                    if let Some(vfx) = &self.vfx {
+                        vfx.record_simulate(&self.device, command_buffer, frame_index);
+                    }
+                }
+                PassKind::VfxDraw => {
+                    if let (Some(vfx), Some(ids)) = (&self.vfx, resources.vfx) {
+                        let view = |resource: Option<crate::graph::ResourceId>| {
+                            resource.map(|resource| self.transient(resource).view())
+                        };
+                        vfx.record_draw(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &VfxTargets {
+                                hdr: hdr_view,
+                                depth: depth_view,
+                                accum: view(ids.accum),
+                                reveal: view(ids.reveal),
+                                extent,
+                            },
+                            &self.scene,
+                        );
+                    }
+                }
+                PassKind::VfxResolve => {
+                    if let Some(vfx) = &self.vfx {
+                        vfx.record_resolve(&self.device, command_buffer, hdr_view, extent);
+                    }
+                }
                 PassKind::Offscreen(slot) => {
                     let slot = usize::from(slot);
                     // The plan only has this pass when a render named the image.
@@ -1243,6 +1434,7 @@ impl Renderer {
                                 terrain: render.terrain,
                                 clear_rects: render.backdrops,
                                 lighting: self.lighting.offscreen_set(),
+                                store_depth: false,
                             },
                         );
                     }
@@ -1342,6 +1534,22 @@ impl Renderer {
         }
         if let (Some(resource), Some(buffer)) = (resources.capture, capture_buffer) {
             bindings.set(resource, Binding::Buffer(buffer));
+        }
+        if let (Some(ids), Some(vfx)) = (resources.vfx, &self.vfx) {
+            let [particles, alive, args] = vfx.buffers();
+            let [spawns, stats] = vfx.frame_buffers(frame_index);
+            for (resource, buffer) in [
+                (ids.particles, particles),
+                (ids.alive, alive),
+                (ids.args, args),
+                (ids.spawns, spawns),
+                (ids.stats, stats),
+            ] {
+                bindings.set(resource, Binding::Buffer(buffer));
+            }
+            for resource in [ids.accum, ids.reveal].into_iter().flatten() {
+                bindings.set(resource, image(resource));
+            }
         }
         debug_assert!(plan.graph.resource_count() <= bindings.0.len());
         bindings

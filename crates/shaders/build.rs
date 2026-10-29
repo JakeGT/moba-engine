@@ -61,6 +61,12 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "skinned_shadow.vert",
         defines: &["SHADOW_PASS"],
     },
+    // Particles with weighted blended OIT outputs (Medium and up, ADR-0013).
+    Permutation {
+        source: "vfx.frag",
+        output: "vfx_oit.frag",
+        defines: &["VFX_OIT"],
+    },
 ];
 
 fn main() {

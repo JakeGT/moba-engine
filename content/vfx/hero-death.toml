@@ -1,0 +1,43 @@
+# A hero falls: a burst, smoke and a fading ring (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.2
+importance = "high"
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "burst"
+burst = 2
+lifetime = [0.5, 0.6]
+size = [4.0, 5.0]
+size_end = 1.5
+color = [2.0, 1.6, 1.4, 1.0]
+team_tint = 0.5
+offset = [0, 1.8, 0]
+fps = 28
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "smoke"
+blend = "alpha"
+burst = 10
+lifetime = [1.0, 1.6]
+speed = [0.5, 2.0]
+direction = "up"
+spread = 70
+shape = "sphere"
+radius = 1.0
+size = [2.0, 3.0]
+size_end = 1.8
+offset = [0, 1.5, 0]
+color = [0.12, 0.11, 0.11, 0.75]
+color_end = [0.08, 0.08, 0.08, 0.0]
+
+[[emitters]]
+primitive = "ring"
+sprite = "halo"
+burst = 1
+lifetime = [1.2, 1.2]
+size = [3.0, 3.0]
+size_end = 2.5
+color = [1.5, 1.5, 1.5, 0.8]
+team_tint = 0.8

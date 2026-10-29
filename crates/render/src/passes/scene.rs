@@ -100,6 +100,8 @@ pub(crate) struct SceneTargets<'a> {
     pub(crate) clear_rects: &'a [ClearRect],
     /// The view's scene lighting set (set 3).
     pub(crate) lighting: vk::DescriptorSet,
+    /// Keep the depth contents for a later pass (soft particles); otherwise `DONT_CARE`.
+    pub(crate) store_depth: bool,
 }
 
 /// The shadow map the shadow pass renders into.
@@ -497,6 +499,13 @@ impl ScenePass {
         self.meshes.len()
     }
 
+    /// A registered static (unskinned) mesh, for mesh particles.
+    pub(crate) fn mesh(&self, mesh: MeshId) -> Option<&GpuMesh> {
+        self.meshes
+            .get(mesh.index())
+            .filter(|gpu| gpu.joint_count == 0)
+    }
+
     /// A view's bone buffer for this frame, for the render graph's host-write → vertex-read
     /// barrier.
     pub(crate) fn bone_buffer(&self, view: usize, frame: usize) -> vk::Buffer {
@@ -646,12 +655,17 @@ impl ScenePass {
                     float32: targets.clear_color,
                 },
             });
-        // Nothing samples depth yet; a later reader switches this to STORE.
+        // The VFX pass tests and samples the main view's depth after the scene (ADR-0013).
+        let depth_store = if targets.store_depth {
+            vk::AttachmentStoreOp::STORE
+        } else {
+            vk::AttachmentStoreOp::DONT_CARE
+        };
         let depth_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(targets.depth)
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .store_op(depth_store)
             .clear_value(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: 1.0,

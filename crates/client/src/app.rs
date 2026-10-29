@@ -51,6 +51,17 @@
 //! - `MOBA_CAPTURE_MAPS=<prefix>` (network mode, evidence for #287): after every map change
 //!   (connect, content reload, map rotation), capture `<prefix>-<n>.ppm` once
 //!   `MOBA_CAPTURE_FRAME` frames with snapshots have rendered on it, and keep playing.
+//! - VFX (ADR-0013): effects from `<asset root>/vfx/bindings.toml` play on presentation
+//!   events (casts, projectiles, hits, zones, deaths, attacks) and attach to animation
+//!   sockets. `MOBA_VFX=off` (or the `vfx` setting) turns them off; the `ally_vfx_opacity`
+//!   setting (`MOBA_VFX_ALLY_OPACITY`) dims allied effects. `MOBA_VFX_SCALE=<1..16>` (dev)
+//!   multiplies every burst and rate, for budget stress tests.
+//! - `MOBA_VFX_PREVIEW=<effect>` (authoring): an empty arena that replays `vfx/<effect>.toml`
+//!   in a loop and reloads it when a file in `vfx/` changes; no match runs.
+//! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
+//!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
+//!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
+//!   ahead; a capture advances one tick per frame.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -119,6 +130,14 @@ struct ClientApp {
     bones: skinning::BonePool,
     /// Per-hero animators for the network view (ADR-0012).
     animation: animation::AnimationDriver,
+    /// Effects and their particle spawns (ADR-0013).
+    vfx: vfx::VfxSystem,
+    /// This frame's units effects can attach to.
+    anchors: vfx::Anchors,
+    /// `MOBA_REPLAY`: the recorded inputs the local view plays, and the next frame.
+    replay: Option<(moba_sim::Replay, usize)>,
+    /// `MOBA_VFX_PREVIEW`: the authoring loop.
+    preview: Option<vfx::Preview>,
     ui: UiDrawList,
     scoreboard_visible: bool,
     shop_visible: bool,
@@ -151,12 +170,13 @@ struct ClientApp {
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
-    /// Per-frame GPU times `[shadow, scene, composite, ui, total, span, portraits, minimap]`
-    /// while logging, from the renderer's timestamp queries (empty on devices without
-    /// timestamp support; `0` for a pass that did not run: shadows off, or an offscreen pass
-    /// not re-rendered that frame). One entry per measured GPU frame: a sample whose frame
-    /// number was already logged is skipped.
-    gpu_log: Option<Vec<[f32; 8]>>,
+    /// Per-frame GPU times `[shadow, scene, composite, ui, total, span, portraits, minimap,
+    /// vfx_simulate, vfx_draw, vfx_resolve]` plus the particle stats `[alive, overdraw]` while
+    /// logging, from the renderer's timestamp queries (empty on devices without timestamp
+    /// support; `0` for a pass that did not run: shadows off, or an offscreen pass not
+    /// re-rendered that frame). One entry per measured GPU frame: a sample whose frame number
+    /// was already logged is skipped.
+    gpu_log: Option<Vec<[f32; launch::GPU_LANES]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
     frame_log_path: Option<PathBuf>,
@@ -180,6 +200,11 @@ impl ClientApp {
         }
         let (settings, warnings) = crate::settings::Settings::load(&settings_path);
         let camera_zoom = settings.camera_zoom;
+        let vfx_setting = settings.vfx;
+        let ally_vfx_opacity = std::env::var("MOBA_VFX_ALLY_OPACITY")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(settings.ally_vfx_opacity);
         let camera_sensitivity = settings.camera_sensitivity;
         let audio_volume = settings.audio_volume;
         let audio_mute = settings.audio_mute;
@@ -238,6 +263,26 @@ impl ClientApp {
             map_capture: map_visuals::SwitchCapture::from_env(),
             bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
             animation: animation::AnimationDriver::new(animation::AnimLod::from_env(), 30),
+            vfx: {
+                let root = models::asset_root_from_env();
+                let library = match std::env::var(vfx::VFX_PREVIEW_ENV) {
+                    Ok(name) if !name.trim().is_empty() => {
+                        vfx::VfxLibrary::preview(root, name.trim())
+                    }
+                    _ => vfx::VfxLibrary::load(root),
+                };
+                let mut system = vfx::VfxSystem::new(
+                    library,
+                    quality.vfx_budget(),
+                    vfx::vfx_enabled_from_env(vfx_setting),
+                );
+                system.set_ally_opacity(ally_vfx_opacity);
+                system.set_scale(vfx::vfx_scale_from_env());
+                system
+            },
+            anchors: vfx::Anchors::new(),
+            replay: None,
+            preview: None,
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
@@ -352,14 +397,35 @@ impl ClientApp {
                         )
                     },
                 );
+                match launch::load_replay(simulation.content()) {
+                    Ok(Some(replay)) => {
+                        simulation = Simulation::new_with_content(
+                            replay.config,
+                            std::sync::Arc::new(simulation.content().clone()),
+                        );
+                        app.replay = Some((replay, 0));
+                    }
+                    Ok(None) => {}
+                    Err(error) => app.startup_error = Some(error),
+                }
                 let warmup: u32 = std::env::var("MOBA_WARMUP_TICKS")
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(0);
                 for _ in 0..warmup {
-                    simulation.tick_with_bots();
+                    match app.replay.as_mut() {
+                        Some((replay, cursor)) => {
+                            if let Some(inputs) = replay.frames.get(*cursor) {
+                                simulation.tick(inputs);
+                                *cursor += 1;
+                            }
+                        }
+                        None => simulation.tick_with_bots(),
+                    }
+                    simulation.clear_events();
                 }
                 simulation.clear_events();
+                app.preview = app.vfx.library().preview_effect().map(vfx::Preview::new);
                 app.simulation = Some(simulation);
             }
         }
@@ -408,7 +474,30 @@ impl ClientApp {
     }
 }
 
+impl ClientApp {
+    /// `MOBA_VFX_PREVIEW` live reload: every 30 frames, reloads the effects (and rebinds
+    /// their meshes) when a file in `<asset root>/vfx` changed.
+    fn poll_vfx_reload(&mut self) {
+        if self.preview.is_none() || !self.frames.is_multiple_of(30) {
+            return;
+        }
+        if !self.vfx.library().changed_on_disk() {
+            return;
+        }
+        self.vfx.clear();
+        self.vfx.library_mut().reload();
+        if let Some(renderer) = self.renderer.as_mut() {
+            self.vfx.library_mut().bind_renderer(renderer);
+        }
+        if let Some(preview) = self.preview.as_mut() {
+            preview.restart();
+        }
+        eprintln!("[vfx] preview reloaded");
+    }
+}
+
 impl App for ClientApp {
+    #[allow(clippy::too_many_lines)] // Renderer creation and every library's binding.
     fn on_start(&mut self, window: &Window) {
         let validation = match std::env::var("MOBA_VULKAN_VALIDATION").as_deref() {
             Ok("required") => ValidationMode::Required,
@@ -426,7 +515,8 @@ impl App for ClientApp {
             .with_pipeline_cache(launch::pipeline_cache_path())
             .with_shader_dir(self.shader_dir.clone())
             .with_compressed_textures(launch::compressed_textures())
-            .with_lighting(Some(launch::lighting_config(self.quality)));
+            .with_lighting(Some(launch::lighting_config(self.quality)))
+            .with_vfx(self.vfx.enabled());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -461,6 +551,13 @@ impl App for ClientApp {
                 // `on_start` may run again after a resume with a fresh mesh table.
                 self.models.renderer_recreated();
                 self.map_visuals.renderer_recreated();
+                self.vfx.library_mut().renderer_recreated();
+                if renderer.vfx_available() {
+                    self.vfx.set_budget(renderer.vfx_budget());
+                    self.vfx.library_mut().bind_renderer(&mut renderer);
+                } else {
+                    self.vfx.set_enabled(false);
+                }
                 if let Some(network) = &self.network {
                     map_visuals::bind_network_map(
                         &mut self.map_visuals,
@@ -526,6 +623,7 @@ impl App for ClientApp {
         }
         self.frames += 1;
         self.poll_shader_reload();
+        self.poll_vfx_reload();
         let now = Instant::now();
         let raw_ms = now.duration_since(self.last_frame).as_secs_f32() * 1_000.0;
         self.last_frame = now;
@@ -578,6 +676,10 @@ impl App for ClientApp {
                 map_capture,
                 bones,
                 animation,
+                vfx,
+                anchors,
+                replay,
+                preview,
                 ui,
                 scoreboard_visible,
                 shop_visible,
@@ -610,11 +712,13 @@ impl App for ClientApp {
                             ClientEvent::Connected { slot } => network.own_slot = slot,
                             ClientEvent::GameEvent(event) => {
                                 animation.queue_event(&event);
+                                queue_network_vfx(vfx, network, &event);
                                 network.handle_game_event(event);
                             }
                             // The events above belong to this snapshot: stamp them with its
                             // tick for the animators.
                             ClientEvent::Snapshot { tick, .. } => {
+                                vfx.stamp(tick);
                                 let client = &network.client;
                                 // Heroes only: a minion's death must not claim an animator.
                                 let pick = |net_id: u16| {
@@ -667,6 +771,7 @@ impl App for ClientApp {
                                 // Hero models may change; the map bind below re-bakes the
                                 // minimap by itself.
                                 portraits.invalidate();
+                                vfx.clear();
                                 // Content reload or map rotation: rebind the map visuals and
                                 // hero models (cached, so only new names touch the disk or
                                 // the GPU).
@@ -711,6 +816,7 @@ impl App for ClientApp {
                             // Rematch: server restarted at tick zero with fresh net ids.
                             network.interpolator.clear();
                             animation.clear();
+                            vfx.clear();
                             network.own_net_id = None;
                             network.prediction.set_target(None);
                             network.client.clear_pending_input();
@@ -802,6 +908,8 @@ impl App for ClientApp {
                             driver: animation,
                             view: lod_view,
                         },
+                        anchors,
+                        !vfx.enabled(),
                     );
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
@@ -846,11 +954,31 @@ impl App for ClientApp {
                             hud_fx,
                         );
                         network.update_effects(frame_ms);
+                        // A pinned capture freezes effects with the view.
+                        let vfx_dt = if network.pinned_tick().is_some() {
+                            0.0
+                        } else {
+                            frame_ms / 1_000.0
+                        };
+                        let view = vfx::VfxView::new(
+                            &camera,
+                            [width as f32, height as f32],
+                            (!network.spectator)
+                                .then(|| u8::try_from(network.client.team().index()).unwrap_or(0)),
+                            network.own_net_id.map(u32::from),
+                        );
+                        let render_tick = network.render_tick();
+                        let socket = |unit: u32, name: &str| {
+                            network_socket(anchors, models, animation, unit, name)
+                        };
+                        vfx.update(vfx_dt, render_tick, &view, anchors, &socket);
+                        vfx::push_placeholders(vfx, units);
                         let vision = build_vision(network);
                         let scene = Scene::with_vision(camera, units, vision)
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
-                            .with_bones(bones.bones());
+                            .with_bones(bones.bones())
+                            .with_vfx(vfx.frame());
                         // With `MOBA_CAPTURE_TICK` the capture waits for the match tick, not
                         // a frame count, so it does not depend on frame pacing.
                         let capture_due = if network.capture_tick.is_some() {
@@ -930,8 +1058,20 @@ impl App for ClientApp {
                 } else {
                     frame.ticks()
                 };
+                let center = simulation.content().map.extent.to_f32() * 0.5;
                 for _ in 0..ticks {
-                    simulation.tick_with_bots();
+                    if preview.is_some() {
+                        break;
+                    }
+                    match replay.as_mut() {
+                        Some((recording, cursor)) => {
+                            if let Some(inputs) = recording.frames.get(*cursor) {
+                                simulation.tick(inputs);
+                                *cursor += 1;
+                            }
+                        }
+                        None => simulation.tick_with_bots(),
+                    }
                     if let Some(audio) = self.local_audio.as_mut() {
                         for event in simulation.events() {
                             if let Some(sound) = local_sound(event) {
@@ -939,10 +1079,12 @@ impl App for ClientApp {
                             }
                         }
                     }
+                    queue_local_vfx(vfx, simulation, center);
                     simulation.clear_events();
                 }
                 units.clear();
                 bones.clear();
+                anchors.clear();
                 // The same walls (and descriptor props) the network path draws.
                 map_visuals.push_instances(units);
                 let world = simulation.world();
@@ -958,8 +1100,16 @@ impl App for ClientApp {
                     if health.current <= 0 {
                         continue;
                     }
+                    if preview.is_some() {
+                        continue;
+                    }
                     let fraction = health.current as f32 / health.max as f32;
-                    let center = simulation.content().map.extent.to_f32() * 0.5;
+                    anchors.push(vfx::UnitAnchor {
+                        id: entity.index(),
+                        position: vfx::world(position.0, center),
+                        height: scene_build::unit_height(*kind),
+                        model: None,
+                    });
                     if *kind == UnitKind::Hero {
                         let model = world
                             .get::<moba_sim::HeroIdentity>(entity)
@@ -985,28 +1135,58 @@ impl App for ClientApp {
                         push_unit(units, position.0, *kind, *team, fraction, 0, center);
                     }
                 }
+                if let Some(preview) = preview.as_mut() {
+                    preview.frame(vfx, anchors, units, frame_ms);
+                }
                 if width > 0 && height > 0 {
                     let aspect = width as f32 / height as f32;
-                    let yaw = if capture_path.is_some() {
+                    let yaw = if capture_path.is_some() || replay.is_some() {
                         -0.7
                     } else {
                         frame.elapsed_secs() as f32 * 0.035
                     };
+                    let hud_mode = if preview.is_some() {
+                        crate::hud::LocalHudMode::VfxPreview
+                    } else if replay.is_some() {
+                        crate::hud::LocalHudMode::Replay
+                    } else {
+                        crate::hud::LocalHudMode::BotPreview
+                    };
                     build_local_hud(
                         ui,
                         simulation,
+                        hud_mode,
                         (width as f32 / self.ui_scale) as u32,
                         (height as f32 / self.ui_scale) as u32,
                         frame_ms,
                         fps,
                         hit_rects,
                     );
-                    let mut camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
+                    let mut camera = if preview.is_some() {
+                        Camera::orbit(Vec3::ZERO, 30.0, -0.7, 0.75, aspect)
+                    } else if replay.is_some() {
+                        let (focus, distance) = launch::replay_focus(simulation, center);
+                        Camera::orbit(focus, distance, yaw, 0.95, aspect)
+                    } else {
+                        Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect)
+                    };
                     map_visuals.light_camera(&mut camera);
+                    // Captures advance one tick per frame, so effects step a tick too.
+                    let vfx_dt = if capture_path.is_some() {
+                        1.0 / 30.0
+                    } else {
+                        frame_ms / 1_000.0
+                    };
+                    let view =
+                        vfx::VfxView::new(&camera, [width as f32, height as f32], Some(0), None);
+                    let render_tick = simulation.current_tick().get() as f32;
+                    vfx.update(vfx_dt, render_tick, &view, anchors, &|_, _| None);
+                    vfx::push_placeholders(vfx, units);
                     let scene = Scene::new(camera, units)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
-                        .with_bones(bones.bones());
+                        .with_bones(bones.bones())
+                        .with_vfx(vfx.frame());
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
@@ -1048,6 +1228,11 @@ impl App for ClientApp {
                 // renderer returns the same timings again.
                 self.gpu_logged_frame = Some(timings.frame);
                 let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
+                let stats = self
+                    .renderer
+                    .as_ref()
+                    .and_then(moba_render::Renderer::vfx_stats)
+                    .filter(|stats| stats.frame == timings.frame);
                 gpu.push([
                     pass("shadow"),
                     pass("scene"),
@@ -1057,6 +1242,11 @@ impl App for ClientApp {
                     timings.span_ms,
                     pass("portraits"),
                     pass("minimap"),
+                    pass("vfx_simulate"),
+                    pass("vfx_draw"),
+                    pass("vfx_resolve"),
+                    stats.map_or(0.0, |stats| stats.alive as f32),
+                    stats.map_or(0.0, |stats| stats.overdraw),
                 ]);
             }
         }
@@ -1084,6 +1274,7 @@ mod models;
 mod offscreen;
 mod scene_build;
 mod skinning;
+mod vfx;
 
 pub(crate) use launch::{
     capture_and_exit, connect_network, frames_is_capture, parse_capture_tick, parse_demo_cast,
@@ -1092,6 +1283,81 @@ pub(crate) use launch::{
 pub(crate) use scene_build::{
     HeroPose, animated_rig, network_camera, push_hero, push_unit, rebuild_network_units,
 };
+
+/// Queues a replicated event's effects until its snapshot's tick is known.
+fn queue_network_vfx(
+    vfx: &mut vfx::VfxSystem,
+    network: &NetworkView,
+    event: &moba_net::protocol::NetEvent,
+) {
+    if !vfx.enabled() {
+        return;
+    }
+    let client = &network.client;
+    let center = crate::hud::map_center(network);
+    let tick_rate = f32::from(client.tick_rate().max(1));
+    let library = vfx.library();
+    let mapped = vfx::from_net(event, center, tick_rate, |source, slot| {
+        let hero = client
+            .entity(source)
+            .filter(|entity| entity.kind == 0)?
+            .hero_pick;
+        animation::ability_name(client.heroes(), client.abilities(), hero, slot)
+            .and_then(|name| library.ability(name))
+    });
+    if let Some(mapped) = mapped {
+        vfx.queue_unstamped(mapped);
+    }
+}
+
+/// Queues this tick's local simulation events for the effects (the preview and replays).
+fn queue_local_vfx(vfx: &mut vfx::VfxSystem, simulation: &Simulation, center: f32) {
+    if !vfx.enabled() {
+        return;
+    }
+    let tick = simulation.current_tick().get();
+    let content = simulation.content();
+    let world = simulation.world();
+    for event in simulation.events() {
+        let library = vfx.library();
+        let mapped = vfx::from_sim(
+            event,
+            center,
+            30.0,
+            moba_ecs::Entity::index,
+            |caster, slot| {
+                let hero = world.get::<moba_sim::HeroIdentity>(caster)?.0.0;
+                let ability = *content
+                    .heroes
+                    .get(usize::from(hero))?
+                    .abilities
+                    .get(usize::from(slot))?;
+                let name = &content.abilities.get(usize::from(ability))?.name;
+                library.ability(name)
+            },
+        );
+        if let Some(mapped) = mapped {
+            vfx.queue(tick, mapped);
+        }
+    }
+}
+
+/// A hero's socket in world space: its animator's last evaluation, placed by the frame's
+/// model-to-world transform.
+fn network_socket(
+    anchors: &vfx::Anchors,
+    models: &models::ModelLibrary,
+    animation: &animation::AnimationDriver,
+    unit: u32,
+    name: &str,
+) -> Option<Vec3> {
+    let (rig, model_to_world) = anchors.get(unit)?.model?;
+    let socket = models.graph(rig)?.socket(name)?;
+    let local = animation
+        .animator(u16::try_from(unit).ok()?)?
+        .socket_transform(socket)?;
+    Some((model_to_world * local).w_axis.truncate())
+}
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
 #[cfg(test)]

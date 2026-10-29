@@ -1,0 +1,19 @@
+# A minion falls: a small puff (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "low"
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "smoke"
+blend = "alpha"
+burst = 4
+lifetime = [0.5, 0.8]
+speed = [0.5, 1.5]
+direction = "up"
+spread = 60
+size = [1.0, 1.5]
+size_end = 1.5
+offset = [0, 1.0, 0]
+color = [0.14, 0.13, 0.12, 0.65]
+color_end = [0.1, 0.1, 0.1, 0.0]

@@ -183,6 +183,75 @@ pub(crate) fn parse_follow_distance() -> f32 {
         .map_or(46.0, |value| value.clamp(8.0, 120.0))
 }
 
+/// Largest replay file `MOBA_REPLAY` reads, in bytes.
+const MAX_REPLAY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `MOBA_REPLAY=<file.mbr>`: the recording the local view plays, checked against `content`
+/// (the replay must have been recorded with the same pack). `Ok(None)` when unset.
+pub(crate) fn load_replay(
+    content: &moba_game::GameContent,
+) -> Result<Option<moba_sim::Replay>, String> {
+    let Some(path) = std::env::var_os("MOBA_REPLAY").filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let describe =
+        |error: &dyn core::fmt::Display| format!("MOBA_REPLAY {}: {error}", path.display());
+    let file = File::open(&path).map_err(|error| describe(&error))?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, MAX_REPLAY_BYTES + 1),
+        &mut bytes,
+    )
+    .map_err(|error| describe(&error))?;
+    if bytes.len() as u64 > MAX_REPLAY_BYTES {
+        return Err(describe(&"larger than 64 MiB"));
+    }
+    let replay = moba_sim::Replay::decode(&bytes).map_err(|error| describe(&error))?;
+    if replay.content_hash != content.hash() {
+        return Err(describe(&format!(
+            "recorded with content {:#018x} ({} {}), loaded {:#018x}; set MOBA_CONTENT to the \
+             recording's pack",
+            replay.content_hash,
+            replay.content_name,
+            replay.content_version,
+            content.hash()
+        )));
+    }
+    eprintln!(
+        "[replay] {}: {} ticks of {} {}",
+        path.display(),
+        replay.frames.len(),
+        replay.content_name,
+        replay.content_version
+    );
+    Ok(Some(replay))
+}
+
+/// The replay camera: the live heroes' centroid (world space) and the follow distance.
+pub(crate) fn replay_focus(
+    simulation: &moba_sim::Simulation,
+    center: f32,
+) -> (moba_core::math::Vec3, f32) {
+    let mut sum = moba_core::math::Vec3::ZERO;
+    let mut count = 0.0f32;
+    for slot in 0..moba_sim::MAX_PLAYERS {
+        let alive = simulation
+            .hero_health(slot)
+            .is_some_and(|health| health.current > 0);
+        if let (true, Some(position)) = (alive, simulation.hero_position(slot)) {
+            sum += crate::app::vfx::world(position, center);
+            count += 1.0;
+        }
+    }
+    let focus = if count > 0.0 {
+        sum / count
+    } else {
+        moba_core::math::Vec3::ZERO
+    };
+    (focus, parse_follow_distance())
+}
+
 /// `MOBA_CAPTURE_TICK=<n>`: the network capture tick, read once at startup.
 pub(crate) fn parse_capture_tick() -> Option<u32> {
     std::env::var("MOBA_CAPTURE_TICK")
@@ -504,29 +573,38 @@ impl Drop for ClientApp {
     }
 }
 
+/// Lanes of one GPU frame-log sample (see [`gpu_report`]).
+pub(crate) const GPU_LANES: usize = 13;
+const GPU_LANE_NAMES: [&str; GPU_LANES] = [
+    "shadow",
+    "scene",
+    "composite",
+    "ui",
+    "total",
+    "span",
+    "portraits",
+    "minimap",
+    "vfx_simulate",
+    "vfx_draw",
+    "vfx_resolve",
+    "vfx_alive",
+    "vfx_overdraw",
+];
+
 /// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[shadow, scene, composite,
-/// ui, total, span, portraits, minimap]` samples (`shadow` is 0 when shadows are off).
-/// `total` sums the passes; `span` runs from the first pass's start to the last pass's end,
-/// so `span - total` is the time spent in barriers between passes. The offscreen passes (R7b)
-/// run only in some frames, so their percentiles cover just those frames, and
-/// `gpu_<pass>_runs` counts them; with no run the columns are left out.
-fn gpu_report(samples: &[[f32; 8]]) -> String {
+/// ui, total, span, portraits, minimap, vfx_simulate, vfx_draw, vfx_resolve]` pass times
+/// (`shadow` is 0 when shadows are off) plus the particle stats `vfx_alive` (live particles)
+/// and `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013), which get
+/// `_p50`/`_p95`/`_max` columns without the unit. `total` sums the passes; `span` runs from
+/// the first pass's start to the last pass's end, so `span - total` is the time spent in
+/// barriers between passes. The offscreen passes (R7b) run only in some frames, so their
+/// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
+/// columns are left out.
+fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
-    for (lane, name) in [
-        "shadow",
-        "scene",
-        "composite",
-        "ui",
-        "total",
-        "span",
-        "portraits",
-        "minimap",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let offscreen = lane >= 6;
+    for (lane, name) in GPU_LANE_NAMES.into_iter().enumerate() {
+        let offscreen = matches!(lane, 6 | 7);
         let mut values: Vec<f32> = samples
             .iter()
             .map(|sample| sample[lane])
@@ -545,12 +623,22 @@ fn gpu_report(samples: &[[f32; 8]]) -> String {
                 .copied()
                 .unwrap_or(0.0)
         };
-        let _ = write!(
-            columns,
-            "gpu_{name}_p50_ms={:.3} gpu_{name}_p95_ms={:.3} ",
-            at(0.50),
-            at(0.95)
-        );
+        if lane >= 11 {
+            let _ = write!(
+                columns,
+                "{name}_p50={:.3} {name}_p95={:.3} {name}_max={:.3} ",
+                at(0.50),
+                at(0.95),
+                at(1.0)
+            );
+        } else {
+            let _ = write!(
+                columns,
+                "gpu_{name}_p50_ms={:.3} gpu_{name}_p95_ms={:.3} ",
+                at(0.50),
+                at(0.95)
+            );
+        }
     }
     columns
 }
@@ -630,7 +718,7 @@ mod tests {
 
     #[test]
     fn gpu_report_lists_each_pass_percentile() {
-        let samples: Vec<[f32; 8]> = (0..=100)
+        let samples: Vec<[f32; super::GPU_LANES]> = (0..=100)
             .map(|index| {
                 let ms = index as f32 / 100.0;
                 // The portrait pass ran in every tenth frame; the minimap never did.
@@ -644,6 +732,11 @@ mod tests {
                     ms * 4.0,
                     portraits,
                     0.0,
+                    ms,
+                    ms,
+                    0.0,
+                    index as f32,
+                    ms,
                 ]
             })
             .collect();
@@ -655,10 +748,15 @@ mod tests {
         assert!(report.contains("gpu_total_p50_ms=1.500 gpu_total_p95_ms=2.850 "));
         assert!(report.contains("gpu_span_p50_ms=2.000 gpu_span_p95_ms=3.800 "));
         // Offscreen passes: percentiles over the frames they ran in, plus a run count.
-        assert!(report.ends_with(
+        assert!(report.contains(
             "gpu_portraits_runs=11 gpu_portraits_p50_ms=0.020 gpu_portraits_p95_ms=0.020 "
         ));
         assert!(!report.contains("gpu_minimap"));
+        assert!(report.contains("gpu_vfx_draw_p95_ms=0.950 "));
+        assert!(report.ends_with(
+            "vfx_alive_p50=50.000 vfx_alive_p95=95.000 vfx_alive_max=100.000 \
+             vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 "
+        ));
     }
 
     #[test]

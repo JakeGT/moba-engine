@@ -1,0 +1,50 @@
+# Cinder Zone: a burning zone for its whole lifetime (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 1.0
+event_duration = true
+importance = "high"
+
+[[emitters]]
+primitive = "ring"
+sprite = "rune"
+burst = 1
+rate = 2
+lifetime = [1.0, 1.0]
+size = [2.0, 2.0]
+size_end = 2.05
+scale_with_radius = true
+color = [2.2, 0.8, 0.2, 0.5]
+color_end = [2.2, 0.8, 0.2, 0.0]
+telegraph = true
+
+[[emitters]]
+sprite = "dot"
+rate = 70
+lifetime = [0.6, 1.1]
+speed = [1.0, 3.0]
+direction = "up"
+spread = 20
+shape = "disc"
+radius = 0.9
+scale_with_radius = true
+size = [0.12, 0.18]
+size_end = 0.3
+color = [3.0, 1.1, 0.25, 1.0]
+color_end = [1.4, 0.3, 0.1, 0.0]
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "smoke"
+blend = "alpha"
+rate = 10
+lifetime = [1.2, 1.8]
+speed = [0.4, 1.0]
+direction = "up"
+shape = "disc"
+radius = 0.8
+scale_with_radius = true
+size = [0.35, 0.5]
+size_end = 1.6
+color = [0.08, 0.06, 0.05, 0.6]
+color_end = [0.06, 0.05, 0.05, 0.0]
+offset = [0, 0.8, 0]

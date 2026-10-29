@@ -1,0 +1,30 @@
+# Hush: a silencing ring (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.8
+importance = "high"
+
+[[emitters]]
+primitive = "ring"
+sprite = "rune"
+burst = 1
+lifetime = [1.0, 1.0]
+size = [14.0, 14.0]
+color = [1.2, 0.6, 1.8, 0.6]
+color_end = [0.6, 0.3, 1.0, 0.0]
+telegraph = true
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "smoke"
+blend = "alpha"
+rate = 24
+lifetime = [0.7, 1.0]
+speed = [0.2, 0.6]
+direction = "up"
+shape = "disc"
+radius = 6.0
+size = [1.5, 2.2]
+size_end = 1.5
+color = [0.45, 0.3, 0.6, 0.55]
+color_end = [0.3, 0.2, 0.4, 0.0]
+offset = [0, 0.4, 0]

@@ -495,3 +495,160 @@ fn persistent_offscreen_targets_are_written_then_sampled_by_the_ui() {
             .all(|barrier| barrier.resource != portrait)
     );
 }
+
+#[test]
+fn compute_writes_reach_vertex_and_indirect_reads_with_exact_masks() {
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    let hdr = graph.transient_image("hdr", HDR);
+    let persistent = ImportState::persistent_buffer(
+        S::COMPUTE_SHADER | S::VERTEX_SHADER | S::DRAW_INDIRECT | S::TRANSFER,
+        A::SHADER_STORAGE_WRITE,
+    );
+    let particles = graph.import_buffer("particles", persistent, None);
+    let args = graph.import_buffer("args", persistent, None);
+    let spawns = graph.import_buffer("spawns", ImportState::host_written(), None);
+    let _ = graph
+        .pass("simulate", 0)
+        .access(spawns, Access::ComputeStorageRead)
+        .access(particles, Access::ComputeStorageReadWrite)
+        .access(args, Access::ComputeStorageReadWrite);
+    let _ = graph
+        .pass("draw", 1)
+        .access(hdr, Access::ColorWrite)
+        .access(particles, Access::VertexStorageRead)
+        .access(args, Access::IndirectRead);
+    let _ = graph
+        .pass("composite", 2)
+        .access(hdr, Access::SampledFragment)
+        .access(target, Access::ColorWrite);
+    let plan = graph.compile().expect("valid graph");
+    assert_eq!(plan.culled(), [] as [&str; 0]);
+    let simulate = &plan.passes()[0].barriers;
+    // The first compute access orders against every earlier frame's use of the buffer.
+    let first = simulate
+        .iter()
+        .find(|barrier| barrier.resource == particles)
+        .expect("particle barrier");
+    assert_eq!(first.src_stage, persistent.stage);
+    assert_eq!(first.src_access, A::SHADER_STORAGE_WRITE);
+    assert_eq!(first.dst_stage, S::COMPUTE_SHADER);
+    assert_eq!(
+        first.dst_access,
+        A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE
+    );
+    assert!(!first.image);
+    let host = simulate
+        .iter()
+        .find(|barrier| barrier.resource == spawns)
+        .expect("spawn barrier");
+    assert_eq!((host.src_stage, host.src_access), (S::HOST, A::HOST_WRITE));
+    assert_eq!(host.dst_access, A::SHADER_STORAGE_READ);
+    let draw = &plan.passes()[1].barriers;
+    let vertex = draw
+        .iter()
+        .find(|barrier| barrier.resource == particles)
+        .expect("vertex read barrier");
+    assert_eq!(
+        (vertex.src_stage, vertex.src_access),
+        (S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE)
+    );
+    assert_eq!(
+        (vertex.dst_stage, vertex.dst_access),
+        (S::VERTEX_SHADER, A::SHADER_STORAGE_READ)
+    );
+    let indirect = draw
+        .iter()
+        .find(|barrier| barrier.resource == args)
+        .expect("indirect barrier");
+    assert_eq!(
+        (indirect.src_stage, indirect.src_access),
+        (S::COMPUTE_SHADER, A::SHADER_STORAGE_WRITE)
+    );
+    assert_eq!(
+        (indirect.dst_stage, indirect.dst_access),
+        (S::DRAW_INDIRECT, A::INDIRECT_COMMAND_READ)
+    );
+}
+
+#[test]
+fn depth_is_read_only_and_sampled_after_the_scene_writes_it() {
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    let hdr = graph.transient_image("hdr", HDR);
+    let depth = graph.transient_image("depth", DEPTH);
+    let _ = graph
+        .pass("scene", 0)
+        .access(hdr, Access::ColorWrite)
+        .access(depth, Access::DepthWrite);
+    let _ = graph
+        .pass("particles", 1)
+        .access(hdr, Access::ColorReadWrite)
+        .access(depth, Access::DepthReadSampled);
+    let _ = graph
+        .pass("composite", 2)
+        .access(hdr, Access::SampledFragment)
+        .access(target, Access::ColorWrite);
+    let plan = graph.compile().expect("valid graph");
+    let particles = &plan.passes()[1].barriers;
+    let read = particles
+        .iter()
+        .find(|barrier| barrier.resource == depth)
+        .expect("depth barrier");
+    assert_eq!(
+        read.src_stage,
+        S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS
+    );
+    assert_eq!(read.src_access, A::DEPTH_STENCIL_ATTACHMENT_WRITE);
+    assert_eq!(
+        read.dst_stage,
+        S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS | S::FRAGMENT_SHADER
+    );
+    assert_eq!(
+        read.dst_access,
+        A::DEPTH_STENCIL_ATTACHMENT_READ | A::SHADER_SAMPLED_READ
+    );
+    assert_eq!(read.old_layout, L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    assert_eq!(read.new_layout, L::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    // HDR: a colour write-after-write between the scene and the particle pass.
+    let colour = particles
+        .iter()
+        .find(|barrier| barrier.resource == hdr)
+        .expect("hdr barrier");
+    assert_eq!(colour.src_access, A::COLOR_ATTACHMENT_WRITE);
+    assert_eq!(
+        colour.dst_access,
+        A::COLOR_ATTACHMENT_READ | A::COLOR_ATTACHMENT_WRITE
+    );
+    // The depth slot's next-frame start state covers the sampled read too.
+    let slot = plan.slots()[plan.slot_of(depth).expect("live")];
+    assert!(slot.start_stage.contains(S::FRAGMENT_SHADER));
+    assert!(slot.usage.contains(vk::ImageUsageFlags::SAMPLED));
+}
+
+#[test]
+fn compute_and_indirect_accesses_are_buffer_only() {
+    for access in [
+        Access::ComputeStorageRead,
+        Access::ComputeStorageReadWrite,
+        Access::IndirectRead,
+    ] {
+        let mut graph = GraphBuilder::<u8>::new();
+        let image = graph.import_image("image", ImportState::idle(), None);
+        let _ = graph.pass("bad", 0).access(image, access).side_effect();
+        assert!(matches!(
+            graph.compile(),
+            Err(GraphError::AccessMismatch { .. })
+        ));
+    }
+    let mut graph = GraphBuilder::<u8>::new();
+    let buffer = graph.import_buffer("buffer", ImportState::idle(), None);
+    let _ = graph
+        .pass("bad", 0)
+        .access(buffer, Access::DepthReadSampled)
+        .side_effect();
+    assert!(matches!(
+        graph.compile(),
+        Err(GraphError::AccessMismatch { .. })
+    ));
+}

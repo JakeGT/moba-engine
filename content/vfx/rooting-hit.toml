@@ -1,0 +1,24 @@
+# Rooting Shot impact: binding roots (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "high"
+
+[[emitters]]
+primitive = "ring"
+sprite = "rune"
+burst = 1
+lifetime = [1.5, 1.5]
+size = [3.0, 3.0]
+color = [1.0, 1.8, 0.4, 0.8]
+color_end = [0.5, 1.0, 0.2, 0.0]
+
+[[emitters]]
+sprite = "shard"
+burst = 10
+lifetime = [0.4, 0.6]
+speed = [2, 5]
+direction = "up"
+spread = 50
+gravity = -8
+size = [0.8, 1.2]
+color = [1.0, 2.0, 0.4, 1.0]

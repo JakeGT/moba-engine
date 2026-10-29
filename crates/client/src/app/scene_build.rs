@@ -14,6 +14,7 @@ use crate::app::animation::{AnimationDriver, LodView, RigRef};
 use crate::app::map_visuals::MapLibrary;
 use crate::app::models::{HeroModel, ModelLibrary};
 use crate::app::skinning::BonePool;
+use crate::app::vfx::{Anchors, UnitAnchor};
 use crate::hud::{HudUnit, map_center, rendered_entity_position};
 
 /// The animated rig of a skinned hero model with a bound animation set.
@@ -33,7 +34,21 @@ pub(crate) struct AnimationFrame<'a> {
     pub(crate) view: Option<LodView>,
 }
 
-#[allow(clippy::too_many_lines)] // One pass over the snapshot's entities.
+/// Visual height of a unit kind, metres (VFX attach at half of it).
+pub(crate) fn unit_height(kind: UnitKind) -> f32 {
+    match kind {
+        UnitKind::Hero => 3.6,
+        UnitKind::MeleeMinion => 2.2,
+        UnitKind::RangedMinion => 1.8,
+        UnitKind::Tower => 9.0,
+        UnitKind::Nexus => 15.0,
+        _ => 2.0,
+    }
+}
+
+/// Rebuilds the drawn units, their bones and the VFX anchors from the latest snapshot.
+/// `projectile_cubes` keeps the pre-VFX projectile placeholders (when effects are off).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One pass over the entities.
 pub(crate) fn rebuild_network_units(
     network: &NetworkView,
     models: &ModelLibrary,
@@ -41,9 +56,12 @@ pub(crate) fn rebuild_network_units(
     units: &mut Vec<UnitInstance>,
     bones: &mut BonePool,
     animation: AnimationFrame<'_>,
+    anchors: &mut Anchors,
+    projectile_cubes: bool,
 ) {
     units.clear();
     bones.clear();
+    anchors.clear();
     let AnimationFrame { driver, view } = animation;
     driver.begin_frame();
     let Some(latest) = network.interpolator.latest() else {
@@ -74,6 +92,11 @@ pub(crate) fn rebuild_network_units(
             continue;
         };
         let position = rendered_entity_position(network, HudUnit::new(entity), render_tick);
+        let ground = Vec3::new(
+            position.x.to_f32() - center,
+            0.0,
+            position.y.to_f32() - center,
+        );
         let fraction = if entity.max_health == 0 {
             1.0
         } else {
@@ -107,6 +130,14 @@ pub(crate) fn rebuild_network_units(
             };
             // Speed for the locomotion blend: both ends interpolated (the own hero's drawn
             // position is predicted ahead), so it depends only on the render tick.
+            anchors.push(UnitAnchor {
+                id: u32::from(entity.net_id),
+                position: ground,
+                height: unit_height(kind),
+                model: rig
+                    .zip(model)
+                    .map(|(rig, model)| (rig.index, hero_transform(&model, &pose))),
+            });
             let animated = match (rig, model) {
                 (Some(rig), Some(model)) => {
                     let here = network
@@ -129,6 +160,12 @@ pub(crate) fn rebuild_network_units(
             push_hero(units, bones, models, model, &pose, animated);
             continue;
         }
+        anchors.push(UnitAnchor {
+            id: u32::from(entity.net_id),
+            position: ground,
+            height: unit_height(kind),
+            model: None,
+        });
         push_unit(
             units,
             position,
@@ -139,7 +176,7 @@ pub(crate) fn rebuild_network_units(
             center,
         );
     }
-    for projectile in &network.projectiles {
+    for projectile in network.projectiles.iter().filter(|_| projectile_cubes) {
         let color = if projectile.team == 0 {
             Vec4::new(0.35, 0.72, 1.0, 1.0)
         } else {

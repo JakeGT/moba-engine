@@ -7,6 +7,7 @@ use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, persp
 use crate::ui::UiImage;
 
 use crate::lighting::{FrameLighting, SceneLighting};
+use crate::vfx::VfxFrame;
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -223,6 +224,8 @@ pub struct Scene<'a> {
     pub bones: &'a [JointMatrix],
     /// Lighting art direction (ADR-0011); [`SceneLighting::DEFAULT`] unless set.
     pub lighting: SceneLighting,
+    /// Particles to spawn and the particle time step ([`VfxFrame::EMPTY`] by default).
+    pub vfx: VfxFrame<'a>,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -371,6 +374,7 @@ impl<'a> Scene<'a> {
             terrain_tint: [0.10, 0.16, 0.11, 1.0],
             bones: &[],
             lighting: SceneLighting::DEFAULT,
+            vfx: VfxFrame::EMPTY,
         }
     }
 
@@ -388,6 +392,7 @@ impl<'a> Scene<'a> {
             terrain_tint: [0.10, 0.16, 0.11, 1.0],
             bones: &[],
             lighting: SceneLighting::DEFAULT,
+            vfx: VfxFrame::EMPTY,
         }
     }
 
@@ -409,6 +414,13 @@ impl<'a> Scene<'a> {
     #[must_use]
     pub const fn with_bones(mut self, bones: &'a [JointMatrix]) -> Self {
         self.bones = bones;
+        self
+    }
+
+    /// Sets this frame's particle spawns and time step (ADR-0013).
+    #[must_use]
+    pub const fn with_vfx(mut self, vfx: VfxFrame<'a>) -> Self {
+        self.vfx = vfx;
         self
     }
 

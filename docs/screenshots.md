@@ -18,6 +18,37 @@ deterministic simulation tick; minions and structures retain the instanced-cube 
 Local bot preview after 3,000 warmup ticks on an RTX 5070 Ti with validation required; frame log
 p95 4.197 ms / max 4.538 ms with vsync off.
 
+### GPU particle VFX (R5)
+![Scripted 5v5 teamfight with VFX](images/r5-vfx-teamfight.png)
+
+The checked-in scripted teamfight (`tests/replays/teamfight-5v5.mbr`) played in the local view
+with every effect of `content/vfx/` ([ADR-0013](adr/0013-vfx-runtime.md)) at tick 345, RTX
+5070 Ti, High, 1920×1080 (shown at 1280×720), camera 20 m, validation and sync validation
+required, zero messages. Heals (green rings and crosses), an Arc Bolt in flight, a Venom Dart
+trail, a Cleaving Throw blade (a mesh particle), hit sparks and a dash smoke trail (purple,
+alpha-blended through weighted blended OIT). The local HUD titles replay playback `REPLAY`
+(and the preview below `VFX PREVIEW`).
+
+![Effect previews](images/r5-vfx-previews.png)
+
+`MOBA_VFX_PREVIEW=<effect>` (the authoring loop; lavapipe, validation required): one sample
+effect per tile at 0.2 s, played at a stand-in target (red) from a stand-in caster (blue). The
+preview reloads within half a second when a file in `content/vfx/` changes.
+
+![Low and High tiers](images/r5-vfx-tiers.png)
+
+The same replay frame (tick 345, cropped) on Low (left: unsorted alpha, no soft particles, no
+mesh particles, the packed HDR target) and High (right), lavapipe with validation required,
+`MOBA_VFX_SCALE=8`. At eight times the authored emission Low's smaller budgets (4,096
+particles, 1.5 screens of overdraw) already drop new spawns by importance — an orange heal
+ring and some sparks are missing — while High draws everything.
+
+```bash
+MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=<tick> MOBA_CAMERA_DISTANCE=30 \
+MOBA_CAPTURE=/tmp/vfx.ppm MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40 cargo run --release -p moba-client
+MOBA_VFX_PREVIEW=nova MOBA_CAPTURE=/tmp/nova.ppm MOBA_CAPTURE_FRAME=6 cargo run --release -p moba-client
+```
+
 ### 500 instanced units + terrain
 ![500 instanced units and terrain](images/m3-500-units.png)
 

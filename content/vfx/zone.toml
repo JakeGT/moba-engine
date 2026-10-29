@@ -1,0 +1,19 @@
+# Default zone: a telegraph ring for the zone's lifetime (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 1.0
+event_duration = true
+importance = "high"
+
+[[emitters]]
+primitive = "ring"
+sprite = "ring"
+burst = 1
+rate = 2
+lifetime = [1.0, 1.0]
+size = [2.0, 2.0]
+size_end = 2.05
+scale_with_radius = true
+color = [1.5, 1.5, 1.5, 0.5]
+color_end = [1.5, 1.5, 1.5, 0.0]
+team_tint = 0.7
+telegraph = true

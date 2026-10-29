@@ -152,6 +152,10 @@ pub(crate) struct Settings {
     /// Team colours for health bars and the minimap: `standard` or `colorblind`
     /// (`MOBA_TEAM_PALETTE` overrides).
     pub(crate) team_palette: String,
+    /// GPU particle effects on or off (`MOBA_VFX=off` overrides; ADR-0013).
+    pub(crate) vfx: bool,
+    /// Opacity of allied (not your own) effects, `0..=1`: the allied-VFX dimming setting.
+    pub(crate) ally_vfx_opacity: f32,
     pub(crate) controls: Controls,
 }
 
@@ -165,6 +169,8 @@ impl Default for Settings {
             camera_sensitivity: 1.0,
             camera_zoom: 240.0,
             team_palette: String::from(crate::hud::theme::TeamPalette::default().name()),
+            vfx: true,
+            ally_vfx_opacity: 1.0,
             controls: Controls::default(),
         }
     }
@@ -352,6 +358,13 @@ impl Settings {
         } else if !(CAMERA_ZOOM_MIN..=CAMERA_ZOOM_MAX).contains(&self.camera_zoom) {
             self.camera_zoom = self.camera_zoom.clamp(CAMERA_ZOOM_MIN, CAMERA_ZOOM_MAX);
             warnings.push(String::from("settings: camera_zoom clamped"));
+        }
+        if !self.ally_vfx_opacity.is_finite() {
+            self.ally_vfx_opacity = 1.0;
+            warnings.push(String::from("settings: ally_vfx_opacity reset"));
+        } else if !(0.0..=1.0).contains(&self.ally_vfx_opacity) {
+            self.ally_vfx_opacity = self.ally_vfx_opacity.clamp(0.0, 1.0);
+            warnings.push(String::from("settings: ally_vfx_opacity clamped"));
         }
         warnings
     }

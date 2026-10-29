@@ -24,7 +24,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
 | Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
 | Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. VAT minions and bone LOD (R4b) are open. |
-| VFX | None beyond unit tinting. Presentation events (cast, projectile spawn/hit, death, zone) already reach the client ([perf/0009](../perf/0009-presentation-events.md)). |
+| VFX | **R5** ([ADR-0013](../adr/0013-vfx-runtime.md), 2026-10-29): compute-simulated GPU particles in a fixed per-tier buffer (sprites, flipbooks, trails, beams, ground rings, mesh particles), additive plus weighted blended OIT (unsorted on Low), soft particles from the scene depth, client-local effect descriptors bound to presentation events and animation sockets, per-tier particle/overdraw budgets with distance culling and enemy-telegraph/ally-dimming rules, and a live-reload preview. Distortion moved to R6. |
 | Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
 | UI | **R7a:** MSDF font (Open Sans Condensed, baked offline by `bake-ui-font`) with derivative anti-aliasing, outlines and soft shadows; the RGBA atlas keeps pixel-art icons. Styled health bars (damage ghost, shield, ticks, colour-blind palette), pooled floating combat text, cooldown sweeps, screen fades and a loading screen ([perf/0014](../perf/0014-ui.md)). **R7b:** render-to-texture through the graph (persistent offscreen images the UI samples): 3D hero portraits (animated idle above `Low`) and a minimap baked from a top-down render of the map at load. |
 | Evidence | Golden 64×36 fingerprints on lavapipe with validation (rebaselined for the tonemap in R1a). Per-pass GPU timestamps in `MOBA_FRAME_LOG` (R1a); real-GPU timings exist only for an RTX 5070 Ti (p95 4.2 ms @1080p, GPU work 0.046 ms, [perf/0011](../perf/0011-render-graph.md)). |
@@ -179,6 +179,15 @@ R1.
 
 **Exit:** a scripted 5v5 teamfight replay (deterministic, from a checked-in `.mbr`) renders at budget on every tier with all ability VFX. The fill-rate p95 is recorded.
 
+**Status (2026-10-29):** done; distortion moved to R6 ([ADR-0013](../adr/0013-vfx-runtime.md),
+[perf/0016](../perf/0016-vfx.md)). Items 1, 3, 4 as written; item 2 without distortion/heat
+haze, which **moved to R6** (item 7 there); item 5 as a client mode (`MOBA_VFX_PREVIEW=<effect>`, reloads on save)
+rather than a separate tool. Effects are client-local and unhashed like every other visual,
+bound by name in `vfx/bindings.toml`. The exit scene is `tests/replays/teamfight-5v5.mbr`
+(`moba-tools teamfight`, all 15 built-in abilities cast, verified by a test), played with
+`MOBA_REPLAY` and measured on every tier on the RTX 5070 Ti; the other §7 reference GPUs are
+still unowned (#9/#127).
+
 ### R6 — Post-processing and image quality (M)
 1. **Tonemapping** (AgX or ACES-fitted) with exposure, and per-map colour-grading LUTs.
 2. **Bloom.** A physically-based downsample/upsample chain.
@@ -186,6 +195,7 @@ R1.
 4. **Ambient occlusion.** GTAO/SSAO at half resolution on High; Low relies on baked AO.
 5. **Resolution scaling.** Render-scale slider and dynamic resolution to hold the frame target. Optional AMD FSR 1/2 (MIT licence) upscaling.
 6. **Effects for gameplay:** death desaturation, damage vignette and a low-health pulse, all accessibility-toggleable.
+7. **Distortion / heat haze** (moved from R5, High and up, `MOBA_DISTORTION=off` switch): a copy of the HDR target before the particle pass, sampled with a refraction offset by distortion particles ([ADR-0013](../adr/0013-vfx-runtime.md#follow-ups)).
 
 **Exit:** reference captures per tier, and a blind A/B readability check against the R2 build.
 
@@ -226,7 +236,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0010 | Texture pipeline | **Accepted** (R1b, [ADR-0010](../adr/0010-texture-pipeline.md)): offline baker → KTX2 (BC7/BC5/BC4), baked mips, sRGB/linear fixed by format and slot; CPU-decode fallback; client-local material descriptors |
 | ADR-0011 | Art style | **Accepted** (R2a, [ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX + wrap/ramp/painted specular/rim), per-map IBL, one fitted directional shadow map; readability rules as acceptance criteria |
 | ADR-0012 | Animation runtime | **Accepted** ([ADR-0012](../adr/0012-animation-runtime.md)): in-house sampler + content-defined state machine; VAT for minions in R4b |
-| ADR-0013 | VFX runtime | GPU compute particles; content-defined effects bound to presentation events |
+| ADR-0013 | VFX runtime | **Accepted** (R5, [ADR-0013](../adr/0013-vfx-runtime.md)): GPU compute particles over a fixed per-tier buffer with a CPU slot allocator; WBOIT with log revealage (no `independentBlend`); client-local effects bound to presentation events and sockets |
 | — | Quality tiers | Low = min-spec 1080p/60; High = mid-range 1440p/144 |
 
 ## 7. Performance targets and evidence

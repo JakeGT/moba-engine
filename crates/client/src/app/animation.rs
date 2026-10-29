@@ -574,8 +574,7 @@ impl AnimationDriver {
     }
 
     /// The animator of a hero: its sockets (`Animator::socket_transform`, the attach points
-    /// R5 VFX will use) and its state. The renderer path does not need it yet.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// of VFX cast sockets, ADR-0013) and its state.
     pub(crate) fn animator(&self, net_id: u16) -> Option<&Animator> {
         self.slot_index(net_id)
             .map(|index| &self.slots[index].animator)

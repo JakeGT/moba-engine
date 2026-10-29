@@ -18,9 +18,10 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this).
-pub(crate) const MAX_PASSES: usize = 8;
-/// Most resources (imported + transient) one graph may declare.
-pub(crate) const MAX_RESOURCES: usize = 16;
+pub(crate) const MAX_PASSES: usize = 12;
+/// Most resources (imported + transient) one graph may declare (at most 32: a pass's
+/// resource set is a `u32` bit mask).
+pub(crate) const MAX_RESOURCES: usize = 24;
 /// Most barriers emitted before one pass or at the end of the graph.
 pub(crate) const MAX_BARRIERS: usize = 16;
 
@@ -52,6 +53,15 @@ pub(crate) enum Access {
     TransferWrite,
     /// Storage buffer read by a vertex shader.
     VertexStorageRead,
+    /// Storage buffer read by a compute shader.
+    ComputeStorageRead,
+    /// Storage buffer read and written by a compute shader (contents kept).
+    ComputeStorageReadWrite,
+    /// Indirect draw arguments (`vkCmdDraw*Indirect`).
+    IndirectRead,
+    /// Depth attachment that is tested but not written, sampled by the fragment shader in
+    /// the same pass (soft particles): `DEPTH_STENCIL_READ_ONLY_OPTIMAL`.
+    DepthReadSampled,
     /// Host read after the submission completes (buffers only; final access).
     HostRead,
     /// Presentation (swapchain images only; final access). Ordered before the submit's
@@ -84,6 +94,7 @@ impl AccessInfo {
 impl Access {
     /// Stage, access, layout and usage of this access.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // One exhaustive table.
     pub(crate) fn info(self) -> AccessInfo {
         use vk::AccessFlags2 as A;
         use vk::ImageLayout as L;
@@ -146,6 +157,38 @@ impl Access {
                 true,
                 U::empty(),
             ),
+            Self::ComputeStorageRead => (
+                S::COMPUTE_SHADER,
+                A::SHADER_STORAGE_READ,
+                A::NONE,
+                L::UNDEFINED,
+                true,
+                U::empty(),
+            ),
+            Self::ComputeStorageReadWrite => (
+                S::COMPUTE_SHADER,
+                A::SHADER_STORAGE_READ | A::SHADER_STORAGE_WRITE,
+                A::SHADER_STORAGE_WRITE,
+                L::UNDEFINED,
+                true,
+                U::empty(),
+            ),
+            Self::IndirectRead => (
+                S::DRAW_INDIRECT,
+                A::INDIRECT_COMMAND_READ,
+                A::NONE,
+                L::UNDEFINED,
+                true,
+                U::empty(),
+            ),
+            Self::DepthReadSampled => (
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS | S::FRAGMENT_SHADER,
+                A::DEPTH_STENCIL_ATTACHMENT_READ | A::SHADER_SAMPLED_READ,
+                A::NONE,
+                L::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                true,
+                U::DEPTH_STENCIL_ATTACHMENT | U::SAMPLED,
+            ),
             Self::HostRead => (
                 S::HOST,
                 A::HOST_READ,
@@ -177,13 +220,26 @@ impl Access {
     }
 
     const fn valid_for_image(self) -> bool {
-        !matches!(self, Self::VertexStorageRead | Self::HostRead)
+        !matches!(
+            self,
+            Self::VertexStorageRead
+                | Self::ComputeStorageRead
+                | Self::ComputeStorageReadWrite
+                | Self::IndirectRead
+                | Self::HostRead
+        )
     }
 
     const fn valid_for_buffer(self) -> bool {
         matches!(
             self,
-            Self::TransferRead | Self::TransferWrite | Self::VertexStorageRead | Self::HostRead
+            Self::TransferRead
+                | Self::TransferWrite
+                | Self::VertexStorageRead
+                | Self::ComputeStorageRead
+                | Self::ComputeStorageReadWrite
+                | Self::IndirectRead
+                | Self::HostRead
         )
     }
 }
@@ -264,6 +320,21 @@ impl ImportState {
     /// earlier frame (a persistent depth buffer): the first barrier orders that write
     /// before this frame's (write-after-write).
     pub(crate) const fn rewritten(
+        stage: vk::PipelineStageFlags2,
+        access: vk::AccessFlags2,
+    ) -> Self {
+        Self {
+            stage,
+            access,
+            layout: vk::ImageLayout::UNDEFINED,
+        }
+    }
+
+    /// A buffer whose contents persist across frames on this queue: the first barrier of a
+    /// frame orders against the previous frames' `stage` work and makes their `access`
+    /// writes available (the particle state, written by compute and read by the vertex
+    /// stage every frame, ADR-0013).
+    pub(crate) const fn persistent_buffer(
         stage: vk::PipelineStageFlags2,
         access: vk::AccessFlags2,
     ) -> Self {
@@ -463,8 +534,8 @@ pub(crate) struct CompiledPass<T> {
     pub(crate) name: &'static str,
     pub(crate) tag: T,
     pub(crate) barriers: Vec<Barrier>,
-    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 16).
-    uses: u16,
+    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 32).
+    uses: u32,
 }
 
 impl<T> CompiledPass<T> {
@@ -908,7 +979,7 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         let uses = pass
             .accesses
             .iter()
-            .fold(0u16, |mask, &(resource, _)| mask | (1 << resource.index()));
+            .fold(0u32, |mask, &(resource, _)| mask | (1 << resource.index()));
         compiled.push(CompiledPass {
             name: pass.name,
             tag: pass.tag,
