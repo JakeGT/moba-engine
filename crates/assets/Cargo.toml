@@ -31,6 +31,10 @@ moba-test-support = { path = "../test-support" }
 name = "skin_sample"
 harness = false
 
+[[bench]]
+name = "vat_minions"
+harness = false
+
 [features]
 default = []
 # Bounded binary glTF (.glb) static-mesh loader (ADR-0007).

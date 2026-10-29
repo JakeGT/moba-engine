@@ -882,6 +882,39 @@ impl Renderer {
         self.scene.register_skinned_mesh(&self.device, data)
     }
 
+    /// Uploads a static mesh with its vertex-animation texture (R4b, ADR-0012) and returns
+    /// its id. Instances of it play [`UnitInstance::vat`](crate::UnitInstance::vat)'s frames
+    /// from `texture` (`RGBA16F`, laid out as `descriptor` says, from `moba-tools vat-bake`)
+    /// in the vertex shader, instanced, without a bone buffer, and cast shadows. Vertex
+    /// colour only (no material). Up to [`MAX_VAT_MESHES`](crate::MAX_VAT_MESHES); shares
+    /// the 64 mesh slots. Load-time only, like [`Self::register_mesh`].
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidVat`] when the VAT pipeline is unavailable, every VAT slot is
+    /// used, or `texture` or `data` do not match `descriptor`; otherwise as
+    /// [`Self::register_mesh`].
+    pub fn register_vat_mesh(
+        &mut self,
+        data: &crate::MeshData,
+        texture: &crate::TextureData,
+        descriptor: &crate::VatDescriptor,
+    ) -> RenderResult<MeshId> {
+        self.scene
+            .register_vat_mesh(&self.device, data, texture, descriptor)
+    }
+
+    /// Whether [`Self::register_vat_mesh`] can succeed (the VAT pipeline built).
+    #[must_use]
+    pub fn vat_available(&self) -> bool {
+        self.scene.vat_available()
+    }
+
+    /// Registered VAT meshes.
+    #[must_use]
+    pub fn vat_mesh_count(&self) -> usize {
+        self.scene.vat_mesh_count()
+    }
+
     /// Uploads a texture and returns its id for [`MaterialData::with_texture`].
     ///
     /// Load-time only (staging upload and a queue wait). BC textures are decoded to their
@@ -982,6 +1015,14 @@ impl Renderer {
     #[must_use]
     pub fn skinning_available(&self) -> bool {
         self.scene.skinning_available()
+    }
+
+    /// Mesh slots in total, including the built-in cube: [`Self::register_mesh`],
+    /// [`Self::register_skinned_mesh`] and [`Self::register_vat_mesh`] fail with
+    /// [`RenderError::TooManyMeshes`] once [`Self::mesh_count`] reaches it.
+    #[must_use]
+    pub fn mesh_capacity(&self) -> usize {
+        crate::passes::scene::MAX_MESHES
     }
 
     /// Number of registered meshes, including the built-in cube.

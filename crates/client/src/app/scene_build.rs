@@ -1,17 +1,21 @@
 //! Scene/unit instance construction for the network client.
 
+use moba_assets::Animator;
 use moba_core::FixVec2;
 use moba_core::math::{Mat4, Quat, Vec3, Vec4};
 use moba_game::Team;
 use moba_net::protocol::{
     STATUS_BURN, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE, STATUS_SLOW,
 };
-use moba_render::{Camera, JointMatrix, UnitInstance};
+use moba_render::{Camera, UnitInstance};
 use moba_sim::UnitKind;
 
 use crate::app::NetworkView;
 use crate::app::animation::{AnimationDriver, LodView, RigRef};
+use crate::app::bone_lod::BoneLod;
+use crate::app::local_feed::LocalFeed;
 use crate::app::map_visuals::MapLibrary;
+use crate::app::minions::{MinionDriver, MinionLibrary};
 use crate::app::models::{HeroModel, ModelLibrary};
 use crate::app::skinning::BonePool;
 use crate::app::vfx::{Anchors, UnitAnchor};
@@ -27,11 +31,106 @@ pub(crate) fn animated_rig(models: &ModelLibrary, model: Option<HeroModel>) -> O
     })
 }
 
-/// Per-frame animation inputs of the network view (ADR-0012).
+/// Per-frame animation inputs of the network view and the local preview (ADR-0012).
 pub(crate) struct AnimationFrame<'a> {
     pub(crate) driver: &'a mut AnimationDriver,
-    /// The camera, for the animation LOD (`None` evaluates every hero).
+    /// The camera, for the animation and bone LODs (`None` evaluates every hero at LOD0).
     pub(crate) view: Option<LodView>,
+    /// VAT minion players and corpses (R4b).
+    pub(crate) minions: &'a mut MinionDriver,
+    pub(crate) minion_library: &'a MinionLibrary,
+    /// Bone-count LOD distances (R4b).
+    pub(crate) bone_lod: BoneLod,
+    /// Draw socket attachments on LOD2 heroes too (every tier above `Low`).
+    pub(crate) far_attachments: bool,
+}
+
+impl AnimationFrame<'_> {
+    /// The bone LOD and whether to draw attachments for a hero standing at `ground`.
+    /// `pinned` (a capture) draws LOD0.
+    pub(crate) fn hero_draw(&self, ground: Vec3, pinned: bool) -> HeroDraw {
+        let lod = match (pinned, self.view) {
+            (false, Some(view)) => {
+                let (distance, on_screen) = view.classify(ground);
+                self.bone_lod.level(distance, on_screen)
+            }
+            _ => 0,
+        };
+        HeroDraw {
+            lod,
+            attachments: lod < 2 || self.far_attachments,
+        }
+    }
+}
+
+/// How one hero is drawn: its bone LOD (0 full, 1, 2) and whether its attachments are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeroDraw {
+    pub(crate) lod: usize,
+    pub(crate) attachments: bool,
+}
+
+impl HeroDraw {
+    /// Full skin with attachments.
+    pub(crate) const FULL: Self = Self {
+        lod: 0,
+        attachments: true,
+    };
+}
+
+/// A minion drawn from its VAT (R4b): the interpolated speed picks idle ↔ run, the facing is
+/// the movement direction or the driver's rest facing. Returns `false` (nothing pushed) for a
+/// unit without a VAT visual.
+#[allow(clippy::too_many_arguments)] // One unit's full presentation inputs.
+pub(crate) fn push_vat_minion(
+    units: &mut Vec<UnitInstance>,
+    animation: &mut AnimationFrame<'_>,
+    net_id: u16,
+    kind: UnitKind,
+    ground: Vec3,
+    step: (f32, f32),
+    speed: f32,
+    now: f32,
+    color: Vec4,
+) -> bool {
+    let Some(visual) = animation.minion_library.visual(kind).copied() else {
+        return false;
+    };
+    let (dx, dy) = step;
+    let facing = if dx * dx + dy * dy > 0.0001 {
+        dy.atan2(dx)
+    } else {
+        animation.minions.rest_facing(net_id).unwrap_or(0.0)
+    };
+    let pose = animation.minions.pose(
+        net_id,
+        &visual,
+        now,
+        speed,
+        animation.minion_library.quality(),
+    );
+    units.push(
+        UnitInstance::new(visual.transform(ground, facing), color)
+            .with_mesh(visual.mesh)
+            .with_vat(pose),
+    );
+    true
+}
+
+/// Draws the dying VAT minions (their corpses) at render time `now`.
+pub(crate) fn push_minion_corpses(
+    units: &mut Vec<UnitInstance>,
+    animation: &mut AnimationFrame<'_>,
+    now: f32,
+    center: f32,
+) {
+    let library = animation.minion_library;
+    animation
+        .minions
+        .push_corpses(units, library, now, center, |kind, team| {
+            let team = team_from_u8(team).unwrap_or(Team::Blue);
+            unit_appearance(kind, team, 0.0, 0).1
+        });
 }
 
 /// Visual height of a unit kind, metres (VFX attach at half of it).
@@ -62,8 +161,8 @@ pub(crate) fn rebuild_network_units(
     units.clear();
     bones.clear();
     anchors.clear();
-    let AnimationFrame { driver, view } = animation;
-    driver.begin_frame();
+    let mut animation = animation;
+    animation.driver.begin_frame();
     let Some(latest) = network.interpolator.latest() else {
         return;
     };
@@ -84,7 +183,11 @@ pub(crate) fn rebuild_network_units(
         let rig = animated_rig(models, model);
         // A dead hero is drawn only while its death clip (and linger) plays.
         if entity.is_dead()
-            && !rig.is_some_and(|rig| driver.visible(entity.net_id, rig.graph, now, true))
+            && !rig.is_some_and(|rig| {
+                animation
+                    .driver
+                    .visible(entity.net_id, rig.graph, now, true)
+            })
         {
             continue;
         }
@@ -115,7 +218,7 @@ pub(crate) fn rebuild_network_units(
             let (facing, gait) = if speed_sq > 0.0001 {
                 (dy.atan2(dx), 1.0)
             } else {
-                let rest = rig.and_then(|_| driver.rest_facing(entity.net_id));
+                let rest = rig.and_then(|_| animation.driver.rest_facing(entity.net_id));
                 (rest.unwrap_or(0.0), 0.0)
             };
             let pose = HeroPose {
@@ -145,19 +248,26 @@ pub(crate) fn rebuild_network_units(
                         .position(entity.net_id, render_tick)
                         .unwrap_or(position);
                     let speed = here.distance(previous).to_f32() * tick_rate / 2.0;
-                    driver.animate(
-                        entity.net_id,
-                        rig,
-                        now,
-                        if entity.is_dead() { 0.0 } else { speed },
-                        hero_transform(&model, &pose),
-                        view.as_ref(),
-                        pinned,
-                    )
+                    animation
+                        .driver
+                        .animate(
+                            entity.net_id,
+                            rig,
+                            now,
+                            if entity.is_dead() { 0.0 } else { speed },
+                            hero_transform(&model, &pose),
+                            animation.view.as_ref(),
+                            pinned,
+                        )
+                        .is_some()
                 }
-                _ => None,
+                _ => false,
             };
-            push_hero(units, bones, models, model, &pose, animated);
+            let draw = animation.hero_draw(ground, pinned);
+            let animator = animated
+                .then(|| animation.driver.animator(entity.net_id))
+                .flatten();
+            push_hero(units, bones, models, model, &pose, animator, draw);
             continue;
         }
         anchors.push(UnitAnchor {
@@ -166,6 +276,35 @@ pub(crate) fn rebuild_network_units(
             height: unit_height(kind),
             model: None,
         });
+        if matches!(kind, UnitKind::MeleeMinion | UnitKind::RangedMinion) {
+            let here = network
+                .interpolator
+                .position(entity.net_id, render_tick)
+                .unwrap_or(position);
+            let previous = network
+                .interpolator
+                .position(entity.net_id, render_tick - 2.0)
+                .unwrap_or(here);
+            let step = (
+                here.x.to_f32() - previous.x.to_f32(),
+                here.y.to_f32() - previous.y.to_f32(),
+            );
+            let speed = here.distance(previous).to_f32() * tick_rate / 2.0;
+            let (_, color) = unit_appearance(kind, team, fraction, entity.status_bits);
+            if push_vat_minion(
+                units,
+                &mut animation,
+                entity.net_id,
+                kind,
+                ground,
+                step,
+                speed,
+                now,
+                color,
+            ) {
+                continue;
+            }
+        }
         push_unit(
             units,
             position,
@@ -176,6 +315,7 @@ pub(crate) fn rebuild_network_units(
             center,
         );
     }
+    push_minion_corpses(units, &mut animation, now, center);
     for projectile in network.projectiles.iter().filter(|_| projectile_cubes) {
         let color = if projectile.team == 0 {
             Vec4::new(0.35, 0.72, 1.0, 1.0)
@@ -192,6 +332,149 @@ pub(crate) fn rebuild_network_units(
             color,
         ));
     }
+}
+
+/// Rebuilds the local preview's units from its [`LocalFeed`] (R4b): the same heroes
+/// (animators, bone LOD, attachments) and VAT minions as a network match, at the latest
+/// simulated tick (no interpolation). `pinned` (a capture) evaluates every hero at LOD0.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One pass over the tick's units.
+pub(crate) fn rebuild_local_units(
+    feed: &LocalFeed,
+    models: &ModelLibrary,
+    units: &mut Vec<UnitInstance>,
+    bones: &mut BonePool,
+    animation: AnimationFrame<'_>,
+    anchors: &mut Anchors,
+    center: f32,
+    tick_rate: f32,
+    pinned: bool,
+) {
+    let mut animation = animation;
+    animation.driver.begin_frame();
+    let snapshot = feed.snapshot();
+    let now = snapshot.tick as f32 / tick_rate;
+    for entity in &snapshot.entities {
+        let (Some(kind), Some(team)) = (kind_from_u8(entity.kind), team_from_u8(entity.team))
+        else {
+            continue;
+        };
+        let model = (kind == UnitKind::Hero)
+            .then(|| models.hero(usize::from(entity.hero_pick)))
+            .flatten();
+        let rig = animated_rig(models, model);
+        if entity.is_dead()
+            && !rig.is_some_and(|rig| {
+                animation
+                    .driver
+                    .visible(entity.net_id, rig.graph, now, true)
+            })
+        {
+            continue;
+        }
+        let position = entity.position();
+        let previous = feed.previous_position(entity.net_id).unwrap_or(position);
+        let step = (
+            position.x.to_f32() - previous.x.to_f32(),
+            position.y.to_f32() - previous.y.to_f32(),
+        );
+        // One tick apart; a respawn teleport is not a speed.
+        let distance = position.distance(previous).to_f32();
+        let speed = if distance > 3.0 {
+            0.0
+        } else {
+            distance * tick_rate
+        };
+        let fraction = if entity.max_health == 0 {
+            1.0
+        } else {
+            f32::from(entity.health) / f32::from(entity.max_health)
+        };
+        let ground = Vec3::new(
+            position.x.to_f32() - center,
+            0.0,
+            position.y.to_f32() - center,
+        );
+        if kind == UnitKind::Hero {
+            let moving = speed > 0.01 && step.0 * step.0 + step.1 * step.1 > 1e-6;
+            let (facing, gait) = if moving {
+                (step.1.atan2(step.0), 1.0)
+            } else {
+                let rest = rig.and_then(|_| animation.driver.rest_facing(entity.net_id));
+                (rest.unwrap_or(0.0), 0.0)
+            };
+            let pose = HeroPose {
+                position,
+                team,
+                health_fraction: fraction,
+                center,
+                time: now,
+                phase_offset: f32::from(entity.net_id),
+                facing,
+                gait,
+            };
+            anchors.push(UnitAnchor {
+                id: u32::from(entity.net_id),
+                position: ground,
+                height: unit_height(kind),
+                model: rig
+                    .zip(model)
+                    .map(|(rig, model)| (rig.index, hero_transform(&model, &pose))),
+            });
+            let animated = match (rig, model) {
+                (Some(rig), Some(model)) => animation
+                    .driver
+                    .animate(
+                        entity.net_id,
+                        rig,
+                        now,
+                        if entity.is_dead() { 0.0 } else { speed },
+                        hero_transform(&model, &pose),
+                        animation.view.as_ref(),
+                        pinned,
+                    )
+                    .is_some(),
+                _ => false,
+            };
+            let draw = animation.hero_draw(ground, pinned);
+            let animator = animated
+                .then(|| animation.driver.animator(entity.net_id))
+                .flatten();
+            push_hero(units, bones, models, model, &pose, animator, draw);
+            continue;
+        }
+        anchors.push(UnitAnchor {
+            id: u32::from(entity.net_id),
+            position: ground,
+            height: unit_height(kind),
+            model: None,
+        });
+        let (_, color) = unit_appearance(kind, team, fraction, entity.status_bits);
+        if matches!(kind, UnitKind::MeleeMinion | UnitKind::RangedMinion)
+            && push_vat_minion(
+                units,
+                &mut animation,
+                entity.net_id,
+                kind,
+                ground,
+                step,
+                speed,
+                now,
+                color,
+            )
+        {
+            continue;
+        }
+        push_unit(
+            units,
+            position,
+            kind,
+            team,
+            fraction,
+            entity.status_bits,
+            center,
+        );
+    }
+    push_minion_corpses(units, &mut animation, now, center);
 }
 
 fn hero_color(team: Team, health_fraction: f32) -> Vec4 {
@@ -242,17 +525,20 @@ pub(crate) fn hero_transform(model: &HeroModel, pose: &HeroPose) -> Mat4 {
 
 /// Pushes a hero as its loaded model when there is one, otherwise as the procedural rig.
 ///
-/// A skinned model uses `animated` (an animator's matrices, ADR-0012) when given, else it is
-/// posed into `bones` by the WP-4.1 rule (run clip weighted by gait, rest pose when idle).
-/// When the bone budget is exhausted it is drawn with its static mesh for that frame. Never
-/// allocates when `units` has capacity.
+/// A skinned model uses `animator`'s matrices (ADR-0012) when given, else it is posed into
+/// `bones` by the WP-4.1 rule (run clip weighted by gait, rest pose when idle). `draw.lod`
+/// above 0 draws the model's reduced bone-LOD skin with the matching joints gathered (R4b),
+/// and `draw.attachments` the animator's socket attachments. When the bone budget is
+/// exhausted it is drawn with its static mesh for that frame. Never allocates when `units`
+/// has capacity.
 pub(crate) fn push_hero(
     units: &mut Vec<UnitInstance>,
     bones: &mut BonePool,
     models: &ModelLibrary,
     model: Option<HeroModel>,
     pose: &HeroPose,
-    animated: Option<&[JointMatrix]>,
+    animator: Option<&Animator>,
+    draw: HeroDraw,
 ) {
     let HeroPose {
         position,
@@ -288,25 +574,68 @@ pub(crate) fn push_hero(
     let color = hero_color(team, health_fraction);
     if let Some(skin) = model.skin
         && let Some(rig) = models.rig(skin.rig)
-        && let Some(range) = match animated {
-            Some(matrices) => bones.push(matrices),
-            None => bones.pose(rig, time, phase_offset, gait),
-        }
     {
-        // The clip animates the body (including the hip bob), so no procedural offset.
-        let transform = hero_transform(&model, pose);
-        units.push(
-            UnitInstance::new(transform, color)
-                .with_mesh(skin.mesh)
-                .with_bones(range),
-        );
-        return;
+        let reduced = draw
+            .lod
+            .checked_sub(1)
+            .and_then(|level| skin.lods.get(level).copied().flatten())
+            .zip(models.skin_lod(skin.rig, draw.lod));
+        let range = match (reduced, animator) {
+            (Some((_, lod)), Some(animator)) => bones.push_gathered(lod, animator.matrices()),
+            (Some((_, lod)), None) => bones.pose_gathered(rig, lod, time, phase_offset, gait),
+            (None, Some(animator)) => bones.push(animator.matrices()),
+            (None, None) => bones.pose(rig, time, phase_offset, gait),
+        };
+        if let Some(range) = range {
+            // The clip animates the body (including the hip bob), so no procedural offset.
+            let transform = hero_transform(&model, pose);
+            let mesh = reduced.map_or(skin.mesh, |(mesh, _)| mesh);
+            units.push(
+                UnitInstance::new(transform, color)
+                    .with_mesh(mesh)
+                    .with_bones(range),
+            );
+            if draw.attachments
+                && let Some(animator) = animator
+            {
+                push_attachments(units, models, skin.rig, animator, transform, color);
+            }
+            return;
+        }
     }
     // A static mesh has no joints; a small stride bob keeps moving heroes readable.
     let bob = (time * 12.0 + phase_offset).sin().abs() * 0.12 * gait.clamp(0.0, 1.0);
     let base = ground + Vec3::Y * bob;
     let transform = Mat4::from_rotation_translation(rotation, base) * model.normalize;
     units.push(UnitInstance::new(transform, color).with_mesh(model.mesh));
+}
+
+/// Draws a rig's visible socket attachments (R4b) at `transform × socket × scale`, a little
+/// brighter than the hero so they read against it. Never allocates while `units` has
+/// capacity (attachments past it are skipped).
+fn push_attachments(
+    units: &mut Vec<UnitInstance>,
+    models: &ModelLibrary,
+    rig: usize,
+    animator: &Animator,
+    transform: Mat4,
+    color: Vec4,
+) {
+    let tint = Vec4::new(
+        (color.x * 1.25 + 0.15).min(1.0),
+        (color.y * 1.25 + 0.15).min(1.0),
+        (color.z * 1.25 + 0.15).min(1.0),
+        1.0,
+    );
+    for (socket, mesh, scale) in models.attachments(rig) {
+        if units.len() >= units.capacity() {
+            return;
+        }
+        if let Some(local) = animator.socket_transform(socket) {
+            let placed = transform * local * Mat4::from_scale(Vec3::splat(scale));
+            units.push(UnitInstance::new(placed, tint).with_mesh(mesh));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // Rig pose inputs are explicit.
@@ -390,6 +719,23 @@ pub(crate) fn push_unit(
     status: u16,
     center: f32,
 ) {
+    let (height, color) = unit_appearance(kind, team, health_fraction, status);
+    let world_position = Vec3::new(
+        position.x.to_f32() - center,
+        0.0,
+        position.y.to_f32() - center,
+    );
+    units.push(UnitInstance::at(world_position, height, color));
+}
+
+/// The drawn height and colour of a non-hero unit: its team colour by kind, darkened by lost
+/// health and tinted by its status effects.
+pub(crate) fn unit_appearance(
+    kind: UnitKind,
+    team: Team,
+    health_fraction: f32,
+    status: u16,
+) -> (f32, Vec4) {
     let team_color = match team {
         Team::Blue => Vec4::new(0.20, 0.46, 1.0, 1.0),
         Team::Red => Vec4::new(1.0, 0.24, 0.18, 1.0),
@@ -450,12 +796,7 @@ pub(crate) fn push_unit(
     if status & STATUS_HASTE != 0 {
         color = color * 0.75 + Vec4::new(0.25, 0.95, 0.4, 1.0) * 0.25;
     }
-    let world_position = Vec3::new(
-        position.x.to_f32() - center,
-        0.0,
-        position.y.to_f32() - center,
-    );
-    units.push(UnitInstance::at(world_position, height, color));
+    (height, color)
 }
 
 pub(crate) fn kind_from_u8(value: u8) -> Option<UnitKind> {
@@ -480,11 +821,17 @@ pub(crate) fn team_from_u8(value: u8) -> Option<Team> {
 pub(crate) fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
     if network.spectator {
         let idle_yaw = network.spectator_yaw + (elapsed * 0.002).sin() * 0.02;
+        // Following a hero (evidence captures) looks down more steeply, over the towers.
+        let pitch = if network.spectator_follow.is_some() {
+            1.25
+        } else {
+            0.92
+        };
         return Camera::orbit(
             network.spectator_pan,
             network.spectator_zoom,
             idle_yaw,
-            0.92,
+            pitch,
             aspect,
         );
     }
@@ -554,6 +901,7 @@ mod tests {
                         gait: (hero % 2) as f32,
                     },
                     None,
+                    super::HeroDraw::FULL,
                 );
             }
         };

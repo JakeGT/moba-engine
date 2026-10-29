@@ -25,7 +25,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol (v41): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing, compute GPU-particle VFX bound to presentation events) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, MSDF text, 3D hero portraits and a baked minimap rendered to texture, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 611 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 634 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -199,7 +199,8 @@ Replays store the seed/config, content manifest, exact per-tick inputs and perio
 checkpoints; the verifier reports the first divergent tick and reproduces the final state
 hash. Useful client variables: `MOBA_CAPTURE=frame.ppm`, `MOBA_CAPTURE_FRAME=N`,
 `MOBA_SMOKE_FRAMES=N`, `MOBA_VULKAN_VALIDATION=required|off`, `MOBA_DEMO_MOVE=x,y`,
-`MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>`,
+`MOBA_DEMO_BUY=<item>`, `MOBA_SHOP=1`, `MOBA_CAMERA_DISTANCE=<m>` (player, spectator
+and replay camera), `MOBA_LOCAL_CAMERA_DISTANCE=<m>` (local bot preview overview),
 `MOBA_CAPTURE_TICK=N` (networked capture at match tick N, repeatable with `MOBA_SERVER=local`),
 `MOBA_WINDOW_SIZE=<w>x<h>`, `MOBA_WARMUP_TICKS=N` (network mode: frame log starts at tick N);
 hero models: a pack's

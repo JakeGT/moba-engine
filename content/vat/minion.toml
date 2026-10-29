@@ -1,0 +1,40 @@
+# Vertex-animation texture descriptor (ADR-0012 R4b), written by
+# `moba-tools vat-bake`. Client-local and cosmetic: never hashed or sent.
+# Format: docs/content-authoring.md#vertex-animation-textures
+
+model = "sentinel-skinned"
+vertex_count = 974
+frame_count = 88
+width = 4096
+height = 42
+fps = 20.0
+mesh_hash = "0x87565fec404bbb79"
+
+[[clips]]
+name = "idle"
+first = 0
+frames = 32
+loop = true
+
+[[clips]]
+name = "run"
+first = 32
+frames = 16
+loop = true
+
+[[clips]]
+name = "attack"
+first = 48
+frames = 15
+loop = false
+
+[[clips]]
+name = "death"
+first = 63
+frames = 25
+loop = false
+
+[playback]
+run_speed = 4.0
+attack_release = 0.35
+crossfade = 0.15

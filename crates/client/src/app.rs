@@ -26,9 +26,16 @@
 //!   ignores animation sets and `MOBA_ANIM_LOD=off|<near>,<far>` sets the animation LOD.
 //!   The map's visuals name resolves to the descriptor `<dir>/maps/<name>.toml` (terrain
 //!   tint, walls, props; #287), falling back to the built-in theme.
+//! - R4b (ADR-0012): minions play vertex-animation textures from `<dir>/vat/` (`MOBA_VAT=off`
+//!   draws cubes); distant or off-screen heroes draw reduced skins (`MOBA_BONE_LOD=off|<near>,
+//!   <far>`); animation-set sockets may carry visible attachments (`MOBA_ATTACHMENTS=off`). The
+//!   local preview feeds the same animation drivers as a match. `MOBA_STRESS_MINIONS=<n>` adds
+//!   `n` client-only VAT minions to the local preview and reports their CPU time at exit.
 //! - `MOBA_CONTENT=<pack.toml>` loads a content pack for the local preview and for the
 //!   `MOBA_SERVER=local` loopback server.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
+//! - `MOBA_LOCAL_CAMERA_DISTANCE=<m>` sets the local bot preview's overview orbit (default
+//!   235, 8-240; R4b stress close-ups). Replays follow `MOBA_CAMERA_DISTANCE`.
 //! - Lighting overrides of the quality tier's defaults (ADR-0011):
 //!   `MOBA_SHADOWS=off|hard|pcf|pcss`, `MOBA_SHADOW_SIZE=<texels>` (256-8192) and
 //!   `MOBA_IBL=0` (hemispheric ambient only) / `MOBA_SPECULAR_IBL=0` (SH ambient only). The
@@ -71,7 +78,6 @@ use std::time::Instant;
 
 use moba_core::Fix;
 use moba_core::math::Vec3;
-use moba_game::Team;
 use moba_net::protocol::{MatchPhase, SnapshotState, WireCommand, quantize_position};
 use moba_net::{ClientEvent, Interpolator, PredictionState};
 use moba_platform::{App, Frame, FrameOutcome, Key, Window};
@@ -79,7 +85,7 @@ use moba_render::{
     Camera, OffscreenRender, RenderConfig, Renderer, Scene, UiDrawList, UiImage, UnitInstance,
     ValidationMode,
 };
-use moba_sim::{SimConfig, Simulation, UnitKind};
+use moba_sim::{SimConfig, Simulation};
 use std::collections::VecDeque;
 
 use crate::hud::{HitList, HudFx, build_local_hud, build_network_hud, build_vision};
@@ -127,8 +133,10 @@ struct ClientApp {
     models: models::ModelLibrary,
     map_visuals: map_visuals::MapLibrary,
     map_capture: Option<map_visuals::SwitchCapture>,
+    /// `MOBA_CAPTURE_SERIES` (R4b evidence): captures at listed render ticks.
+    capture_series: Option<evidence::CaptureSeries>,
     bones: skinning::BonePool,
-    /// Per-hero animators for the network view (ADR-0012).
+    /// Per-hero animators for the network view and the local preview (ADR-0012).
     animation: animation::AnimationDriver,
     /// Effects and their particle spawns (ADR-0013).
     vfx: vfx::VfxSystem,
@@ -138,6 +146,16 @@ struct ClientApp {
     replay: Option<(moba_sim::Replay, usize)>,
     /// `MOBA_VFX_PREVIEW`: the authoring loop.
     preview: Option<vfx::Preview>,
+    /// VAT minion players and corpses (R4b).
+    minions: minions::MinionDriver,
+    /// The loaded VAT minion visuals (R4b).
+    minion_library: minions::MinionLibrary,
+    /// Bone-count LOD distances (R4b).
+    bone_lod: bone_lod::BoneLod,
+    /// The local preview's snapshot and events for the animation drivers (R4b).
+    local_feed: local_feed::LocalFeed,
+    /// `MOBA_STRESS_MINIONS` (R4b, perf/0018).
+    stress: Option<stress::StressScene>,
     ui: UiDrawList,
     scoreboard_visible: bool,
     shop_visible: bool,
@@ -251,18 +269,38 @@ impl ClientApp {
             local_audio: None,
             // Every entity, five extra rig parts per hero, map walls/props and projectiles,
             // so the frame loop never grows the buffer.
+            // Plus socket attachments, dying VAT minions and the stress scene (R4b).
             units: Vec::with_capacity(
                 moba_sim::MAX_UNITS
                     + 5 * 10
                     + moba_game::MAX_CONTENT_WALLS
                     + moba_assets::MAX_MAP_PROPS
-                    + 64,
+                    + 64
+                    + moba_assets::MAX_SOCKETS * 10
+                    + 64
+                    + stress::MAX_STRESS_MINIONS,
             ),
-            models: models::ModelLibrary::from_env(),
+            models: {
+                let mut models = models::ModelLibrary::from_env();
+                models.set_bone_lod(bone_lod::BoneLod::from_env(quality).enabled());
+                models
+            },
             map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env()),
             map_capture: map_visuals::SwitchCapture::from_env(),
+            capture_series: evidence::CaptureSeries::from_env(),
             bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
-            animation: animation::AnimationDriver::new(animation::AnimLod::from_env(), 30),
+            animation: animation::AnimationDriver::new(animation::AnimLod::from_env(), 30)
+                .with_log(
+                    std::env::var("MOBA_SERVER")
+                        .map_or(true, |spec| spec.is_empty())
+                        .then(evidence::AnimLog::from_env)
+                        .flatten(),
+                ),
+            minions: minions::MinionDriver::new(30),
+            minion_library: minions::MinionLibrary::from_env(quality),
+            bone_lod: bone_lod::BoneLod::from_env(quality),
+            local_feed: local_feed::LocalFeed::new(),
+            stress: stress::StressScene::from_env(),
             vfx: {
                 let root = models::asset_root_from_env();
                 let library = match std::env::var(vfx::VFX_PREVIEW_ENV) {
@@ -339,7 +377,9 @@ impl ClientApp {
                     app.animation = animation::AnimationDriver::new(
                         animation::AnimLod::from_env(),
                         client.tick_rate(),
-                    );
+                    )
+                    .with_log(evidence::AnimLog::from_env());
+                    app.minions = minions::MinionDriver::new(client.tick_rate());
                     app.network = Some(NetworkView {
                         client,
                         prediction,
@@ -371,6 +411,7 @@ impl ClientApp {
                         // Only a capture pins the render tick; otherwise play normally.
                         capture_tick: parse_capture_tick()
                             .filter(|_| std::env::var_os("MOBA_CAPTURE").is_some()),
+                        spectator_follow: evidence::spectate_follow_from_env(),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
                         audio: crate::audio::Audio::new(audio_volume, audio_mute),
@@ -558,6 +599,12 @@ impl App for ClientApp {
                 } else {
                     self.vfx.set_enabled(false);
                 }
+                self.minion_library.renderer_recreated();
+                self.minion_library.bind(|mesh, texture, descriptor| {
+                    renderer
+                        .register_vat_mesh(mesh, texture, descriptor)
+                        .map_err(|error| error.to_string())
+                });
                 if let Some(network) = &self.network {
                     map_visuals::bind_network_map(
                         &mut self.map_visuals,
@@ -674,12 +721,18 @@ impl App for ClientApp {
                 models,
                 map_visuals,
                 map_capture,
+                capture_series,
                 bones,
                 animation,
                 vfx,
                 anchors,
                 replay,
                 preview,
+                minions,
+                minion_library,
+                bone_lod,
+                local_feed,
+                stress,
                 ui,
                 scoreboard_visible,
                 shop_visible,
@@ -713,6 +766,7 @@ impl App for ClientApp {
                             ClientEvent::GameEvent(event) => {
                                 animation.queue_event(&event);
                                 queue_network_vfx(vfx, network, &event);
+                                minions.queue_event(&event);
                                 network.handle_game_event(event);
                             }
                             // The events above belong to this snapshot: stamp them with its
@@ -745,6 +799,11 @@ impl App for ClientApp {
                                         })
                                     },
                                 );
+                                minions.flush_events(
+                                    tick,
+                                    tick as f32 - SNAPSHOT_DELAY_TICKS,
+                                    minion_library,
+                                );
                             }
                             ClientEvent::ContentUpdated { .. } => {
                                 let hero = usize::from(network.client.hero_pick())
@@ -766,6 +825,7 @@ impl App for ClientApp {
                                 network.projectiles.clear();
                                 network.kill_feed.clear();
                                 animation.clear();
+                                minions.clear();
                                 hud_fx.reset();
                                 hud_fx.restart_splash();
                                 // Hero models may change; the map bind below re-bakes the
@@ -817,6 +877,7 @@ impl App for ClientApp {
                             network.interpolator.clear();
                             animation.clear();
                             vfx.clear();
+                            minions.clear();
                             network.own_net_id = None;
                             network.prediction.set_target(None);
                             network.client.clear_pending_input();
@@ -832,6 +893,7 @@ impl App for ClientApp {
                         animation.on_snapshot(&snapshot, |hero| {
                             animated_rig(models, models.hero(usize::from(hero)))
                         });
+                        minions.on_snapshot(&snapshot);
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
                             entity.hero_slot == network.own_slot
                                 && entity.team == network.client.team().index() as u8
@@ -887,6 +949,35 @@ impl App for ClientApp {
                             network.prediction.step();
                         }
                     }
+                    if network.spectator
+                        && let Some((team, slot)) = network.spectator_follow
+                    {
+                        let followed = network.interpolator.latest().and_then(|latest| {
+                            latest
+                                .entities
+                                .iter()
+                                .find(|entity| {
+                                    entity.kind == 0
+                                        && entity.team == team
+                                        && entity.hero_slot == slot
+                                })
+                                .copied()
+                        });
+                        if let Some(hero) = followed {
+                            let position = crate::hud::rendered_entity_position(
+                                network,
+                                crate::hud::HudUnit::new(&hero),
+                                network.render_tick(),
+                            );
+                            let center = crate::hud::map_center(network);
+                            network.spectator_pan = Vec3::new(
+                                position.x.to_f32() - center,
+                                0.0,
+                                position.y.to_f32() - center,
+                            );
+                            network.spectator_zoom = network.follow_distance;
+                        }
+                    }
                     let lod_view = (width > 0 && height > 0).then(|| {
                         let camera = network_camera(
                             network,
@@ -907,6 +998,10 @@ impl App for ClientApp {
                         scene_build::AnimationFrame {
                             driver: animation,
                             view: lod_view,
+                            minions,
+                            minion_library,
+                            bone_lod: *bone_lod,
+                            far_attachments: self.quality != moba_render::QualityTier::Low,
                         },
                         anchors,
                         !vfx.enabled(),
@@ -991,6 +1086,12 @@ impl App for ClientApp {
                             .filter(|_| network.interpolator.latest().is_some())
                             .and_then(|capture| {
                                 capture.due(map_visuals.generation(), *capture_frame)
+                            })
+                            .or_else(|| {
+                                capture_series
+                                    .as_mut()
+                                    .filter(|_| network.phase == MatchPhase::Playing)
+                                    .and_then(|series| series.due(network.render_tick()))
                             });
                         let mut offscreen: arrayvec::ArrayVec<OffscreenRender<'_>, 2> =
                             arrayvec::ArrayVec::new();
@@ -1025,14 +1126,10 @@ impl App for ClientApp {
                                     &mut capture_failure,
                                 );
                                 match capture_failure {
-                                    None => eprintln!(
-                                        "[assets] map capture written to {}",
-                                        path.display()
-                                    ),
-                                    Some(error) => eprintln!(
-                                        "[assets] map capture {} failed: {error}",
-                                        path.display()
-                                    ),
+                                    None => eprintln!("[capture] written to {}", path.display()),
+                                    Some(error) => {
+                                        eprintln!("[capture] {} failed: {error}", path.display());
+                                    }
                                 }
                             } else {
                                 render_started = Some(Instant::now());
@@ -1080,6 +1177,33 @@ impl App for ClientApp {
                         }
                     }
                     queue_local_vfx(vfx, simulation, center);
+                    // The same animation inputs a match delivers (R4b): this tick's snapshot
+                    // and events, flushed and applied in the network order.
+                    local_feed.capture(simulation);
+                    for event in local_feed.events() {
+                        animation.queue_event(event);
+                        minions.queue_event(event);
+                    }
+                    let tick = local_feed.snapshot().tick;
+                    let content = simulation.content();
+                    let feed = &*local_feed;
+                    animation.flush_events(
+                        tick,
+                        |net_id| {
+                            feed.hero_pick(net_id).and_then(|hero| {
+                                animated_rig(models, models.hero(usize::from(hero)))
+                            })
+                        },
+                        |net_id, slot| {
+                            feed.hero_pick(net_id)
+                                .and_then(|hero| local_ability_name(content, hero, slot))
+                        },
+                    );
+                    minions.flush_events(tick, tick as f32, minion_library);
+                    animation.on_snapshot(feed.snapshot(), |hero| {
+                        animated_rig(models, models.hero(usize::from(hero)))
+                    });
+                    minions.on_snapshot(feed.snapshot());
                     simulation.clear_events();
                 }
                 units.clear();
@@ -1087,64 +1211,66 @@ impl App for ClientApp {
                 anchors.clear();
                 // The same walls (and descriptor props) the network path draws.
                 map_visuals.push_instances(units);
-                let world = simulation.world();
-                for entity in world.entities() {
-                    let (Some(position), Some(team), Some(kind), Some(health)) = (
-                        world.get::<moba_sim::Position>(entity),
-                        world.get::<Team>(entity),
-                        world.get::<UnitKind>(entity),
-                        world.get::<moba_sim::Health>(entity),
-                    ) else {
-                        continue;
-                    };
-                    if health.current <= 0 {
-                        continue;
-                    }
-                    if preview.is_some() {
-                        continue;
-                    }
-                    let fraction = health.current as f32 / health.max as f32;
-                    anchors.push(vfx::UnitAnchor {
-                        id: entity.index(),
-                        position: vfx::world(position.0, center),
-                        height: scene_build::unit_height(*kind),
-                        model: None,
-                    });
-                    if *kind == UnitKind::Hero {
-                        let model = world
-                            .get::<moba_sim::HeroIdentity>(entity)
-                            .and_then(|hero| models.hero(usize::from(hero.0.0)));
-                        push_hero(
-                            units,
-                            bones,
-                            models,
-                            model,
-                            &HeroPose {
-                                position: position.0,
-                                team: *team,
-                                health_fraction: fraction,
-                                center,
-                                time: simulation.current_tick().get() as f32 / 30.0,
-                                phase_offset: entity.index() as f32,
-                                facing: 0.0,
-                                gait: 1.0,
-                            },
-                            None,
-                        );
-                    } else {
-                        push_unit(units, position.0, *kind, *team, fraction, 0, center);
-                    }
+                let aspect = if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    1.0
+                };
+                let yaw = if capture_path.is_some() || replay.is_some() {
+                    -0.7
+                } else {
+                    frame.elapsed_secs() as f32 * 0.035
+                };
+                let local_camera = if preview.is_some() {
+                    Camera::orbit(Vec3::ZERO, 30.0, -0.7, 0.75, aspect)
+                } else if replay.is_some() {
+                    let (focus, distance) = launch::replay_focus(simulation, center);
+                    Camera::orbit(focus, distance, yaw, 0.95, aspect)
+                } else {
+                    Camera::orbit(
+                        Vec3::ZERO,
+                        launch::local_camera_distance(),
+                        yaw,
+                        0.92,
+                        aspect,
+                    )
+                };
+                let pinned = capture_path.is_some();
+                // The VFX authoring preview draws only its own stage.
+                if preview.is_none() {
+                    rebuild_local_units(
+                        local_feed,
+                        models,
+                        units,
+                        bones,
+                        scene_build::AnimationFrame {
+                            driver: animation,
+                            view: (width > 0 && height > 0).then_some(animation::LodView {
+                                eye: local_camera.position,
+                                view_proj: local_camera.view_proj,
+                            }),
+                            minions,
+                            minion_library,
+                            bone_lod: *bone_lod,
+                            far_attachments: self.quality != moba_render::QualityTier::Low,
+                        },
+                        anchors,
+                        center,
+                        30.0,
+                        pinned,
+                    );
+                }
+                if let Some(stress) = stress.as_mut() {
+                    stress.push(
+                        units,
+                        minion_library,
+                        local_feed.snapshot().tick as f32 / 30.0,
+                    );
                 }
                 if let Some(preview) = preview.as_mut() {
                     preview.frame(vfx, anchors, units, frame_ms);
                 }
                 if width > 0 && height > 0 {
-                    let aspect = width as f32 / height as f32;
-                    let yaw = if capture_path.is_some() || replay.is_some() {
-                        -0.7
-                    } else {
-                        frame.elapsed_secs() as f32 * 0.035
-                    };
                     let hud_mode = if preview.is_some() {
                         crate::hud::LocalHudMode::VfxPreview
                     } else if replay.is_some() {
@@ -1162,14 +1288,7 @@ impl App for ClientApp {
                         fps,
                         hit_rects,
                     );
-                    let mut camera = if preview.is_some() {
-                        Camera::orbit(Vec3::ZERO, 30.0, -0.7, 0.75, aspect)
-                    } else if replay.is_some() {
-                        let (focus, distance) = launch::replay_focus(simulation, center);
-                        Camera::orbit(focus, distance, yaw, 0.95, aspect)
-                    } else {
-                        Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect)
-                    };
+                    let mut camera = local_camera;
                     map_visuals.light_camera(&mut camera);
                     // Captures advance one tick per frame, so effects step a tick too.
                     let vfx_dt = if capture_path.is_some() {
@@ -1180,7 +1299,10 @@ impl App for ClientApp {
                     let view =
                         vfx::VfxView::new(&camera, [width as f32, height as f32], Some(0), None);
                     let render_tick = simulation.current_tick().get() as f32;
-                    vfx.update(vfx_dt, render_tick, &view, anchors, &|_, _| None);
+                    let socket = |unit: u32, name: &str| {
+                        network_socket(anchors, models, animation, unit, name)
+                    };
+                    vfx.update(vfx_dt, render_tick, &view, anchors, &socket);
                     vfx::push_placeholders(vfx, units);
                     let scene = Scene::new(camera, units)
                         .with_terrain_tint(map_visuals.terrain_tint())
@@ -1267,13 +1389,18 @@ impl App for ClientApp {
 }
 
 mod animation;
+mod bone_lod;
+mod evidence;
 mod launch;
+mod local_feed;
 mod map_visuals;
 mod materials;
+mod minions;
 mod models;
 mod offscreen;
 mod scene_build;
 mod skinning;
+mod stress;
 mod vfx;
 
 pub(crate) use launch::{
@@ -1281,7 +1408,7 @@ pub(crate) use launch::{
     parse_demo_move, parse_follow_distance, run,
 };
 pub(crate) use scene_build::{
-    HeroPose, animated_rig, network_camera, push_hero, push_unit, rebuild_network_units,
+    animated_rig, network_camera, rebuild_local_units, rebuild_network_units,
 };
 
 /// Queues a replicated event's effects until its snapshot's tick is known.
@@ -1324,7 +1451,8 @@ fn queue_local_vfx(vfx: &mut vfx::VfxSystem, simulation: &Simulation, center: f3
             event,
             center,
             30.0,
-            moba_ecs::Entity::index,
+            // The anchors use the local feed's net ids (R4b), as the animators do.
+            |entity| u32::from(local_feed::net_id(entity.index())),
             |caster, slot| {
                 let hero = world.get::<moba_sim::HeroIdentity>(caster)?.0.0;
                 let ability = *content
@@ -1357,6 +1485,18 @@ fn network_socket(
         .animator(u16::try_from(unit).ok()?)?
         .socket_transform(socket)?;
     Some((model_to_world * local).w_axis.truncate())
+}
+
+/// The catalogue ability name of a local hero's cast slot (as the wire catalogue gives a
+/// network client).
+fn local_ability_name(content: &moba_game::GameContent, hero: u8, slot: u8) -> Option<&str> {
+    let hero = content.heroes.get(usize::from(hero))?;
+    let ability = *hero.abilities.get(usize::from(slot))?;
+    content
+        .abilities
+        .get(usize::from(ability))
+        .map(|ability| ability.name.as_str())
+        .filter(|name| !name.is_empty())
 }
 
 #[allow(clippy::too_many_lines)] // One HUD layout, kept together for review.
@@ -1422,12 +1562,14 @@ pub(crate) mod allocation_probe {
 
 #[cfg(test)]
 mod tests {
-    use super::{Camera, Fix, MatchPhase, Team, UnitKind, Vec3};
+    use super::{Camera, Fix, MatchPhase, Vec3};
     use crate::app::scene_build::{kind_from_u8, team_from_u8};
     use crate::hud::HudAction;
     use crate::input::{InputFocus, cursor_ground, ground_orders_allowed};
     use moba_core::FixVec2;
     use moba_core::math::Vec2;
+    use moba_game::Team;
+    use moba_sim::UnitKind;
 
     #[test]
     fn shop_focus_routes_to_shop() {

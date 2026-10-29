@@ -1,7 +1,7 @@
 //! Presentation-side scene data: camera and per-instance transforms.
 
 use bytemuck::{Pod, Zeroable};
-use moba_assets::JointMatrix;
+use moba_assets::{JointMatrix, VatPose};
 use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, perspective_rh};
 
 use crate::ui::UiImage;
@@ -161,6 +161,8 @@ pub struct UnitInstance {
     pub mesh: MeshId,
     /// Joint matrices for a skinned mesh ([`BoneRange::NONE`] for static meshes).
     pub bones: BoneRange,
+    /// The frame of a vertex-animation-texture mesh to show (R4b; ignored by other meshes).
+    pub vat: VatPose,
 }
 
 impl UnitInstance {
@@ -172,6 +174,7 @@ impl UnitInstance {
             color,
             mesh: MeshId::CUBE,
             bones: BoneRange::NONE,
+            vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
         }
     }
 
@@ -179,6 +182,14 @@ impl UnitInstance {
     #[must_use]
     pub const fn with_mesh(mut self, mesh: MeshId) -> Self {
         self.mesh = mesh;
+        self
+    }
+
+    /// Returns this instance showing `pose` of its vertex-animation texture (for a mesh from
+    /// [`Renderer::register_vat_mesh`](crate::Renderer::register_vat_mesh)).
+    #[must_use]
+    pub const fn with_vat(mut self, pose: VatPose) -> Self {
+        self.vat = pose;
         self
     }
 
@@ -202,6 +213,7 @@ impl UnitInstance {
             color,
             mesh: MeshId::CUBE,
             bones: BoneRange::NONE,
+            vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
         }
     }
 }
@@ -497,19 +509,38 @@ impl CameraUniform {
     }
 }
 
-/// GPU layout of one instance. Must match `shaders/unit.vert`.
+/// GPU layout of one instance (112 bytes). Must match `shaders/include/instance.glsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct GpuInstance {
     model: [[f32; 4]; 4],
     color: [f32; 4],
+    /// `(from frame, from next, from t, crossfade)`; frames as floats are exact below 2^24.
+    vat0: [f32; 4],
+    /// `(to frame, to next, to t, 0)`.
+    vat1: [f32; 4],
 }
 
 impl From<UnitInstance> for GpuInstance {
     fn from(instance: UnitInstance) -> Self {
+        let (from, to, blend) = (instance.vat.from, instance.vat.to, instance.vat.blend);
+        let unit = |value: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
         Self {
             model: instance.transform.to_cols_array_2d(),
             color: instance.color.to_array(),
+            vat0: [
+                from.frame as f32,
+                from.next as f32,
+                unit(from.t),
+                unit(blend),
+            ],
+            vat1: [to.frame as f32, to.next as f32, unit(to.t), 0.0],
         }
     }
 }
@@ -521,6 +552,11 @@ mod tests {
 
     /// `CameraBlock` in `include/camera.glsl` is std140 with only 16-byte members, so the Rust
     /// struct's offsets are the GLSL offsets.
+    #[test]
+    fn instances_are_112_bytes() {
+        assert_eq!(size_of::<super::GpuInstance>(), 112);
+    }
+
     #[test]
     fn camera_uniform_matches_the_std140_block() {
         assert_eq!(offset_of!(CameraUniform, wall_count), 912);

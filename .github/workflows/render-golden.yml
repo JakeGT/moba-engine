@@ -105,6 +105,30 @@ jobs:
           status=$?
           cat network-fingerprint.log
           exit $status
+      # VAT golden (R4b): 64 stress minions in the local preview at 40 m, pinned (one tick per
+      # frame), so the vertex-animation-texture path is checked pixel-wise.
+      - name: VAT capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          timeout 180 xvfb-run -a ./target/release/moba-client \
+            > vat-capture.log 2>&1 || { cat vat-capture.log; exit 1; }
+          test -s render-vat-actual.ppm
+        env:
+          MOBA_STRESS_MINIONS: "64"
+          MOBA_LOCAL_CAMERA_DISTANCE: "40"
+          MOBA_SMOKE_FRAMES: "120"
+          MOBA_CAPTURE: render-vat-actual.ppm
+          MOBA_CAPTURE_FRAME: "90"
+      - name: Compare VAT fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          ./target/release/image-check render-vat-actual.ppm \
+            --expected tests/golden/render-vat-fingerprint.rgb \
+            --diff render-vat-diff.ppm > vat-fingerprint.log 2>&1
+          status=$?
+          cat vat-fingerprint.log
+          exit $status
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -118,4 +142,8 @@ jobs:
             render-network-diff.ppm
             network-capture.log
             network-fingerprint.log
+            render-vat-actual.ppm
+            render-vat-diff.ppm
+            vat-capture.log
+            vat-fingerprint.log
           if-no-files-found: ignore

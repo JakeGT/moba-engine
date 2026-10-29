@@ -34,6 +34,7 @@ mod swapchain;
 mod targets;
 mod texture;
 mod ui;
+mod vat;
 mod vfx;
 
 pub use error::{RenderError, RenderResult};
@@ -70,10 +71,14 @@ pub use moba_assets::{MaterialShader, TextureSlot};
 /// Validated texture accepted by [`Renderer::register_texture`] (and, as a cube map, by
 /// [`Renderer::set_environment`]).
 pub use moba_assets::{TextureData, TextureFormat};
+/// Vertex-animation-texture descriptor and per-instance pose for
+/// [`Renderer::register_vat_mesh`] and [`UnitInstance::with_vat`] (R4b).
+pub use moba_assets::{VatDescriptor, VatPose, VatSample};
 pub use ui::{
     ATLAS_HEIGHT, ATLAS_WIDTH, TextStyle, UI_IMAGE_SLOTS, UiDrawList, UiImage, UiVertex,
     build_atlas, pack_rgba8,
 };
+pub use vat::MAX_VAT_MESHES;
 pub use vfx::{
     ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, VFX_MESH_SLOTS, VfxBudget, VfxFrame,
     VfxStats,

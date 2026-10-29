@@ -12,7 +12,7 @@
 //! A hero that does not fit is not allocated for: it is counted and drawn with its static
 //! mesh that frame.
 
-use moba_assets::Skeleton;
+use moba_assets::{MAX_JOINTS, Skeleton, SkinLod};
 use moba_render::{BoneRange, JointMatrix};
 
 /// Seconds of phase offset per unit of `phase_offset`, so heroes do not walk in lockstep.
@@ -75,6 +75,53 @@ impl BonePool {
         );
         self.used = end;
         Some(range)
+    }
+
+    /// Copies the joints a reduced bone-LOD skin keeps out of a full set of matrices into
+    /// the next free joints and returns their range (`None`, counted, when the pool is full
+    /// or `full` is too short). Never allocates.
+    pub(crate) fn push_gathered(
+        &mut self,
+        lod: &SkinLod,
+        full: &[JointMatrix],
+    ) -> Option<BoneRange> {
+        let count = lod.joint_count();
+        let end = self.used + count;
+        if count == 0 {
+            return None;
+        }
+        let Some(slots) = self.bones.get_mut(self.used..end) else {
+            self.note_truncation();
+            return None;
+        };
+        if !lod.gather(full, slots) {
+            return None;
+        }
+        let range = BoneRange::new(u32::try_from(self.used).ok()?, u32::try_from(count).ok()?);
+        self.used = end;
+        Some(range)
+    }
+
+    /// [`Self::pose`] for a reduced bone-LOD skin: the WP-4.1 pose of the full rig, gathered.
+    /// Never allocates (the full pose lives on the stack).
+    pub(crate) fn pose_gathered(
+        &mut self,
+        rig: &Skeleton,
+        lod: &SkinLod,
+        time: f32,
+        phase_offset: f32,
+        gait: f32,
+    ) -> Option<BoneRange> {
+        let mut full: [JointMatrix; MAX_JOINTS] = [[[0.0; 4]; 3]; MAX_JOINTS];
+        let joints = rig.joint_count();
+        if !rig.sample(
+            time + phase_offset * PHASE_SECONDS,
+            gait,
+            &mut full[..joints],
+        ) {
+            return None;
+        }
+        self.push_gathered(lod, &full[..joints])
     }
 
     fn note_truncation(&mut self) {

@@ -10,6 +10,11 @@
 //! LUT, ramp; `crate::lighting`), bound once per view: the main view's names the shadow map,
 //! the offscreen views' a default image (their camera uniform also turns shadows off).
 //!
+//! **VAT meshes** (R4b, ADR-0012): minions registered with [`ScenePass::register_vat_mesh`]
+//! draw instanced, one draw per mesh after the skinned draws, through `vat.vert` (and
+//! `vat_shadow.vert` into the shadow map). Their pipelines use a second layout whose set 2 is
+//! the mesh's VAT texture set; sets 0/1 stay compatible and set 3 is re-bound with it.
+//!
 //! The pass draws one or more **views** (R7b): view 0 is the frame's main scene; the others
 //! are the offscreen images (portraits, the minimap) rendered with the same pipelines and
 //! meshes into their own targets. Each view owns its per-frame camera, instance and bone
@@ -33,6 +38,7 @@ use crate::resources::{
 };
 use crate::scene::{BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Scene};
 use crate::shaders::ShaderSource;
+use crate::vat::{VatMeshes, VatPush};
 
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
 pub(crate) const MAX_MESHES: usize = 64;
@@ -153,14 +159,20 @@ pub(crate) struct ScenePipelines {
     /// Depth-only skinned caster; `None` when shadows or skinning are off (then skinned
     /// meshes cast no shadow).
     skinned_shadow: Option<GraphicsPipeline>,
+    /// Vertex-animation-texture pipeline (R4b); `None` if it failed to build (then
+    /// [`ScenePass::register_vat_mesh`] fails and minions keep their fallback).
+    vat: Option<GraphicsPipeline>,
+    /// Depth-only VAT caster; `None` when shadows are off or `vat` is.
+    vat_shadow: Option<GraphicsPipeline>,
 }
 
 impl ScenePipelines {
-    #[allow(clippy::too_many_lines)] // One pipeline per permutation, built together.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One pipeline per permutation.
     fn build(
         device: &DeviceContext,
         shaders: &ShaderSource,
         layout: vk::PipelineLayout,
+        vat_layout: vk::PipelineLayout,
         color_format: vk::Format,
         depth_format: vk::Format,
         shadow: Option<ShadowPipelineSpec>,
@@ -253,6 +265,49 @@ impl ScenePipelines {
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
             })
         };
+        let vat = module("vat.vert")
+            .and_then(|vertex| {
+                pipeline::create(
+                    device,
+                    &PipelineSpec {
+                        layout: vat_layout,
+                        vertex_layout: VertexLayout::Static,
+                        vertex: vertex.handle(),
+                        fragment: unit_fragment.handle(),
+                        color_format,
+                        depth_format,
+                        cull_mode: vk::CullModeFlags::NONE,
+                    },
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+            })
+            .inspect_err(|error| {
+                eprintln!(
+                    "[render] VAT pipeline unavailable ({error}); minions use their fallback"
+                );
+            })
+            .ok();
+        let vat_shadow = match (shadow, &vat) {
+            (Some(spec), Some(_)) => module("vat_shadow.vert")
+                .and_then(|vertex| {
+                    pipeline::create_depth_only(
+                        device,
+                        vat_layout,
+                        VertexLayout::StaticShadow,
+                        vertex.handle(),
+                        spec.format,
+                        spec.depth_clamp,
+                    )
+                    .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+                })
+                .inspect_err(|error| {
+                    eprintln!(
+                        "[render] VAT shadow pipeline unavailable ({error}); VAT meshes cast no shadow"
+                    );
+                })
+                .ok(),
+            _ => None,
+        };
         let (unit_shadow, skinned_shadow) = match shadow {
             Some(spec) => {
                 let unit_shadow =
@@ -281,6 +336,8 @@ impl ScenePipelines {
             skinned_textured,
             unit_shadow,
             skinned_shadow,
+            vat,
+            vat_shadow,
         })
     }
 }
@@ -314,6 +371,12 @@ pub(crate) struct ScenePass {
     /// The shadow casters' spec; `None` when shadows are off.
     shadow: Option<ShadowPipelineSpec>,
     skinning: bool,
+    /// VAT textures and sets (R4b).
+    vat: VatMeshes,
+    /// Layout of the VAT pipelines: sets 0/1/3 as `pipeline_layout`, set 2 the VAT set.
+    vat_pipeline_layout: PipelineLayout,
+    /// Per mesh slot: its index in `vat`, or `u8::MAX` for a mesh without a VAT.
+    mesh_vat: [u8; MAX_MESHES],
 }
 
 impl ScenePass {
@@ -383,10 +446,22 @@ impl ScenePass {
             .size(SKIN_PUSH_SIZE)];
         let pipeline_layout =
             PipelineLayout::with_push_constants(device.device.clone(), &layouts, &skin_push)?;
+        // The VAT pipelines differ only in set 2 (the VAT texture); the push range is the
+        // same 16 bytes (`VatPush`), so sets 0/1 bound with either layout stay compatible.
+        let vat = VatMeshes::new(device)?;
+        let vat_layouts = [
+            camera_layout.handle(),
+            instance_layout.handle(),
+            vat.set_layout(),
+            lighting_layout,
+        ];
+        let vat_pipeline_layout =
+            PipelineLayout::with_push_constants(device.device.clone(), &vat_layouts, &skin_push)?;
         let pipelines = ScenePipelines::build(
             device,
             shaders,
             pipeline_layout.handle(),
+            vat_pipeline_layout.handle(),
             color_format,
             depth_format,
             shadow,
@@ -425,6 +500,9 @@ impl ScenePass {
             depth_format,
             shadow,
             skinning,
+            vat,
+            vat_pipeline_layout,
+            mesh_vat: [u8::MAX; MAX_MESHES],
         })
     }
 
@@ -441,6 +519,7 @@ impl ScenePass {
             device,
             shaders,
             self.pipeline_layout.handle(),
+            self.vat_pipeline_layout.handle(),
             self.color_format,
             self.depth_format,
             self.shadow,
@@ -451,6 +530,11 @@ impl ScenePass {
             || pipelines.skinned_shadow.is_some() != self.pipelines.skinned_shadow.is_some()
         {
             return Err(RenderError::Shader("a skinned pipeline failed to rebuild"));
+        }
+        if pipelines.vat.is_some() != self.pipelines.vat.is_some()
+            || pipelines.vat_shadow.is_some() != self.pipelines.vat_shadow.is_some()
+        {
+            return Err(RenderError::Shader("a VAT pipeline failed to rebuild"));
         }
         Ok(pipelines)
     }
@@ -537,6 +621,47 @@ impl ScenePass {
         let cpu = mesh::CpuSkinnedMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
         self.meshes.push(mesh::upload_skinned(device, &cpu)?);
         Ok(id)
+    }
+
+    /// Uploads a static mesh with its vertex-animation texture into the next slot (load time
+    /// only). The mesh draws with the VAT pipelines and each instance's
+    /// [`UnitInstance::vat`](crate::UnitInstance::vat) pose.
+    pub(crate) fn register_vat_mesh(
+        &mut self,
+        device: &DeviceContext,
+        data: &crate::MeshData,
+        texture: &crate::TextureData,
+        descriptor: &moba_assets::VatDescriptor,
+    ) -> RenderResult<MeshId> {
+        if self.pipelines.vat.is_none() {
+            return Err(RenderError::InvalidVat("the VAT pipeline is unavailable"));
+        }
+        let id = self.next_mesh_id()?;
+        let cpu = mesh::CpuMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
+        if cpu.vertices.len() != descriptor.vertex_count as usize {
+            return Err(RenderError::InvalidVat(
+                "the mesh does not match its descriptor",
+            ));
+        }
+        // Every check first, then the mesh, then the VAT entry: a failure at any step leaves
+        // no VAT slot or mesh slot taken (the uploaded mesh is dropped).
+        crate::vat::validate(self.vat.len(), data, texture, descriptor)?;
+        let gpu = mesh::upload(device, &cpu)?;
+        let entry = self.vat.register(device, data, texture, descriptor)?;
+        let entry = u8::try_from(entry).map_err(|_| RenderError::InvalidVat("too many VATs"))?;
+        self.meshes.push(gpu);
+        self.mesh_vat[id.index()] = entry;
+        Ok(id)
+    }
+
+    /// Whether VAT meshes can be registered (the VAT pipeline exists).
+    pub(crate) fn vat_available(&self) -> bool {
+        self.pipelines.vat.is_some()
+    }
+
+    /// Registered VAT meshes.
+    pub(crate) fn vat_mesh_count(&self) -> usize {
+        self.vat.len()
     }
 
     fn next_mesh_id(&self) -> RenderResult<MeshId> {
@@ -743,6 +868,14 @@ impl ScenePass {
             );
         }
 
+        // Last: the VAT pipelines re-bind sets 2/3 with their own layout, which would
+        // invalidate set 3 for any scene-layout draw after them.
+        if state.unit_count > 0
+            && let Some(vat) = &self.pipelines.vat
+        {
+            self.draw_vat(device, command_buffer, state, vat, Some(targets.lighting));
+        }
+
         device.cmd_end_rendering(command_buffer);
     }
 
@@ -828,6 +961,9 @@ impl ScenePass {
                     self.draw_skinned(device, command_buffer, state, pipeline, textured, false);
                 }
             }
+            if let Some(pipeline) = &self.pipelines.vat_shadow {
+                self.draw_vat(device, command_buffer, state, pipeline, None);
+            }
         }
         device.cmd_end_rendering(command_buffer);
     }
@@ -864,9 +1000,11 @@ impl ScenePass {
             for (slot, mesh) in self.meshes.iter().enumerate() {
                 let count = state.mesh_counts[slot];
                 let set = self.mesh_material_sets[slot];
-                // Skinned meshes are drawn per instance below, with their own pipeline.
+                // Skinned meshes are drawn per instance below, and VAT meshes instanced, each
+                // with their own pipeline.
                 if count == 0
                     || mesh.joint_count > 0
+                    || self.mesh_vat[slot] != u8::MAX
                     || (set != vk::DescriptorSet::null()) != textured
                 {
                     continue;
@@ -896,6 +1034,82 @@ impl ScenePass {
                         state.mesh_starts[slot],
                     );
                 }
+            }
+        }
+    }
+
+    /// One instanced draw per VAT mesh with `pipeline` (`vat` or `vat_shadow`), binding the
+    /// mesh's VAT set at 2 and, for the colour pass, `lighting` at 3. Both are bound with the
+    /// VAT layout, which differs from the scene layout in set 2 only, so sets 0/1 stay valid;
+    /// binding 2 and 3 in one call re-validates 3 after 2 changed layout.
+    fn draw_vat(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        state: &SceneView,
+        pipeline: &GraphicsPipeline,
+        lighting: Option<vk::DescriptorSet>,
+    ) {
+        let layout = self.vat_pipeline_layout.handle();
+        let mut bound = false;
+        for (slot, mesh) in self.meshes.iter().enumerate() {
+            let count = state.mesh_counts[slot];
+            let entry = self.mesh_vat[slot];
+            if count == 0 || entry == u8::MAX {
+                continue;
+            }
+            let Some((set, push)) = self.vat.entry(usize::from(entry)) else {
+                continue;
+            };
+            if !bound {
+                bind_pipeline(device, command_buffer, pipeline);
+                bound = true;
+            }
+            let lighting_set = [set, lighting.unwrap_or(vk::DescriptorSet::null())];
+            let sets = if lighting.is_some() {
+                &lighting_set[..]
+            } else {
+                &lighting_set[..1]
+            };
+            // SAFETY: the VAT set was allocated with the VAT set layout, which the VAT pipeline
+            // layout declares at 2, and the lighting set with the lighting layout it declares
+            // at 3; both outlive the renderer's frames and are not updated after creation
+            // (the lighting set only while the device is idle).
+            unsafe {
+                device.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    layout,
+                    2,
+                    sets,
+                    &[],
+                );
+            }
+            // SAFETY: the VAT layout declares exactly this 16-byte vertex-stage range at 0.
+            unsafe {
+                device.device.cmd_push_constants(
+                    command_buffer,
+                    layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    bytes_of::<VatPush>(&push),
+                );
+            }
+            bind_mesh(device, command_buffer, mesh);
+            // SAFETY: indices are in range for the vertex buffer (`CpuMesh::from_asset`);
+            // `mesh_starts[slot] + count <= unit_count <= max_instances` (`bucket_by_mesh`).
+            // Texture reads: the mesh has exactly `push.vertex_count` vertices and the shader
+            // clamps every frame below `push.frame_count`, and `VatMeshes::register` checked
+            // that `2 * frames * vertices` texels fit the texture.
+            unsafe {
+                device.device.cmd_draw_indexed(
+                    command_buffer,
+                    mesh.index_count,
+                    count,
+                    0,
+                    0,
+                    state.mesh_starts[slot],
+                );
             }
         }
     }
