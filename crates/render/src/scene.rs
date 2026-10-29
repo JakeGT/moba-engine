@@ -2,7 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use moba_assets::JointMatrix;
-use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, perspective_rh};
+use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, perspective_rh};
+
+use crate::ui::UiImage;
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,6 +36,39 @@ impl Camera {
     ) -> Self {
         let view = look_at_rh(eye, target, up);
         let projection = perspective_rh(fov_y_radians, aspect.max(1e-4), near, far);
+        Self {
+            view_proj: projection * view,
+            position: eye,
+            light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
+            light_intensity: 1.15,
+            ambient: Vec3::new(0.32, 0.35, 0.42),
+        }
+    }
+
+    /// Builds an orthographic camera looking from `eye` at `target`: the view box is
+    /// `half_width` x `half_height` around the view axis and `near..far` along it. Used for
+    /// offscreen views (R7b): the top-down minimap and the portrait studio.
+    #[must_use]
+    pub fn orthographic(
+        eye: Vec3,
+        target: Vec3,
+        up: Vec3,
+        half_width: f32,
+        half_height: f32,
+        near: f32,
+        far: f32,
+    ) -> Self {
+        let view = look_at_rh(eye, target, up);
+        let half_width = half_width.max(1e-4);
+        let half_height = half_height.max(1e-4);
+        let projection = orthographic_rh(
+            -half_width,
+            half_width,
+            -half_height,
+            half_height,
+            near,
+            far,
+        );
         Self {
             view_proj: projection * view,
             position: eye,
@@ -178,11 +213,93 @@ pub struct Scene<'a> {
     pub units: &'a [UnitInstance],
     /// Allied vision circles; an empty set disables fog darkening.
     pub vision: VisionCircles,
-    /// Terrain tint (RGB, `1.0` = default grass palette).
+    /// Terrain tint: RGB (`1.0` = default grass palette) and, in alpha, the strength of the
+    /// terrain's grid lines (`1.0` = the default; R7b's baked minimap uses a fainter grid).
     pub terrain_tint: [f32; 4],
     /// Joint matrices for skinned instances, indexed by [`UnitInstance::bones`]. Up to
     /// [`RenderConfig::max_bones`](crate::RenderConfig::max_bones) are uploaded per frame.
     pub bones: &'a [JointMatrix],
+}
+
+/// A rectangle of an offscreen image cleared to its own colour before anything is drawn
+/// (R7b: the team-coloured backdrop of each hero portrait).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClearRect {
+    /// `[x, y, width, height]` in the image's pixels, top-left origin; clamped to the image.
+    pub rect: [u32; 4],
+    /// Linear HDR RGBA colour (tonemapped with the image when the UI samples it).
+    pub color: [f32; 4],
+}
+
+impl ClearRect {
+    /// A rectangle of `color`.
+    #[must_use]
+    pub const fn new(rect: [u32; 4], color: [f32; 4]) -> Self {
+        Self { rect, color }
+    }
+}
+
+/// One render into an offscreen [`UiImage`] this frame (R7b), for
+/// [`Renderer::render_with_offscreen`](crate::Renderer::render_with_offscreen).
+///
+/// The scene is drawn with the main scene's pipelines, meshes and materials into the image's
+/// colour target (the HDR format) and its own depth buffer, through its own render-graph
+/// pass. Its camera, units and bones are uploaded to the image's own buffers, which hold up
+/// to [`OFFSCREEN_MAX_INSTANCES`] units and [`OFFSCREEN_MAX_BONES`] joint matrices (the
+/// rest are dropped). The image keeps the result until the next render into it.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct OffscreenRender<'a> {
+    /// The image to render into.
+    pub image: UiImage,
+    /// Camera, units, bones and terrain tint. Pass empty vision for no fog darkening.
+    pub scene: Scene<'a>,
+    /// Draw the terrain plane (the minimap does; portraits do not). Default `false`.
+    pub terrain: bool,
+    /// Linear HDR colour the whole image is cleared to first. Default opaque black.
+    pub clear_color: [f32; 4],
+    /// Rectangles then cleared to their own colours (up to 32). Default none.
+    pub backdrops: &'a [ClearRect],
+}
+
+/// Units uploaded per [`OffscreenRender`]; more are dropped in scene order.
+pub const OFFSCREEN_MAX_INSTANCES: usize = 1_024;
+/// Joint matrices uploaded per [`OffscreenRender`] (16 skinned heroes × 64 joints).
+pub const OFFSCREEN_MAX_BONES: usize = 16 * 64;
+
+impl<'a> OffscreenRender<'a> {
+    /// Renders `scene` into `image`, without terrain, over opaque black.
+    #[must_use]
+    pub const fn new(image: UiImage, scene: Scene<'a>) -> Self {
+        Self {
+            image,
+            scene,
+            terrain: false,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+            backdrops: &[],
+        }
+    }
+
+    /// Sets whether the terrain plane is drawn.
+    #[must_use]
+    pub const fn with_terrain(mut self, terrain: bool) -> Self {
+        self.terrain = terrain;
+        self
+    }
+
+    /// Sets the colour the image is cleared to.
+    #[must_use]
+    pub const fn with_clear_color(mut self, color: [f32; 4]) -> Self {
+        self.clear_color = color;
+        self
+    }
+
+    /// Sets the backdrop rectangles cleared after the full clear.
+    #[must_use]
+    pub const fn with_backdrops(mut self, backdrops: &'a [ClearRect]) -> Self {
+        self.backdrops = backdrops;
+        self
+    }
 }
 
 /// Up to 16 allied vision circles used to darken unseen terrain.

@@ -23,7 +23,7 @@ struct CompositePush {
 const COMPOSITE_PUSH_SIZE: u32 = core::mem::size_of::<CompositePush>() as u32;
 /// `AgX` look saturation (the "punchy" preset's 1.4 with identity slope/offset/power): keeps
 /// team colours as saturated as the pre-tonemap image. Colour grading replaces it in R6.
-const TONEMAP_SATURATION: f32 = 1.4;
+pub(crate) const TONEMAP_SATURATION: f32 = 1.4;
 
 /// Fullscreen tonemap pipeline and the descriptor set that names the HDR target.
 pub(crate) struct CompositePass {
@@ -114,6 +114,12 @@ impl CompositePass {
     /// Installs a pipeline from [`Self::build_pipeline`]. The device must be idle.
     pub(crate) fn install_pipeline(&mut self, pipeline: GraphicsPipeline) {
         self.pipeline = pipeline;
+    }
+
+    /// The exposure applied before the tonemap (sanitised; the UI's offscreen images use it
+    /// too).
+    pub(crate) fn exposure(&self) -> f32 {
+        self.push.exposure
     }
 
     /// Points the descriptor set at the HDR target. Only call while no submitted frame
@@ -209,7 +215,7 @@ fn build_pipeline(
 }
 
 /// Whether stores to `format` are sRGB-encoded by the hardware.
-fn is_srgb(format: vk::Format) -> bool {
+pub(crate) fn is_srgb(format: vk::Format) -> bool {
     matches!(
         format,
         vk::Format::B8G8R8A8_SRGB

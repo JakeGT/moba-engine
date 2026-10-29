@@ -442,13 +442,24 @@ fn build_match_hud(
         entity.progress
     });
     if !network.spectator {
-        // Hero panel.
-        let panel_w = 452.0;
+        // Hero panel, with the 3D portrait (R7b) in a column on its left when portraits
+        // are on. `x` is where the text, bars and slots start.
+        let portrait_column = if fx.images.portrait_cells > 0 {
+            HERO_PORTRAIT_COLUMN
+        } else {
+            0.0
+        };
+        let content_w = 452.0;
+        let panel_w = content_w + portrait_column;
         let panel_h = 196.0;
-        let x = 24.0;
+        let panel_x = 24.0;
+        let x = panel_x + portrait_column;
         let y = height_f - panel_h - 24.0;
-        ui.panel(x, y, panel_w, panel_h, bg, border);
-        register(hits, HudAction::Block, x, y, panel_w, panel_h);
+        ui.panel(panel_x, y, panel_w, panel_h, bg, border);
+        register(hits, HudAction::Block, panel_x, y, panel_w, panel_h);
+        if portrait_column > 0.0 {
+            draw_hero_portrait(ui, fx.images, own, panel_x + 12.0, y + 14.0, track);
+        }
         let level = progress.level.max(1);
         let rules = network.client.rules();
         let xp_needed = if level >= rules.level_cap {
@@ -500,7 +511,7 @@ fn build_match_hud(
         ui.bar(
             x + 14.0,
             y + 58.0,
-            panel_w - 28.0,
+            content_w - 28.0,
             14.0,
             hp as f32 / max_hp as f32,
             health,
@@ -517,7 +528,7 @@ fn build_match_hud(
         ui.bar(
             x + 14.0,
             y + 94.0,
-            panel_w - 28.0,
+            content_w - 28.0,
             10.0,
             mp as f32 / max_mp as f32,
             mana,
@@ -538,7 +549,7 @@ fn build_match_hud(
         ui.bar(
             x + 14.0,
             y + 128.0,
-            panel_w - 28.0,
+            content_w - 28.0,
             8.0,
             xp_fraction,
             theme::XP,
@@ -601,10 +612,18 @@ fn build_match_hud(
             }
         }
     }
-    draw_minimap(ui, network, width, height, hits, fx.palette);
+    draw_minimap(
+        ui,
+        network,
+        width,
+        height,
+        hits,
+        fx.palette,
+        fx.images.minimap,
+    );
     if scoreboard {
         super::scoreboard::draw_scoreboard(
-            ui, network, snapshot, width_f, height_f, text, muted, border, hits,
+            ui, network, snapshot, width_f, height_f, text, muted, border, hits, fx.images,
         );
     }
     if shop && !network.spectator {
@@ -744,6 +763,42 @@ fn build_match_hud(
     let loading = fx.screen.loading();
     if loading > 0.0 {
         draw_loading_screen(ui, width_f, height_f, loading, fx.clock, map_line, "READY");
+    }
+}
+
+/// Width the hero panel grows by for its portrait column (R7b).
+const HERO_PORTRAIT_COLUMN: f32 = 124.0;
+/// Side of the hero panel's portrait.
+const HERO_PORTRAIT_SIZE: f32 = 104.0;
+
+/// The own hero's portrait in the hero panel: its rendered cell, or the team backdrop until
+/// the first render lands.
+fn draw_hero_portrait(
+    ui: &mut UiDrawList,
+    images: super::images::HudImages,
+    own: Option<&moba_net::NetEntity>,
+    x: f32,
+    y: f32,
+    track: moba_core::math::Vec4,
+) {
+    let size = HERO_PORTRAIT_SIZE;
+    let drawn = own.is_some_and(|entity| {
+        super::images::draw_portrait(
+            ui,
+            images,
+            entity.team,
+            entity.hero_slot,
+            [x, y, size],
+            entity.is_dead(),
+            theme::GOLD,
+        )
+    });
+    if !drawn {
+        let fill = own.map_or(track, |entity| {
+            super::images::portrait_placeholder(entity.team)
+        });
+        ui.rect(x, y, size, size, fill);
+        ui.outline(x, y, size, size, 1.0, theme::PANEL_CHROME);
     }
 }
 
@@ -959,8 +1014,8 @@ mod tests {
         let input = InputState::default();
         let mut ui = UiDrawList::new();
         let mut hits = HitList::new();
-        let fx = crate::hud::HudFx::new(crate::hud::theme::TeamPalette::Standard);
-        let build = |ui: &mut UiDrawList, hits: &mut HitList| {
+        let mut fx = crate::hud::HudFx::new(crate::hud::theme::TeamPalette::Standard);
+        let build = |ui: &mut UiDrawList, hits: &mut HitList, fx: &crate::hud::HudFx| {
             ui.clear();
             hits.clear();
             super::build_match_hud(
@@ -975,19 +1030,43 @@ mod tests {
                 16.0,
                 60.0,
                 hits,
-                &fx,
+                fx,
                 "LOADING MAP",
             );
         };
-        build(&mut ui, &mut hits);
+        build(&mut ui, &mut hits, &fx);
         let warm = ui.len();
         assert!(
             warm > 1_000,
             "panels, bars, text, minimap, scoreboard and shop: {warm}"
         );
-        let ((), allocations) = crate::app::allocation_probe::probe(|| build(&mut ui, &mut hits));
+        let ((), allocations) =
+            crate::app::allocation_probe::probe(|| build(&mut ui, &mut hits, &fx));
         assert_eq!(allocations, 0, "steady-state match HUD allocation");
         assert_eq!(ui.len(), warm);
+
+        // R7b: with every portrait cell rendered and the baked minimap (image quads and the
+        // minimap fog grid) the HUD still allocates nothing.
+        fx.images = crate::hud::images::HudImages {
+            portraits: u16::MAX,
+            portrait_cells: 16,
+            minimap: true,
+        };
+        build(&mut ui, &mut hits, &fx);
+        let warm_images = ui.len();
+        let ((), allocations) =
+            crate::app::allocation_probe::probe(|| build(&mut ui, &mut hits, &fx));
+        assert_eq!(
+            allocations, 0,
+            "steady-state match HUD allocation with images"
+        );
+        assert_eq!(ui.len(), warm_images);
+        assert!(
+            ui.vertices()
+                .iter()
+                .any(|vertex| vertex.mode == moba_render::UiVertex::MODE_IMAGE),
+            "the baked minimap is drawn"
+        );
     }
 
     #[test]

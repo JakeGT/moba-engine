@@ -2,8 +2,10 @@
 //!
 //! A frame is a precompiled render graph (ADR-0008, [`crate::frame_graph`]): the scene pass
 //! renders into an HDR target, the composite pass tonemaps it into the swapchain image and
-//! the UI pass draws the HUD on top. The pass code lives in [`crate::passes`]; this module
-//! owns acquisition, submission, presentation, resize and the capture readback.
+//! the UI pass draws the HUD on top. Frames that re-render an offscreen image (R7b: hero
+//! portraits, the baked minimap) run that image's pass first, with the scene pipelines. The
+//! pass code lives in [`crate::passes`]; this module owns acquisition, submission,
+//! presentation, resize and the capture readback.
 
 use core::ffi::CStr;
 use std::path::PathBuf;
@@ -16,25 +18,30 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
-use crate::frame_graph::{self, Binding, Bindings, FramePlan, PassKind};
+use crate::frame_graph::{self, Binding, Bindings, FramePlan, OFFSCREEN_VARIANTS, PassKind};
 use crate::instance::{InstanceContext, ValidationMode};
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::passes::composite::CompositePass;
-use crate::passes::overlay::UiPass;
-use crate::passes::scene::{ScenePass, SceneTargets};
+use crate::passes::overlay::{UiImages, UiPass};
+use crate::passes::scene::{ScenePass, SceneTargets, ViewBudget};
 use crate::pipeline_cache::PipelineCacheState;
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
-use crate::scene::{MeshId, Scene};
+use crate::scene::{MeshId, OFFSCREEN_MAX_BONES, OFFSCREEN_MAX_INSTANCES, OffscreenRender, Scene};
 use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
-use crate::targets::{self, TransientPool};
-use crate::ui::UiDrawList;
+use crate::targets::{self, OffscreenTarget, TransientPool};
+use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
 
 const FRAMES_IN_FLIGHT: usize = 2;
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
+/// Largest side of an offscreen [`UiImage`] (the guaranteed `maxImageDimension2D`).
+pub const MAX_UI_IMAGE_SIZE: u32 = 4096;
+/// Default [`RenderConfig::ui_image_sizes`]: a 2048x128 portrait strip (sixteen 128-pixel
+/// cells) and a 512x512 minimap.
+pub const DEFAULT_UI_IMAGE_SIZES: [[u32; 2]; UI_IMAGE_SLOTS] = [[2048, 128], [512, 512]];
 
 /// Renderer configuration.
 #[derive(Clone, Debug)]
@@ -79,6 +86,11 @@ pub struct RenderConfig {
     /// devices without `textureCompressionBC`, they are decoded on the CPU at load. Default
     /// `true`.
     pub compressed_textures: bool,
+    /// Size of each offscreen [`UiImage`] (R7b), indexed by [`UiImage::index`]; default
+    /// [`DEFAULT_UI_IMAGE_SIZES`]. Each side is clamped to `1..=`[`MAX_UI_IMAGE_SIZE`]; a
+    /// 1x1 image is the cheapest way to switch a slot off. The images are allocated once
+    /// with the renderer in the HDR format (with a depth buffer each) and never resized.
+    pub ui_image_sizes: [[u32; 2]; UI_IMAGE_SLOTS],
 }
 
 impl Default for RenderConfig {
@@ -97,6 +109,7 @@ impl Default for RenderConfig {
             pipeline_cache: None,
             shader_dir: None,
             compressed_textures: true,
+            ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
         }
     }
 }
@@ -192,6 +205,14 @@ impl RenderConfig {
         self.compressed_textures = compressed;
         self
     }
+
+    /// Returns this config with the size of offscreen `image` set
+    /// ([`RenderConfig::ui_image_sizes`]).
+    #[must_use]
+    pub const fn with_ui_image_size(mut self, image: UiImage, size: [u32; 2]) -> Self {
+        self.ui_image_sizes[image.index()] = size;
+        self
+    }
 }
 
 /// How the renderer's pipelines were built ([`Renderer::pipeline_stats`]).
@@ -250,16 +271,21 @@ pub struct Renderer {
     profiler: GpuProfiler,
     frames: Vec<FrameSync>,
     capture_buffer: Option<GpuBuffer>,
-    /// The normal frame and the capture variant, compiled once at creation.
-    plan: FramePlan,
-    capture_plan: FramePlan,
+    /// Offscreen images (R7b), indexed by [`UiImage::index`]; fixed size.
+    offscreen: Vec<OffscreenTarget>,
+    /// Every frame variant, compiled once at creation: index
+    /// `capture * OFFSCREEN_VARIANTS + offscreen mask` (see [`Self::plan_index`]).
+    plans: Vec<FramePlan>,
     capture_pending: bool,
     capture_ready: bool,
     capture_extent: Option<vk::Extent2D>,
     capture_format: Option<vk::Format>,
     images_in_flight: Vec<Option<usize>>,
     frame_index: usize,
+    /// Whether the latest frame reached `vkQueueSubmit` ([`Self::last_frame_submitted`]).
+    last_submitted: bool,
     hdr_format: vk::Format,
+    depth_aspect: vk::ImageAspectFlags,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -334,28 +360,60 @@ impl Renderer {
         let (depth_format, depth_aspect) = targets::choose_depth_format(&device)?;
         let graph_error =
             |error: crate::graph::GraphError| RenderError::RenderGraph(error.to_string());
-        let plan = frame_graph::build(hdr_format, depth_format, depth_aspect, false)
-            .map_err(graph_error)?;
-        let capture_plan = frame_graph::build(hdr_format, depth_format, depth_aspect, true)
-            .map_err(graph_error)?;
+        let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
+        for capture in [false, true] {
+            for offscreen in 0..OFFSCREEN_VARIANTS {
+                plans.push(
+                    frame_graph::build(hdr_format, depth_format, depth_aspect, capture, offscreen)
+                        .map_err(graph_error)?,
+                );
+            }
+        }
         // The variants alternate on the same physical transients, so each slot must also
-        // start from the same (stage, access) in both: a slot's first barrier orders against
-        // whichever variant ran in the previous frame.
-        if !plan.graph.shares_transients_with(&capture_plan.graph) {
+        // start from the same (stage, access) in all of them: a slot's first barrier orders
+        // against whichever variant ran in the previous frame.
+        if plans
+            .iter()
+            .any(|variant| !variant.graph.shares_transients_with(&plans[0].graph))
+        {
             return Err(RenderError::RenderGraph(String::from(
-                "the capture variant disagrees on transient slots or their start state",
+                "a frame variant disagrees on transient slots or their start state",
             )));
         }
-        if !plan.graph.culled().is_empty() {
-            eprintln!("[render] graph culled passes: {:?}", plan.graph.culled());
+        if !plans[0].graph.culled().is_empty() {
+            eprintln!(
+                "[render] graph culled passes: {:?}",
+                plans[0].graph.culled()
+            );
         }
-        let transients = TransientPool::new(&device, plan.graph.slots(), swapchain.extent)?;
+        let transients = TransientPool::new(&device, plans[0].graph.slots(), swapchain.extent)?;
+        let mut offscreen = Vec::with_capacity(UI_IMAGE_SLOTS);
+        for (slot, size) in config.ui_image_sizes.into_iter().enumerate() {
+            let [width, height] = size.map(|side| side.clamp(1, MAX_UI_IMAGE_SIZE));
+            config.ui_image_sizes[slot] = [width, height];
+            offscreen.push(OffscreenTarget::new(
+                &device,
+                frame_graph::OFFSCREEN_PASS_NAMES[slot],
+                vk::Extent2D { width, height },
+                hdr_format,
+                (depth_format, depth_aspect),
+            )?);
+        }
 
         let materials = Materials::new(
             &device,
             config.compressed_textures,
             config.quality_tier.max_anisotropy(),
         )?;
+        // View 0 is the main scene; view `1 + slot` renders offscreen image `slot`.
+        let mut views = [ViewBudget {
+            max_instances: OFFSCREEN_MAX_INSTANCES,
+            max_bones: OFFSCREEN_MAX_BONES,
+        }; 1 + UI_IMAGE_SLOTS];
+        views[0] = ViewBudget {
+            max_instances: config.max_instances,
+            max_bones: config.max_bones,
+        };
         let scene = ScenePass::new(
             &device,
             &shaders,
@@ -363,8 +421,7 @@ impl Renderer {
             hdr_format,
             depth_format,
             materials.set_layout(),
-            config.max_instances,
-            config.max_bones,
+            &views,
             config.skinning,
         )?;
         config.max_bones = scene.max_bones();
@@ -375,6 +432,10 @@ impl Renderer {
             swapchain.format,
             config.max_ui_vertices,
             config.ui_scale,
+            &UiImages {
+                views: core::array::from_fn(|slot| offscreen[slot].color().view()),
+                exposure: composite.exposure(),
+            },
         )?;
         let profiler = GpuProfiler::new(
             device.device.clone(),
@@ -427,15 +488,17 @@ impl Renderer {
             profiler,
             frames,
             capture_buffer: None,
-            plan,
-            capture_plan,
+            offscreen,
+            plans,
             capture_pending: false,
             capture_ready: false,
             capture_extent: None,
             capture_format: None,
             images_in_flight,
             frame_index: 0,
+            last_submitted: false,
             hdr_format,
+            depth_aspect,
             device,
             surface,
             instance,
@@ -631,12 +694,20 @@ impl Renderer {
         [self.swapchain.extent.width, self.swapchain.extent.height]
     }
 
+    /// Size in pixels of offscreen `image` ([`RenderConfig::ui_image_sizes`], after
+    /// clamping).
+    #[must_use]
+    pub fn ui_image_extent(&self, image: UiImage) -> [u32; 2] {
+        let extent = self.offscreen[image.index()].extent();
+        [extent.width, extent.height]
+    }
+
     /// Draws one frame.
     ///
     /// Returns `Ok(())` when the frame was presented or when the window is minimised. A
     /// stale swapchain is recreated internally and the frame is skipped.
     pub fn render(&mut self, scene: &Scene<'_>) -> RenderResult<()> {
-        self.render_internal(scene, None)
+        self.render_internal(scene, None, &[]).map(drop)
     }
 
     /// Draws a frame with a screen-space UI overlay.
@@ -644,23 +715,62 @@ impl Renderer {
     /// # Errors
     /// Returns Vulkan errors from resource creation, presentation or the frame submission.
     pub fn render_with_ui(&mut self, scene: &Scene<'_>, ui: &UiDrawList) -> RenderResult<()> {
-        self.render_internal(scene, Some(ui))
+        self.render_internal(scene, Some(ui), &[]).map(drop)
+    }
+
+    /// Draws a frame that first re-renders the offscreen images in `offscreen` (R7b), each
+    /// through its own render-graph pass, then the scene and the UI, which can sample every
+    /// offscreen image ([`UiDrawList::image`]). Images not named keep their last contents.
+    /// At most one render per image is used (the first); `offscreen` may be empty.
+    ///
+    /// Offscreen renders cost GPU time in the frame that carries them, so re-render an
+    /// image only when it changes (a map load for the minimap, a few times a second for
+    /// animated portraits).
+    ///
+    /// Returns `Ok(true)` when the frame was submitted, so the offscreen images now hold the
+    /// new renders, and `Ok(false)` when it was skipped (a minimised window or a stale
+    /// swapchain, which is recreated): then nothing was rendered and the caller should
+    /// re-send the renders with a later frame.
+    ///
+    /// # Errors
+    /// As [`Self::render_with_ui`]. An error does not mean nothing ran: presentation, or the
+    /// swapchain recreation after it, can fail after the frame was submitted, and then the
+    /// offscreen renders have landed. [`Self::last_frame_submitted`] tells the two apart.
+    pub fn render_with_offscreen(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: &UiDrawList,
+        offscreen: &[OffscreenRender<'_>],
+    ) -> RenderResult<bool> {
+        self.render_internal(scene, Some(ui), offscreen)
+    }
+
+    /// Whether the most recent `render*`/`capture_frame*` call submitted its frame (and so its
+    /// offscreen renders), including when it then returned an error from presentation or
+    /// swapchain recreation. `false` before the first frame and after a skipped one.
+    #[must_use]
+    pub fn last_frame_submitted(&self) -> bool {
+        self.last_submitted
+    }
+
+    /// The plan variant for a capture flag and an offscreen mask.
+    const fn plan_index(capture: bool, offscreen: usize) -> usize {
+        (capture as usize) * OFFSCREEN_VARIANTS + offscreen
     }
 
     /// Points passes that sample transients at the current pool images.
     fn bind_transients(&self) {
-        let hdr = self
-            .plan
+        let plan = &self.plans[0];
+        let hdr = plan
             .graph
-            .slot_of(self.plan.resources.hdr)
+            .slot_of(plan.resources.hdr)
             .expect("the composite keeps the HDR target live");
         self.composite
             .bind_hdr(&self.device, self.transients.image(hdr).view());
     }
 
     fn transient(&self, resource: crate::graph::ResourceId) -> &GpuImage {
-        let slot = self
-            .plan
+        let slot = self.plans[0]
             .graph
             .slot_of(resource)
             .expect("frame transients are live in both variants");
@@ -697,9 +807,16 @@ impl Renderer {
         }
     }
 
-    fn render_internal(&mut self, scene: &Scene<'_>, ui: Option<&UiDrawList>) -> RenderResult<()> {
+    #[allow(clippy::too_many_lines)] // Fence, acquire, prepare, record, submit, present.
+    fn render_internal(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: Option<&UiDrawList>,
+        offscreen: &[OffscreenRender<'_>],
+    ) -> RenderResult<bool> {
+        self.last_submitted = false;
         if !self.sync_extent()? {
-            return Ok(());
+            return Ok(false);
         }
         if self.capture_pending {
             if !self.swapchain.transfer_src {
@@ -724,7 +841,7 @@ impl Renderer {
             Ok(result) => result,
             Err(RenderError::SwapchainOutOfDate) => {
                 self.recreate_swapchain()?;
-                return Ok(());
+                return Ok(false);
             }
             Err(error) => return Err(error),
         };
@@ -740,7 +857,16 @@ impl Renderer {
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
 
-        self.scene.prepare(frame_index, scene)?;
+        self.scene.prepare(0, frame_index, scene)?;
+        let mut offscreen_mask = 0usize;
+        for render in offscreen {
+            let slot = render.image.index();
+            if offscreen_mask & (1 << slot) != 0 {
+                continue; // One render per image and frame: the first wins.
+            }
+            offscreen_mask |= 1 << slot;
+            self.scene.prepare(1 + slot, frame_index, &render.scene)?;
+        }
         self.ui.prepare(frame_index, ui)?;
 
         let command_buffers = self.frames[frame_index].command_buffers;
@@ -761,7 +887,12 @@ impl Renderer {
                     .begin_command_buffer(command_buffer, &begin)
             }?;
         }
-        self.record_frame(command_buffers, frame_index, image_index)?;
+        self.record_frame(
+            command_buffers,
+            frame_index,
+            image_index,
+            (offscreen_mask, offscreen),
+        )?;
         for &command_buffer in &command_buffers {
             // SAFETY: the command buffer is recording and is ended exactly once.
             unsafe { self.device.device.end_command_buffer(command_buffer) }?;
@@ -794,6 +925,7 @@ impl Renderer {
                 .queue_submit(self.device.graphics_queue, &submits, fence)
         }?;
         self.profiler.submitted(frame_index);
+        self.last_submitted = true;
         if self.capture_pending {
             self.capture_pending = false;
             self.capture_ready = true;
@@ -804,11 +936,12 @@ impl Renderer {
                 .present(self.device.present_queue, image_index, render_finished);
         self.frame_index = (frame_index + 1) % FRAMES_IN_FLIGHT;
 
+        // The frame was submitted: its offscreen renders ran even if presenting did not.
         match present_result {
-            Ok(true) if !suboptimal => Ok(()),
+            Ok(true) if !suboptimal => Ok(true),
             Ok(_) | Err(RenderError::SwapchainSuboptimal | RenderError::SwapchainOutOfDate) => {
                 self.recreate_swapchain()?;
-                Ok(())
+                Ok(true)
             }
             Err(error) => Err(error),
         }
@@ -817,11 +950,13 @@ impl Renderer {
     /// Records the compiled frame graph: per pass, its barriers, a timestamp pair around the
     /// pass's commands, then the final transitions. Passes before the plan's acquire split go
     /// into `command_buffers[0]`, the rest (and the final transitions) into `[1]`.
+    #[allow(clippy::too_many_lines)] // One dispatch over the compiled passes.
     fn record_frame(
         &mut self,
         command_buffers: [vk::CommandBuffer; 2],
         frame_index: usize,
         image_index: u32,
+        (offscreen_mask, offscreen): (usize, &[OffscreenRender<'_>]),
     ) -> RenderResult<()> {
         let capturing = self.capture_pending;
         let extent = self.swapchain.extent;
@@ -844,11 +979,7 @@ impl Renderer {
         } else {
             None
         };
-        let plan = if capturing {
-            &self.capture_plan
-        } else {
-            &self.plan
-        };
+        let plan = &self.plans[Self::plan_index(capturing, offscreen_mask)];
         let resources = plan.resources;
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
@@ -864,14 +995,40 @@ impl Renderer {
                 PassKind::Scene => self.scene.record(
                     &self.device,
                     command_buffer,
+                    0,
                     frame_index,
                     &SceneTargets {
                         color: hdr_view,
                         depth: depth_view,
                         extent,
                         clear_color: self.config.clear_color,
+                        terrain: true,
+                        clear_rects: &[],
                     },
                 ),
+                PassKind::Offscreen(slot) => {
+                    let slot = usize::from(slot);
+                    // The plan only has this pass when a render named the image.
+                    if let Some(render) =
+                        offscreen.iter().find(|render| render.image.index() == slot)
+                    {
+                        let target = &self.offscreen[slot];
+                        self.scene.record(
+                            &self.device,
+                            command_buffer,
+                            1 + slot,
+                            frame_index,
+                            &SceneTargets {
+                                color: target.color().view(),
+                                depth: target.depth().view(),
+                                extent: target.extent(),
+                                clear_color: render.clear_color,
+                                terrain: render.terrain,
+                                clear_rects: render.backdrops,
+                            },
+                        );
+                    }
+                }
                 PassKind::Composite => {
                     self.composite
                         .record(&self.device, command_buffer, swapchain_view, extent);
@@ -939,8 +1096,29 @@ impl Renderer {
         bindings.set(resources.depth, image(resources.depth));
         bindings.set(
             resources.bones,
-            Binding::Buffer(self.scene.bone_buffer(frame_index)),
+            Binding::Buffer(self.scene.bone_buffer(0, frame_index)),
         );
+        for (slot, offscreen) in resources.offscreen.iter().enumerate() {
+            let target = &self.offscreen[slot];
+            bindings.set(
+                offscreen.color,
+                Binding::Image {
+                    image: target.color().image(),
+                    aspect: vk::ImageAspectFlags::COLOR,
+                },
+            );
+            bindings.set(
+                offscreen.depth,
+                Binding::Image {
+                    image: target.depth().image(),
+                    aspect: self.depth_aspect,
+                },
+            );
+            bindings.set(
+                offscreen.bones,
+                Binding::Buffer(self.scene.bone_buffer(1 + slot, frame_index)),
+            );
+        }
         if let (Some(resource), Some(buffer)) = (resources.capture, capture_buffer) {
             bindings.set(resource, Binding::Buffer(buffer));
         }
@@ -968,7 +1146,7 @@ impl Renderer {
         // Build the new targets before replacing anything, so a failed allocation cannot
         // pair the new extent with old-size transients.
         let transients =
-            TransientPool::new(&self.device, self.plan.graph.slots(), swapchain.extent)?;
+            TransientPool::new(&self.device, self.plans[0].graph.slots(), swapchain.extent)?;
         self.swapchain = swapchain;
         self.transients = transients;
         self.bind_transients();
@@ -996,7 +1174,7 @@ impl Renderer {
     /// Debug/test path: it waits for the device to go idle. Used for golden images and by
     /// the `MOBA_CAPTURE` client mode.
     pub fn capture_frame(&mut self, scene: &Scene<'_>) -> RenderResult<CapturedFrame> {
-        self.capture_frame_internal(scene, None)
+        self.capture_frame_internal(scene, None, &[])
     }
 
     /// Renders with a UI overlay and reads the frame back.
@@ -1008,19 +1186,33 @@ impl Renderer {
         scene: &Scene<'_>,
         ui: &UiDrawList,
     ) -> RenderResult<CapturedFrame> {
-        self.capture_frame_internal(scene, Some(ui))
+        self.capture_frame_internal(scene, Some(ui), &[])
+    }
+
+    /// [`Self::render_with_offscreen`], then reads the frame back.
+    ///
+    /// # Errors
+    /// Returns Vulkan errors from rendering or the readback.
+    pub fn capture_frame_with_offscreen(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: &UiDrawList,
+        offscreen: &[OffscreenRender<'_>],
+    ) -> RenderResult<CapturedFrame> {
+        self.capture_frame_internal(scene, Some(ui), offscreen)
     }
 
     fn capture_frame_internal(
         &mut self,
         scene: &Scene<'_>,
         ui: Option<&UiDrawList>,
+        offscreen: &[OffscreenRender<'_>],
     ) -> RenderResult<CapturedFrame> {
         // The capture plan imports the readback buffer as idle: every capture waits for the
         // device below before reading it, so no earlier submission still touches it.
         self.capture_ready = false;
         self.capture_pending = true;
-        if let Err(error) = self.render_internal(scene, ui) {
+        if let Err(error) = self.render_internal(scene, ui, offscreen) {
             // A capture copy may already be submitted (for example when present fails after
             // the submit); keep the "idle" import true for the next capture.
             self.capture_pending = false;

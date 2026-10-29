@@ -16,7 +16,7 @@ moba-net       UDP protocol, transport, prediction, snapshot model
 moba-netsim    lossy UDP proxy used only by tests
 moba-platform  winit window, input, fixed-step frame loop
 moba-shaders   GLSL compiled/validated to SPIR-V
-moba-render    Vulkan renderer, terrain/fog, HUD batch, capture
+moba-render    Vulkan renderer, terrain/fog, HUD batch, offscreen HUD images, capture
 moba-client    playable client wiring render + platform + net + UI
 moba-server    headless server wiring net + sim
 moba-tools     soak/fuzz developer binaries
@@ -98,15 +98,23 @@ compiling derives the `synchronization2` barriers and layout transitions, pools 
 and culls unused passes. Each pass is timed with GPU timestamps (`Renderer::gpu_timings`). The
 passes run in this order:
 
-1. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
+1. `portraits` and `minimap` (R7b), only in frames that re-render them: the scene pipelines
+   draw an `OffscreenRender` into one of the renderer's fixed offscreen images (a 2048×128
+   hero-portrait strip and a 512×512 minimap by default, HDR format, each with its own depth
+   buffer and per-frame buffers);
+2. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
    the `Low` quality tier) with a sampled-capable depth buffer;
-2. `composite` applies exposure and an AgX tonemap into the swapchain image;
-3. `ui` draws the HUD on top, so text is never tonemapped;
-4. `capture` copies the swapchain image for readback, in capture frames only.
+3. `composite` applies exposure and an AgX tonemap into the swapchain image;
+4. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images;
+5. `capture` copies the swapchain image for readback, in capture frames only.
 
-The scene pass is submitted ahead of the acquire-semaphore wait (it never touches the
-swapchain), and the passes from `composite` on wait for the acquired image, in one
-`vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
+The offscreen images are graph imports, not transients: they keep their contents across
+frames and start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, so a frame that does not
+re-render one still samples last frame's contents with no transition. Every combination of
+capture and offscreen passes is a variant compiled at creation (eight), and all share the
+transient slots. The offscreen and scene passes are submitted ahead of the acquire-semaphore
+wait (they never touch the swapchain), and the passes from `composite` on wait for the
+acquired image, in one `vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
 load from a pool sized by the registered content
 ([ADR-0009](adr/0009-descriptor-model.md), [ADR-0010](adr/0010-texture-pipeline.md)). Every
 pipeline, each shader permutation included, is built at renderer creation through a
@@ -129,8 +137,18 @@ can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
 - up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
   darkens unseen ground.
 
-The UI pass draws a screen-space batch (solid quads + textured glyph/icon atlas), and the
-capture pass provides the GPU readback used for deterministic screenshots and goldens.
+The UI pass draws one screen-space batch: solid quads, the pixel-art icon atlas, MSDF text,
+cooldown sweeps and (R7b) offscreen images, picked per vertex (`UiVertex::mode`, and
+`UiVertex::image` for the image slot). The images are tonemapped in the UI shader with the
+composite's AgX curve, so a portrait matches the world. The capture pass provides the GPU
+readback used for deterministic screenshots and goldens.
+
+The client fills the offscreen images from state it already has (`app::offscreen`): one
+portrait cell per `(team, hero slot)`, rendered when the heroes change and, above the `Low`
+tier, a few times a second with each skinned hero's idle clip; and the minimap, a top-down
+orthographic render of the map's terrain, walls and props baked at every map bind. The HUD
+darkens the minimap outside allied vision from the units it was sent, so nothing hidden is
+revealed.
 
 No renderer types leak into simulation or networking. A different renderer only needs
 `Camera`, unit instances and a UI draw list (or can ignore the latter).

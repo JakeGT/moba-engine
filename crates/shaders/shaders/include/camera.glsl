@@ -13,7 +13,7 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 camera_pos;
     vec4 light_direction; // xyz direction *towards* the light, w = intensity
     vec4 ambient;
-    vec4 terrain;
+    vec4 terrain; // rgb tint, w grid-line strength (1 = default)
     vec4 vision_circles[MOBA_VISION_CIRCLES];
     uvec4 vision_count;
     vec4 vision_walls[MOBA_VISION_WALLS];

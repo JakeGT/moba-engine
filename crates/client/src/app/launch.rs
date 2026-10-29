@@ -11,7 +11,7 @@ use moba_core::FixVec2;
 use moba_net::protocol::MatchPhase;
 use moba_net::{NetClient, NetServer};
 use moba_platform::{WindowConfig, run as run_window};
-use moba_render::{CapturedFrame, Renderer, Scene, UiDrawList};
+use moba_render::{CapturedFrame, OffscreenRender, Renderer, Scene, UiDrawList};
 use moba_sim::SimConfig;
 
 use crate::app::ClientApp;
@@ -24,23 +24,31 @@ pub(crate) fn frames_is_capture(
     capture_path.is_some() && frames >= capture_frame
 }
 
+/// Renders `scene` (after the `offscreen` renders, R7b) and writes the frame to
+/// `capture_path`. Returns whether the frame was rendered, so the offscreen renders landed.
 pub(crate) fn capture_and_exit(
     renderer: &mut Renderer,
     scene: &Scene<'_>,
     ui: &UiDrawList,
+    offscreen: &[OffscreenRender<'_>],
     capture_path: Option<&Path>,
     failure: &mut Option<String>,
-) {
+) -> bool {
     let Some(path) = capture_path else {
-        return;
+        return false;
     };
-    match renderer.capture_frame_with_ui(scene, ui) {
+    match renderer.capture_frame_with_offscreen(scene, ui, offscreen) {
         Ok(frame) => {
             if let Err(error) = write_ppm(path, &frame) {
                 *failure = Some(format!("capture write failed: {error}"));
             }
+            true
         }
-        Err(error) => *failure = Some(format!("capture failed: {error}")),
+        Err(error) => {
+            *failure = Some(format!("capture failed: {error}"));
+            // A capture can fail after its frame (and offscreen renders) was submitted.
+            renderer.last_frame_submitted()
+        }
     }
 }
 
@@ -455,16 +463,38 @@ impl Drop for ClientApp {
 }
 
 /// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[scene, composite, ui,
-/// total, span]` samples. `total` sums the passes; `span` runs from the first pass's start
-/// to the last pass's end, so `span - total` is the time spent in barriers between passes.
-fn gpu_report(samples: &[[f32; 5]]) -> String {
+/// total, span, portraits, minimap]` samples. `total` sums the passes; `span` runs from the
+/// first pass's start to the last pass's end, so `span - total` is the time spent in
+/// barriers between passes. The offscreen passes (R7b) run only in some frames, so their
+/// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
+/// columns are left out.
+fn gpu_report(samples: &[[f32; 7]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
-    for (lane, name) in ["scene", "composite", "ui", "total", "span"]
-        .into_iter()
-        .enumerate()
+    for (lane, name) in [
+        "scene",
+        "composite",
+        "ui",
+        "total",
+        "span",
+        "portraits",
+        "minimap",
+    ]
+    .into_iter()
+    .enumerate()
     {
-        let mut values: Vec<f32> = samples.iter().map(|sample| sample[lane]).collect();
+        let offscreen = lane >= 5;
+        let mut values: Vec<f32> = samples
+            .iter()
+            .map(|sample| sample[lane])
+            .filter(|&value| !offscreen || value > 0.0)
+            .collect();
+        if offscreen {
+            if values.is_empty() {
+                continue;
+            }
+            let _ = write!(columns, "gpu_{name}_runs={} ", values.len());
+        }
         values.sort_by(f32::total_cmp);
         let at = |fraction: f32| {
             values
@@ -524,10 +554,12 @@ mod tests {
 
     #[test]
     fn gpu_report_lists_each_pass_percentile() {
-        let samples: Vec<[f32; 5]> = (0..=100)
+        let samples: Vec<[f32; 7]> = (0..=100)
             .map(|index| {
                 let ms = index as f32 / 100.0;
-                [ms, ms * 2.0, 0.5, ms * 3.0, ms * 4.0]
+                // The portrait pass ran in every tenth frame; the minimap never did.
+                let portraits = if index % 10 == 0 { 0.02 } else { 0.0 };
+                [ms, ms * 2.0, 0.5, ms * 3.0, ms * 4.0, portraits, 0.0]
             })
             .collect();
         let report = gpu_report(&samples);
@@ -535,7 +567,12 @@ mod tests {
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));
         assert!(report.contains("gpu_ui_p50_ms=0.500 gpu_ui_p95_ms=0.500 "));
         assert!(report.contains("gpu_total_p50_ms=1.500 gpu_total_p95_ms=2.850 "));
-        assert!(report.ends_with("gpu_span_p50_ms=2.000 gpu_span_p95_ms=3.800 "));
+        assert!(report.contains("gpu_span_p50_ms=2.000 gpu_span_p95_ms=3.800 "));
+        // Offscreen passes: percentiles over the frames they ran in, plus a run count.
+        assert!(report.ends_with(
+            "gpu_portraits_runs=11 gpu_portraits_p50_ms=0.020 gpu_portraits_p95_ms=0.020 "
+        ));
+        assert!(!report.contains("gpu_minimap"));
     }
 
     #[test]

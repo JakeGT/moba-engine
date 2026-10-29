@@ -378,3 +378,120 @@ fn variants_share_transients_only_with_the_same_start_state() {
     other.slots[0].start_access = A::NONE;
     assert!(!normal.shares_transients_with(&other));
 }
+
+/// R7b: a persistent offscreen target (colour + depth imports) that a pass renders into and
+/// the UI samples, with and without the writer in the frame.
+#[test]
+#[allow(clippy::too_many_lines)] // Both variants' full barrier plan, checked together.
+fn persistent_offscreen_targets_are_written_then_sampled_by_the_ui() {
+    let build = |with_writer: bool| {
+        let mut graph = GraphBuilder::new();
+        let target = swapchain(&mut graph);
+        let portrait = graph.import_image(
+            "portrait",
+            ImportState::persistent(S::FRAGMENT_SHADER, L::SHADER_READ_ONLY_OPTIMAL),
+            Some(Access::SampledFragment),
+        );
+        let depth = graph.import_image(
+            "portrait-depth",
+            ImportState::rewritten(
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
+                A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            None,
+        );
+        if with_writer {
+            let _ = graph
+                .pass("portraits", 0)
+                .access(portrait, Access::ColorWrite)
+                .access(depth, Access::DepthWrite);
+        }
+        let _ = graph
+            .pass("composite", 1)
+            .access(target, Access::ColorWrite);
+        let _ = graph
+            .pass("ui", 2)
+            .access(target, Access::ColorReadWrite)
+            .access(portrait, Access::SampledFragment);
+        (graph.compile().expect("valid graph"), portrait, depth)
+    };
+
+    let (plan, portrait, depth) = build(true);
+    assert_eq!(
+        plan.culled(),
+        [] as [&str; 0],
+        "the UI read keeps the writer"
+    );
+    assert!(plan.slots().is_empty(), "imports take no transient slots");
+    let write = &plan.passes()[0].barriers;
+    let colour = write
+        .iter()
+        .find(|barrier| barrier.resource == portrait)
+        .expect("colour barrier");
+    // Write-after-read against the previous frame's UI sampling, keeping the contents.
+    assert_eq!(
+        (colour.src_stage, colour.src_access),
+        (S::FRAGMENT_SHADER, A::NONE)
+    );
+    assert_eq!(
+        (colour.dst_stage, colour.dst_access),
+        (S::COLOR_ATTACHMENT_OUTPUT, A::COLOR_ATTACHMENT_WRITE)
+    );
+    assert_eq!(
+        (colour.old_layout, colour.new_layout),
+        (L::SHADER_READ_ONLY_OPTIMAL, L::COLOR_ATTACHMENT_OPTIMAL)
+    );
+    let depth_barrier = write
+        .iter()
+        .find(|barrier| barrier.resource == depth)
+        .expect("depth barrier");
+    // Write-after-write against the previous use, discarding the contents.
+    assert_eq!(depth_barrier.src_access, A::DEPTH_STENCIL_ATTACHMENT_WRITE);
+    assert_eq!(depth_barrier.old_layout, L::UNDEFINED);
+    assert_eq!(
+        depth_barrier.new_layout,
+        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    );
+    // The UI waits for the colour writes and samples in SHADER_READ_ONLY_OPTIMAL.
+    let ui = plan.passes()[2]
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == portrait)
+        .expect("ui barrier");
+    assert_eq!(
+        (ui.src_stage, ui.src_access),
+        (S::COLOR_ATTACHMENT_OUTPUT, A::COLOR_ATTACHMENT_WRITE)
+    );
+    assert_eq!(
+        (ui.dst_stage, ui.dst_access),
+        (S::FRAGMENT_SHADER, A::SHADER_SAMPLED_READ)
+    );
+    assert_eq!(
+        (ui.old_layout, ui.new_layout),
+        (L::COLOR_ATTACHMENT_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL)
+    );
+    // The frame ends in the import's start layout: no final transition is needed.
+    assert!(
+        plan.final_barriers()
+            .iter()
+            .all(|barrier| barrier.resource != portrait)
+    );
+
+    // Without the writer the UI reads last frame's contents: same layout, only an
+    // execution dependency, and still no final transition.
+    let (plan, portrait, _) = build(false);
+    assert_eq!(plan.passes().len(), 2);
+    let ui = plan.passes()[1]
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == portrait)
+        .expect("ui barrier");
+    assert_eq!(ui.src_access, A::NONE);
+    assert_eq!(ui.old_layout, ui.new_layout);
+    assert_eq!(ui.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+    assert!(
+        plan.final_barriers()
+            .iter()
+            .all(|barrier| barrier.resource != portrait)
+    );
+}

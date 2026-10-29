@@ -212,6 +212,11 @@ impl MapLibrary {
         self.active.as_deref()
     }
 
+    /// The map's walls and props, in render space (the minimap bake takes a bounded prefix).
+    pub(crate) fn instances(&self) -> &[UnitInstance] {
+        &self.instances
+    }
+
     /// Appends the map's walls and props. Never allocates once `units` has capacity.
     pub(crate) fn push_instances(&self, units: &mut Vec<UnitInstance>) {
         units.extend_from_slice(&self.instances);

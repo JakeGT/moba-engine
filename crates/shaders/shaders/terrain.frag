@@ -16,7 +16,9 @@ float grid_line(vec2 position, float spacing, float thickness) {
 }
 
 void main() {
-    float grid = max(grid_line(in_world_pos.xz, 4.0, 1.0), grid_line(in_world_pos.xz, 16.0, 1.4) * 0.6);
+    // `terrain.w` scales the grid lines: 1 for the world, fainter for the baked minimap (R7b).
+    float grid = max(grid_line(in_world_pos.xz, 4.0, 1.0), grid_line(in_world_pos.xz, 16.0, 1.4) * 0.6)
+        * camera.terrain.w;
 
     vec3 grass = camera.terrain.rgb;
     vec3 line = camera.terrain.rgb * 2.0;

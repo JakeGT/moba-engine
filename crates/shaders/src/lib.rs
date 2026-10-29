@@ -5,8 +5,9 @@
 //! ships source code to the driver.
 //!
 //! Sources share declarations through `#include` files in `shaders/include/` (camera block,
-//! instance buffer, lighting, material set). A few sources are also built as **permutations**
-//! with preprocessor defines, each its own module: the `*_TEXTURED` modules are the
+//! instance buffer, lighting, material set, and the `AgX` tonemap that the composite and the
+//! UI's offscreen images share). A few sources are also built as **permutations** with
+//! preprocessor defines, each its own module: the `*_TEXTURED` modules are the
 //! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010).
 
 #![forbid(unsafe_code)]
