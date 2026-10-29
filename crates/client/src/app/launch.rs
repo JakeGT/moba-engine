@@ -122,6 +122,15 @@ pub(crate) fn parse_demo_move() -> Option<FixVec2> {
     ))
 }
 
+/// `MOBA_DEMO_CAST=<slot>@<tick>` (capture demos): cast ability slot 0-2 once, at the first
+/// Playing snapshot at or after `tick`.
+pub(crate) fn parse_demo_cast() -> Option<(u8, u32)> {
+    let value = std::env::var("MOBA_DEMO_CAST").ok()?;
+    let (slot, tick) = value.split_once('@')?;
+    let slot = slot.trim().parse::<u8>().ok().filter(|slot| *slot < 3)?;
+    Some((slot, tick.trim().parse().ok()?))
+}
+
 /// Player-camera orbit distance: `MOBA_CAMERA_DISTANCE` metres (clamped to 8–120) or 46.
 ///
 /// Read once at startup (close-up captures of hero models), never per frame.

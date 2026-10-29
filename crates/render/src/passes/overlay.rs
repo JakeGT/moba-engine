@@ -17,6 +17,22 @@ use crate::texture;
 use crate::ui::{UiDrawList, UiVertex};
 
 const UI_ATLAS: &[u8] = include_bytes!("../../assets/ui-atlas.rgba");
+/// The baked MTSDF HUD font (`bake-ui-font`, R7a).
+const UI_FONT: &[u8] = include_bytes!("../../assets/ui-font.rgba");
+
+/// UI push constants; matches `UiPush` in `ui.vert` and `ui.frag`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct UiPush {
+    viewport: [f32; 2],
+    font_range_px: f32,
+    pad: f32,
+}
+
+const UI_PUSH_SIZE: u32 = core::mem::size_of::<UiPush>() as u32;
+const UI_PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
+    vk::ShaderStageFlags::VERTEX.as_raw() | vk::ShaderStageFlags::FRAGMENT.as_raw(),
+);
 static UI_VERTICES_TRUNCATED: AtomicU64 = AtomicU64::new(0);
 static UI_TRUNCATION_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -34,6 +50,8 @@ pub(crate) struct UiPass {
     _set_layout: DescriptorSetLayout,
     _atlas: GpuImage,
     _sampler: Sampler,
+    _font_atlas: GpuImage,
+    _font_sampler: Sampler,
     pipeline_layout: PipelineLayout,
     pipeline: GraphicsPipeline,
     max_vertices: usize,
@@ -43,6 +61,7 @@ pub(crate) struct UiPass {
 }
 
 impl UiPass {
+    #[allow(clippy::too_many_lines)] // Linear resource setup: two textures, set, pipeline.
     pub(crate) fn new(
         device: &DeviceContext,
         frames: usize,
@@ -52,11 +71,14 @@ impl UiPass {
     ) -> RenderResult<Self> {
         let vertex = ShaderModule::new(device.device.clone(), moba_shaders::UI_VERT)?;
         let fragment = ShaderModule::new(device.device.clone(), moba_shaders::UI_FRAG)?;
-        let binding = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+        // Binding 0: the RGBA pixel-art atlas (nearest). Binding 1: the MSDF font (linear).
+        let binding = [0, 1].map(|binding| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(binding)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+        });
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &binding)?;
         let atlas = texture::upload_rgba(
             device,
@@ -64,6 +86,19 @@ impl UiPass {
             crate::ui::ATLAS_WIDTH,
             crate::ui::ATLAS_HEIGHT,
             UI_ATLAS,
+        )?;
+        let [font_width, font_height] = crate::font::ATLAS_SIZE;
+        let font_atlas = texture::upload_rgba(device, "ui-font", font_width, font_height, UI_FONT)?;
+        // The distance field must be filtered; no mips (the shader samples LOD 0 and derives
+        // its anti-aliasing width from screen-space derivatives).
+        let font_sampler = Sampler::new(
+            device.device.clone(),
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
         )?;
         let sampler = Sampler::new(
             device.device.clone(),
@@ -77,7 +112,7 @@ impl UiPass {
         let frame_count = u32::try_from(frames).expect("frame count fits u32");
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(frame_count)];
+            .descriptor_count(frame_count * 2)];
         let descriptor_pool = DescriptorPool::new(device.device.clone(), &pool_sizes, frame_count)?;
         let set_layouts = vec![set_layout.handle(); frames];
         let sets = descriptor_pool.allocate(&device.device, &set_layouts)?;
@@ -85,23 +120,34 @@ impl UiPass {
             .sampler(sampler.handle())
             .image_view(atlas.view())
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let font_info = [vk::DescriptorImageInfo::default()
+            .sampler(font_sampler.handle())
+            .image_view(font_atlas.view())
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         let writes: Vec<vk::WriteDescriptorSet<'_>> = sets
             .iter()
-            .map(|set| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(*set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&image_info)
+            .flat_map(|set| {
+                [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&image_info),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&font_info),
+                ]
             })
             .collect();
-        // SAFETY: the sets, sampler and image view are live and the write describes them.
+        // SAFETY: the sets, samplers and image views are live and the writes describe them.
         unsafe { device.device.update_descriptor_sets(&writes, &[]) };
 
         let push = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .stage_flags(UI_PUSH_STAGES)
             .offset(0)
-            .size(8)];
+            .size(UI_PUSH_SIZE)];
         let pipeline_layout = PipelineLayout::with_push_constants(
             device.device.clone(),
             &[set_layout.handle()],
@@ -138,6 +184,8 @@ impl UiPass {
             _set_layout: set_layout,
             _atlas: atlas,
             _sampler: sampler,
+            _font_atlas: font_atlas,
+            _font_sampler: font_sampler,
             pipeline_layout,
             pipeline,
             max_vertices,
@@ -231,16 +279,19 @@ impl UiPass {
                 &[],
             );
         }
-        let viewport_size = [extent.width as f32, extent.height as f32];
-        // SAFETY: the UI pipeline layout declares exactly this 8-byte vertex-stage push
-        // constant range.
+        let push = UiPush {
+            viewport: [extent.width as f32, extent.height as f32],
+            font_range_px: crate::font::RANGE_PX,
+            pad: 0.0,
+        };
+        // SAFETY: the UI pipeline layout declares exactly this push constant range and stages.
         unsafe {
             device.device.cmd_push_constants(
                 command_buffer,
                 self.pipeline_layout.handle(),
-                vk::ShaderStageFlags::VERTEX,
+                UI_PUSH_STAGES,
                 0,
-                bytes_of(&viewport_size),
+                bytes_of(&push),
             );
         }
         // SAFETY: `count` was bounded by the vertex buffer capacity in `prepare`.

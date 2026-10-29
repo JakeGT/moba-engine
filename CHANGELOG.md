@@ -60,6 +60,9 @@ the semver check):
     `Scene::new`/`Scene::empty` and the `with_*` methods), `UnitInstance` (gained `mesh`/`bones`;
     use `UnitInstance::new`/`at` with `with_mesh`/`with_bones`), `Camera` (use `perspective`/
     `orbit`), `CapturedFrame`, `VulkanProbe`.
+  - `UiVertex` (R7a): `atlas` renamed to `mode`, new `outline` and `params` fields (48-byte
+    layout). `UiDrawList::text` now uses the MSDF font, so `text_width` values change; the old
+    5×7 font is `text_bitmap`/`bitmap_text_width`.
 - **`moba-platform`**
   - `#[non_exhaustive]`: `PlatformError`, `Key`, `MouseButton` (add a `_` arm) and
     `WindowConfig` (use `WindowConfig::new(title, w, h)` or `Default` with `with_*` builders).
@@ -152,6 +155,57 @@ the semver check):
     [docs/api-1.0.md](docs/api-1.0.md). Golden captures are byte-identical to `main`
     (lavapipe, validation + sync validation, 0 messages); evidence in
     `docs/perf/0013-materials.md`. No wire, replay, logic or content-hash change.
+- **UI, HUD and presentation polish (AAA roadmap R7a):**
+  - **MSDF text:** HUD text is drawn from a multi-channel signed-distance-field atlas (an
+    MTSDF: RGB for sharp corners, alpha for the true distance) of Open Sans Condensed SemiBold
+    (SIL OFL 1.1, `THIRD_PARTY.md`). `ui.frag` anti-aliases it from screen-space derivatives,
+    so text stays crisp at any UI scale and at 4K; outlines and soft shadows come from the
+    same atlas. The 512×208 atlas and its metrics table are baked offline by
+    `crates/tools/font-bake` and checked in. The baker uses `fdsm` and `skrifa`, both
+    permissive, and is a standalone crate with its own lockfile, like `fuzz/`. Through
+    `nalgebra` it pulls in the unmaintained build-time `paste` macro (RUSTSEC-2024-0436), so it
+    stays out of the workspace and the shipped dependency graph. `ci-tools` re-bakes the font
+    and fails on any difference. Capital letters keep the old `7 × scale` height, so
+    layouts keep their proportions. The RGBA atlas keeps the pixel-art icons and the legacy
+    5×7 font (`UiDrawList::text_bitmap`).
+  - **Health bars:** palette team colours (own/ally/enemy), a damage "ghost" that holds 9
+    ticks and then drains, a shield segment, tick marks every 100 HP (heroes, stronger every
+    1,000) or 500 HP (structures), hero level badge and mana strip. Bars of units far off
+    screen are culled instead of piling up at the edge.
+  - **Colour-blind palette:** new `team_palette` setting (`standard`/`colorblind`, default
+    `standard`) and `MOBA_TEAM_PALETTE` override. `colorblind` uses Okabe-Ito yellow,
+    sky-blue and orange for self/ally/enemy on health bars and the minimap.
+  - **Floating combat text:** damage, heal and own-gold numbers rise and fade, with a pop
+    and `!` for big hits. They come from snapshot health and gold deltas (the wire has no
+    per-hit damage, attacker or crit flag; "crit" means one change of at least 12 % of max
+    health), are timed by the render tick so they appear with the interpolated hit, and live
+    in a fixed 360-slot ring. The ring fits 8 spawns per snapshot across the render lag plus
+    the longest life. Each snapshot keeps its 8 most important numbers: the own hero first,
+    then the viewer's team, then the biggest changes. The newest 48 are drawn, and off-screen
+    numbers are culled. A unit that was fogged for a snapshot, or unseen for more than
+    15 ticks, is re-initialised silently instead of reporting the gap as one number. Health
+    bars also follow the render tick, so the bar, ghost and number change together.
+  - **Ability slots:** a radial cooldown sweep with a bright leading edge, remaining seconds
+    (tenths under one second), a blue tint when mana is short, mana cost and a gold frame when
+    ready. Item cooldowns use the sweep too.
+  - **Screens:** a procedural loading screen (gradient, light bands, glowing title, spinner,
+    map name, tip) for at least 1.2 s after connecting or a map change, then a cross-fade;
+    a dip-to-dark fade between lobby, match and results; lobby and results panels fade and
+    slide in. `MOBA_CAPTURE_TICK` captures settle all fades.
+  - **Also:** the kill feed moved under the controls line (it overlapped it), the map name
+    sits under the timer (it was under the status panel), and `MOBA_DEMO_CAST=<slot>@<tick>`
+    casts once for capture demos.
+  - **Public API:** `UiVertex` (GPU layout, exhaustive) grew from 36 to 48 bytes: `atlas` is
+    now `mode` (`UiVertex::MODE_*`), plus `outline` and `params`. `UiDrawList::text` draws
+    the MSDF font with new advances; new `text_styled`, `text_outlined`, `text_bitmap`,
+    `bitmap_text_width`, `rect_gradient`, `sweep` and `ring`; new `TextStyle`
+    (`#[non_exhaustive]`, `new` + `with_outline`/`with_shadow`) and `pack_rgba8`.
+  - **Golden images:** both fingerprints were **deliberately rebaselined** (HUD text and
+    health bars) on lavapipe with validation and sync validation required, 0 messages.
+  - **Cost:** RTX 5070 Ti at 1920×1080: the `ui` pass stays at 5–6 µs for the normal HUD
+    (5 µs before). A 2× HUD with the scoreboard and shop open goes from 38–41 µs to 49–52 µs
+    p50. Steady-state HUD frames still allocate nothing (`docs/perf/0014-ui.md`).
+  - No wire, replay, logic or content-hash change.
 - **Render graph, HDR and tonemap (AAA roadmap R1a, ADR-0008/ADR-0009):** the frame is now a
   small in-house render graph (`moba-render` `graph`). Passes declare image and buffer
   accesses, and compiling the graph derives `vkCmdPipelineBarrier2` barriers and layout

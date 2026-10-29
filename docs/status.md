@@ -20,7 +20,7 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 | M3 | Renderer | 🟡 | Vulkan 1.3 device/swapchain/dynamic rendering, a render graph with HDR target, AgX tonemap composite, quality tiers and per-pass GPU timestamps ([ADR-0008](adr/0008-render-graph.md), [perf/0011](perf/0011-render-graph.md)), client-local materials with KTX2 textures (BC7/BC5/BC4 with mips, CPU-decode fallback), a `MATERIAL_TEXTURED` shader permutation, GLSL includes, a persistent pipeline cache and debug-build shader hot reload (R1b, [ADR-0010](adr/0010-texture-pipeline.md), [perf/0013](perf/0013-materials.md)), instanced units, terrain fog/LOS, textured UI atlas, animated hero rig, GPU skinning of `.glb` hero models (rig fallback; #288, ADR-0007), an [animation runtime](adr/0012-animation-runtime.md) (R4a: named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local state machine driven by snapshots and cast/death/attack events (basic attacks from `EVENT_ATTACK`, protocol v41, R4b-1), spring bones, sockets and a distance LOD; 200 units in 0.12 ms of CPU per frame, [perf/0012](perf/0012-animation-runtime.md)) with a [networked skinned-match frame cost](perf/0007-real-hardware.md#networked-match-with-skinned-heroes-wp-42-289) (RTX 5070 Ti, 1920×1080, p95 4.192 ms) and a deterministic networked golden (#289), map themes, [golden-image CI](../.github/workflows/render-golden.yml) and [NVIDIA timings](perf/0007-real-hardware.md). Windows/macOS real-GPU timing remains open (#127). |
 | M4 | Simulation | ✅ | [Deterministic 5v5](perf/0004-simulation.md), 3 lanes, towers/nexuses, minions, vision-respecting bots, respawns, XP/gold/items, modes/rules; measured ~26.3 µs/tick steady benchmark (7.876 ms/300 ticks, 2026-10-19). |
 | M5 | Networking | ✅ | [UDP, fragmentation](perf/0005-networking.md), delta snapshots, prediction/interpolation, reconnect, spectators, protocol v41, content updates, identity/attestation. Deterministic and sanitizer fuzz gates exist. |
-| M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. A 10-client playtest on a real network has not been recorded. |
+| M6 | Vertical slice | 🟡 | Lobby/countdown/results/rematch, ready/surrender, reconnect, spectator, HUD, shop, minimap, scoreboard, fog/LOS, status icons, procedural audio, persistent settings/remapping/UI scale. R7a HUD polish: MSDF text, styled health bars (damage ghost, shield, ticks, colour-blind palette), floating combat text, cooldown sweeps, screen fades and a loading screen. A 10-client playtest on a real network has not been recorded. |
 | M7 | Hardening | 🟡 | AEAD, per-client tokens, Ed25519 server/client identity with rotation/revocation, handshake replay window, per-address/per-match/host-wide datagram budgets charged before decode, graceful shutdown, results log, soak/fuzz/bench evidence, Loom model, [50 concurrent matches per box](perf/0010-multi-match.md) (`MatchHost`, `moba-server --matches N`, #293) with per-port poll caps and [flood isolation](perf/0010-multi-match.md#flood-isolation) (#292). Independent external review remains open. |
 | M8 | Content pipeline | ✅ | [Runtime](tasks/0008-content.md) item/hero/ability/map packs, manifests, per-client catalogue updates (v36), manifest attestation, map names/rotation, visual themes and modes. Static `.glb` hero models load from a client-local asset root with procedural fallback (#286, ADR-0007) and are GPU-skinned when the file has a skin (#288). Packs reference visuals by name through an `[assets]` manifest that content-check validates, and the names are hashed and carried in the catalogue (protocol v40, #285). Map visuals names resolve to client-local descriptors (terrain tint, walls, props, optional meshes) with the built-in themes as fallback, and switch on content updates and rotation without a restart (#287). |
 
@@ -38,14 +38,17 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
   replay window and application-layer DoS budgets.
 - **Content**: validated runtime TOML packs with hashes, signed manifests, hot reload in
   Lobby/Results, map names/themes, empty-lobby rotation and 1v1/ARAM modes.
-- **Client**: textured UI atlas/icons, settings/key remapping/UI scale, procedural audio,
+- **Client**: MSDF HUD text (R7a) plus the pixel-art icon atlas, styled health bars, combat
+  text, cooldown sweeps, screen transitions, settings/key remapping/UI scale/team palette,
+  procedural audio,
   animated hero rig, map themes, spectator camera, capture/frame-log modes.
 - **Tooling**: replay verifier, match/network soak, wire fuzzers (deterministic + cargo-fuzz),
-  content checker/signer, state hash, image fingerprint, atlas bake, Vulkan probe and Loom.
+  content checker/signer, state hash, image fingerprint, atlas and MSDF font bake, Vulkan probe
+  and Loom.
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **498 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **530 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
@@ -55,8 +58,9 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 - Golden render workflow: on lavapipe with validation + sync validation, the 64×36 default-scene
   fingerprint and a networked fingerprint with skinned heroes at a pinned tick (#318) are green.
   Both were rebaselined deliberately for the R1a HDR + AgX tonemap frame
-  ([ADR-0008](adr/0008-render-graph.md)); the graph's barrier plan is unit-tested headless.
-  R1b's materials leave both captures byte-identical to `main` (the textured material is on
+  ([ADR-0008](adr/0008-render-graph.md)) and again for the R7a HUD (MSDF text, health bars;
+  [perf/0014](perf/0014-ui.md)); the graph's barrier plan is unit-tested headless.
+  R1b's materials leave both captures byte-identical to the then `main` (the textured material is on
   the static `sentinel` model, which neither golden uses).
 - Deterministic wire fuzzer historical evidence: v11 **2,476,647,000** iterations clean and
   final v12 **2,384,035,000** clean. Current cargo-fuzz targets `wire`, `replay`, `content`,

@@ -26,7 +26,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. VAT minions and bone LOD (R4b) are open. |
 | VFX | None beyond unit tinting. Presentation events (cast, projectile spawn/hit, death, zone) already reach the client ([perf/0009](../perf/0009-presentation-events.md)). |
 | Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
-| UI | Baked bitmap font and RGBA atlas, with UI scale. |
+| UI | **R7a:** MSDF font (Open Sans Condensed, baked offline by `bake-ui-font`) with derivative anti-aliasing, outlines and soft shadows; the RGBA atlas keeps pixel-art icons. Styled health bars (damage ghost, shield, ticks, colour-blind palette), pooled floating combat text, cooldown sweeps, screen fades and a loading screen ([perf/0014](../perf/0014-ui.md)). No 3D portraits or baked minimap yet (R7b). |
 | Evidence | Golden 64×36 fingerprints on lavapipe with validation (rebaselined for the tonemap in R1a). Per-pass GPU timestamps in `MOBA_FRAME_LOG` (R1a); real-GPU timings exist only for an RTX 5070 Ti (p95 4.2 ms @1080p, GPU work 0.046 ms, [perf/0011](../perf/0011-render-graph.md)). |
 
 **What already helps:**
@@ -179,10 +179,11 @@ R1.
 **Exit:** reference captures per tier, and a blind A/B readability check against the R2 build.
 
 ### R7 — UI, HUD and presentation polish (M)
-- Signed-distance-field or MSDF text and icons, so they stay crisp at any UI scale or 4K. Keep the atlas for pixel-art elements.
-- 3D hero portraits rendered to texture, and an animated minimap from a baked top-down render of the map.
-- Floating combat text, styled health bars with shield/damage-ghost segments, and cooldown sweeps — all batched, with no per-frame allocation.
-- Screen transitions for lobby, champion select and results; a stylised loading screen.
+**Status:** R7a done (2026-10-28, [perf/0014](../perf/0014-ui.md)); R7b open.
+- Signed-distance-field or MSDF text and icons, so they stay crisp at any UI scale or 4K. Keep the atlas for pixel-art elements. **R7a: text done** (MTSDF atlas, outline and shadow styles); icons stay pixel art.
+- 3D hero portraits rendered to texture, and an animated minimap from a baked top-down render of the map. **R7b** (needs render-to-texture through the graph).
+- Floating combat text, styled health bars with shield/damage-ghost segments, and cooldown sweeps — all batched, with no per-frame allocation. **R7a: done** (derived from snapshot health deltas; shield size and crit flags are not on the wire).
+- Screen transitions for lobby, champion select and results; a stylised loading screen. **R7a: done** for loading, lobby, match and results (there is no champion select yet).
 
 ### R8 — Performance, scaling and platform evidence (M, continuous)
 - **Culling.** GPU-driven frustum culling with indirect draws (`vkCmdDrawIndexedIndirectCount`, core in 1.2) once instance counts justify it. Mesh LODs from `meshoptimizer` (MIT).

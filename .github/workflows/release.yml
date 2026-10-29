@@ -91,6 +91,9 @@ jobs:
           for bin in content-check fuzz-wire match-soak replay soak state-hash; do
             cp "target/release/$bin" "dist/moba-${{ matrix.target }}/"
           done
+          # Licences: the client embeds a font atlas derived from Open Sans (SIL OFL 1.1 §2).
+          cp LICENSE LICENSE-MIT LICENSE-APACHE THIRD_PARTY.md "dist/moba-${{ matrix.target }}/"
+          cp crates/tools/fonts/OFL.txt "dist/moba-${{ matrix.target }}/OFL-OpenSans.txt"
           tar -C dist -czf "moba-${{ matrix.target }}.tar.gz" "moba-${{ matrix.target }}"
       - name: Archive (Windows)
         if: runner.os == 'Windows'
@@ -102,6 +105,11 @@ jobs:
           foreach ($bin in @('content-check','fuzz-wire','match-soak','replay','soak','state-hash')) {
             Copy-Item "target/release/$bin.exe" "dist/moba-${{ matrix.target }}/"
           }
+          # Licences: the client embeds a font atlas derived from Open Sans (SIL OFL 1.1 §2).
+          foreach ($file in @('LICENSE','LICENSE-MIT','LICENSE-APACHE','THIRD_PARTY.md')) {
+            Copy-Item $file "dist/moba-${{ matrix.target }}/"
+          }
+          Copy-Item crates/tools/fonts/OFL.txt "dist/moba-${{ matrix.target }}/OFL-OpenSans.txt"
           Compress-Archive -Path "dist/moba-${{ matrix.target }}" -DestinationPath "moba-${{ matrix.target }}.zip"
       - uses: actions/upload-artifact@v7
         with:

@@ -7,8 +7,44 @@ use moba_platform::InputState;
 use crate::app::NetworkView;
 use moba_net::protocol::NetEntity;
 
-use crate::hud::theme;
+use crate::hud::{UiDrawList, theme};
 use crate::hud_fmt;
+
+/// How one ability slot is drawn.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct SlotState {
+    /// Remaining cooldown fraction for the sweep, 0..1 (0 = ready).
+    pub(crate) cooldown: f32,
+    /// The hero cannot pay the mana cost (tinted, independent of the cooldown).
+    pub(crate) no_mana: bool,
+}
+
+impl SlotState {
+    pub(crate) fn ready(self) -> bool {
+        self.cooldown <= 0.0 && !self.no_mana
+    }
+}
+
+/// Slot state from the replicated remaining cooldown and mana, and the catalogue cost and
+/// cooldown. Without an own hero (spectating, before the first snapshot) nothing is tinted.
+pub(crate) fn slot_state(
+    remaining_ticks: u16,
+    cooldown_ticks: u32,
+    mana_cost: i32,
+    mana: i32,
+    has_hero: bool,
+) -> SlotState {
+    let cooldown = if remaining_ticks == 0 {
+        0.0
+    } else {
+        // Clamp if the remaining time exceeds the catalogue cooldown.
+        (f32::from(remaining_ticks) / cooldown_ticks.max(1) as f32).min(1.0)
+    };
+    SlotState {
+        cooldown,
+        no_mana: has_hero && mana < mana_cost,
+    }
+}
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn draw_abilities(
@@ -27,17 +63,75 @@ pub(crate) fn draw_abilities(
     input: &InputState,
 ) {
     let cooldowns = own.map_or([0; 3], |entity| entity.cooldowns);
+    let mana = own.map_or(0, |entity| i32::from(entity.mana));
     let mut hovered_ability = None;
     for slot in 0..3 {
         let box_size = 38.0;
         let bx = x + 14.0 + slot as f32 * 48.0;
         let by = y + 146.0;
         let key = ["Q", "W", "E"][slot];
-        ui.rect(bx, by, box_size, box_size, track);
-        ui.outline(bx, by, box_size, box_size, 1.0, border);
+        let ability = network
+            .client
+            .abilities()
+            .get(usize::from(ability_ids[slot]));
+        let state = slot_state(
+            cooldowns[slot],
+            ability.map_or(0, |ability| ability.cooldown_ticks),
+            ability.map_or(0, |ability| ability.mana_cost),
+            mana,
+            own.is_some(),
+        );
+        ui.rect_gradient(
+            bx,
+            by,
+            box_size,
+            box_size,
+            Vec4::new(track.x + 0.06, track.y + 0.08, track.z + 0.11, track.w),
+            track,
+        );
         let icon = [0u32, 1, 6][slot];
-        ui.icon(bx + 9.0, by + 5.0, 20.0, icon, text);
-        ui.text(bx + 3.0, by + 27.0, 1.6, muted, key);
+        let icon_color = if state.ready() { text } else { muted };
+        ui.icon(bx + 9.0, by + 7.0, 20.0, icon, icon_color);
+        if state.no_mana {
+            ui.rect(bx, by, box_size, box_size, theme::NO_MANA);
+        }
+        if state.cooldown > 0.0 {
+            ui.sweep(
+                bx,
+                by,
+                box_size,
+                state.cooldown,
+                theme::COOLDOWN,
+                theme::COOLDOWN_EDGE,
+            );
+            let label = super::model::cooldown_label(cooldowns[slot]);
+            let scale = 2.4;
+            ui.text_outlined(
+                bx + (box_size - UiDrawList::text_width(&label, scale)) * 0.5,
+                by + (box_size - 7.0 * scale) * 0.5,
+                scale,
+                text,
+                &label,
+            );
+        }
+        let frame = if state.ready() { theme::GOLD } else { border };
+        ui.outline(bx, by, box_size, box_size, 1.0, frame);
+        ui.text_outlined(bx + 3.0, by + 2.5, 1.3, muted, key);
+        if let Some(ability) = ability.filter(|ability| ability.mana_cost > 0) {
+            let cost = hud_fmt!("{}", ability.mana_cost);
+            let color = if state.no_mana {
+                theme::RED_ACCENT
+            } else {
+                theme::HEALTHBAR_MANA
+            };
+            ui.text_outlined(
+                bx + box_size - 3.0 - UiDrawList::text_width(&cost, 1.2),
+                by + box_size - 11.0,
+                1.2,
+                color,
+                &cost,
+            );
+        }
         if input.cursor().is_some_and(|cursor| {
             cursor.x >= bx
                 && cursor.x <= bx + box_size
@@ -45,27 +139,6 @@ pub(crate) fn draw_abilities(
                 && cursor.y <= by + box_size
         }) {
             hovered_ability = Some(slot);
-        }
-        let remaining = cooldowns[slot];
-        let max_cooldown = network
-            .client
-            .abilities()
-            .get(usize::from(ability_ids[slot]))
-            .map_or(1, |ability| {
-                u16::try_from(ability.cooldown_ticks).unwrap_or(u16::MAX)
-            })
-            .max(1);
-        if remaining > 0 {
-            let fraction = f32::from(remaining) / f32::from(max_cooldown);
-            ui.rect(
-                bx,
-                by,
-                box_size,
-                box_size * fraction.clamp(0.0, 1.0),
-                theme::COOLDOWN,
-            );
-            let seconds = f32::from(remaining) / 30.0;
-            ui.text(bx + 4.0, by + 24.0, 1.8, text, &hud_fmt!("{seconds:.1}"));
         }
     }
     if let Some(slot) = hovered_ability
@@ -118,5 +191,27 @@ pub(crate) fn draw_abilities(
             muted,
             &hud_fmt!("{kind}  AMOUNT {}", effect.amount),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slot_state;
+
+    #[test]
+    fn slot_state_covers_cooldown_and_mana() {
+        let ready = slot_state(0, 300, 40, 100, true);
+        assert!(ready.ready());
+        let cooling = slot_state(150, 300, 40, 100, true);
+        assert!((cooling.cooldown - 0.5).abs() < 1e-6 && !cooling.no_mana);
+        let broke = slot_state(0, 300, 40, 10, true);
+        assert!(broke.no_mana && !broke.ready());
+        assert_eq!(slot_state(500, 300, 0, 0, true).cooldown, 1.0);
+        assert!(!slot_state(0, 300, 40, 0, false).no_mana);
+        assert_eq!(crate::hud::model::cooldown_label(95).as_str(), "4");
+        assert_eq!(crate::hud::model::cooldown_label(12).as_str(), "0.4");
+        assert_eq!(crate::hud::model::cooldown_label(1).as_str(), "0.1");
+        assert_eq!(crate::hud::model::cooldown_label(29).as_str(), "1.0");
+        assert_eq!(crate::hud::model::cooldown_label(30).as_str(), "1");
     }
 }

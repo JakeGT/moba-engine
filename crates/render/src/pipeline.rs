@@ -162,6 +162,7 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
 }
 
 /// Creates the screen-space UI pipeline: no depth attachment, alpha blending, the atlas set.
+#[allow(clippy::too_many_lines)] // One linear pipeline description (six vertex attributes).
 pub(crate) fn create_ui(
     device: &DeviceContext,
     layout: vk::PipelineLayout,
@@ -205,6 +206,17 @@ pub(crate) fn create_ui(
             .binding(0)
             .format(vk::Format::R32G32B32A32_SFLOAT)
             .offset(20),
+        // R7a: packed outline colour and the per-mode parameters.
+        vk::VertexInputAttributeDescription::default()
+            .location(4)
+            .binding(0)
+            .format(vk::Format::R32_UINT)
+            .offset(36),
+        vk::VertexInputAttributeDescription::default()
+            .location(5)
+            .binding(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(40),
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&bindings)

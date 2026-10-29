@@ -74,6 +74,7 @@ if [[ "$FULL" == "1" ]]; then
   cargo check -p moba-engine --no-default-features --locked
   cargo check -p moba-engine --no-default-features --features render --locked
   cargo check -p moba-engine --all-features --locked
+  cargo check --manifest-path crates/tools/font-bake/Cargo.toml --locked
 
   section "Loom model"
   RUSTFLAGS="--cfg loom" cargo test -p moba-jobs --lib loom -- --test-threads=1

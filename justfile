@@ -130,3 +130,6 @@ ci-tools:
     cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 30
     cargo run --release -p moba-tools --bin load-test -- --matches 8 --clients 10 --seconds 60
     cargo bench --workspace --no-run
+    # The checked-in MSDF HUD font (R7a) must be exactly what the baker produces.
+    cargo run --release --locked --manifest-path crates/tools/font-bake/Cargo.toml
+    git diff --exit-code -- crates/render/assets/ui-font.rgba crates/render/src/font_metrics.rs

@@ -1,0 +1,31 @@
+# Offline MSDF font baker for the HUD (R7a). A standalone crate with its own lockfile, like
+# `fuzz/`: the baked atlas and metrics are checked in, so the engine workspace never builds
+# or links these dependencies. Run from the repository root:
+#
+#     cargo run --release --locked --manifest-path crates/tools/font-bake/Cargo.toml
+#
+# `nalgebra` (via `fdsm`) pulls in `simba`, which uses the unmaintained `paste` proc-macro
+# (RUSTSEC-2024-0436) at build time. Keeping the baker outside the workspace keeps that out
+# of the shipped dependency graph and `cargo deny`'s no-ignore advisory policy.
+[package]
+name = "moba-font-bake"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Bakes the HUD font into the checked-in MTSDF atlas and metrics table."
+
+[workspace]
+
+[[bin]]
+name = "bake-ui-font"
+path = "src/main.rs"
+
+[dependencies]
+# skrifa replaces the unmaintained ttf-parser (#22).
+fdsm = "0.8"
+fdsm-skrifa = "0.2"
+skrifa = "0.40"
+image = { version = "0.25", default-features = false }
+nalgebra = "0.34"

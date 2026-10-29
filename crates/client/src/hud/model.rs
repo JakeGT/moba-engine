@@ -1,5 +1,7 @@
 //! HUD model.
 
+use super::fx::{HudFx, Screen};
+use super::screens::{draw_combat_text, draw_loading_screen, draw_transition, faded};
 use super::theme;
 use super::{
     Camera, Fix, HitList, HudAction, HudString, InputState, Key, NetworkView, Simulation, Team,
@@ -8,6 +10,7 @@ use super::{
 };
 use crate::{hud_fmt, hud_static};
 use moba_core::FixVec2;
+use moba_core::math::Vec4;
 use moba_net::protocol::{MatchPhase, OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_RED};
 
 /// Borrowed view of one network unit for HUD drawing.
@@ -46,6 +49,15 @@ impl<'a> HudUnit<'a> {
     }
     pub(crate) fn status_bits(self) -> u16 {
         self.0.status_bits
+    }
+    pub(crate) fn level(self) -> u8 {
+        self.0.progress.level
+    }
+    pub(crate) fn mana(self) -> i32 {
+        i32::from(self.0.mana)
+    }
+    pub(crate) fn max_mana(self) -> i32 {
+        i32::from(self.0.max_mana)
     }
 }
 
@@ -166,7 +178,8 @@ impl<'a> HudModel<'a> {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // HUD composition is one pass.
+/// Builds the network-mode HUD: the loading screen, or the match HUD with screen fades.
+#[allow(clippy::too_many_arguments)] // HUD inputs.
 pub(crate) fn build_network_hud(
     ui: &mut UiDrawList,
     network: &NetworkView,
@@ -179,12 +192,66 @@ pub(crate) fn build_network_hud(
     frame_ms: f32,
     fps: f32,
     hits: &mut HitList,
+    fx: &mut HudFx,
 ) {
     hits.clear();
     ui.clear();
     if width == 0 || height == 0 {
         return;
     }
+    // A pinned-tick capture (the networked golden) settles every fade and skips the splash.
+    let settle = network.capture_tick.is_some();
+    let screen = hud_screen(network, fx.clock, settle);
+    fx.update_screen(screen, frame_ms / 1_000.0, settle);
+    let map_line = hud_fmt!("LOADING {}", network.client.map().name_str());
+    if screen == Screen::Loading {
+        register(
+            hits,
+            HudAction::Block,
+            0.0,
+            0.0,
+            width as f32,
+            height as f32,
+        );
+        let status = if network.client.snapshot().is_some() {
+            "MATCH STATE RECEIVED"
+        } else {
+            "WAITING FOR THE SERVER"
+        };
+        draw_loading_screen(
+            ui,
+            width as f32,
+            height as f32,
+            1.0,
+            fx.clock,
+            &map_line,
+            status,
+        );
+        return;
+    }
+    build_match_hud(
+        ui, network, scoreboard, shop, input, camera, width, height, frame_ms, fps, hits, fx,
+        &map_line,
+    );
+}
+
+/// The lobby/match/results HUD under any screen fade (everything but the loading screen).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // HUD composition is one pass.
+fn build_match_hud(
+    ui: &mut UiDrawList,
+    network: &NetworkView,
+    scoreboard: bool,
+    shop: bool,
+    input: &InputState,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    frame_ms: f32,
+    fps: f32,
+    hits: &mut HitList,
+    fx: &HudFx,
+    map_line: &str,
+) {
     let bg = theme::PANEL_BG;
     let border = theme::PANEL_CHROME;
     let text = theme::TEXT;
@@ -195,24 +262,19 @@ pub(crate) fn build_network_hud(
     let width_f = width as f32;
     let height_f = height as f32;
     draw_perf(ui, width_f, frame_ms, fps);
-    ui.text_shadowed(
-        12.0,
-        12.0,
-        1.8,
-        theme::TEXT,
-        &hud_fmt!("MAP {}", network.client.map().name_str()),
-    );
+    // Right-aligned under the controls line and the frame diagnostics.
     for (index, entry) in network.kill_feed.iter().enumerate() {
-        ui.text(
-            width_f - 280.0,
-            12.0 + index as f32 * 14.0,
+        ui.text_shadowed(
+            width_f - 24.0 - UiDrawList::text_width(&entry.text, 1.7),
+            80.0 + index as f32 * 17.0,
             1.7,
             theme::HERO_NAME,
             &entry.text,
         );
     }
 
-    draw_health_bars(ui, network, camera, width, height);
+    draw_health_bars(ui, network, camera, width, height, fx);
+    draw_combat_text(ui, network, camera, width, height, fx);
     let center = network.prediction.position();
     {
         let hero = network
@@ -317,6 +379,14 @@ pub(crate) fn build_network_hud(
         2.0,
         theme::RED_ACCENT,
         &hud_fmt!("RED {red}"),
+    );
+    let map_label = hud_fmt!("{}", network.client.map().name_str());
+    ui.text_shadowed(
+        (width_f - UiDrawList::text_width(&map_label, 1.6)) * 0.5,
+        92.0,
+        1.6,
+        theme::MUTED,
+        &map_label,
     );
 
     // Connection/status block.
@@ -508,14 +578,30 @@ pub(crate) fn build_network_hud(
                 }
                 let cooldown = progress.item_cooldowns[slot];
                 if cooldown > 0 {
-                    let seconds = f32::from(cooldown) / 30.0;
-                    ui.rect(bx, by, 34.0, 26.0, theme::COOLDOWN);
-                    ui.text(bx + 2.0, by + 8.0, 1.6, text, &hud_fmt!("{seconds:.0}"));
+                    // Item cooldown lengths are not replicated: sweep against a nominal 30 s.
+                    let fraction = (f32::from(cooldown) / 900.0).min(1.0);
+                    ui.rect(bx, by, 34.0, 26.0, theme::OVERLAY);
+                    ui.sweep(
+                        bx + 4.0,
+                        by + 0.0,
+                        26.0,
+                        fraction,
+                        theme::COOLDOWN,
+                        theme::COOLDOWN_EDGE,
+                    );
+                    let label = cooldown_label(cooldown);
+                    ui.text_outlined(
+                        bx + (34.0 - UiDrawList::text_width(&label, 1.6)) * 0.5,
+                        by + 7.5,
+                        1.6,
+                        text,
+                        &label,
+                    );
                 }
             }
         }
     }
-    draw_minimap(ui, network, width, height, hits);
+    draw_minimap(ui, network, width, height, hits, fx.palette);
     if scoreboard {
         super::scoreboard::draw_scoreboard(
             ui, network, snapshot, width_f, height_f, text, muted, border, hits,
@@ -559,48 +645,76 @@ pub(crate) fn build_network_hud(
                 hud_static!("BOTS FILL EMPTY SLOTS"),
             )
         };
+        let intro = fx.screen.progress();
         let panel_w = 560.0;
         let panel_h = 110.0;
+        let top = height_f * 0.35 + (1.0 - intro) * 16.0;
         ui.panel(
             (width_f - panel_w) * 0.5,
-            height_f * 0.35,
+            top,
             panel_w,
             panel_h,
-            bg,
-            border,
+            faded(bg, intro),
+            faded(border, intro),
         );
         ui.text_shadowed(
             (width_f - UiDrawList::text_width(&label, 4.0)) * 0.5,
-            height_f * 0.35 + 26.0,
+            top + 26.0,
             4.0,
-            text,
+            faded(text, intro),
             &label,
         );
         ui.text(
             (width_f - UiDrawList::text_width(&footer, 2.0)) * 0.5,
-            height_f * 0.35 + 72.0,
+            top + 72.0,
             2.0,
-            muted,
+            faded(muted, intro),
             &footer,
         );
     }
     if let Some((label, color)) =
         snapshot.and_then(|state| outcome_banner(state.outcome, network.client.team()))
     {
-        ui.rect(0.0, 0.0, width_f, height_f, theme::OVERLAY);
+        let intro = fx.screen.progress();
+        let top = height_f * 0.36 + (1.0 - intro) * 24.0;
+        ui.rect(
+            0.0,
+            0.0,
+            width_f,
+            height_f,
+            faded(theme::OVERLAY, 0.4 + 0.6 * intro),
+        );
+        ui.rect_gradient(
+            0.0,
+            top - 40.0,
+            width_f,
+            210.0,
+            Vec4::ZERO,
+            faded(
+                Vec4::new(color.x * 0.2, color.y * 0.2, color.z * 0.2, 0.55),
+                intro,
+            ),
+        );
         ui.panel(
             (width_f - 460.0) * 0.5,
-            height_f * 0.36,
+            top,
             460.0,
             130.0,
-            bg,
-            border,
+            faded(bg, intro),
+            faded(color, intro),
         );
-        ui.text_shadowed(
+        let banner = moba_render::TextStyle::new(faded(color, intro))
+            .with_outline(faded(Vec4::new(0.0, 0.0, 0.0, 0.9), intro), 0.05)
+            .with_shadow(
+                faded(Vec4::new(color.x, color.y, color.z, 0.45), intro),
+                [0.0, 0.0],
+                0.09,
+            );
+        ui.text_styled(
             (width_f - UiDrawList::text_width(label, 7.0)) * 0.5,
-            height_f * 0.36 + 24.0,
+            top + 24.0,
             7.0,
-            color,
+            &banner,
             label,
         );
         let seconds = u32::from(model.countdown()).div_ceil(30);
@@ -611,9 +725,9 @@ pub(crate) fn build_network_hud(
         };
         ui.text(
             (width_f - UiDrawList::text_width(&footer, 2.0)) * 0.5,
-            height_f * 0.36 + 92.0,
+            top + 92.0,
             2.0,
-            muted,
+            faded(muted, intro),
             &footer,
         );
     }
@@ -625,6 +739,41 @@ pub(crate) fn build_network_hud(
             theme::RESPAWN,
             "RESPAWNING",
         );
+    }
+    draw_transition(ui, width_f, height_f, fx);
+    let loading = fx.screen.loading();
+    if loading > 0.0 {
+        draw_loading_screen(ui, width_f, height_f, loading, fx.clock, map_line, "READY");
+    }
+}
+
+/// Which screen the network view is on, for transitions. The loading screen stays up for at
+/// least [`super::fx::SPLASH_SECONDS`] after connecting or a map change (not when settled).
+fn hud_screen(network: &NetworkView, clock: f32, settle: bool) -> Screen {
+    let Some(snapshot) = network.client.snapshot() else {
+        return Screen::Loading;
+    };
+    if !settle && clock < super::fx::SPLASH_SECONDS {
+        return Screen::Loading;
+    }
+    if snapshot.outcome != moba_net::protocol::OUTCOME_NONE || network.phase == MatchPhase::Results
+    {
+        Screen::Results
+    } else if matches!(network.phase, MatchPhase::Lobby | MatchPhase::Countdown) {
+        Screen::Lobby
+    } else {
+        Screen::Match
+    }
+}
+
+/// Cooldown text: whole seconds from one second, tenths below it, both rounded up so a
+/// slot still cooling never reads "0.0" (at 30 Hz a tenth is 3 ticks).
+pub(crate) fn cooldown_label(ticks: u16) -> HudString {
+    if ticks >= 30 {
+        hud_fmt!("{}", u32::from(ticks).div_ceil(30))
+    } else {
+        let tenths = u32::from(ticks).div_ceil(3);
+        hud_fmt!("{}.{}", tenths / 10, tenths % 10)
     }
 }
 
@@ -777,15 +926,68 @@ mod tests {
         let input = InputState::default();
         let mut ui = UiDrawList::new();
         let mut hits = HitList::new();
+        let mut fx = crate::hud::HudFx::new(crate::hud::theme::TeamPalette::ColorBlind);
         build_network_hud(
             &mut ui, &network, false, false, &input, &camera, 1280, 720, 16.0, 60.0, &mut hits,
+            &mut fx,
         );
         let ((), allocations) = crate::app::allocation_probe::probe(|| {
             build_network_hud(
                 &mut ui, &network, false, false, &input, &camera, 1280, 720, 16.0, 60.0, &mut hits,
+                &mut fx,
             );
         });
         assert_eq!(allocations, 0, "steady-state network HUD allocation");
+        assert!(
+            !ui.is_empty(),
+            "the stub has no snapshot: the loading screen"
+        );
+    }
+
+    #[test]
+    fn match_hud_has_zero_steady_state_allocations() {
+        let network = NetworkView::test_stub();
+        let camera = Camera::perspective(
+            Vec3::new(0.0, 30.0, 30.0),
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0),
+            0.8,
+            16.0 / 9.0,
+            0.1,
+            200.0,
+        );
+        let input = InputState::default();
+        let mut ui = UiDrawList::new();
+        let mut hits = HitList::new();
+        let fx = crate::hud::HudFx::new(crate::hud::theme::TeamPalette::Standard);
+        let build = |ui: &mut UiDrawList, hits: &mut HitList| {
+            ui.clear();
+            hits.clear();
+            super::build_match_hud(
+                ui,
+                &network,
+                true,
+                true,
+                &input,
+                &camera,
+                1280,
+                720,
+                16.0,
+                60.0,
+                hits,
+                &fx,
+                "LOADING MAP",
+            );
+        };
+        build(&mut ui, &mut hits);
+        let warm = ui.len();
+        assert!(
+            warm > 1_000,
+            "panels, bars, text, minimap, scoreboard and shop: {warm}"
+        );
+        let ((), allocations) = crate::app::allocation_probe::probe(|| build(&mut ui, &mut hits));
+        assert_eq!(allocations, 0, "steady-state match HUD allocation");
+        assert_eq!(ui.len(), warm);
     }
 
     #[test]

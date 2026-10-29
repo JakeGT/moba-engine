@@ -5,7 +5,9 @@ all-features = true
 version = 2
 yanked = "deny"
 # No advisory ignores. The UI uses a baked atlas and winit's no-title CSD feature, so the
-# ab_glyph/ttf-parser chain is not present (#22).
+# ab_glyph/ttf-parser chain is not present (#22). The offline MSDF font baker
+# (crates/tools/font-bake, R7a) is a standalone crate outside this graph; its lockfile pulls
+# the unmaintained build-time `paste` macro via nalgebra/simba and is never shipped.
 
 [licenses]
 version = 2

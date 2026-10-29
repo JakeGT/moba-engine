@@ -149,6 +149,9 @@ pub(crate) struct Settings {
     pub(crate) audio_mute: bool,
     pub(crate) camera_sensitivity: f32,
     pub(crate) camera_zoom: f32,
+    /// Team colours for health bars and the minimap: `standard` or `colorblind`
+    /// (`MOBA_TEAM_PALETTE` overrides).
+    pub(crate) team_palette: String,
     pub(crate) controls: Controls,
 }
 
@@ -161,6 +164,7 @@ impl Default for Settings {
             audio_mute: false,
             camera_sensitivity: 1.0,
             camera_zoom: 240.0,
+            team_palette: String::from(crate::hud::theme::TeamPalette::default().name()),
             controls: Controls::default(),
         }
     }
@@ -296,9 +300,22 @@ impl Settings {
         moba_render::QualityTier::from_name(&self.quality).unwrap_or_default()
     }
 
+    /// The configured team palette (validated by [`Self::sanitize`]).
+    #[must_use]
+    pub(crate) fn team_palette(&self) -> crate::hud::theme::TeamPalette {
+        crate::hud::theme::TeamPalette::from_name(&self.team_palette).unwrap_or_default()
+    }
+
     /// Clamps numeric settings, validates names and reports corrections.
     pub(crate) fn sanitize(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
+        if crate::hud::theme::TeamPalette::from_name(&self.team_palette).is_none() {
+            warnings.push(format!(
+                "settings: unknown team_palette {:?} (standard/colorblind); using standard",
+                self.team_palette
+            ));
+            self.team_palette = String::from(crate::hud::theme::TeamPalette::default().name());
+        }
         if moba_render::QualityTier::from_name(&self.quality).is_none() {
             warnings.push(format!(
                 "settings: unknown quality {:?} (low/medium/high/ultra); using high",
@@ -438,6 +455,33 @@ mod tests {
         let (bindings, warnings) = settings.bindings();
         assert_eq!(warnings.len(), 0);
         assert_eq!(bindings.attack_button, MouseBinding::Right);
+    }
+
+    #[test]
+    fn example_settings_file_parses_cleanly() {
+        let mut settings: Settings =
+            toml::from_str(include_str!("../../../moba-settings.example.toml")).expect("parse");
+        assert_eq!(settings.sanitize(), Vec::<String>::new());
+        assert_eq!(settings.bindings().1, Vec::<String>::new());
+    }
+
+    #[test]
+    fn team_palette_validates_and_round_trips() {
+        use crate::hud::theme::TeamPalette;
+        let mut settings = Settings {
+            team_palette: String::from("Color-Blind"),
+            ..Settings::default()
+        };
+        assert_eq!(settings.sanitize(), Vec::<String>::new());
+        assert_eq!(settings.team_palette(), TeamPalette::ColorBlind);
+        settings.team_palette = String::from("sepia");
+        assert_eq!(settings.sanitize().len(), 1);
+        assert_eq!(settings.team_palette(), TeamPalette::Standard);
+        let parsed: Settings = toml::from_str("team_palette = \"colorblind\"").expect("parse");
+        assert_eq!(parsed.team_palette(), TeamPalette::ColorBlind);
+        // Older files without the key keep the default.
+        let old: Settings = toml::from_str("ui_scale = 1.5").expect("parse");
+        assert_eq!(old.team_palette(), TeamPalette::Standard);
     }
 
     #[test]

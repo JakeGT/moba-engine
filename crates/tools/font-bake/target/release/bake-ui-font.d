@@ -1,0 +1,1 @@
+/home/jaket/Projects/MOBA/engine/.claude/worktrees/agent-a4715d81be496cfe8/crates/tools/font-bake/target/release/bake-ui-font: /home/jaket/Projects/MOBA/engine/.claude/worktrees/agent-a4715d81be496cfe8/crates/tools/font-bake/src/main.rs

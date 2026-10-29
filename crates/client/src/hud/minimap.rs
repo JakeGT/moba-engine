@@ -12,7 +12,9 @@ pub(crate) fn draw_minimap(
     width: u32,
     height: u32,
     hits: &mut HitList,
+    palette: theme::TeamPalette,
 ) {
+    let own_team = network.client.team().index() as u8;
     let size = 188.0;
     let margin = 24.0;
     let x = width as f32 - size - margin;
@@ -55,11 +57,8 @@ pub(crate) fn draw_minimap(
             continue;
         }
         let point = map(unit.position());
-        let team_color = if unit.team() == 0 {
-            theme::BLUE_ACCENT
-        } else {
-            theme::RED_ACCENT
-        };
+        // Allies and enemies in the configured palette (the gold frame marks the own hero).
+        let team_color = palette.relation(unit.team(), own_team, false);
         let dot = if unit.kind() == 0 || unit.kind() >= 3 {
             5.0
         } else {
