@@ -70,11 +70,18 @@ fn pipeline_cache_path_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) ->
     Some(base.join("moba-engine").join("pipeline-cache.bin"))
 }
 
-/// `MOBA_SHADER_DIR`: dev-build SPIR-V overrides, hot-reloaded when a file changes.
+/// `MOBA_SHADER_DIR`: SPIR-V overrides, hot-reloaded when a file changes. Debug builds only
+/// (a mismatched module is invalid Vulkan usage); release builds log once and ignore it.
 pub(crate) fn shader_dir() -> Option<PathBuf> {
-    std::env::var_os("MOBA_SHADER_DIR")
+    let dir = std::env::var_os("MOBA_SHADER_DIR")
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(PathBuf::from)?;
+    if cfg!(debug_assertions) {
+        Some(dir)
+    } else {
+        eprintln!("[render] MOBA_SHADER_DIR is a debug-build feature; ignored");
+        None
+    }
 }
 
 /// `MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU even where the GPU samples
@@ -83,11 +90,16 @@ pub(crate) fn compressed_textures() -> bool {
     std::env::var("MOBA_COMPRESSED_TEXTURES").map_or(true, |value| value.trim() != "0")
 }
 
-/// Latest modification time of the `.spv` files in `dir` (dev shader hot reload), polled a
-/// few times a second at most. Allocates (directory listing); dev-only.
-pub(crate) fn newest_shader_change(dir: &Path) -> Option<std::time::SystemTime> {
-    std::fs::read_dir(dir)
-        .ok()?
+/// Number of `.spv` files in a shader override directory and their newest modification time.
+pub(crate) type ShaderStamp = (usize, Option<std::time::SystemTime>);
+
+/// The [`ShaderStamp`] of `dir` (dev shader hot reload), polled a few times a second at
+/// most; a missing directory is `(0, None)`. Allocates (directory listing); debug builds only.
+pub(crate) fn shader_stamp(dir: &Path) -> ShaderStamp {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, None);
+    };
+    entries
         .filter_map(Result::ok)
         .filter(|entry| {
             entry
@@ -95,8 +107,10 @@ pub(crate) fn newest_shader_change(dir: &Path) -> Option<std::time::SystemTime> 
                 .extension()
                 .is_some_and(|extension| extension == "spv")
         })
-        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
-        .max()
+        .fold((0, None), |(count, newest), entry| {
+            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+            (count + 1, newest.max(modified))
+        })
 }
 
 pub(crate) fn parse_demo_move() -> Option<FixVec2> {

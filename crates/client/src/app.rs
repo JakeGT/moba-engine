@@ -125,8 +125,9 @@ struct ClientApp {
     camera_sensitivity: f32,
     /// `MOBA_SHADER_DIR` (dev): SPIR-V overrides, hot-reloaded when a `.spv` changes.
     shader_dir: Option<PathBuf>,
-    /// Newest override modification time seen, for the hot-reload poll.
-    shader_stamp: Option<std::time::SystemTime>,
+    /// Override file count and newest modification time at the last poll (`None` before
+    /// the first one), for the hot-reload poll.
+    shader_stamp: Option<launch::ShaderStamp>,
     frame_log: Option<Vec<f32>>,
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
@@ -350,14 +351,12 @@ impl ClientApp {
         if !self.frames.is_multiple_of(30) {
             return;
         }
-        let stamp = launch::newest_shader_change(dir);
-        if stamp.is_none() || stamp == self.shader_stamp {
-            return;
-        }
-        let first = self.shader_stamp.is_none();
-        self.shader_stamp = stamp;
-        if first {
-            return; // The renderer was built from these files already.
+        // The stamp covers the file count too, so deleting an override (even the last one)
+        // also reloads, back to the built-in module.
+        let stamp = launch::shader_stamp(dir);
+        let previous = self.shader_stamp.replace(stamp);
+        if previous.is_none_or(|previous| previous == stamp) {
+            return; // First poll (the renderer was built from these files) or no change.
         }
         let started = Instant::now();
         match renderer.reload_shaders() {

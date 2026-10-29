@@ -143,7 +143,7 @@ use the mesh-name rules, so a path can never leave the asset root.
 - **Pipeline cache and precompilation.** Every pipeline, each permutation included, is built
   when the renderer is created, through a persistent `VkPipelineCache` (wrapped file with a
   checksum; vendor, device and `pipelineCacheUUID` checked before the driver sees it; a
-  corrupt or foreign file is a cold start). On the RTX 5070 Ti, 7 pipelines take 90–98 ms cold
+  corrupt or foreign file is a cold start; a corrupt one is deleted, a foreign one kept). On the RTX 5070 Ti, 7 pipelines take 90–98 ms cold
   and 0.5 ms warm with the driver's own disk cache off
   ([perf/0013](../perf/0013-materials.md)).
 
@@ -164,7 +164,8 @@ use the mesh-name rules, so a path can never leave the asset root.
   `MaterialShader`, `TextureSlot`, `MeshData::with_uvs`/`uvs` and `MaterialReport`; in
   `moba-render` `Renderer::register_texture`, `register_materials`, `set_mesh_material`,
   `material_stats`, `pipeline_stats`, `reload_shaders` and `compressed_textures_supported`,
-  `MaterialData`, `MaterialId`, `TextureId`, `MaterialStats`, `PipelineStats`,
+  `MaterialData` (texture slots set with `with_texture`, read with `texture`), `MaterialId`,
+  `TextureId`, `MaterialStats`, `PipelineStats`,
   `PipelineCacheState`, `RenderConfig::with_pipeline_cache`, `with_shader_dir` and
   `with_compressed_textures`, and three `RenderError` variants. New types are
   `#[non_exhaustive]`.

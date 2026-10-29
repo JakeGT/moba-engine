@@ -290,6 +290,9 @@ impl DeviceContext {
             },
             Some(Err(reason)) => (None, PipelineCacheState::Rejected(reason)),
         };
+        if let (Some(path), PipelineCacheState::Rejected(reason)) = (path, state) {
+            pipeline_cache::discard_rejected(path, reason);
+        }
         let mut info = vk::PipelineCacheCreateInfo::default();
         if let Some(data) = data.as_deref() {
             info = info.initial_data(data);

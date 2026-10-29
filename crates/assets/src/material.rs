@@ -134,8 +134,9 @@ impl TextureSlot {
 pub struct MaterialDesc {
     /// Shader permutation.
     pub shader: MaterialShader,
-    /// Texture names per [`TextureSlot`] (index with [`TextureSlot::index`]).
-    pub textures: [Option<String>; TextureSlot::COUNT],
+    /// Texture names per [`TextureSlot`]; private so a new slot is not a breaking change (use
+    /// [`MaterialDesc::texture`] and [`MaterialDesc::bound_textures`]).
+    textures: [Option<String>; TextureSlot::COUNT],
     /// Linear RGBA multiplier of the base colour.
     pub base_color_factor: [f32; 4],
     /// Metallic factor (R2's PBR).

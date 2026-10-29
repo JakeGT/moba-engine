@@ -19,6 +19,7 @@
 //! Saving writes a temporary file next to the target and renames it over the old one, so a
 //! crash mid-write leaves the previous cache intact.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ash::vk;
@@ -40,8 +41,10 @@ pub enum PipelineCacheState {
     Cold,
     /// A valid file for this device was loaded.
     Warm,
-    /// A file existed but was rejected (corrupt, truncated, oversized, or from another
-    /// driver/device); the cache started empty and is overwritten on shutdown.
+    /// A file existed but was rejected; the cache started empty. A corrupt, truncated or
+    /// oversized file is deleted at once; a file from another driver/device is kept. Either is
+    /// replaced when this device's driver returns reusable cache data on save (some, such as
+    /// lavapipe, never do, and then nothing is written).
     Rejected(PipelineCacheRejection),
 }
 
@@ -165,12 +168,31 @@ pub(crate) fn read(path: &Path) -> Result<Option<Vec<u8>>, PipelineCacheRejectio
     if !metadata.is_file() {
         return Err(PipelineCacheRejection::Unreadable);
     }
-    if metadata.len() > (MAX_PIPELINE_CACHE_BYTES + WRAPPER_BYTES) as u64 {
+    let cap = (MAX_PIPELINE_CACHE_BYTES + WRAPPER_BYTES) as u64;
+    if metadata.len() > cap {
         return Err(PipelineCacheRejection::Malformed);
     }
-    std::fs::read(path)
-        .map(Some)
-        .map_err(|_| PipelineCacheRejection::Unreadable)
+    // `take` bounds the read even if the file grows after the metadata check.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(path)
+        .and_then(|file| file.take(cap + 1).read_to_end(&mut bytes))
+        .map_err(|_| PipelineCacheRejection::Unreadable)?;
+    if bytes.len() as u64 > cap {
+        return Err(PipelineCacheRejection::Malformed);
+    }
+    Ok(Some(bytes))
+}
+
+/// Removes a cache file that was rejected as corrupt (so a driver whose own data is not
+/// reusable, such as lavapipe, does not keep re-reading garbage). A file written for another
+/// device is kept: it is valid for that device, and one file serves whichever GPU last saved.
+pub(crate) fn discard_rejected(path: &Path, reason: PipelineCacheRejection) {
+    if !matches!(
+        reason,
+        PipelineCacheRejection::OtherDevice | PipelineCacheRejection::Unreadable
+    ) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Writes `payload` atomically (temporary file + rename) to `path`.
@@ -188,10 +210,23 @@ pub(crate) fn write(path: &Path, payload: &[u8]) -> std::io::Result<()> {
     temporary
         .as_mut_os_string()
         .push(format!(".tmp{}", std::process::id()));
-    std::fs::write(&temporary, wrap(payload))?;
-    std::fs::rename(&temporary, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })
+    // A stale temporary (or a planted symlink) is removed, not followed: `create_new` refuses
+    // to open anything that already exists.
+    let _ = std::fs::remove_file(&temporary);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(&wrap(payload))?;
+            // Durable before the rename, so a crash cannot leave a renamed but empty file.
+            file.sync_all()
+        });
+    written
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+        })
 }
 
 #[cfg(test)]
@@ -277,6 +312,19 @@ mod tests {
             Err(PipelineCacheRejection::Unreadable),
             "a directory"
         );
+        // A stale temporary from a crashed save does not block the next one.
+        let mut stale = path.clone();
+        stale
+            .as_mut_os_string()
+            .push(format!(".tmp{}", std::process::id()));
+        std::fs::write(&stale, b"stale").expect("stale temp");
+        write(&path, &data).expect("write over a stale temporary");
+        assert!(!stale.exists());
+        // Corrupt files are discarded; files from another device are kept.
+        discard_rejected(&path, PipelineCacheRejection::OtherDevice);
+        assert!(path.exists());
+        discard_rejected(&path, PipelineCacheRejection::Checksum);
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

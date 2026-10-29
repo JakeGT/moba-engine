@@ -12,7 +12,7 @@
 //!
 //! [`load_ktx2`] parses a KTX 2.0 container from untrusted bytes. Every count, dimension,
 //! offset and length is checked against the caps and the file size *before* anything is
-//! allocated, the data format descriptor's transfer function must agree with the format's
+//! allocated, level ranges must not overlap (so the texel data never exceeds the file), the data format descriptor's transfer function must agree with the format's
 //! sRGB-ness, and supercompression is rejected (Zstd/Basis would need a decoder dependency;
 //! see the ADR). [`write_ktx2`] produces the files the `texture-bake` tool ships.
 
@@ -594,8 +594,18 @@ pub fn load_ktx2(bytes: &[u8]) -> Result<TextureData, TextureError> {
         total = total
             .checked_add(range.len())
             .ok_or(TextureError::BadLevel)?;
+        // Levels may not share bytes (the specification stores them disjoint, smallest
+        // first), so the texel data can never exceed the file: no aliased level ranges that
+        // inflate a small file into a large allocation.
+        if ranges[..level as usize]
+            .iter()
+            .any(|other| range.start < other.end && other.start < range.end)
+        {
+            return Err(TextureError::BadLevel);
+        }
         ranges[level as usize] = range;
     }
+    debug_assert!(total <= bytes.len());
     let mut data = Vec::with_capacity(total);
     let mut table = Vec::with_capacity(levels as usize);
     for range in &ranges[..levels as usize] {
@@ -919,6 +929,16 @@ mod tests {
                 }
             }
         }
+        // Level 1 aliasing level 0's bytes (or overlapping them) is rejected.
+        let level0_offset = u64_at(&good, level0).unwrap();
+        let mut aliased = good.clone();
+        aliased[level0 + LEVEL_INDEX_BYTES..level0 + LEVEL_INDEX_BYTES + 8]
+            .copy_from_slice(&level0_offset.to_le_bytes());
+        assert_eq!(load_ktx2(&aliased), Err(TextureError::BadLevel));
+        let mut overlapping = good.clone();
+        overlapping[level0 + LEVEL_INDEX_BYTES..level0 + LEVEL_INDEX_BYTES + 8]
+            .copy_from_slice(&(level0_offset + 16).to_le_bytes());
+        assert_eq!(load_ktx2(&overlapping), Err(TextureError::BadLevel));
         // levelCount 0 ("generate at load") reads only level 0.
         let one = mutate(40, 0).expect("level 0 only");
         assert_eq!(one.level_count(), 1);

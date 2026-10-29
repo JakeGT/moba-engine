@@ -112,7 +112,7 @@ load from a pool sized by the registered content
 pipeline, each shader permutation included, is built at renderer creation through a
 persistent `VkPipelineCache` (a per-user file, validated before use), so nothing compiles
 mid-match. GLSL shares declarations through `#include` files and a small, enumerated set of
-permutations (`MATERIAL_TEXTURED`) is compiled to separate SPIR-V at build time; dev builds
+permutations (`MATERIAL_TEXTURED`) is compiled to separate SPIR-V at build time; debug builds
 can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
 
 - terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes

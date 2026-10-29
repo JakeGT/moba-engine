@@ -70,8 +70,10 @@ pub struct RenderConfig {
     /// (the default) builds every pipeline from scratch and saves nothing. A missing, corrupt
     /// or foreign file is a cold start, never an error ([`PipelineStats::cache`]).
     pub pipeline_cache: Option<PathBuf>,
-    /// Dev builds: a directory of SPIR-V overrides (`<module>.spv`) used instead of the
-    /// built-in modules, and re-read by [`Renderer::reload_shaders`]. Default `None`.
+    /// Debug builds (`debug_assertions`) only: a directory of SPIR-V overrides
+    /// (`<module>.spv`) used instead of the built-in modules, and re-read by
+    /// [`Renderer::reload_shaders`]. Release builds ignore it, because an override that does
+    /// not match its pipeline's interface is invalid Vulkan usage. Default `None`.
     pub shader_dir: Option<PathBuf>,
     /// Upload BC7/BC5/BC4 textures as is when the device supports them. When `false`, or on
     /// devices without `textureCompressionBC`, they are decoded on the CPU at load. Default
@@ -593,7 +595,8 @@ impl Renderer {
     /// is configured.
     ///
     /// # Errors
-    /// A pipeline that fails to build; the passes keep their previous pipelines.
+    /// A pipeline that fails to build (or a skinned permutation that no longer builds); then
+    /// every pass keeps its previous pipelines.
     pub fn reload_shaders(&mut self) -> RenderResult<bool> {
         if !self.shaders.has_overrides() {
             return Ok(false);
@@ -601,9 +604,12 @@ impl Renderer {
         // SAFETY: waiting for the device to idle guarantees no submitted frame still uses
         // the pipelines being replaced.
         unsafe { self.device.device.device_wait_idle() }?;
-        self.scene.rebuild_pipelines(&self.device, &self.shaders)?;
-        self.composite
-            .rebuild_pipeline(&self.device, &self.shaders)?;
+        // Build everything first and swap only when every pass succeeded, so a failed reload
+        // never mixes new scene pipelines with an old composite (or drops one).
+        let scene = self.scene.build_pipelines(&self.device, &self.shaders)?;
+        let composite = self.composite.build_pipeline(&self.device, &self.shaders)?;
+        self.scene.install_pipelines(scene);
+        self.composite.install_pipeline(composite);
         Ok(true)
     }
 

@@ -78,8 +78,9 @@ impl MaterialId {
 pub struct MaterialData {
     /// Shader permutation.
     pub shader: MaterialShader,
-    /// Texture per [`TextureSlot`] (index with [`TextureSlot::index`]).
-    pub textures: [Option<TextureId>; TextureSlot::COUNT],
+    /// Texture per [`TextureSlot`]; private so a new slot is not a breaking change (use
+    /// [`MaterialData::with_texture`] and [`MaterialData::texture`]).
+    textures: [Option<TextureId>; TextureSlot::COUNT],
     /// Linear RGBA multiplier of the base colour.
     pub base_color_factor: [f32; 4],
     /// Metallic factor (read by R2's PBR).
@@ -110,15 +111,13 @@ impl MaterialData {
         }
     }
 
-    /// The parameters of `desc`, with `textures` resolved per slot by the caller.
+    /// The shader and parameters of `desc`, with no textures yet: the caller uploads each
+    /// texture `desc` names and binds it with [`Self::with_texture`].
     #[must_use]
-    pub fn from_desc(
-        desc: &moba_assets::MaterialDesc,
-        textures: [Option<TextureId>; TextureSlot::COUNT],
-    ) -> Self {
+    pub fn from_desc(desc: &moba_assets::MaterialDesc) -> Self {
         Self {
             shader: desc.shader,
-            textures,
+            textures: [None; TextureSlot::COUNT],
             base_color_factor: desc.base_color_factor,
             metallic: desc.metallic,
             roughness: desc.roughness,
@@ -133,6 +132,12 @@ impl MaterialData {
     pub const fn with_texture(mut self, slot: TextureSlot, texture: TextureId) -> Self {
         self.textures[slot.index()] = Some(texture);
         self
+    }
+
+    /// The texture bound to `slot`, if any.
+    #[must_use]
+    pub const fn texture(&self, slot: TextureSlot) -> Option<TextureId> {
+        self.textures[slot.index()]
     }
 
     /// Returns this material with [`MaterialData::base_color_factor`] set.
@@ -514,9 +519,7 @@ mod tests {
         let block = MaterialParamsGpu::from(&material);
         assert_eq!(block.base_color_factor, [1.0, 0.5, 0.0, 1.0]);
         assert_eq!(block.params, [0.0, 1.0, 2.0, 0.25]);
-        assert_eq!(
-            material.textures[TextureSlot::Mask.index()],
-            Some(TextureId(3))
-        );
+        assert_eq!(material.texture(TextureSlot::Mask), Some(TextureId(3)));
+        assert_eq!(material.texture(TextureSlot::Normal), None);
     }
 }

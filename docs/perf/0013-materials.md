@@ -69,7 +69,8 @@ The saved cache is 128,736 bytes for the 7 pipelines. On lavapipe the driver ret
 20-byte blob with a truncated header; the renderer refuses to save it (`not saved ... not
 reusable`), so lavapipe always starts cold (7 pipelines in about 6–8 ms) and a lavapipe run
 never overwrites another device's cache. A cache written on the RTX and then offered to
-lavapipe is rejected as `OtherDevice` before the driver sees it.
+lavapipe is rejected as `OtherDevice` before the driver sees it, and kept for the RTX; a
+corrupt file (checksum, header, size) is deleted when it is rejected.
 
 ## Textures: CPU fallback cost and parity
 
@@ -103,7 +104,8 @@ Bake quality (`texture-bake bake`, level-0 PSNR decoded with `bcdec_rs`): base c
   warning). Fixed with per-permutation vertex layouts before the runs above.
 - **RTX 5070 Ti** with the Khronos layer and synchronisation validation: the default capture,
   the networked capture and the textured networked sentinel capture report **0** messages.
-- **Hot reload** (lavapipe, validation required): with `MOBA_SHADER_DIR` holding
+- **Hot reload** (lavapipe, validation required; measured with a release build before the
+  review made overrides debug-build-only): with `MOBA_SHADER_DIR` holding
   `unit.frag.spv`, replacing it mid-run with a variant that outputs red logged
   `shaders reloaded ... in 7.6 ms`, the final capture had 6,657 red-dominant pixels, and the
   run reported 0 validation messages.

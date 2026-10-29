@@ -163,7 +163,9 @@ now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
-  `with_base_color_factor`, `with_team_tint`), and the frame inputs that already had
+  `with_base_color_factor`, `with_team_tint`; the texture slots are private, read with
+  `texture`, so a new `TextureSlot` is not breaking — `MaterialDesc` likewise), and the frame
+  inputs that already had
   constructors:
   `Scene` (`new`, `empty`, `with_*`), `UnitInstance` (`new`, `at`, `with_mesh`, `with_bones`),
   `Camera` (`perspective`, `orbit`).

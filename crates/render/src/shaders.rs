@@ -7,7 +7,13 @@
 //! embedded module with one log line. [`Renderer::reload_shaders`](crate::Renderer) rebuilds
 //! the scene and composite pipelines from the current files, so a shader edit shows up
 //! without restarting (hot reload).
+//!
+//! **Debug builds only** (`debug_assertions`). The checks above cannot prove that a module
+//! matches the pipeline interface it is built into, and a mismatched module is invalid usage
+//! of `vkCreateGraphicsPipelines` (undefined behaviour without the validation layer), so
+//! release builds ignore the directory.
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use crate::device::DeviceContext;
@@ -26,6 +32,15 @@ pub(crate) struct ShaderSource {
 
 impl ShaderSource {
     pub(crate) fn new(dir: Option<PathBuf>) -> Self {
+        if !cfg!(debug_assertions)
+            && let Some(dir) = &dir
+        {
+            eprintln!(
+                "[render] shader overrides in {} ignored: a debug-build feature",
+                dir.display()
+            );
+            return Self { dir: None };
+        }
         Self { dir }
     }
 
@@ -45,16 +60,23 @@ impl ShaderSource {
         } else {
             None
         };
-        let bytes = match problem {
-            Some(problem) => {
-                eprintln!(
-                    "[render] shader override {}: {problem}; using the built-in module",
-                    path.display()
-                );
-                return None;
-            }
-            None => std::fs::read(&path).ok()?,
-        };
+        if let Some(problem) = problem {
+            eprintln!(
+                "[render] shader override {}: {problem}; using the built-in module",
+                path.display()
+            );
+            return None;
+        }
+        // `take` bounds the read even if the file grew after the metadata check.
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .ok()?
+            .take(MAX_SHADER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_SHADER_BYTES {
+            return None;
+        }
         let magic = bytes
             .get(..4)
             .and_then(|word| word.try_into().ok())

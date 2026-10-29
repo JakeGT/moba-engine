@@ -97,19 +97,23 @@ impl CompositePass {
         })
     }
 
-    /// Rebuilds the pipeline from `shaders` (dev shader reload); the device must be idle.
-    pub(crate) fn rebuild_pipeline(
-        &mut self,
+    /// Builds a replacement pipeline from `shaders` (dev shader reload) without installing it.
+    pub(crate) fn build_pipeline(
+        &self,
         device: &DeviceContext,
         shaders: &ShaderSource,
-    ) -> RenderResult<()> {
-        self.pipeline = build_pipeline(
+    ) -> RenderResult<GraphicsPipeline> {
+        build_pipeline(
             device,
             shaders,
             self.pipeline_layout.handle(),
             self.swapchain_format,
-        )?;
-        Ok(())
+        )
+    }
+
+    /// Installs a pipeline from [`Self::build_pipeline`]. The device must be idle.
+    pub(crate) fn install_pipeline(&mut self, pipeline: GraphicsPipeline) {
+        self.pipeline = pipeline;
     }
 
     /// Points the descriptor set at the HDR target. Only call while no submitted frame

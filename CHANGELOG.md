@@ -127,8 +127,9 @@ the semver check):
   - **Pipeline cache:** every pipeline and permutation is built at renderer creation through a
     persistent `VkPipelineCache` (`MOBA_PIPELINE_CACHE`, default a per-user cache file; `off`
     disables). The file is checksummed and its vendor, device and `pipelineCacheUUID` are
-    checked before the driver sees it; a corrupt or foreign file is a cold start, and a
-    driver blob that would not be reusable is not saved. RTX 5070 Ti: 7 pipelines in 90–98 ms
+    checked before the driver sees it; a corrupt or foreign file is a cold start (a corrupt
+    one is deleted, a foreign one kept), a driver blob that would not be reusable is not
+    saved, and saves go through a fresh `create_new` temporary, `sync_all` and a rename. RTX 5070 Ti: 7 pipelines in 90–98 ms
     cold, 0.5 ms warm (driver disk cache off); renderer ready in about 175 ms vs 84 ms. The
     startup log and `MOBA_FRAME_LOG` report `pipelines`, `pipeline_build_ms`,
     `pipeline_cache` and `startup_ms`.
@@ -136,7 +137,8 @@ the semver check):
     block that was duplicated in five shaders, the instance buffer, lighting and the material
     set), a build-time permutation table (`MATERIAL_TEXTURED` → `unit_textured.frag.spv`,
     `unit_textured.vert.spv`, `skinned_textured.vert.spv`), `spirv-val` on every module as
-    before, and dev hot reload: `MOBA_SHADER_DIR` holds SPIR-V overrides that are re-read when a
+    before, and hot reload in debug builds (release builds ignore it, since a mismatched module
+    is invalid Vulkan usage): `MOBA_SHADER_DIR` holds SPIR-V overrides that are re-read when a
     `.spv` changes (scene and composite pipelines; `Renderer::reload_shaders`).
   - **R1a review fixes:** the normal and capture graph variants must agree on each transient
     slot's cross-frame start `(stage, access)`, not only the slot list; read-before-write is

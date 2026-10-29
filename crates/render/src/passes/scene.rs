@@ -83,7 +83,7 @@ pub(crate) struct SceneTargets {
 }
 
 /// Every scene pipeline: the vertex-colour set and the `MATERIAL_TEXTURED` permutations.
-struct ScenePipelines {
+pub(crate) struct ScenePipelines {
     unit: GraphicsPipeline,
     unit_textured: GraphicsPipeline,
     terrain: GraphicsPipeline,
@@ -381,14 +381,16 @@ impl ScenePass {
         })
     }
 
-    /// Rebuilds every pipeline from `shaders` (dev shader reload). The caller must have
-    /// waited for the device to idle. On error the old pipelines stay.
-    pub(crate) fn rebuild_pipelines(
-        &mut self,
+    /// Builds a replacement for every pipeline from `shaders` (dev shader reload) without
+    /// installing it, so the caller can swap all passes at once or none. A set that lost a
+    /// pipeline the current one has (a skinned permutation that no longer builds) is an
+    /// error, so a reload never silently drops skinning.
+    pub(crate) fn build_pipelines(
+        &self,
         device: &DeviceContext,
         shaders: &ShaderSource,
-    ) -> RenderResult<()> {
-        self.pipelines = ScenePipelines::build(
+    ) -> RenderResult<ScenePipelines> {
+        let pipelines = ScenePipelines::build(
             device,
             shaders,
             self.pipeline_layout.handle(),
@@ -396,7 +398,17 @@ impl ScenePass {
             self.depth_format,
             self.skinning,
         )?;
-        Ok(())
+        if pipelines.skinned.is_some() != self.pipelines.skinned.is_some()
+            || pipelines.skinned_textured.is_some() != self.pipelines.skinned_textured.is_some()
+        {
+            return Err(RenderError::Shader("a skinned pipeline failed to rebuild"));
+        }
+        Ok(pipelines)
+    }
+
+    /// Installs pipelines from [`Self::build_pipelines`]. The device must be idle.
+    pub(crate) fn install_pipelines(&mut self, pipelines: ScenePipelines) {
+        self.pipelines = pipelines;
     }
 
     /// Draws `mesh` with the material whose descriptor set is `set` (null for the

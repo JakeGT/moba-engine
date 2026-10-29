@@ -17,9 +17,7 @@
 
 use std::path::PathBuf;
 
-use moba_assets::{
-    MaterialDesc, TextureFormat, TextureSlot, load_ktx2_file, material_path, texture_path,
-};
+use moba_assets::{MaterialDesc, TextureSlot, load_ktx2_file, material_path, texture_path};
 use moba_render::{MaterialData, MaterialId, MeshId, TextureData, TextureId};
 
 /// What the material binder needs from a renderer (a trait so tests need no GPU).
@@ -63,7 +61,7 @@ pub(crate) struct MaterialLibrary {
     /// Model names already handled (applied, absent or failed): each is tried once.
     seen: Vec<String>,
     /// Uploaded textures by name, with their format (cleared with the renderer).
-    textures: Vec<(String, TextureId, TextureFormat)>,
+    textures: Vec<(String, TextureId, moba_render::TextureFormat)>,
     /// Models drawn with a material, for the startup log.
     applied: Vec<String>,
 }
@@ -163,46 +161,50 @@ impl MaterialLibrary {
         }
         let desc = MaterialDesc::load_file(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let mut textures = [None; TextureSlot::COUNT];
+        // Resolve and check every slot first, upload afterwards: a material that fails on its
+        // third texture must not leave its first two uploaded (and counted toward the
+        // renderer's texture limit).
+        let mut pending: Vec<(TextureSlot, &str, Option<TextureData>)> = Vec::new();
         for (slot, name) in desc.bound_textures() {
-            textures[slot.index()] = Some(self.texture(sink, slot, name)?);
-        }
-        Ok(Some(MaterialData::from_desc(&desc, textures)))
-    }
-
-    /// Uploads (or reuses) texture `name` for `slot`.
-    fn texture(
-        &mut self,
-        sink: &mut impl MaterialSink,
-        slot: TextureSlot,
-        name: &str,
-    ) -> Result<TextureId, String> {
-        let path =
-            texture_path(&self.root, name).ok_or_else(|| format!("bad texture name {name}"))?;
-        let check = |format: TextureFormat| {
-            if slot.accepts(format) {
-                Ok(())
+            let path =
+                texture_path(&self.root, name).ok_or_else(|| format!("bad texture name {name}"))?;
+            let cached = self.textures.iter().find(|(known, ..)| known == name);
+            let (format, data) = if let Some(&(_, _, format)) = cached {
+                (format, None)
             } else {
-                Err(format!(
+                let data = load_ktx2_file(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                (data.format(), Some(data))
+            };
+            // A cached texture must suit this slot too (a normal map is not a base colour).
+            if !slot.accepts(format) {
+                return Err(format!(
                     "{}: format {format} is not allowed for the {} slot",
                     path.display(),
                     slot.name()
-                ))
+                ));
             }
-        };
-        // A texture already uploaded for another material is reused, but must still suit
-        // this slot (a normal map is not a base colour).
-        if let Some(&(_, id, format)) = self.textures.iter().find(|(known, ..)| known == name) {
-            check(format)?;
-            return Ok(id);
+            pending.push((slot, name, data));
         }
-        let data = load_ktx2_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        check(data.format())?;
-        let id = sink
-            .register_texture(&data)
-            .map_err(|error| format!("{}: upload failed ({error})", path.display()))?;
-        self.textures.push((name.to_owned(), id, data.format()));
-        Ok(id)
+        let mut material = MaterialData::from_desc(&desc);
+        for (slot, name, data) in pending {
+            // Cached (by another material, or earlier in this one when a texture is named
+            // twice) or uploaded now; `data` was loaded exactly when it was not cached.
+            let cached = self.textures.iter().find(|(known, ..)| known == name);
+            let id = if let Some(&(_, id, _)) = cached {
+                id
+            } else if let Some(data) = data {
+                let id = sink
+                    .register_texture(&data)
+                    .map_err(|error| format!("textures/{name}.ktx2: upload failed ({error})"))?;
+                self.textures.push((name.to_owned(), id, data.format()));
+                id
+            } else {
+                return Err(format!("textures/{name}.ktx2: not loaded"));
+            };
+            material = material.with_texture(slot, id);
+        }
+        Ok(Some(material))
     }
 }
 
@@ -292,6 +294,13 @@ mod tests {
         )
         .expect("write");
         std::fs::write(root.join("materials/broken.toml"), "shader = 3").expect("write");
+        // A valid first texture and a missing second one: nothing may be uploaded.
+        std::fs::write(root.join("textures/fresh.ktx2"), BASE).expect("write fresh");
+        std::fs::write(
+            root.join("materials/partial.toml"),
+            "shader = \"textured\"\nbase_color = \"fresh\"\nnormal = \"gone\"\n",
+        )
+        .expect("write");
         let mut library = MaterialLibrary::new(root.clone());
         let mut renderer = FakeRenderer::default();
         let models = || {
@@ -301,6 +310,7 @@ mod tests {
                 model("swapped"),
                 model("missing"),
                 model("broken"),
+                model("partial"),
                 model("plain"),
             ]
         };
