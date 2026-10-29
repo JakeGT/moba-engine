@@ -1,7 +1,7 @@
 //! Presentation-side scene data: camera and per-instance transforms.
 
 use bytemuck::{Pod, Zeroable};
-use moba_assets::JointMatrix;
+use moba_assets::{JointMatrix, VatPose};
 use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, perspective_rh};
 
 use crate::ui::UiImage;
@@ -165,6 +165,8 @@ pub struct UnitInstance {
     /// Outline palette slot ([`Scene::outlines`], ADR-0016): `0` (the default) draws no
     /// outline; slots past `OUTLINE_SLOTS - 1` are treated as `0`.
     pub outline: u8,
+    /// The frame of a vertex-animation-texture mesh to show (R4b; ignored by other meshes).
+    pub vat: VatPose,
 }
 
 impl UnitInstance {
@@ -177,6 +179,7 @@ impl UnitInstance {
             mesh: MeshId::CUBE,
             bones: BoneRange::NONE,
             outline: 0,
+            vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
         }
     }
 
@@ -191,6 +194,14 @@ impl UnitInstance {
     #[must_use]
     pub const fn with_mesh(mut self, mesh: MeshId) -> Self {
         self.mesh = mesh;
+        self
+    }
+
+    /// Returns this instance showing `pose` of its vertex-animation texture (for a mesh from
+    /// [`Renderer::register_vat_mesh`](crate::Renderer::register_vat_mesh)).
+    #[must_use]
+    pub const fn with_vat(mut self, pose: VatPose) -> Self {
+        self.vat = pose;
         self
     }
 
@@ -215,6 +226,7 @@ impl UnitInstance {
             mesh: MeshId::CUBE,
             bones: BoneRange::NONE,
             outline: 0,
+            vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
         }
     }
 }
@@ -628,22 +640,41 @@ impl CameraUniform {
     }
 }
 
-/// GPU layout of one instance. Must match `shaders/unit.vert`.
+/// GPU layout of one instance (128 bytes). Must match `shaders/include/instance.glsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct GpuInstance {
     model: [[f32; 4]; 4],
     color: [f32; 4],
-    /// x: outline slot (0 when out of range); yzw reserved.
+    /// `(from frame, from next, from t, crossfade)`; frames as floats are exact below 2^24.
+    vat0: [f32; 4],
+    /// `(to frame, to next, to t, 0)`.
+    vat1: [f32; 4],
+    /// x: outline slot (0 when out of range, ADR-0016); yzw reserved.
     params: [u32; 4],
 }
 
 impl From<UnitInstance> for GpuInstance {
     fn from(instance: UnitInstance) -> Self {
+        let (from, to, blend) = (instance.vat.from, instance.vat.to, instance.vat.blend);
+        let unit = |value: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
         let slot = usize::from(instance.outline);
         Self {
             model: instance.transform.to_cols_array_2d(),
             color: instance.color.to_array(),
+            vat0: [
+                from.frame as f32,
+                from.next as f32,
+                unit(from.t),
+                unit(blend),
+            ],
+            vat1: [to.frame as f32, to.next as f32, unit(to.t), 0.0],
             params: [
                 if slot < OUTLINE_SLOTS {
                     u32::from(instance.outline)
@@ -667,6 +698,13 @@ mod tests {
     /// `CameraBlock` in `include/camera.glsl` is std140 with only 16-byte members, so the Rust
     /// struct's offsets are the GLSL offsets.
     #[test]
+    fn instances_are_128_bytes_with_the_outline_slot_last() {
+        assert_eq!(size_of::<super::GpuInstance>(), 128);
+        assert_eq!(offset_of!(super::GpuInstance, vat0), 80);
+        assert_eq!(offset_of!(super::GpuInstance, params), 112);
+    }
+
+    #[test]
     fn camera_uniform_matches_the_std140_block() {
         assert_eq!(offset_of!(CameraUniform, wall_count), 912);
         assert_eq!(offset_of!(CameraUniform, light_view_proj), 928);
@@ -682,7 +720,6 @@ mod tests {
 
     #[test]
     fn instances_carry_a_clamped_outline_slot() {
-        assert_eq!(size_of::<GpuInstance>(), 96);
         let unit = UnitInstance::new(Mat4::IDENTITY, Vec4::ONE);
         assert_eq!(GpuInstance::from(unit.with_outline(3)).params[0], 3);
         assert_eq!(GpuInstance::from(unit.with_outline(8)).params[0], 0);

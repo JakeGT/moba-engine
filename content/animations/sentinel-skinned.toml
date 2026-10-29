@@ -87,11 +87,15 @@ stiffness = 0.25
 damping = 0.2
 gravity = 9.81
 
-# Attach points for weapon trails and VFX (R5).
+# Attach points for weapon trails and VFX (R5). A socket with a `model` also draws that
+# client-local static model there (R4b): a crystal set on the spear head and a crystal crest
+# on the helm. `MOBA_ATTACHMENTS=off` hides them.
 [[sockets]]
 name = "spear_tip"
 joint = "arm_r"
 offset = [0.09, 1.3, 0.21]
+model = "crystal"
+scale = 0.1
 
 [[sockets]]
 name = "shield"
@@ -102,3 +106,5 @@ offset = [0.05, -0.65, 0.47]
 name = "head"
 joint = "head"
 offset = [0.0, 0.6, 0.0]
+model = "crystal"
+scale = 0.14

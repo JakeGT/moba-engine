@@ -66,7 +66,8 @@ crates/client     playable client, HUD, spectator, settings, audio, capture mode
 crates/server     headless dedicated server
 crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wire,
                   state-hash, image-check, vulkan-probe, bake-ui-atlas, sample-mesh,
-                  texture-bake, teamfight (the R5 VFX evidence replay)
+                  texture-bake, teamfight (the R5 VFX evidence replay), vat-bake (R4b
+                  minion VATs), link-proxy (RTT/jitter/loss UDP proxy)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)

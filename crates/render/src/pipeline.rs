@@ -256,9 +256,9 @@ pub(crate) fn create_depth_only(
     device.create_graphics_pipeline(&create_info)
 }
 
-/// Creates a depth pre-pass pipeline (R2b, ADR-0016): depth test/write `LESS_OR_EQUAL` with
-/// a dynamic depth bias that pushes the pre-pass depth slightly *back*, so the scene pass,
-/// which loads it and tests `LESS_OR_EQUAL`, always passes where the pre-pass drew. With
+/// Creates a depth pre-pass pipeline (R2b, ADR-0016): depth test/write `LESS_OR_EQUAL`, no
+/// depth bias. The scene vertex shaders' positions are `invariant`, so the scene pass, which
+/// loads this depth and tests `LESS_OR_EQUAL`, reproduces it exactly where the pre-pass drew. With
 /// `id_format` the pass also has the outline ID colour attachment: `fragment` writes it, and
 /// without a fragment shader (the terrain) its write mask is empty. No culling, like the
 /// scene pipelines.
@@ -305,7 +305,7 @@ pub(crate) fn create_prepass(
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .depth_bias_enable(true)
+        .depth_bias_enable(false)
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -327,11 +327,7 @@ pub(crate) fn create_prepass(
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
         .attachments(&attachments[..attachment_count]);
-    let dynamic_states = [
-        vk::DynamicState::VIEWPORT,
-        vk::DynamicState::SCISSOR,
-        vk::DynamicState::DEPTH_BIAS,
-    ];
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
     let color_formats = [id_format.unwrap_or(vk::Format::UNDEFINED)];
     let mut rendering = vk::PipelineRenderingCreateInfo::default()

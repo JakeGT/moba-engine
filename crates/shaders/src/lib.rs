@@ -11,7 +11,8 @@
 //! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010), and the
 //! `*_shadow` modules are the `SHADOW_PASS` depth-only casters of the shadow map (ADR-0011),
 //! the `*_prepass` modules the `DEPTH_PREPASS` depth pre-pass and the `*_outline` modules the
-//! `OUTLINE_HULL` inverted-hull outlines (ADR-0016).
+//! `OUTLINE_HULL` inverted-hull outlines (ADR-0016). `vat.vert` plays vertex-animation
+//! textures for minions (R4b, ADR-0012).
 
 #![forbid(unsafe_code)]
 
@@ -62,6 +63,17 @@ pub const OUTLINE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/outlin
 /// Screen-space contact-shadow fragment shader: a short depth-buffer ray march to the sun.
 pub const CONTACT_SHADOWS_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/contact_shadows.frag.spv"));
+/// Vertex-animation-texture vertex shader (R4b): plays baked clips from the VAT texture
+/// (set 2) by the instance's frame samples; pairs with [`UNIT_FRAG`].
+pub const VAT_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat.vert.spv"));
+/// Depth-only shadow caster for VAT meshes (`vat.vert` + `SHADOW_PASS`).
+pub const VAT_SHADOW_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat_shadow.vert.spv"));
+/// Depth pre-pass for VAT meshes (`vat.vert` + `DEPTH_PREPASS`, R2b).
+pub const VAT_PREPASS_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vat_prepass.vert.spv"));
+/// Inverted-hull outline for VAT meshes (`vat.vert` + `OUTLINE_HULL`, R2b).
+pub const VAT_OUTLINE_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vat_outline.vert.spv"));
 /// Procedural terrain vertex shader.
 pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
 /// Procedural terrain fragment shader.
@@ -166,6 +178,22 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: CONTACT_SHADOWS_FRAG,
     },
     ShaderModule {
+        name: "vat.vert",
+        spirv: VAT_VERT,
+    },
+    ShaderModule {
+        name: "vat_prepass.vert",
+        spirv: VAT_PREPASS_VERT,
+    },
+    ShaderModule {
+        name: "vat_outline.vert",
+        spirv: VAT_OUTLINE_VERT,
+    },
+    ShaderModule {
+        name: "vat_shadow.vert",
+        spirv: VAT_SHADOW_VERT,
+    },
+    ShaderModule {
         name: "terrain.vert",
         spirv: TERRAIN_VERT,
     },
@@ -260,6 +288,9 @@ mod tests {
         assert_ne!(UNIT_VERT, UNIT_OUTLINE_VERT);
         assert_ne!(SKINNED_VERT, SKINNED_PREPASS_VERT);
         assert_ne!(SKINNED_VERT, SKINNED_OUTLINE_VERT);
+        assert_ne!(VAT_VERT, VAT_SHADOW_VERT);
+        assert_ne!(VAT_VERT, VAT_PREPASS_VERT);
+        assert_ne!(VAT_VERT, VAT_OUTLINE_VERT);
         let mut names: Vec<_> = MODULES.iter().map(|module| module.name).collect();
         names.sort_unstable();
         names.dedup();

@@ -76,6 +76,8 @@ pub(crate) struct NetworkView {
     /// `MOBA_CAPTURE_TICK`: capture once Playing reaches this snapshot tick, with the render
     /// (interpolation and animation) tick pinned to it.
     pub(crate) capture_tick: Option<u32>,
+    /// `MOBA_SPECTATE_FOLLOW=<team>:<slot>`: the spectator camera follows that hero.
+    pub(crate) spectator_follow: Option<(u8, u8)>,
     pub(crate) kill_feed: VecDeque<KillFeedEntry>,
     pub(crate) projectiles: Vec<ProjectileFx>,
     pub(crate) audio: crate::audio::Audio,
@@ -113,6 +115,7 @@ impl NetworkView {
             follow_distance: 46.0,
             overview_camera: false,
             capture_tick: None,
+            spectator_follow: None,
             kill_feed: VecDeque::with_capacity(6),
             projectiles: Vec::with_capacity(32),
             audio: crate::audio::Audio::headless(),

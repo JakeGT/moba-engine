@@ -88,6 +88,23 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "vfx_oit.frag",
         defines: &["VFX_OIT"],
     },
+    // Vertex-animation-texture shadow caster (R4b, ADR-0012).
+    Permutation {
+        source: "vat.vert",
+        output: "vat_shadow.vert",
+        defines: &["SHADOW_PASS"],
+    },
+    // VAT depth pre-pass and inverted-hull outline (R2b, ADR-0016).
+    Permutation {
+        source: "vat.vert",
+        output: "vat_prepass.vert",
+        defines: &["DEPTH_PREPASS"],
+    },
+    Permutation {
+        source: "vat.vert",
+        output: "vat_outline.vert",
+        defines: &["OUTLINE_HULL"],
+    },
 ];
 
 fn main() {

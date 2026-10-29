@@ -23,7 +23,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Terrain | A flat plane with a procedural grid and per-map tint. Walls are only drawn on the network path. |
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
 | Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
-| Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. VAT minions and bone LOD (R4b) are open. |
+| Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. R4b (2026-10-29, [perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions (baked by `vat-bake`, instanced, shadow-casting, cube fallback), tiered bone-count LOD, visible socket attachments, 2D blend spaces and the local preview/replays on the same runtime; 200 VAT minions ≈ 0.01 ms CPU per frame. |
 | VFX | **R5** ([ADR-0013](../adr/0013-vfx-runtime.md), 2026-10-29): compute-simulated GPU particles in a fixed per-tier buffer (sprites, flipbooks, trails, beams, ground rings, mesh particles), additive plus weighted blended OIT (unsorted on Low), soft particles from the scene depth, client-local effect descriptors bound to presentation events and animation sockets, per-tier particle/overdraw budgets with distance culling and enemy-telegraph/ally-dimming rules, and a live-reload preview. Distortion moved to R6. |
 | Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
 | UI | **R7a:** MSDF font (Open Sans Condensed, baked offline by `bake-ui-font`) with derivative anti-aliasing, outlines and soft shadows; the RGBA atlas keeps pixel-art icons. Styled health bars (damage ghost, shield, ticks, colour-blind palette), pooled floating combat text, cooldown sweeps, screen fades and a loading screen ([perf/0014](../perf/0014-ui.md)). **R7b:** render-to-texture through the graph (persistent offscreen images the UI samples): 3D hero portraits (animated idle above `Low`) and a minimap baked from a top-down render of the map at load. |
@@ -165,8 +165,12 @@ perf/0020 for an art director to sign.
 **Status:** R4a (items 1–4, with a 1D blend space, and the update-rate half of 5) is done in
 [ADR-0012](../adr/0012-animation-runtime.md). R4b-1 replicated basic attacks (`EVENT_ATTACK`,
 protocol v41), so attack wind-up and release follow the simulation's attack timer and the hit
-frame lands on the hit tick. The rest of R4b — VAT minions and renderer bone LOD — waits for
-R1.
+frame lands on the hit tick. **R4b is done** (2026-10-29, ADR-0012 amendment,
+[perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions, bone-count LOD, visible socket
+attachments, 2D blend spaces and local preview/replay animation. Exit: a skinned hero ran
+idle, run, attack, three casts and death in a networked match at 150 ms RTT (30 ms jitter,
+5 % loss); recall does not exist in the simulation, so it is bound but never triggered.
+200 VAT minions cost ≈ 0.01 ms of CPU per frame against a 0.5 ms budget.
 
 1. **Clips and blending.** Multiple clips per hero, 1D/2D blend spaces for locomotion, crossfades, additive hit reactions and an upper/lower-body mask (cast while moving).
 2. **Animation state machine** defined in content, driven by snapshot state and presentation events:

@@ -223,6 +223,60 @@ the semver check):
     High), two lavapipe runs byte-identical.
   - No wire, replay, simulation-logic or content-hash change (protocol v41, replay v5, logic
     v8): effects, map visuals and bakes are client-local.
+- **Animation runtime R4b: VAT minions, bone LOD, attachments (AAA roadmap R4, ADR-0012
+  amendment):**
+  - **Vertex-animation-texture minions:** `moba-tools vat-bake <model.glb> <out>` skins a
+    model's clips on the CPU (the shader's formula) at 20 fps into one `RGBA16F` KTX2
+    (positions then normals, rows ≤ 4,096 texels) plus a `<out>.toml` descriptor
+    (`moba_assets::VatDescriptor`: vertex/frame counts, clips, a `mesh_hash` that detects a
+    stale bake, `[playback]` run speed / attack release / crossfade). The sample
+    `content/vat/minion.{toml,ktx2}` is baked from `sentinel-skinned` (974 vertices, 88 frames,
+    1.4 MB). `Renderer::register_vat_mesh` registers a static mesh with its VAT (≤ 8,
+    `MAX_VAT_MESHES`); VAT units are drawn instanced by a new `vat.vert` (one draw per VAT
+    mesh, no bone buffer, frames interpolated and two samples crossfaded in the shader) and
+    cast shadows through a `vat_shadow.vert` permutation. `UnitInstance::with_vat(VatPose)`
+    sets the per-instance clip times; the instance block grows from 80 to 112 bytes.
+    `VatPlayer` (fixed size) drives idle ↔ run by interpolated speed, attacks from
+    `EVENT_ATTACK` (release on the hit tick) and deaths from `EVENT_UNIT_DIED` on a corpse at
+    the death position. Melee/ranged minions use `vat/minion-melee`/`vat/minion-ranged`, else
+    `vat/minion`; a missing or mismatched asset falls back to the cube (logged once).
+    Tiers: Low nearest frame, Medium interpolated, High/Ultra interpolated + crossfaded.
+    `MOBA_VAT=off` draws cubes.
+  - **Bone-count LOD:** `moba_assets::SkinLod` builds reduced skins at load (LOD1 ≤ 2
+    influences and 75 % of the joints, spring joints first; LOD2 1 influence, ≤ 4 joints;
+    dropped joints collapse onto their nearest kept ancestor) and gathers their palettes from
+    the animator's matrices. Heroes switch by distance (Low 40/80 m … Ultra 110/180 m) and draw
+    LOD2 off screen; pinned captures keep LOD0. `skinned.vert` skips zero-weight influences.
+    `MOBA_BONE_LOD=off|<near>,<far>`.
+  - **Visible socket attachments:** `[[sockets]]` take an optional static `model` and `scale`
+    (`AnimationGraph::attachment(s)`, `AnimationSet::attachment_models`); the client draws them
+    at the socket in a brightened hero colour, skipping far and off-screen ones on Low. The sample set puts a
+    `crystal` on the sentinel's spear tip and head. `MOBA_ATTACHMENTS=off`.
+  - **2D blend spaces:** `BlendSpace2d` (gradient-band weights, ≤ 8 points) used when
+    `[[locomotion]]` points give `x`/`y`; `Animator::evaluate_motion` takes a local velocity.
+  - **Local preview and replays on the same runtime:** the bot preview and `MOBA_REPLAY`
+    turn each simulated tick into the snapshot and events a match delivers (`LocalFeed`), so
+    heroes play the same attack/cast/death animations and minions their VATs as in a match;
+    local VFX anchors use the same ids, so local effects attach to sockets.
+  - **Evidence tooling:** `MOBA_STRESS_MINIONS=<n>` (≤ 512 client-only VAT minions in the
+    local preview, CPU per frame in the frame log), `MOBA_LOCAL_CAMERA_DISTANCE` for the local
+    overview, `MOBA_ANIM_LOG`, `MOBA_CAPTURE_SERIES`/`MOBA_CAPTURE_SERIES_TICKS`,
+    `MOBA_SPECTATE_FOLLOW=<team>:<slot>`, and `moba-tools link-proxy` (a UDP proxy with RTT,
+    jitter and loss around `moba_netsim::LinkProxy`). The frame log gains `vat_meshes=` and the
+    `stress_*` columns.
+  - **Evidence** ([perf/0018](docs/perf/0018-vat-anim-lod.md)): 200 VAT minions cost
+    ≈ 8 µs of CPU per frame, p95 ≤ 17 µs (budget 0.5 ms), and 0.04 ms of GPU over cubes on
+    the RTX 5070 Ti; validation and synchronisation validation
+    report 0 messages on lavapipe and the RTX 5070 Ti on every tier and with every off
+    switch; at 150 ms RTT a skinned hero played idle, run, attack, three casts and death
+    (the simulation has no recall). Both golden fingerprints were rebaselined (VAT minions,
+    attachments, animated local preview), and a third golden checks a VAT close-up
+    (`tests/golden/render-vat-fingerprint.rgb`). `Renderer::mesh_capacity` reports the mesh
+    slots; heroes register their base meshes before any bone-LOD skin, and LOD skins are
+    skipped (logged once) when fewer than 8 slots would remain. `vat-bake` refuses playback
+    values or texture sizes (over `MAX_VAT_TEXELS`, the KTX2 limit) the client would reject.
+  - No wire, replay, simulation-logic or content-hash change: VATs, attachments and LOD are
+    client-local.
 - **VFX system (AAA roadmap R5, ADR-0013):**
   - **GPU particles:** a fixed per-tier particle buffer (`QualityTier::vfx_budget`: Low 4,096
     … Ultra 49,152 particles, 512 … 4,096 spawns per frame) simulated by a new `vfx_simulate`

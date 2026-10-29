@@ -5,6 +5,10 @@ Vertex-animation textures for minions and renderer-side bone LOD are R4b and are
 here beyond the direction in [Follow-ups](#follow-ups-r4b-and-later).
 **Amended** 2026-10-28 by R4b-1: basic attacks are driven by the replicated `EVENT_ATTACK`
 (protocol v41), no longer inferred from health drops ([below](#basic-attacks-event_attack-r4b-1)).
+**Amended** 2026-10-29 by R4b: vertex-animation-texture minions, renderer bone-count LOD,
+visible socket attachments, a 2D blend space and the local preview on the same runtime
+([Amendment: R4b](#amendment-r4b-vat-minions-bone-lod-attachments)). No wire, replay,
+simulation or content-hash change.
 
 ## Context
 WP-4.1 ([ADR-0007](0007-mesh-format.md#skinning-wp-41)) made heroes GPU-skinned with one clip:
@@ -195,6 +199,121 @@ blend, upper-body action, additive hit, 3 spring joints, a socket) evaluates in 
 units take ~116 µs per frame, ~31 µs with a quarter of them evaluated per frame, against a
 1 ms animation budget. The steady state allocates nothing (`moba-assets` test
 `animation_allocations`, client test `steady_state_driver_frames_do_not_allocate`).
+
+## Amendment: R4b (VAT minions, bone LOD, attachments)
+
+Written before the code, 2026-10-29. Everything here is client-local presentation like the
+rest of this ADR: nothing is hashed, signed, replicated or replayed; protocol v41, replay v5,
+logic v8 and the golden state hash are unchanged. Every feature is tiered and has an off
+switch; nothing allocates per frame.
+
+### Vertex-animation textures for minions
+Minions are many (up to ~150 alive in a late 5v5) and need few states, so they do not get an
+`Animator` and a bone range each. Their clips are **baked offline** into a vertex-animation
+texture (VAT) and played in the vertex shader from two numbers per instance.
+
+- **Baker.** `moba-tools vat-bake <model.glb> <out>` samples every chosen clip of a skinned
+  model at a fixed rate (default 20 fps; frames are interpolated in the shader) through the same `Skeleton::sample_clip` /
+  `skinning_matrices` path as the runtime, skins every vertex on the CPU (4 influences, the
+  shader's formula) and writes `<out>.ktx2` plus a `<out>.toml` sidecar descriptor.
+- **Texture.** One `RGBA16F` KTX2 (`VK_FORMAT_R16G16B16A16_SFLOAT`, one level, linear) per
+  model. Texel `i = frame × vertices + vertex` holds the skinned model-space position (`w = 1`);
+  texel `frames × vertices + i` holds its normal. Rows wrap at the texture width (≤ 4,096), so
+  the height is `ceil(2 × frames × vertices / width)` (≤ 4,096). Half floats give ~2 mm at
+  4 m from the origin, below a pixel at gameplay zoom. Frames are fetched with `texelFetch`
+  (no filtering), so wrapping is free; the shader interpolates between frames itself.
+- **Descriptor** (`<asset root>/vat/<name>.toml`, ≤ 8 KiB, unknown keys rejected,
+  range-checked like an animation set): the source `model` (whose static mesh is drawn),
+  `vertex_count`, `frame_count`, `width`/`height`, `fps`, a 64-bit FNV-1a `mesh_hash` of the
+  model's positions and indices (a re-exported model without a re-bake is detected and falls
+  back), and ≤ 16 clips (`name`, `first`, `frames`, `loop`). An optional `[playback]` table holds
+  the run speed (the locomotion clip's rate scales with ground speed), the attack release time
+  and the crossfade time. `moba_assets::VatDescriptor` parses it and checks it against the
+  loaded texture and mesh (`check_texture`, `check_mesh`); `VatAnimation::bind` then resolves
+  the clips the player uses. The renderer re-checks the texel fit before upload. Texels are
+  capped at `MAX_VAT_TEXELS` so the file fits `MAX_KTX2_BYTES`, and the baker range-checks
+  `[playback]` so it never writes a descriptor the client rejects.
+- **Draw path.** `Renderer::register_vat_mesh(mesh, texture, layout)` uploads the static
+  mesh and the VAT image (vertex-stage combined image sampler, nearest) with its own
+  descriptor set. VAT meshes are drawn **instanced, one draw per VAT mesh**, by `vat.vert`
+  (which feeds the existing `unit.frag`), after the skinned draws; a `SHADOW_PASS`
+  permutation (`vat_shadow.vert`) casts into the shadow map. No bone buffer is read. The VAT
+  pipelines use their own layout whose set 2 is the VAT set (sets 0/1 stay compatible; set 3,
+  lighting, is re-bound), because Vulkan only guarantees four bound sets. A VAT mesh does not
+  take a textured material (the minion look is vertex colour and team tint).
+- **Per instance.** `UnitInstance::with_vat(VatPose)` sets two frame samples (`frame`,
+  `next`, `t`) and a crossfade weight between them (the previous clip fading into the current
+  one). The instance block grows from 80 to 112 bytes (two `vec4`s that only `vat.vert`
+  reads). The shader clamps both frames below `frame_count` and the vertex below
+  `vertex_count` (the push constant), so no fetch leaves the texture.
+- **What drives it.** `moba_assets::VatPlayer` (fixed size, no heap): idle ↔ run by the
+  interpolated speed (the run clip's rate follows speed / `run_speed`), attack from
+  `EVENT_ATTACK` (its release frame on the hit tick, as for heroes), death from
+  `EVENT_UNIT_DIED`. The client's `MinionDriver` keeps a fixed table of 1,024 players indexed by net id and a
+  64-entry corpse ring: a minion is despawned in the snapshot that reports its death, so
+  the corpse is drawn at its last position for the death clip plus a 0.6 s linger. Facing is
+  the last snapshot step, or towards the attack target.
+- **Tiers.** `Low`: nearest frame, no crossfade (2 fetches per vertex). `Medium`: frames
+  interpolated, no crossfade (4). `High`/`Ultra`: interpolated and crossfaded (8). All tiers
+  cast shadows when shadows are on.
+- **Fallback and off switch.** A minion kind without a usable VAT asset (melee tries
+  `vat/minion-melee`, then `vat/minion`; ranged `vat/minion-ranged`, then `vat/minion`) is drawn
+  as today's cube. A missing, oversized, malformed or mismatched asset is logged once and
+  falls back. `MOBA_VAT=off` draws every minion as a cube.
+
+### Bone-count LOD in the renderer
+On top of `MOBA_ANIM_LOD` (update rate), distant and off-screen heroes draw **reduced
+skins**: fewer joints in the bone buffer and fewer influences per vertex.
+
+- `moba_assets::SkinLod::build(mesh, max_joints, max_influences)` keeps the joints carrying
+  the most skinned weight (with every ancestor of a kept joint, so the hierarchy closes),
+  re-points each vertex's influences at its nearest kept ancestor, merges duplicates, keeps the
+  largest `max_influences` (sorted, renormalised to 255) and compacts the joint palette. It
+  returns the reduced mesh and the palette map; `SkinLod::gather` copies the kept joints'
+  skinning matrices out of the animator's full set. Collapsing a joint into its ancestor is
+  exact for rigidly bound parts and makes secondary parts (the cape) follow their parent.
+- Levels: LOD0 full; **LOD1** ≤ 2 influences and ≤ 75 % of the joints (spring-chain joints are
+  dropped first); **LOD2** 1 influence and ≤ 4 joints. Each level is its own skinned mesh
+  registration, made at load.
+- Selection per hero per frame, by distance from the eye and visibility (the same
+  `LodView` as the update-rate LOD). Off-screen heroes (still shadow casters) use LOD2. The
+  distances are per tier: `Low` 40/80 m, `Medium` 60/110 m, `High` 80/140 m, `Ultra` 110/180 m.
+  A pinned capture uses LOD0. `MOBA_BONE_LOD=off` keeps LOD0; `MOBA_BONE_LOD=<near>,<far>`
+  overrides the distances.
+- `skinned.vert` skips influences whose weight is zero (an exact no-op for the full mesh),
+  so 1- and 2-influence skins do less GPU work.
+
+### Visible socket attachments
+A socket may name a client-local static `model` and a `scale`; the client loads it like a
+hero model (`<asset root>/models/<model>.glb`, cached, logged once on failure) and draws one
+extra instance per attached socket, at `instance transform × socket transform × scale`, in
+a brightened tint of the hero's colour (so they read against the body). Attachments follow
+the update-rate LOD (they use the animator's last sockets); on `Low` they are skipped for
+heroes on bone LOD2, that is beyond the far distance or off screen. `MOBA_ATTACHMENTS=off`
+hides them. The sample set attaches a small `crystal` to the sentinel's spear tip and one to
+its head.
+
+### 2D blend spaces
+`BlendSpace2d` places ≤ 8 clips on a plane (strafe `x`, forward `y`, m/s in the unit's
+facing frame) and weights them by gradient-band interpolation (Johansen 2009), which needs
+no triangulation and gives exact weights at the sample points. An animation set uses it when
+its `[[locomotion]]` points give `x`/`y` instead of `speed`. `Animator::evaluate_motion`
+takes the local velocity; `Animator::evaluate` (speed only) passes `(0, speed)`. Heroes face
+their movement, so the shipped sets stay 1D.
+
+### The local preview on the same runtime
+The local bot preview (no `MOBA_SERVER`) feeds the same `AnimationDriver` (and minion
+driver) as a network match: each simulated tick becomes a `SnapshotState` of the units
+(net id = entity index + 1, quantised exactly like the wire) and its `SimEvent`s
+(`BasicAttack`, `AbilityCast`, `UnitDied`) become the `NetEvent`s the server would send, then
+the driver's `on_snapshot` / `flush_events` run as in a match. This is a local adapter: the
+wire, the server and the simulation are untouched. Anything that drives the local preview's
+simulation (`MOBA_REPLAY`, R5) gets the same animation. The local VFX anchors use the same
+net ids, so local effects attach to the animated heroes' sockets as in a match.
+
+### Exit criterion
+The simulation has no recall, so the recall state stays bound but untriggered (as in R4a);
+the exit evidence records it instead of adding a simulation feature.
 
 ## Alternatives considered
 - **A third-party animation runtime** (an engine's animation module such as Bevy's or
