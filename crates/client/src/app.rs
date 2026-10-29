@@ -33,6 +33,14 @@
 //!   `MOBA_SHADOWS=off|hard|pcf|pcss`, `MOBA_SHADOW_SIZE=<texels>` (256-8192) and
 //!   `MOBA_IBL=0` (hemispheric ambient only) / `MOBA_SPECULAR_IBL=0` (SH ambient only). The
 //!   map's `[lighting]` table (and its `environment`) sets the art direction.
+//! - Post-processing overrides of the tier's defaults (ADR-0015): `MOBA_BLOOM=off|on`,
+//!   `MOBA_AA=off|fxaa|msaa4`, `MOBA_AO=off|on`, `MOBA_RENDER_SCALE=0.5..1` (the settings'
+//!   `render_scale`), `MOBA_DYNRES=off|on|<target ms>`, `MOBA_UPSCALE=bilinear|bicubic`,
+//!   `MOBA_GRADING=off`, `MOBA_EXPOSURE=auto|fixed|<EV>` and `MOBA_SCREEN_EFFECTS=off` (death
+//!   desaturation, damage vignette and low-health pulse, also per-effect settings);
+//!   `MOBA_SCREEN_EFFECTS_PREVIEW=death|damage|lowhealth` holds one effect for captures. The
+//!   map's `[post]` table sets exposure, eye adaptation, bloom strength and the grading LUT.
+//!   Captures pin auto exposure and dynamic resolution off unless they are set explicitly.
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
 //!   `MOBA_SERVER=local` server is lock-stepped to the client and stops at `n`, so the frame
@@ -148,6 +156,10 @@ struct ClientApp {
     portraits: offscreen::PortraitStudio,
     /// The baked top-down minimap (R7b).
     minimap: offscreen::MinimapBaker,
+    /// Gameplay screen effects (R6): death desaturation, damage vignette, low-health pulse.
+    screen_fx: screen_fx::ScreenFx,
+    /// The settings' render scale (`MOBA_RENDER_SCALE` overrides it at renderer creation).
+    render_scale: f32,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -170,13 +182,13 @@ struct ClientApp {
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
-    /// Per-frame GPU times `[shadow, scene, composite, ui, total, span, portraits, minimap,
-    /// vfx_simulate, vfx_draw, vfx_resolve]` plus the particle stats `[alive, overdraw]` while
-    /// logging, from the renderer's timestamp queries (empty on devices without timestamp
-    /// support; `0` for a pass that did not run: shadows off, or an offscreen pass not
-    /// re-rendered that frame). One entry per measured GPU frame: a sample whose frame number
-    /// was already logged is skipped.
-    gpu_log: Option<Vec<[f32; launch::GPU_LANES]>>,
+    /// Per-frame GPU times in [`launch::GPU_LANES`] order (`shadow` … `vfx_resolve`) plus the
+    /// particle stats `[alive, overdraw]` while logging, from the renderer's timestamp
+    /// queries (empty on devices without timestamp support; `0` for a pass that did not run:
+    /// shadows off, a post pass the configuration lacks, or an offscreen pass not re-rendered
+    /// that frame). One entry per measured GPU frame: a sample whose frame number was already
+    /// logged is skipped.
+    gpu_log: Option<Vec<[f32; launch::GPU_LANES.len()]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
     frame_log_path: Option<PathBuf>,
@@ -259,7 +271,8 @@ impl ClientApp {
                     + 64,
             ),
             models: models::ModelLibrary::from_env(),
-            map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env()),
+            map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env())
+                .with_exposure_override(launch::exposure_override()),
             map_capture: map_visuals::SwitchCapture::from_env(),
             bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
             animation: animation::AnimationDriver::new(animation::AnimLod::from_env(), 30),
@@ -290,6 +303,17 @@ impl ClientApp {
             hud_fx: HudFx::new(team_palette),
             portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(quality)),
             minimap: offscreen::MinimapBaker::new(offscreen::MinimapMode::from_env()),
+            screen_fx: screen_fx::ScreenFx::new(
+                screen_fx::ScreenFxSettings {
+                    death_desaturation: settings.death_desaturation,
+                    damage_vignette: settings.damage_vignette,
+                    low_health_pulse: settings.low_health_pulse,
+                },
+                std::env::var("MOBA_SCREEN_EFFECTS_PREVIEW")
+                    .ok()
+                    .and_then(|name| screen_fx::Preview::from_name(&name)),
+            ),
+            render_scale: settings.render_scale,
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -497,7 +521,7 @@ impl ClientApp {
 }
 
 impl App for ClientApp {
-    #[allow(clippy::too_many_lines)] // Renderer creation and every library's binding.
+    #[allow(clippy::too_many_lines)] // Renderer config, creation and every library's binding.
     fn on_start(&mut self, window: &Window) {
         let validation = match std::env::var("MOBA_VULKAN_VALIDATION").as_deref() {
             Ok("required") => ValidationMode::Required,
@@ -516,7 +540,12 @@ impl App for ClientApp {
             .with_shader_dir(self.shader_dir.clone())
             .with_compressed_textures(launch::compressed_textures())
             .with_lighting(Some(launch::lighting_config(self.quality)))
-            .with_vfx(self.vfx.enabled());
+            .with_vfx(self.vfx.enabled())
+            .with_post(Some(launch::post_config(
+                self.quality,
+                self.render_scale,
+                self.capture_path.is_some() || self.map_capture.is_some(),
+            )));
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -687,6 +716,7 @@ impl App for ClientApp {
                 hud_fx,
                 portraits,
                 minimap,
+                screen_fx,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -821,6 +851,7 @@ impl App for ClientApp {
                             network.prediction.set_target(None);
                             network.client.clear_pending_input();
                             hud_fx.reset();
+                            screen_fx.reset();
                         }
                         network.last_tick = snapshot.tick;
                         if network.capture_tick.is_some() {
@@ -838,6 +869,7 @@ impl App for ClientApp {
                         }) {
                             network.own_net_id = Some(own.net_id);
                             network.prediction.set_dead(own.is_dead());
+                            screen_fx.observe(own.health, own.max_health, own.is_dead());
                             network.prediction.reconcile(own.position());
                             if let Some(item) = network.demo_buy.filter(|_| {
                                 !network.demo_bought && network.phase == MatchPhase::Playing
@@ -978,7 +1010,8 @@ impl App for ClientApp {
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
                             .with_bones(bones.bones())
-                            .with_vfx(vfx.frame());
+                            .with_vfx(vfx.frame())
+                            .with_effects(screen_fx.update(frame_ms / 1_000.0));
                         // With `MOBA_CAPTURE_TICK` the capture waits for the match tick, not
                         // a frame count, so it does not depend on frame pacing.
                         let capture_due = if network.capture_tick.is_some() {
@@ -1182,11 +1215,13 @@ impl App for ClientApp {
                     let render_tick = simulation.current_tick().get() as f32;
                     vfx.update(vfx_dt, render_tick, &view, anchors, &|_, _| None);
                     vfx::push_placeholders(vfx, units);
+                    // The local preview has no player hero: only a preview effect applies.
                     let scene = Scene::new(camera, units)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
                         .with_bones(bones.bones())
-                        .with_vfx(vfx.frame());
+                        .with_vfx(vfx.frame())
+                        .with_effects(screen_fx.update(frame_ms / 1_000.0));
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
@@ -1227,27 +1262,12 @@ impl App for ClientApp {
                 // Only fresh samples: when no newer frame completed since the last call, the
                 // renderer returns the same timings again.
                 self.gpu_logged_frame = Some(timings.frame);
-                let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
                 let stats = self
                     .renderer
                     .as_ref()
                     .and_then(moba_render::Renderer::vfx_stats)
                     .filter(|stats| stats.frame == timings.frame);
-                gpu.push([
-                    pass("shadow"),
-                    pass("scene"),
-                    pass("composite"),
-                    pass("ui"),
-                    timings.total_ms,
-                    timings.span_ms,
-                    pass("portraits"),
-                    pass("minimap"),
-                    pass("vfx_simulate"),
-                    pass("vfx_draw"),
-                    pass("vfx_resolve"),
-                    stats.map_or(0.0, |stats| stats.alive as f32),
-                    stats.map_or(0.0, |stats| stats.overdraw),
-                ]);
+                gpu.push(launch::gpu_sample(&timings, stats));
             }
         }
         if let Some(message) = failure {
@@ -1273,6 +1293,7 @@ mod materials;
 mod models;
 mod offscreen;
 mod scene_build;
+mod screen_fx;
 mod skinning;
 mod vfx;
 

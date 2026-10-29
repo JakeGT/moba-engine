@@ -8,7 +8,38 @@ use crate::graph::{ImageSize, PhysicalImage};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, GpuImage};
 
-/// One `GpuImage` per transient slot, sized to the swapchain. Recreated only on resize.
+/// The two window-dependent extents transient slots are sized from (ADR-0015).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TargetExtents {
+    /// The swapchain image size.
+    pub(crate) swapchain: vk::Extent2D,
+    /// The render allocation: the swapchain size times the maximum render scale. Dynamic
+    /// resolution renders a sub-rectangle of it.
+    pub(crate) render: vk::Extent2D,
+}
+
+impl TargetExtents {
+    /// The size of a slot of `size`.
+    pub(crate) fn of(self, size: ImageSize) -> vk::Extent2D {
+        match size {
+            ImageSize::Swapchain => self.swapchain,
+            ImageSize::Render { shift } => shifted(self.render, shift),
+            ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
+        }
+    }
+}
+
+/// `extent >> shift` per side, at least 1.
+pub(crate) fn shifted(extent: vk::Extent2D, shift: u8) -> vk::Extent2D {
+    let shift = u32::from(shift.min(31));
+    vk::Extent2D {
+        width: (extent.width >> shift).max(1),
+        height: (extent.height >> shift).max(1),
+    }
+}
+
+/// One `GpuImage` per transient slot, sized to the swapchain or the render allocation.
+/// Recreated only on resize.
 pub(crate) struct TransientPool {
     images: Vec<GpuImage>,
 }
@@ -17,28 +48,30 @@ impl TransientPool {
     pub(crate) fn new(
         device: &DeviceContext,
         slots: &[PhysicalImage],
-        extent: vk::Extent2D,
+        extents: TargetExtents,
     ) -> RenderResult<Self> {
         let mut images = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            images.push(create_slot(device, index, slot, extent)?);
+            images.push(create_slot(device, index, slot, extents)?);
         }
         Ok(Self { images })
     }
 
-    /// Reallocates the swapchain-sized slots for `extent` (a resize) and keeps the
-    /// fixed-size ones (the shadow map: up to 64 MiB that a resize must not churn). Every new
-    /// image is created before any is replaced, so a failed allocation changes nothing.
+    /// Reallocates the window-sized slots for `extents` (a resize) and keeps the fixed-size
+    /// ones (the shadow map: up to 64 MiB that a resize must not churn). Every new image is
+    /// created before any is replaced, so a failed allocation changes nothing.
     pub(crate) fn resize(
         &mut self,
         device: &DeviceContext,
         slots: &[PhysicalImage],
-        extent: vk::Extent2D,
+        extents: TargetExtents,
     ) -> RenderResult<()> {
         let mut fresh = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
             fresh.push(match slot.desc.size {
-                ImageSize::Swapchain => Some(create_slot(device, index, slot, extent)?),
+                ImageSize::Swapchain | ImageSize::Render { .. } => {
+                    Some(create_slot(device, index, slot, extents)?)
+                }
                 ImageSize::Fixed { .. } => None,
             });
         }
@@ -59,20 +92,17 @@ fn create_slot(
     device: &DeviceContext,
     index: usize,
     slot: &PhysicalImage,
-    extent: vk::Extent2D,
+    extents: TargetExtents,
 ) -> RenderResult<GpuImage> {
-    let size = match slot.desc.size {
-        ImageSize::Swapchain => extent,
-        ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
-    };
-    GpuImage::new(
+    GpuImage::with_samples(
         device.device.clone(),
         device.allocator(),
         &format!("graph-transient-{index}"),
-        size,
+        extents.of(slot.desc.size),
         slot.desc.format,
         slot.usage,
         slot.desc.aspect,
+        slot.desc.samples,
     )
 }
 
@@ -155,7 +185,10 @@ impl OffscreenTarget {
 /// Clears `image` (one colour level) to opaque black and transitions it to
 /// `SHADER_READ_ONLY_OPTIMAL`, waiting for the graphics queue. On error, the flag says
 /// whether the submitted clear may still be running (the caller must then not free `image`).
-fn initialise_sampled(device: &DeviceContext, image: vk::Image) -> Result<(), (RenderError, bool)> {
+pub(crate) fn initialise_sampled(
+    device: &DeviceContext,
+    image: vk::Image,
+) -> Result<(), (RenderError, bool)> {
     let idle = |error: vk::Result| (RenderError::from(error), false);
     let range = vk::ImageSubresourceRange {
         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -240,7 +273,10 @@ fn initialise_sampled(device: &DeviceContext, image: vk::Image) -> Result<(), (R
     Ok(())
 }
 
-fn optimal_features(device: &DeviceContext, format: vk::Format) -> vk::FormatFeatureFlags {
+pub(crate) fn optimal_features(
+    device: &DeviceContext,
+    format: vk::Format,
+) -> vk::FormatFeatureFlags {
     // SAFETY: the physical device belongs to the instance the device context was made from.
     let properties = unsafe {
         device
@@ -259,6 +295,22 @@ pub(crate) fn choose_hdr_format(device: &DeviceContext, tier: QualityTier) -> vk
     let preferred = tier.hdr_format();
     if optimal_features(device, preferred).contains(required) {
         preferred
+    } else {
+        vk::Format::R16G16B16A16_SFLOAT
+    }
+}
+
+/// The bloom mip format (R6): the packed `B10G11R11_UFLOAT_PACK32` (half the bandwidth of
+/// the 64-bit format, no alpha, positive values only) where it can be rendered to, blended
+/// into and sampled with linear filtering; otherwise `R16G16B16A16_SFLOAT`.
+pub(crate) fn choose_bloom_format(device: &DeviceContext) -> vk::Format {
+    let required = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+    let packed = vk::Format::B10G11R11_UFLOAT_PACK32;
+    if optimal_features(device, packed).contains(required) {
+        packed
     } else {
         vk::Format::R16G16B16A16_SFLOAT
     }

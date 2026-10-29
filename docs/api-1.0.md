@@ -180,15 +180,26 @@ clear_environment, has_environment, set_lighting_ramp}`, `MaterialData`'s stylis
 (`new` + `with_*`), `ParticleShape`, `ParticleBlend`, `ParticleRole`, `VfxFrame` (`new`,
 `EMPTY`, `with_ally_opacity`; `Scene::with_vfx`), `VfxBudget` (`QualityTier::vfx_budget`),
 `VfxStats`, `VFX_MESH_SLOTS`, `RenderConfig::with_vfx`, `Renderer::{vfx_available,
-vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`.
+vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`. R6 (ADR-0015)
+added post-processing: `PostConfig` (`for_tier`, `off`, a `with_*` per field, `sanitized`,
+`scaled`), `AntiAliasing` and `UpscaleFilter` (`name`, `from_name`), `PostLook` (`DEFAULT` +
+`with_*`, `sanitized`: per-map exposure, eye adaptation, bloom and grading strength),
+`ScreenEffects` (`NONE` + `with_desaturation`, `with_vignette`; `Scene::effects`/
+`with_effects`), `MIN_RENDER_SCALE`/`MAX_RENDER_SCALE`, `RenderConfig::post`/`with_post`/
+`effective_post`, `Renderer::{post_config, post_look, set_post_look, set_grading_lut,
+render_scale, render_extent}` and `GpuTimings::group_ms`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
-  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`.
+  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R6):
+  `AntiAliasing`, `UpscaleFilter`.
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
   `with_*`), `VfxFrame`, and the read-only `VfxBudget` and `VfxStats`.
+- `#[non_exhaustive]` structs (R6): `PostConfig` (`for_tier`/`Default` + `with_*`), `PostLook`
+  (`DEFAULT`/`Default` + `with_*`) and `ScreenEffects` (`NONE`/`Default` + `with_*`); every
+  value is clamped by `sanitized`, which the renderer applies.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
@@ -229,7 +240,13 @@ fields, `EnvironmentDesc`/`EnvironmentError`/`environment_paths`/`sh_basis`, cub
 descriptors (ADR-0013: `VfxEffect`, `VfxEmitter`, `VfxBindings`, `VfxAbilityBinding`,
 `VfxUnitEffects`, `VfxSprite`/`VFX_SPRITES`, `procedural_atlas`, `vfx_path`; the enums
 `VfxPrimitive`, `VfxBlend`, `VfxAnchor`, `VfxDirection`, `VfxShape`, `VfxImportance` and
-`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`).
+`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`),
+and R6's post-processing assets (ADR-0015: `MapPost`/`MapVisuals::post` with the
+`DEFAULT_BLOOM_STRENGTH`, `DEFAULT_ADAPTATION`, `DEFAULT_EXPOSURE_MIN`/`MAX` defaults, and the
+`.cube` grading LUT `GradingLut` (`identity`, `from_texels`, `parse`, `load_file`, `sample`,
+`to_cube_string`), `GradingLutError`, `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
+`MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`; `GradingLut`, `GradingLutError` and `MapPost`
+are `#[non_exhaustive]`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,

@@ -11,6 +11,7 @@ const HDR: ImageDesc = ImageDesc {
     format: vk::Format::R16G16B16A16_SFLOAT,
     aspect: vk::ImageAspectFlags::COLOR,
     size: ImageSize::Swapchain,
+    samples: vk::SampleCountFlags::TYPE_1,
     extra_usage: vk::ImageUsageFlags::empty(),
 };
 
@@ -18,6 +19,7 @@ const DEPTH: ImageDesc = ImageDesc {
     format: vk::Format::D32_SFLOAT,
     aspect: vk::ImageAspectFlags::DEPTH,
     size: ImageSize::Swapchain,
+    samples: vk::SampleCountFlags::TYPE_1,
     extra_usage: vk::ImageUsageFlags::SAMPLED,
 };
 
@@ -651,4 +653,146 @@ fn compute_and_indirect_accesses_are_buffer_only() {
         graph.compile(),
         Err(GraphError::AccessMismatch { .. })
     ));
+}
+
+#[test]
+fn prepass_depth_is_sampled_then_loaded_and_written_by_the_scene() {
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    let hdr = graph.transient_image("hdr", HDR);
+    let depth = graph.transient_image("depth", DEPTH);
+    let ao = graph.transient_image(
+        "ao",
+        ImageDesc {
+            format: vk::Format::R8_UNORM,
+            size: ImageSize::Render { shift: 1 },
+            ..HDR
+        },
+    );
+    let _ = graph.pass("prepass", 0).access(depth, Access::DepthWrite);
+    let _ = graph
+        .pass("ao", 1)
+        .access(depth, Access::SampledFragment)
+        .access(ao, Access::ColorWrite);
+    let _ = graph
+        .pass("scene", 2)
+        .access(hdr, Access::ColorWrite)
+        .access(depth, Access::DepthReadWrite)
+        .access(ao, Access::SampledFragment);
+    let _ = graph
+        .pass("composite", 3)
+        .access(hdr, Access::SampledFragment)
+        .access(target, Access::ColorWrite);
+    let compiled = graph.compile().expect("compiles");
+    assert_eq!(compiled.culled(), [] as [&str; 0]);
+    let passes = compiled.passes();
+    // AO reads the prepass depth: a depth write -> fragment sampled read with a transition.
+    let read = passes[1]
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == depth)
+        .expect("depth barrier before ao");
+    assert_eq!(
+        (read.old_layout, read.new_layout),
+        (
+            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            L::SHADER_READ_ONLY_OPTIMAL
+        )
+    );
+    assert_eq!(read.src_access, A::DEPTH_STENCIL_ATTACHMENT_WRITE);
+    // The scene loads it back as an attachment after the read (write-after-read, so no
+    // access to make available, but the layout changes back and keeps the contents).
+    let load = passes[2]
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == depth)
+        .expect("depth barrier before the scene");
+    assert_eq!(
+        (load.old_layout, load.new_layout),
+        (
+            L::SHADER_READ_ONLY_OPTIMAL,
+            L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        )
+    );
+    assert_eq!(load.src_stage, S::FRAGMENT_SHADER);
+    assert!(load.dst_access.contains(A::DEPTH_STENCIL_ATTACHMENT_READ));
+    // The half-resolution AO image has its own slot.
+    assert_eq!(compiled.slots().len(), 3);
+}
+
+#[test]
+fn a_depth_resolve_is_made_visible_to_a_later_sampled_read() {
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    let msaa = ImageDesc {
+        samples: vk::SampleCountFlags::TYPE_4,
+        extra_usage: vk::ImageUsageFlags::empty(),
+        ..DEPTH
+    };
+    let msaa_depth = graph.transient_image("msaa-depth", msaa);
+    let depth = graph.transient_image("depth", DEPTH);
+    let _ = graph
+        .pass("scene", 0)
+        .access(msaa_depth, Access::DepthWrite)
+        .access(depth, Access::DepthResolveWrite)
+        .access(target, Access::ColorWrite);
+    let _ = graph
+        .pass("post", 1)
+        .access(depth, Access::SampledFragment)
+        .access(target, Access::ColorReadWrite);
+    let compiled = graph.compile().expect("compiles");
+    // Different sample counts never alias.
+    assert_eq!(compiled.slots().len(), 2);
+    let read = compiled.passes()[1]
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == depth)
+        .expect("resolve -> sampled barrier");
+    assert!(read.src_stage.contains(S::COLOR_ATTACHMENT_OUTPUT));
+    assert!(read.src_access.contains(A::COLOR_ATTACHMENT_WRITE));
+    assert_eq!(read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+}
+
+#[test]
+fn graphs_up_to_the_limits_compile_and_past_them_fail() {
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    let mut previous = None;
+    for index in 0..super::MAX_PASSES - 1 {
+        let image = graph.transient_image(
+            "chain",
+            ImageDesc {
+                size: ImageSize::Render {
+                    shift: u8::try_from(index % 6).expect("small"),
+                },
+                ..HDR
+            },
+        );
+        let mut pass = graph.pass("link", index).access(image, Access::ColorWrite);
+        if let Some(source) = previous {
+            pass = pass.access(source, Access::SampledFragment);
+        }
+        let _ = pass;
+        previous = Some(image);
+    }
+    let _ = graph
+        .pass("last", super::MAX_PASSES)
+        .access(previous.expect("chain"), Access::SampledFragment)
+        .access(target, Access::ColorWrite);
+    let compiled = graph.compile().expect("MAX_PASSES compile");
+    assert_eq!(compiled.passes().len(), super::MAX_PASSES);
+    // Resources past bit 15 are tracked (the use mask is 64-bit).
+    assert!(compiled.passes()[super::MAX_PASSES - 1].uses(previous.expect("chain")));
+
+    let mut graph = GraphBuilder::new();
+    let target = swapchain(&mut graph);
+    for index in 0..=super::MAX_PASSES {
+        let _ = graph
+            .pass("pass", index)
+            .access(target, Access::ColorReadWrite);
+    }
+    assert_eq!(
+        graph.compile().map(|_| ()),
+        Err(GraphError::TooLarge("passes"))
+    );
 }

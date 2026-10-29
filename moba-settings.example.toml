@@ -11,6 +11,13 @@ team_palette = "standard"
 # GPU particle effects (MOBA_VFX=off overrides) and the opacity of allied effects (0..1).
 vfx = true
 ally_vfx_opacity = 1.0
+# Render resolution relative to the window, 0.5..1 (the HUD stays native). MOBA_RENDER_SCALE
+# overrides it; dynamic resolution (Low by default, MOBA_DYNRES) lowers it under load.
+render_scale = 1.0
+# Accessibility: gameplay screen effects (R6). MOBA_SCREEN_EFFECTS=off turns all three off.
+death_desaturation = true   # fade to grey while your hero is dead
+damage_vignette = true      # red edge flash when your hero takes damage
+low_health_pulse = true     # red edge pulse below 30 % health
 
 [controls]
 move_up = "W"

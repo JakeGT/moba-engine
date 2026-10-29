@@ -141,6 +141,7 @@ impl Bindings {
 /// User settings persisted as TOML.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent player preferences.
 pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
     /// Rendering quality tier: `low`, `medium`, `high` or `ultra` (`MOBA_QUALITY` overrides).
@@ -156,6 +157,15 @@ pub(crate) struct Settings {
     pub(crate) vfx: bool,
     /// Opacity of allied (not your own) effects, `0..=1`: the allied-VFX dimming setting.
     pub(crate) ally_vfx_opacity: f32,
+    /// Render resolution relative to the window, `0.5..=1` (`MOBA_RENDER_SCALE` overrides);
+    /// the HUD always stays native (R6).
+    pub(crate) render_scale: f32,
+    /// Accessibility (R6): fade the screen towards grey while the local hero is dead.
+    pub(crate) death_desaturation: bool,
+    /// Accessibility (R6): flash a red vignette when the local hero takes damage.
+    pub(crate) damage_vignette: bool,
+    /// Accessibility (R6): pulse a red vignette while the local hero is below 30 % health.
+    pub(crate) low_health_pulse: bool,
     pub(crate) controls: Controls,
 }
 
@@ -171,6 +181,10 @@ impl Default for Settings {
             team_palette: String::from(crate::hud::theme::TeamPalette::default().name()),
             vfx: true,
             ally_vfx_opacity: 1.0,
+            render_scale: 1.0,
+            death_desaturation: true,
+            damage_vignette: true,
+            low_health_pulse: true,
             controls: Controls::default(),
         }
     }
@@ -352,6 +366,17 @@ impl Settings {
                 .clamp(SENSITIVITY_MIN, SENSITIVITY_MAX);
             warnings.push(String::from("settings: camera_sensitivity clamped"));
         }
+        if !self.render_scale.is_finite() {
+            self.render_scale = 1.0;
+            warnings.push(String::from("settings: render_scale reset"));
+        } else if !(moba_render::MIN_RENDER_SCALE..=moba_render::MAX_RENDER_SCALE)
+            .contains(&self.render_scale)
+        {
+            self.render_scale = self
+                .render_scale
+                .clamp(moba_render::MIN_RENDER_SCALE, moba_render::MAX_RENDER_SCALE);
+            warnings.push(String::from("settings: render_scale clamped"));
+        }
         if !self.camera_zoom.is_finite() {
             self.camera_zoom = 240.0;
             warnings.push(String::from("settings: camera_zoom reset"));
@@ -468,6 +493,28 @@ mod tests {
         let (bindings, warnings) = settings.bindings();
         assert_eq!(warnings.len(), 0);
         assert_eq!(bindings.attack_button, MouseBinding::Right);
+    }
+
+    #[test]
+    fn render_scale_and_screen_effect_settings_validate() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.render_scale, 1.0);
+        assert!(
+            defaults.death_desaturation && defaults.damage_vignette && defaults.low_health_pulse
+        );
+        let mut settings = Settings {
+            render_scale: 0.1,
+            ..Settings::default()
+        };
+        assert_eq!(settings.sanitize().len(), 1);
+        assert_eq!(settings.render_scale, 0.5);
+        settings.render_scale = f32::NAN;
+        assert_eq!(settings.sanitize().len(), 1);
+        assert_eq!(settings.render_scale, 1.0);
+        let parsed: Settings =
+            toml::from_str("render_scale = 0.75\ndamage_vignette = false\n").expect("parse");
+        assert_eq!(parsed.render_scale, 0.75);
+        assert!(!parsed.damage_vignette && parsed.low_health_pulse);
     }
 
     #[test]

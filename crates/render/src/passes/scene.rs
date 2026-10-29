@@ -27,7 +27,7 @@ use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::lighting::FrameLighting;
 use crate::mesh::{self, GpuMesh};
-use crate::pipeline::{self, PipelineSpec, VertexLayout};
+use crate::pipeline::{self, DepthOnly, PipelineSpec, VertexLayout};
 use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
@@ -88,10 +88,22 @@ struct SceneFrame {
     instance_set: vk::DescriptorSet,
 }
 
+/// Single-sample images an MSAA scene resolves into (ADR-0015).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SceneResolve {
+    pub(crate) color: vk::ImageView,
+    /// The depth resolve target (`SAMPLE_ZERO`); `None` when the prepass already resolved it.
+    pub(crate) depth: Option<vk::ImageView>,
+}
+
 /// Attachments the scene pass renders into, and how one view is drawn.
 pub(crate) struct SceneTargets<'a> {
+    /// The colour attachment (the multisampled one with MSAA).
     pub(crate) color: vk::ImageView,
+    /// The depth attachment (the multisampled one with MSAA).
     pub(crate) depth: vk::ImageView,
+    /// The render area and viewport: this frame's rendered sub-rectangle (dynamic
+    /// resolution) from the top-left corner.
     pub(crate) extent: vk::Extent2D,
     pub(crate) clear_color: [f32; 4],
     /// Draw the terrain plane (the main view and the minimap; portraits do not).
@@ -100,8 +112,21 @@ pub(crate) struct SceneTargets<'a> {
     pub(crate) clear_rects: &'a [ClearRect],
     /// The view's scene lighting set (set 3).
     pub(crate) lighting: vk::DescriptorSet,
+    /// MSAA resolve targets (main view only).
+    pub(crate) resolve: Option<SceneResolve>,
+    /// Load the depth the prepass wrote instead of clearing it (main view with AO).
+    pub(crate) load_depth: bool,
     /// Keep the depth contents for a later pass (soft particles); otherwise `DONT_CARE`.
     pub(crate) store_depth: bool,
+}
+
+/// The depth prepass's attachment (R6, ADR-0015).
+pub(crate) struct PrepassTarget {
+    /// The depth attachment (the multisampled one with MSAA), stored for the scene.
+    pub(crate) depth: vk::ImageView,
+    /// The single-sample depth the MSAA depth resolves into, for the AO pass.
+    pub(crate) resolve: Option<vk::ImageView>,
+    pub(crate) extent: vk::Extent2D,
 }
 
 /// The shadow map the shadow pass renders into.
@@ -153,6 +178,28 @@ pub(crate) struct ScenePipelines {
     /// Depth-only skinned caster; `None` when shadows or skinning are off (then skinned
     /// meshes cast no shadow).
     skinned_shadow: Option<GraphicsPipeline>,
+    /// The depth prepass (R6); `None` without AO.
+    prepass: Option<PrepassPipelines>,
+}
+
+/// Depth-only pipelines of the prepass: the scene's own vertex shaders (`invariant
+/// gl_Position`) with no fragment stage, so the scene pass reproduces the depth exactly.
+pub(crate) struct PrepassPipelines {
+    terrain: GraphicsPipeline,
+    unit: GraphicsPipeline,
+    unit_textured: GraphicsPipeline,
+    skinned: Option<GraphicsPipeline>,
+    skinned_textured: Option<GraphicsPipeline>,
+}
+
+/// What one [`ScenePipelines`] set is built for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SceneSetSpec {
+    pub(crate) samples: vk::SampleCountFlags,
+    /// Build the shadow casters (the single-sample set only).
+    pub(crate) shadow: Option<ShadowPipelineSpec>,
+    /// Build the prepass pipelines (the main view's set, with AO).
+    pub(crate) prepass: bool,
 }
 
 impl ScenePipelines {
@@ -163,9 +210,14 @@ impl ScenePipelines {
         layout: vk::PipelineLayout,
         color_format: vk::Format,
         depth_format: vk::Format,
-        shadow: Option<ShadowPipelineSpec>,
+        set: SceneSetSpec,
         skinning: bool,
     ) -> RenderResult<Self> {
+        let SceneSetSpec {
+            samples,
+            shadow,
+            prepass,
+        } = set;
         let module = |name| shaders.module(device, name);
         let unit_vertex = module("unit.vert")?;
         let unit_fragment = module("unit.frag")?;
@@ -184,6 +236,7 @@ impl ScenePipelines {
                     color_format,
                     depth_format,
                     cull_mode: vk::CullModeFlags::NONE,
+                    samples,
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -248,7 +301,7 @@ impl ScenePipelines {
                     vertex_layout,
                     vertex.handle(),
                     spec.format,
-                    spec.depth_clamp,
+                    DepthOnly::shadow(spec.depth_clamp),
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
             })
@@ -273,6 +326,43 @@ impl ScenePipelines {
             }
             None => (None, None),
         };
+        let prepass = if prepass {
+            let depth_only = |vertex: vk::ShaderModule, vertex_layout| {
+                pipeline::create_depth_only(
+                    device,
+                    layout,
+                    vertex_layout,
+                    vertex,
+                    depth_format,
+                    DepthOnly::prepass(samples),
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+            };
+            // Each depth-only twin exists exactly when its shaded pipeline does.
+            let skinned_depth = match &skinned {
+                Some(_) => Some(depth_only(
+                    module("skinned.vert")?.handle(),
+                    VertexLayout::Skinned,
+                )?),
+                None => None,
+            };
+            let skinned_textured_depth = match &skinned_textured {
+                Some(_) => Some(depth_only(
+                    module("skinned_textured.vert")?.handle(),
+                    VertexLayout::SkinnedTextured,
+                )?),
+                None => None,
+            };
+            Some(PrepassPipelines {
+                terrain: depth_only(terrain_vertex.handle(), VertexLayout::Static)?,
+                unit: depth_only(unit_vertex.handle(), VertexLayout::Static)?,
+                unit_textured: depth_only(textured_vertex.handle(), VertexLayout::StaticTextured)?,
+                skinned: skinned_depth,
+                skinned_textured: skinned_textured_depth,
+            })
+        } else {
+            None
+        };
         Ok(Self {
             unit,
             unit_textured,
@@ -281,6 +371,7 @@ impl ScenePipelines {
             skinned_textured,
             unit_shadow,
             skinned_shadow,
+            prepass,
         })
     }
 }
@@ -308,12 +399,42 @@ pub(crate) struct ScenePass {
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
     pipeline_layout: PipelineLayout,
+    /// Single-sample pipelines: the offscreen views, the shadow casters and, without MSAA,
+    /// the main view (and its prepass).
     pipelines: ScenePipelines,
+    /// The main view's MSAA pipelines (and its prepass), when MSAA is on (ADR-0015).
+    msaa_pipelines: Option<ScenePipelines>,
     color_format: vk::Format,
     depth_format: vk::Format,
     /// The shadow casters' spec; `None` when shadows are off.
     shadow: Option<ShadowPipelineSpec>,
+    /// The main view's sample count and whether it has a prepass.
+    main: MainViewSpec,
     skinning: bool,
+}
+
+/// How the main view is drawn (ADR-0015).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainViewSpec {
+    pub(crate) samples: vk::SampleCountFlags,
+    pub(crate) prepass: bool,
+}
+
+impl MainViewSpec {
+    fn sets(self, shadow: Option<ShadowPipelineSpec>) -> (SceneSetSpec, Option<SceneSetSpec>) {
+        let msaa = self.samples != vk::SampleCountFlags::TYPE_1;
+        let base = SceneSetSpec {
+            samples: vk::SampleCountFlags::TYPE_1,
+            shadow,
+            prepass: self.prepass && !msaa,
+        };
+        let main = msaa.then_some(SceneSetSpec {
+            samples: self.samples,
+            shadow: None,
+            prepass: self.prepass,
+        });
+        (base, main)
+    }
 }
 
 impl ScenePass {
@@ -333,6 +454,7 @@ impl ScenePass {
         material_layout: vk::DescriptorSetLayout,
         lighting_layout: vk::DescriptorSetLayout,
         views: &[ViewBudget],
+        main: MainViewSpec,
         skinning: bool,
     ) -> RenderResult<Self> {
         let camera_binding = [vk::DescriptorSetLayoutBinding::default()
@@ -383,15 +505,29 @@ impl ScenePass {
             .size(SKIN_PUSH_SIZE)];
         let pipeline_layout =
             PipelineLayout::with_push_constants(device.device.clone(), &layouts, &skin_push)?;
+        let (base_set, main_set) = main.sets(shadow);
         let pipelines = ScenePipelines::build(
             device,
             shaders,
             pipeline_layout.handle(),
             color_format,
             depth_format,
-            shadow,
+            base_set,
             skinning,
         )?;
+        let msaa_pipelines = main_set
+            .map(|set| {
+                ScenePipelines::build(
+                    device,
+                    shaders,
+                    pipeline_layout.handle(),
+                    color_format,
+                    depth_format,
+                    set,
+                    skinning,
+                )
+            })
+            .transpose()?;
 
         let terrain_mesh = mesh::upload(device, &mesh::CpuMesh::plane(300.0))?;
         let mut meshes = Vec::with_capacity(MAX_MESHES);
@@ -421,9 +557,11 @@ impl ScenePass {
             _instance_layout: instance_layout,
             pipeline_layout,
             pipelines,
+            msaa_pipelines,
             color_format,
             depth_format,
             shadow,
+            main,
             skinning,
         })
     }
@@ -436,28 +574,52 @@ impl ScenePass {
         &self,
         device: &DeviceContext,
         shaders: &ShaderSource,
-    ) -> RenderResult<ScenePipelines> {
-        let pipelines = ScenePipelines::build(
-            device,
-            shaders,
-            self.pipeline_layout.handle(),
-            self.color_format,
-            self.depth_format,
-            self.shadow,
-            self.skinning,
-        )?;
-        if pipelines.skinned.is_some() != self.pipelines.skinned.is_some()
-            || pipelines.skinned_textured.is_some() != self.pipelines.skinned_textured.is_some()
-            || pipelines.skinned_shadow.is_some() != self.pipelines.skinned_shadow.is_some()
+    ) -> RenderResult<(ScenePipelines, Option<ScenePipelines>)> {
+        let (base_set, main_set) = self.main.sets(self.shadow);
+        let build = |set| {
+            ScenePipelines::build(
+                device,
+                shaders,
+                self.pipeline_layout.handle(),
+                self.color_format,
+                self.depth_format,
+                set,
+                self.skinning,
+            )
+        };
+        let pipelines = build(base_set)?;
+        let msaa = main_set.map(build).transpose()?;
+        let lost = |new: &ScenePipelines, old: &ScenePipelines| {
+            new.skinned.is_some() != old.skinned.is_some()
+                || new.skinned_textured.is_some() != old.skinned_textured.is_some()
+                || new.skinned_shadow.is_some() != old.skinned_shadow.is_some()
+        };
+        if lost(&pipelines, &self.pipelines)
+            || msaa
+                .as_ref()
+                .zip(self.msaa_pipelines.as_ref())
+                .is_some_and(|(new, old)| lost(new, old))
         {
             return Err(RenderError::Shader("a skinned pipeline failed to rebuild"));
         }
-        Ok(pipelines)
+        Ok((pipelines, msaa))
     }
 
     /// Installs pipelines from [`Self::build_pipelines`]. The device must be idle.
-    pub(crate) fn install_pipelines(&mut self, pipelines: ScenePipelines) {
+    pub(crate) fn install_pipelines(
+        &mut self,
+        (pipelines, msaa): (ScenePipelines, Option<ScenePipelines>),
+    ) {
         self.pipelines = pipelines;
+        self.msaa_pipelines = msaa;
+    }
+
+    /// The pipeline set `view` draws with: the MSAA set for the main view when MSAA is on.
+    fn view_pipelines(&self, view: usize) -> &ScenePipelines {
+        match (&self.msaa_pipelines, view) {
+            (Some(msaa), 0) => msaa,
+            _ => &self.pipelines,
+        }
     }
 
     /// Draws `mesh` with the material whose descriptor set is `set` (null for the
@@ -644,8 +806,9 @@ impl ScenePass {
         targets: &SceneTargets<'_>,
     ) {
         let state = &self.views[view];
+        let pipelines = self.view_pipelines(view);
         let extent = targets.extent;
-        let color_attachment = vk::RenderingAttachmentInfo::default()
+        let mut color_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(targets.color)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -661,10 +824,15 @@ impl ScenePass {
         } else {
             vk::AttachmentStoreOp::DONT_CARE
         };
-        let depth_attachment = vk::RenderingAttachmentInfo::default()
+        let depth_load = if targets.load_depth {
+            vk::AttachmentLoadOp::LOAD
+        } else {
+            vk::AttachmentLoadOp::CLEAR
+        };
+        let mut depth_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(targets.depth)
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(depth_load)
             .store_op(depth_store)
             .clear_value(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
@@ -672,6 +840,20 @@ impl ScenePass {
                     stencil: 0,
                 },
             });
+        if let Some(resolve) = targets.resolve {
+            // MSAA: only the resolved images live on; the multisampled colour is discarded.
+            color_attachment = color_attachment
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+                .resolve_image_view(resolve.color)
+                .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            if let Some(depth) = resolve.depth {
+                depth_attachment = depth_attachment
+                    .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+                    .resolve_image_view(depth)
+                    .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            }
+        }
         let render_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
@@ -705,7 +887,7 @@ impl ScenePass {
         }
 
         if targets.terrain {
-            bind_pipeline(device, command_buffer, &self.pipelines.terrain);
+            bind_pipeline(device, command_buffer, &pipelines.terrain);
             bind_mesh(device, command_buffer, &self.terrain_mesh);
             // SAFETY: the mesh is uploaded and drawable; its index buffer holds `index_count`
             // in-range `u32` indices.
@@ -723,16 +905,21 @@ impl ScenePass {
 
         if state.unit_count > 0 {
             for textured in [false, true] {
-                self.record_static(device, command_buffer, state, textured);
+                let pipeline = if textured {
+                    &pipelines.unit_textured
+                } else {
+                    &pipelines.unit
+                };
+                self.draw_static(device, command_buffer, state, pipeline, textured, true);
             }
         }
 
         if !state.skinned_draws.is_empty()
-            && let Some(skinned) = &self.pipelines.skinned
+            && let Some(skinned) = &pipelines.skinned
         {
             // Textured skinned meshes fall back to the vertex-colour pipeline if their
             // permutation is missing.
-            let textured = self.pipelines.skinned_textured.as_ref();
+            let textured = pipelines.skinned_textured.as_ref();
             self.record_skinned(device, command_buffer, state, skinned, false);
             self.record_skinned(
                 device,
@@ -832,20 +1019,82 @@ impl ScenePass {
         device.cmd_end_rendering(command_buffer);
     }
 
-    /// One instanced draw per static mesh whose material is (`textured`) or is not textured.
-    fn record_static(
+    /// Records the main view's depth prepass (R6, ADR-0015): terrain, static and skinned
+    /// meshes with the depth-only twins of the scene pipelines into `target` (cleared to 1
+    /// and stored for the scene, which loads it), resolving sample 0 into the single-sample
+    /// depth with MSAA. Uses the main view's camera, instances and bones prepared for the
+    /// scene; materials are not bound (the vertex shaders do not read them).
+    pub(crate) fn record_prepass(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
-        state: &SceneView,
-        textured: bool,
+        frame: usize,
+        target: &PrepassTarget,
     ) {
-        let pipeline = if textured {
-            &self.pipelines.unit_textured
-        } else {
-            &self.pipelines.unit
+        let Some(prepass) = self.view_pipelines(0).prepass.as_ref() else {
+            return;
         };
-        self.draw_static(device, command_buffer, state, pipeline, textured, true);
+        let state = &self.views[0];
+        let mut depth_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(target.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            });
+        if let Some(resolve) = target.resolve {
+            depth_attachment = depth_attachment
+                .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+                .resolve_image_view(resolve)
+                .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        }
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: target.extent,
+            })
+            .layer_count(1)
+            .depth_attachment(&depth_attachment);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(
+            device,
+            command_buffer,
+            super::flipped_viewport(target.extent),
+            target.extent,
+        );
+        self.bind_view_sets(device, command_buffer, state, frame);
+        bind_pipeline(device, command_buffer, &prepass.terrain);
+        bind_mesh(device, command_buffer, &self.terrain_mesh);
+        // SAFETY: as in `record`: the terrain mesh holds `index_count` in-range indices.
+        unsafe {
+            device.device.cmd_draw_indexed(
+                command_buffer,
+                self.terrain_mesh.index_count,
+                1,
+                0,
+                0,
+                0,
+            );
+        }
+        if state.unit_count > 0 {
+            for (textured, pipeline) in [(false, &prepass.unit), (true, &prepass.unit_textured)] {
+                self.draw_static(device, command_buffer, state, pipeline, textured, false);
+            }
+        }
+        if !state.skinned_draws.is_empty()
+            && let Some(skinned) = &prepass.skinned
+        {
+            // The same fallback as the shaded pass: textured skinned meshes without their
+            // permutation draw with the vertex-colour pipeline.
+            let textured = prepass.skinned_textured.as_ref().unwrap_or(skinned);
+            self.draw_skinned(device, command_buffer, state, skinned, false, false);
+            self.draw_skinned(device, command_buffer, state, textured, true, false);
+        }
+        device.cmd_end_rendering(command_buffer);
     }
 
     /// One instanced draw with `pipeline` per static mesh whose material is (`textured`) or is

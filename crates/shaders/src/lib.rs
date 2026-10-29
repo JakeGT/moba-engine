@@ -10,6 +10,7 @@
 //! preprocessor defines, each its own module: the `*_TEXTURED` modules are the
 //! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010), and the
 //! `*_shadow` modules are the `SHADOW_PASS` depth-only casters of the shadow map (ADR-0011).
+//! The R6 post-processing chain (ADR-0015) adds fullscreen passes sharing `include/post.glsl`.
 
 #![forbid(unsafe_code)]
 
@@ -43,8 +44,23 @@ pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrai
 pub const TERRAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.frag.spv"));
 /// Fullscreen-triangle vertex shader (no vertex buffer) for fullscreen passes.
 pub const FULLSCREEN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv"));
-/// Composite fragment shader: HDR scene colour, exposure and the `AgX` tonemap.
+/// Composite fragment shader: HDR scene colour, bloom, exposure, the `AgX` tonemap, the
+/// grading LUT and the gameplay screen effects (R6).
 pub const COMPOSITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composite.frag.spv"));
+/// Bloom down-sample (R6): the 13-tap filter, Karis average on the first level.
+pub const BLOOM_DOWN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom_down.frag.spv"));
+/// Bloom up-sample (R6): a 3x3 tent added into the larger mip.
+pub const BLOOM_UP_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom_up.frag.spv"));
+/// Auto exposure (R6): log-average metering of the last bloom mip, clamped.
+pub const EXPOSURE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/exposure.frag.spv"));
+/// FXAA (R6) on the tonemapped image at render resolution.
+pub const FXAA_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fxaa.frag.spv"));
+/// Render-scale upscale (R6): bilinear or Catmull-Rom bicubic.
+pub const UPSCALE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/upscale.frag.spv"));
+/// Ground-truth ambient occlusion (R6) at half resolution from the prepass depth.
+pub const GTAO_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gtao.frag.spv"));
+/// Depth-aware 4x4 AO blur (R6).
+pub const AO_BLUR_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ao_blur.frag.spv"));
 /// Screen-space UI vertex shader.
 pub const UI_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.vert.spv"));
 /// Screen-space UI fragment shader.
@@ -123,6 +139,34 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "composite.frag",
         spirv: COMPOSITE_FRAG,
+    },
+    ShaderModule {
+        name: "bloom_down.frag",
+        spirv: BLOOM_DOWN_FRAG,
+    },
+    ShaderModule {
+        name: "bloom_up.frag",
+        spirv: BLOOM_UP_FRAG,
+    },
+    ShaderModule {
+        name: "exposure.frag",
+        spirv: EXPOSURE_FRAG,
+    },
+    ShaderModule {
+        name: "fxaa.frag",
+        spirv: FXAA_FRAG,
+    },
+    ShaderModule {
+        name: "upscale.frag",
+        spirv: UPSCALE_FRAG,
+    },
+    ShaderModule {
+        name: "gtao.frag",
+        spirv: GTAO_FRAG,
+    },
+    ShaderModule {
+        name: "ao_blur.frag",
+        spirv: AO_BLUR_FRAG,
     },
     ShaderModule {
         name: "ui.vert",

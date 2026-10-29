@@ -85,6 +85,7 @@ pub(crate) fn upload(
                 height: texture.height(),
             },
             cube: texture.is_cube(),
+            depth: 1,
             levels: &levels[..count],
             bytes: texture.data(),
         },
@@ -97,6 +98,8 @@ pub(crate) struct RawImage<'a> {
     pub(crate) format: vk::Format,
     pub(crate) extent: vk::Extent2D,
     pub(crate) cube: bool,
+    /// Slices of a 3D image (a square `extent` x `depth` volume, one level); 1 otherwise.
+    pub(crate) depth: u32,
     pub(crate) levels: &'a [(usize, usize)],
     pub(crate) bytes: &'a [u8],
 }
@@ -133,7 +136,16 @@ pub(crate) fn upload_raw(
     )?;
     staging.write_bytes(0, raw.bytes);
     let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
-    let image = if raw.cube {
+    let image = if raw.depth > 1 {
+        GpuImage::volume(
+            device.device.clone(),
+            device.allocator(),
+            name,
+            raw.extent.width,
+            raw.format,
+            usage,
+        )?
+    } else if raw.cube {
         GpuImage::cube_with_mips(
             device.device.clone(),
             device.allocator(),
@@ -206,7 +218,7 @@ pub(crate) fn upload_raw(
                 .image_extent(vk::Extent3D {
                     width,
                     height,
-                    depth: 1,
+                    depth: raw.depth.max(1),
                 }),
         );
     }

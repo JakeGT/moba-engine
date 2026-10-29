@@ -575,6 +575,11 @@ pub(crate) struct FrameLighting {
     pub(crate) specular_tint: [f32; 4],
     pub(crate) ambient_ground: [f32; 4],
     pub(crate) sh: [[f32; 4]; 9],
+    /// R6 AO lookup (`camera.post_params`): strength, AO uv per render pixel; zero (no AO
+    /// fetch) unless the renderer sets it for the main view.
+    pub(crate) post_params: [f32; 4],
+    /// Largest AO uv inside the rendered sub-rectangle (`camera.post_clamp`).
+    pub(crate) post_clamp: [f32; 4],
 }
 
 impl FrameLighting {
@@ -674,12 +679,14 @@ impl FrameLighting {
             ],
             ambient_ground: [ground[0], ground[1], ground[2], 0.0],
             sh,
+            post_params: [0.0; 4],
+            post_clamp: [0.0; 4],
         }
     }
 }
 
 /// Bindings of the lighting set (set 3), as in `lighting.glsl`.
-const BINDINGS: u32 = 5;
+const BINDINGS: u32 = 6;
 
 /// The scene lighting descriptor set and the images it names besides the shadow transient.
 pub(crate) struct LightingResources {
@@ -703,6 +710,8 @@ pub(crate) struct LightingResources {
     ramp: Option<vk::ImageView>,
     /// The bound shadow-map view: the graph transient, or the default.
     shadow_view: vk::ImageView,
+    /// The bound AO view (R6): the graph transient, or `default_ramp` (white).
+    ao_view: vk::ImageView,
     state: EnvironmentState,
 }
 
@@ -786,6 +795,7 @@ impl LightingResources {
                     height: 1,
                 },
                 cube: true,
+                depth: 1,
                 levels: &[(0, 24)],
                 bytes: &[0, 0, 0, 255].repeat(6),
             },
@@ -801,12 +811,14 @@ impl LightingResources {
                     height: BRDF_LUT_SIZE,
                 },
                 cube: false,
+                depth: 1,
                 levels: &[(0, lut.len())],
                 bytes: &lut,
             },
         )?;
         let default_ramp = texture::upload_rgba(device, "default-ramp", 1, 1, &[255; 4])?;
         let shadow_view = default_shadow.view();
+        let ao_view = default_ramp.view();
         let resources = Self {
             set,
             offscreen_set,
@@ -822,6 +834,7 @@ impl LightingResources {
             default_ramp,
             ramp: None,
             shadow_view,
+            ao_view,
             state: EnvironmentState::NONE,
         };
         resources.write(device);
@@ -853,6 +866,13 @@ impl LightingResources {
         self.write(device);
     }
 
+    /// Points the main view's set at `view` (the blurred AO transient, R6) or white. The
+    /// device must be idle or the set unused by pending work (creation, resize).
+    pub(crate) fn bind_ao(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
+        self.ao_view = view.unwrap_or(self.default_ramp.view());
+        self.write(device);
+    }
+
     /// Replaces the environment. The device must be idle.
     pub(crate) fn set_environment(
         &mut self,
@@ -873,11 +893,23 @@ impl LightingResources {
     }
 
     fn write(&self, device: &DeviceContext) {
-        self.write_set(device, self.set, self.shadow_view);
-        self.write_set(device, self.offscreen_set, self.default_shadow.view());
+        self.write_set(device, self.set, self.shadow_view, self.ao_view);
+        // Offscreen views: the default shadow image and white AO.
+        self.write_set(
+            device,
+            self.offscreen_set,
+            self.default_shadow.view(),
+            self.default_ramp.view(),
+        );
     }
 
-    fn write_set(&self, device: &DeviceContext, set: vk::DescriptorSet, shadow: vk::ImageView) {
+    fn write_set(
+        &self,
+        device: &DeviceContext,
+        set: vk::DescriptorSet,
+        shadow: vk::ImageView,
+        ao: vk::ImageView,
+    ) {
         let environment = self
             .environment
             .as_ref()
@@ -891,6 +923,7 @@ impl LightingResources {
                 self.linear_clamp.handle(),
                 self.ramp.unwrap_or(self.default_ramp.view()),
             ),
+            (self.linear_clamp.handle(), ao),
         ];
         let infos: [[vk::DescriptorImageInfo; 1]; BINDINGS as usize] =
             core::array::from_fn(|index| {

@@ -15,3 +15,10 @@ shadow_strength = 0.75
 wrap = 0.2
 rim = 0.25
 rim_color = [0.85, 0.92, 1.0]
+
+# Post-processing (R6): the neutral-warm meadow grade and the default-level bloom.
+[post]
+exposure = 0.0                   # EV stops
+bloom = 0.04
+grading = "meadow"               # grading/meadow.cube: grade-bake bake --preset meadow --size 17
+grading_strength = 0.8

@@ -38,6 +38,10 @@ layout(set = 0, binding = 0) uniform CameraBlock {
     vec4 specular_tint;    // rgb painted-specular tint, w specular scale
     vec4 ambient_ground;   // rgb hemispheric ground ambient, w reserved
     vec4 sh[9];            // SH-L2 diffuse irradiance / pi (rgb), environment maps only
+    // R6 post-processing (ADR-0015).
+    vec4 post_params;      // x AO strength (0 = no AO fetch), yz 0.5 / AO image size (AO uv
+                           // per render pixel), w reserved
+    vec4 post_clamp;       // xy largest AO uv inside this frame's rendered sub-rectangle
 } camera;
 
 #endif

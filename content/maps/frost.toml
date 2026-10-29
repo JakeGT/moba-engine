@@ -53,3 +53,10 @@ rim = 0.3
 rim_color = [0.6, 0.85, 1.0]
 unit_roughness = 0.45
 terrain_roughness = 0.7
+
+# Post-processing (R6): the cool, crisp frost grade; restrained bloom over bright snow.
+[post]
+exposure = 0.0                   # EV stops
+bloom = 0.04
+grading = "frost"                # grading/frost.cube: grade-bake bake --preset frost --size 17
+grading_strength = 0.85

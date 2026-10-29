@@ -882,6 +882,86 @@ the target point, a projectile from the caster to the target if the effect has a
 3 s, 4 m zone if it sets `event_duration`. Saving any file in `vfx/` reloads the effects
 within half a second, without restarting.
 
+### Post-processing
+
+Exposure, eye adaptation, bloom and colour grading are set per map in the visuals descriptor's
+optional `[post]` table (R6); every key is optional and unset keys keep the engine defaults.
+Like the rest of the descriptor it is client-local and never hashed or sent. The three shipped
+descriptors each have one; [`content/maps/ember.toml`](../content/maps/ember.toml) is the
+auto-exposure example:
+
+```toml
+[post]
+exposure = 0.0                 # exposure compensation in EV stops, -4..=4 (default 0)
+auto_exposure = true           # opt in to eye adaptation (default off)
+exposure_min = -1.0            # auto-exposure clamp in EV stops, -8..=8 (default -2)
+exposure_max = 1.0             # -8..=8, at least exposure_min (default 2)
+adaptation = 1.5               # adaptation rate per second, 0.1..=10 (default 1.5)
+bloom = 0.06                   # bloom strength, 0..=0.25 (default 0.04)
+grading = "ember"              # <root>/grading/ember.cube: a colour-grading 3D LUT
+grading_strength = 0.9         # 0..=1: blend from the ungraded to the graded colour
+```
+
+- **Exposure** is in EV stops: `+1` doubles the scene light reaching the tonemapper, `-1`
+  halves it.
+- **Auto exposure** is opt-in per map. When on, the exposure adapts towards the scene's
+  brightness at `adaptation` per second, clamped to `exposure_min..=exposure_max` EV. An
+  unset bound takes its default, so `exposure_min = 3` alone is an error (above the default
+  `exposure_max` of 2). Captures and golden images pin auto exposure off so they stay
+  deterministic.
+- **Bloom** is kept low by default so bright surfaces glow; the range stops at 0.25 so a map
+  cannot wash its units out.
+- **Grading names** follow the model-name rules (1..=32 of `[A-Za-z0-9_-]`) and resolve to
+  `<root>/grading/<name>.cube`.
+- **Limits.** Unknown keys, wrong types and out-of-range or non-finite numbers are errors,
+  like the rest of the descriptor.
+
+**Grading LUTs** use the Adobe/Resolve `.cube` text format, 3D only. The LUT's input and
+output are **display-encoded** RGB: the input is the tonemapper's AgX output (roughly a 2.2
+gamma) and the output is written to the display as is, so a LUT from a grading tool must be
+built for a display-referred (gamma 2.2 / sRGB-like) image, not for log or linear footage.
+The loader accepts:
+
+- `LUT_3D_SIZE` from 2 to 64, exactly once and before the data, then exactly size³ data lines
+  of three numbers, red varying fastest, then green, then blue;
+- `TITLE` (ignored), `#` comments and blank lines;
+- `DOMAIN_MIN 0 0 0` and `DOMAIN_MAX 1 1 1` only: any other input domain is an error, since
+  the input is always `0..1`;
+- data values that are finite and within −0.5..=1.5, stored clamped to `0..=1`.
+
+`LUT_1D_SIZE`, unknown keywords and keywords after the data are errors. A file is at most
+8 MiB (a 64³ LUT with six decimals is about 7 MB). The shipped LUTs are 17³ (about 130 KB).
+
+**Readability.** Grades are art direction, not a filter: they must keep team colours
+distinguishable (ADR-0011 rule 1). Team red stays red and team blue stays blue, with their
+hues within about 15°; keep blue-channel loss small in warm grades. The `grade-bake` presets
+are tested for exactly this; check a hand-made LUT with `grade-bake apply` on a capture.
+
+**LUTs** come from `moba-tools grade-bake`, which evaluates a deterministic grade on every
+lattice point: per-channel lift/gamma/gain (`out = (gain·(x + lift·(1 − x)))^(1/gamma)`),
+contrast around 0.5, saturation around Rec.709 luma, then white balance as per-channel gains
+(`r ·= 1 + 0.1·temperature`, `b ·= 1 − 0.1·temperature`, `g ·= 1 − 0.1·tint`), clamped to
+`0..=1`, all in display space:
+
+```bash
+# writes content/grading/ember.cube (17³)
+cargo run --release -p moba-tools --bin grade-bake -- bake --preset ember --size 17 content/grading/ember.cube
+cargo run --release -p moba-tools --bin grade-bake -- bake --preset frost --saturation 0.85 \
+  --lift 0,0.01,0.02 content/grading/my-frost.cube
+cargo run --release -p moba-tools --bin grade-bake -- info content/grading/ember.cube
+cargo run --release -p moba-tools --bin grade-bake -- apply content/grading/ember.cube shot.png graded.png
+```
+
+Presets are `identity` (the default), `ember` (warm, slightly lifted shadows, gentle
+contrast), `frost` (cool, slightly desaturated, crisp) and `meadow` (neutral-warm, a touch
+more saturation). `--saturation` (0..=2), `--contrast` (0.5..=2), `--temperature` and
+`--tint` (−1..=1), `--lift r,g,b` (−0.5..=0.5), `--gamma r,g,b` (0.2..=5) and
+`--gain r,g,b` (0..=2) override any value; `--size` is 2..=64 (default 33). The file's header
+comments record the preset and every parameter, so a bake is reproducible. `info` prints the
+size, each channel's output range and the mean absolute deviation from the identity; `apply`
+grades an 8-bit PNG (its values taken as display-encoded) for side-by-side previews.
+`scripts/bake-sample-textures.sh` regenerates the shipped three.
+
 ## Hot reload
 
 ```bash

@@ -10,6 +10,10 @@
 //   view-projection (no fragment shader).
 
 #include "camera.glsl"
+
+// The depth prepass (R6, ADR-0015) draws with this shader and no fragment stage; the scene
+// pass then tests LESS_OR_EQUAL against that depth, so both must compute the same position.
+invariant gl_Position;
 #include "instance.glsl"
 
 layout(location = 0) in vec3 in_position;

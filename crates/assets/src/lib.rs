@@ -28,6 +28,9 @@
 //! (`vfx/<name>.toml`, up to eight particle emitters), [`VfxBindings`] maps ability names and
 //! unit events to effects (`vfx/bindings.toml`), and [`procedural_atlas`] generates the
 //! built-in particle atlas.
+//! Post-processing (R6): [`MapPost`] is the descriptor's `[post]` table (exposure, eye
+//! adaptation, bloom, grading) and [`GradingLut`] is a bounded 3D colour-grading LUT parsed
+//! from the `.cube` text format (`grading/<name>.cube`).
 
 #![forbid(unsafe_code)]
 
@@ -35,6 +38,7 @@ mod animation;
 mod environment;
 #[cfg(feature = "glb")]
 mod glb;
+mod grading;
 mod map_visuals;
 mod material;
 mod mesh;
@@ -60,10 +64,15 @@ pub use environment::{
 };
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
+pub use grading::{
+    GRADING_DIR, GradingLut, GradingLutError, MAX_GRADING_LUT_BYTES, MAX_GRADING_LUT_SIZE,
+    MIN_GRADING_LUT_SIZE, grading_path,
+};
 pub use map_visuals::{
+    DEFAULT_ADAPTATION, DEFAULT_BLOOM_STRENGTH, DEFAULT_EXPOSURE_MAX, DEFAULT_EXPOSURE_MIN,
     DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_ROUGHNESS, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT,
     MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MESH_NAME, MAX_SHADOW_STRENGTH,
-    MIN_SUN_ELEVATION, MapLighting, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
+    MIN_SUN_ELEVATION, MapLighting, MapPost, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
 };
 pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,

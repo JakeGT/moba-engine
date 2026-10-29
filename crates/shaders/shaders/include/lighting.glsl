@@ -26,6 +26,8 @@ layout(set = 3, binding = 2) uniform samplerCube environment_specular;
 layout(set = 3, binding = 3) uniform sampler2D brdf_lut;
 // Stylisation ramp: N.L remapped from [-1, 1] to u, rgb multiplier.
 layout(set = 3, binding = 4) uniform sampler2D lighting_ramp;
+// Half-resolution ambient occlusion (R6 GTAO, ADR-0015); white 1x1 without AO.
+layout(set = 3, binding = 5) uniform sampler2D ambient_occlusion;
 
 const float MOBA_PI = 3.14159265;
 const float MOBA_MIN_ROUGHNESS = 0.045;
@@ -86,6 +88,22 @@ vec3 ambient_specular(vec3 r, float roughness) {
     }
     // Low tier: no cube fetch; the irradiance in the reflection direction stands in.
     return sh_irradiance(r) * intensity;
+}
+
+// Screen-space ambient occlusion under this fragment (1 = open), blended by the AO
+// strength. Main view only: offscreen views set the strength to 0 and skip the fetch.
+float ambient_occlusion_here() {
+    float strength = camera.post_params.x;
+    if (strength <= 0.0) {
+        return 1.0;
+    }
+    vec2 uv = min(gl_FragCoord.xy * camera.post_params.yz, camera.post_clamp.xy);
+    return mix(1.0, textureLod(ambient_occlusion, uv, 0.0).r, strength);
+}
+
+// Specular occlusion from ambient occlusion (Lagarde and de Rousiers 2014).
+float specular_occlusion(float n_dot_v, float ao, float roughness) {
+    return clamp(pow(n_dot_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
 float distribution_ggx(float n_dot_h, float alpha) {
@@ -228,6 +246,11 @@ vec3 shade(Surface surface) {
     vec3 ambient_diffuse = kd_ambient * surface.albedo * ambient_irradiance(n);
     vec3 ambient_spec = ambient_specular(r, roughness) * (f0 * brdf.x + brdf.y)
         * surface.specular.rgb * surface.specular.w;
+    // R6: AO occludes the ambient (indirect) terms only; direct light, rim and emissive
+    // keep their readability (ADR-0015).
+    float ao = ambient_occlusion_here();
+    ambient_diffuse *= ao;
+    ambient_spec *= specular_occlusion(n_dot_v, ao, roughness);
 
     // Rim: a coloured silhouette term, strongest where the surface turns away from the eye.
     // Half of it takes the surface's own hue (albedo normalised to its brightest channel), so

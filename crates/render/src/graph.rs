@@ -17,11 +17,12 @@
 
 use ash::vk;
 
-/// Most passes one graph may hold (the GPU profiler sizes its query pools from this).
-pub(crate) const MAX_PASSES: usize = 12;
-/// Most resources (imported + transient) one graph may declare (at most 32: a pass's
-/// resource set is a `u32` bit mask).
-pub(crate) const MAX_RESOURCES: usize = 24;
+/// Most passes one graph may hold (the GPU profiler sizes its query pools from this). R6's
+/// post chain (ADR-0015) brings a full frame to about 27.
+pub(crate) const MAX_PASSES: usize = 32;
+/// Most resources (imported + transient) one graph may declare (at most 64: a pass's
+/// resource set is a `u64` bit mask).
+pub(crate) const MAX_RESOURCES: usize = 48;
 /// Most barriers emitted before one pass or at the end of the graph.
 pub(crate) const MAX_BARRIERS: usize = 16;
 
@@ -45,6 +46,13 @@ pub(crate) enum Access {
     ColorReadWrite,
     /// Depth attachment, cleared, tested and written.
     DepthWrite,
+    /// Depth attachment that loads the previous contents, tests and writes (the scene after
+    /// a depth prepass, ADR-0015).
+    DepthReadWrite,
+    /// Single-sample depth written by a multisample depth resolve at the end of a rendering
+    /// scope. Resolves run at `COLOR_ATTACHMENT_OUTPUT` with `COLOR_ATTACHMENT_WRITE`; the
+    /// fragment-test stages and depth write are included so the access is conservative.
+    DepthResolveWrite,
     /// Sampled from a fragment shader.
     SampledFragment,
     /// Copy source (image or buffer).
@@ -121,6 +129,22 @@ impl Access {
                 S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
                 A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                false,
+                U::DEPTH_STENCIL_ATTACHMENT,
+            ),
+            Self::DepthReadWrite => (
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
+                A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                true,
+                U::DEPTH_STENCIL_ATTACHMENT,
+            ),
+            Self::DepthResolveWrite => (
+                S::COLOR_ATTACHMENT_OUTPUT | S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
+                A::COLOR_ATTACHMENT_WRITE | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                A::COLOR_ATTACHMENT_WRITE | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 false,
                 U::DEPTH_STENCIL_ATTACHMENT,
@@ -247,8 +271,15 @@ impl Access {
 /// Size of a transient image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageSize {
-    /// The swapchain extent.
+    /// The swapchain extent. The R6 frame has no swapchain-sized transient (the scene and
+    /// post images are render-sized and the swapchain itself is imported); kept for passes
+    /// that work at native resolution.
+    #[allow(dead_code)]
     Swapchain,
+    /// The render allocation (the swapchain extent times the maximum render scale,
+    /// ADR-0015) divided by `2^shift` (at least 1×1): the scene targets (`shift` 0), bloom
+    /// mips and half-resolution AO.
+    Render { shift: u8 },
     /// A fixed extent (for example the shadow map), independent of the window.
     Fixed { width: u32, height: u32 },
 }
@@ -259,6 +290,8 @@ pub(crate) struct ImageDesc {
     pub(crate) format: vk::Format,
     pub(crate) aspect: vk::ImageAspectFlags,
     pub(crate) size: ImageSize,
+    /// Samples per pixel (`TYPE_1` except the MSAA scene attachments).
+    pub(crate) samples: vk::SampleCountFlags,
     /// Usage beyond what the graph's accesses imply (for example `SAMPLED` on a depth
     /// buffer that later passes will read).
     pub(crate) extra_usage: vk::ImageUsageFlags,
@@ -534,8 +567,8 @@ pub(crate) struct CompiledPass<T> {
     pub(crate) name: &'static str,
     pub(crate) tag: T,
     pub(crate) barriers: Vec<Barrier>,
-    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 32).
-    uses: u32,
+    /// Bit `r` is set when the pass accesses resource `r` (`MAX_RESOURCES` <= 64).
+    uses: u64,
 }
 
 impl<T> CompiledPass<T> {
@@ -979,7 +1012,7 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         let uses = pass
             .accesses
             .iter()
-            .fold(0u32, |mask, &(resource, _)| mask | (1 << resource.index()));
+            .fold(0u64, |mask, &(resource, _)| mask | (1 << resource.index()));
         compiled.push(CompiledPass {
             name: pass.name,
             tag: pass.tag,
