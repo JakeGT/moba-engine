@@ -57,6 +57,8 @@ pub(crate) struct NetworkView {
     pub(crate) demo_sent: bool,
     pub(crate) demo_buy: Option<u8>,
     pub(crate) demo_bought: bool,
+    /// `MOBA_DEMO_CAST`: ability slot and the tick to cast it at, cleared once sent.
+    pub(crate) demo_cast: Option<(u8, u32)>,
     pub(crate) shop_page: usize,
     pub(crate) spectator_pan: Vec3,
     pub(crate) spectator_yaw: f32,
@@ -95,6 +97,7 @@ impl NetworkView {
             demo_sent: false,
             demo_buy: None,
             demo_bought: false,
+            demo_cast: None,
             shop_page: 0,
             spectator_pan: Vec3::ZERO,
             spectator_yaw: -0.7,

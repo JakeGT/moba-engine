@@ -156,7 +156,8 @@ re-exported `TextureData`/`TextureFormat`/`MaterialShader`/`TextureSlot`), the p
 `RenderConfig::with_pipeline_cache`), dev shader overrides (`RenderConfig::with_shader_dir`,
 `Renderer::reload_shaders`), `RenderConfig::with_compressed_textures`, `GpuTimings::frame`
 and `RenderError::{TooManyTextures, TooManyMaterials, InvalidMaterial}`. `QualityTier::ALL` is
-now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change.
+now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change. R7a added `TextStyle` (MSDF text styling) and
+`pack_rgba8`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`.
@@ -168,9 +169,11 @@ now a `&'static [QualityTier]` slice, so adding a tier is not a breaking change.
   inputs that already had
   constructors:
   `Scene` (`new`, `empty`, `with_*`), `UnitInstance` (`new`, `at`, `with_mesh`, `with_bones`),
-  `Camera` (`perspective`, `orbit`).
+  `Camera` (`perspective`, `orbit`), and `TextStyle` (`new`/`Default` + `with_outline`,
+  `with_shadow`).
 - Exhaustive by design: `BoneRange`, `MeshId`, `MaterialId`, `TextureId` (opaque ids, checked
-  where used), `UiVertex` (GPU vertex layout), `VisionCircles` (uniform layout),
+  where used), `UiVertex` (GPU vertex layout; R7a renamed `atlas` to `mode` and added
+  `outline`/`params`, 48 bytes), `VisionCircles` (uniform layout),
   `ValidationMode` (a closed policy).
 - Public but unstable: `bones_truncated`, `skinned_instances_dropped`,
   `ui_vertices_truncated` (diagnostic counters) and `build_atlas`/`ATLAS_*`.

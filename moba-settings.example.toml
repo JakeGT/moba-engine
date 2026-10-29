@@ -5,6 +5,9 @@ audio_volume = 0.7
 audio_mute = false
 camera_sensitivity = 1.0
 camera_zoom = 240.0
+# Team colours for health bars and the minimap: "standard" (green self, blue allies, red
+# enemies) or "colorblind" (Okabe-Ito yellow/sky blue/orange). MOBA_TEAM_PALETTE overrides it.
+team_palette = "standard"
 
 [controls]
 move_up = "W"

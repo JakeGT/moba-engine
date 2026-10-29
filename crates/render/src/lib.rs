@@ -12,7 +12,9 @@
 
 mod device;
 mod error;
+mod font;
 mod font_data;
+mod font_metrics;
 mod frame_graph;
 mod graph;
 mod instance;
@@ -56,4 +58,4 @@ pub use moba_assets::MeshData;
 pub use moba_assets::{MaterialShader, TextureSlot};
 /// Validated texture accepted by [`Renderer::register_texture`].
 pub use moba_assets::{TextureData, TextureFormat};
-pub use ui::{ATLAS_HEIGHT, ATLAS_WIDTH, UiDrawList, UiVertex, build_atlas};
+pub use ui::{ATLAS_HEIGHT, ATLAS_WIDTH, TextStyle, UiDrawList, UiVertex, build_atlas, pack_rgba8};

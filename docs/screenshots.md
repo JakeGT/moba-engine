@@ -213,6 +213,86 @@ The same networked golden frame (tick 120, lavapipe, 1280×720), before and afte
 - **Rebaseline:** this is the deliberate rebaseline of both golden fingerprints. Validation and
   synchronisation validation reported zero messages, and two runs gave identical fingerprints.
 
+### HUD polish (R7a): before and after
+![HUD before (left) and after (right) R7a](images/r7-hud-before-after.png)
+
+The same networked frame before (left, `main` at `e2972de`) and after R7a (right), cropped from
+1280×720 lavapipe captures. The local hero walks into the mid-lane fight
+(`MOBA_DEMO_MOVE=118,127`), and the frame is pinned at tick 950.
+- **Text:** the 5×7 bitmap font is replaced by an MSDF font (Open Sans Condensed SemiBold)
+  with derivative anti-aliasing, outlines and soft shadows. Capitals keep their height, so the
+  layout is unchanged.
+- **Health bars:** own/ally/enemy fill colours, a cream damage ghost trailing each hit (the red
+  bars), tick marks every 100 HP, a level badge and a mana strip for heroes.
+- **Combat text:** numbers rise over the fight. Damage to the viewer's team is red and damage
+  to enemies white; heals are green with a `+`. They come from snapshot health deltas, so hits
+  inside one snapshot interval add up.
+- **Ability slots:** Q (cast at tick 930 with `MOBA_DEMO_CAST=0@930`) shows the radial
+  cooldown sweep and its remaining seconds. Ready slots have a gold frame and show the mana
+  cost.
+- The "before" run ignores `MOBA_DEMO_CAST`, which is new, so its Q slot is idle.
+
+![Full R7a HUD frame](images/r7-hud-after.png)
+
+The full "after" frame. The kill feed now sits under the controls line, and the map name under
+the timer.
+
+### Crisp text at UI scale 2.0
+![HUD panel at UI scale 2.0, before (top) and after (bottom)](images/r7-ui-scale-2x.png)
+
+The same frame at 2560×1440 with `MOBA_UI_SCALE=2.0`, cropped at native resolution. Top: the
+bitmap font, scaled with nearest filtering, shows its blocky 5×7 cells. Bottom: the MSDF text,
+baked at 40 px per em, stays sharp when drawn larger than the atlas (the hero name is about
+59 px per em here). Bars and frames are also scaled 2×.
+
+![World-space bars and combat text at UI scale 2.0](images/r7-ui-scale-2x-world.png)
+
+The world-space bars and numbers in the same 2× frames.
+
+![HUD panel at UI scale 0.5, magnified 3×](images/r7-ui-scale-half.png)
+
+The supported minimum, `MOBA_UI_SCALE=0.5`, at 1280×720, magnified 3× with nearest filtering.
+The outlined key labels and mana costs on Q/W/E show no dark glyph boxes. At this size the
+on-screen distance range is under one pixel, and the outline fades out over the empty margin of
+each glyph cell (reviewer finding, fixed in `ui.frag`).
+
+### Colour-blind team palette
+![Standard (left) and colour-blind (right) team palettes](images/r7-colorblind.png)
+
+`team_palette = "colorblind"` (or `MOBA_TEAM_PALETTE=colorblind`), right, against the default
+`standard`, left. It uses Okabe-Ito colours: yellow for the own hero, sky blue for allies and
+orange for enemies, on health bars and the minimap. Allies and enemies then differ mainly on
+the blue–yellow axis, which protanopes and deuteranopes can still see.
+
+### Loading screen
+![Procedural loading screen](images/r7-loading.png)
+
+The loading screen is procedural (gradient, light bands, a glowing outlined title, map name,
+spinner and tip). It shows for at least 1.2 s after connecting or a map change, then
+cross-fades into the lobby. Lobby, match and results screens change with a short dip to dark,
+and the lobby and results panels fade and slide in. Captured at frame 3 of a
+`MOBA_SERVER=local` run. `MOBA_CAPTURE_TICK` captures, such as the networked golden, settle
+all fades and skip the splash.
+
+All R7a captures: lavapipe, `MOBA_VULKAN_VALIDATION=required` (validation plus
+synchronisation validation), exit 0, zero validation messages. The only stderr line was
+`[assets] model 'sentinel-skinned' loaded (skinned)`.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_SMOKE_FRAMES=100000 \
+MOBA_DEMO_MOVE=118,127 MOBA_DEMO_CAST=0@930 MOBA_CAPTURE_TICK=950 \
+MOBA_CAPTURE=/tmp/fight.ppm MOBA_VULKAN_VALIDATION=required \
+cargo run --release -p moba-client
+# + MOBA_UI_SCALE=2.0 MOBA_WINDOW_SIZE=2560x1440, or MOBA_TEAM_PALETTE=colorblind
+```
+
+**Golden rebaseline:** both render-golden captures include the HUD, so both fingerprints were
+**deliberately rebaselined** for R7a. The new fingerprints come from lavapipe runs of this
+branch rebased on R4a (#324), made exactly as `render-golden.yml` makes them. Before the change,
+this machine reproduced the old fingerprints with a difference of 0, and two runs after it gave
+byte-identical PPMs. The images above were captured just before the rebase. R4a's animation
+moves a few hero pixels in them, but the HUD is the same.
+
 ### Per-map visuals
 ![Ember Crossing with its visuals descriptor](images/m8-map-visuals-ember.png)
 

@@ -14,6 +14,8 @@
 //! - `MOBA_VULKAN_VALIDATION=required|off`.
 //! - `MOBA_DEMO_MOVE=x,y` issues one move order after the first snapshot (capture demos).
 //! - `MOBA_DEMO_BUY=<item>` buys one catalogue item after the first snapshot.
+//! - `MOBA_DEMO_CAST=<slot>@<tick>` casts ability slot 0-2 once at that match tick (captures).
+//! - `MOBA_TEAM_PALETTE=standard|colorblind` overrides the settings' team colours.
 //! - `MOBA_SHOP=1` starts with the shop open; `MOBA_SCOREBOARD=1` with the scoreboard.
 //! - `MOBA_ASSET_ROOT=<dir>` (default `content`): heroes whose catalogue names a `model`
 //!   draw `<dir>/models/<model>.glb`; `MOBA_HERO_MODELS=<hero=model,...>` overrides that per
@@ -58,7 +60,7 @@ use moba_render::{
 use moba_sim::{SimConfig, Simulation, UnitKind};
 use std::collections::VecDeque;
 
-use crate::hud::{HitList, build_local_hud, build_network_hud, build_vision};
+use crate::hud::{HitList, HudFx, build_local_hud, build_network_hud, build_vision};
 
 // Four ticks (133 ms) covers two lost 30 Hz snapshots plus 30 ms of jitter.
 const SNAPSHOT_DELAY_TICKS: f32 = 4.0;
@@ -110,6 +112,8 @@ struct ClientApp {
     scoreboard_visible: bool,
     shop_visible: bool,
     hit_rects: HitList,
+    /// Retained HUD presentation state: damage ghosts, combat text, screen fades (R7a).
+    hud_fx: HudFx,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -187,6 +191,17 @@ impl ClientApp {
                 })
             },
         );
+        let team_palette = std::env::var("MOBA_TEAM_PALETTE").ok().map_or_else(
+            || settings.team_palette(),
+            |name| {
+                crate::hud::theme::TeamPalette::from_name(&name).unwrap_or_else(|| {
+                    eprintln!(
+                        "MOBA_TEAM_PALETTE={name:?} is not standard/colorblind; using settings"
+                    );
+                    settings.team_palette()
+                })
+            },
+        );
         let mut app = Self {
             renderer: None,
             simulation: None,
@@ -210,6 +225,7 @@ impl ClientApp {
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
             hit_rects: HitList::new(),
+            hud_fx: HudFx::new(team_palette),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -280,6 +296,7 @@ impl ClientApp {
                             .ok()
                             .and_then(|value| value.parse().ok()),
                         demo_bought: false,
+                        demo_cast: parse_demo_cast(),
                         shop_page: 0,
                         spectator_pan: Vec3::ZERO,
                         spectator_yaw: -0.7,
@@ -530,6 +547,7 @@ impl App for ClientApp {
                 scoreboard_visible,
                 shop_visible,
                 hit_rects,
+                hud_fx,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -607,6 +625,8 @@ impl App for ClientApp {
                                 network.projectiles.clear();
                                 network.kill_feed.clear();
                                 animation.clear();
+                                hud_fx.reset();
+                                hud_fx.restart_splash();
                                 // Content reload or map rotation: rebind the map visuals and
                                 // hero models (cached, so only new names touch the disk or
                                 // the GPU).
@@ -654,6 +674,7 @@ impl App for ClientApp {
                             network.own_net_id = None;
                             network.prediction.set_target(None);
                             network.client.clear_pending_input();
+                            hud_fx.reset();
                         }
                         network.last_tick = snapshot.tick;
                         if network.capture_tick.is_some() {
@@ -681,6 +702,20 @@ impl App for ClientApp {
                             {
                                 network.demo_bought = true;
                             }
+                            if let Some((slot, _)) = network.demo_cast.filter(|(_, tick)| {
+                                network.phase == MatchPhase::Playing && snapshot.tick >= *tick
+                            }) {
+                                let (x, y) = quantize_position(
+                                    own.position() + moba_core::FixVec2::from_ints(4, 4),
+                                );
+                                if network
+                                    .client
+                                    .send_command(WireCommand::CastAbility { slot, x, y })
+                                    .is_ok()
+                                {
+                                    network.demo_cast = None;
+                                }
+                            }
                             if let Some(target) = network.demo_move.filter(|_| {
                                 !network.demo_sent && network.phase == MatchPhase::Playing
                             }) {
@@ -695,6 +730,11 @@ impl App for ClientApp {
                                 }
                             }
                         }
+                        hud_fx.observe(
+                            &snapshot,
+                            network.own_net_id,
+                            network.client.team().index() as u8,
+                        );
                     }
                     if network.phase == MatchPhase::Playing {
                         for _ in 0..frame.ticks() {
@@ -754,6 +794,7 @@ impl App for ClientApp {
                             frame_ms,
                             fps,
                             hit_rects,
+                            hud_fx,
                         );
                         network.update_effects(frame_ms);
                         let vision = build_vision(network);
@@ -969,8 +1010,8 @@ mod scene_build;
 mod skinning;
 
 pub(crate) use launch::{
-    capture_and_exit, connect_network, frames_is_capture, parse_capture_tick, parse_demo_move,
-    parse_follow_distance, run,
+    capture_and_exit, connect_network, frames_is_capture, parse_capture_tick, parse_demo_cast,
+    parse_demo_move, parse_follow_distance, run,
 };
 pub(crate) use scene_build::{
     HeroPose, animated_rig, network_camera, push_hero, push_unit, rebuild_network_units,

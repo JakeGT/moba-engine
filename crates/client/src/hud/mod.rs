@@ -1,16 +1,19 @@
 //! HUD/layout drawing shared by network and local-preview modes.
 
 mod abilities;
+pub(crate) mod fx;
 mod geometry;
 mod healthbars;
 mod hit;
 mod minimap;
 mod model;
 mod scoreboard;
+mod screens;
 mod shop;
 mod status;
 pub(crate) mod theme;
 
+pub(crate) use fx::HudFx;
 pub(crate) use geometry::*;
 pub(crate) use healthbars::*;
 pub(crate) use hit::{HitList, HudAction, minimap_world, rect_at, register};
