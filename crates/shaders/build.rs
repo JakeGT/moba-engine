@@ -67,6 +67,12 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "vfx_oit.frag",
         defines: &["VFX_OIT"],
     },
+    // Vertex-animation-texture shadow caster (R4b, ADR-0012).
+    Permutation {
+        source: "vat.vert",
+        output: "vat_shadow.vert",
+        defines: &["SHADOW_PASS"],
+    },
 ];
 
 fn main() {

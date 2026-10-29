@@ -180,8 +180,11 @@ clear_environment, has_environment, set_lighting_ramp}`, `MaterialData`'s stylis
 (`new` + `with_*`), `ParticleShape`, `ParticleBlend`, `ParticleRole`, `VfxFrame` (`new`,
 `EMPTY`, `with_ally_opacity`; `Scene::with_vfx`), `VfxBudget` (`QualityTier::vfx_budget`),
 `VfxStats`, `VFX_MESH_SLOTS`, `RenderConfig::with_vfx`, `Renderer::{vfx_available,
-vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`. R6 (ADR-0015)
-added post-processing: `PostConfig` (`for_tier`, `off`, a `with_*` per field, `sanitized`,
+vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`. R4b (ADR-0012
+amendment) added vertex-animation-texture meshes: `Renderer::{register_vat_mesh,
+vat_available, vat_mesh_count, mesh_capacity}`, `UnitInstance::with_vat` (and its `vat` field),
+`MAX_VAT_MESHES`, `RenderError::InvalidVat` and re-exports of `moba-assets`'
+`VatDescriptor`, `VatPose` and `VatSample`. R6 (ADR-0015) added post-processing: `PostConfig` (`for_tier`, `off`, a `with_*` per field, `sanitized`,
 `scaled`), `AntiAliasing` and `UpscaleFilter` (`name`, `from_name`), `PostLook` (`DEFAULT` +
 `with_*`, `sanitized`: per-map exposure, eye adaptation, bloom and grading strength),
 `ScreenEffects` (`NONE` + `with_desaturation`, `with_vignette`; `Scene::effects`/
@@ -241,8 +244,18 @@ descriptors (ADR-0013: `VfxEffect`, `VfxEmitter`, `VfxBindings`, `VfxAbilityBind
 `VfxUnitEffects`, `VfxSprite`/`VFX_SPRITES`, `procedural_atlas`, `vfx_path`; the enums
 `VfxPrimitive`, `VfxBlend`, `VfxAnchor`, `VfxDirection`, `VfxShape`, `VfxImportance` and
 `VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`),
-and R6's post-processing assets (ADR-0015: `MapPost`/`MapVisuals::post` with the
-`DEFAULT_BLOOM_STRENGTH`, `DEFAULT_ADAPTATION`, `DEFAULT_EXPOSURE_MIN`/`MAX` defaults, and the
+R4b's additions (ADR-0012 amendment): vertex-animation textures (`VatDescriptor`
+(`parse`/`load_file`/`to_toml`/`clip`/`check_texture`/`check_mesh`), `VatClip`,
+`VatPlaybackParams` (`validated`), `VatBakeClip::new`, `bake_vat`, `mesh_hash`, `vat_extent`, `vat_paths`,
+`VatAnimation::bind`, `VatPlayer`, `VatPose`/`VatSample`/`VatQuality` (`FULL`,
+`INTERPOLATED`, `NEAREST`), `VatError` and the `MAX_VAT_*` (including `MAX_VAT_TEXELS`)/`DEFAULT_VAT_FPS`/
+`VAT_DEATH_LINGER`/`VAT_DIR` constants), bone-count LOD (`SkinLod::build`/`gather`), 2D blend
+spaces (`BlendSpace2d`, `BlendSpaceError::Coincident`, `Animator::evaluate_motion`) and socket
+attachments (`AnimationGraph::{attachment, attachments, socket_count, planar_locomotion,
+spring_joints}`, `AnimationSet::attachment_models`). `VatError` and every `Vat*` struct with
+public fields are `#[non_exhaustive]`; `VatAnimation`, `VatPlayer`, `SkinLod` and
+`BlendSpace2d` have private fields and constructors; and R6's post-processing assets
+(ADR-0015: `MapPost`/`MapVisuals::post` with the `DEFAULT_BLOOM_STRENGTH`, `DEFAULT_ADAPTATION`, `DEFAULT_EXPOSURE_MIN`/`MAX` defaults, and the
 `.cube` grading LUT `GradingLut` (`identity`, `from_texels`, `parse`, `load_file`, `sample`,
 `to_cube_string`), `GradingLutError`, `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
 `MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`; `GradingLut`, `GradingLutError` and `MapPost`

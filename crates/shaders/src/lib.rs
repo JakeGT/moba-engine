@@ -10,6 +10,7 @@
 //! preprocessor defines, each its own module: the `*_TEXTURED` modules are the
 //! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010), and the
 //! `*_shadow` modules are the `SHADOW_PASS` depth-only casters of the shadow map (ADR-0011).
+//! `vat.vert` plays vertex-animation textures for minions (R4b, ADR-0012).
 //! The R6 post-processing chain (ADR-0015) adds fullscreen passes sharing `include/post.glsl`.
 
 #![forbid(unsafe_code)]
@@ -38,6 +39,11 @@ pub const UNIT_SHADOW_VERT: &[u8] =
 /// Depth-only shadow caster for skinned meshes (`skinned.vert` + `SHADOW_PASS`).
 pub const SKINNED_SHADOW_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/skinned_shadow.vert.spv"));
+/// Vertex-animation-texture vertex shader (R4b): plays baked clips from the VAT texture
+/// (set 2) by the instance's frame samples; pairs with [`UNIT_FRAG`].
+pub const VAT_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat.vert.spv"));
+/// Depth-only shadow caster for VAT meshes (`vat.vert` + `SHADOW_PASS`).
+pub const VAT_SHADOW_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat_shadow.vert.spv"));
 /// Procedural terrain vertex shader.
 pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
 /// Procedural terrain fragment shader.
@@ -123,6 +129,14 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "skinned_shadow.vert",
         spirv: SKINNED_SHADOW_VERT,
+    },
+    ShaderModule {
+        name: "vat.vert",
+        spirv: VAT_VERT,
+    },
+    ShaderModule {
+        name: "vat_shadow.vert",
+        spirv: VAT_SHADOW_VERT,
     },
     ShaderModule {
         name: "terrain.vert",
@@ -243,9 +257,30 @@ mod tests {
         assert_ne!(UNIT_VERT, UNIT_SHADOW_VERT);
         assert_ne!(SKINNED_VERT, SKINNED_SHADOW_VERT);
         assert_ne!(VFX_FRAG, VFX_OIT_FRAG);
+        assert_ne!(VAT_VERT, VAT_SHADOW_VERT);
         let mut names: Vec<_> = MODULES.iter().map(|module| module.name).collect();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), MODULES.len(), "module names are unique");
+    }
+
+    /// The depth prepass (R6, ADR-0015) draws with the scene's own vertex shaders and the
+    /// scene tests `LESS_OR_EQUAL` against it, so every one must declare an invariant
+    /// position (the textured permutations are built from these sources).
+    #[test]
+    fn prepass_vertex_shaders_declare_an_invariant_position() {
+        for (name, source) in [
+            ("terrain.vert", include_str!("../shaders/terrain.vert")),
+            ("unit.vert", include_str!("../shaders/unit.vert")),
+            ("skinned.vert", include_str!("../shaders/skinned.vert")),
+            ("vat.vert", include_str!("../shaders/vat.vert")),
+        ] {
+            assert!(
+                source
+                    .lines()
+                    .any(|line| line.trim() == "invariant gl_Position;"),
+                "{name} must declare `invariant gl_Position;`"
+            );
+        }
     }
 }

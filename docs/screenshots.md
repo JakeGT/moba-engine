@@ -89,6 +89,39 @@ MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_S
 MOBA_SCREEN_EFFECTS_PREVIEW=death MOBA_CAPTURE=/tmp/r6-death.ppm cargo run --release -p moba-client
 ```
 
+### VAT minions, attachments and the 150 ms RTT run (R4b)
+![200 VAT minions: High, Low and the cube fallback](images/r4b-vat-stress.png)
+
+`MOBA_STRESS_MINIONS=200` in the local bot preview at tick 90, camera 40 m, RTX 5070 Ti,
+1280×720, validation and sync validation required, zero messages
+([perf/0018](perf/0018-vat-anim-lod.md)). Half the stress minions run in circles and half
+attack on the spot, each with its own `VatPlayer`, drawn instanced from
+`content/vat/minion.{toml,ktx2}` with no bone buffer and casting shadows. Left: High
+(interpolated frames, crossfades); middle: Low (nearest frame); right: `MOBA_VAT=off`, the
+cube every minion drew before R4b.
+
+![Socket attachments](images/r4b-attachments.png)
+
+The networked golden configuration (`MOBA_SERVER=local`, `MOBA_HERO_MODELS=sentinel-skinned`,
+pinned `MOBA_CAPTURE_TICK`) with `MOBA_CAMERA_DISTANCE=12`, cropped around the own hero and
+scaled 1.5×: the `crystal` attachments on the `spear_tip` and `head` sockets
+(`content/animations/sentinel-skinned.toml`), the same frame with `MOBA_ATTACHMENTS=off`, and
+tick 300.
+
+![150 ms RTT animation sequence](images/r4b-rtt-sequence.png)
+
+The R4 exit run: `moba-server` with 10 bots, a spectator client following blue slot 0 through
+`moba-tools link-proxy --rtt 150 --jitter 30 --loss 5` (RTX 5070 Ti). Captures at the render
+ticks where the hero's animation log (`MOBA_ANIM_LOG`) shows run, cast 3, cast 1, a basic
+attack, idle, cast 2, death and the respawned run. The simulation has no recall.
+
+```bash
+MOBA_STRESS_MINIONS=200 MOBA_LOCAL_CAMERA_DISTANCE=40 MOBA_CAPTURE=/tmp/stress.ppm \
+  MOBA_CAPTURE_FRAME=90 MOBA_SMOKE_FRAMES=120 cargo run --release -p moba-client
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_CAMERA_DISTANCE=12 \
+  MOBA_SMOKE_FRAMES=100000 MOBA_CAPTURE=/tmp/attach.ppm cargo run --release -p moba-client
+```
+
 ### 500 instanced units + terrain
 ![500 instanced units and terrain](images/m3-500-units.png)
 
@@ -496,9 +529,9 @@ zero validation messages. The client's stderr was exactly:
 
 ```text
 [assets] map visuals 'ember' loaded (5 props)
-[assets] map capture written to /tmp/switch-1.ppm
+[capture] written to /tmp/switch-1.ppm
 [assets] map visuals 'frost' loaded (5 props)
-[assets] map capture written to /tmp/switch-2.ppm
+[capture] written to /tmp/switch-2.ppm
 ```
 
 ```bash

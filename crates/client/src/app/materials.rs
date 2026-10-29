@@ -50,8 +50,8 @@ impl MaterialSink for moba_render::Renderer {
 /// A model whose material should be resolved: its name and every mesh drawn for it.
 pub(crate) struct ModelMeshes<'a> {
     pub(crate) name: &'a str,
-    /// The static mesh and, for a skinned model, the skinned one.
-    pub(crate) meshes: [Option<MeshId>; 2],
+    /// The static mesh and, for a skinned model, the skinned one and its bone-LOD skins.
+    pub(crate) meshes: [Option<MeshId>; 4],
 }
 
 /// Resolved materials and uploaded textures for the current renderer.
@@ -98,7 +98,7 @@ impl MaterialLibrary {
         sink: &mut impl MaterialSink,
         models: impl IntoIterator<Item = ModelMeshes<'a>>,
     ) {
-        let mut pending: Vec<(String, [Option<MeshId>; 2], MaterialData)> = Vec::new();
+        let mut pending: Vec<(String, [Option<MeshId>; 4], MaterialData)> = Vec::new();
         for model in models {
             if self.seen.iter().any(|seen| seen == model.name) {
                 continue;
@@ -272,7 +272,7 @@ mod tests {
     fn model(name: &str) -> ModelMeshes<'_> {
         ModelMeshes {
             name,
-            meshes: [Some(MeshId::CUBE), None],
+            meshes: [Some(MeshId::CUBE), None, None, None],
         }
     }
 

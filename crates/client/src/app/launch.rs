@@ -359,6 +359,16 @@ pub(crate) fn replay_focus(
     (focus, parse_follow_distance())
 }
 
+/// Local-preview camera orbit distance: `MOBA_LOCAL_CAMERA_DISTANCE` metres (clamped to 8–240)
+/// or the default overview of 235 m (close-ups of the R4b stress scene).
+pub(crate) fn local_camera_distance() -> f32 {
+    std::env::var("MOBA_LOCAL_CAMERA_DISTANCE")
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map_or(235.0, |value| value.clamp(8.0, 240.0))
+}
+
 /// `MOBA_CAPTURE_TICK=<n>`: the network capture tick, read once at startup.
 pub(crate) fn parse_capture_tick() -> Option<u32> {
     std::env::var("MOBA_CAPTURE_TICK")
@@ -590,6 +600,9 @@ pub(crate) fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<(
 
 impl Drop for ClientApp {
     fn drop(&mut self) {
+        if let Some(stress) = &self.stress {
+            stress.report();
+        }
         let (Some(mut samples), Some(path)) = (self.frame_log.take(), self.frame_log_path.take())
         else {
             return;
@@ -639,46 +652,27 @@ impl Drop for ClientApp {
         } else {
             String::from("gpu_timing=unavailable ")
         };
-        let quality = self.renderer.as_ref().map_or_else(
-            || String::from("?"),
-            |renderer| {
-                let pipelines = renderer.pipeline_stats();
-                let lighting = renderer.lighting_config();
-                let post = renderer.post_config();
-                let [render_width, render_height] = renderer.render_extent();
-                format!(
-                    "{} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
-                     auto_exposure={} grading={} render={render_width}x{render_height} \
-                     dynres={} ibl={} specular_ibl={} pipelines={} \
-                     pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
-                    renderer.quality_tier(),
-                    renderer.hdr_format_name(),
-                    lighting.shadows,
-                    lighting.shadow_resolution,
-                    post.anti_aliasing,
-                    on_off(post.bloom),
-                    on_off(post.ambient_occlusion),
-                    on_off(post.auto_exposure && renderer.post_look().auto_exposure),
-                    on_off(post.grading),
-                    on_off(post.dynamic_resolution),
-                    if lighting.ibl && renderer.has_environment() {
-                        "on"
-                    } else {
-                        "off"
-                    },
-                    if lighting.specular_ibl { "on" } else { "off" },
-                    pipelines.pipelines,
-                    pipelines.build_ms,
-                    pipelines.cache,
-                    pipelines.startup_ms,
-                )
-            },
-        );
+        let quality = self
+            .renderer
+            .as_ref()
+            .map_or_else(|| String::from("?"), quality_summary);
+        let stress = self
+            .stress
+            .as_ref()
+            .and_then(|stress| {
+                stress.summary().map(|(mean, p95, _)| {
+                    format!(
+                        "stress_minions={} stress_cpu_mean_us={mean:.1} stress_cpu_p95_us={p95:.1} ",
+                        stress.count()
+                    )
+                })
+            })
+            .unwrap_or_default();
         let report = format!(
             "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
-             {gpu_columns}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
+             {gpu_columns}{stress}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),
@@ -688,6 +682,41 @@ impl Drop for ClientApp {
         let _ = std::fs::write(&path, &report);
         eprintln!("frame log: {}", report.trim_end());
     }
+}
+
+/// The renderer's quality, post and pipeline fields of the frame-log summary line.
+fn quality_summary(renderer: &moba_render::Renderer) -> String {
+    let pipelines = renderer.pipeline_stats();
+    let lighting = renderer.lighting_config();
+    let post = renderer.post_config();
+    let [render_width, render_height] = renderer.render_extent();
+    format!(
+        "{} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
+             auto_exposure={} grading={} render={render_width}x{render_height} \
+             dynres={} ibl={} specular_ibl={} vat_meshes={} pipelines={} \
+             pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
+        renderer.quality_tier(),
+        renderer.hdr_format_name(),
+        lighting.shadows,
+        lighting.shadow_resolution,
+        post.anti_aliasing,
+        on_off(post.bloom),
+        on_off(post.ambient_occlusion),
+        on_off(post.auto_exposure && renderer.post_look().auto_exposure),
+        on_off(post.grading),
+        on_off(post.dynamic_resolution),
+        if lighting.ibl && renderer.has_environment() {
+            "on"
+        } else {
+            "off"
+        },
+        if lighting.specular_ibl { "on" } else { "off" },
+        renderer.vat_mesh_count(),
+        pipelines.pipelines,
+        pipelines.build_ms,
+        pipelines.cache,
+        pipelines.startup_ms,
+    )
 }
 
 fn on_off(on: bool) -> &'static str {

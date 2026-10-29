@@ -330,17 +330,19 @@ impl PortraitStudio {
                     if pinned {
                         animator.reset_springs();
                     }
-                    Some(animator.evaluate(
+                    animator.evaluate(
                         rig.graph,
                         rig.skeleton,
                         now,
                         0.0,
                         hero_transform(&model, &pose),
                         &mut self.scratch,
-                    ))
+                    );
+                    Some(&*animator)
                 }
                 _ => None,
             };
+            // Portraits are close-ups: the full skin, with attachments.
             push_hero(
                 &mut self.units,
                 &mut self.bones,
@@ -348,6 +350,7 @@ impl PortraitStudio {
                 model,
                 &pose,
                 animated,
+                crate::app::scene_build::HeroDraw::FULL,
             );
         }
         self.building = *heroes;
@@ -581,12 +584,16 @@ mod tests {
         let units = render.scene.units;
         assert_eq!(
             units.len(),
-            1 + 6,
-            "one skinned instance and the six-part rig"
+            1 + 2 + 6,
+            "one skinned instance, its two socket attachments (R4b) and the six-part rig"
         );
         assert!(units[0].bones.count > 0, "the skinned hero is posed");
+        assert!(
+            units[1].bones.count == 0 && units[2].bones.count == 0,
+            "attachments are static"
+        );
         // Cell 0's hero stands left of cell 12's on the strip's line.
-        assert!(units[0].transform.w_axis.x < units[1].transform.w_axis.x);
+        assert!(units[0].transform.w_axis.x < units[3].transform.w_axis.x);
         let mut images = HudImages::default();
         studio.hud(&mut images);
         assert_eq!(images.portrait_cells, 16);
