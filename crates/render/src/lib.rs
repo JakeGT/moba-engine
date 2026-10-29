@@ -2,7 +2,9 @@
 //!
 //! The renderer requires Vulkan 1.3 and uses core dynamic rendering and synchronization2
 //! (ADR-0002). Each frame is a small render graph (ADR-0008): a scene pass into an HDR
-//! target, a tonemap composite into the swapchain and a UI pass on top, with barriers
+//! target (with the map's terrain, height fog and sky since R3a, ADR-0014; the fog-of-war
+//! texture is built by two passes before it), a tonemap composite into the swapchain and a
+//! UI pass on top, with barriers
 //! derived from the passes' declared accesses and per-pass GPU timestamps
 //! ([`Renderer::gpu_timings`]). On macOS it runs through `MoltenVK` or `KosmicKrisp` with
 //! `VK_KHR_portability_subset`. It owns no winit types; the surface is created from the
@@ -10,6 +12,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+mod descriptor_budget;
 mod device;
 mod error;
 mod font;
@@ -32,10 +35,12 @@ mod scene;
 mod shaders;
 mod swapchain;
 mod targets;
+mod terrain;
 mod texture;
 mod ui;
 mod vat;
 mod vfx;
+mod world;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
@@ -45,6 +50,7 @@ pub use lighting::{
 pub use material::{
     MAX_MATERIALS, MAX_TEXTURES, MaterialData, MaterialId, MaterialStats, TextureId,
 };
+pub use passes::fog::vision_sources_dropped;
 pub use passes::overlay::ui_vertices_truncated;
 pub use passes::scene::{bones_truncated, skinned_instances_dropped};
 pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
@@ -82,4 +88,10 @@ pub use vat::MAX_VAT_MESHES;
 pub use vfx::{
     ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, VFX_MESH_SLOTS, VfxBudget, VfxFrame,
     VfxStats,
+};
+pub use world::{
+    DEFAULT_MAX_VISION_SOURCES, FOG_OF_WAR_SETTLE_DT, FogOfWar, FogOfWarMode,
+    MAX_FOG_OF_WAR_RESOLUTION, MAX_TERRAIN_LAYERS, MAX_VISION_SOURCES, MAX_VISION_WALLS,
+    MIN_FOG_OF_WAR_RESOLUTION, SceneAtmosphere, TerrainData, TerrainShading, VisionSource,
+    VisionWall, WorldConfig,
 };

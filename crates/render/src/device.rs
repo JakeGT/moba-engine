@@ -33,6 +33,12 @@ pub(crate) struct DeviceContext {
     /// `VkPhysicalDeviceLimits::maxStorageBufferRange`: the largest storage-buffer
     /// descriptor range (bytes).
     pub(crate) max_storage_buffer_range: u32,
+    /// `maxPerStageDescriptorSamplers`: samplers one stage may access through a pipeline
+    /// layout (16 on the minimum device and `MoltenVK`).
+    pub(crate) max_per_stage_samplers: u32,
+    /// `maxPerStageDescriptorSampledImages` (likewise; combined image samplers count for
+    /// both).
+    pub(crate) max_per_stage_sampled_images: u32,
     /// `VkPhysicalDeviceLimits::timestampPeriod`: nanoseconds per timestamp tick.
     pub(crate) timestamp_period: f32,
     /// `timestampValidBits` of the graphics queue family; `0` means no timestamps.
@@ -302,6 +308,14 @@ impl DeviceContext {
             name: device_name(&candidate.properties),
             surface,
             max_storage_buffer_range: candidate.properties.limits.max_storage_buffer_range,
+            max_per_stage_samplers: candidate
+                .properties
+                .limits
+                .max_per_stage_descriptor_samplers,
+            max_per_stage_sampled_images: candidate
+                .properties
+                .limits
+                .max_per_stage_descriptor_sampled_images,
             timestamp_period: candidate.properties.limits.timestamp_period,
             timestamp_valid_bits,
             compute_supported,

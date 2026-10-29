@@ -309,6 +309,27 @@ pub(crate) struct Materials {
     stats: MaterialStats,
 }
 
+/// Bindings of the material set (set 2): the material block and one combined image sampler
+/// per [`TextureSlot`], all fragment-only. Also counted by the scene layout's descriptor
+/// budget (`descriptor_budget`).
+pub(crate) fn set_layout_bindings()
+-> [vk::DescriptorSetLayoutBinding<'static>; 1 + TextureSlot::COUNT] {
+    let mut bindings = [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        1 + TextureSlot::COUNT];
+    for (index, binding) in bindings.iter_mut().enumerate().skip(1) {
+        *binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(index as u32)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+    }
+    bindings
+}
+
 impl Materials {
     /// The set layout, sampler and default textures. `anisotropy` is the tier's maximum
     /// sampler anisotropy (`None` or 1 disables it).
@@ -317,19 +338,7 @@ impl Materials {
         compressed: bool,
         anisotropy: Option<f32>,
     ) -> RenderResult<Self> {
-        let mut bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-            1 + TextureSlot::COUNT];
-        for (index, binding) in bindings.iter_mut().enumerate().skip(1) {
-            *binding = vk::DescriptorSetLayoutBinding::default()
-                .binding(index as u32)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        }
+        let bindings = set_layout_bindings();
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &bindings)?;
         let anisotropy = anisotropy
             .zip(device.max_anisotropy)

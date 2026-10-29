@@ -103,21 +103,27 @@ passes run in this order:
    hero-portrait strip and a 512×512 minimap by default, HDR format, each with its own depth
    buffer and per-frame buffers), lit like the scene but with shadows off (their lighting
    set names a default shadow image, ADR-0011);
-2. `vfx_simulate` (compute) spawns, ages, integrates and compacts GPU particles and writes
+2. `fow-raster` and `fow-resolve` (R3a, when the fog of war uses the texture): one quad per
+   own-team vision source into a fixed-size `R8` transient (`MAX` blend, line-of-sight walls
+   tested per texel), then a blur and a time-based ease from the other frame's image into
+   this frame's persistent image ([ADR-0014](adr/0014-terrain-fog-of-war.md));
+3. `vfx_simulate` (compute) spawns, ages, integrates and compacts GPU particles and writes
    their indirect draw arguments ([ADR-0013](adr/0013-vfx-runtime.md));
-3. `shadow` renders the main view's units (static meshes instanced, skinned heroes through a
+4. `shadow` renders the main view's units (static meshes instanced, skinned heroes through a
    `SHADOW_PASS` permutation of the skinned vertex shader) depth-only into one directional
    shadow map fitted to the camera's view of the board and texel-snapped (1024²–4096² by
    tier; absent when shadows are off, ADR-0011);
-4. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
-   the `Low` quality tier) with a sampled-capable depth buffer, sampling the shadow map;
-5. `vfx_draw` draws the particles into the HDR target, testing the scene depth read-only and
+5. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
+   the `Low` quality tier) with a sampled-capable depth buffer, sampling the shadow map and
+   this frame's fog-of-war image, and draws the sky last on the far plane;
+6. `vfx_draw` draws the particles into the HDR target, testing the scene depth read-only and
    sampling it for soft particles; alpha particles accumulate weighted blended OIT targets on
    Medium and up, which
-6. `vfx_resolve` composites over the HDR target;
-7. `composite` applies exposure and an AgX tonemap into the swapchain image;
-8. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images;
-9. `capture` copies the swapchain image for readback, in capture frames only.
+7. `vfx_resolve` composites over the HDR target;
+8. `composite` applies exposure and an AgX tonemap into the swapchain image;
+9. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images
+   and (the minimap's mask) the fog-of-war image;
+10. `capture` copies the swapchain image for readback, in capture frames only.
 
 The offscreen images are graph imports, not transients: they keep their contents across
 frames and start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, so a frame that does not
@@ -125,7 +131,7 @@ re-render one still samples last frame's contents with no transition. Every comb
 capture and offscreen passes is a variant compiled at creation (eight), and all share the
 transient slots (the shadow map included, which keeps its fixed-size image across resizes).
 Without VFX (`RenderConfig::vfx`, or no compute on the graphics queue) the VFX passes are
-absent. The passes before `composite` are submitted ahead of the acquire-semaphore wait (they
+absent, and without the fog-of-war texture (`MOBA_FOW=legacy|off`) the fog-of-war passes. The passes before `composite` are submitted ahead of the acquire-semaphore wait (they
 never touch the swapchain), and the passes from `composite` on wait for the acquired image,
 in one `vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
 load from a pool sized by the registered content
@@ -136,7 +142,15 @@ mid-match. GLSL shares declarations through `#include` files and a small, enumer
 permutations (`MATERIAL_TEXTURED`) is compiled to separate SPIR-V at build time; debug builds
 can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
 
-- terrain (single procedural grid mesh tinted by the map theme) and instanced units; heroes
+- terrain: the map's heightfield mesh with splat-textured layers (R3a,
+  [ADR-0014](adr/0014-terrain-fog-of-war.md)): up to eight layers from two texture arrays
+  (albedo with cavity in alpha, BC5 normals) weighted by a splat array, top-down on flat
+  ground and triplanar on slopes, the relief's baked occlusion in the vertex UV. The
+  heightfield and, for the sample maps, the splat come from `moba_assets::generate_terrain`,
+  which follows the simulation's map (paths along lanes, rock on slopes and at wall feet) and
+  keeps the board within ±0.5 m (the simulation is flat) while the margin rises into hills or
+  cliffs. Without a `[terrain]` table (or with `MOBA_TERRAIN=flat`) the R2a procedural grid
+  plane draws instead. Then instanced units; heroes
   use a client-local `.glb` model when one is configured (GPU-skinned when the file has a
   skin: a per-frame bone SSBO plus a push-constant bone range, ADR-0007; posed on the CPU by
   the animation runtime of ADR-0012 when the model has an animation set, else by its run clip
@@ -153,9 +167,19 @@ can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
   from the map's client-local environment; hemispheric ambient without one), the shadow map
   (hard, PCF or PCSS-lite by tier) and a stylisation layer (wrap, ramp, painted specular,
   rim) set per map and per material. The lighting set (set 3: shadow map, environment cube,
-  BRDF LUT, ramp) is written at load and resize only;
-- up to 16 allied vision circles uploaded in the camera UBO; the terrain fragment shader
-  darkens unseen ground.
+  BRDF LUT, ramp, then the fog-of-war image and the terrain arrays; the binding map and the
+  per-stage sampler budget, 13 of 16, are in ADR-0014 §6) is written at load and resize
+  only;
+- the fog of war (R3a): two graph passes before the shadow pass rasterise the client's
+  own-team vision sources (no cap of 16 or 32: up to 1,024 sources and 256 walls a frame)
+  into a fixed-size `R8` texture with line-of-sight walls, then blur it and ease it from the
+  previous frame's (ping-pong persistent images, one per frame in flight). The terrain
+  shader darkens, desaturates and mists unseen ground by the map's `[fog_of_war]` style;
+  units are never fogged (the server already decides what the client sees). The pre-R3a
+  16-circle uniform loop remains as `MOBA_FOW=legacy`;
+- atmosphere (R3a): analytic height fog on the terrain and units, and a sky on the far
+  plane (the environment cube or a gradient) whose horizon is the fog colour, so the terrain
+  margin fades into it and no board edge shows.
 
 The UI pass draws one screen-space batch: solid quads, the pixel-art icon atlas, MSDF text,
 cooldown sweeps and (R7b) offscreen images, picked per vertex (`UiVertex::mode`, and
@@ -167,8 +191,10 @@ The client fills the offscreen images from state it already has (`app::offscreen
 portrait cell per `(team, hero slot)`, rendered when the heroes change and, above the `Low`
 tier, a few times a second with each skinned hero's idle clip; and the minimap, a top-down
 orthographic render of the map's terrain, walls and props baked at every map bind. The HUD
-darkens the minimap outside allied vision from the units it was sent, so nothing hidden is
-revealed.
+darkens the minimap outside allied vision with the fog-of-war texture itself
+(`UiDrawList::fog_mask`, R3a: walls respected, faded like the world), or with a 24×24 grid of
+the units it was sent with `MOBA_FOW=legacy`, so nothing hidden is revealed; with
+`MOBA_FOW=off` the minimap has no fog, like the world.
 
 **VFX** are presentation only. The client's `VfxSystem` turns presentation events (casts,
 projectiles, hits, zones, deaths, structures and basic attacks; network events are released
@@ -222,8 +248,10 @@ remain future work (tracked in GitHub Issues).
 
 Each map can carry vision-blocking wall segments. The server intersects the source→unit
 segment against walls before revealing an enemy; allied units and structures stay visible.
-The terrain shader receives the same segments and rejects a vision-circle contribution when
-a wall crosses the circle-center→fragment ray. The client renders wall geometry in the world
+The client's fog-of-war texture (R3a) uses the same segments: its raster pass rejects a
+texel when a wall crosses the source→texel segment, from the team's own units only. The
+client renders wall geometry in the world (placed by `moba_assets::wall_box`, which
+`content-check` also uses to verify that every simulation wall is covered by a visual one)
 and as segments on the minimap.
 
 The server binary accepts a TOML deployment file (`--config`); CLI flags override file
