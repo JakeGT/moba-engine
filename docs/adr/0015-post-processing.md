@@ -165,13 +165,13 @@ Options measured in [perf/0019](../perf/0019-post.md); defaults:
   `maxPerStageDescriptorSamplers` (16 on the Vulkan minimum and MoltenVK, which set 3 and
   the material set approach once R3a and R2b land). Applying AO in the composite instead
   would remove that sampler but darken direct light (see Alternatives).
-- **Composition with R3a and R2b.** On `main` today AO is set 3 binding 5, the first free
-  one. R3a takes set-3 bindings 5–9 and R2b appends after it; R6 merges after both, so on
-  rebase AO moves to the **next free set-3 binding after R2b's** (one line in
-  `lighting.glsl` and the set-3 layout). R2b adds a reusable main-view depth prepass on High
-  and up: once it lands, **GTAO reads R2b's prepass depth** and R6's own prepass is folded
-  into it (keeping the multisample depth and `SAMPLE_ZERO` resolve for MSAA), so the frame
-  has one prepass, not two.
+- **Composition with R3a and R2b.** R6 merges after R3a and before R2b. On `main` today AO
+  is set 3 binding 5, the first free one; R3a takes set-3 bindings 5–9, so when R6 catches
+  up with it AO moves to the **next free set-3 binding after R3a's** (one line in
+  `lighting.glsl` and the set-3 layout) and keeps R3a's per-stage sampler-budget check
+  passing. R2b then appends its bindings after AO. **The frame has one depth prepass, R6's**
+  (main view, High and up; multisample depth with a `SAMPLE_ZERO` resolve under MSAA): R2b's
+  contact shadows reuse it rather than adding their own.
 - **Low/Medium:** off; Low will rely on baked AO (R2b). `MOBA_AO=off`.
 
 ### 6. Resolution scaling
