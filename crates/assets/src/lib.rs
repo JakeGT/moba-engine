@@ -19,11 +19,15 @@
 //! validated [`TextureData`] (BC7/BC5/BC4 or 8-bit formats with mips; the `bc-decode`
 //! feature adds the CPU fallback decode), and [`MaterialDesc`] is the bounded client-local
 //! material descriptor (`materials/<model>.toml`) naming a shader permutation, a parameter
-//! block and a texture set (`textures/<name>.ktx2`).
+//! block and a texture set (`textures/<name>.ktx2`). KTX2 also carries cube maps and
+//! `RGBA16F` for image-based lighting (R2a): [`EnvironmentDesc`] is the bounded per-map
+//! environment descriptor (`environments/<name>.toml`, SH-L2 diffuse ambient) next to its
+//! prefiltered specular cube map (`environments/<name>.ktx2`).
 
 #![forbid(unsafe_code)]
 
 mod animation;
+mod environment;
 #[cfg(feature = "glb")]
 mod glb;
 mod map_visuals;
@@ -44,11 +48,16 @@ pub use animation::{
     MAX_SOCKETS, MAX_SPRING_CHAINS, MAX_SPRING_JOINTS, MAX_SPRING_STEPS, PlayMode, SPRING_STEP,
     SocketId, StateId, pose_matrices,
 };
+pub use environment::{
+    ENVIRONMENTS_DIR, EnvironmentDesc, EnvironmentError, MAX_ENVIRONMENT_BYTES, MAX_SPECULAR_MIPS,
+    SH_COEFFICIENTS, environment_paths, sh_basis,
+};
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
 pub use map_visuals::{
-    DEFAULT_PROP_HEIGHT, DEFAULT_WALL_HEIGHT, MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES,
-    MAX_MESH_NAME, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
+    DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_ROUGHNESS, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT,
+    MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MESH_NAME, MAX_SHADOW_STRENGTH,
+    MIN_SUN_ELEVATION, MapLighting, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
 };
 pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
@@ -65,8 +74,9 @@ pub use skin::{
     valid_animation_name,
 };
 pub use texture::{
-    MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData, TextureError,
-    TextureFormat, full_mip_chain, load_ktx2, load_ktx2_file, mip_size, write_ktx2,
+    MAX_CUBE_DIMENSION, MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData,
+    TextureError, TextureFormat, f16_from_f32, f32_from_f16, full_mip_chain, load_ktx2,
+    load_ktx2_file, mip_size, write_ktx2,
 };
 
 /// One asset entry.

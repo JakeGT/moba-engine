@@ -19,6 +19,19 @@ fuzz_target!(|data: &[u8]| {
                 .iter()
                 .all(|&index| (index as usize) < mesh.vertex_count())
         );
+        // File tangents: one per vertex, finite, handedness exactly ±1 (R2a).
+        if let Some(tangents) = mesh.tangents() {
+            assert_eq!(tangents.len(), mesh.vertex_count());
+            assert!(
+                tangents
+                    .iter()
+                    .all(|tangent| tangent.iter().all(|value| value.is_finite())
+                        && (tangent[3] == 1.0 || tangent[3] == -1.0))
+            );
+        }
+        if let Some(tangents) = mesh.generate_tangents() {
+            assert_eq!(tangents.len(), mesh.vertex_count());
+        }
         if let Some(skin) = mesh.skin() {
             let joints = skin.skeleton().joint_count();
             assert!((1..=moba_assets::MAX_JOINTS).contains(&joints));

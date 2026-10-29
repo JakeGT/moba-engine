@@ -1,0 +1,17 @@
+# Map visuals descriptor for the built-in grass theme (`visuals` unset, theme "grass"), so
+# the default map gets image-based lighting (R2a, ADR-0011). The terrain and wall colours are
+# the built-in theme table's, so only the lighting differs from having no file.
+# Client-local and cosmetic: never hashed or sent. See docs/content-authoring.md#lighting.
+terrain = [0.10, 0.16, 0.11]
+wall = [0.24, 0.21, 0.16]
+
+[lighting]
+environment = "meadow"           # environments/meadow.{toml,ktx2}: env-bake --preset meadow
+sun_direction = [0.45, 1.0, 0.35]
+sun_color = [1.0, 0.96, 0.90]
+sun_intensity = 1.15
+ibl_intensity = 0.6                # the meadow sky is bright; keep the sun dominant
+shadow_strength = 0.75
+wrap = 0.2
+rim = 0.25
+rim_color = [0.85, 0.92, 1.0]

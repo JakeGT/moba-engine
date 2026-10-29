@@ -98,6 +98,39 @@ pub(crate) fn compressed_textures() -> bool {
     std::env::var("MOBA_COMPRESSED_TEXTURES").map_or(true, |value| value.trim() != "0")
 }
 
+/// The lighting features for `tier` with the `MOBA_SHADOWS` (`off|hard|pcf|pcss`),
+/// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides.
+pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
+    lighting_config_from(tier, |name| std::env::var(name).ok())
+}
+
+fn lighting_config_from(
+    tier: moba_render::QualityTier,
+    var: impl Fn(&str) -> Option<String>,
+) -> moba_render::LightingConfig {
+    let mut config = moba_render::LightingConfig::for_tier(tier);
+    if let Some(value) = var("MOBA_SHADOWS") {
+        match moba_render::ShadowFilter::from_name(&value) {
+            Some(filter) => config = config.with_shadows(filter),
+            None => eprintln!("MOBA_SHADOWS={value:?} is not off/hard/pcf/pcss; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_SHADOW_SIZE") {
+        match value.trim().parse::<u32>() {
+            Ok(size) => config = config.with_shadow_resolution(size),
+            Err(_) => eprintln!("MOBA_SHADOW_SIZE={value:?} is not a number; using the tier's"),
+        }
+    }
+    let off = |name| var(name).is_some_and(|value| value.trim() == "0");
+    if off("MOBA_IBL") {
+        config = config.with_ibl(false);
+    }
+    if off("MOBA_SPECULAR_IBL") {
+        config = config.with_specular_ibl(false);
+    }
+    config
+}
+
 /// Number of `.spv` files in a shader override directory and their newest modification time.
 pub(crate) type ShaderStamp = (usize, Option<std::time::SystemTime>);
 
@@ -434,11 +467,20 @@ impl Drop for ClientApp {
             || String::from("?"),
             |renderer| {
                 let pipelines = renderer.pipeline_stats();
+                let lighting = renderer.lighting_config();
                 format!(
-                    "{} hdr={} pipelines={} pipeline_build_ms={:.3} pipeline_cache={} \
-                     startup_ms={:.1}",
+                    "{} hdr={} shadows={} shadow_size={} ibl={} specular_ibl={} pipelines={} \
+                     pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
                     renderer.quality_tier(),
                     renderer.hdr_format_name(),
+                    lighting.shadows,
+                    lighting.shadow_resolution,
+                    if lighting.ibl && renderer.has_environment() {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                    if lighting.specular_ibl { "on" } else { "off" },
                     pipelines.pipelines,
                     pipelines.build_ms,
                     pipelines.cache,
@@ -462,16 +504,17 @@ impl Drop for ClientApp {
     }
 }
 
-/// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[scene, composite, ui,
-/// total, span, portraits, minimap]` samples. `total` sums the passes; `span` runs from the
-/// first pass's start to the last pass's end, so `span - total` is the time spent in
-/// barriers between passes. The offscreen passes (R7b) run only in some frames, so their
-/// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
-/// columns are left out.
-fn gpu_report(samples: &[[f32; 7]]) -> String {
+/// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[shadow, scene, composite,
+/// ui, total, span, portraits, minimap]` samples (`shadow` is 0 when shadows are off).
+/// `total` sums the passes; `span` runs from the first pass's start to the last pass's end,
+/// so `span - total` is the time spent in barriers between passes. The offscreen passes (R7b)
+/// run only in some frames, so their percentiles cover just those frames, and
+/// `gpu_<pass>_runs` counts them; with no run the columns are left out.
+fn gpu_report(samples: &[[f32; 8]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
     for (lane, name) in [
+        "shadow",
         "scene",
         "composite",
         "ui",
@@ -483,7 +526,7 @@ fn gpu_report(samples: &[[f32; 7]]) -> String {
     .into_iter()
     .enumerate()
     {
-        let offscreen = lane >= 5;
+        let offscreen = lane >= 6;
         let mut values: Vec<f32> = samples
             .iter()
             .map(|sample| sample[lane])
@@ -514,7 +557,9 @@ fn gpu_report(samples: &[[f32; 7]]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_report, parse_hex32, parse_window_size, pipeline_cache_path_from};
+    use super::{
+        gpu_report, lighting_config_from, parse_hex32, parse_window_size, pipeline_cache_path_from,
+    };
 
     #[test]
     fn pipeline_cache_path_follows_the_override_then_the_platform_cache_dir() {
@@ -553,17 +598,58 @@ mod tests {
     }
 
     #[test]
+    fn lighting_overrides_turn_tier_features_off() {
+        use moba_render::{LightingConfig, QualityTier, ShadowFilter};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        let high = LightingConfig::for_tier(QualityTier::High);
+        assert_eq!(lighting_config_from(QualityTier::High, env(&[])), high);
+        let off = lighting_config_from(
+            QualityTier::High,
+            env(&[
+                ("MOBA_SHADOWS", "OFF"),
+                ("MOBA_IBL", "0"),
+                ("MOBA_SHADOW_SIZE", "512"),
+            ]),
+        );
+        assert_eq!(off.shadows, ShadowFilter::Off);
+        assert!(!off.ibl);
+        assert_eq!(off.shadow_resolution, 512);
+        let bad = lighting_config_from(
+            QualityTier::Low,
+            env(&[("MOBA_SHADOWS", "vsm"), ("MOBA_SHADOW_SIZE", "big")]),
+        );
+        assert_eq!(bad, LightingConfig::for_tier(QualityTier::Low));
+    }
+
+    #[test]
     fn gpu_report_lists_each_pass_percentile() {
-        let samples: Vec<[f32; 7]> = (0..=100)
+        let samples: Vec<[f32; 8]> = (0..=100)
             .map(|index| {
                 let ms = index as f32 / 100.0;
                 // The portrait pass ran in every tenth frame; the minimap never did.
                 let portraits = if index % 10 == 0 { 0.02 } else { 0.0 };
-                [ms, ms * 2.0, 0.5, ms * 3.0, ms * 4.0, portraits, 0.0]
+                [
+                    ms * 0.5,
+                    ms,
+                    ms * 2.0,
+                    0.5,
+                    ms * 3.0,
+                    ms * 4.0,
+                    portraits,
+                    0.0,
+                ]
             })
             .collect();
         let report = gpu_report(&samples);
-        assert!(report.starts_with("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
+        assert!(report.starts_with("gpu_shadow_p50_ms=0.250 gpu_shadow_p95_ms=0.475 "));
+        assert!(report.contains("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));
         assert!(report.contains("gpu_ui_p50_ms=0.500 gpu_ui_p95_ms=0.500 "));
         assert!(report.contains("gpu_total_p50_ms=1.500 gpu_total_p95_ms=2.850 "));

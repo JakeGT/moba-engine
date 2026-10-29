@@ -14,15 +14,15 @@ accounts and live operations are separate tracks (see [§9](#9-other-tracks-a-sh
 The engine has a solid base to build on, but today's picture is a prototype. Compare
 [the NVIDIA teamfight capture](../images/m8-nvidia-teamfight.png) with any commercial MOBA.
 
-| Area | Today (checked against `main` @ 9a251a1; R1a/R1b rows updated 2026-10-28) |
+| Area | Today (checked against `main` @ 9a251a1; R1a/R1b rows updated 2026-10-28, R2a rows 2026-10-29) |
 |---|---|
 | Frame structure | **R1a:** a render graph ([ADR-0008](../adr/0008-render-graph.md)): `scene` → HDR colour (`R16G16B16A16_SFLOAT`, `B10G11R11_UFLOAT_PACK32` on Low) + sampled-capable depth, `composite` (tonemap) → swapchain, `ui` on top, with derived sync2 barriers, transient pooling and pass culling. `FRAMES_IN_FLIGHT = 2`. `QualityTier` exists (Low/Medium/High/Ultra). |
-| Shaders | **R1b:** 9 GLSL sources sharing `#include` files (camera block, instance buffer, lighting, material set) plus three `MATERIAL_TEXTURED` permutations, 12 SPIR-V modules validated with `spirv-val`. Every pipeline is built at load through a persistent `VkPipelineCache` (7 pipelines: 90–98 ms cold, 0.5 ms warm on the RTX 5070 Ti). Hot reload of SPIR-V overrides in debug builds (`MOBA_SHADER_DIR`). |
-| Lighting | One directional light (Lambert), hemispheric ambient and a rim term (`unit.frag`). No shadows, no specular, no PBR, no image-based lighting. |
+| Shaders | **R1b:** 9 GLSL sources sharing `#include` files (camera block, instance buffer, lighting, material set) plus `MATERIAL_TEXTURED` permutations and (R2a) two `SHADOW_PASS` depth-only casters: 14 SPIR-V modules validated with `spirv-val`. Every pipeline is built at load through a persistent `VkPipelineCache` (9 with shadows on). Hot reload of SPIR-V overrides in debug builds (`MOBA_SHADER_DIR`). |
+| Lighting | **R2a** ([ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX, Smith-GGX, Schlick, energy-conserving diffuse) with wrap/ramp/painted-specular/rim set per map and material; per-map IBL (SH-L2 diffuse + prefiltered specular cube, split-sum LUT) from `env-bake`'s analytic skies; one fitted, texel-snapped directional shadow map with hard/PCF/PCSS-lite filtering by tier, skinned heroes casting. No dynamic point lights, outlines or baked AO yet (R2b). |
 | Geometry | Instanced cubes. Heroes are a 6-cube rig posed on the CPU (`push_hero_rig`). The instance SSBO is capped at 4,096. Mesh loading is in progress (WP-3.2, #286). |
 | Terrain | A flat plane with a procedural grid and per-map tint. Walls are only drawn on the network path. |
 | Fog of war | The terrain shader loops over 16 vision circles and 32 wall segments held in the camera UBO. |
-| Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). Lighting is still the R1a Lambert model; PBR is R2. |
+| Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
 | Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. VAT minions and bone LOD (R4b) are open. |
 | VFX | None beyond unit tinting. Presentation events (cast, projectile spawn/hit, death, zone) already reach the client ([perf/0009](../perf/0009-presentation-events.md)). |
 | Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
@@ -128,6 +128,17 @@ criterion is discussed in perf/0011.
 
 **Exit:** a lit, textured, shadowed hero-and-map scene at the target budgets on all three reference GPUs, and a readability review signed off by art direction.
 
+**Status (2026-10-29):** R2a done — items 1–3 ([ADR-0011](../adr/0011-art-style-lighting.md),
+[perf/0015](../perf/0015-lighting.md)): PBR with the stylisation layer and vertex tangents,
+per-map IBL baked by `moba-tools env-bake`, and one fitted directional shadow map (no
+cascades: the sphere fit gives 4–9 cm texels at the player cameras and stays readable at the
+overview) with hard/PCF/PCSS-lite by tier and off switches. Scope choices: screen-space
+contact shadows (item 3) need a depth pre-pass and move to R2b; BC6H for environments is
+deferred (ADR-0010 amendment). **R2b** (open): baked AO/lightmaps (item 4), clustered forward
+dynamic lights (item 5), team and selection outlines (item 6), contact shadows. The exit's
+"all three reference GPUs" and the art-direction sign-off still need hardware and an art
+director; the RTX 5070 Ti is the only measured GPU.
+
 ### R3 — Terrain and environment (L)
 1. **Terrain.** Heightfield or authored mesh with splat-map texturing (4–8 layers, triplanar on slopes), plus normal and AO maps. Walls and cliffs are props from the asset manifest. The simulation's map geometry stays authoritative and is validated against the visual mesh by content-check.
 2. **Decals.** Projected decals for ability telegraphs, scorch marks and blood/goo, with clustered or deferred-decal binning. Telegraph decals get guaranteed contrast.
@@ -213,7 +224,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0008 | Render graph | **Accepted** (R1a): in-house, small, compile-time pass list; transient pooling |
 | ADR-0009 | Descriptor model | **Accepted** (R1a): per-material plain sets now; bindless deferred until measured on MoltenVK + UHD 620 |
 | ADR-0010 | Texture pipeline | **Accepted** (R1b, [ADR-0010](../adr/0010-texture-pipeline.md)): offline baker → KTX2 (BC7/BC5/BC4), baked mips, sRGB/linear fixed by format and slot; CPU-decode fallback; client-local material descriptors |
-| ADR-0011 | Art style | Stylised PBR with a painterly layer; readability rules as acceptance criteria |
+| ADR-0011 | Art style | **Accepted** (R2a, [ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX + wrap/ramp/painted specular/rim), per-map IBL, one fitted directional shadow map; readability rules as acceptance criteria |
 | ADR-0012 | Animation runtime | **Accepted** ([ADR-0012](../adr/0012-animation-runtime.md)): in-house sampler + content-defined state machine; VAT for minions in R4b |
 | ADR-0013 | VFX runtime | GPU compute particles; content-defined effects bound to presentation events |
 | — | Quality tiers | Low = min-spec 1080p/60; High = mid-range 1440p/144 |

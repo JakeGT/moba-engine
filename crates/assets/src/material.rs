@@ -15,7 +15,13 @@
 //! roughness = 1.0                      # optional, 0..=1 (default 1)
 //! normal_scale = 1.0                   # optional, 0..=2 (default 1)
 //! team_tint = 1.0                      # optional, 0..=1: how much the mask tints (default 1)
-//! emissive = [0.0, 0.0, 0.0]           # optional, linear RGB in 0..=16 (default 0; R2)
+//! emissive = [0.0, 0.0, 0.0]           # optional, linear RGB in 0..=16 (default 0)
+//! # Stylisation (ADR-0011), all optional:
+//! wrap = 0.3                           # 0..=1 wrap lighting (default: the map's)
+//! rim = 1.0                            # 0..=4 multiplier of the map's rim (default 1)
+//! ramp = 1.0                           # 0..=1 multiplier of the map's ramp strength (default 1)
+//! specular = 1.0                       # 0..=2 specular scale (default 1)
+//! specular_tint = [1.0, 1.0, 1.0]      # linear RGB in 0..=1, painted-specular tint (default 1)
 //! ```
 //!
 //! Like map visuals (#287), descriptors are untrusted, client-local and cosmetic: they never
@@ -139,16 +145,26 @@ pub struct MaterialDesc {
     textures: [Option<String>; TextureSlot::COUNT],
     /// Linear RGBA multiplier of the base colour.
     pub base_color_factor: [f32; 4],
-    /// Metallic factor (R2's PBR).
+    /// Metallic factor, times the metallic-roughness texture's R.
     pub metallic: f32,
-    /// Roughness factor (R2's PBR).
+    /// Roughness factor, times the metallic-roughness texture's G.
     pub roughness: f32,
     /// Normal map strength.
     pub normal_scale: f32,
     /// How strongly the mask tints the base colour by the unit colour.
     pub team_tint: f32,
-    /// Linear RGB emissive factor (R2).
+    /// Linear RGB emissive factor, added after lighting.
     pub emissive: [f32; 3],
+    /// Wrap lighting `0..=1`; `None` uses the map's (ADR-0011).
+    pub wrap: Option<f32>,
+    /// Multiplier of the map's rim strength, `0..=4`.
+    pub rim: f32,
+    /// Multiplier of the map's ramp strength, `0..=1`.
+    pub ramp: f32,
+    /// Specular scale, `0..=2`.
+    pub specular: f32,
+    /// Painted-specular tint, linear RGB in `0..=1`.
+    pub specular_tint: [f32; 3],
 }
 
 impl Default for MaterialDesc {
@@ -162,6 +178,11 @@ impl Default for MaterialDesc {
             normal_scale: 1.0,
             team_tint: 1.0,
             emissive: [0.0; 3],
+            wrap: None,
+            rim: 1.0,
+            ramp: 1.0,
+            specular: 1.0,
+            specular_tint: [1.0; 3],
         }
     }
 }
@@ -190,6 +211,16 @@ struct RawMaterial {
     team_tint: Option<f32>,
     #[serde(default)]
     emissive: Option<[f32; 3]>,
+    #[serde(default)]
+    wrap: Option<f32>,
+    #[serde(default)]
+    rim: Option<f32>,
+    #[serde(default)]
+    ramp: Option<f32>,
+    #[serde(default)]
+    specular: Option<f32>,
+    #[serde(default)]
+    specular_tint: Option<[f32; 3]>,
 }
 
 /// Why a material descriptor could not be used.
@@ -294,6 +325,28 @@ impl MaterialDesc {
         if !emissive.iter().all(|&value| in_range(value, 0.0, 16.0)) {
             return Err(MaterialError::Invalid("emissive must be in 0..=16"));
         }
+        let ranged = |value: Option<f32>, default: f32, high: f32, what| match value {
+            None => Ok(default),
+            Some(value) if in_range(value, 0.0, high) => Ok(value),
+            Some(_) => Err(MaterialError::Invalid(what)),
+        };
+        let wrap = match raw.wrap {
+            None => None,
+            Some(value) if in_range(value, 0.0, 1.0) => Some(value),
+            Some(_) => return Err(MaterialError::Invalid("wrap must be in 0..=1")),
+        };
+        let rim = ranged(raw.rim, defaults.rim, 4.0, "rim must be in 0..=4")?;
+        let ramp = ranged(raw.ramp, defaults.ramp, 1.0, "ramp must be in 0..=1")?;
+        let specular = ranged(
+            raw.specular,
+            defaults.specular,
+            2.0,
+            "specular must be in 0..=2",
+        )?;
+        let specular_tint = raw.specular_tint.unwrap_or(defaults.specular_tint);
+        if !specular_tint.iter().all(|&value| in_range(value, 0.0, 1.0)) {
+            return Err(MaterialError::Invalid("specular_tint must be in 0..=1"));
+        }
         Ok(Self {
             shader,
             textures,
@@ -303,6 +356,11 @@ impl MaterialDesc {
             normal_scale,
             team_tint,
             emissive,
+            wrap,
+            rim,
+            ramp,
+            specular,
+            specular_tint,
         })
     }
 
@@ -381,6 +439,15 @@ roughness = 0.6
         assert!((material.roughness - 0.6).abs() < f32::EPSILON);
         assert!((material.metallic).abs() < f32::EPSILON);
         assert!((material.team_tint - 1.0).abs() < f32::EPSILON);
+        assert_eq!(material.wrap, None);
+        assert_eq!(material.specular_tint, [1.0; 3]);
+        let styled = MaterialDesc::parse(&format!(
+            "{SAMPLE}wrap = 0.4\nrim = 2.0\nramp = 0.5\nspecular = 0.5\nspecular_tint = [1.0, 0.8, 0.6]\n"
+        ))
+        .expect("stylised");
+        assert_eq!(styled.wrap, Some(0.4));
+        assert_eq!((styled.rim, styled.ramp, styled.specular), (2.0, 0.5, 0.5));
+        assert_eq!(styled.specular_tint, [1.0, 0.8, 0.6]);
         let slots: Vec<_> = material.bound_textures().map(|(slot, _)| slot).collect();
         assert_eq!(
             slots,
@@ -420,6 +487,18 @@ roughness = 0.6
         assert!(invalid(
             "shader = \"textured\"\nbase_color = \"x\"\nemissive = [0, 0, 17]"
         ));
+        for bad in [
+            "wrap = 1.5",
+            "rim = 5",
+            "ramp = -0.1",
+            "specular = inf",
+            "specular_tint = [1, 2, 1]",
+        ] {
+            assert!(
+                invalid(&format!("shader = \"textured\"\nbase_color = \"x\"\n{bad}")),
+                "{bad}"
+            );
+        }
         assert!(matches!(
             MaterialDesc::parse("shader = \"textured\"\nbase_color = \"x\"\nalbedo = \"y\""),
             Err(MaterialError::Toml(_))

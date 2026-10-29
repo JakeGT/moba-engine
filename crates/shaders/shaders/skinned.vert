@@ -7,7 +7,8 @@
 // first_bone + joint_count <= the bones uploaded this frame; joint indices are clamped to
 // the range, so no read can leave it. The output matches unit.vert, so unit.frag is reused.
 //
-// Permutations (crates/shaders/build.rs): `MATERIAL_TEXTURED` also passes the mesh UVs.
+// Permutations (crates/shaders/build.rs): `MATERIAL_TEXTURED` also passes the mesh UVs and
+// tangents; `SHADOW_PASS` is the depth-only shadow caster (position, joints and weights).
 
 #include "camera.glsl"
 #include "instance.glsl"
@@ -24,18 +25,24 @@ layout(push_constant) uniform SkinBlock {
 } skin;
 
 layout(location = 0) in vec3 in_position;
+#ifndef SHADOW_PASS
 layout(location = 1) in vec3 in_normal;
+#endif
 layout(location = 2) in uvec4 in_joints;  // R8G8B8A8_UINT
 layout(location = 3) in vec4 in_weights;  // R8G8B8A8_UNORM, sum 1 or all zero
 #ifdef MATERIAL_TEXTURED
 layout(location = 4) in vec2 in_uv;
+layout(location = 5) in vec4 in_tangent;
 #endif
 
+#ifndef SHADOW_PASS
 layout(location = 0) out vec3 out_world_normal;
 layout(location = 1) out vec3 out_color;
 layout(location = 2) out vec3 out_world_pos;
+#endif
 #ifdef MATERIAL_TEXTURED
 layout(location = 3) out vec2 out_uv;
+layout(location = 4) out vec4 out_world_tangent;
 #endif
 
 mat4 bone(uint joint) {
@@ -63,12 +70,18 @@ void main() {
     }
     mat4 model = instance.model * skinning;
     vec4 world = model * vec4(in_position, 1.0);
+#ifdef SHADOW_PASS
+    gl_Position = camera.light_view_proj * world;
+#else
     gl_Position = camera.view_proj * world;
 
     out_world_normal = normalize(transpose(inverse(mat3(model))) * in_normal);
     out_color = instance.color.rgb;
     out_world_pos = world.xyz;
+#endif
 #ifdef MATERIAL_TEXTURED
     out_uv = in_uv;
+    float mirror = determinant(mat3(model)) < 0.0 ? -1.0 : 1.0;
+    out_world_tangent = vec4(mat3(model) * in_tangent.xyz, in_tangent.w * mirror);
 #endif
 }

@@ -106,6 +106,59 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Lighting: stylised PBR, image-based lighting and shadows (AAA roadmap R2a, ADR-0011):**
+  - **PBR:** every lit surface (units, GPU-skinned heroes, terrain) goes through one
+    `shade()` in `include/lighting.glsl`: GGX, height-correlated Smith-GGX visibility,
+    Schlick Fresnel and an energy-conserving Lambert, with metallic/roughness from the
+    material texture × factors (now read) and emissive (now added). A **stylisation layer**
+    — wrap lighting, an optional N·L ramp texture, painted-specular tint and scale, a coloured
+    rim — is set per map (`[lighting]` in `maps/<name>.toml`, `moba_assets::MapLighting`) and
+    refined per material (`wrap`, `rim`, `ramp`, `specular`, `specular_tint`). ADR-0011
+    records the model and the readability rules as acceptance criteria.
+  - **Tangents:** normal maps use a vertex tangent frame instead of screen-space derivatives:
+    the `.glb` loader reads `TANGENT` (`MeshData::with_tangents`/`tangents`), and a
+    MikkTSpace-style generator (`MeshData::generate_tangents`) fills them in at registration
+    and in `sample-mesh` (the static samples now ship tangents; the skinned sample is
+    unchanged). Static vertices are 48 bytes, skinned ones 56.
+  - **Image-based lighting:** per-map environments (`[lighting] environment = "<name>"` →
+    `environments/<name>.{toml,ktx2}`, `moba_assets::EnvironmentDesc`, ≤ 4 KiB) give SH-L2
+    diffuse irradiance and a prefiltered GGX specular cube, combined through a split-sum BRDF
+    LUT generated at renderer creation. `moba-tools env-bake` bakes them from an analytic sky
+    (presets `meadow`, `ember`, `frost`, every parameter overridable;
+    `scripts/bake-sample-environments.sh`); no external HDRIs. The default grass map now has a
+    descriptor (`content/maps/map-grass.toml`, the built-in colours plus `meadow`), and ember
+    and frost got lighting tables. Without an environment the hemispheric ambient stays.
+  - **KTX2 cube maps and RGBA16F** (ADR-0010 amendment): `faceCount` 6 (square, ≤ 1024²),
+    `TextureFormat::Rgba16Float`, `TextureData::new_cube`/`is_cube`/`face`,
+    `f16_from_f32`/`f32_from_f16`; same untrusted-input caps, a cube seed in the `ktx2` fuzz
+    corpus. BC6H is deferred (documented).
+  - **Shadows:** a new `shadow` render-graph pass before `scene` renders every unit (static
+    meshes instanced; skinned heroes through a `SHADOW_PASS` permutation of the skinned
+    vertex shader) into one directional map fitted to the camera's view of the board (sphere
+    fit, 2 m radius steps, texel snapping: no shimmer while panning; no cascades needed at
+    MOBA zoom, see ADR-0011), with slope-scaled bias and a normal offset. The graph derives
+    the depth-write → fragment-sampled barrier. Filtering by tier: hard (1 tap, 1024²) on
+    Low, 3×3 PCF (2048²) on Medium, PCSS-lite (16 + 16 taps, 2048²) on High and (16 + 32,
+    4096²) on Ultra (PCSS taps keyed on the tier). Depth clamping ("pancaking") where
+    `depthClamp` is supported; the map's format must support depth-comparison sampling
+    (`mutableComparisonSamplers` on portability devices), else shadows turn off; the map
+    survives resizes. R7b's offscreen views (portraits, minimap) render with shadows off and
+    a lighting set naming a default shadow image, and the shadow pass draws only the main
+    view. `shade()` output is clamped to 32768 (fp16-safe). Map descriptors enforce
+    readability rules 2–3 (`shadow_strength` ≤ 0.9, `rim` > 0, terrain rougher than units,
+    some ambient) and a sun elevation ≥ 0.2. A zero-length file tangent no longer rejects a
+    `.glb`. Screen-space contact shadows are an R2b follow-up.
+  - **Tiers and switches:** `LightingConfig::for_tier`, `RenderConfig::with_lighting`;
+    `MOBA_SHADOWS=off|hard|pcf|pcss`, `MOBA_SHADOW_SIZE`, `MOBA_IBL=0` and
+    `MOBA_SPECULAR_IBL=0` in the client. Low skips the specular cube (SH ambient only). The
+    frame log gains `gpu_shadow_*` columns and `shadows=`, `shadow_size=`, `ibl=`,
+    `specular_ibl=`.
+  - **Evidence** ([perf/0015](docs/perf/0015-lighting.md)): validation and synchronisation
+    validation report 0 messages on lavapipe and on the RTX 5070 Ti for the default,
+    networked and textured captures on every tier. Both golden fingerprints were rebaselined
+    deliberately for the new lighting.
+  - No wire, replay, simulation-logic or content-hash change: environments, map lighting and
+    materials are client-local.
 - **Materials, textures, pipeline cache and shader tooling (AAA roadmap R1b, ADR-0010):**
   - **Materials:** a model named `<m>` picks up a client-local descriptor
     `<MOBA_ASSET_ROOT>/materials/<m>.toml` (`moba_assets::MaterialDesc`, ≤ 4 KiB, range-checked):

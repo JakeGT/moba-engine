@@ -167,10 +167,22 @@ last_frame_submitted}`,
 frame was submitted (`RenderResult<bool>`), so a caller can re-send renders a skipped frame
 dropped; an error can still follow a submit (presentation), which `last_frame_submitted`
 reports. The alpha of `Scene::terrain_tint` now scales the terrain grid lines (every built-in
-tint already uses `1.0`, the old look).
+tint already uses `1.0`, the old look). R2a (ADR-0011) added lighting: `LightingConfig`
+(`for_tier`, `with_shadows`, `with_shadow_resolution`, `with_specular_ibl`, `with_ibl`,
+`with_pcss_taps`), `ShadowFilter` (`ALL`, `name`, `from_name`), `SceneLighting` (`DEFAULT` + a
+`with_*` per group), `Scene::lighting`/`with_lighting`, `RenderConfig::lighting`/
+`with_lighting`/`effective_lighting`, `Renderer::{lighting_config, set_environment,
+clear_environment, has_environment, set_lighting_ramp}`, `MaterialData`'s stylisation fields
+(`wrap`, `rim`, `ramp`, `specular`, `specular_tint`) with `with_metallic_roughness`,
+`with_emissive`, `with_style` and `with_specular`, `MIN_SHADOW_RESOLUTION`/
+`MAX_SHADOW_RESOLUTION`, the re-exported `EnvironmentDesc` and
+`RenderError::InvalidEnvironment`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
-- `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`.
+- `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
+  `ShadowFilter`.
+- `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
+  `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
@@ -202,15 +214,22 @@ tint already uses `1.0`, the old look).
 ADR-0012 (`Pose`, `BoneMask`, `BlendSpace1d`, `AnimationSet`, `AnimationGraph`, `Animator`,
 `AnimationScratch`, `StateId`, `SocketId`), and R1b's textures and materials (ADR-0010:
 `TextureData`, `TextureFormat`, `load_ktx2`/`load_ktx2_file`/`write_ktx2`, `MaterialDesc`,
-`MaterialShader`, `TextureSlot`, `MaterialReport`, `MeshData::with_uvs`/`uvs`).
+`MaterialShader`, `TextureSlot`, `MaterialReport`, `MeshData::with_uvs`/`uvs`), and R2a's
+lighting assets (ADR-0011: `MapLighting`/`MapVisuals::lighting`, the material stylisation
+fields, `EnvironmentDesc`/`EnvironmentError`/`environment_paths`/`sh_basis`, cube
+`TextureData` (`new_cube`, `is_cube`, `face_count`, `face`), `TextureFormat::Rgba16Float`,
+`f16_from_f32`/`f32_from_f16`, `MeshData::with_tangents`/`tangents`/`generate_tangents`/
+`with_generated_tangents` and `MeshError::BadTangent`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,
   `AssetList`, `MeshError`, `GlbError`, `SkinError`, `MapVisualsError`, `TrackPath`,
   `Interpolation`, `AnimationSetError`, `AnimationEvent`, `PlayMode`, `Layer`, `ClipWrap`,
   `BlendSpaceError`, `TextureFormat`, `TextureError`, `MaterialShader`, `MaterialError`,
-  `TextureSlot`; structs `AnimatorReport` and `MaterialReport` (read-only) and `MaterialDesc`
-  (validated, built by `parse`/`load_file`). `TextureData` has private fields and the
+  `TextureSlot`, `EnvironmentError`; structs `AnimatorReport` and `MaterialReport` (read-only),
+  `MaterialDesc` (validated, built by `parse`/`load_file`), `MapLighting` (validated with its
+  `MapVisuals`; `Default` = no overrides) and `EnvironmentDesc` (`new` + `with_*`, or
+  `parse`/`load_file`). `TextureData` has private fields and the
   validating `TextureData::new`. The other animation types have
   private fields and constructors (`Pose::rest`, `BlendSpace1d::new`, `AnimationSet::parse`,
   `AnimationGraph::bind`, `Animator::new`).

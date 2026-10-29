@@ -29,6 +29,10 @@
 //! - `MOBA_CONTENT=<pack.toml>` loads a content pack for the local preview and for the
 //!   `MOBA_SERVER=local` loopback server.
 //! - `MOBA_CAMERA_DISTANCE=<m>` sets the player-camera distance (default 46, 8-120).
+//! - Lighting overrides of the quality tier's defaults (ADR-0011):
+//!   `MOBA_SHADOWS=off|hard|pcf|pcss`, `MOBA_SHADOW_SIZE=<texels>` (256-8192) and
+//!   `MOBA_IBL=0` (hemispheric ambient only) / `MOBA_SPECULAR_IBL=0` (SH ambient only). The
+//!   map's `[lighting]` table (and its `environment`) sets the art direction.
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
 //!   `MOBA_SERVER=local` server is lock-stepped to the client and stops at `n`, so the frame
@@ -147,11 +151,12 @@ struct ClientApp {
     /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
-    /// Per-frame GPU times `[scene, composite, ui, total, span, portraits, minimap]` while
-    /// logging, from the renderer's timestamp queries (empty on devices without timestamp
-    /// support; `0` for an offscreen pass that did not run). One entry per measured GPU
-    /// frame: a sample whose frame number was already logged is skipped.
-    gpu_log: Option<Vec<[f32; 7]>>,
+    /// Per-frame GPU times `[shadow, scene, composite, ui, total, span, portraits, minimap]`
+    /// while logging, from the renderer's timestamp queries (empty on devices without
+    /// timestamp support; `0` for a pass that did not run: shadows off, or an offscreen pass
+    /// not re-rendered that frame). One entry per measured GPU frame: a sample whose frame
+    /// number was already logged is skipped.
+    gpu_log: Option<Vec<[f32; 8]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
     frame_log_path: Option<PathBuf>,
@@ -420,7 +425,8 @@ impl App for ClientApp {
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
             .with_shader_dir(self.shader_dir.clone())
-            .with_compressed_textures(launch::compressed_textures());
+            .with_compressed_textures(launch::compressed_textures())
+            .with_lighting(Some(launch::lighting_config(self.quality)));
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -799,7 +805,9 @@ impl App for ClientApp {
                     );
                     if width > 0 && height > 0 {
                         let aspect = width as f32 / height as f32;
-                        let camera = network_camera(network, aspect, frame.elapsed_secs() as f32);
+                        let mut camera =
+                            network_camera(network, aspect, frame.elapsed_secs() as f32);
+                        map_visuals.light_camera(&mut camera);
                         let ui_input = frame.input().scaled_cursor(self.ui_scale);
                         handle_network_input(
                             network,
@@ -841,6 +849,7 @@ impl App for ClientApp {
                         let vision = build_vision(network);
                         let scene = Scene::with_vision(camera, units, vision)
                             .with_terrain_tint(map_visuals.terrain_tint())
+                            .with_lighting(map_visuals.scene_lighting())
                             .with_bones(bones.bones());
                         // With `MOBA_CAPTURE_TICK` the capture waits for the match tick, not
                         // a frame count, so it does not depend on frame pacing.
@@ -992,9 +1001,11 @@ impl App for ClientApp {
                         fps,
                         hit_rects,
                     );
-                    let camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
+                    let mut camera = Camera::orbit(Vec3::ZERO, 235.0, yaw, 0.92, aspect);
+                    map_visuals.light_camera(&mut camera);
                     let scene = Scene::new(camera, units)
                         .with_terrain_tint(map_visuals.terrain_tint())
+                        .with_lighting(map_visuals.scene_lighting())
                         .with_bones(bones.bones());
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
@@ -1038,6 +1049,7 @@ impl App for ClientApp {
                 self.gpu_logged_frame = Some(timings.frame);
                 let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
                 gpu.push([
+                    pass("shadow"),
                     pass("scene"),
                     pass("composite"),
                     pass("ui"),

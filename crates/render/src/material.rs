@@ -83,16 +83,28 @@ pub struct MaterialData {
     textures: [Option<TextureId>; TextureSlot::COUNT],
     /// Linear RGBA multiplier of the base colour.
     pub base_color_factor: [f32; 4],
-    /// Metallic factor (read by R2's PBR).
+    /// Metallic factor, times the metallic-roughness texture's R.
     pub metallic: f32,
-    /// Roughness factor (read by R2's PBR).
+    /// Roughness factor, times the metallic-roughness texture's G.
     pub roughness: f32,
     /// Normal map strength.
     pub normal_scale: f32,
     /// How strongly the mask tints the base colour by the unit colour.
     pub team_tint: f32,
-    /// Linear RGB emissive factor (R2).
+    /// Linear RGB emissive factor, added after lighting.
     pub emissive: [f32; 3],
+    /// Wrap lighting `0..=1`; `None` uses the scene's ([`SceneLighting::wrap`]).
+    ///
+    /// [`SceneLighting::wrap`]: crate::SceneLighting::wrap
+    pub wrap: Option<f32>,
+    /// Multiplier of the scene's rim strength, `0..=4`.
+    pub rim: f32,
+    /// Multiplier of the scene's ramp strength, `0..=1`.
+    pub ramp: f32,
+    /// Specular scale, `0..=2` (times the scene's).
+    pub specular: f32,
+    /// Painted-specular tint, linear RGB `0..=1` (times the scene's).
+    pub specular_tint: [f32; 3],
 }
 
 impl MaterialData {
@@ -108,6 +120,11 @@ impl MaterialData {
             normal_scale: 1.0,
             team_tint: 1.0,
             emissive: [0.0; 3],
+            wrap: None,
+            rim: 1.0,
+            ramp: 1.0,
+            specular: 1.0,
+            specular_tint: [1.0; 3],
         }
     }
 
@@ -124,6 +141,11 @@ impl MaterialData {
             normal_scale: desc.normal_scale,
             team_tint: desc.team_tint,
             emissive: desc.emissive,
+            wrap: desc.wrap,
+            rim: desc.rim,
+            ramp: desc.ramp,
+            specular: desc.specular,
+            specular_tint: desc.specular_tint,
         }
     }
 
@@ -153,16 +175,53 @@ impl MaterialData {
         self.team_tint = team_tint;
         self
     }
+
+    /// Returns this material with the metallic and roughness factors set.
+    #[must_use]
+    pub const fn with_metallic_roughness(mut self, metallic: f32, roughness: f32) -> Self {
+        self.metallic = metallic;
+        self.roughness = roughness;
+        self
+    }
+
+    /// Returns this material with [`MaterialData::emissive`] set.
+    #[must_use]
+    pub const fn with_emissive(mut self, emissive: [f32; 3]) -> Self {
+        self.emissive = emissive;
+        self
+    }
+
+    /// Returns this material with the stylisation set (ADR-0011): wrap (`None` = the
+    /// scene's), rim and ramp multipliers.
+    #[must_use]
+    pub const fn with_style(mut self, wrap: Option<f32>, rim: f32, ramp: f32) -> Self {
+        self.wrap = wrap;
+        self.rim = rim;
+        self.ramp = ramp;
+        self
+    }
+
+    /// Returns this material with the painted-specular tint and scale set.
+    #[must_use]
+    pub const fn with_specular(mut self, tint: [f32; 3], scale: f32) -> Self {
+        self.specular_tint = tint;
+        self.specular = scale;
+        self
+    }
 }
 
-/// `MaterialBlock` in `shaders/include/material.glsl` (std140, 64 bytes).
+/// `MaterialBlock` in `shaders/include/material.glsl` (std140, 80 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct MaterialParamsGpu {
     base_color_factor: [f32; 4],
     params: [f32; 4],
+    /// rgb emissive, w specular scale.
     emissive: [f32; 4],
-    flags: [u32; 4],
+    /// x wrap (negative: the scene's), y rim, z ramp, w reserved.
+    style: [f32; 4],
+    /// rgb painted-specular tint, w reserved.
+    specular_tint: [f32; 4],
 }
 
 impl MaterialParamsGpu {
@@ -186,9 +245,20 @@ impl MaterialParamsGpu {
                 clamp(material.emissive[0], 16.0),
                 clamp(material.emissive[1], 16.0),
                 clamp(material.emissive[2], 16.0),
+                clamp(material.specular, 2.0),
+            ],
+            style: [
+                material.wrap.map_or(-1.0, |wrap| clamp(wrap, 1.0)),
+                clamp(material.rim, 4.0),
+                clamp(material.ramp, 1.0),
                 0.0,
             ],
-            flags: [0; 4],
+            specular_tint: [
+                clamp(material.specular_tint[0], 1.0),
+                clamp(material.specular_tint[1], 1.0),
+                clamp(material.specular_tint[2], 1.0),
+                0.0,
+            ],
         }
     }
 }
@@ -197,6 +267,8 @@ struct RegisteredTexture {
     image: GpuImage,
     /// Format as uploaded (the 8-bit equivalent when a BC texture was decoded).
     format: TextureFormat,
+    /// A cube map (never bindable to a material slot or as a ramp).
+    cube: bool,
 }
 
 struct GpuMaterial {
@@ -352,8 +424,31 @@ impl Materials {
         self.textures.push(RegisteredTexture {
             image,
             format: upload.format(),
+            cube: upload.is_cube(),
         });
         Ok(id)
+    }
+
+    /// The view of a registered 2D colour texture usable as the lighting ramp: sRGB or
+    /// linear RGBA (8-bit or BC7), not a cube.
+    pub(crate) fn ramp_view(&self, texture: TextureId) -> RenderResult<vk::ImageView> {
+        let registered = self
+            .textures
+            .get(texture.index())
+            .ok_or(RenderError::InvalidMaterial("unknown texture id"))?;
+        let colour = matches!(
+            registered.format,
+            TextureFormat::Rgba8Srgb | TextureFormat::Rgba8Unorm
+        ) || matches!(
+            registered.format,
+            TextureFormat::Bc7Srgb | TextureFormat::Bc7Unorm
+        );
+        if registered.cube || !colour {
+            return Err(RenderError::InvalidMaterial(
+                "a lighting ramp must be a 2D RGBA colour texture",
+            ));
+        }
+        Ok(registered.image.view())
     }
 
     /// Checks one material against the registered textures.
@@ -367,6 +462,11 @@ impl Materials {
             if !slot.accepts(registered.format) {
                 return Err(RenderError::InvalidMaterial(
                     "texture format not allowed for its slot (sRGB colour, linear data)",
+                ));
+            }
+            if registered.cube {
+                return Err(RenderError::InvalidMaterial(
+                    "a cube map cannot be bound to a material slot",
                 ));
             }
         }
@@ -510,7 +610,7 @@ mod tests {
 
     #[test]
     fn parameter_block_is_std140_sized_and_clamped() {
-        assert_eq!(core::mem::size_of::<MaterialParamsGpu>(), 64);
+        assert_eq!(core::mem::size_of::<MaterialParamsGpu>(), 80);
         let mut material = MaterialData::new(MaterialShader::Textured)
             .with_texture(TextureSlot::Mask, TextureId(3))
             .with_base_color_factor([2.0, 0.5, f32::NAN, 1.0])
@@ -519,6 +619,16 @@ mod tests {
         let block = MaterialParamsGpu::from(&material);
         assert_eq!(block.base_color_factor, [1.0, 0.5, 0.0, 1.0]);
         assert_eq!(block.params, [0.0, 1.0, 2.0, 0.25]);
+        // The scene's wrap unless the material sets one; stylisation clamped.
+        assert_eq!(block.style, [-1.0, 1.0, 1.0, 0.0]);
+        let styled = MaterialParamsGpu::from(
+            &material
+                .with_style(Some(3.0), 9.0, 0.5)
+                .with_specular([0.5, 2.0, f32::INFINITY], 5.0),
+        );
+        assert_eq!(styled.style, [1.0, 4.0, 0.5, 0.0]);
+        assert_eq!(styled.specular_tint, [0.5, 1.0, 0.0, 0.0]);
+        assert_eq!(styled.emissive[3], 2.0);
         assert_eq!(material.texture(TextureSlot::Mask), Some(TextureId(3)));
         assert_eq!(material.texture(TextureSlot::Normal), None);
     }

@@ -8,7 +8,8 @@
 //! instance buffer, lighting, material set, and the `AgX` tonemap that the composite and the
 //! UI's offscreen images share). A few sources are also built as **permutations** with
 //! preprocessor defines, each its own module: the `*_TEXTURED` modules are the
-//! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010).
+//! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010), and the
+//! `*_shadow` modules are the `SHADOW_PASS` depth-only casters of the shadow map (ADR-0011).
 
 #![forbid(unsafe_code)]
 
@@ -29,6 +30,13 @@ pub const SKINNED_TEXTURED_VERT: &[u8] =
 /// Skinned unit vertex shader (bone buffer + push-constant bone range; pairs with
 /// [`UNIT_FRAG`]).
 pub const SKINNED_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/skinned.vert.spv"));
+/// Depth-only shadow caster for static meshes (`unit.vert` + `SHADOW_PASS`): position only,
+/// through the light's view-projection (R2a, ADR-0011).
+pub const UNIT_SHADOW_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_shadow.vert.spv"));
+/// Depth-only shadow caster for skinned meshes (`skinned.vert` + `SHADOW_PASS`).
+pub const SKINNED_SHADOW_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/skinned_shadow.vert.spv"));
 /// Procedural terrain vertex shader.
 pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.vert.spv"));
 /// Procedural terrain fragment shader.
@@ -76,6 +84,14 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "skinned_textured.vert",
         spirv: SKINNED_TEXTURED_VERT,
+    },
+    ShaderModule {
+        name: "unit_shadow.vert",
+        spirv: UNIT_SHADOW_VERT,
+    },
+    ShaderModule {
+        name: "skinned_shadow.vert",
+        spirv: SKINNED_SHADOW_VERT,
     },
     ShaderModule {
         name: "terrain.vert",
@@ -141,6 +157,8 @@ mod tests {
         assert_ne!(UNIT_FRAG, UNIT_TEXTURED_FRAG);
         assert_ne!(UNIT_VERT, UNIT_TEXTURED_VERT);
         assert_ne!(SKINNED_VERT, SKINNED_TEXTURED_VERT);
+        assert_ne!(UNIT_VERT, UNIT_SHADOW_VERT);
+        assert_ne!(SKINNED_VERT, SKINNED_SHADOW_VERT);
         let mut names: Vec<_> = MODULES.iter().map(|module| module.name).collect();
         names.sort_unstable();
         names.dedup();

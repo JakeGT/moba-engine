@@ -1,9 +1,11 @@
 //! The renderer: device and swapchain lifecycle, frame synchronisation and the frame graph.
 //!
-//! A frame is a precompiled render graph (ADR-0008, [`crate::frame_graph`]): the scene pass
-//! renders into an HDR target, the composite pass tonemaps it into the swapchain image and
-//! the UI pass draws the HUD on top. Frames that re-render an offscreen image (R7b: hero
-//! portraits, the baked minimap) run that image's pass first, with the scene pipelines. The
+//! A frame is a precompiled render graph (ADR-0008, [`crate::frame_graph`]): the shadow pass
+//! renders the directional shadow map (when shadows are on), the scene pass renders into an
+//! HDR target with stylised PBR (ADR-0011), the composite pass tonemaps it into the swapchain
+//! image and the UI pass draws the HUD on top. Frames that re-render an offscreen image (R7b:
+//! hero portraits, the baked minimap) run that image's pass first, with the scene pipelines,
+//! shadows off and the environment kept. The
 //! pass code lives in [`crate::passes`]; this module owns acquisition, submission,
 //! presentation, resize and the capture readback.
 
@@ -18,12 +20,17 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
-use crate::frame_graph::{self, Binding, Bindings, FramePlan, OFFSCREEN_VARIANTS, PassKind};
+use crate::frame_graph::{
+    self, Binding, Bindings, FramePlan, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
+};
 use crate::instance::{InstanceContext, ValidationMode};
+use crate::lighting::{
+    self, EnvironmentState, FrameLighting, LightingConfig, LightingResources, ShadowFilter,
+};
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::passes::composite::CompositePass;
 use crate::passes::overlay::{UiImages, UiPass};
-use crate::passes::scene::{ScenePass, SceneTargets, ViewBudget};
+use crate::passes::scene::{ScenePass, SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget};
 use crate::pipeline_cache::PipelineCacheState;
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
@@ -91,6 +98,10 @@ pub struct RenderConfig {
     /// 1x1 image is the cheapest way to switch a slot off. The images are allocated once
     /// with the renderer in the HDR format (with a depth buffer each) and never resized.
     pub ui_image_sizes: [[u32; 2]; UI_IMAGE_SLOTS],
+    /// Shadow and image-based-lighting features (ADR-0011). `None` (the default) uses
+    /// [`LightingConfig::for_tier`] of [`RenderConfig::quality_tier`]; set it to override a
+    /// tier default or turn a feature off.
+    pub lighting: Option<LightingConfig>,
 }
 
 impl Default for RenderConfig {
@@ -110,6 +121,7 @@ impl Default for RenderConfig {
             shader_dir: None,
             compressed_textures: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
+            lighting: None,
         }
     }
 }
@@ -206,6 +218,23 @@ impl RenderConfig {
         self
     }
 
+    /// Returns this config with [`RenderConfig::lighting`] set.
+    #[must_use]
+    pub const fn with_lighting(mut self, lighting: Option<LightingConfig>) -> Self {
+        self.lighting = lighting;
+        self
+    }
+
+    /// The lighting features this config asks for: [`RenderConfig::lighting`], else the
+    /// tier's defaults.
+    #[must_use]
+    pub const fn effective_lighting(&self) -> LightingConfig {
+        match self.lighting {
+            Some(lighting) => lighting,
+            None => LightingConfig::for_tier(self.quality_tier),
+        }
+    }
+
     /// Returns this config with the size of offscreen `image` set
     /// ([`RenderConfig::ui_image_sizes`]).
     #[must_use]
@@ -265,6 +294,7 @@ pub struct Renderer {
     scene: ScenePass,
     composite: CompositePass,
     ui: UiPass,
+    lighting: LightingResources,
     materials: Materials,
     shaders: ShaderSource,
     pipeline_stats: PipelineStats,
@@ -286,6 +316,10 @@ pub struct Renderer {
     last_submitted: bool,
     hdr_format: vk::Format,
     depth_aspect: vk::ImageAspectFlags,
+    /// The lighting features in use (shadows off when the device has no shadow format).
+    lighting_config: LightingConfig,
+    /// The shadow map, when shadows are on.
+    shadow: Option<ShadowSpec>,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -358,14 +392,45 @@ impl Renderer {
 
         let hdr_format = targets::choose_hdr_format(&device, config.quality_tier);
         let (depth_format, depth_aspect) = targets::choose_depth_format(&device)?;
+        let mut lighting_config = config.effective_lighting();
+        let shadow_format = targets::choose_shadow_format(&device);
+        if shadow_format.is_none() && lighting_config.shadows != ShadowFilter::Off {
+            eprintln!(
+                "[render] no depth format usable for comparison-sampled shadow maps \
+                 (or no mutableComparisonSamplers); shadows off"
+            );
+            lighting_config = lighting_config.with_shadows(ShadowFilter::Off);
+        }
+        lighting_config = lighting_config.with_shadow_resolution(
+            lighting_config.clamped_resolution(device.max_image_dimension_2d),
+        );
+        let shadow = shadow_format
+            .filter(|_| lighting_config.shadows != ShadowFilter::Off)
+            .map(|(format, _)| ShadowSpec {
+                format,
+                size: lighting_config.shadow_resolution,
+            });
+        if !device.depth_clamp && shadow.is_some() {
+            eprintln!(
+                "[render] depthClamp unsupported: casters above the shadow map's near plane \
+                 are clipped (the fit's lift covers 32 m casters)"
+            );
+        }
         let graph_error =
             |error: crate::graph::GraphError| RenderError::RenderGraph(error.to_string());
         let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
         for capture in [false, true] {
             for offscreen in 0..OFFSCREEN_VARIANTS {
                 plans.push(
-                    frame_graph::build(hdr_format, depth_format, depth_aspect, capture, offscreen)
-                        .map_err(graph_error)?,
+                    frame_graph::build(
+                        hdr_format,
+                        depth_format,
+                        depth_aspect,
+                        shadow,
+                        capture,
+                        offscreen,
+                    )
+                    .map_err(graph_error)?,
                 );
             }
         }
@@ -414,13 +479,20 @@ impl Renderer {
             max_instances: config.max_instances,
             max_bones: config.max_bones,
         };
+        let (default_shadow_format, shadow_linear) = shadow_format.unwrap_or((depth_format, false));
+        let lighting = LightingResources::new(&device, default_shadow_format, shadow_linear)?;
         let scene = ScenePass::new(
             &device,
             &shaders,
             FRAMES_IN_FLIGHT,
             hdr_format,
             depth_format,
+            shadow.map(|spec| ShadowPipelineSpec {
+                format: spec.format,
+                depth_clamp: device.depth_clamp,
+            }),
             materials.set_layout(),
+            lighting.set_layout(),
             &views,
             config.skinning,
         )?;
@@ -475,13 +547,14 @@ impl Renderer {
             );
         }
 
-        let renderer = Self {
+        let mut renderer = Self {
             window: window.clone(),
             swapchain,
             transients,
             scene,
             composite,
             ui,
+            lighting,
             materials,
             shaders,
             pipeline_stats,
@@ -499,6 +572,8 @@ impl Renderer {
             last_submitted: false,
             hdr_format,
             depth_aspect,
+            lighting_config,
+            shadow,
             device,
             surface,
             instance,
@@ -506,6 +581,99 @@ impl Renderer {
         };
         renderer.bind_transients();
         Ok(renderer)
+    }
+
+    /// The lighting features in use: the configured ones, with the shadow resolution clamped
+    /// to the device and shadows off when the device has no comparison-sampled depth format.
+    #[must_use]
+    pub fn lighting_config(&self) -> LightingConfig {
+        self.lighting_config
+    }
+
+    /// Sets the map's image-based lighting (ADR-0011): `desc`'s SH-L2 diffuse irradiance and
+    /// intensity, and `specular`, its prefiltered specular cube (linear, e.g. `rgba16f` from
+    /// `moba-tools env-bake`; mip `m` of `M` holds roughness `m / (M - 1)`). The cube is
+    /// skipped when [`LightingConfig::specular_ibl`] is off (the `Low` tier keeps only the
+    /// SH). A cube whose level count differs from `desc.specular_mips` is used with its own
+    /// count and logged. Replaces the previous environment. Load-time only: it waits for the
+    /// device to idle and uploads through a staging buffer.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidEnvironment`] for a 2D or sRGB specular map or a format the
+    /// device cannot sample with linear filtering; allocation or Vulkan errors from the
+    /// upload. On error the previous environment stays.
+    pub fn set_environment(
+        &mut self,
+        desc: &moba_assets::EnvironmentDesc,
+        specular: Option<&crate::TextureData>,
+    ) -> RenderResult<()> {
+        let specular = specular.filter(|_| self.lighting_config.specular_ibl);
+        if let Some(data) = specular {
+            lighting::check_environment_cube(data)?;
+            if !crate::texture::sampleable(&self.device, crate::texture::vk_format(data.format())) {
+                return Err(RenderError::InvalidEnvironment(
+                    "the device cannot sample the specular map's format",
+                ));
+            }
+            if data.level_count() != desc.specular_mips {
+                eprintln!(
+                    "[render] environment: the specular cube has {} levels but the descriptor \
+                     says specular_mips = {}; using the cube's",
+                    data.level_count(),
+                    desc.specular_mips
+                );
+            }
+        }
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses the
+        // lighting sets or the environment image being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        let image = specular
+            .map(|data| crate::texture::upload(&self.device, "environment-specular", data))
+            .transpose()?;
+        let state = EnvironmentState {
+            sh: desc.sh,
+            intensity: lighting::sanitize(desc.intensity, 0.0, 16.0),
+            max_lod: specular.map_or(0.0, |data| data.level_count().saturating_sub(1) as f32),
+            specular: image.is_some(),
+        };
+        self.lighting.set_environment(&self.device, image, state);
+        Ok(())
+    }
+
+    /// Removes the environment: the hemispheric ambient lights the scene again. Waits for
+    /// the device to idle.
+    ///
+    /// # Errors
+    /// Vulkan errors from the idle wait.
+    pub fn clear_environment(&mut self) -> RenderResult<()> {
+        // SAFETY: as in `set_environment`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.lighting
+            .set_environment(&self.device, None, EnvironmentState::NONE);
+        Ok(())
+    }
+
+    /// Whether an environment is set (image-based lighting rather than hemispheric ambient,
+    /// unless [`LightingConfig::ibl`] is off).
+    #[must_use]
+    pub fn has_environment(&self) -> bool {
+        self.lighting.state().intensity > 0.0
+    }
+
+    /// Binds a registered 2D colour texture as the stylisation ramp (`None` removes it), used
+    /// with [`SceneLighting::ramp`](crate::SceneLighting) > 0. Waits for the device to idle.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidMaterial`] for an unknown id or a texture that is not a 2D
+    /// RGBA colour texture; Vulkan errors from the idle wait.
+    pub fn set_lighting_ramp(&mut self, texture: Option<TextureId>) -> RenderResult<()> {
+        let view = texture
+            .map(|texture| self.materials.ramp_view(texture))
+            .transpose()?;
+        // SAFETY: as in `set_environment`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.lighting.set_ramp(&self.device, view);
+        Ok(())
     }
 
     /// Human-readable name of the selected GPU.
@@ -573,7 +741,7 @@ impl Renderer {
     }
 
     /// Uploads a skinned mesh (its [`MeshSkin`](moba_assets::MeshSkin) joints and weights in
-    /// the 32-byte skinned vertex layout) and returns its id. Draw it with a
+    /// the 56-byte skinned vertex layout) and returns its id. Draw it with a
     /// [`UnitInstance`](crate::UnitInstance) whose [`BoneRange`](crate::BoneRange) names one
     /// joint matrix per joint in [`Scene::bones`]; instances without a valid range are
     /// skipped and counted.
@@ -759,7 +927,7 @@ impl Renderer {
     }
 
     /// Points passes that sample transients at the current pool images.
-    fn bind_transients(&self) {
+    fn bind_transients(&mut self) {
         let plan = &self.plans[0];
         let hdr = plan
             .graph
@@ -767,6 +935,31 @@ impl Renderer {
             .expect("the composite keeps the HDR target live");
         self.composite
             .bind_hdr(&self.device, self.transients.image(hdr).view());
+        let shadow = plan
+            .resources
+            .shadow
+            .and_then(|resource| plan.graph.slot_of(resource))
+            .map(|slot| self.transients.image(slot).view());
+        self.lighting.bind_shadow(&self.device, shadow);
+    }
+
+    /// The main view's lighting uniform values: the shadow map fitted to the camera (when
+    /// shadows are on), the scene's art direction and the environment.
+    fn frame_lighting(&self, scene: &Scene<'_>) -> FrameLighting {
+        let fit = self.shadow.and_then(|spec| {
+            lighting::fit_shadow(
+                scene.camera.view_proj,
+                scene.camera.light_direction,
+                spec.size,
+            )
+        });
+        FrameLighting::new(
+            &scene.lighting,
+            self.lighting_config,
+            self.lighting_config.shadow_resolution,
+            fit,
+            self.lighting.state(),
+        )
     }
 
     fn transient(&self, resource: crate::graph::ResourceId) -> &GpuImage {
@@ -857,7 +1050,8 @@ impl Renderer {
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
 
-        self.scene.prepare(0, frame_index, scene)?;
+        let frame_lighting = self.frame_lighting(scene);
+        self.scene.prepare(0, frame_index, scene, &frame_lighting)?;
         let mut offscreen_mask = 0usize;
         for render in offscreen {
             let slot = render.image.index();
@@ -865,7 +1059,15 @@ impl Renderer {
                 continue; // One render per image and frame: the first wins.
             }
             offscreen_mask |= 1 << slot;
-            self.scene.prepare(1 + slot, frame_index, &render.scene)?;
+            // Offscreen views never sample the shadow map (it is the main view's, and their
+            // pass runs before the shadow pass): shadows off, the environment kept.
+            let view_lighting = FrameLighting::offscreen(
+                &render.scene.lighting,
+                self.lighting_config,
+                self.lighting.state(),
+            );
+            self.scene
+                .prepare(1 + slot, frame_index, &render.scene, &view_lighting)?;
         }
         self.ui.prepare(frame_index, ui)?;
 
@@ -983,6 +1185,7 @@ impl Renderer {
         let resources = plan.resources;
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
+        let shadow_view = resources.shadow.map(|shadow| self.transient(shadow).view());
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);
@@ -992,6 +1195,19 @@ impl Renderer {
             self.profiler
                 .begin_pass(command_buffer, frame_index, pass.name);
             match pass.tag {
+                PassKind::Shadow => {
+                    if let (Some(depth), Some(spec)) = (shadow_view, self.shadow) {
+                        self.scene.record_shadow(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &ShadowTarget {
+                                depth,
+                                size: spec.size,
+                            },
+                        );
+                    }
+                }
                 PassKind::Scene => self.scene.record(
                     &self.device,
                     command_buffer,
@@ -1004,6 +1220,7 @@ impl Renderer {
                         clear_color: self.config.clear_color,
                         terrain: true,
                         clear_rects: &[],
+                        lighting: self.lighting.set(),
                     },
                 ),
                 PassKind::Offscreen(slot) => {
@@ -1025,6 +1242,7 @@ impl Renderer {
                                 clear_color: render.clear_color,
                                 terrain: render.terrain,
                                 clear_rects: render.backdrops,
+                                lighting: self.lighting.offscreen_set(),
                             },
                         );
                     }
@@ -1094,6 +1312,9 @@ impl Renderer {
         );
         bindings.set(resources.hdr, image(resources.hdr));
         bindings.set(resources.depth, image(resources.depth));
+        if let Some(shadow) = resources.shadow {
+            bindings.set(shadow, image(shadow));
+        }
         bindings.set(
             resources.bones,
             Binding::Buffer(self.scene.bone_buffer(0, frame_index)),
@@ -1143,12 +1364,12 @@ impl Renderer {
             self.config.vsync,
             Some(self.swapchain.handle()),
         )?;
-        // Build the new targets before replacing anything, so a failed allocation cannot
-        // pair the new extent with old-size transients.
-        let transients =
-            TransientPool::new(&self.device, self.plans[0].graph.slots(), swapchain.extent)?;
+        // Build the new swapchain-sized targets before replacing anything, so a failed
+        // allocation cannot pair the new extent with old-size transients. Fixed-size slots
+        // (the shadow map) are kept.
+        self.transients
+            .resize(&self.device, self.plans[0].graph.slots(), swapchain.extent)?;
         self.swapchain = swapchain;
-        self.transients = transients;
         self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
         self.frame_index = 0;
@@ -1300,6 +1521,7 @@ impl core::fmt::Debug for Renderer {
             .field("extent", &self.extent())
             .field("validation", &self.validation_enabled())
             .field("quality_tier", &self.config.quality_tier)
+            .field("lighting", &self.lighting_config)
             .finish_non_exhaustive()
     }
 }

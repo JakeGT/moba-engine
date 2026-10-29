@@ -16,11 +16,15 @@
 //!   looping or exhausting the stack.
 //!
 //! Supported: triangle-list primitives with `POSITION` (`f32` VEC3), optional `NORMAL`
-//! (`f32` VEC3), optional `TEXCOORD_0` (`f32` or normalised `u8`/`u16` VEC2) and optional
+//! (`f32` VEC3), optional `TEXCOORD_0` (`f32` or normalised `u8`/`u16` VEC2), optional
+//! `TANGENT` (`f32` VEC4, on primitives that also have `NORMAL`) and optional
 //! `u8`/`u16`/`u32` indices in the embedded BIN chunk; node transforms of the default scene
-//! are baked into the vertices. Missing normals are replaced by flat face normals, as the glTF
-//! specification requires. When any primitive has `TEXCOORD_0`, primitives without it get
-//! `(0, 0)`. Sparse accessors, external buffers and any `extensionsRequired` entry are
+//! are baked into the vertices (a tangent's `xyz` by the node's linear part, its handedness
+//! flipped by a mirroring transform). Missing normals are replaced by flat face normals, as
+//! the glTF specification requires. When any primitive has `TEXCOORD_0`, primitives without it
+//! get `(0, 0)`. Tangents are kept only when *every* primitive supplied them (flat-normal
+//! primitives never do); otherwise the mesh carries none and consumers generate them
+//! ([`MeshData::with_generated_tangents`]). Sparse accessors, external buffers and any `extensionsRequired` entry are
 //! rejected; glTF materials, images and morph targets are ignored (materials come from a
 //! client-local descriptor, ADR-0010).
 //!
@@ -228,9 +232,13 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
     }
     let skin = builder.skin;
     let uvs = builder.has_uvs.then_some(builder.uvs);
+    let tangents = (!builder.missing_tangents).then_some(builder.tangents);
     let mut mesh = MeshData::new(builder.positions, builder.normals, builder.indices)?;
     if let Some(uvs) = uvs {
         mesh = mesh.with_uvs(uvs)?;
+    }
+    if let Some(tangents) = tangents {
+        mesh = mesh.with_tangents(tangents)?;
     }
     let SkinMode::Skinned(skin) = skin else {
         return Ok(mesh);
@@ -777,9 +785,34 @@ impl SkinMode {
     }
 }
 
+/// A primitive's `TANGENT` (`f32` VEC4, one per position), read only when it also has
+/// `NORMAL`: a flat-normal primitive drops it (the mesh then gets generated tangents).
+fn tangent_stream<'a>(
+    root: &gltf::json::Root,
+    bin: Option<&'a [u8]>,
+    primitive: &gltf::json::mesh::Primitive,
+    has_normals: bool,
+    vertex_count: usize,
+) -> Result<Option<AccessorData<'a>>, GlbError> {
+    let Some(index) = primitive
+        .attributes
+        .get(&Checked::Valid(Semantic::Tangents))
+        .filter(|_| has_normals)
+    else {
+        return Ok(None);
+    };
+    let tangents = accessor(root, bin, index.value(), Type::Vec4, &[ComponentType::F32])?;
+    if tangents.count != vertex_count {
+        return Err(GlbError::BadAccessor);
+    }
+    Ok(Some(tangents))
+}
+
 /// One primitive's optional per-vertex streams.
 struct VertexStreams<'s, 'a> {
     uvs: Option<&'s AccessorData<'a>>,
+    /// `TANGENT`, read only on the indexed (has `NORMAL`) path.
+    tangents: Option<&'s AccessorData<'a>>,
     skin: Option<&'s SkinStreams<'a>>,
 }
 
@@ -793,6 +826,10 @@ struct Builder {
     uvs: Vec<[f32; 2]>,
     /// Whether any primitive so far had `TEXCOORD_0`.
     has_uvs: bool,
+    /// One per vertex, zero where a primitive has no `TANGENT`.
+    tangents: Vec<[f32; 4]>,
+    /// Whether some primitive so far contributed vertices without `TANGENT`.
+    missing_tangents: bool,
     joints: Vec<[u8; 4]>,
     weights: Vec<[u8; 4]>,
     primitives: usize,
@@ -843,6 +880,7 @@ impl Builder {
         self.positions.reserve(vertices);
         self.normals.reserve(vertices);
         self.uvs.reserve(vertices);
+        self.tangents.reserve(vertices);
         self.indices.reserve(indices);
         if self.skinned() {
             self.joints.reserve(vertices);
@@ -978,8 +1016,12 @@ impl Builder {
                 return Err(GlbError::BadAccessor);
             }
             self.has_uvs |= uvs.is_some();
+            let tangents =
+                tangent_stream(root, bin, primitive, normals.is_some(), positions.count)?;
+            self.missing_tangents |= tangents.is_none();
             let streams = VertexStreams {
                 uvs: uvs.as_ref(),
+                tangents: tangents.as_ref(),
                 skin: None,
             };
             let indices = primitive
@@ -1034,6 +1076,13 @@ impl Builder {
     ) -> Result<(), GlbError> {
         self.reserve(positions.count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
+        let linear = Mat3::from_mat4(world);
+        // A mirroring transform flips the tangent basis' handedness.
+        let handedness = if linear.determinant() < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
         for element in 0..positions.count {
             let position = positions.f32_vec3(element).ok_or(GlbError::BadAccessor)?;
             let normal = normals.f32_vec3(element).ok_or(GlbError::BadAccessor)?;
@@ -1041,6 +1090,22 @@ impl Builder {
             let normal = (normal_matrix * Vec3::from_array(normal)).normalize_or(Vec3::Y);
             self.positions.push(position.to_array());
             self.normals.push(normal.to_array());
+            let tangent = match streams.tangents {
+                Some(tangents) => {
+                    let [x, y, z, w] = tangents.f32s::<4>(element).ok_or(GlbError::BadAccessor)?;
+                    let transformed = linear * Vec3::new(x, y, z);
+                    if !transformed.is_finite() {
+                        return Err(MeshError::NonFinite.into());
+                    }
+                    // A zero-length tangent (common at UV seams or degenerate texels in
+                    // exported files) is kept as zero: the shader then keeps the geometric
+                    // normal for that vertex instead of the whole model being rejected.
+                    let xyz = transformed.try_normalize().unwrap_or(Vec3::ZERO);
+                    [xyz.x, xyz.y, xyz.z, w * handedness]
+                }
+                None => [0.0; 4],
+            };
+            self.tangents.push(tangent);
             self.push_streams(streams, element)?;
         }
         let vertex_count = positions.count as u32; // <= MAX_VERTICES, checked by `reserve`.
@@ -1090,6 +1155,7 @@ impl Builder {
             for (corner, source) in corners.iter().zip(sources) {
                 self.positions.push(corner.to_array());
                 self.normals.push(normal.to_array());
+                self.tangents.push([0.0; 4]);
                 self.push_streams(streams, source)?;
             }
         }
@@ -1210,6 +1276,131 @@ mod tests {
                 .uvs()
                 .is_none()
         );
+    }
+
+    /// The triangle with a `TANGENT` accessor (bufferView 3, at byte 80) of `data`.
+    fn with_tangents(
+        extra_node: &str,
+        component: u32,
+        kind: &str,
+        count: u32,
+        data: Vec<u8>,
+    ) -> Result<MeshData, GlbError> {
+        let json = triangle_json(extra_node, POSITION_ACCESSOR)
+            .replace(r#""NORMAL":1}"#, r#""NORMAL":1,"TANGENT":3}"#)
+            .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+            .replace(
+                r#""byteLength":6}],"#,
+                r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":48}],"#,
+            )
+            .replace(
+                r#""type":"SCALAR"}]"#,
+                &format!(
+                    r#""type":"SCALAR"}},{{"bufferView":3,"componentType":{component},"count":{count},"type":"{kind}"}}]"#
+                ),
+            );
+        let mut bin = triangle_bin();
+        bin.extend([0, 0]); // pad the u16 indices to 80 bytes
+        bin.extend(data);
+        load_glb(&glb(&json, Some(&bin)))
+    }
+
+    #[test]
+    fn tangents_are_read_transformed_and_validated() {
+        let tangent = floats(&[2.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, -1.0, 1.0, 0.0, 0.0, 1.0]);
+        let mesh = with_tangents("", 5126, "VEC4", 3, tangent.clone()).expect("tangents");
+        assert_eq!(
+            mesh.tangents(),
+            Some(
+                &[
+                    [1.0, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0, -1.0],
+                    [1.0, 0.0, 0.0, 1.0]
+                ][..]
+            )
+        );
+        // A mirroring node transform mirrors xyz and flips the handedness.
+        let mirrored = with_tangents(r#","scale":[-1,1,1]"#, 5126, "VEC4", 3, tangent.clone())
+            .expect("mirrored");
+        assert_eq!(
+            mirrored.tangents(),
+            Some(
+                &[
+                    [-1.0, 0.0, 0.0, -1.0],
+                    [0.0, 1.0, 0.0, 1.0],
+                    [-1.0, 0.0, 0.0, -1.0]
+                ][..]
+            )
+        );
+        // Wrong count, type or component, a zero vector, a NaN or a bad handedness.
+        assert!(matches!(
+            with_tangents("", 5126, "VEC4", 2, tangent.clone()),
+            Err(GlbError::BadAccessor)
+        ));
+        assert!(matches!(
+            with_tangents("", 5126, "VEC3", 3, tangent.clone()),
+            Err(GlbError::BadAccessor)
+        ));
+        assert!(matches!(
+            with_tangents("", 5123, "VEC4", 3, tangent.clone()),
+            Err(GlbError::BadAccessor)
+        ));
+        // A zero-length tangent is kept (as zero), not a reason to reject the model.
+        let zero = floats(&[0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+        let kept = with_tangents("", 5126, "VEC4", 3, zero).expect("zero tangent kept");
+        assert_eq!(kept.tangents().expect("tangents")[0], [0.0, 0.0, 0.0, 1.0]);
+        let nan = floats(&[
+            1.0,
+            0.0,
+            0.0,
+            f32::NAN,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+        ]);
+        assert!(matches!(
+            with_tangents("", 5126, "VEC4", 3, nan),
+            Err(GlbError::Mesh(MeshError::NonFinite))
+        ));
+        let half = floats(&[1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+        assert!(matches!(
+            with_tangents("", 5126, "VEC4", 3, half),
+            Err(GlbError::Mesh(MeshError::BadTangent))
+        ));
+        // No TANGENT: none attached.
+        let json = triangle_json("", POSITION_ACCESSOR);
+        let plain = load_glb(&glb(&json, Some(&triangle_bin()))).expect("no tangents");
+        assert!(plain.tangents().is_none());
+    }
+
+    #[test]
+    fn tangents_are_dropped_unless_every_primitive_has_them() {
+        // Two primitives sharing the streams; only the first names TANGENT.
+        let json = triangle_json("", POSITION_ACCESSOR)
+            .replace(
+                r#""primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]"#,
+                r#""primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TANGENT":3},"indices":2},{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]"#,
+            )
+            .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+            .replace(
+                r#""byteLength":6}],"#,
+                r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":48}],"#,
+            )
+            .replace(
+                r#""type":"SCALAR"}]"#,
+                r#""type":"SCALAR"},{"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"}]"#,
+            );
+        let mut bin = triangle_bin();
+        bin.extend([0, 0]);
+        bin.extend(floats(&[1.0, 0.0, 0.0, 1.0].repeat(3)));
+        let mesh = load_glb(&glb(&json, Some(&bin))).expect("two primitives");
+        assert_eq!(mesh.vertex_count(), 6);
+        assert!(mesh.tangents().is_none());
     }
 
     #[test]

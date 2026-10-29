@@ -1,0 +1,24 @@
+# Environment baked by moba-tools env-bake 0.4.0 (R2a image-based lighting).
+# Client-local and cosmetic: never hashed or sent. Regenerate with
+# scripts/bake-sample-environments.sh; see docs/content-authoring.md.
+# preset = "ember", size = 64, samples = 256
+# zenith = [0.2, 0.07, 0.05]
+# horizon = [0.95, 0.38, 0.12]
+# ground = [0.14, 0.04, 0.02]
+# sun_dir = [-0.6, 0.35, 0.45]
+# sun_color = [2.4, 0.9, 0.3]
+# sun_glow = 6.0
+# sh: cosine-convolved SH-L2 / pi, linear RGB, order Y00 Y1-1 Y10 Y11 Y2-2 Y2-1 Y20 Y21 Y22
+sh = [
+    [1.6958541, 0.62671685, 0.24653848],
+    [0.48306668, 0.19445865, 0.07855621],
+    [0.2928304, 0.10981139, 0.0366038],
+    [-0.3904295, -0.14641105, -0.048803687],
+    [-0.12872171, -0.04827064, -0.016090214],
+    [0.0965432, 0.036203697, 0.0120679],
+    [0.035339277, 0.01527395, 0.0032755542],
+    [-0.1325847, -0.049719263, -0.016573088],
+    [0.13854003, 0.055454228, 0.015339755],
+]
+intensity = 1.0
+specular_mips = 7

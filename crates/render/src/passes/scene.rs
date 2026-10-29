@@ -1,10 +1,14 @@
-//! Scene pass: terrain, instanced units and GPU-skinned meshes into the HDR target.
+//! Scene and shadow passes: terrain, instanced units and GPU-skinned meshes into the HDR
+//! target, and the main view's units (static and skinned) into the directional shadow map
+//! before it.
 //!
-//! Every pipeline, each material permutation included, is built in [`ScenePass::new`] (or
-//! [`ScenePass::rebuild_pipelines`] on a dev shader reload), never while drawing. A mesh
-//! with a textured material ([`ScenePass::set_mesh_material`]) draws with the
+//! Every pipeline, each material permutation and the shadow casters included, is built in
+//! [`ScenePass::new`] (or [`ScenePass::build_pipelines`] on a dev shader reload), never while
+//! drawing. A mesh with a textured material ([`ScenePass::set_mesh_material`]) draws with the
 //! `MATERIAL_TEXTURED` permutation and its material's descriptor set (set 2); every other
-//! mesh keeps the vertex-colour look.
+//! mesh keeps the vertex-colour look. Set 3 is a scene lighting set (shadow map, IBL, BRDF
+//! LUT, ramp; `crate::lighting`), bound once per view: the main view's names the shadow map,
+//! the offscreen views' a default image (their camera uniform also turns shadows off).
 //!
 //! The pass draws one or more **views** (R7b): view 0 is the frame's main scene; the others
 //! are the offscreen images (portraits, the minimap) rendered with the same pipelines and
@@ -21,6 +25,7 @@ use moba_assets::JointMatrix;
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
+use crate::lighting::FrameLighting;
 use crate::mesh::{self, GpuMesh};
 use crate::pipeline::{self, PipelineSpec, VertexLayout};
 use crate::resources::{
@@ -93,7 +98,21 @@ pub(crate) struct SceneTargets<'a> {
     pub(crate) terrain: bool,
     /// Rectangles cleared to their own colour after the full clear (portrait backdrops).
     pub(crate) clear_rects: &'a [ClearRect],
+    /// The view's scene lighting set (set 3).
+    pub(crate) lighting: vk::DescriptorSet,
 }
+
+/// The shadow map the shadow pass renders into.
+pub(crate) struct ShadowTarget {
+    pub(crate) depth: vk::ImageView,
+    pub(crate) size: u32,
+}
+
+/// Slope-scaled depth bias of the shadow casters (in units of the depth format's minimum
+/// resolvable difference, and of the polygon's depth slope); the shader adds a normal
+/// offset of 1.5 texels on top (ADR-0011).
+const SHADOW_BIAS_CONSTANT: f32 = 1.25;
+const SHADOW_BIAS_SLOPE: f32 = 1.75;
 
 /// Per-view budget: the instance and joint-matrix capacity of its per-frame buffers.
 #[derive(Clone, Copy, Debug)]
@@ -127,15 +146,22 @@ pub(crate) struct ScenePipelines {
     /// `None` with `skinned`, or if the textured skinned permutation failed to build (then
     /// textured skinned meshes draw with `skinned`).
     skinned_textured: Option<GraphicsPipeline>,
+    /// Depth-only static caster; `None` when shadows are off.
+    unit_shadow: Option<GraphicsPipeline>,
+    /// Depth-only skinned caster; `None` when shadows or skinning are off (then skinned
+    /// meshes cast no shadow).
+    skinned_shadow: Option<GraphicsPipeline>,
 }
 
 impl ScenePipelines {
+    #[allow(clippy::too_many_lines)] // One pipeline per permutation, built together.
     fn build(
         device: &DeviceContext,
         shaders: &ShaderSource,
         layout: vk::PipelineLayout,
         color_format: vk::Format,
         depth_format: vk::Format,
+        shadow: Option<ShadowPipelineSpec>,
         skinning: bool,
     ) -> RenderResult<Self> {
         let module = |name| shaders.module(device, name);
@@ -212,14 +238,58 @@ impl ScenePipelines {
         } else {
             (None, None)
         };
+        let shadow_caster = |name, vertex_layout, spec: ShadowPipelineSpec| {
+            module(name).and_then(|vertex| {
+                pipeline::create_depth_only(
+                    device,
+                    layout,
+                    vertex_layout,
+                    vertex.handle(),
+                    spec.format,
+                    spec.depth_clamp,
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+            })
+        };
+        let (unit_shadow, skinned_shadow) = match shadow {
+            Some(spec) => {
+                let unit_shadow =
+                    shadow_caster("unit_shadow.vert", VertexLayout::StaticShadow, spec)?;
+                let skinned_shadow = if skinned.is_some() {
+                    shadow_caster("skinned_shadow.vert", VertexLayout::SkinnedShadow, spec)
+                        .inspect_err(|error| {
+                            eprintln!(
+                                "[render] skinned shadow pipeline unavailable ({error}); \
+                                 skinned meshes cast no shadow"
+                            );
+                        })
+                        .ok()
+                } else {
+                    None
+                };
+                (Some(unit_shadow), skinned_shadow)
+            }
+            None => (None, None),
+        };
         Ok(Self {
             unit,
             unit_textured,
             terrain,
             skinned,
             skinned_textured,
+            unit_shadow,
+            skinned_shadow,
         })
     }
+}
+
+/// How the shadow casters are built: the shadow map's format and whether depth clamping
+/// ("pancaking") is enabled, so casters nearer the light than the map's near plane still
+/// write depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ShadowPipelineSpec {
+    pub(crate) format: vk::Format,
+    pub(crate) depth_clamp: bool,
 }
 
 /// Pipelines, meshes and per-frame buffers of the scene pass.
@@ -239,6 +309,8 @@ pub(crate) struct ScenePass {
     pipelines: ScenePipelines,
     color_format: vk::Format,
     depth_format: vk::Format,
+    /// The shadow casters' spec; `None` when shadows are off.
+    shadow: Option<ShadowPipelineSpec>,
     skinning: bool,
 }
 
@@ -246,8 +318,8 @@ impl ScenePass {
     /// Builds the scene pipelines for `color_format`/`depth_format` and, per view in `views`
     /// (view 0 is the main scene), `frames` sets of per-frame buffers. Each view's
     /// `max_bones` is clamped to the storage-buffer range; the main view's is returned
-    /// through the pass (see [`Self::max_bones`]). `material_layout` is set 2 of every scene
-    /// pipeline.
+    /// through the pass (see [`Self::max_bones`]). `material_layout` and `lighting_layout` are
+    /// sets 2 and 3 of every scene pipeline; `shadow` builds the shadow casters.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // Wiring belongs together.
     pub(crate) fn new(
         device: &DeviceContext,
@@ -255,7 +327,9 @@ impl ScenePass {
         frames: usize,
         color_format: vk::Format,
         depth_format: vk::Format,
+        shadow: Option<ShadowPipelineSpec>,
         material_layout: vk::DescriptorSetLayout,
+        lighting_layout: vk::DescriptorSetLayout,
         views: &[ViewBudget],
         skinning: bool,
     ) -> RenderResult<Self> {
@@ -292,12 +366,14 @@ impl ScenePass {
             DescriptorPool::new(device.device.clone(), &pool_sizes, 2 * frame_count)?;
 
         // One layout for every scene pipeline keeps the bound descriptor sets compatible
-        // across them: sets 0/1 (camera, instances + bones) are bound once per pass and set 2
-        // (the material) per textured mesh. Only `skinned*.vert` reads the push constant.
+        // across them: sets 0/1 (camera, instances + bones) and 3 (lighting) are bound once per
+        // view and set 2 (the material) per textured mesh. The shadow casters use only sets
+        // 0/1. Only `skinned*.vert` reads the push constant.
         let layouts = [
             camera_layout.handle(),
             instance_layout.handle(),
             material_layout,
+            lighting_layout,
         ];
         let skin_push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -311,6 +387,7 @@ impl ScenePass {
             pipeline_layout.handle(),
             color_format,
             depth_format,
+            shadow,
             skinning,
         )?;
 
@@ -344,6 +421,7 @@ impl ScenePass {
             pipelines,
             color_format,
             depth_format,
+            shadow,
             skinning,
         })
     }
@@ -363,10 +441,12 @@ impl ScenePass {
             self.pipeline_layout.handle(),
             self.color_format,
             self.depth_format,
+            self.shadow,
             self.skinning,
         )?;
         if pipelines.skinned.is_some() != self.pipelines.skinned.is_some()
             || pipelines.skinned_textured.is_some() != self.pipelines.skinned_textured.is_some()
+            || pipelines.skinned_shadow.is_some() != self.pipelines.skinned_shadow.is_some()
         {
             return Err(RenderError::Shader("a skinned pipeline failed to rebuild"));
         }
@@ -458,14 +538,15 @@ impl ScenePass {
         Ok(MeshId::from_index(id))
     }
 
-    /// Writes this frame's camera, instances and bones of `view` and buckets its draws. The
-    /// frame's fence must have been waited on. The truncation counters report the main view
-    /// (0) only.
+    /// Writes this frame's camera (with `lighting`), instances and bones of `view` and
+    /// buckets its draws. The frame's fence must have been waited on. The truncation counters
+    /// report the main view (0) only.
     pub(crate) fn prepare(
         &mut self,
         view: usize,
         frame: usize,
         scene: &Scene<'_>,
+        lighting: &FrameLighting,
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
         let Self { views, meshes, .. } = self;
@@ -482,7 +563,7 @@ impl ScenePass {
         state.unit_count = unit_count;
         let mut skinned_dropped = 0u64;
         let target = &mut state.frames[frame];
-        let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint);
+        let uniform = CameraUniform::new(scene.camera, &scene.vision, scene.terrain_tint, lighting);
         target.camera_buffer.write_bytes(0, bytes_of(&uniform));
         if bone_count > 0 {
             let mapped = target
@@ -594,17 +675,17 @@ impl ScenePass {
         );
         clear_rects(device, command_buffer, targets);
 
-        let scene_frame = &state.frames[frame];
-        let descriptor_sets = [scene_frame.camera_set, scene_frame.instance_set];
-        // SAFETY: both sets were allocated from this frame's layout and the pipeline layout
-        // declares them at indices 0 and 1.
+        self.bind_view_sets(device, command_buffer, state, frame);
+        // SAFETY: the lighting set was allocated with the layout the pipeline layout declares
+        // at index 3; its views live as long as the renderer and it is only rewritten while
+        // the device is idle.
         unsafe {
             device.device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_layout.handle(),
-                0,
-                &descriptor_sets,
+                3,
+                &[targets.lighting],
                 &[],
             );
         }
@@ -651,6 +732,92 @@ impl ScenePass {
         device.cmd_end_rendering(command_buffer);
     }
 
+    /// Binds `state`'s camera and instance sets (0 and 1) for this frame.
+    fn bind_view_sets(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        state: &SceneView,
+        frame: usize,
+    ) {
+        let scene_frame = &state.frames[frame];
+        let descriptor_sets = [scene_frame.camera_set, scene_frame.instance_set];
+        // SAFETY: both sets were allocated from this frame's layout and the pipeline layout
+        // declares them at indices 0 and 1.
+        unsafe {
+            device.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout.handle(),
+                0,
+                &descriptor_sets,
+                &[],
+            );
+        }
+    }
+
+    /// Records the shadow pass: the **main view's** units (static meshes instanced, skinned
+    /// meshes one draw each, from view 0's buckets and bones) depth-only through the light's
+    /// view-projection into `target`, cleared to 1. Offscreen views never cast into it. The
+    /// terrain receives but never casts.
+    pub(crate) fn record_shadow(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        frame: usize,
+        target: &ShadowTarget,
+    ) {
+        let state = &self.views[0];
+        let extent = vk::Extent2D {
+            width: target.size,
+            height: target.size,
+        };
+        let depth_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(target.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            });
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            })
+            .layer_count(1)
+            .depth_attachment(&depth_attachment);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(device, command_buffer, super::full_viewport(extent), extent);
+        // SAFETY: the bound shadow pipelines declare DEPTH_BIAS dynamic and the rasterizer's
+        // depth bias is enabled; a zero clamp disables clamping.
+        unsafe {
+            device.device.cmd_set_depth_bias(
+                command_buffer,
+                SHADOW_BIAS_CONSTANT,
+                0.0,
+                SHADOW_BIAS_SLOPE,
+            );
+        }
+        if state.unit_count > 0 {
+            self.bind_view_sets(device, command_buffer, state, frame);
+            if let Some(pipeline) = &self.pipelines.unit_shadow {
+                for textured in [false, true] {
+                    self.draw_static(device, command_buffer, state, pipeline, textured, false);
+                }
+            }
+            if let Some(pipeline) = &self.pipelines.skinned_shadow {
+                for textured in [false, true] {
+                    self.draw_skinned(device, command_buffer, state, pipeline, textured, false);
+                }
+            }
+        }
+        device.cmd_end_rendering(command_buffer);
+    }
+
     /// One instanced draw per static mesh whose material is (`textured`) or is not textured.
     fn record_static(
         &self,
@@ -664,6 +831,20 @@ impl ScenePass {
         } else {
             &self.pipelines.unit
         };
+        self.draw_static(device, command_buffer, state, pipeline, textured, true);
+    }
+
+    /// One instanced draw with `pipeline` per static mesh whose material is (`textured`) or is
+    /// not textured, binding each material set when `bind_materials`.
+    fn draw_static(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        state: &SceneView,
+        pipeline: &GraphicsPipeline,
+        textured: bool,
+        bind_materials: bool,
+    ) {
         let mut bound = false;
         {
             for (slot, mesh) in self.meshes.iter().enumerate() {
@@ -680,7 +861,7 @@ impl ScenePass {
                     bind_pipeline(device, command_buffer, pipeline);
                     bound = true;
                 }
-                if textured {
+                if textured && bind_materials {
                     bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
                 }
                 bind_mesh(device, command_buffer, mesh);
@@ -715,6 +896,20 @@ impl ScenePass {
         pipeline: &GraphicsPipeline,
         textured: bool,
     ) {
+        self.draw_skinned(device, command_buffer, state, pipeline, textured, true);
+    }
+
+    /// One draw per skinned instance whose mesh's material is (`textured`) or is not
+    /// textured, with `pipeline`, binding each material set when `bind_materials`.
+    fn draw_skinned(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        state: &SceneView,
+        pipeline: &GraphicsPipeline,
+        textured: bool,
+        bind_materials: bool,
+    ) {
         {
             let mut bound_pipeline = false;
             let mut bound_slot = u32::MAX;
@@ -732,7 +927,7 @@ impl ScenePass {
                 }
                 if draw.slot != bound_slot {
                     bound_slot = draw.slot;
-                    if textured {
+                    if textured && bind_materials {
                         bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
                     }
                     // Skinned meshes (joint_count > 0) hold `SkinnedVertex` data, the layout

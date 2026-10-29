@@ -50,6 +50,17 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "unit_textured.frag",
         defines: &["MATERIAL_TEXTURED"],
     },
+    // Depth-only shadow casters (R2a, ADR-0011): no fragment shader.
+    Permutation {
+        source: "unit.vert",
+        output: "unit_shadow.vert",
+        defines: &["SHADOW_PASS"],
+    },
+    Permutation {
+        source: "skinned.vert",
+        output: "skinned_shadow.vert",
+        defines: &["SHADOW_PASS"],
+    },
 ];
 
 fn main() {

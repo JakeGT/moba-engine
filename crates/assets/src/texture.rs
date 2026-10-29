@@ -1,14 +1,16 @@
 //! Validated textures and the bounded KTX2 container (ADR-0010).
 //!
 //! [`TextureData`] is the hand-off type between the texture loader and the renderer: one 2D
-//! image with a full or partial mip chain in one of the [`TextureFormat`]s the engine
-//! samples. Its invariants are checked at construction, so the renderer's upload copies
-//! never read past a level:
+//! image, or one cube map (six square faces, R2a image-based lighting), with a full or
+//! partial mip chain in one of the [`TextureFormat`]s the engine samples. Its invariants are
+//! checked at construction, so the renderer's upload copies never read past a level:
 //!
-//! - width and height in `1..=`[`MAX_TEXTURE_DIMENSION`];
+//! - width and height in `1..=`[`MAX_TEXTURE_DIMENSION`] (cube faces: square and at most
+//!   [`MAX_CUBE_DIMENSION`]);
 //! - `1..=` the full chain length of mip levels, level `i` being `max(1, size >> i)`;
 //! - every level holds exactly the bytes its format and size need (whole 4×4 blocks for the
-//!   block-compressed formats).
+//!   block-compressed formats), times six for a cube map, whose faces are stored one after
+//!   another in each level in the KTX2/Vulkan order `+X, -X, +Y, -Y, +Z, -Z`.
 //!
 //! [`load_ktx2`] parses a KTX 2.0 container from untrusted bytes. Every count, dimension,
 //! offset and length is checked against the caps and the file size *before* anything is
@@ -26,6 +28,11 @@ pub const MAX_TEXTURE_DIMENSION: u32 = 4096;
 /// Most mip levels a texture can have (the full chain of a
 /// [`MAX_TEXTURE_DIMENSION`]-sized image).
 pub const MAX_MIP_LEVELS: u32 = MAX_TEXTURE_DIMENSION.ilog2() + 1;
+/// Largest accepted cube-map face edge, in texels (environment maps are small: the
+/// shipped ones are 64²).
+pub const MAX_CUBE_DIMENSION: u32 = 1024;
+/// Faces of a cube map.
+const CUBE_FACES: u32 = 6;
 
 /// KTX 2.0 file identifier.
 const KTX2_IDENTIFIER: [u8; 12] = [
@@ -47,6 +54,11 @@ mod dfd {
     pub(super) const TRANSFER_SRGB: u8 = 2;
     pub(super) const CHANNEL_ALPHA: u8 = 15;
     pub(super) const QUALIFIER_LINEAR: u8 = 0x10;
+    pub(super) const QUALIFIER_SIGNED: u8 = 0x40;
+    pub(super) const QUALIFIER_FLOAT: u8 = 0x80;
+    /// `-1.0f32` and `1.0f32`: a float sample's lower and upper bounds.
+    pub(super) const FLOAT_LOWER: u32 = 0xBF80_0000;
+    pub(super) const FLOAT_UPPER: u32 = 0x3F80_0000;
     /// Block header (2 words) plus model/dimension/plane words.
     pub(super) const BLOCK_HEADER_BYTES: usize = 24;
     pub(super) const SAMPLE_BYTES: usize = 16;
@@ -75,6 +87,9 @@ pub enum TextureFormat {
     Bc5Unorm,
     /// BC4 one-channel, linear (`VK_FORMAT_BC4_UNORM_BLOCK`), 8 bytes per block.
     Bc4Unorm,
+    /// 16-bit float RGBA, linear (`VK_FORMAT_R16G16B16A16_SFLOAT`), 8 bytes per texel: HDR
+    /// data such as prefiltered environment cube maps (R2a). No material slot takes it.
+    Rgba16Float,
 }
 
 impl TextureFormat {
@@ -88,6 +103,7 @@ impl TextureFormat {
         Self::Bc7Unorm,
         Self::Bc5Unorm,
         Self::Bc4Unorm,
+        Self::Rgba16Float,
     ];
 
     /// The `VkFormat` value (the KTX2 header's `vkFormat`).
@@ -98,6 +114,7 @@ impl TextureFormat {
             Self::Rg8Unorm => 16,
             Self::Rgba8Unorm => 37,
             Self::Rgba8Srgb => 43,
+            Self::Rgba16Float => 97,
             Self::Bc4Unorm => 139,
             Self::Bc5Unorm => 141,
             Self::Bc7Unorm => 145,
@@ -126,6 +143,7 @@ impl TextureFormat {
             Self::Bc7Unorm => "bc7",
             Self::Bc5Unorm => "bc5",
             Self::Bc4Unorm => "bc4",
+            Self::Rgba16Float => "rgba16f",
         }
     }
 
@@ -157,7 +175,11 @@ impl TextureFormat {
     #[must_use]
     pub const fn channels(self) -> u32 {
         match self {
-            Self::Rgba8Srgb | Self::Rgba8Unorm | Self::Bc7Srgb | Self::Bc7Unorm => 4,
+            Self::Rgba8Srgb
+            | Self::Rgba8Unorm
+            | Self::Bc7Srgb
+            | Self::Bc7Unorm
+            | Self::Rgba16Float => 4,
             Self::Rg8Unorm | Self::Bc5Unorm => 2,
             Self::R8Unorm | Self::Bc4Unorm => 1,
         }
@@ -170,8 +192,8 @@ impl TextureFormat {
             Self::Rgba8Srgb | Self::Rgba8Unorm => 4,
             Self::Rg8Unorm => 2,
             Self::R8Unorm => 1,
+            Self::Rgba16Float | Self::Bc4Unorm => 8,
             Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm => 16,
-            Self::Bc4Unorm => 8,
         }
     }
 
@@ -227,10 +249,11 @@ pub enum TextureError {
     NotKtx2,
     /// The `vkFormat` is not one of the [`TextureFormat`]s (the value is given).
     UnsupportedFormat(u32),
-    /// A KTX2 feature the engine does not load: the text names it (cube maps, arrays, 3D,
-    /// supercompression, ...).
+    /// A KTX2 feature the engine does not load: the text names it (arrays, 3D,
+    /// supercompression, a face count other than 1 or 6, ...).
     Unsupported(&'static str),
-    /// Width or height is zero or above [`MAX_TEXTURE_DIMENSION`].
+    /// Width or height is zero or above [`MAX_TEXTURE_DIMENSION`], or a cube map's faces are
+    /// not square or larger than [`MAX_CUBE_DIMENSION`].
     BadDimensions,
     /// More mip levels than the full chain, or none.
     BadLevelCount,
@@ -272,12 +295,15 @@ struct Level {
     len: usize,
 }
 
-/// A validated 2D texture with its mip chain (see the module docs for the invariants).
+/// A validated 2D texture or cube map with its mip chain (see the module docs for the
+/// invariants).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextureData {
     format: TextureFormat,
     width: u32,
     height: u32,
+    /// 1, or 6 for a cube map.
+    faces: u32,
     levels: Vec<Level>,
     data: Vec<u8>,
 }
@@ -297,9 +323,12 @@ pub fn mip_size(width: u32, height: u32, level: u32) -> (u32, u32) {
     )
 }
 
-fn check_shape(width: u32, height: u32, levels: usize) -> Result<(), TextureError> {
+fn check_shape(width: u32, height: u32, faces: u32, levels: usize) -> Result<(), TextureError> {
     if width == 0 || height == 0 || width > MAX_TEXTURE_DIMENSION || height > MAX_TEXTURE_DIMENSION
     {
+        return Err(TextureError::BadDimensions);
+    }
+    if faces == CUBE_FACES && (width != height || width > MAX_CUBE_DIMENSION) {
         return Err(TextureError::BadDimensions);
     }
     let chain = full_mip_chain(width, height) as usize;
@@ -321,11 +350,37 @@ impl TextureData {
         height: u32,
         levels: &[Vec<u8>],
     ) -> Result<Self, TextureError> {
-        check_shape(width, height, levels.len())?;
+        Self::build(format, width, height, 1, levels)
+    }
+
+    /// Builds a cube map with `size` × `size` faces from its levels, largest first. Each
+    /// level holds the six faces one after another in the order `+X, -X, +Y, -Y, +Z, -Z`
+    /// (KTX2 and Vulkan), each `format.level_bytes(w, h)` bytes.
+    ///
+    /// # Errors
+    /// [`TextureError::BadDimensions`] (also for `size` above [`MAX_CUBE_DIMENSION`]),
+    /// [`TextureError::BadLevelCount`], or [`TextureError::BadLevel`] when a level's length is
+    /// not exactly six faces.
+    pub fn new_cube(
+        format: TextureFormat,
+        size: u32,
+        levels: &[Vec<u8>],
+    ) -> Result<Self, TextureError> {
+        Self::build(format, size, size, CUBE_FACES, levels)
+    }
+
+    fn build(
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+        faces: u32,
+        levels: &[Vec<u8>],
+    ) -> Result<Self, TextureError> {
+        check_shape(width, height, faces, levels.len())?;
         let mut total = 0usize;
         for (index, level) in levels.iter().enumerate() {
             let (w, h) = mip_size(width, height, index as u32);
-            if format.level_bytes(w, h) != Some(level.len()) {
+            if level_bytes(format, w, h, faces) != Some(level.len()) {
                 return Err(TextureError::BadLevel);
             }
             total = total
@@ -345,6 +400,7 @@ impl TextureData {
             format,
             width,
             height,
+            faces,
             levels: table,
             data,
         })
@@ -374,7 +430,20 @@ impl TextureData {
         self.levels.len() as u32
     }
 
-    /// Level `index`'s size and bytes (largest level first).
+    /// Number of faces: 1, or 6 for a cube map.
+    #[must_use]
+    pub fn face_count(&self) -> u32 {
+        self.faces
+    }
+
+    /// Whether this is a cube map (six square faces).
+    #[must_use]
+    pub fn is_cube(&self) -> bool {
+        self.faces == CUBE_FACES
+    }
+
+    /// Level `index`'s size and bytes (largest level first). For a cube map the bytes are
+    /// the whole level, every face in order (see [`Self::face`] for one face).
     #[must_use]
     pub fn level(&self, index: u32) -> Option<(u32, u32, &[u8])> {
         let level = self.levels.get(index as usize)?;
@@ -384,6 +453,19 @@ impl TextureData {
             height,
             &self.data[level.offset..level.offset + level.len],
         ))
+    }
+
+    /// The bytes of face `face` (`0..face_count()`, cube order `+X, -X, +Y, -Y, +Z, -Z`) of
+    /// level `level`.
+    #[must_use]
+    pub fn face(&self, level: u32, face: u32) -> Option<&[u8]> {
+        if face >= self.faces {
+            return None;
+        }
+        let (_, _, bytes) = self.level(level)?;
+        let face_len = bytes.len() / self.faces as usize;
+        let start = face_len * face as usize;
+        bytes.get(start..start + face_len)
     }
 
     /// Every level's bytes, contiguous and largest first.
@@ -413,10 +495,15 @@ impl TextureData {
         let target = self.format.uncompressed();
         let mut levels = Vec::with_capacity(self.levels.len());
         for index in 0..self.level_count() {
-            let (width, height, bytes) = self.level(index).ok_or(TextureError::Decode)?;
-            levels.push(decode_level(self.format, width, height, bytes)?);
+            let (width, height, _) = self.level(index).ok_or(TextureError::Decode)?;
+            let mut level = Vec::new();
+            for face in 0..self.faces {
+                let bytes = self.face(index, face).ok_or(TextureError::Decode)?;
+                level.extend_from_slice(&decode_level(self.format, width, height, bytes)?);
+            }
+            levels.push(level);
         }
-        Self::new(target, self.width, self.height, &levels)
+        Self::build(target, self.width, self.height, self.faces, &levels)
     }
 }
 
@@ -463,6 +550,77 @@ fn decode_level(
     Ok(out)
 }
 
+/// Bytes of one level with `faces` faces of `width` × `height` texels.
+fn level_bytes(format: TextureFormat, width: u32, height: u32, faces: u32) -> Option<usize> {
+    format
+        .level_bytes(width, height)?
+        .checked_mul(faces as usize)
+}
+
+/// Converts an `f32` to IEEE 754 binary16 bits, rounding to nearest even. Values beyond the
+/// half range become infinity, tiny values become (signed) subnormals or zero, and NaN stays
+/// a (quiet) NaN.
+#[must_use]
+pub fn f16_from_f32(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff).cast_signed();
+    let mantissa = bits & 0x007f_ffff;
+    if exponent == 0xff {
+        // Infinity, or NaN with the quiet bit set and the payload's top bits kept.
+        let nan = if mantissa == 0 {
+            0
+        } else {
+            0x0200 | (mantissa >> 13) as u16
+        };
+        return sign | 0x7c00 | nan;
+    }
+    let unbiased = exponent - 127;
+    if unbiased > 15 {
+        return sign | 0x7c00;
+    }
+    if unbiased >= -14 {
+        // Normal: a carry out of the mantissa bumps the exponent (to infinity at the top).
+        // `unbiased + 15` is in 1..=30 here.
+        let mut half = ((unbiased + 15).cast_unsigned() << 10) | (mantissa >> 13);
+        let rest = mantissa & 0x1fff;
+        if rest > 0x1000 || (rest == 0x1000 && half & 1 == 1) {
+            half += 1;
+        }
+        return sign | half as u16;
+    }
+    if unbiased < -25 {
+        return sign;
+    }
+    // Subnormal half (value = m * 2^-24); the implicit leading one is made explicit.
+    let full = mantissa | 0x0080_0000;
+    let shift = (-1 - unbiased).cast_unsigned(); // 14..=24
+    let mut half = full >> shift;
+    let rest = full & ((1 << shift) - 1);
+    let halfway = 1 << (shift - 1);
+    if rest > halfway || (rest == halfway && half & 1 == 1) {
+        half += 1;
+    }
+    sign | half as u16
+}
+
+/// Converts IEEE 754 binary16 bits to `f32` (exact).
+#[must_use]
+pub fn f32_from_f16(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = u32::from((bits >> 10) & 0x1f);
+    let mantissa = u32::from(bits & 0x03ff);
+    match exponent {
+        0 => {
+            // Zero or subnormal: m * 2^-24, exact in f32.
+            let magnitude = mantissa as f32 * (1.0 / 16_777_216.0);
+            if sign == 0 { magnitude } else { -magnitude }
+        }
+        31 => f32::from_bits(sign | 0x7f80_0000 | (mantissa << 13)),
+        _ => f32::from_bits(sign | ((exponent + 112) << 23) | (mantissa << 13)),
+    }
+}
+
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
     let chunk = bytes.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_le_bytes(chunk.try_into().ok()?))
@@ -507,7 +665,8 @@ pub fn load_ktx2_file(path: &Path) -> Result<TextureData, TextureError> {
 
 /// Parses a KTX 2.0 container from untrusted bytes.
 ///
-/// Accepts one 2D image (no array layers, cube faces or depth) in a [`TextureFormat`], with
+/// Accepts one 2D image, or one cube map (`faceCount` 6, square faces of at most
+/// [`MAX_CUBE_DIMENSION`]), without array layers or depth, in a [`TextureFormat`], with
 /// `1..=` the full chain of mip levels, no supercompression, and a basic data format
 /// descriptor whose transfer function matches the format (sRGB for `*_SRGB`, linear
 /// otherwise). A `levelCount` of 0 ("generate mips at load") is read as one level. Never
@@ -550,8 +709,8 @@ pub fn load_ktx2(bytes: &[u8]) -> Result<TextureData, TextureError> {
     if layers > 1 {
         return Err(TextureError::Unsupported("array textures"));
     }
-    if faces != 1 {
-        return Err(TextureError::Unsupported("cube maps"));
+    if faces != 1 && faces != CUBE_FACES {
+        return Err(TextureError::Unsupported("cube maps need 6 faces"));
     }
     if supercompression != 0 || sgd_length != 0 {
         return Err(TextureError::Unsupported("supercompression"));
@@ -560,7 +719,7 @@ pub fn load_ktx2(bytes: &[u8]) -> Result<TextureData, TextureError> {
     if levels > MAX_MIP_LEVELS {
         return Err(TextureError::BadLevelCount);
     }
-    check_shape(width, height, levels as usize)?;
+    check_shape(width, height, faces, levels as usize)?;
     // Unused when its length is zero, but a stated offset must still be in the file.
     if range_in(bytes.len(), sgd_offset, sgd_length).is_none() {
         return Err(TextureError::BadLevel);
@@ -586,7 +745,7 @@ pub fn load_ktx2(bytes: &[u8]) -> Result<TextureData, TextureError> {
         let length = u64_at(bytes, entry + 8).ok_or(TextureError::NotKtx2)?;
         let uncompressed = u64_at(bytes, entry + 16).ok_or(TextureError::NotKtx2)?;
         let (w, h) = mip_size(width, height, level);
-        let expected = format.level_bytes(w, h).ok_or(TextureError::BadLevel)?;
+        let expected = level_bytes(format, w, h, faces).ok_or(TextureError::BadLevel)?;
         if length != expected as u64 || uncompressed != length {
             return Err(TextureError::BadLevel);
         }
@@ -619,6 +778,7 @@ pub fn load_ktx2(bytes: &[u8]) -> Result<TextureData, TextureError> {
         format,
         width,
         height,
+        faces,
         levels: table,
         data,
     })
@@ -663,25 +823,34 @@ fn check_descriptor(dfd: &[u8], format: TextureFormat) -> Result<(), TextureErro
 
 /// The basic data format descriptor (with its leading total size) for `format`.
 fn descriptor(format: TextureFormat) -> Vec<u8> {
-    // (channel id | qualifiers, bit offset, bit length, upper)
-    let samples: &[(u8, u16, u8, u32)] = match format {
+    // (channel id | qualifiers, bit offset, bit length, lower, upper)
+    const HALF: u8 = dfd::QUALIFIER_FLOAT | dfd::QUALIFIER_SIGNED;
+    const LOWER: u32 = dfd::FLOAT_LOWER;
+    const UPPER: u32 = dfd::FLOAT_UPPER;
+    let samples: &[(u8, u16, u8, u32, u32)] = match format {
         TextureFormat::Rgba8Srgb => &[
-            (0, 0, 8, 255),
-            (1, 8, 8, 255),
-            (2, 16, 8, 255),
-            (dfd::CHANNEL_ALPHA | dfd::QUALIFIER_LINEAR, 24, 8, 255),
+            (0, 0, 8, 0, 255),
+            (1, 8, 8, 0, 255),
+            (2, 16, 8, 0, 255),
+            (dfd::CHANNEL_ALPHA | dfd::QUALIFIER_LINEAR, 24, 8, 0, 255),
         ],
         TextureFormat::Rgba8Unorm => &[
-            (0, 0, 8, 255),
-            (1, 8, 8, 255),
-            (2, 16, 8, 255),
-            (dfd::CHANNEL_ALPHA, 24, 8, 255),
+            (0, 0, 8, 0, 255),
+            (1, 8, 8, 0, 255),
+            (2, 16, 8, 0, 255),
+            (dfd::CHANNEL_ALPHA, 24, 8, 0, 255),
         ],
-        TextureFormat::Rg8Unorm => &[(0, 0, 8, 255), (1, 8, 8, 255)],
-        TextureFormat::R8Unorm => &[(0, 0, 8, 255)],
-        TextureFormat::Bc7Srgb | TextureFormat::Bc7Unorm => &[(0, 0, 128, u32::MAX)],
-        TextureFormat::Bc5Unorm => &[(0, 0, 64, u32::MAX), (1, 64, 64, u32::MAX)],
-        TextureFormat::Bc4Unorm => &[(0, 0, 64, u32::MAX)],
+        TextureFormat::Rg8Unorm => &[(0, 0, 8, 0, 255), (1, 8, 8, 0, 255)],
+        TextureFormat::R8Unorm => &[(0, 0, 8, 0, 255)],
+        TextureFormat::Bc7Srgb | TextureFormat::Bc7Unorm => &[(0, 0, 128, 0, u32::MAX)],
+        TextureFormat::Bc5Unorm => &[(0, 0, 64, 0, u32::MAX), (1, 64, 64, 0, u32::MAX)],
+        TextureFormat::Bc4Unorm => &[(0, 0, 64, 0, u32::MAX)],
+        TextureFormat::Rgba16Float => &[
+            (HALF, 0, 16, LOWER, UPPER),
+            (1 | HALF, 16, 16, LOWER, UPPER),
+            (2 | HALF, 32, 16, LOWER, UPPER),
+            (dfd::CHANNEL_ALPHA | HALF, 48, 16, LOWER, UPPER),
+        ],
     };
     let model = match format {
         TextureFormat::Bc7Srgb | TextureFormat::Bc7Unorm => dfd::MODEL_BC7,
@@ -703,18 +872,18 @@ fn descriptor(format: TextureFormat) -> Vec<u8> {
     let edge = (format.block_dimension() - 1) as u8;
     out.extend_from_slice(&[edge, edge, 0, 0]);
     out.extend_from_slice(&[format.block_bytes() as u8, 0, 0, 0, 0, 0, 0, 0]);
-    for &(channel, bit_offset, bit_length, upper) in samples {
+    for &(channel, bit_offset, bit_length, lower, upper) in samples {
         out.extend_from_slice(&bit_offset.to_le_bytes());
         out.push(bit_length - 1);
         out.push(channel);
         out.extend_from_slice(&[0; 4]); // sample position
-        out.extend_from_slice(&0u32.to_le_bytes()); // lower
+        out.extend_from_slice(&lower.to_le_bytes());
         out.extend_from_slice(&upper.to_le_bytes());
     }
     out
 }
 
-/// Serialises `texture` as a KTX 2.0 file: no supercompression, a basic data format
+/// Serialises `texture` (a 2D image or a cube map) as a KTX 2.0 file: no supercompression, a basic data format
 /// descriptor, a `KTXwriter` key, and mip data stored smallest level first, each level
 /// aligned to `lcm(block bytes, 4)` as the specification requires.
 #[must_use]
@@ -751,7 +920,7 @@ pub fn write_ktx2(texture: &TextureData, writer: &str) -> Vec<u8> {
         texture.height,
         0, // pixelDepth
         0, // layerCount
-        1, // faceCount
+        texture.faces,
         levels as u32,
         0, // supercompressionScheme
         dfd_offset as u32,
@@ -894,7 +1063,9 @@ mod tests {
         assert_eq!(mutate(24, 1 << 20), Err(TextureError::BadDimensions));
         assert!(matches!(mutate(28, 2), Err(TextureError::Unsupported(_))));
         assert!(matches!(mutate(32, 6), Err(TextureError::Unsupported(_))));
-        assert!(matches!(mutate(36, 6), Err(TextureError::Unsupported(_))));
+        assert!(matches!(mutate(36, 2), Err(TextureError::Unsupported(_))));
+        // Six faces with one face's bytes per level is a length mismatch.
+        assert_eq!(mutate(36, 6), Err(TextureError::BadLevel));
         assert_eq!(mutate(40, 6), Err(TextureError::BadLevelCount));
         assert_eq!(mutate(40, u32::MAX), Err(TextureError::BadLevelCount));
         assert!(matches!(mutate(44, 2), Err(TextureError::Unsupported(_))));
@@ -942,6 +1113,155 @@ mod tests {
         // levelCount 0 ("generate at load") reads only level 0.
         let one = mutate(40, 0).expect("level 0 only");
         assert_eq!(one.level_count(), 1);
+    }
+
+    fn cube(format: TextureFormat, size: u32) -> TextureData {
+        let levels: Vec<Vec<u8>> = (0..full_mip_chain(size, size))
+            .map(|level| {
+                let (w, h) = mip_size(size, size, level);
+                let len = format.level_bytes(w, h).expect("size") * 6;
+                (0..len)
+                    .map(|index| (index * 13 + level as usize * 3) as u8)
+                    .collect()
+            })
+            .collect();
+        TextureData::new_cube(format, size, &levels).expect("valid cube")
+    }
+
+    #[test]
+    fn half_floats_round_trip_and_round_to_nearest_even() {
+        for value in [
+            0.0f32,
+            -0.0,
+            1.0,
+            -2.5,
+            0.5,
+            65_504.0,
+            6.103_515_6e-5,
+            5.960_464_5e-8,
+        ] {
+            assert_eq!(f32_from_f16(f16_from_f32(value)), value, "{value}");
+        }
+        assert_eq!(f16_from_f32(1.0), 0x3c00);
+        assert_eq!(f16_from_f32(-2.0), 0xc000);
+        assert_eq!(f16_from_f32(65_504.0), 0x7bff);
+        assert_eq!(f16_from_f32(65_520.0), 0x7c00, "rounds up to infinity");
+        assert_eq!(f16_from_f32(1.0e9), 0x7c00);
+        assert_eq!(f16_from_f32(f32::NEG_INFINITY), 0xfc00);
+        assert!(f32_from_f16(f16_from_f32(f32::NAN)).is_nan());
+        assert_eq!(f16_from_f32(5.960_464_5e-8), 0x0001, "smallest subnormal");
+        assert_eq!(
+            f16_from_f32(2.980_232_2e-8),
+            0x0000,
+            "half of it ties to even zero"
+        );
+        assert_eq!(f16_from_f32(1.0e-10), 0x0000);
+        assert_eq!(f16_from_f32(-1.0e-10), 0x8000);
+        // 1 + 2^-11 is halfway between 1 and the next half: ties to even (1.0).
+        assert_eq!(f16_from_f32(1.0 + 1.0 / 2048.0), 0x3c00);
+        assert_eq!(f16_from_f32(1.0 + 3.0 / 2048.0), 0x3c02);
+        assert_eq!(f32_from_f16(0x7c00), f32::INFINITY);
+        assert_eq!(f32_from_f16(0x03ff), 1023.0 / 16_777_216.0);
+        // Every finite half survives f32 and back.
+        for bits in 0..=u16::MAX {
+            if bits & 0x7c00 != 0x7c00 {
+                assert_eq!(f16_from_f32(f32_from_f16(bits)), bits, "{bits:#06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn cube_maps_round_trip_and_expose_faces() {
+        for format in [
+            TextureFormat::Rgba16Float,
+            TextureFormat::Rgba8Srgb,
+            TextureFormat::Bc7Srgb,
+        ] {
+            let texture = cube(format, 16);
+            assert!(texture.is_cube());
+            assert_eq!(texture.face_count(), 6);
+            let bytes = write_ktx2(&texture, "cube");
+            assert_eq!(u32_at(&bytes, 36), Some(6), "faceCount");
+            assert_eq!(load_ktx2(&bytes).as_ref(), Ok(&texture), "{format}");
+            let face_len = format.level_bytes(16, 16).expect("size");
+            let (_, _, level0) = texture.level(0).expect("level 0");
+            assert_eq!(level0.len(), 6 * face_len);
+            assert_eq!(
+                texture.face(0, 2),
+                Some(&level0[2 * face_len..3 * face_len])
+            );
+            assert_eq!(texture.face(0, 6), None);
+        }
+        let flat = checker(TextureFormat::Rgba16Float, 8);
+        assert!(!flat.is_cube());
+        assert_eq!(flat.face(0, 0), flat.level(0).map(|(_, _, bytes)| bytes));
+        assert_eq!(flat.face(0, 1), None);
+        // Constructors reject non-cube shapes and wrong face counts.
+        assert_eq!(
+            TextureData::new_cube(TextureFormat::Rgba8Unorm, 4, &[vec![0; 4 * 4 * 4]]),
+            Err(TextureError::BadLevel)
+        );
+        assert_eq!(
+            TextureData::new_cube(
+                TextureFormat::Rgba8Unorm,
+                MAX_CUBE_DIMENSION * 2,
+                &[Vec::new()]
+            ),
+            Err(TextureError::BadDimensions)
+        );
+    }
+
+    #[test]
+    fn hostile_cube_headers_are_rejected() {
+        let good = write_ktx2(&cube(TextureFormat::Rgba16Float, 8), "x");
+        assert!(load_ktx2(&good).is_ok());
+        let mutate = |offset: usize, value: u32| {
+            let mut bytes = good.clone();
+            put(&mut bytes, offset, value);
+            load_ktx2(&bytes)
+        };
+        // Non-square faces, an oversized cube, layered cubes, other face counts.
+        assert_eq!(mutate(24, 4), Err(TextureError::BadDimensions));
+        assert_eq!(mutate(20, 2048), Err(TextureError::BadDimensions));
+        assert!(matches!(mutate(32, 6), Err(TextureError::Unsupported(_))));
+        assert!(matches!(mutate(36, 3), Err(TextureError::Unsupported(_))));
+        // One face's worth of data per level.
+        assert_eq!(mutate(36, 1), Err(TextureError::BadLevel));
+        let mut oversized = good.clone();
+        put(&mut oversized, 20, MAX_CUBE_DIMENSION + 4);
+        put(&mut oversized, 24, MAX_CUBE_DIMENSION + 4);
+        assert_eq!(load_ktx2(&oversized), Err(TextureError::BadDimensions));
+        for cut in 0..good.len() {
+            let _ = load_ktx2(&good[..cut]);
+        }
+        for byte in 0..good.len() {
+            for bit in 0..8 {
+                let mut flipped = good.clone();
+                flipped[byte] ^= 1 << bit;
+                if let Ok(texture) = load_ktx2(&flipped) {
+                    let mut total = 0;
+                    for level in 0..texture.level_count() {
+                        let (w, h, bytes) = texture.level(level).expect("level");
+                        let face = texture.format().level_bytes(w, h).expect("size");
+                        assert_eq!(bytes.len(), face * texture.face_count() as usize);
+                        total += bytes.len();
+                    }
+                    assert_eq!(total, texture.data().len());
+                    assert!(texture.face_count() == 1 || texture.width() == texture.height());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "bc-decode")]
+    #[test]
+    fn cube_maps_decode_face_by_face() {
+        let texture = cube(TextureFormat::Bc4Unorm, 8);
+        let decoded = texture.decode_to_uncompressed().expect("decodes");
+        assert!(decoded.is_cube());
+        assert_eq!(decoded.format(), TextureFormat::R8Unorm);
+        assert_eq!(decoded.face(0, 5).map(<[u8]>::len), Some(64));
+        assert_eq!(decoded.level_count(), texture.level_count());
     }
 
     #[test]

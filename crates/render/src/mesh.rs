@@ -8,19 +8,22 @@ use crate::device::DeviceContext;
 use crate::error::RenderResult;
 use crate::resources::{CommandPool, GpuBuffer};
 
-/// Vertex layout of the static scene pipelines (unit and terrain), stride 32. `uv` is
-/// `(0, 0)` for meshes without texture coordinates; only textured permutations read it.
+/// Vertex layout of the static scene pipelines (unit and terrain), stride 48. `uv` is
+/// `(0, 0)` for meshes without texture coordinates and `tangent` (glTF convention: xyz along
+/// +u, w the bitangent sign) is from the file or generated from the UVs at registration;
+/// only textured permutations read them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
     pub(crate) uv: [f32; 2],
+    pub(crate) tangent: [f32; 4],
 }
 
-/// Vertex layout of the skinned pipeline (`skinned.vert`), stride 40: position and normal
-/// as in [`Vertex`], then four `R8G8B8A8_UINT` joints, four `R8G8B8A8_UNORM` weights and the
-/// UV.
+/// Vertex layout of the skinned pipeline (`skinned.vert`), stride 56: position and normal
+/// as in [`Vertex`], then four `R8G8B8A8_UINT` joints, four `R8G8B8A8_UNORM` weights, the
+/// UV and the tangent.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct SkinnedVertex {
@@ -29,6 +32,38 @@ pub(crate) struct SkinnedVertex {
     pub(crate) joints: [u8; 4],
     pub(crate) weights: [u8; 4],
     pub(crate) uv: [f32; 2],
+    pub(crate) tangent: [f32; 4],
+}
+
+/// The tangent used when a mesh has none (no UVs): +X, right-handed. Never read by the
+/// vertex-colour permutations.
+const DEFAULT_TANGENT: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+/// Per-vertex tangents for `data`: the file's (renormalised), else generated from the UVs
+/// (MikkTSpace-style, `MeshData::generate_tangents`), else [`DEFAULT_TANGENT`].
+fn tangents(data: &moba_assets::MeshData) -> Vec<[f32; 4]> {
+    let count = data.vertex_count();
+    let normalised = |tangent: &[f32; 4]| {
+        let [x, y, z, w] = *tangent;
+        let length = (x * x + y * y + z * z).sqrt();
+        let sign = if w < 0.0 { -1.0 } else { 1.0 };
+        if length.is_finite() && length > 1e-6 {
+            [x / length, y / length, z / length, sign]
+        } else {
+            // Zero (a degenerate file tangent): the shader keeps the geometric normal.
+            [0.0, 0.0, 0.0, sign]
+        }
+    };
+    match data.tangents() {
+        Some(tangents) if tangents.len() == count => tangents.iter().map(normalised).collect(),
+        _ => data
+            .generate_tangents()
+            .filter(|tangents| tangents.len() == count)
+            .map_or_else(
+                || vec![DEFAULT_TANGENT; count],
+                |tangents| tangents.iter().map(normalised).collect(),
+            ),
+    }
 }
 
 /// CPU-side interleaved skinned mesh, ready for [`upload_bytes`].
@@ -74,6 +109,7 @@ impl CpuSkinnedMesh {
                 joints,
                 weights,
                 uv: vertex.uv,
+                tangent: vertex.tangent,
             })
             .collect();
         Some(Self {
@@ -174,9 +210,26 @@ impl CpuMesh {
                     position: corner,
                     normal,
                     uv,
+                    tangent: DEFAULT_TANGENT,
                 });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        Self::with_generated_tangents(vertices, indices)
+    }
+
+    /// Fills the tangents of a built-in mesh from its UVs (the same generator as assets).
+    fn with_generated_tangents(mut vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
+        let asset = moba_assets::MeshData::new(
+            vertices.iter().map(|vertex| vertex.position).collect(),
+            vertices.iter().map(|vertex| vertex.normal).collect(),
+            indices.clone(),
+        )
+        .and_then(|mesh| mesh.with_uvs(vertices.iter().map(|vertex| vertex.uv).collect()));
+        if let Ok(asset) = asset {
+            for (vertex, tangent) in vertices.iter_mut().zip(tangents(&asset)) {
+                vertex.tangent = tangent;
+            }
         }
         Self {
             vertices,
@@ -193,6 +246,7 @@ impl CpuMesh {
             position: [x, 0.0, z],
             normal: [0.0, 1.0, 0.0],
             uv: [x / 8.0, z / 8.0],
+            tangent: DEFAULT_TANGENT,
         };
         let vertices = vec![
             corner(-half, -half),
@@ -201,11 +255,7 @@ impl CpuMesh {
             corner(-half, half),
         ];
         let indices = vec![0, 1, 2, 0, 2, 3];
-        Self {
-            vertices,
-            indices,
-            has_uvs: true,
-        }
+        Self::with_generated_tangents(vertices, indices)
     }
 
     /// Interleaves a validated asset mesh into the shared `{position, normal}` layout.
@@ -228,15 +278,18 @@ impl CpuMesh {
             return None;
         }
         let uvs = data.uvs().filter(|uvs| uvs.len() == vertex_count);
+        let tangents = tangents(data);
         let vertices = data
             .positions()
             .iter()
             .zip(data.normals())
+            .zip(&tangents)
             .enumerate()
-            .map(|(index, (&position, &normal))| Vertex {
+            .map(|(index, ((&position, &normal), &tangent))| Vertex {
                 position,
                 normal,
                 uv: uvs.map_or([0.0, 0.0], |uvs| uvs[index]),
+                tangent,
             })
             .collect();
         Some(Self {
@@ -426,12 +479,33 @@ mod tests {
     use super::{CpuMesh, CpuSkinnedMesh, SkinnedVertex};
 
     #[test]
-    fn skinned_vertices_are_40_bytes_with_joints_weights_then_uv() {
-        assert_eq!(core::mem::size_of::<SkinnedVertex>(), 40);
+    fn skinned_vertices_are_56_bytes_with_joints_weights_uv_then_tangent() {
+        assert_eq!(core::mem::size_of::<SkinnedVertex>(), 56);
         assert_eq!(core::mem::offset_of!(SkinnedVertex, joints), 24);
         assert_eq!(core::mem::offset_of!(SkinnedVertex, weights), 28);
         assert_eq!(core::mem::offset_of!(SkinnedVertex, uv), 32);
-        assert_eq!(core::mem::size_of::<super::Vertex>(), 32);
+        assert_eq!(core::mem::offset_of!(SkinnedVertex, tangent), 40);
+        assert_eq!(core::mem::size_of::<super::Vertex>(), 48);
+        assert_eq!(core::mem::offset_of!(super::Vertex, tangent), 32);
+    }
+
+    #[test]
+    fn built_in_meshes_get_unit_tangents_orthogonal_to_their_normals() {
+        for mesh in [CpuMesh::cube(), CpuMesh::plane(10.0)] {
+            for vertex in &mesh.vertices {
+                let [x, y, z, w] = vertex.tangent;
+                let [nx, ny, nz] = vertex.normal;
+                assert!(((x * x + y * y + z * z).sqrt() - 1.0).abs() < 1e-4);
+                assert!((x * nx + y * ny + z * nz).abs() < 1e-4);
+                assert_eq!(w.abs(), 1.0);
+            }
+        }
+        // The terrain plane: +u along +X, v along +Z, so the bitangent (up the image, -v)
+        // is -Z = cross(+Y, +X) * w with w = +1.
+        assert_eq!(
+            CpuMesh::plane(10.0).vertices[0].tangent,
+            [1.0, 0.0, 0.0, 1.0]
+        );
     }
 
     #[test]
@@ -481,6 +555,7 @@ mod tests {
         assert_eq!(cpu.vertices[1].position, [1.0, 0.0, 0.0]);
         assert_eq!(cpu.vertices[2].normal, [0.0, 0.0, 1.0]);
         assert_eq!(cpu.vertices[2].uv, [0.0, 0.0]);
+        assert_eq!(cpu.vertices[2].tangent, super::DEFAULT_TANGENT);
         assert!(!cpu.has_uvs);
         assert_eq!(cpu.indices, vec![0, 1, 2]);
         let textured = data

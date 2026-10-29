@@ -38,3 +38,18 @@ position = [180, 76]
 color = [0.70, 0.88, 1.00]
 height = 14.0
 yaw = 45.0
+
+# Lighting and art direction (R2a, ADR-0011): a high, cold sun over snow, a bright bounce from
+# the ground in the environment, soft cyan rims and slightly glossier ice.
+[lighting]
+environment = "frost"            # environments/frost.{toml,ktx2}: env-bake --preset frost
+sun_direction = [0.3, 0.8, -0.5]
+sun_color = [0.92, 0.96, 1.0]
+sun_intensity = 1.0
+ibl_intensity = 0.35
+shadow_strength = 0.7
+wrap = 0.15
+rim = 0.3
+rim_color = [0.6, 0.85, 1.0]
+unit_roughness = 0.45
+terrain_roughness = 0.7

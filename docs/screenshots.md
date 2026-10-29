@@ -213,6 +213,55 @@ The same networked golden frame (tick 120, lavapipe, 1280×720), before and afte
 - **Rebaseline:** this is the deliberate rebaseline of both golden fingerprints. Validation and
   synchronisation validation reported zero messages, and two runs gave identical fingerprints.
 
+### R2a lighting
+Stylised PBR, image-based lighting and directional shadows
+([ADR-0011](adr/0011-art-style-lighting.md), [perf/0015](perf/0015-lighting.md)). Every
+capture below is 1280×720 on lavapipe with validation and synchronisation validation required
+(0 messages), halved side by side. **Left:** `main` at `503bbad` (R1b, before R7a's and R7b's HUD work, so
+the HUD fonts, portrait and minimap differ; the right-hand networked frame is the R7b-rebased golden). **Right:** this branch at the High tier.
+
+![Networked golden frame before (left) and after (right) R2a](images/r2a-network-before-after.png)
+
+**The networked golden frame** (tick 120, GPU-skinned heroes). The default grass map now has a
+descriptor (`content/maps/map-grass.toml`) with the `meadow` environment.
+- Every unit — minions, towers, walls and the skinned heroes — casts into one fitted shadow
+  map; the tower and minion shadows fall away from the sun (upper right).
+- Ambient comes from the environment's SH irradiance instead of the flat hemispheric term,
+  and the sides facing away from the sun keep their team colour (`shadow_strength` 0.75 and
+  wrap 0.2, readability rules 1–2).
+- This is the deliberate rebaseline of both golden fingerprints; two runs gave identical
+  fingerprints.
+
+![Textured sentinel close-up before (left) and after (right)](images/r2a-sentinel-before-after.png)
+
+**The textured sentinel** at the 18 m player camera (`MOBA_HERO_MODELS=sentinel
+MOBA_CAMERA_DISTANCE=18`). The normal map now uses the vertex tangents written by
+`sample-mesh`, roughness comes from the metallic-roughness texture (the bronze trim is
+metallic), and the PCSS-lite shadow hardens where the feet touch the ground and softens
+towards the head.
+
+![Ember map before (left) and after (right)](images/r2a-ember-before-after.png)
+
+**Map art direction** (`MOBA_CONTENT=content/ember-map.toml`): the ember descriptor's
+`[lighting]` table sets a low, warm sun with long shadows, the `ember` environment at reduced
+intensity and a warm rim that takes half its hue from each unit's albedo, so blue units stay
+blue under an orange sky (ADR-0011 rule 1; the first tuning pass turned them grey and was
+reverted).
+
+![Low tier (left) and High tier (right)](images/r2a-tiers-low-high.png)
+
+**Tiers:** Low (left: one hard PCF tap at 1024², SH ambient without the specular cube) and
+High (right: PCSS-lite at 2048², specular cube), same frame. Low keeps the readability of
+High; its shadow edges are harder and slightly aliased.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel MOBA_CAMERA_DISTANCE=18 MOBA_CAPTURE_TICK=120 \
+MOBA_SMOKE_FRAMES=100000 MOBA_QUALITY=low MOBA_CAPTURE=/tmp/low.ppm \
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
+# MOBA_SHADOWS=off|hard|pcf|pcss, MOBA_SHADOW_SIZE=<n>, MOBA_IBL=0 and MOBA_SPECULAR_IBL=0
+# turn individual features off or override the tier.
+```
+
 ### HUD polish (R7a): before and after
 ![HUD before (left) and after (right) R7a](images/r7-hud-before-after.png)
 
