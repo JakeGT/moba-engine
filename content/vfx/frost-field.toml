@@ -1,0 +1,29 @@
+# Frost Field: a slowing area with drifting snow (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 1.2
+importance = "high"
+
+[[emitters]]
+primitive = "ring"
+sprite = "rune"
+burst = 1
+lifetime = [1.4, 1.4]
+size = [16.0, 16.0]
+color = [0.5, 1.1, 2.0, 0.55]
+color_end = [0.3, 0.7, 1.4, 0.0]
+telegraph = true
+
+[[emitters]]
+sprite = "star"
+blend = "alpha"
+rate = 80
+lifetime = [0.8, 1.2]
+speed = [0.3, 1.0]
+direction = "up"
+shape = "disc"
+radius = 7.5
+size = [0.25, 0.45]
+spin = [-90, 90]
+color = [0.8, 0.95, 1.2, 0.9]
+color_end = [0.6, 0.8, 1.0, 0.0]
+offset = [0, 0.3, 0]

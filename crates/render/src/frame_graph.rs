@@ -1,16 +1,19 @@
 //! The engine's frame, declared as a render graph, and barrier recording.
 //!
 //! ```text
-//! portraits  (R7b; frames that update them) hero models → portrait atlas (persistent)
-//! minimap    (R7b; frames that bake it) top-down map → minimap image (persistent)
-//! shadow     (R2a; when shadows are on) the main view's units + skinned, depth only →
-//!            shadow map (fixed size)
-//! scene      terrain + units + skinned → hdr (colour, cleared) + depth (sampled-capable),
-//!            sampling the shadow map
-//! composite  hdr (sampled) → exposure + AgX tonemap → swapchain
-//! ui         HUD batch blended over the swapchain (not tonemapped); samples both
-//!            offscreen images
-//! capture    swapchain → readback buffer (only in the capture variant)
+//! portraits     (R7b; frames that update them) hero models → portrait atlas (persistent)
+//! minimap       (R7b; frames that bake it) top-down map → minimap image (persistent)
+//! vfx_simulate  compute: spawn, age, integrate and compact particles; indirect args (R5)
+//! shadow        (R2a; when shadows are on) the main view's units + skinned, depth only →
+//!               shadow map (fixed size)
+//! scene         terrain + units + skinned → hdr (colour, cleared) + depth (sampled-capable),
+//!               sampling the shadow map
+//! vfx_draw      particles → hdr (+ OIT accum/reveal), depth read-only + sampled (soft)
+//! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
+//! composite     hdr (sampled) → exposure + AgX tonemap → swapchain
+//! ui            HUD batch blended over the swapchain (not tonemapped); samples both
+//!               offscreen images
+//! capture       swapchain → readback buffer (only in the capture variant)
 //! ```
 //!
 //! The offscreen images are imports owned by the renderer, not transients: their contents
@@ -48,7 +51,10 @@ pub(crate) const OFFSCREEN_VARIANTS: usize = 1 << UI_IMAGE_SLOTS;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PassKind {
     Shadow,
+    VfxSimulate,
     Scene,
+    VfxDraw,
+    VfxResolve,
     Composite,
     Ui,
     Capture,
@@ -64,6 +70,29 @@ pub(crate) struct OffscreenResources {
     pub(crate) bones: ResourceId,
 }
 
+/// Whether and how the frame draws GPU particles (ADR-0013).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VfxMode {
+    /// No VFX passes (disabled, or no compute on the graphics queue).
+    Off,
+    /// Particles blend straight into the HDR target (alpha unsorted; Low).
+    Unsorted,
+    /// Alpha particles go through weighted blended OIT and a resolve pass.
+    Oit,
+}
+
+/// Resource ids of the VFX passes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VfxResources {
+    pub(crate) particles: ResourceId,
+    pub(crate) alive: ResourceId,
+    pub(crate) args: ResourceId,
+    pub(crate) spawns: ResourceId,
+    pub(crate) stats: ResourceId,
+    pub(crate) accum: Option<ResourceId>,
+    pub(crate) reveal: Option<ResourceId>,
+}
+
 /// Resource ids of the engine frame graph.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrameResources {
@@ -75,6 +104,7 @@ pub(crate) struct FrameResources {
     pub(crate) offscreen: [OffscreenResources; UI_IMAGE_SLOTS],
     /// The directional shadow map; `None` when shadows are off.
     pub(crate) shadow: Option<ResourceId>,
+    pub(crate) vfx: Option<VfxResources>,
 }
 
 /// The shadow map a frame renders, when shadows are on.
@@ -107,6 +137,7 @@ pub(crate) fn build(
     shadow: Option<ShadowSpec>,
     capture: bool,
     offscreen: usize,
+    vfx_mode: VfxMode,
 ) -> Result<FramePlan, GraphError> {
     let mut graph = GraphBuilder::new();
     // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT; the composite writes
@@ -154,6 +185,40 @@ pub(crate) fn build(
             },
         )
     });
+
+    let vfx = (vfx_mode != VfxMode::Off).then(|| {
+        // The particle state, lists and arguments persist across frames on this queue: a
+        // frame's first barrier orders against every earlier frame's compute, vertex,
+        // indirect and copy work on them. The spawn upload is host-written per frame slot
+        // (its fence covers the previous use), and the stats copy is read by the host after
+        // the frame fence.
+        let persistent = ImportState::persistent_buffer(
+            vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::VERTEX_SHADER
+                | vk::PipelineStageFlags2::DRAW_INDIRECT
+                | vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        );
+        let oit = vfx_mode == VfxMode::Oit;
+        let (accum_format, reveal_format) = crate::passes::vfx::oit_formats();
+        let target = |format| ImageDesc {
+            format,
+            aspect: vk::ImageAspectFlags::COLOR,
+            size: ImageSize::Swapchain,
+            extra_usage: vk::ImageUsageFlags::empty(),
+        };
+        VfxResources {
+            particles: graph.import_buffer("vfx-particles", persistent, None),
+            alive: graph.import_buffer("vfx-alive", persistent, None),
+            args: graph.import_buffer("vfx-args", persistent, None),
+            spawns: graph.import_buffer("vfx-spawns", ImportState::host_written(), None),
+            stats: graph.import_buffer("vfx-stats", ImportState::idle(), Some(Access::HostRead)),
+            accum: oit.then(|| graph.transient_image("vfx-accum", target(accum_format))),
+            reveal: oit.then(|| graph.transient_image("vfx-reveal", target(reveal_format))),
+        }
+    });
+
+    // Declared after every resource both variants share, so their ids match.
     let capture_buffer = capture.then(|| {
         // Every capture waits for the device to idle before reading the buffer back, so no
         // earlier submission still touches it when the next capture frame starts.
@@ -204,6 +269,15 @@ pub(crate) fn build(
             .access(resources.depth, Access::DepthWrite)
             .access(resources.bones, Access::VertexStorageRead);
     }
+    if let Some(vfx) = vfx {
+        let _ = graph
+            .pass("vfx_simulate", PassKind::VfxSimulate)
+            .access(vfx.spawns, Access::ComputeStorageRead)
+            .access(vfx.particles, Access::ComputeStorageReadWrite)
+            .access(vfx.alive, Access::ComputeStorageReadWrite)
+            .access(vfx.args, Access::ComputeStorageReadWrite)
+            .access(vfx.stats, Access::TransferWrite);
+    }
     if let Some(shadow_map) = shadow_map {
         let _ = graph
             .pass("shadow", PassKind::Shadow)
@@ -217,6 +291,28 @@ pub(crate) fn build(
         .access(bones, Access::VertexStorageRead);
     if let Some(shadow_map) = shadow_map {
         let _ = scene.access(shadow_map, Access::SampledFragment);
+    }
+    if let Some(vfx) = vfx {
+        let mut pass = graph
+            .pass("vfx_draw", PassKind::VfxDraw)
+            .access(hdr, Access::ColorReadWrite)
+            .access(depth, Access::DepthReadSampled)
+            .access(vfx.particles, Access::VertexStorageRead)
+            .access(vfx.alive, Access::VertexStorageRead)
+            .access(vfx.args, Access::IndirectRead);
+        if let (Some(accum), Some(reveal)) = (vfx.accum, vfx.reveal) {
+            pass = pass
+                .access(accum, Access::ColorWrite)
+                .access(reveal, Access::ColorWrite);
+        }
+        let _ = pass;
+        if let (Some(accum), Some(reveal)) = (vfx.accum, vfx.reveal) {
+            let _ = graph
+                .pass("vfx_resolve", PassKind::VfxResolve)
+                .access(accum, Access::SampledFragment)
+                .access(reveal, Access::SampledFragment)
+                .access(hdr, Access::ColorReadWrite);
+        }
     }
     let _ = graph
         .pass("composite", PassKind::Composite)
@@ -250,6 +346,7 @@ pub(crate) fn build(
             capture: capture_buffer,
             offscreen: offscreen_resources,
             shadow: shadow_map,
+            vfx,
         },
     })
 }
@@ -356,11 +453,19 @@ pub(crate) fn record_barriers(
 
 #[cfg(test)]
 mod tests {
-    use super::{OFFSCREEN_VARIANTS, PassKind, ShadowSpec, build};
+    use super::{OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode, build};
     use ash::vk;
     use vk::ImageLayout as L;
 
     fn variant(capture: bool, offscreen: usize) -> super::FramePlan {
+        full(capture, offscreen, VfxMode::Off)
+    }
+
+    fn plan_with(capture: bool, vfx: VfxMode) -> super::FramePlan {
+        full(capture, 0, vfx)
+    }
+
+    fn full(capture: bool, offscreen: usize, vfx: VfxMode) -> super::FramePlan {
         build(
             vk::Format::R16G16B16A16_SFLOAT,
             vk::Format::D32_SFLOAT,
@@ -368,6 +473,7 @@ mod tests {
             None,
             capture,
             offscreen,
+            vfx,
         )
         .expect("the engine frame graph compiles")
     }
@@ -383,6 +489,7 @@ mod tests {
             }),
             capture,
             offscreen,
+            VfxMode::Off,
         )
         .expect("the shadowed frame graph compiles")
     }
@@ -562,6 +669,103 @@ mod tests {
                 // Each image is back in SHADER_READ_ONLY_OPTIMAL after the UI: only the
                 // swapchain (and the capture buffer) need final barriers.
                 assert_eq!(frame.graph.final_barriers().len(), 1 + usize::from(capture));
+            }
+        }
+    }
+
+    #[test]
+    fn vfx_passes_wrap_the_scene_and_share_slots_across_variants() {
+        for mode in [VfxMode::Unsorted, VfxMode::Oit] {
+            let frame = plan_with(false, mode);
+            let kinds: Vec<_> = frame.graph.passes().iter().map(|pass| pass.tag).collect();
+            let mut expected = vec![PassKind::VfxSimulate, PassKind::Scene, PassKind::VfxDraw];
+            if mode == VfxMode::Oit {
+                expected.push(PassKind::VfxResolve);
+            }
+            expected.extend([PassKind::Composite, PassKind::Ui]);
+            assert_eq!(kinds, expected, "{mode:?}");
+            assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+            // Everything before the composite is submitted ahead of the acquire wait.
+            assert_eq!(frame.acquire_split, expected.len() - 2);
+            let vfx = frame.resources.vfx.expect("vfx resources");
+            assert_eq!(vfx.accum.is_some(), mode == VfxMode::Oit);
+            // HDR + depth, plus the two OIT targets.
+            let slots = if mode == VfxMode::Oit { 4 } else { 2 };
+            assert_eq!(frame.graph.slots().len(), slots);
+            let draw = frame
+                .graph
+                .passes()
+                .iter()
+                .find(|pass| pass.tag == PassKind::VfxDraw)
+                .expect("draw pass");
+            assert!(draw.barriers.iter().any(|barrier| {
+                barrier.resource == frame.resources.depth
+                    && barrier.new_layout == L::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            }));
+            assert!(draw.barriers.iter().any(|barrier| {
+                barrier.resource == vfx.args
+                    && barrier.dst_access == vk::AccessFlags2::INDIRECT_COMMAND_READ
+            }));
+            let capture = plan_with(true, mode);
+            assert!(capture.graph.shares_transients_with(&frame.graph));
+            // The stats copy reaches the host after the frame: present + stats readback.
+            assert_eq!(frame.graph.final_barriers().len(), 2);
+            assert!(frame.graph.final_barriers().iter().any(|barrier| {
+                barrier.resource == vfx.stats && barrier.dst_access == vk::AccessFlags2::HOST_READ
+            }));
+        }
+    }
+
+    #[test]
+    fn every_shadowed_vfx_variant_fits_the_graph_limits() {
+        let shadow = Some(ShadowSpec {
+            format: vk::Format::D32_SFLOAT,
+            size: 2048,
+        });
+        let plan = |capture, offscreen| {
+            build(
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::Format::D32_SFLOAT,
+                vk::ImageAspectFlags::DEPTH,
+                shadow,
+                capture,
+                offscreen,
+                VfxMode::Oit,
+            )
+            .expect("the shadowed VFX frame graph compiles")
+        };
+        let plain = plan(false, 0);
+        for capture in [false, true] {
+            for offscreen in 0..OFFSCREEN_VARIANTS {
+                let frame = plan(capture, offscreen);
+                assert!(frame.graph.shares_transients_with(&plain.graph));
+                assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                let kinds: Vec<_> = frame.graph.passes().iter().map(|pass| pass.tag).collect();
+                let count = offscreen.count_ones() as usize;
+                let mut expected = vec![
+                    PassKind::VfxSimulate,
+                    PassKind::Shadow,
+                    PassKind::Scene,
+                    PassKind::VfxDraw,
+                    PassKind::VfxResolve,
+                    PassKind::Composite,
+                    PassKind::Ui,
+                ];
+                if capture {
+                    expected.push(PassKind::Capture);
+                }
+                assert_eq!(&kinds[count..], expected.as_slice());
+                assert!(kinds.len() <= crate::graph::MAX_PASSES);
+                // Every pass before the composite goes ahead of the acquire wait.
+                assert_eq!(frame.acquire_split, count + 5);
+                // The VFX passes never touch the shadow map.
+                let shadow = frame.resources.shadow.expect("shadow map");
+                for pass in frame.graph.passes() {
+                    assert_eq!(
+                        pass.uses(shadow),
+                        matches!(pass.tag, PassKind::Shadow | PassKind::Scene)
+                    );
+                }
             }
         }
     }

@@ -1,0 +1,24 @@
+# Default projectile impact (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "normal"
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "burst"
+burst = 1
+lifetime = [0.3, 0.3]
+size = [2.0, 2.0]
+size_end = 1.5
+color = [2.0, 1.4, 0.8, 1.0]
+fps = 48
+
+[[emitters]]
+sprite = "spark"
+burst = 10
+lifetime = [0.2, 0.4]
+speed = [4, 8]
+direction = "random"
+size = [0.6, 1]
+color = [2.0, 1.5, 0.9, 1.0]
+drag = 3

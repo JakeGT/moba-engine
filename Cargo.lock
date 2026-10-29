@@ -1297,6 +1297,7 @@ dependencies = [
  "crossbeam-queue",
  "moba-assets",
  "moba-core",
+ "moba-ecs",
  "moba-game",
  "moba-net",
  "moba-platform",

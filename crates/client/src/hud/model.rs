@@ -876,9 +876,40 @@ pub(crate) fn item_summary(item: &moba_net::protocol::WireItem) -> HudString {
     out
 }
 
+/// What the local (no server) view is showing: titles its HUD panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalHudMode {
+    /// A bot match (the default local preview).
+    BotPreview,
+    /// `MOBA_REPLAY` playback.
+    Replay,
+    /// The `MOBA_VFX_PREVIEW` authoring arena.
+    VfxPreview,
+}
+
+impl LocalHudMode {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::BotPreview => "LOCAL BOT PREVIEW",
+            Self::Replay => "REPLAY",
+            Self::VfxPreview => "VFX PREVIEW",
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::BotPreview => "SET MOBA_SERVER TO PLAY ONLINE",
+            Self::Replay => "PLAYING MOBA_REPLAY",
+            Self::VfxPreview => "SAVE A FILE IN VFX/ TO RELOAD",
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // The local HUD's full inputs.
 pub(crate) fn build_local_hud(
     ui: &mut UiDrawList,
     simulation: &Simulation,
+    mode: LocalHudMode,
     width: u32,
     height: u32,
     frame_ms: f32,
@@ -898,7 +929,7 @@ pub(crate) fn build_local_hud(
     let muted = theme::MUTED;
     ui.panel(18.0, 18.0, 330.0, 112.0, bg, border);
     register(hits, HudAction::Block, 18.0, 18.0, 330.0, 112.0);
-    ui.text_shadowed(32.0, 30.0, 3.0, text, "LOCAL BOT PREVIEW");
+    ui.text_shadowed(32.0, 30.0, 3.0, text, mode.title());
     ui.text(
         32.0,
         64.0,
@@ -911,7 +942,7 @@ pub(crate) fn build_local_hud(
             model.unit_count()
         ),
     );
-    ui.text(32.0, 88.0, 2.0, muted, "SET MOBA_SERVER TO PLAY ONLINE");
+    ui.text(32.0, 88.0, 2.0, muted, mode.hint());
     ui.text(
         width as f32 - 24.0 - UiDrawList::text_width("OFFLINE", 2.0),
         height as f32 - 36.0,
@@ -924,8 +955,8 @@ pub(crate) fn build_local_hud(
 #[cfg(test)]
 mod tests {
     use super::{
-        Camera, HitList, HudModel, InputState, MatchPhase, NetworkView, Simulation, Team,
-        UiDrawList, build_local_hud, build_network_hud, outcome_banner,
+        Camera, HitList, HudModel, InputState, LocalHudMode, MatchPhase, NetworkView, Simulation,
+        Team, UiDrawList, build_local_hud, build_network_hud, outcome_banner,
     };
     use crate::{hud_fmt, hud_static};
     use moba_core::math::Vec3;
@@ -948,7 +979,16 @@ mod tests {
         let simulation = Simulation::new(SimConfig::default());
         let mut ui = UiDrawList::new();
         let mut hits = HitList::new();
-        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
+        build_local_hud(
+            &mut ui,
+            &simulation,
+            LocalHudMode::BotPreview,
+            1280,
+            720,
+            16.0,
+            60.0,
+            &mut hits,
+        );
         assert_ne!(ui.vertices().len(), 0);
         assert!(!hits.is_empty());
     }
@@ -959,9 +999,27 @@ mod tests {
         let mut ui = UiDrawList::new();
         let mut hits = HitList::new();
         // Warm retained draw-list capacity before measuring.
-        build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
+        build_local_hud(
+            &mut ui,
+            &simulation,
+            LocalHudMode::BotPreview,
+            1280,
+            720,
+            16.0,
+            60.0,
+            &mut hits,
+        );
         let ((), allocations) = crate::app::allocation_probe::probe(|| {
-            build_local_hud(&mut ui, &simulation, 1280, 720, 16.0, 60.0, &mut hits);
+            build_local_hud(
+                &mut ui,
+                &simulation,
+                LocalHudMode::BotPreview,
+                1280,
+                720,
+                16.0,
+                60.0,
+                &mut hits,
+            );
         });
         assert_eq!(allocations, 0, "steady-state HUD allocation");
     }

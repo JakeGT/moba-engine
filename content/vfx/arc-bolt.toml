@@ -1,0 +1,30 @@
+# Arc Bolt: a crackling orb with a lightning trail (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "high"
+
+[[emitters]]
+primitive = "flipbook"
+sprite = "lightning"
+rate = 45
+lifetime = [0.12, 0.2]
+size = [1.6, 2.2]
+spin = [-180, 180]
+fps = 40
+color = [1.0, 1.6, 4.0, 1.0]
+
+[[emitters]]
+sprite = "soft"
+rate = 30
+lifetime = [0.1, 0.1]
+size = [1.8, 1.8]
+color = [0.6, 1.0, 3.0, 1.0]
+
+[[emitters]]
+primitive = "trail"
+lifetime = [0.35, 0.35]
+size = [1, 1]
+width = 0.7
+size_end = 0.0
+color = [0.5, 0.9, 3.0, 1.0]
+rate = 1

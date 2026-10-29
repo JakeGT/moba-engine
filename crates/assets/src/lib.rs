@@ -23,6 +23,11 @@
 //! `RGBA16F` for image-based lighting (R2a): [`EnvironmentDesc`] is the bounded per-map
 //! environment descriptor (`environments/<name>.toml`, SH-L2 diffuse ambient) next to its
 //! prefiltered specular cube map (`environments/<name>.ktx2`).
+//!
+//! VFX (ADR-0013): [`VfxEffect`] is the bounded client-local effect descriptor
+//! (`vfx/<name>.toml`, up to eight particle emitters), [`VfxBindings`] maps ability names and
+//! unit events to effects (`vfx/bindings.toml`), and [`procedural_atlas`] generates the
+//! built-in particle atlas.
 
 #![forbid(unsafe_code)]
 
@@ -36,6 +41,7 @@ mod mesh;
 mod pose;
 mod skin;
 mod texture;
+mod vfx;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -77,6 +83,13 @@ pub use texture::{
     MAX_CUBE_DIMENSION, MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData,
     TextureError, TextureFormat, f16_from_f32, f32_from_f16, full_mip_chain, load_ktx2,
     load_ktx2_file, mip_size, write_ktx2,
+};
+pub use vfx::{
+    MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS, MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES,
+    MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_EMITTERS, MAX_VFX_NAME, MAX_VFX_RATE, VFX_ATLAS_CELL,
+    VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES, VfxAbilityBinding, VfxAnchor, VfxBindings,
+    VfxBlend, VfxDirection, VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxPrimitive, VfxShape,
+    VfxSprite, VfxUnitEffects, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
 };
 
 /// One asset entry.

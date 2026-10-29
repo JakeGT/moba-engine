@@ -176,13 +176,19 @@ clear_environment, has_environment, set_lighting_ramp}`, `MaterialData`'s stylis
 (`wrap`, `rim`, `ramp`, `specular`, `specular_tint`) with `with_metallic_roughness`,
 `with_emissive`, `with_style` and `with_specular`, `MIN_SHADOW_RESOLUTION`/
 `MAX_SHADOW_RESOLUTION`, the re-exported `EnvironmentDesc` and
-`RenderError::InvalidEnvironment`.
+`RenderError::InvalidEnvironment`. R5 (ADR-0013) added GPU particles: `ParticleSpawn`
+(`new` + `with_*`), `ParticleShape`, `ParticleBlend`, `ParticleRole`, `VfxFrame` (`new`,
+`EMPTY`, `with_ally_opacity`; `Scene::with_vfx`), `VfxBudget` (`QualityTier::vfx_budget`),
+`VfxStats`, `VFX_MESH_SLOTS`, `RenderConfig::with_vfx`, `Renderer::{vfx_available,
+vfx_budget, vfx_stats, set_vfx_atlas, set_vfx_mesh}` and `RenderError::Vfx`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm).
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
-  `ShadowFilter`.
+  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`.
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
+- `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
+  `with_*`), `VfxFrame`, and the read-only `VfxBudget` and `VfxStats`.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
@@ -219,7 +225,11 @@ lighting assets (ADR-0011: `MapLighting`/`MapVisuals::lighting`, the material st
 fields, `EnvironmentDesc`/`EnvironmentError`/`environment_paths`/`sh_basis`, cube
 `TextureData` (`new_cube`, `is_cube`, `face_count`, `face`), `TextureFormat::Rgba16Float`,
 `f16_from_f32`/`f32_from_f16`, `MeshData::with_tangents`/`tangents`/`generate_tangents`/
-`with_generated_tangents` and `MeshError::BadTangent`).
+`with_generated_tangents` and `MeshError::BadTangent`), and R5's VFX
+descriptors (ADR-0013: `VfxEffect`, `VfxEmitter`, `VfxBindings`, `VfxAbilityBinding`,
+`VfxUnitEffects`, `VfxSprite`/`VFX_SPRITES`, `procedural_atlas`, `vfx_path`; the enums
+`VfxPrimitive`, `VfxBlend`, `VfxAnchor`, `VfxDirection`, `VfxShape`, `VfxImportance` and
+`VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,

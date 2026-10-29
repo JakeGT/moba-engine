@@ -1,0 +1,134 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// GPU particle simulation (ADR-0013), three dispatches per frame separated by barriers:
+//   mode 0: copy this frame's spawn records into their slots, reset the counters;
+//   mode 1: age, integrate and kill every slot, append live ones to the draw lists and
+//           accumulate the projected pixel area (the overdraw estimate);
+//   mode 2: write the indirect draw arguments (clamped to each list's capacity) and stats.
+
+#define VFX_COMPUTE
+#include "vfx.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform Push {
+    uint mode;
+    uint slot;
+} push;
+
+// Screen-space radius (pixels) of a sphere of `radius` at `center`; 0 when off screen.
+float projected_radius(vec3 center, float radius) {
+    vec4 clip = frame.view_proj * vec4(center, 1.0);
+    if (clip.w <= 1e-3) {
+        return 0.0;
+    }
+    vec3 ndc = clip.xyz / clip.w;
+    vec4 edge = frame.view_proj * vec4(center + frame.camera_up.xyz * radius, 1.0);
+    float r_ndc = length(edge.xy / max(edge.w, 1e-3) - ndc.xy);
+    if (abs(ndc.x) > 1.0 + r_ndc || abs(ndc.y) > 1.0 + r_ndc || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 0.0;
+    }
+    return r_ndc * 0.5 * frame.viewport.y;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    uint capacity = frame.counts.x;
+    if (push.mode == 0u) {
+        if (id == 0u) {
+            for (uint i = VFX_COUNT_SPRITE; i <= VFX_STAT_SPAWNED; ++i) {
+                args[i] = 0u;
+            }
+        }
+        if (id < frame.counts.y) {
+            Particle s = spawns[id];
+            if (s.misc.w < capacity) {
+                particles[s.misc.w] = s;
+            }
+        }
+        return;
+    }
+    if (push.mode == 2u) {
+        if (id != 0u) {
+            return;
+        }
+        uint region = frame.counts.z;
+        args[VFX_ARGS_SPRITE + 0u] = 6u;
+        args[VFX_ARGS_SPRITE + 1u] = min(args[VFX_COUNT_SPRITE], capacity);
+        args[VFX_ARGS_SPRITE + 2u] = 0u;
+        args[VFX_ARGS_SPRITE + 3u] = 0u;
+        for (uint m = 0u; m < VFX_MESH_SLOTS; ++m) {
+            uint base = VFX_ARGS_MESH + m * 5u;
+            uint indices = frame.mesh_indices[m];
+            args[base + 0u] = indices;
+            args[base + 1u] = indices == 0u ? 0u : min(args[VFX_COUNT_MESH + m], region);
+            args[base + 2u] = 0u;
+            args[base + 3u] = 0u;
+            args[base + 4u] = 0u;
+        }
+        args[VFX_STAT_SPAWNED] = frame.counts.y;
+        return;
+    }
+
+    if (id >= capacity) {
+        return;
+    }
+    Particle p = particles[id];
+    if (p.vel_life.w <= 0.0) {
+        return;
+    }
+    float dt = frame.camera_right.w;
+    p.pos_age.w += dt;
+    if (p.pos_age.w >= p.vel_life.w) {
+        particles[id].vel_life.w = 0.0;
+        return;
+    }
+    float gravity = uintBitsToFloat(p.misc.z);
+    p.vel_life.y += gravity * dt;
+    p.vel_life.xyz *= 1.0 / (1.0 + p.size_spin.w * dt);
+    p.pos_age.xyz += p.vel_life.xyz * dt;
+    particles[id].pos_age = p.pos_age;
+    particles[id].vel_life = p.vel_life;
+
+    uint flags = p.misc.x;
+    uint shape = flags & VFX_SHAPE_MASK;
+    if (shape == VFX_SHAPE_MESH) {
+        uint slot = (flags >> VFX_MESH_SHIFT) & 3u;
+        if (frame.mesh_indices[slot] == 0u) {
+            return;
+        }
+        uint index = atomicAdd(args[VFX_COUNT_MESH + slot], 1u);
+        if (index >= frame.counts.z) {
+            return;
+        }
+        alive[capacity + slot * frame.counts.z + index] = id;
+    } else {
+        uint index = atomicAdd(args[VFX_COUNT_SPRITE], 1u);
+        if (index >= capacity) {
+            return; // Cannot happen (one append per slot); bounds the write regardless.
+        }
+        alive[index] = id;
+    }
+    atomicAdd(args[VFX_STAT_ALIVE], 1u);
+
+    // Overdraw estimate: the particle's projected screen area at its current size.
+    float t = p.pos_age.w / p.vel_life.w;
+    float size = mix(p.size_spin.x, p.size_spin.y, t);
+    float pixels;
+    if (shape == VFX_SHAPE_SEGMENT) {
+        vec3 middle = p.pos_age.xyz + p.seg_rot.xyz * 0.5;
+        float along = projected_radius(middle, length(p.seg_rot.xyz) * 0.5);
+        float across = projected_radius(middle, size * 0.5);
+        pixels = 4.0 * along * across;
+    } else {
+        float r = projected_radius(p.pos_age.xyz, size * 0.5);
+        pixels = 4.0 * r * r;
+    }
+    pixels = min(pixels, frame.viewport.x * frame.viewport.y);
+    // The sum saturates near 2^31 pixels (about 1,000 screens of 1080p overdraw) instead of
+    // wrapping; the check races, so it can overshoot by one frame's worth, not wrap.
+    if (pixels >= 1.0 && args[VFX_STAT_PIXELS] < 0x80000000u) {
+        atomicAdd(args[VFX_STAT_PIXELS], uint(pixels));
+    }
+}

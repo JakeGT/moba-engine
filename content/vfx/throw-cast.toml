@@ -1,0 +1,16 @@
+# Cleaving Throw wind-up flash (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "normal"
+
+[[emitters]]
+anchor = "source"
+sprite = "shard"
+burst = 6
+lifetime = [0.2, 0.35]
+speed = [4, 8]
+direction = "forward"
+spread = 35
+size = [1, 1.6]
+size_end = 0.2
+color = [2.0, 1.6, 1.2, 1.0]

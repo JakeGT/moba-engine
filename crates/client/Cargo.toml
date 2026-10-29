@@ -19,6 +19,7 @@ workspace = true
 [dependencies]
 arrayvec.workspace = true
 moba-core.workspace = true
+moba-ecs.workspace = true
 moba-platform.workspace = true
 moba-render.workspace = true
 moba-assets = { workspace = true, features = ["glb"] }

@@ -8,6 +8,9 @@ camera_zoom = 240.0
 # Team colours for health bars and the minimap: "standard" (green self, blue allies, red
 # enemies) or "colorblind" (Okabe-Ito yellow/sky blue/orange). MOBA_TEAM_PALETTE overrides it.
 team_palette = "standard"
+# GPU particle effects (MOBA_VFX=off overrides) and the opacity of allied effects (0..1).
+vfx = true
+ally_vfx_opacity = 1.0
 
 [controls]
 move_up = "W"

@@ -17,6 +17,7 @@ use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
 const SWAPCHAIN: &CStr = c"VK_KHR_swapchain";
 const PORTABILITY_SUBSET: &CStr = c"VK_KHR_portability_subset";
 
+#[allow(clippy::struct_excessive_bools)] // Independent device capabilities.
 pub(crate) struct DeviceContext {
     pub(crate) device: ash::Device,
     /// The instance's function table, for physical-device queries after creation.
@@ -36,6 +37,10 @@ pub(crate) struct DeviceContext {
     pub(crate) timestamp_period: f32,
     /// `timestampValidBits` of the graphics queue family; `0` means no timestamps.
     pub(crate) timestamp_valid_bits: u32,
+    /// The graphics queue family also supports compute (GPU particles, ADR-0013).
+    pub(crate) compute_supported: bool,
+    /// `VK_KHR_portability_subset` is enabled (`MoltenVK` and other layered drivers).
+    pub(crate) portability_subset: bool,
     /// `textureCompressionBC` is supported and enabled: BC7/BC5/BC4 upload as is.
     pub(crate) texture_compression_bc: bool,
     /// `maxSamplerAnisotropy` when `samplerAnisotropy` is supported and enabled.
@@ -100,9 +105,17 @@ impl DeviceContext {
             // SAFETY: `physical` came from this instance.
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
+            // Prefer a graphics family that also runs compute (the VFX simulation records on
+            // the graphics queue); Vulkan guarantees one exists on some device.
+            let both = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
             let Some(graphics_family) = families
                 .iter()
-                .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+                .position(|family| family.queue_flags.contains(both))
+                .or_else(|| {
+                    families
+                        .iter()
+                        .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+                })
             else {
                 let _ = writeln!(reasons, "{name}: no graphics queue; ");
                 continue;
@@ -179,6 +192,7 @@ impl DeviceContext {
         Self::create(context, surface_loader, &candidate)
     }
 
+    #[allow(clippy::too_many_lines)] // Feature selection, queues and the allocator.
     fn create(
         context: &InstanceContext,
         surface: ash::khr::surface::Instance,
@@ -255,6 +269,9 @@ impl DeviceContext {
         let timestamp_valid_bits = families
             .get(candidate.graphics_family as usize)
             .map_or(0, |family| family.timestamp_valid_bits);
+        let compute_supported = families
+            .get(candidate.graphics_family as usize)
+            .is_some_and(|family| family.queue_flags.contains(vk::QueueFlags::COMPUTE));
 
         // SAFETY: the queues belong to this device and family 0 was created.
         let graphics_queue = unsafe { device.get_device_queue(candidate.graphics_family, 0) };
@@ -287,6 +304,8 @@ impl DeviceContext {
             max_storage_buffer_range: candidate.properties.limits.max_storage_buffer_range,
             timestamp_period: candidate.properties.limits.timestamp_period,
             timestamp_valid_bits,
+            compute_supported,
+            portability_subset: candidate.extensions.contains(&PORTABILITY_SUBSET),
             texture_compression_bc,
             max_anisotropy: sampler_anisotropy
                 .then_some(candidate.properties.limits.max_sampler_anisotropy),
@@ -376,6 +395,33 @@ impl DeviceContext {
         // cache (possibly null) belongs to this device.
         let pipelines = unsafe {
             self.device.create_graphics_pipelines(
+                self.pipeline_cache,
+                core::slice::from_ref(create_info),
+                None,
+            )
+        };
+        let (count, time) = self.pipeline_builds.get();
+        self.pipeline_builds
+            .set((count + 1, time + started.elapsed()));
+        match pipelines {
+            Ok(mut pipelines) => pipelines
+                .pop()
+                .ok_or(RenderError::Shader("no pipeline returned")),
+            Err((_, error)) => Err(error.into()),
+        }
+    }
+
+    /// Builds one compute pipeline through the pipeline cache, timing the driver call (it
+    /// counts towards [`Self::pipeline_builds`]).
+    pub(crate) fn create_compute_pipeline(
+        &self,
+        create_info: &vk::ComputePipelineCreateInfo<'_>,
+    ) -> RenderResult<vk::Pipeline> {
+        let started = Instant::now();
+        // SAFETY: the caller's create info and everything it points to outlive the call; the
+        // cache (possibly null) belongs to this device.
+        let pipelines = unsafe {
+            self.device.create_compute_pipelines(
                 self.pipeline_cache,
                 core::slice::from_ref(create_info),
                 None,

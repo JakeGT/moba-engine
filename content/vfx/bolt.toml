@@ -1,0 +1,22 @@
+# Default projectile: a glowing orb with a trail (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "high"
+
+[[emitters]]
+sprite = "soft"
+rate = 30
+lifetime = [0.08, 0.08]
+size = [1.4, 1.4]
+color = [1.6, 1.6, 1.6, 1.0]
+team_tint = 0.6
+
+[[emitters]]
+primitive = "trail"
+lifetime = [0.3, 0.3]
+size = [1, 1]
+width = 0.6
+size_end = 0.0
+color = [1.4, 1.4, 1.4, 0.9]
+team_tint = 0.6
+rate = 1

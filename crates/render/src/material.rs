@@ -601,6 +601,13 @@ impl Materials {
     pub(crate) fn contains(&self, material: MaterialId) -> bool {
         material.index() < self.entries.len()
     }
+
+    /// The view of a registered texture (the VFX atlas binds one), if `texture` exists.
+    pub(crate) fn texture_view(&self, texture: TextureId) -> Option<vk::ImageView> {
+        self.textures
+            .get(texture.index())
+            .map(|registered| registered.image.view())
+    }
 }
 
 #[cfg(test)]

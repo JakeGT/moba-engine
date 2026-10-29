@@ -3,6 +3,7 @@
 //! ```text
 //! texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|mask [--format F] [--no-mips]
 //! texture-bake generate sentinel <dir>     # the self-generated sample set, as PNG sources
+//! texture-bake generate vfx <dir>          # the procedural particle atlas (ADR-0013)
 //! texture-bake info <file.ktx2>            # format, size, levels, bytes
 //! ```
 //!
@@ -26,7 +27,7 @@ use moba_assets::{TextureData, TextureFormat};
 
 const USAGE: &str = "usage:
   texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|mask [--format F] [--no-mips]
-  texture-bake generate sentinel <dir>
+  texture-bake generate sentinel|vfx <dir>
   texture-bake info <file.ktx2>";
 
 /// Largest PNG accepted, in bytes (sources are authoring files, still bounded).
@@ -234,8 +235,11 @@ fn generate(args: &[String]) -> Result<(), String> {
     let [set, dir] = args else {
         return Err(String::from(USAGE));
     };
+    if set == "vfx" {
+        return generate_vfx_atlas(Path::new(dir));
+    }
     if set != "sentinel" {
-        return Err(format!("unknown set {set} (known: sentinel)"));
+        return Err(format!("unknown set {set} (known: sentinel, vfx)"));
     }
     let dir = Path::new(dir);
     std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
@@ -245,6 +249,23 @@ fn generate(args: &[String]) -> Result<(), String> {
         write_png(&path, patterns::SIZE, patterns::SIZE, &rgba)?;
         println!("{}", path.display());
     }
+    Ok(())
+}
+
+/// The procedural particle atlas (ADR-0013) as an RGBA PNG source: R coverage, G hot core.
+fn generate_vfx_atlas(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let atlas = moba_assets::procedural_atlas();
+    let (width, height, texels) = atlas.level(0).ok_or("the atlas has no level 0")?;
+    let rgba: Vec<u8> = texels
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .flat_map(|&[coverage, core]| [coverage, core, 0, 255])
+        .collect();
+    let path = dir.join("vfx-atlas.png");
+    write_png(&path, width, height, &rgba)?;
+    println!("{}", path.display());
     Ok(())
 }
 
@@ -356,5 +377,30 @@ mod tests {
                 "content/textures/sentinel-{map}.ktx2 is stale; run scripts/bake-sample-textures.sh"
             );
         }
+    }
+
+    /// The shipped particle atlas is the BC5 bake of the procedural one. The generator uses
+    /// libm (`exp`, `atan2`, ...), so the comparison allows its last-bit differences.
+    #[test]
+    fn committed_vfx_atlas_matches_the_generator() {
+        let committed =
+            moba_assets::load_ktx2(include_bytes!("../../../../../content/vfx/atlas.ktx2"))
+                .expect("committed atlas loads");
+        let atlas = moba_assets::procedural_atlas();
+        assert_eq!(committed.format(), TextureFormat::Bc5Unorm);
+        assert_eq!(
+            (
+                committed.width(),
+                committed.height(),
+                committed.level_count()
+            ),
+            (atlas.width(), atlas.height(), atlas.level_count())
+        );
+        let (_, _, source) = atlas.level(0).expect("level 0");
+        let psnr = level0_psnr(&committed, source).expect("decodes");
+        assert!(
+            psnr > 40.0,
+            "content/vfx/atlas.ktx2 is stale ({psnr:.1} dB); run scripts/bake-sample-textures.sh"
+        );
     }
 }

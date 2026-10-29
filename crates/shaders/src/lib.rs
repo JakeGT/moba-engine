@@ -50,6 +50,21 @@ pub const UI_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.vert.spv
 /// Screen-space UI fragment shader.
 pub const UI_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.frag.spv"));
 
+/// GPU particle simulation compute shader (spawn, integrate, compact, indirect args).
+pub const VFX_SIMULATE_COMP: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_simulate.comp.spv"));
+/// Particle vertex shader: sprites, flipbooks, segments and ground quads.
+pub const VFX_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx.vert.spv"));
+/// Mesh-particle vertex shader.
+pub const VFX_MESH_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx_mesh.vert.spv"));
+/// Particle fragment shader: one premultiplied HDR output (unsorted alpha, Low).
+pub const VFX_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx.frag.spv"));
+/// Particle fragment shader, `VFX_OIT` permutation: HDR + weighted blended OIT targets.
+pub const VFX_OIT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx_oit.frag.spv"));
+/// Weighted blended OIT resolve onto the HDR target.
+pub const VFX_RESOLVE_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_resolve.frag.spv"));
+
 /// A named SPIR-V module, for tooling and validation.
 #[derive(Clone, Copy, Debug)]
 pub struct ShaderModule {
@@ -117,6 +132,30 @@ pub const MODULES: &[ShaderModule] = &[
         name: "ui.frag",
         spirv: UI_FRAG,
     },
+    ShaderModule {
+        name: "vfx_simulate.comp",
+        spirv: VFX_SIMULATE_COMP,
+    },
+    ShaderModule {
+        name: "vfx.vert",
+        spirv: VFX_VERT,
+    },
+    ShaderModule {
+        name: "vfx_mesh.vert",
+        spirv: VFX_MESH_VERT,
+    },
+    ShaderModule {
+        name: "vfx.frag",
+        spirv: VFX_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_oit.frag",
+        spirv: VFX_OIT_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_resolve.frag",
+        spirv: VFX_RESOLVE_FRAG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -159,6 +198,7 @@ mod tests {
         assert_ne!(SKINNED_VERT, SKINNED_TEXTURED_VERT);
         assert_ne!(UNIT_VERT, UNIT_SHADOW_VERT);
         assert_ne!(SKINNED_VERT, SKINNED_SHADOW_VERT);
+        assert_ne!(VFX_FRAG, VFX_OIT_FRAG);
         let mut names: Vec<_> = MODULES.iter().map(|module| module.name).collect();
         names.sort_unstable();
         names.dedup();

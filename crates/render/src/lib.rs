@@ -34,6 +34,7 @@ mod swapchain;
 mod targets;
 mod texture;
 mod ui;
+mod vfx;
 
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
@@ -72,4 +73,8 @@ pub use moba_assets::{TextureData, TextureFormat};
 pub use ui::{
     ATLAS_HEIGHT, ATLAS_WIDTH, TextStyle, UI_IMAGE_SLOTS, UiDrawList, UiImage, UiVertex,
     build_atlas, pack_rgba8,
+};
+pub use vfx::{
+    ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, VFX_MESH_SLOTS, VfxBudget, VfxFrame,
+    VfxStats,
 };

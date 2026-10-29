@@ -1,0 +1,20 @@
+# Rooting Shot: a lobbed seed with a vine trail (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "high"
+
+[[emitters]]
+sprite = "dot"
+rate = 30
+lifetime = [0.08, 0.08]
+size = [2, 2]
+color = [1.6, 2.0, 0.5, 1.0]
+
+[[emitters]]
+primitive = "trail"
+lifetime = [0.45, 0.45]
+size = [1, 1]
+width = 0.5
+size_end = 0.2
+color = [0.8, 1.6, 0.3, 0.9]
+rate = 1

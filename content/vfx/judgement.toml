@@ -1,0 +1,35 @@
+# Judgement: a golden bolt circled by crystal shards (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "high"
+
+[[emitters]]
+sprite = "star"
+rate = 30
+lifetime = [0.1, 0.1]
+size = [2.0, 2.0]
+spin = [200, 200]
+color = [3.0, 2.4, 0.9, 1.0]
+
+[[emitters]]
+primitive = "mesh"
+mesh = "crystal"
+rate = 18
+lifetime = [0.3, 0.4]
+speed = [1, 2]
+direction = "random"
+shape = "sphere"
+radius = 0.6
+size = [0.3, 0.45]
+size_end = 0.1
+spin = [-300, 300]
+color = [1.8, 1.5, 0.6, 1.0]
+
+[[emitters]]
+primitive = "trail"
+lifetime = [0.3, 0.3]
+size = [1, 1]
+width = 0.8
+size_end = 0.0
+color = [2.2, 1.8, 0.6, 0.9]
+rate = 1

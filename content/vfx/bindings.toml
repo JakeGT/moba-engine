@@ -1,0 +1,130 @@
+# VFX bindings (ADR-0013): which effect each ability and unit event plays.
+#
+# Client-local and cosmetic: never hashed, signed or sent on the wire. A missing or invalid
+# effect file is logged once and plays nothing. Format: docs/content-authoring.md#vfx
+
+[defaults]
+cast = "cast-flash"
+projectile = "bolt"
+hit = "impact"
+zone = "zone"
+hero_death = "hero-death"
+minion_death = "minion-death"
+structure_destroyed = "collapse"
+attack = "attack-hit"
+
+# Built-in heroes (crates/game/src/ability.rs).
+[[abilities]]
+name = "Blade Dash"
+cast = "dash"
+tint = [1.2, 1.0, 0.8]
+
+[[abilities]]
+name = "Second Wind"
+cast = "heal"
+
+[[abilities]]
+name = "Cleaving Throw"
+cast = "throw-cast"
+projectile = "cleaver"
+hit = "impact"
+
+[[abilities]]
+name = "Piercing Arrow"
+cast = "cast-flash"
+projectile = "arrow"
+hit = "impact"
+
+[[abilities]]
+name = "Field Dressing"
+cast = "heal"
+tint = [1.2, 1.2, 0.8]
+
+[[abilities]]
+name = "Evade"
+cast = "dash"
+tint = [0.8, 1.4, 0.8]
+
+[[abilities]]
+name = "Arc Bolt"
+cast = "cast-flash"
+cast_socket = "spear_tip"
+projectile = "arc-bolt"
+hit = "arc-hit"
+
+[[abilities]]
+name = "Nova"
+cast = "nova"
+
+[[abilities]]
+name = "Blink Step"
+cast = "dash"
+tint = [1.4, 0.8, 1.6]
+
+[[abilities]]
+name = "Shield Bash"
+cast = "shield-bash"
+cast_socket = "shield"
+
+[[abilities]]
+name = "Bulwark"
+cast = "heal"
+tint = [0.8, 0.9, 1.6]
+
+[[abilities]]
+name = "Judgement"
+cast = "cast-flash"
+projectile = "judgement"
+hit = "judgement-hit"
+
+[[abilities]]
+name = "Shadow Step"
+cast = "dash"
+tint = [0.6, 0.4, 0.9]
+
+[[abilities]]
+name = "Blood Rite"
+cast = "heal"
+tint = [2.0, 0.3, 0.3]
+
+[[abilities]]
+name = "Venom Dart"
+cast = "cast-flash"
+projectile = "venom-dart"
+hit = "venom-hit"
+
+# The Nova Pack (content/ability-pack.toml).
+[[abilities]]
+name = "Barrier"
+cast = "barrier"
+
+[[abilities]]
+name = "Frost Field"
+cast = "frost-field"
+
+[[abilities]]
+name = "Binding Field"
+cast = "binding-field"
+
+[[abilities]]
+name = "Hush"
+cast = "hush"
+
+[[abilities]]
+name = "Ember Curse"
+cast = "ember-curse"
+
+[[abilities]]
+name = "Wind Rush"
+cast = "wind-rush"
+
+[[abilities]]
+name = "Rooting Shot"
+cast = "cast-flash"
+projectile = "rooting-shot"
+hit = "rooting-hit"
+
+[[abilities]]
+name = "Cinder Zone"
+cast = "cast-flash"
+zone = "cinder-zone"

@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene + networked skinned capture), lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **576 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **611 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -55,21 +55,23 @@ crates/net        UDP transport, protocol, crypto, snapshots, prediction, server
 crates/netsim     lossy-link conditioner
 crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader (ADR-0007),
                   animation sampling/blending/state machine (ADR-0012), bounded KTX2
-                  textures and material descriptors (ADR-0010)
+                  textures and material descriptors (ADR-0010), VFX descriptors and the
+                  procedural particle atlas (ADR-0013)
 crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, terrain/fog, MSDF UI text,
-                  animated rig, GPU skinning, materials, pipeline cache, per-pass GPU timestamps
+                  animated rig, GPU skinning, materials, pipeline cache, per-pass GPU timestamps,
+                  compute GPU particles (ADR-0013)
 crates/shaders    GLSL -> SPIR-V build (shared #include files, enumerated permutations)
 crates/platform   winit window/input/fixed step
 crates/client     playable client, HUD, spectator, settings, audio, capture modes
 crates/server     headless dedicated server
 crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wire,
                   state-hash, image-check, vulkan-probe, bake-ui-atlas, sample-mesh,
-                  texture-bake
+                  texture-bake, teamfight (the R5 VFX evidence replay)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
 docs/             architecture, status, tasks, ADRs, perf logs, screenshots, agent guide
-fuzz/             standalone cargo-fuzz crate (wire/replay/content)
+fuzz/             standalone cargo-fuzz crate (wire/replay/content/glb/ktx2/vfx)
 scripts/          agent-verify.sh and operational helpers
 .github/          CI, golden/fuzz/loom/platform workflows, issue/PR templates
 ```
@@ -147,8 +149,10 @@ cargo run --release -p moba-tools --bin soak -- --seconds 300
 cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 60
 cargo run -p moba-tools --bin bake-ui-atlas -- crates/render/assets/ui-atlas.rgba
 cargo run --release -p moba-tools --bin texture-bake -- bake in.png out.ktx2 --kind color
-scripts/bake-sample-textures.sh                       # regenerate content/textures/
+scripts/bake-sample-textures.sh                       # regenerate content/textures/ and the VFX atlas
 cargo run --release --locked --manifest-path crates/tools/font-bake/Cargo.toml   # MSDF HUD font (R7a)
+cargo run --release -p moba-tools --bin teamfight     # regenerate tests/replays/teamfight-5v5.mbr
+MOBA_VFX_PREVIEW=nova cargo run -p moba-client        # live-reload effect preview (content/vfx/)
 cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/render-fingerprint.rgb
 cargo run -p moba-tools --bin vulkan-probe
 ```
@@ -163,6 +167,7 @@ cargo +nightly fuzz run replay -- -max_total_time=60
 cargo +nightly fuzz run content -- -max_total_time=60
 cargo +nightly fuzz run glb -- -max_total_time=60
 cargo +nightly fuzz run ktx2 -- -max_total_time=60
+cargo +nightly fuzz run vfx -- -max_total_time=60
 RUSTFLAGS="--cfg loom" cargo test -p moba-jobs --lib loom -- --test-threads=1
 ```
 

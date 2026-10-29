@@ -1,0 +1,28 @@
+# Ember Curse: a burning area (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 1.0
+importance = "high"
+
+[[emitters]]
+primitive = "ring"
+sprite = "ring"
+burst = 1
+lifetime = [1.2, 1.2]
+size = [12.0, 12.0]
+color = [2.0, 0.7, 0.2, 0.6]
+color_end = [1.2, 0.3, 0.1, 0.0]
+telegraph = true
+
+[[emitters]]
+sprite = "dot"
+rate = 90
+lifetime = [0.5, 1.0]
+speed = [1.5, 3.5]
+direction = "up"
+spread = 25
+shape = "disc"
+radius = 5.5
+size = [0.4, 0.7]
+size_end = 0.2
+color = [3.0, 1.2, 0.3, 1.0]
+color_end = [1.5, 0.3, 0.1, 0.0]

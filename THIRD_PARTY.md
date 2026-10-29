@@ -163,6 +163,15 @@ procedurally by `moba-tools texture-bake generate sentinel`
 (`scripts/bake-sample-textures.sh`), so they carry the repository's MIT OR Apache-2.0 licence.
 A unit test checks that level 0 of each committed file matches the generator.
 
+## VFX atlas and effects
+
+`content/vfx/atlas.ktx2` and the effect descriptors in `content/vfx/` (and their copies in
+`fuzz/corpus/vfx/`) are not third-party art either. The atlas is generated procedurally by
+`moba_assets::procedural_atlas` (`crates/assets/src/vfx.rs`; the renderer's built-in atlas)
+and baked to BC5 by `texture-bake` (`scripts/bake-sample-textures.sh`); the effects are
+hand-written TOML. Both carry the repository's MIT OR Apache-2.0 licence. See
+[ADR-0013](docs/adr/0013-vfx-runtime.md).
+
 The texture loader's CPU fallback and the baker's quality check decode BC blocks with
 `bcdec_rs` (MIT), a Rust port of `bcdec`; the baker reads and writes PNG with `png`
 (MIT OR Apache-2.0). See [ADR-0010](docs/adr/0010-texture-pipeline.md).

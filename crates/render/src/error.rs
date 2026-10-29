@@ -67,6 +67,10 @@ pub enum RenderError {
     /// is unusable (not a linear cube map, or a format the device cannot sample); the text
     /// says which.
     InvalidEnvironment(&'static str),
+    /// GPU particles are disabled ([`RenderConfig::vfx`](crate::RenderConfig::vfx)) or
+    /// unsupported, or a VFX binding is invalid (an unknown texture or mesh, a skinned mesh,
+    /// a slot out of range); the text says which (ADR-0013).
+    Vfx(&'static str),
 }
 
 impl fmt::Display for RenderError {
@@ -107,6 +111,7 @@ impl fmt::Display for RenderError {
             }
             Self::SkinningUnavailable => f.write_str("GPU skinning is unavailable"),
             Self::RenderGraph(reason) => write!(f, "render graph error: {reason}"),
+            Self::Vfx(reason) => write!(f, "VFX: {reason}"),
         }
     }
 }

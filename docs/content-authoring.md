@@ -756,6 +756,132 @@ and whether the specular cube is sampled; `MOBA_SHADOWS=off|hard|pcf|pcss`,
 and lights the map with the hemispheric ambient; a missing ramp logs once and draws without
 it. A match never fails because of lighting.
 
+### VFX
+
+Ability, projectile, zone, death and attack effects are GPU particles described by small
+client-local TOML files under `<root>/vfx/` ([ADR-0013](adr/0013-vfx-runtime.md)). Like map
+visuals, animation sets and materials they are cosmetic: never hashed, signed, sent or
+replayed, so two players with different files see different effects in the same match. The
+sample set for every shipped ability is in [`content/vfx/`](../content/vfx/).
+
+**Bindings.** `<root>/vfx/bindings.toml` says which effect plays on which event. Abilities
+are matched by their catalogue `name` (ASCII case-insensitive); `[defaults]` covers unit
+events and any ability without its own binding:
+
+```toml
+[defaults]                        # every key optional
+cast = "cast-flash"               # an ability is cast
+projectile = "bolt"               # carried by the ability's projectile while it flies
+hit = "impact"                    # where the projectile hits
+zone = "zone"                     # for the zone's whole lifetime
+hero_death = "hero-death"
+minion_death = "minion-death"
+structure_destroyed = "collapse"  # a tower or nexus
+attack = "attack-hit"             # a basic attack lands (at the target)
+
+[[abilities]]                     # at most 128
+name = "Arc Bolt"
+cast = "cast-flash"
+cast_socket = "spear_tip"         # the caster's animation-set socket for `source` emitters
+projectile = "arc-bolt"
+hit = "arc-hit"
+zone = "cinder-zone"
+tint = [1.0, 1.0, 1.0]            # colour multiplier for this binding's effects, 0..=4
+```
+
+Projectiles, hits and zones carry no ability on the wire; they take the ability of their
+owner's most recent cast. A cast socket needs an animated hero (an animation set with that
+`[[sockets]]` name); otherwise `source` emitters attach to the caster's mid-height.
+
+**Effects.** `<root>/vfx/<name>.toml` (names are 1..=48 of `[A-Za-z0-9_-]`) holds up to eight
+emitters:
+
+```toml
+duration = 0.6            # seconds the effect emits (0..=30)
+importance = "high"       # low | normal | high: which effects budgets cull first
+event_duration = false    # zones: emit for the zone's lifetime instead of `duration`
+
+[[emitters]]
+primitive = "sprite"      # sprite | flipbook | trail | beam | ring | mesh
+blend = "additive"        # additive | alpha
+sprite = "soft"           # an atlas sprite (below)
+anchor = "target"         # target | source | line (source to target)
+burst = 24                # particles at `delay` (0..=512)
+rate = 0                  # particles per second while emitting (0..=1024)
+delay = 0.0               # seconds before this emitter starts
+stop = 0.4                # optional: stop the rate early
+lifetime = [0.3, 0.6]     # required, 0.01..=10 s, low <= high
+speed = [2.0, 6.0]        # m/s
+direction = "out"         # up | out | random | forward | none
+spread = 30               # cone half-angle for up/forward, degrees
+shape = "sphere"          # point | sphere | disc | circle
+radius = 0.5              # shape radius, metres
+scale_with_radius = false # multiply radius and size by the event's radius (zones)
+offset = [0, 1, 0]        # metres from the anchor, +Y up
+size = [0.4, 1.2]         # required, start size, metres
+size_end = 0.2            # size multiplier at the end of life
+color = [1.0, 0.6, 0.2, 1.0]      # required, linear RGBA; RGB may exceed 1 (HDR glow, 0..=32)
+color_end = [0.8, 0.1, 0.0, 0.0]  # default: `color` with alpha 0
+team_tint = 0.0           # pull towards the team colour, 0..=1
+gravity = -2.0            # m/s² along +Y
+drag = 1.0                # 1/s
+spin = [-90, 90]          # degrees per second
+width = 0.25              # trails and beams, metres
+fps = 0                   # flipbooks: frames per second (0 = spread over the lifetime)
+mesh = "crystal"          # mesh emitters: `cube` or <root>/models/<name>.glb
+telegraph = false         # an area telegraph (readability rules below)
+```
+
+- **Primitives.** `sprite` and `flipbook` are camera-facing quads (a flipbook plays a
+  multi-frame sprite). `trail` draws a ribbon behind a moving anchor (projectiles), one segment
+  per frame; `beam` draws a segment from the source to the target every frame while the effect
+  emits (dashes); `ring` lies flat on the ground (shockwaves, area telegraphs); `mesh` draws a
+  registered mesh tumbling at its spin (at most four distinct meshes over all effects; more, a
+  missing model or the Low tier draw a shard billboard instead).
+- **Blending.** `additive` adds light and never darkens. `alpha` is weighted blended
+  order-independent transparency on Medium and up (no sorting needed) and unsorted
+  premultiplied blending on Low.
+- **Sprites** (the 8×8 atlas layout): `soft`, `dot`, `ring`, `spark`, `star`, `shard`, `rune`,
+  `beam`, `noise`, `swirl`, `cross`, `halo`, `solid`, and the flipbooks `burst` (16 frames),
+  `smoke` (16) and `lightning` (8). The built-in atlas is procedural; `<root>/vfx/atlas.ktx2`
+  replaces it (512×512 or any 8×8 grid; R is coverage, G a hot core that whitens the colour;
+  [`scripts/bake-sample-textures.sh`](../scripts/bake-sample-textures.sh) bakes the shipped one
+  as BC5 through `texture-bake`).
+- **Anchors.** `target` is the event's position: the cast point, the impact, the zone centre,
+  the dead unit; for a projectile effect, the flying projectile. `source` follows the caster
+  (or its socket). `line` spawns along the segment between them.
+
+**Readability rules** (AAA roadmap §2) are applied for every viewer:
+
+- An **enemy** effect's `telegraph = true` emitters are never culled by distance, visibility or
+  budgets, and keep at least 35 % opacity until the last 15 % of their life (they are drawn
+  without the soft-particle fade).
+- **Enemy projectiles** (and, for a spectator, every projectile) are exempt from culling and
+  budgets the same way: a skillshot is gameplay information. A projectile whose effect does
+  not resolve, or that spawns nothing for 0.1 s (an ally's over budget), is drawn as the
+  pre-VFX cube, so a projectile never becomes invisible.
+- **Allied** effects (a teammate's, not your own) are scaled by the `ally_vfx_opacity` setting
+  (`MOBA_VFX_ALLY_OPACITY`, default `1`), and their `alpha` particles are capped at 75 %
+  opacity so an ally's smoke never fully hides an enemy behind it.
+- **Budgets.** Each quality tier caps live particles (Low 4,096 … Ultra 49,152) and an overdraw
+  estimate (particle pixels per screen pixel); as either fills, new `low` effects are dropped
+  first (at 50 %), then `normal` (80 %), then `high` (95 %). Effects farther than the tier's
+  distance (90–240 m, from the camera's focus and scaled up when the camera is zoomed out past
+  46 m) or off screen spawn nothing.
+
+**Limits and fallback.** A descriptor is at most 16 KiB and a bindings file 32 KiB; unknown
+keys, wrong types and out-of-range or non-finite numbers are errors (the `vfx` fuzz target
+covers both parsers). A missing or invalid file is logged once (`[vfx] effect ...: ...; no
+effect`) and plays nothing; a match never fails because of an effect. A missing or invalid
+`bindings.toml` turns effects off (`[vfx] ...; effects off`), as do `MOBA_VFX=off` and the
+`vfx = false` setting; projectiles then draw as cubes.
+
+**Preview.** `MOBA_VFX_PREVIEW=<name> cargo run -p moba-client` opens an empty arena with a
+stand-in caster and target and replays `vfx/<name>.toml` as soon as each play ends: a cast at
+the target point, a projectile from the caster to the target if the effect has a trail, or a
+3 s, 4 m zone if it sets `event_duration`. Saving any file in `vfx/` reloads the effects
+within half a second, without restarting.
+
 ## Hot reload
 
 ```bash

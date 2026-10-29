@@ -50,4 +50,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "vfx"
+path = "fuzz_targets/vfx.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

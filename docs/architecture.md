@@ -103,24 +103,31 @@ passes run in this order:
    hero-portrait strip and a 512×512 minimap by default, HDR format, each with its own depth
    buffer and per-frame buffers), lit like the scene but with shadows off (their lighting
    set names a default shadow image, ADR-0011);
-2. `shadow` renders the main view's units (static meshes instanced, skinned heroes through a
+2. `vfx_simulate` (compute) spawns, ages, integrates and compacts GPU particles and writes
+   their indirect draw arguments ([ADR-0013](adr/0013-vfx-runtime.md));
+3. `shadow` renders the main view's units (static meshes instanced, skinned heroes through a
    `SHADOW_PASS` permutation of the skinned vertex shader) depth-only into one directional
    shadow map fitted to the camera's view of the board and texel-snapped (1024²–4096² by
    tier; absent when shadows are off, ADR-0011);
-3. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
+4. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
    the `Low` quality tier) with a sampled-capable depth buffer, sampling the shadow map;
-4. `composite` applies exposure and an AgX tonemap into the swapchain image;
-5. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images;
-6. `capture` copies the swapchain image for readback, in capture frames only.
+5. `vfx_draw` draws the particles into the HDR target, testing the scene depth read-only and
+   sampling it for soft particles; alpha particles accumulate weighted blended OIT targets on
+   Medium and up, which
+6. `vfx_resolve` composites over the HDR target;
+7. `composite` applies exposure and an AgX tonemap into the swapchain image;
+8. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images;
+9. `capture` copies the swapchain image for readback, in capture frames only.
 
 The offscreen images are graph imports, not transients: they keep their contents across
 frames and start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, so a frame that does not
 re-render one still samples last frame's contents with no transition. Every combination of
 capture and offscreen passes is a variant compiled at creation (eight), and all share the
 transient slots (the shadow map included, which keeps its fixed-size image across resizes).
-The offscreen, shadow and scene passes are submitted ahead of the acquire-semaphore wait
-(they never touch the swapchain), and the passes from `composite` on wait for the acquired
-image, in one `vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
+Without VFX (`RenderConfig::vfx`, or no compute on the graphics queue) the VFX passes are
+absent. The passes before `composite` are submitted ahead of the acquire-semaphore wait (they
+never touch the swapchain), and the passes from `composite` on wait for the acquired image,
+in one `vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
 load from a pool sized by the registered content
 ([ADR-0009](adr/0009-descriptor-model.md), [ADR-0010](adr/0010-texture-pipeline.md)). Every
 pipeline, each shader permutation included, is built at renderer creation through a
@@ -162,6 +169,16 @@ tier, a few times a second with each skinned hero's idle clip; and the minimap, 
 orthographic render of the map's terrain, walls and props baked at every map bind. The HUD
 darkens the minimap outside allied vision from the units it was sent, so nothing hidden is
 revealed.
+
+**VFX** are presentation only. The client's `VfxSystem` turns presentation events (casts,
+projectiles, hits, zones, deaths, structures and basic attacks; network events are released
+when the interpolated view reaches their snapshot's tick) into instances of client-local
+effects (`vfx/bindings.toml` and `vfx/<effect>.toml`, never hashed or sent), whose emitters
+follow units, animation sockets and extrapolated projectiles and emit `ParticleSpawn`s each
+frame from a client-only RNG. Per-tier budgets, distance/visibility culling and the
+readability rules (enemy telegraphs never culled and kept opaque enough; allied effects
+dimmable) apply there and in the particle shaders. The renderer owns a fixed-capacity GPU
+particle buffer and allocates each spawn a slot; nothing allocates per frame.
 
 No renderer types leak into simulation or networking. A different renderer only needs
 `Camera`, unit instances and a UI draw list (or can ignore the latter).

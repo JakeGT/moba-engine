@@ -38,6 +38,8 @@ jobs:
         run: cargo +nightly fuzz run glb -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
       - name: Fuzz KTX2
         run: cargo +nightly fuzz run ktx2 -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
+      - name: Fuzz VFX descriptors
+        run: cargo +nightly fuzz run vfx -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
       - name: Upload crash artifacts
         if: always()
         uses: actions/upload-artifact@v7

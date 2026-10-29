@@ -1,0 +1,21 @@
+# Piercing Arrow: a bright streak (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.1
+importance = "high"
+
+[[emitters]]
+primitive = "trail"
+lifetime = [0.3, 0.3]
+size = [1, 1]
+width = 0.5
+size_end = 0.0
+color = [2.4, 2.2, 1.4, 1.0]
+color_end = [1.0, 0.8, 0.4, 0.0]
+rate = 1
+
+[[emitters]]
+sprite = "spark"
+rate = 40
+lifetime = [0.08, 0.08]
+size = [2.8, 2.8]
+color = [3.0, 2.6, 1.6, 1.0]

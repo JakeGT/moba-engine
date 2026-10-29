@@ -1,0 +1,28 @@
+# Generic cast flash at the caster (ADR-0013). Client-local and cosmetic: never hashed, signed or sent.
+# Format: docs/content-authoring.md#vfx
+duration = 0.2
+importance = "normal"
+
+[[emitters]]
+anchor = "source"
+sprite = "star"
+burst = 1
+lifetime = [0.25, 0.25]
+size = [2.5, 2.5]
+size_end = 0.4
+color = [2.0, 1.8, 1.4, 1.0]
+color_end = [1.0, 0.8, 0.5, 0.0]
+team_tint = 0.4
+
+[[emitters]]
+anchor = "source"
+sprite = "spark"
+burst = 10
+lifetime = [0.25, 0.45]
+speed = [3, 7]
+direction = "random"
+size = [0.8, 1.4]
+size_end = 0.2
+color = [1.6, 1.4, 1.0, 1.0]
+team_tint = 0.5
+drag = 3
