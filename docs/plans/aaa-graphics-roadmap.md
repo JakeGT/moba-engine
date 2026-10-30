@@ -1,7 +1,8 @@
 # Roadmap: from preview renderer to AAA-quality MOBA visuals
 
-Written 2026-10-27. Status: **proposal** — no work package below is started unless it is also in
-[finish-plan-2026-10-20.md](finish-plan-2026-10-20.md). Owner: maintainer.
+Written 2026-10-27. Status: **engine work complete** (2026-10-30): every phase R0–R8 is merged
+on `main`. The open items are the maintainer and art items listed in
+[Completion status](#completion-status-2026-10-30). Owner: maintainer.
 
 This plan covers **graphics only**: the renderer, the asset and animation pipeline, VFX, art
 production and the performance evidence a commercial release needs. Gameplay, matchmaking,
@@ -9,17 +10,63 @@ accounts and live operations are separate tracks (see [§9](#9-other-tracks-a-sh
 
 ---
 
-## 1. Where we are
+## Completion status (2026-10-30)
+
+The engine is now AAA-*capable* in the sense of [§2](#2-what-aaa-means-for-a-moba): every
+engineering item below is merged, tiered (Low/Medium/High/Ultra) with an off switch, clean
+under validation and sync validation on lavapipe, and covered by goldens. Rendering stays
+purely presentational: the only wire changes were R0's WP-3.1 (protocol v40, asset references)
+and R4b-1 (protocol v41, basic-attack events for hit-frame sync); sim logic v8, replay v5 and
+the golden state hash were untouched by every phase.
+
+| Phase | Engine work | Merged in | Exit items left to the maintainer or the art team |
+|---|---|---|---|
+| R0 Asset foundation | done | #317, #309, #319, #316, #318 | — |
+| R1 Renderer architecture | done | #323 (R1a), #327 (R1b) | the ≤ 5 % criterion's reading (below) |
+| R2 Lighting and materials | done | #330 (R2a), #335 (R2b) | timings on the three §7 reference GPUs; art-direction readability sign-off |
+| R3 Terrain and environment | done | #333 (R3a), #336 (R3b) | sign-off of "one fully art-directed map" (the sample maps are engine-authored) |
+| R4 Animation runtime | done | #324 (R4a), #325 (R4b-1), #332 (R4b) | recall plays only once the simulation has recall |
+| R5 VFX | done | #329 | §7 reference-GPU timings (#9/#127) |
+| R6 Post and image quality | done, including item 7 (distortion) | #334, #338 | the blind A/B readability sign-off (image set in perf/0019) |
+| R7 UI and presentation | done | #326 (R7a), #328 (R7b) | — (champion select does not exist yet) |
+| R8 Performance and scaling | done | #337 | reference-machine matrix and min-spec/MoltenVK evidence (#9/#127); a self-hosted GPU runner for `nightly-perf.yml` |
+
+**R1's "≤ 5 % GPU-time overhead".** As [perf/0011](../perf/0011-render-graph.md) shows, the
+literal relative figure cannot hold for any design that adds the HDR target R1 itself asks for:
+the old frame did 13–30 µs of GPU work and one fullscreen copy is ~14 µs. This roadmap reads
+the criterion as **graph overhead for the same work** — barriers below 1 µs, CPU recording
+within noise — which is met; the HDR composite's cost is a feature cost and counts against
+each tier's §7 GPU budget, where every later phase was measured.
+
+**Left for the maintainer, all planned for just before 1.0:**
+- **Art production (§8)**: an art director, the style guide sign-off and the heroes and maps
+  themselves. The engine ships engine-authored sample content only.
+- **Reference hardware** (§7, #9/#127): Low/min-spec (UHD 620, Apple M1 via MoltenVK),
+  Medium and High machines, and one self-hosted `[self-hosted, gpu]` runner with
+  `HAS_GPU_RUNNER=true` so `nightly-perf.yml` gates budgets every night. Every real-GPU number
+  so far is from one RTX 5070 Ti.
+- **Sign-offs**: R2's readability review, R3's art-directed map, R6's blind A/B.
+- **RTX re-runs** that a full GPU blocked on 2026-10-30: R8's validation matrix, 10-minute
+  `perf-replay.sh` and `tests/perf/baseline.toml` refresh, R3b's `terrain-decal-check.sh`, and
+  the distortion on/off timings (perf/0022, perf/0023 list the commands).
+
+**Optional or deferred engine work** (not exit items): GPU-driven indirect culling (ADR-0018 §2
+sets the triggers), TAA, SMAA and FSR (ADR-0015), hero and skin streaming at champion select
+(waits for a champion-select flow), BC6H environments (ADR-0010), bindless descriptors
+(ADR-0009), and moving contact shadows into the half-res GTAO pass to free a scene sampler
+(the scene fragment stage is at 16 of 16).
+
+## 1. Where we were (2026-10-27) and are now
 
 The engine has a solid base to build on, but today's picture is a prototype. Compare
 [the NVIDIA teamfight capture](../images/m8-nvidia-teamfight.png) with any commercial MOBA.
 
-| Area | Today (checked against `main` @ 9a251a1; R1a/R1b rows updated 2026-10-28, R2a rows 2026-10-29) |
+| Area | State (written against `main` @ 9a251a1; rows updated as each phase merged, last 2026-10-30) |
 |---|---|
 | Frame structure | **R1a:** a render graph ([ADR-0008](../adr/0008-render-graph.md)): `scene` → HDR colour (`R16G16B16A16_SFLOAT`, `B10G11R11_UFLOAT_PACK32` on Low) + sampled-capable depth, `composite` (tonemap) → swapchain, `ui` on top, with derived sync2 barriers, transient pooling and pass culling. `FRAMES_IN_FLIGHT = 2`. `QualityTier` exists (Low/Medium/High/Ultra). |
 | Shaders | **R1b:** 9 GLSL sources sharing `#include` files (camera block, instance buffer, lighting, material set) plus `MATERIAL_TEXTURED` permutations and (R2a) two `SHADOW_PASS` depth-only casters: 14 SPIR-V modules validated with `spirv-val`. Every pipeline is built at load through a persistent `VkPipelineCache` (9 with shadows on). Hot reload of SPIR-V overrides in debug builds (`MOBA_SHADER_DIR`). |
 | Lighting | **R2a** ([ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX, Smith-GGX, Schlick, energy-conserving diffuse) with wrap/ramp/painted-specular/rim set per map and material; per-map IBL (SH-L2 diffuse + prefiltered specular cube, split-sum LUT) from `env-bake`'s analytic skies; one fitted, texel-snapped directional shadow map with hard/PCF/PCSS-lite filtering by tier, skinned heroes casting. **R2b** ([ADR-0016](../adr/0016-lights-outlines-ao.md)): clustered forward point lights (ground-aligned 32×32 grid, per-tier caps) fed by effect `[light]` blocks, team/hover/target outlines (screen-space ID-buffer on High+, inverted hull on Low/Medium) in the colour-blind-capable team palette, baked top-down AO from `ao-bake` on the ambient line, and a depth pre-pass with screen-space contact shadows on High+. |
-| Geometry | Instanced cubes. Heroes are a 6-cube rig posed on the CPU (`push_hero_rig`). The instance SSBO is capped at 4,096. Mesh loading is in progress (WP-3.2, #286). |
+| Geometry | **R0:** `.glb` meshes with a procedural cube fallback (WP-3.2) and GPU-skinned heroes (WP-4.1); cubes remain only as fallbacks. **R8** ([ADR-0018](../adr/0018-culling-lods-memory.md)): CPU per-view frustum culling of units, shadow casters and terrain chunks; meshoptimizer LODs baked offline (`mesh-bake`) and picked by screen-space error; per-tier VRAM budgets. |
 | Terrain | **R3a** ([ADR-0014](../adr/0014-terrain-fog-of-war.md)): a per-map heightfield mesh (board relief ≤ 0.5 m, hills or cliffs beyond the edge) with 1–8 splat-textured layers (texture arrays, triplanar on slopes, layer normal maps and cavity AO, baked relief AO), generated from the simulation's map by `moba_assets::generate_terrain`; `content-check` verifies the visuals against the simulation's map. Height fog and a sky close every view. **R3b** ([ADR-0017](../adr/0017-decals-foliage-water.md), 2026-10-30): ground decals binned in a 32×32 world grid (telegraphs with a guaranteed-contrast rim, scorch, splats), GPU-instanced wind-animated foliage pushed aside only by drawn units, and rivers and pools with flow, depth fade, foam and refraction on High; `content-check` keeps water wadeable. |
 | Fog of war | **R3a:** a GPU visibility texture (`R8`, 128²–512² by tier) rasterised every frame from the own team's vision with line-of-sight walls, blurred and faded; no 16/32 caps; styled per map; also masks the minimap. |
 | Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
@@ -27,9 +74,9 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | VFX | **R5** ([ADR-0013](../adr/0013-vfx-runtime.md), 2026-10-29): compute-simulated GPU particles in a fixed per-tier buffer (sprites, flipbooks, trails, beams, ground rings, mesh particles), additive plus weighted blended OIT (unsorted on Low), soft particles from the scene depth, client-local effect descriptors bound to presentation events and animation sockets, per-tier particle/overdraw budgets with distance culling and enemy-telegraph/ally-dimming rules, and a live-reload preview. Distortion moved to R6. |
 | Image quality | **R6** ([ADR-0015](../adr/0015-post-processing.md), 2026-10-29): AgX with per-map exposure and opt-in eye adaptation, per-map 3D colour-grading LUTs, a physically based 5-level bloom chain (Medium+), FXAA (Low–High) and MSAA 4× (Ultra), half-resolution GTAO from a depth prepass on the ambient terms (High+), render scale with dynamic resolution (Low) and a native-resolution HUD, and accessibility-toggleable death desaturation, damage vignette and low-health pulse. Heat-haze distortion particles (High+, [ADR-0019](../adr/0019-distortion.md), 2026-10-30): a refraction draw over a copy of the HDR target before the particles, capped per tier and resolution, depth-aware and masked off every unit. No TAA, SMAA or FSR yet. |
 | UI | **R7a:** MSDF font (Open Sans Condensed, baked offline by `bake-ui-font`) with derivative anti-aliasing, outlines and soft shadows; the RGBA atlas keeps pixel-art icons. Styled health bars (damage ghost, shield, ticks, colour-blind palette), pooled floating combat text, cooldown sweeps, screen fades and a loading screen ([perf/0014](../perf/0014-ui.md)). **R7b:** render-to-texture through the graph (persistent offscreen images the UI samples): 3D hero portraits (animated idle above `Low`) and a minimap baked from a top-down render of the map at load. |
-| Evidence | Golden 64×36 fingerprints on lavapipe with validation (rebaselined for the tonemap in R1a). Per-pass GPU timestamps in `MOBA_FRAME_LOG` (R1a); real-GPU timings exist only for an RTX 5070 Ti (p95 4.2 ms @1080p, GPU work 0.046 ms, [perf/0011](../perf/0011-render-graph.md)). |
+| Evidence | Fifteen lavapipe captures in `renderer-gate` with validation and sync validation (13 golden fingerprints, the distortion on/no-draw pair), plus the outline-occlusion and culling-exactness probes. Per-pass GPU timestamps in `MOBA_FRAME_LOG`; `perf-gate` checks p95/p99 and VRAM against `tests/perf/baseline.toml`. Real-GPU timings exist only for an RTX 5070 Ti ([perf/0011](../perf/0011-render-graph.md) to [perf/0023](../perf/0023-distortion.md)). |
 
-**What already helps:**
+**What helped from the start:**
 - The simulation is deterministic, and **rendering is purely presentational**. Visuals can never desync a match, and fog-of-war visuals are cosmetic because the server already withholds unseen units.
 - Presentation events give VFX and animation a clean trigger stream.
 - Vulkan 1.3 with dynamic rendering and sync2 is a modern baseline.
@@ -84,6 +131,9 @@ So the target is:
 Sizes are rough, for one experienced graphics engineer, unless noted: S ≤ 2 weeks, M ≈ 1 month, L ≈ 2–3 months, XL > 3 months. Phases overlap. The critical path is R0 → R1 → R2/R3 → R4, with art production (§8) running alongside from R1.
 
 ### R0 — Finish the asset foundation (already planned)
+**Status:** done in the finish plan: WP-3.1 (#317), WP-3.2 (#309), WP-3.3 (#319), WP-4.1
+(#316) and WP-4.2 (#318).
+
 The finish plan's Phases 3–4 are the first step of this roadmap. Don't duplicate them:
 - WP-3.1 packs reference assets (#285);
 - WP-3.2 `.glb` mesh loading with fallback (#286);
@@ -269,8 +319,9 @@ water and before the particles, on High (6 px at 1080p) and Ultra (8 px), off on
 `MOBA_DISTORTION=off` and portability-subset devices; units are masked through the prepass ID
 target and telegraph decals' bands through the scene's alpha, nearer geometry is never pulled
 in, and the particles (telegraph rings), outlines and the UI draw after it. Heat haze ships on `cinder-zone`, `ember-curse` and the Ember map's crystals. Not done:
-TAA (optional; not started for the readability reason above), SMAA and FSR (ADR-0015 §4, §6),
-and baked AO for Low (R2b).
+TAA (optional; not started for the readability reason above), and SMAA and FSR (ADR-0015 §4,
+§6), which are alternatives to the MSAA and render scale that shipped. Low's AO is R2b's baked
+AO (done).
 
 ### R7 — UI, HUD and presentation polish (M)
 **Status:** done. R7a (2026-10-28) and R7b (2026-10-29), [perf/0014](../perf/0014-ui.md).
@@ -382,8 +433,14 @@ These are out of scope here; each needs its own plan:
 
 ## 10. Next concrete steps
 
-1. Land R0 (finish-plan Phases 3–4), which is in progress.
-2. Write ADR-0008 (render graph) and ADR-0009 (descriptor model) with a small spike that measures both descriptor options on MoltenVK and a UHD 620-class device.
-3. Acquire or borrow the §7 reference hardware, and set up one self-hosted GPU runner for nightly perf.
-4. Commission or adopt an art style guide (ADR-0011) before R2 starts, so lighting is tuned to the target look.
-5. Open one tracking issue per phase (R1–R8), linked to this document.
+The original list (land R0, write ADR-0008/0009, adopt a style guide, open phase issues) is
+done or superseded. What remains is the maintainer list in
+[Completion status](#completion-status-2026-10-30):
+
+1. Acquire or borrow the §7 reference hardware and register one self-hosted GPU runner
+   (`HAS_GPU_RUNNER=true`), then run `scripts/perf-replay.sh` on each and refresh
+   `tests/perf/baseline.toml` (#9/#127).
+2. Re-run the RTX evidence that a full GPU blocked on 2026-10-30 (perf/0022, perf/0023).
+3. Hire or commission the art direction and production in §8, and sign off R2's readability
+   review, R3's art-directed map and R6's blind A/B against the first art-complete hero and map
+   (the §8 vertical slice).
