@@ -104,8 +104,23 @@ snapshot, because the hero teleports out of their vision in the tick it complete
 ## Bandwidth
 Recall costs nothing unless someone recalls: the flag is a spare bit of the existing entity
 flags byte, and `EVENT_RECALL` is one 26-byte event per edge (at most three per recall). The
-`soak` runs of [perf/0009](0009-presentation-events.md#protocol-v41-basic-attack-events) are
-unchanged, since bots do not recall.
+`soak` runs of [perf/0009](0009-presentation-events.md#protocol-v41-basic-attack-events), on
+this branch (150 ms RTT, 5 % loss, 30 ms jitter; bots do not recall):
+
+| Run | v41 down/client (perf/0009) | v42 down/client | v42 server sent |
+|---|---:|---:|---:|
+| `soak --seconds 60` (10 players) | 5.0–6.2 KiB/s | 5.1–6.2 KiB/s | 3,665 KiB |
+| `soak --seconds 120 --clients 2` (8 bot heroes fight) | 7.2–7.3 KiB/s | 7.2–7.3 KiB/s | 1,844 KiB |
+
+Upstream is 1.16–1.18 KiB/s (unchanged). A player recalling adds one event per edge to the
+snapshots that carry it: under 0.1 KiB per recall.
+
+## Goldens
+Every `render-golden.yml` capture and comparison (default, networked, ember, outline probe,
+VAT, Ultra, Low scaled, map overview/horizon, culling probe, environments, distortion) passes
+unchanged on lavapipe with validation and sync validation, run through XWayland at scale 1 as
+CI's Xvfb does: no golden was rebaselined. None of them shows a recall, a teleport or the
+shop key.
 
 ## Reproduce
 The server and proxy commands above, then the client with the environment shown. Two runs
