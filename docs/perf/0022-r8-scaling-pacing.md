@@ -23,7 +23,7 @@ Captured 2026-10-30 on the development workstation, not a CI runner, for
 | CPU cost | the render call grows by 0.009–0.027 ms p50 (culling, level selection, the caster list); the stress scene's whole per-frame cull + select over 612 units is inside that |
 | VRAM | 58 MB (Low) to 263 MB (Ultra) at 1080p, every tier far inside its budget; texture bytes 6.8–7.5 MB |
 | Mid-match uploads / pipeline builds | 0 / 0 in every run (`locked_uploads`, `locked_pipelines`) |
-| 10-minute pacing (p99 ≤ 1.5 × p50) | see [Frame pacing](#frame-pacing-10-minute-replay) |
+| 10-minute pacing (p99 ≤ 1.5 × p50) | p99 ÷ p50 = 1.006 (Low), 1.044 (Medium), 1.289 (High), 1.248 (Ultra); GPU p99 0.44–1.08 ms, every tier inside its §7 budget ([below](#frame-pacing-10-minute-replay)) |
 | Goldens | culling: unchanged; LODs: deliberate rebaseline of all eight fingerprints (silhouette pixels only) |
 
 ## GPU-driven culling: the measurement that decided it
@@ -83,7 +83,8 @@ Reading it:
 - **LODs.** The teamfight draws every unit at LOD0 at 1080p (heroes and minions are tens of
   pixels tall, so the 0.5 px Ultra tolerance keeps them full detail). The stress scene's
   minions at 40–80 m draw LOD2 (527 of 612), which is most of its saving: the shadow pass
-  (−40 %) and the scene (−13 %). The attribution runs below separate culling from LODs.
+  (−40 %) and the scene (−13 %). The attribution runs below confirm it: in the stress scene
+  the saving is all LODs, in the teamfight all terrain culling.
 - **High p95.** `after-high` GPU p95 is higher than `before-high` (0.915 vs 0.709) while the
   p50s agree (0.404 vs 0.411) and every pass's p50 is equal or lower. The Low–High p95s move
   by 0.1–0.3 ms between rounds in both builds: the GPU was shared with another session's
@@ -95,7 +96,31 @@ Reading it:
 
 ## Culling and LOD attribution
 
-(Filled from `interleave2`.)
+This branch's build only, Ultra, interleaved per round (on, culling off, LODs off, both off),
+3 rounds, median. `MOBA_GPU_CULL=off` and `MOBA_MESH_LOD=off` are the off switches.
+
+| Scene, config | GPU total p50 / p95 | shadow | prepass | scene | render p50 | drawn / casters | chunks | LOD0/1/2/3 |
+|---|---|---|---|---|---|---|---|---|
+| teamfight, on | 0.588 / 0.603 | 0.012 | 0.062 | 0.206 | 0.120 | 53 / 62 | 14/144 | 53/0/0/0 |
+| teamfight, culling off | 0.622 / 0.633 | 0.012 | 0.076 | 0.220 | 0.121 | 64 / 64 | 144/144 | 64/0/0/0 |
+| teamfight, LODs off | 0.595 / 0.607 | 0.013 | 0.062 | 0.207 | 0.121 | 53 / 62 | 14/144 | 53/0/0/0 |
+| teamfight, both off | 0.621 / 0.634 | 0.012 | 0.077 | 0.221 | 0.098 | 64 / 64 | 144/144 | 64/0/0/0 |
+| stress 512, on | 0.734 / 0.748 | 0.027 | 0.135 | 0.350 | 0.137 | 612 / 607 | 99/144 | 76/0/527/9 |
+| stress 512, culling off | 0.737 / 0.750 | 0.025 | 0.135 | 0.354 | 0.159 | 612 / 612 | 144/144 | 76/0/527/9 |
+| stress 512, LODs off | 0.816 / 0.831 | 0.045 | 0.158 | 0.393 | 0.125 | 612 / 607 | 99/144 | 612/0/0/0 |
+| stress 512, both off | 0.820 / 0.833 | 0.044 | 0.159 | 0.396 | 0.132 | 612 / 612 | 144/144 | 612/0/0/0 |
+
+- **Both off reproduces `main`** (teamfight 0.621 vs 0.621 ms, stress 0.820 vs 0.816 ms): the
+  switches are real off switches.
+- **Culling** pays in the teamfight (−0.033 ms, all of it terrain: prepass −19 %, scene −6 %)
+  and nothing in the stress scene, whose camera keeps every unit and two-thirds of the
+  terrain in view.
+- **LODs** pay in the stress scene (−0.082 ms: shadow −40 %, prepass −15 %, scene −11 %) and
+  nothing in the teamfight, where every unit is close enough for LOD0.
+- **CPU.** Culling and level selection cost ≈ 22 µs in the teamfight render call (0.098 →
+  0.120 ms) and ≈ 5 µs in the stress scene, whose render call is dominated by other work. The
+  stress rows' render p50 spread (0.125–0.159 ms) is larger than that and does not follow
+  the switches; it is CPU contention from the shared host.
 
 ## Mesh LOD bake
 
@@ -138,11 +163,58 @@ persistent cache (`pipeline_cache=warm` in every run here).
 
 ## Frame pacing (10-minute replay)
 
-(Filled from `scripts/perf-replay.sh`.)
+`scripts/perf-replay.sh` on the RTX 5070 Ti: `teamfight --ticks 18000` recorded once (a
+10-minute, 5v5 scripted match), then played once per tier at 1920×1080 with vsync off and
+validation off, each after a 30-frame run that warms the pipeline cache. Every frame of the
+10 minutes is in the log (≈ 142 k frames per tier). `perf-gate --warm-cache` checked all four
+logs: **ok**.
+
+| Tier | Frames | Frame p50 / p95 / p99 / max (ms) | p99 ÷ p50 | GPU total p50 / p95 / p99 (ms) | §7 GPU budget | CPU p95 | render p95 | mid-match uploads / pipelines | cache |
+|---|---|---|---|---|---|---|---|---|---|
+| Low | 143,427 | 4.177 / 4.194 / 4.203 / 13.957 | 1.006 | 0.382 / 0.423 / 0.439 | 14 ms | 0.032 | 0.279 | 0 / 0 | warm |
+| Medium | 143,208 | 4.177 / 4.193 / 4.359 / 60.571 | 1.044 | 0.525 / 0.578 / 0.600 | 6.0 ms | 0.029 | 0.302 | 0 / 0 | warm |
+| High | 142,035 | 4.181 / 4.375 / 5.391 / 92.207 | 1.289 | 0.673 / 1.037 / 1.078 | 6.0 ms | 0.028 | 0.315 | 0 / 0 | warm |
+| Ultra | 142,357 | 4.181 / 4.279 / 5.217 / 9.844 | 1.248 | 0.551 / 0.599 / 0.604 | 7.5 ms | 0.027 | 0.171 | 0 / 0 | warm |
+
+```bash
+cargo build --release --locked -p moba-client -p moba-tools
+BASELINE= scripts/perf-replay.sh perf-replay           # 4 × 10 minutes, then perf-gate
+./target/release/perf-gate --warm-cache --baseline tests/perf/baseline.toml perf-replay/frames-*.log
+```
+
+- **p99 ≤ 1.5 × p50 holds on every tier** (1.006–1.289). The frame interval is
+  compositor-paced at 240 Hz (4.18 ms) even with vsync off, so p50 is the display interval
+  and p99 counts the frames that missed it.
+- **No compile or allocation hitch.** `locked_pipelines=0` and `locked_uploads=0` over all
+  four 10-minute runs: no pipeline was built and no mesh, texture or terrain uploaded after
+  the first measured frame, and every tier started from a warm cache. CPU p95 is ≤ 0.032 ms
+  and GPU p99 ≤ 1.08 ms, so neither side of the frame came near the interval.
+- **The max spikes** (Medium 60.6 ms and High 92.2 ms, one or a few frames each) are not the
+  client's own work. CPU and GPU p99 stay flat through them, and no upload or pipeline build
+  happened. The GPU and the compositor were shared with another session's client running at
+  the same time; a dedicated runner should not show them. `perf-gate` gates p99, not max.
+- **The committed baseline** (`tests/perf/baseline.toml`) is these runs' `gpu_total_p95_ms`
+  and `render_p95_ms`, and the same logs pass the gate against it. The High p95 (1.037 ms) is
+  the noisiest baseline value (see the High p95 note above).
+- 10 minutes of the scripted teamfight draws 46 of 58 units in view and LOD0 throughout at
+  1080p (the camera follows the fight); terrain 5/16 (Low) to 12/144 (Ultra) chunks.
+
 
 ## Validation
 
-(Filled from the validation runs.)
+`MOBA_VULKAN_VALIDATION=required` (Khronos validation with synchronization validation, which
+the renderer enables; the run fails if the layer is missing), 1280×720, LODs on:
+
+| Device | Scene | Low | Medium | High | Ultra |
+|---|---|---|---|---|---|
+| RTX 5070 Ti | teamfight replay, culling on / off, 300 frames | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| RTX 5070 Ti | 64 VAT minions, culling on / off | | | | 0 / 0 |
+| lavapipe | teamfight replay, culling on / off, 90 frames | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| lavapipe | 64 VAT minions, culling on / off | | | | 0 / 0 |
+
+Every cell is the number of `[vulkan …]` messages. Also 0 on lavapipe: `scripts/cull-probe.sh`
+(five scenes, culling on and off) and the eight golden captures with LODs on and off. The nightly perf workflow repeats the
+teamfight rows on its runner before the timed runs.
 
 ## Goldens
 

@@ -1,0 +1,24 @@
+# perf-gate baseline (R8, ADR-0018 §6; docs/perf/0022-r8-scaling-pacing.md).
+#
+# Measured 2026-10-30 with scripts/perf-replay.sh (teamfight --ticks 18000, 1920x1080, vsync
+# off, validation off, warm pipeline cache) on an NVIDIA GeForce RTX 5070 Ti (driver
+# 615.78.08), AMD Ryzen 7 9800X3D, CachyOS Linux 7.3. perf-gate fails a run whose
+# gpu_total_p95_ms or render_p95_ms grows past these by more than --max-regression (25 %,
+# with a 0.05 ms noise floor). A different runner GPU needs its own baseline: run
+# `BASELINE= scripts/perf-replay.sh` there and replace these values.
+
+[low]
+gpu_total_p95_ms = 0.423
+render_p95_ms = 0.279
+
+[medium]
+gpu_total_p95_ms = 0.578
+render_p95_ms = 0.302
+
+[high]
+gpu_total_p95_ms = 1.037
+render_p95_ms = 0.315
+
+[ultra]
+gpu_total_p95_ms = 0.599
+render_p95_ms = 0.171

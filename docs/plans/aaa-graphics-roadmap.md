@@ -259,6 +259,23 @@ readability reason above), SMAA and FSR (ADR-0015 §4, §6), and baked AO for Lo
 - **Hardware matrix.** Owned or lab hardware is mandatory: hosted CI has no real GPU on Windows/macOS ([#9](https://github.com/JakeGT/moba-engine/issues/9)/[#127](https://github.com/JakeGT/moba-engine/issues/127)). Use the three reference machines in §7. A nightly perf job on at least one self-hosted GPU runner fails on budget regressions.
 - **Frame pacing.** No compile or allocation hitches. p99 within 1.5× p50 over a 10-minute replay.
 
+**Status (2026-10-30):** engineering done ([ADR-0018](../adr/0018-culling-lods-memory.md),
+[perf/0022](../perf/0022-r8-scaling-pacing.md)). Culling runs on the CPU per view: unit spheres
+against the camera frustum, a separate shadow caster list, and 32×32-cell terrain chunks
+(`MOBA_GPU_CULL=off` switches it off). It is checked byte-identical to unculled in five golden
+scenes. GPU-driven culling is designed but deferred: at ≈ 700 instances the CPU path costs
+microseconds, and ADR-0018 §2 sets the triggers for building it. meshoptimizer LODs are baked
+offline (`mesh-bake`), picked by screen-space error per tier, with `MOBA_MESH_LOD=off|<px>`;
+they combine with the R4b bone LOD. Per-tier VRAM and texture budgets are accounted in the
+frame log and at startup; over-budget textures drop mips instead of failing. Loads happen
+only at load time (`locked_uploads=0`, `locked_pipelines=0` in every run), and content-check
+reports per-tier fits. The 10-minute replay holds p99 ≤ 1.29 × p50 on every tier on the RTX
+5070 Ti. `nightly-perf.yml` gates it on a `[self-hosted, gpu]` runner once
+`HAS_GPU_RUNNER=true`. Texture formats (BC7/BC5 in KTX2) shipped in R1b; Basis transcoding is
+not needed yet. Not done: hero and skin streaming at champion select waits for a
+champion-select flow (today everything loads before the match). The reference-machine
+matrix (§7) is a **maintainer item** (#9/#127); perf/0022 has the checklist.
+
 ## 5. Sequencing at a glance
 
 ```text
