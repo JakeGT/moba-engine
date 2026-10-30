@@ -1077,6 +1077,10 @@ impl VfxSystem {
     /// Starts the effects an event triggers.
     pub(crate) fn trigger(&mut self, event: &VfxEvent, view: &VfxView, anchors: &Anchors) {
         let defaults = *self.library.defaults();
+        if event.trigger == Trigger::RecallEnd {
+            self.end_recall(event.source, defaults.recall);
+            return;
+        }
         let ability = match event.trigger {
             Trigger::Cast => {
                 if let (Some(source), Some(binding)) = (event.source, event.ability) {
@@ -1111,6 +1115,8 @@ impl VfxSystem {
             Trigger::MinionDeath => defaults.minion_death,
             Trigger::StructureDestroyed => defaults.structure_destroyed,
             Trigger::Attack => defaults.attack,
+            Trigger::Recall => defaults.recall,
+            Trigger::RecallEnd => None,
         };
         let effect = event.effect.or(effect);
         // A projectile without an effect still flies its fallback cube.
@@ -1127,6 +1133,32 @@ impl VfxSystem {
             .filter(|(caster, _, _)| *caster == source)
             .max_by(|a, b| a.2.total_cmp(&b.2))
             .map(|&(_, binding, _)| binding)
+    }
+
+    /// Stops `source`'s recall effect (a cancel or a completion): it stops emitting and its
+    /// live particles fade out, like a landed projectile's trail.
+    fn end_recall(&mut self, source: Option<u32>, recall: Option<EffectId>) {
+        let Some(source) = source else {
+            return;
+        };
+        let now = self.time;
+        let library = &self.library;
+        for instance in &mut self.instances {
+            let Some(loaded) = instance
+                .effect
+                .filter(|_| instance.alive && instance.source == Some(source))
+                .filter(|effect| Some(*effect) == recall)
+                .and_then(|effect| library.effect(effect))
+            else {
+                continue;
+            };
+            // Emitting stops now; the instance ends once its last particle and light have.
+            let age = (now - instance.start).max(1e-3);
+            instance.emit = instance.emit.min(age);
+            instance.end = instance
+                .end
+                .min(instance.start + loaded.effect.lifespan(age));
+        }
     }
 
     /// Ends the flight of the source's projectile nearest the impact and returns its ability.

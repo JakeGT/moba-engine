@@ -480,6 +480,9 @@ impl ClientApp {
                             .and_then(|value| value.parse().ok()),
                         demo_bought: false,
                         demo_cast: parse_demo_cast(),
+                        demo_orders: launch::parse_demo_orders(),
+                        demo_next: 0,
+                        own_recall: None,
                         shop_page: 0,
                         hover: None,
                         attack_target: None,
@@ -1013,6 +1016,9 @@ impl App for ClientApp {
                                 && entity.team == network.client.team().index() as u8
                         }) {
                             network.own_net_id = Some(own.net_id);
+                            network.own_recall = own
+                                .is_recalling()
+                                .then(|| network.own_recall.unwrap_or(snapshot.tick));
                             network.prediction.set_dead(own.is_dead());
                             screen_fx.observe(own.health, own.max_health, own.is_dead());
                             network.prediction.reconcile(own.position());
@@ -1038,6 +1044,14 @@ impl App for ClientApp {
                                 {
                                     network.demo_cast = None;
                                 }
+                            }
+                            while network.phase == MatchPhase::Playing
+                                && let Some(&(tick, order)) =
+                                    network.demo_orders.get(network.demo_next)
+                                && snapshot.tick >= tick
+                            {
+                                network.demo_next += 1;
+                                send_demo_order(network, order, own.position());
                             }
                             if let Some(target) = network.demo_move.filter(|_| {
                                 !network.demo_sent && network.phase == MatchPhase::Playing
@@ -1601,6 +1615,34 @@ pub(crate) use launch::{
 pub(crate) use scene_build::{
     animated_rig, network_camera, rebuild_local_units, rebuild_network_units,
 };
+
+/// Sends one scripted `MOBA_DEMO_ORDERS` order for the own hero standing at `own`.
+fn send_demo_order(network: &mut NetworkView, order: launch::DemoOrder, own: moba_core::FixVec2) {
+    match order {
+        launch::DemoOrder::Recall => crate::input::request_recall(network),
+        launch::DemoOrder::Stop => {
+            if network.client.send_command(WireCommand::Stop).is_ok() {
+                network.prediction.set_target(None);
+            }
+        }
+        launch::DemoOrder::Cast(slot) => {
+            let (x, y) = quantize_position(own + moba_core::FixVec2::from_ints(4, 4));
+            let _ = network
+                .client
+                .send_command(WireCommand::CastAbility { slot, x, y });
+        }
+        launch::DemoOrder::Move(target) => {
+            let (x, y) = quantize_position(target);
+            if network
+                .client
+                .send_command(WireCommand::MoveTo { x, y })
+                .is_ok()
+            {
+                network.prediction.set_target(Some(target));
+            }
+        }
+    }
+}
 
 /// Queues a replicated event's effects until its snapshot's tick is known.
 fn queue_network_vfx(

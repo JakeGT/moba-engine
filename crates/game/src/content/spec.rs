@@ -261,6 +261,9 @@ pub struct StructureStatsSpec {
     pub vision_range: Fix,
 }
 
+/// Default recall channel length: 240 ticks (8 s at 30 Hz).
+pub(crate) const DEFAULT_RECALL_TICKS: u32 = 240;
+
 /// Tunable match rules shared by simulation and server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RulesSpec {
@@ -318,6 +321,8 @@ pub struct RulesSpec {
     pub nexus_win: bool,
     /// Score limit that ends the match (0 disables).
     pub score_limit: u16,
+    /// Recall channel length in ticks (0 disables recall). The default is 240 (8 s).
+    pub recall_ticks: u32,
 }
 
 impl Default for RulesSpec {
@@ -384,6 +389,7 @@ impl Default for RulesSpec {
             structure_heroes_first: false,
             nexus_win: true,
             score_limit: 0,
+            recall_ticks: DEFAULT_RECALL_TICKS,
         }
     }
 }

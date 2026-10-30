@@ -482,6 +482,64 @@ pub(crate) fn parse_demo_cast() -> Option<(u8, u32)> {
     Some((slot, tick.trim().parse().ok()?))
 }
 
+/// One scripted order of `MOBA_DEMO_ORDERS` (capture and evidence runs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DemoOrder {
+    /// Start recalling.
+    Recall,
+    /// Stop (cancels a recall).
+    Stop,
+    /// Cast ability slot 0-2 four units from the hero, like `MOBA_DEMO_CAST`.
+    Cast(u8),
+    /// Walk to a map position.
+    Move(FixVec2),
+}
+
+/// Most orders `MOBA_DEMO_ORDERS` takes.
+const MAX_DEMO_ORDERS: usize = 32;
+
+/// `MOBA_DEMO_ORDERS=<order>@<tick>,...` (capture and evidence runs): scripted orders sent
+/// at the first Playing snapshot at or after each tick, in tick order. An order is
+/// `recall`, `stop`, `q`/`w`/`e` (cast at four units from the hero) or `move:<x>:<y>`. An
+/// entry that does not parse is skipped (and logged); at most 32 are kept.
+pub(crate) fn parse_demo_orders() -> Vec<(u32, DemoOrder)> {
+    std::env::var("MOBA_DEMO_ORDERS").map_or_else(|_| Vec::new(), |value| demo_orders(&value))
+}
+
+pub(crate) fn demo_orders(value: &str) -> Vec<(u32, DemoOrder)> {
+    let mut orders: Vec<(u32, DemoOrder)> = value
+        .split(',')
+        .filter(|entry| !entry.trim().is_empty())
+        .filter_map(|entry| {
+            let parsed = entry.trim().split_once('@').and_then(|(order, tick)| {
+                let tick = tick.trim().parse::<u32>().ok()?;
+                let order = match order.trim().to_ascii_lowercase().as_str() {
+                    "recall" => DemoOrder::Recall,
+                    "stop" => DemoOrder::Stop,
+                    "q" => DemoOrder::Cast(0),
+                    "w" => DemoOrder::Cast(1),
+                    "e" => DemoOrder::Cast(2),
+                    other => {
+                        let (x, y) = other.strip_prefix("move:")?.split_once(':')?;
+                        DemoOrder::Move(FixVec2::from_ints(
+                            x.trim().parse().ok()?,
+                            y.trim().parse().ok()?,
+                        ))
+                    }
+                };
+                Some((tick, order))
+            });
+            if parsed.is_none() {
+                eprintln!("[demo] MOBA_DEMO_ORDERS: skipping {entry:?}");
+            }
+            parsed
+        })
+        .take(MAX_DEMO_ORDERS)
+        .collect();
+    orders.sort_by_key(|(tick, _)| *tick);
+    orders
+}
+
 /// Player-camera orbit distance: `MOBA_CAMERA_DISTANCE` metres (clamped to 8–120) or 46.
 ///
 /// Read once at startup (close-up captures of hero models), never per frame.
@@ -1149,6 +1207,22 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn demo_orders_parse_in_tick_order() {
+        use super::{DemoOrder, demo_orders};
+        assert_eq!(
+            demo_orders("recall@450, stop@360,recall@300,move:118:127@30,e@9,bogus@1,q@x"),
+            vec![
+                (9, DemoOrder::Cast(2)),
+                (30, DemoOrder::Move(moba_core::FixVec2::from_ints(118, 127))),
+                (300, DemoOrder::Recall),
+                (360, DemoOrder::Stop),
+                (450, DemoOrder::Recall),
+            ]
+        );
+        assert_eq!(demo_orders(""), []);
+    }
     use super::{
         cull_mode_from, environment_config_from, frame_log_frames_from, gpu_report,
         lighting_config_from, mesh_lod_from, parse_hex32, parse_preview_camera, parse_window_size,

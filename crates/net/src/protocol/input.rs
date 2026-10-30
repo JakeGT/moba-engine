@@ -48,6 +48,8 @@ pub enum WireCommand {
         /// Inventory slot `0..6`.
         slot: u8,
     },
+    /// Start recalling to the team's spawn (since v42).
+    Recall,
 }
 
 /// Client intent payload.
@@ -118,6 +120,7 @@ fn encode_command(out: &mut Vec<u8>, command: WireCommand) {
             out.push(7);
             out.push(slot);
         }
+        WireCommand::Recall => out.push(8),
     }
 }
 
@@ -141,6 +144,10 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<WireCommand, WireError> {
             ready: reader.u8()? != 0,
         },
         6 => WireCommand::Surrender,
+        // Before v42 the decoder had no arm for `UseItem`, so the server dropped every item
+        // active a client sent.
+        7 => WireCommand::UseItem { slot: reader.u8()? },
+        8 => WireCommand::Recall,
         _ => return Err(WireError::BadValue),
     })
 }

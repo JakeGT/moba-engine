@@ -946,3 +946,53 @@ fn looping_map_effects_never_starve_events_or_fake_telegraphs() {
     assert!(fake.decals().is_empty() && fake.frame().spawns.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Recall (protocol v42): the shipped recall effect plays at the hero for the channel, is
+/// not an area telegraph, and stops when the recall ends (a cancel or the arrival).
+#[test]
+fn recall_plays_for_the_channel_and_stops_when_it_ends() {
+    let content = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
+    let library = VfxLibrary::load(content);
+    assert!(library.defaults().recall.is_some(), "the shipped binding");
+    let mut vfx = VfxSystem::new(library, QualityTier::High.vfx_budget(), true);
+    let view = view(Some(1));
+    let anchors = anchors();
+    let mut start = event(Trigger::Recall, 0, Some(3));
+    start.target = None;
+    start.position = Vec3::ZERO;
+    start.seconds = 8.0;
+    vfx.queue(1, start);
+    let mut spawned = 0;
+    for tick in 1..=60 {
+        vfx.update(1.0 / 30.0, tick as f32, &view, &anchors, NO_SOCKET);
+        let frame = vfx.frame();
+        spawned += frame.spawns.len();
+        assert!(
+            frame
+                .spawns
+                .iter()
+                .all(|spawn| spawn.role != ParticleRole::EnemyTelegraph),
+            "not a telegraph"
+        );
+        assert!(vfx.decals().is_empty(), "no telegraph decals");
+    }
+    assert!(spawned > 30, "it plays: {spawned}");
+    assert_eq!(vfx.counters().instances, 1, "still channelling at 2 s");
+    // Another hero's recall ending changes nothing; this hero's stops it.
+    let mut other = event(Trigger::RecallEnd, 0, Some(1));
+    other.target = None;
+    vfx.queue(61, other);
+    vfx.update(1.0 / 30.0, 61.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(vfx.counters().instances, 1);
+    let mut end = event(Trigger::RecallEnd, 0, Some(3));
+    end.target = None;
+    vfx.queue(62, end);
+    vfx.update(1.0 / 30.0, 62.0, &view, &anchors, NO_SOCKET);
+    vfx.update(1.0 / 30.0, 63.0, &view, &anchors, NO_SOCKET);
+    assert!(vfx.frame().spawns.is_empty(), "stopped emitting");
+    // Gone once the last mote (1.3 s) and the light's fade (0.4 s) have finished.
+    for tick in 64..=110 {
+        vfx.update(1.0 / 30.0, tick as f32, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(vfx.counters().instances, 0, "ended long before 8 s");
+}

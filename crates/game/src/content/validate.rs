@@ -320,6 +320,10 @@ impl RulesSpec {
         if self.score_limit > 1_000 {
             return Some("score_limit");
         }
+        // Up to two minutes; 0 disables recall.
+        if self.recall_ticks > 3_600 {
+            return Some("recall_ticks");
+        }
         if self.melee_vision != self.melee_minion.vision_range {
             return Some("melee_vision");
         }

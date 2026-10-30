@@ -275,6 +275,7 @@ impl GameContent {
             structure_heroes_first,
             nexus_win,
             score_limit,
+            recall_ticks,
         } = &self.rules;
         feed(&[*team_size, u8::from(*bot_fill), *level_cap]);
         for value in [xp_base, xp_per_level] {
@@ -412,6 +413,14 @@ impl GameContent {
                 optional(&mut *feed, hero.model.as_deref());
             }
             optional(&mut *feed, map_visuals.as_deref());
+        }
+        // The recall channel length (protocol v42), appended **only when it is not the
+        // default** for the same reason: a pack that leaves it at 240 ticks (every pack
+        // written before recall existed) keeps its hash, replays and signature. The tag
+        // differs from the visuals block's, so the two trailing blocks cannot collide.
+        if *recall_ticks != super::spec::DEFAULT_RECALL_TICKS {
+            string(feed, "recall");
+            feed(&recall_ticks.to_le_bytes());
         }
     }
 

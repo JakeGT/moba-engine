@@ -226,6 +226,11 @@ pub(crate) fn rebuild_network_units(
                 .interpolator
                 .position(entity.net_id, render_tick - 2.0)
                 .unwrap_or(position);
+            // A recall or respawn teleport in the last two ticks is neither a facing nor a
+            // speed: without this the hero would turn towards its spawn and break into a run
+            // (which also cuts a recall clip short) on the frame it arrives.
+            let teleported = moba_net::interpolation::is_teleport(previous, position, 2.0);
+            let previous = if teleported { position } else { previous };
             let dx = position.x.to_f32() - previous.x.to_f32();
             let dy = position.y.to_f32() - previous.y.to_f32();
             let speed_sq = dx * dx + dy * dy;
@@ -263,7 +268,11 @@ pub(crate) fn rebuild_network_units(
                         .interpolator
                         .position(entity.net_id, render_tick)
                         .unwrap_or(position);
-                    let speed = here.distance(previous).to_f32() * tick_rate / 2.0;
+                    let speed = if teleported {
+                        0.0
+                    } else {
+                        here.distance(previous).to_f32() * tick_rate / 2.0
+                    };
                     animation
                         .driver
                         .animate(

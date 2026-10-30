@@ -7,6 +7,24 @@ use moba_core::{Fix, FixVec2};
 
 use crate::protocol::{NetEntity, NetId, SnapshotState};
 
+/// A step between two snapshots longer than this (world units), plus
+/// [`TELEPORT_SPEED_PER_TICK`] per tick between them, is a teleport (a recall or a respawn),
+/// not movement: the entity stays where it was until the later snapshot's tick and then
+/// appears at its new position, instead of sliding across the map. Dashes (at most a few
+/// world units) still interpolate.
+pub const TELEPORT_DISTANCE: f32 = 16.0;
+/// Movement allowance per tick between two snapshots for [`TELEPORT_DISTANCE`] (about four
+/// times a hero's walking speed).
+pub const TELEPORT_SPEED_PER_TICK: f32 = 1.0;
+
+/// Whether moving from `from` to `to` over `ticks` ticks is a teleport, not movement.
+#[must_use]
+pub fn is_teleport(from: FixVec2, to: FixVec2, ticks: f32) -> bool {
+    let (dx, dy) = ((to.x - from.x).to_f32(), (to.y - from.y).to_f32());
+    let limit = TELEPORT_DISTANCE + ticks.max(0.0) * TELEPORT_SPEED_PER_TICK;
+    dx * dx + dy * dy > limit * limit
+}
+
 /// Interpolates entity positions between the last few snapshots.
 #[derive(Debug)]
 pub struct Interpolator {
@@ -75,6 +93,9 @@ impl Interpolator {
 
     /// Returns the interpolated position of an entity at `render_tick`.
     ///
+    /// A teleport between the two snapshots around `render_tick` ([`is_teleport`]) is not
+    /// interpolated: the earlier position holds until the later snapshot's tick.
+    ///
     /// Returns `None` if the entity is not present in any buffered snapshot.
     #[must_use]
     pub fn position(&self, net_id: NetId, render_tick: f32) -> Option<FixVec2> {
@@ -95,6 +116,9 @@ impl Interpolator {
         match (before, after) {
             (Some((before_tick, before)), Some((after_tick, after))) => {
                 let span = after_tick - before_tick;
+                if is_teleport(before.position(), after.position(), span) {
+                    return Some(before.position());
+                }
                 let alpha = if span <= 0.0 {
                     0.0
                 } else {
@@ -168,6 +192,31 @@ mod tests {
             FixVec2::from_ints(0, 0)
         );
         assert!(interpolator.position(2, 11.0).is_none());
+    }
+
+    #[test]
+    fn a_teleport_snaps_instead_of_sliding_across_the_map() {
+        let mut interpolator = Interpolator::new(0.0, 30.0);
+        // A recall: one tick from the lane (100, 100) to the spawn (24, 128).
+        interpolator.push(state(1, 10, vec![entity(1, 1_600, 1_600)]));
+        interpolator.push(state(2, 11, vec![entity(1, 384, 2_048)]));
+        let lane = FixVec2::from_ints(100, 100);
+        let spawn = FixVec2::from_ints(24, 128);
+        assert_eq!(interpolator.position(1, 10.0), Some(lane));
+        assert_eq!(interpolator.position(1, 10.5), Some(lane), "no slide");
+        assert_eq!(interpolator.position(1, 10.99), Some(lane));
+        assert_eq!(interpolator.position(1, 11.0), Some(spawn));
+        // A dash of 8 units in one tick still interpolates.
+        let mut interpolator = Interpolator::new(0.0, 30.0);
+        interpolator.push(state(1, 10, vec![entity(1, 0, 0)]));
+        interpolator.push(state(2, 11, vec![entity(1, 128, 0)]));
+        assert_eq!(
+            interpolator.position(1, 10.5),
+            Some(FixVec2::from_ints(4, 0))
+        );
+        // So does a long walk across a gap of lost snapshots (30 units over 30 ticks).
+        assert!(!is_teleport(FixVec2::ZERO, FixVec2::from_ints(30, 0), 30.0));
+        assert!(is_teleport(FixVec2::ZERO, FixVec2::from_ints(30, 0), 1.0));
     }
 
     #[test]

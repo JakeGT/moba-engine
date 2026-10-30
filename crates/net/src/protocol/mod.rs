@@ -41,20 +41,21 @@ pub use catalog_codec::{decode_content_update, encode_content_update};
 pub use handshake::{Hello, Welcome, decode_hello, decode_welcome, encode_hello, encode_welcome};
 pub use input::{InputMessage, WireCommand, decode_input, encode_input};
 pub use snapshot::{
-    ENTITY_FLAG_BURN, ENTITY_FLAG_DEAD, ENTITY_FLAG_HASTE, ENTITY_FLAG_ROOT, ENTITY_FLAG_SHIELD,
-    ENTITY_FLAG_SILENCE, ENTITY_FLAG_SLOW, EVENT_ATTACK, EVENT_CAST, EVENT_MATCH_ENDED,
-    EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN, EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED,
-    EVENT_ZONE_SPAWNED, MATCH_ENDED_DRAW, MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, NetEvent,
-    NetId, NetProgress, NetUpdate, OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED,
-    STATUS_BURN, STATUS_DEAD, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD, STATUS_SILENCE,
-    STATUS_SLOW, SnapshotDelta, SnapshotState, build_delta, build_delta_into,
+    ENTITY_FLAG_BURN, ENTITY_FLAG_DEAD, ENTITY_FLAG_HASTE, ENTITY_FLAG_RECALL, ENTITY_FLAG_ROOT,
+    ENTITY_FLAG_SHIELD, ENTITY_FLAG_SILENCE, ENTITY_FLAG_SLOW, EVENT_ATTACK, EVENT_CAST,
+    EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN, EVENT_RECALL,
+    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, MATCH_ENDED_DRAW,
+    MAX_SNAPSHOT_EVENTS, MatchPhase, NetEntity, NetEvent, NetId, NetProgress, NetUpdate,
+    OUTCOME_BLUE, OUTCOME_DRAW, OUTCOME_NONE, OUTCOME_RED, RECALL_CANCELLED, RECALL_COMPLETED,
+    RECALL_STARTED, STATUS_BURN, STATUS_DEAD, STATUS_HASTE, STATUS_ROOT, STATUS_SHIELD,
+    STATUS_SILENCE, STATUS_SLOW, SnapshotDelta, SnapshotState, build_delta, build_delta_into,
 };
 pub use snapshot_codec::{decode_snapshot, encode_snapshot};
 
 /// Datagram magic (`"MOBA"` little-endian).
 pub const MAGIC: u32 = 0x4D4F_4241;
 /// Wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 41;
+pub const PROTOCOL_VERSION: u8 = 42;
 /// Fixed packet header size.
 pub const HEADER_LEN: usize = 26;
 /// Maximum datagram size, including the header.

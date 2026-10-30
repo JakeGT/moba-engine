@@ -11,12 +11,12 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 | Item | Value | Source of truth |
 |---|---|---|
 | Workspace version | `0.4.0` pre-1.0 | `Cargo.toml` |
-| Wire protocol | **v41** | `crates/net/src/protocol/mod.rs` |
-| Replay format | **v5**, simulation logic **v8** | `crates/sim/src/replay.rs` |
+| Wire protocol | **v42** | `crates/net/src/protocol/mod.rs` |
+| Replay format | **v5**, simulation logic **v9** | `crates/sim/src/replay.rs` |
 | Content | runtime TOML, hashed; signed packs optional | `crates/game/src/content/` |
 | Toolchain | Rust MSRV **1.88**, Vulkan **1.3** minimum | `Cargo.toml`, ADR-0002 |
-| Tests | **826 passed**, 3 ignored | `cargo test --workspace --locked` |
-| Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
+| Tests | **850 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default, networked, VAT, map overview + horizon, Ultra MSAA, Low at 0.75, ember) + outline occlusion probe, lavapipe + validation | `.github/workflows/render-golden.yml` |
 
 Always re-run the commands rather than copying these numbers into a PR if they are stale.

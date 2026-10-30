@@ -585,6 +585,8 @@ pub struct WireRules {
     pub nexus_win: bool,
     /// Score limit that ends the match (0 disables).
     pub score_limit: u16,
+    /// Recall channel length in ticks (0 disables recall; since v42).
+    pub recall_ticks: u32,
 }
 
 /// Complete runtime content catalogue.

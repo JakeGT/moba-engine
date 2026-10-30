@@ -194,6 +194,7 @@ pub(super) fn encode_catalog(catalog: &WireCatalog, out: &mut Vec<u8>) {
     out.push(u8::from(catalog.rules.structure_heroes_first));
     out.push(u8::from(catalog.rules.nexus_win));
     out.extend_from_slice(&catalog.rules.score_limit.to_le_bytes());
+    out.extend_from_slice(&catalog.rules.recall_ticks.to_le_bytes());
     let map = &catalog.map;
     out.extend_from_slice(&map.name);
     out.push(map.name_len);
@@ -413,6 +414,7 @@ pub(super) fn decode_catalog(reader: &mut Reader<'_>) -> Result<WireCatalog, Wir
         structure_heroes_first: reader.u8()? != 0,
         nexus_win: reader.u8()? != 0,
         score_limit: reader.u16()?,
+        recall_ticks: reader.u32()?,
     };
     let map = &mut catalog.map;
     map.name.copy_from_slice(reader.bytes(WIRE_MANIFEST_FIELD)?);

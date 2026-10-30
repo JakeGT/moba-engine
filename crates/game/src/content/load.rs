@@ -507,6 +507,7 @@ pub fn load_toml(text: &str) -> Result<GameContent, ContentLoadError> {
                 structure_heroes_first: rules.structure_heroes_first,
                 nexus_win: rules.nexus_win,
                 score_limit: rules.score_limit,
+                recall_ticks: rules.recall_ticks,
             }
         }
         None => RulesSpec::default(),

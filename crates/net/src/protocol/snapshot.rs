@@ -102,6 +102,9 @@ pub const ENTITY_FLAG_SILENCE: u8 = 1 << 4;
 pub const ENTITY_FLAG_BURN: u8 = 1 << 5;
 /// A movement haste is active.
 pub const ENTITY_FLAG_HASTE: u8 = 1 << 6;
+/// The hero is channelling a recall (since v42). Like every flag it is only sent for units
+/// the viewer can see, so an enemy's recall is known exactly while it is in vision.
+pub const ENTITY_FLAG_RECALL: u8 = 1 << 7;
 
 /// Wide status bit: dead hero.
 pub const STATUS_DEAD: u16 = 1 << 0;
@@ -139,7 +142,12 @@ impl NetEntity {
                     0
                 })
                 | (if unit.burning { ENTITY_FLAG_BURN } else { 0 })
-                | (if unit.hasted { ENTITY_FLAG_HASTE } else { 0 }),
+                | (if unit.hasted { ENTITY_FLAG_HASTE } else { 0 })
+                | (if unit.recalling {
+                    ENTITY_FLAG_RECALL
+                } else {
+                    0
+                }),
             status_bits: unit.status_bits
                 | (if unit.dead { STATUS_DEAD } else { 0 })
                 | (if unit.shielded { STATUS_SHIELD } else { 0 })
@@ -179,6 +187,12 @@ impl NetEntity {
     #[must_use]
     pub const fn is_dead(self) -> bool {
         self.flags & ENTITY_FLAG_DEAD != 0
+    }
+
+    /// Whether this entity is a hero channelling a recall (since v42).
+    #[must_use]
+    pub const fn is_recalling(self) -> bool {
+        self.flags & ENTITY_FLAG_RECALL != 0
     }
 
     /// Returns the changed dynamic fields relative to `previous`.
@@ -352,6 +366,23 @@ pub const EVENT_ZONE_SPAWNED: u8 = 7;
 /// and decode as zero. Lowest priority of the snapshot's events: a full snapshot drops
 /// attacks first, hero attacks last among them.
 pub const EVENT_ATTACK: u8 = 8;
+/// Recall event (since v42): hero `source` (`source_slot`, `team`) started, cancelled or
+/// completed a recall; `value` is one of [`RECALL_STARTED`], [`RECALL_CANCELLED`] or
+/// [`RECALL_COMPLETED`]. `x`/`y` is where it channels (for a completion: where it left);
+/// `x2`/`y2` is where it arrived for a completion (its team's spawn), else the same as
+/// `x`/`y`. `aux` is the channel length in ticks for a start, else 0. Presentation only:
+/// the channel itself is [`ENTITY_FLAG_RECALL`].
+///
+/// Sent like other events only when the hero is in the viewer's snapshot; a completion
+/// also reaches a viewer that had the hero in its previous snapshot (the hero has left
+/// for its spawn by the snapshot that carries the event).
+pub const EVENT_RECALL: u8 = 9;
+/// [`EVENT_RECALL`] `value`: the channel started.
+pub const RECALL_STARTED: u16 = 0;
+/// [`EVENT_RECALL`] `value`: the channel was cancelled.
+pub const RECALL_CANCELLED: u16 = 1;
+/// [`EVENT_RECALL`] `value`: the channel completed and the hero teleported.
+pub const RECALL_COMPLETED: u16 = 2;
 
 impl SnapshotDelta {
     /// Whether the delta carries no state at all.

@@ -21,6 +21,11 @@
 //!   interval ahead (the simulation's attack timer) to get its whole wind-up; it is
 //!   withdrawn if no attack event confirms it. Melee and ranged attacks are the same: the
 //!   simulation resolves both instantly, without a projectile.
+//! - **recall** (protocol v42) from `EVENT_RECALL` (`RECALL_STARTED` loops the recall
+//!   state from the snapshot tick; `RECALL_CANCELLED` and `RECALL_COMPLETED` fade it out)
+//!   and, when those events are lost, from the recall entity flag starting or clearing.
+//!   The snap to the spawn on completion is the interpolator's ([`moba_net::interpolation::
+//!   is_teleport`]); the recall loop's `interrupt_on_move` also stops it if the hero walks.
 //!
 //! Time is the render tick in seconds, so a pinned capture tick (`MOBA_CAPTURE_TICK`) gives
 //! a pose that does not depend on frame pacing; while pinned, spring bones restart from the
@@ -37,7 +42,8 @@
 use moba_assets::{AnimationEvent, AnimationGraph, AnimationScratch, Animator, Skeleton};
 use moba_core::math::{Mat4, Vec3, Vec4};
 use moba_net::protocol::{
-    EVENT_ATTACK, EVENT_CAST, EVENT_UNIT_DIED, NetEvent, SnapshotState, WireAbility, WireHero,
+    EVENT_ATTACK, EVENT_CAST, EVENT_RECALL, EVENT_UNIT_DIED, NetEvent, RECALL_STARTED,
+    SnapshotState, WireAbility, WireHero,
 };
 use moba_render::JointMatrix;
 
@@ -164,6 +170,8 @@ struct Slot {
     /// Facing for a stationary hero: the last snapshot movement direction, or towards the
     /// target of its last attack (map x/y plane, radians).
     facing: Option<f32>,
+    /// Tick the recall loop playing now started on (from the event or the flag).
+    recall: Option<u32>,
     /// Whether a snapshot has shown this hero to the slot yet.
     seen: bool,
     /// Frame the animator last evaluated.
@@ -171,6 +179,28 @@ struct Slot {
 }
 
 impl Slot {
+    /// Starts the recall loop on `tick` unless one is playing.
+    fn start_recall(&mut self, graph: &AnimationGraph, tick: u32, tick_seconds: f32) {
+        if self.dead || self.recall.is_some() {
+            return;
+        }
+        self.animator
+            .trigger(graph, AnimationEvent::Recall, tick as f32 * tick_seconds);
+        self.recall = Some(tick);
+    }
+
+    /// Fades the recall loop out from `tick` (a cancel, a completion or the flag clearing).
+    fn end_recall(&mut self, graph: &AnimationGraph, tick: u32, tick_seconds: f32) {
+        if let Some(started) = self.recall.take() {
+            self.animator.cancel(
+                graph,
+                AnimationEvent::Recall,
+                started as f32 * tick_seconds,
+                tick as f32 * tick_seconds,
+            );
+        }
+    }
+
     fn empty() -> Self {
         Self {
             net_id: None,
@@ -180,6 +210,7 @@ impl Slot {
             flinched: None,
             predicted: None,
             facing: None,
+            recall: None,
             seen: false,
             evaluated: None,
         }
@@ -313,9 +344,13 @@ impl AnimationDriver {
         self.queued_len = 0;
     }
 
-    /// Buffers an attack, cast or death event until [`Self::flush_events`] learns its tick.
+    /// Buffers an attack, cast, death or recall event until [`Self::flush_events`] learns
+    /// its tick.
     pub(crate) fn queue_event(&mut self, event: &NetEvent) {
-        if !matches!(event.kind, EVENT_ATTACK | EVENT_CAST | EVENT_UNIT_DIED) {
+        if !matches!(
+            event.kind,
+            EVENT_ATTACK | EVENT_CAST | EVENT_UNIT_DIED | EVENT_RECALL
+        ) {
             return;
         }
         if let Some(slot) = self.queued.get_mut(self.queued_len) {
@@ -382,6 +417,20 @@ impl AnimationDriver {
                 }
                 continue;
             }
+            if event.kind == EVENT_RECALL {
+                let Some(rig) = rig_of(event.source) else {
+                    continue;
+                };
+                let tick_seconds = self.tick_seconds;
+                if let Some(slot) = Self::claim(&mut self.slots, event.source, rig.index) {
+                    if event.value == RECALL_STARTED {
+                        slot.start_recall(rig.graph, tick, tick_seconds);
+                    } else {
+                        slot.end_recall(rig.graph, tick, tick_seconds);
+                    }
+                }
+                continue;
+            }
             let (net_id, animation) = match event.kind {
                 EVENT_CAST => {
                     let slot = u8::try_from(event.value).unwrap_or(u8::MAX);
@@ -403,6 +452,7 @@ impl AnimationDriver {
                 if matches!(animation, AnimationEvent::Death) {
                     slot.dead = true;
                     slot.predicted = None;
+                    slot.recall = None;
                 }
                 slot.animator.trigger(rig.graph, animation, at);
             }
@@ -492,6 +542,7 @@ impl AnimationDriver {
                 slot.animator
                     .trigger(rig.graph, AnimationEvent::Death, died);
                 slot.predicted = None;
+                slot.recall = None;
             } else if !dead && slot.dead {
                 slot.animator
                     .trigger(rig.graph, AnimationEvent::Respawn, at);
@@ -500,6 +551,13 @@ impl AnimationDriver {
             slot.dead = dead;
             if dead {
                 continue;
+            }
+            // The recall flag backs up lost recall events: a hero seen recalling without a
+            // start event starts the loop here, and one no longer recalling stops it.
+            if hero.is_recalling() {
+                slot.start_recall(rig.graph, tick, self.tick_seconds);
+            } else {
+                slot.end_recall(rig.graph, tick, self.tick_seconds);
             }
             // Taking damage plays the additive hit reaction, at most every 0.3 s.
             let hurt = previous.is_some_and(|(_, health, _, _)| hero.health < health);
@@ -647,8 +705,9 @@ pub(crate) fn ability_name<'a>(
 mod tests {
     use moba_core::math::{Mat4, Vec3};
     use moba_net::protocol::{
-        ENTITY_FLAG_DEAD, EVENT_ATTACK, EVENT_CAST, EVENT_UNIT_DIED, NetEntity, NetEvent,
-        NetProgress, SnapshotState,
+        ENTITY_FLAG_DEAD, ENTITY_FLAG_RECALL, EVENT_ATTACK, EVENT_CAST, EVENT_RECALL,
+        EVENT_UNIT_DIED, NetEntity, NetEvent, NetProgress, RECALL_CANCELLED, RECALL_COMPLETED,
+        RECALL_STARTED, SnapshotState,
     };
     use moba_render::{MeshData, MeshId};
 
@@ -866,6 +925,85 @@ mod tests {
         // A rematch forgets every hero.
         driver.clear();
         assert!(driver.animator(HERO).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Recall (protocol v42): the start event loops the recall clip, a cancel or a
+    /// completion fades it back to idle, and the flag stands in for lost events.
+    #[test]
+    fn recall_events_and_flag_play_and_end_the_recall_loop() {
+        let (models, root) = library("recall", Some(SET));
+        let rig_of = |_: u8| animated_rig(&models, models.hero(0));
+        let hero_rig = |net_id: u16| (net_id == HERO).then(|| rig_of(0)).flatten();
+        let graph = rig_of(0).expect("rig").graph;
+        let mut driver = AnimationDriver::new(AnimLod::parse("off"), 30);
+        let action = |driver: &AnimationDriver, tick: u32| {
+            driver
+                .animator(HERO)
+                .expect("animator")
+                .report(graph, tick as f32 / 30.0, 0.0)
+                .action
+                .map(|state| graph.state_name(state).to_owned())
+        };
+        let hero = |recalling: bool| {
+            let mut hero = entity(HERO, 0, 0, 100.0, 600);
+            hero.flags = if recalling { ENTITY_FLAG_RECALL } else { 0 };
+            hero
+        };
+        let recall = |value: u16| NetEvent {
+            aux: if value == RECALL_STARTED { 240 } else { 0 },
+            ..event(EVENT_RECALL, HERO, 0xFFFF, value)
+        };
+        // As in the app: the frame loop evaluates the view (three ticks behind the newest
+        // snapshot) before that snapshot's events are applied.
+        let step = |driver: &mut AnimationDriver, tick: u32, recalling, event: Option<u16>| {
+            driver.begin_frame();
+            let rig = rig_of(0).expect("rig");
+            let view = tick.saturating_sub(3) as f32 / 30.0;
+            assert!(
+                driver
+                    .animate(HERO, rig, view, 0.0, Mat4::IDENTITY, None, false)
+                    .is_some()
+            );
+            if let Some(value) = event {
+                driver.queue_event(&recall(value));
+            }
+            driver.flush_events(tick, hero_rig, |_, _| None);
+            driver.on_snapshot(&snapshot(tick, vec![hero(recalling)]), rig_of);
+        };
+
+        // Started on tick 10: the loop plays through the channel.
+        step(&mut driver, 9, false, None);
+        step(&mut driver, 10, true, Some(RECALL_STARTED));
+        assert_eq!(action(&driver, 9), None);
+        for tick in [11, 60, 200] {
+            assert_eq!(action(&driver, tick).as_deref(), Some("recall"), "{tick}");
+        }
+        // Cancelled on tick 70 (a stop): faded out (0.2 s) and back to idle.
+        step(&mut driver, 70, false, Some(RECALL_CANCELLED));
+        assert_eq!(action(&driver, 69).as_deref(), Some("recall"));
+        assert_eq!(action(&driver, 80), None, "idle after the cancel");
+
+        // Restarted on tick 90 and completed on tick 330: idle at the spawn.
+        step(&mut driver, 90, true, Some(RECALL_STARTED));
+        assert_eq!(action(&driver, 300).as_deref(), Some("recall"));
+        step(&mut driver, 330, false, Some(RECALL_COMPLETED));
+        assert_eq!(action(&driver, 345), None);
+
+        // Both recall events lost (packet loss): the flag starts and ends the loop.
+        step(&mut driver, 400, true, None);
+        assert_eq!(action(&driver, 420).as_deref(), Some("recall"));
+        step(&mut driver, 450, true, None);
+        step(&mut driver, 460, false, None);
+        assert_eq!(action(&driver, 459).as_deref(), Some("recall"));
+        assert_eq!(action(&driver, 470), None);
+
+        // Dying while recalling plays the death, not the loop.
+        step(&mut driver, 500, true, Some(RECALL_STARTED));
+        driver.queue_event(&event(EVENT_UNIT_DIED, 0xFFFF, HERO, 0));
+        driver.queue_event(&recall(RECALL_CANCELLED));
+        driver.flush_events(520, hero_rig, |_, _| None);
+        assert_eq!(action(&driver, 530).as_deref(), Some("death"));
         let _ = std::fs::remove_dir_all(root);
     }
 

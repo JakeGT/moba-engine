@@ -200,6 +200,7 @@ pub(super) struct RulesEntry {
     pub(super) structure_heroes_first: bool,
     pub(super) nexus_win: bool,
     pub(super) score_limit: u16,
+    pub(super) recall_ticks: u32,
 }
 
 #[derive(Deserialize)]
@@ -278,6 +279,7 @@ impl Default for RulesEntry {
             structure_heroes_first: rules.structure_heroes_first,
             nexus_win: rules.nexus_win,
             score_limit: rules.score_limit,
+            recall_ticks: rules.recall_ticks,
         }
     }
 }

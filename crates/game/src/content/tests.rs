@@ -786,3 +786,27 @@ fn sentinel_pack_names_a_shipped_model() {
     );
     assert_ne!(content.hash(), defaults.hash());
 }
+
+#[test]
+fn recall_ticks_defaults_parses_validates_and_is_hashed() {
+    let default = GameContent::default();
+    assert_eq!(default.rules.recall_ticks, 240, "8 s at 30 Hz");
+    let content = load_toml("[rules]\nrecall_ticks = 90\n").expect("parse");
+    assert_eq!(content.rules.recall_ticks, 90);
+    assert_eq!(content.validate(), Ok(()));
+    assert_ne!(content.hash(), default.hash(), "recall_ticks is hashed");
+    let disabled = load_toml("[rules]\nrecall_ticks = 0\n").expect("parse");
+    assert_eq!(disabled.validate(), Ok(()), "0 disables recall");
+    assert_ne!(disabled.hash(), content.hash());
+    // The default, written out, is the pack that leaves it out (every pre-recall pack keeps
+    // its hash and signature).
+    let explicit = load_toml("[rules]\nrecall_ticks = 240\n").expect("parse");
+    assert_eq!(explicit.hash(), default.hash());
+    let mut too_long = GameContent::default();
+    too_long.rules.recall_ticks = 3_601;
+    assert_eq!(
+        too_long.validate(),
+        Err(ContentError::BadRules("recall_ticks"))
+    );
+    assert!(load_toml("[rules]\nrecall_ticks = 3601\n").is_err());
+}

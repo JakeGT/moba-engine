@@ -59,6 +59,12 @@ pub(crate) struct NetworkView {
     pub(crate) demo_bought: bool,
     /// `MOBA_DEMO_CAST`: ability slot and the tick to cast it at, cleared once sent.
     pub(crate) demo_cast: Option<(u8, u32)>,
+    /// `MOBA_DEMO_ORDERS`: scripted `(tick, order)`s in tick order, and the next to send.
+    pub(crate) demo_orders: Vec<(u32, super::launch::DemoOrder)>,
+    pub(crate) demo_next: usize,
+    /// Snapshot tick the own hero's recall channel started on (for the HUD bar), while
+    /// snapshots show it recalling.
+    pub(crate) own_recall: Option<u32>,
     pub(crate) shop_page: usize,
     /// The unit under the cursor (R2b hover outline): picked from the previous frame's
     /// camera, so it lags one frame. Only units in the latest snapshot can be picked.
@@ -106,6 +112,9 @@ impl NetworkView {
             demo_buy: None,
             demo_bought: false,
             demo_cast: None,
+            demo_orders: Vec::new(),
+            demo_next: 0,
+            own_recall: None,
             shop_page: 0,
             hover: None,
             attack_target: None,
@@ -142,6 +151,14 @@ impl NetworkView {
 
     #[allow(clippy::too_many_lines)] // Event-to-HUD/audio mapping is linear.
     pub(crate) fn handle_game_event(&mut self, event: NetEvent) {
+        if event.kind == moba_net::protocol::EVENT_RECALL
+            && Some(event.source) == self.own_net_id
+            && event.value == moba_net::protocol::RECALL_STARTED
+        {
+            // A new channel (perhaps a restart between two snapshots): the snapshot that
+            // carries this event stamps its start.
+            self.own_recall = None;
+        }
         match event.kind {
             EVENT_CAST => self.audio.play(crate::audio::Sound::Cast),
             EVENT_PROJECTILE_SPAWN => {

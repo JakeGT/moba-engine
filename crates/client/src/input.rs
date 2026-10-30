@@ -177,6 +177,13 @@ pub(crate) fn handle_network_input(
     if input.was_key_pressed(bindings.surrender) && network.phase == MatchPhase::Playing {
         let _ = network.client.send_command(WireCommand::Surrender);
     }
+    if let Some(key) = bindings.recall
+        && input.was_key_pressed(key)
+        && network.phase == MatchPhase::Playing
+        && matches!(InputFocus::from_shop(*shop), InputFocus::Gameplay)
+    {
+        request_recall(network);
+    }
     if input.was_key_pressed(bindings.shop) {
         *shop = !*shop;
     }
@@ -235,6 +242,15 @@ pub(crate) fn handle_network_input(
     }
     if input.was_key_pressed(bindings.stop) {
         let _ = network.client.send_command(WireCommand::Stop);
+        network.prediction.set_target(None);
+        network.attack_target = None;
+    }
+}
+
+/// Sends a recall order. Recalling stands the hero still, so the local prediction drops its
+/// movement order too (the server cancels the channel if a later order moves it).
+pub(crate) fn request_recall(network: &mut NetworkView) {
+    if network.client.send_command(WireCommand::Recall).is_ok() {
         network.prediction.set_target(None);
         network.attack_target = None;
     }

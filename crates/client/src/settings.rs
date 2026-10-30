@@ -43,6 +43,8 @@ pub(crate) struct Controls {
     pub(crate) scoreboard: String,
     pub(crate) ready: String,
     pub(crate) surrender: String,
+    /// Recall to base (since protocol v42). Older settings files lack it and get `B`.
+    pub(crate) recall: String,
     pub(crate) attack_button: String,
     pub(crate) camera_left: String,
     pub(crate) camera_right: String,
@@ -61,10 +63,13 @@ impl Default for Controls {
             cast_w: String::from("W"),
             cast_e: String::from("E"),
             stop: String::from("Space"),
-            shop: String::from("B"),
+            // The usual MOBA layout: B recalls, P opens the shop (B was the shop key before
+            // recall existed).
+            shop: String::from("P"),
             scoreboard: String::from("Tab"),
             ready: String::from("R"),
             surrender: String::from("F5"),
+            recall: String::from("B"),
             attack_button: String::from("left"),
             camera_left: String::from("Left"),
             camera_right: String::from("Right"),
@@ -89,6 +94,9 @@ pub(crate) struct Bindings {
     pub(crate) scoreboard: Key,
     pub(crate) ready: Key,
     pub(crate) surrender: Key,
+    /// `None` when the configured key is taken by another action (see
+    /// [`Settings::bindings`]).
+    pub(crate) recall: Option<Key>,
     pub(crate) attack_button: MouseBinding,
     pub(crate) camera_left: Key,
     pub(crate) camera_right: Key,
@@ -129,6 +137,7 @@ impl Bindings {
             scoreboard,
             ready,
             surrender,
+            recall: Some(Key::B),
             attack_button: MouseBinding::Left,
             camera_left,
             camera_right,
@@ -301,7 +310,7 @@ impl Settings {
                 Key::W,
                 Key::E,
                 Key::Space,
-                Key::B,
+                Key::P,
                 Key::Tab,
                 Key::R,
                 Key::F5,
@@ -311,7 +320,41 @@ impl Settings {
                 Key::ArrowDown,
             );
         }
+        bindings.recall = self.recall_binding(&bindings, &mut warnings);
         (bindings, warnings)
+    }
+
+    /// The recall key: the configured one (or `B` if it does not parse), unless another
+    /// action already uses it. A settings file saved before recall existed binds the shop
+    /// to `B`, the new recall default; the shop keeps its key and recall is left unbound,
+    /// with a warning, rather than one key doing both.
+    fn recall_binding(&self, bindings: &Bindings, warnings: &mut Vec<String>) -> Option<Key> {
+        let defaults = Controls::default();
+        let key = parse_key(&self.controls.recall).unwrap_or_else(|| {
+            warnings.push(format!(
+                "settings: invalid binding recall={:?}",
+                self.controls.recall
+            ));
+            parse_key(&defaults.recall).unwrap_or(Key::B)
+        });
+        let taken = [
+            (bindings.cast_q, "cast_q"),
+            (bindings.cast_w, "cast_w"),
+            (bindings.cast_e, "cast_e"),
+            (bindings.stop, "stop"),
+            (bindings.shop, "shop"),
+            (bindings.scoreboard, "scoreboard"),
+            (bindings.ready, "ready"),
+            (bindings.surrender, "surrender"),
+        ];
+        if let Some((_, name)) = taken.iter().find(|(other, _)| *other == key) {
+            warnings.push(format!(
+                "settings: recall shares {key:?} with {name}; recall is unbound \
+                 (set controls.recall, e.g. recall = \"B\" and shop = \"P\")"
+            ));
+            return None;
+        }
+        Some(key)
     }
 
     /// The configured rendering quality tier (validated by [`Self::sanitize`]).
@@ -414,6 +457,7 @@ pub(crate) fn parse_key(name: &str) -> Option<Key> {
         "R" => Key::R,
         "F" => Key::F,
         "B" => Key::B,
+        "P" => Key::P,
         "M" => Key::M,
         "SPACE" => Key::Space,
         "TAB" => Key::Tab,
@@ -459,6 +503,7 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(bindings.move_up, Key::W);
         assert_eq!(bindings.cast_q, Key::Q);
+        assert_eq!((bindings.recall, bindings.shop), (Some(Key::B), Key::P));
 
         let broken = Settings {
             controls: Controls {
@@ -554,6 +599,31 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(loaded.controls.scoreboard, "F2");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_recall_keeps_its_shop_key() {
+        // Saved before recall existed: the shop on B and no `recall` key.
+        let old: Settings = toml::from_str("[controls]\nshop = \"B\"\n").expect("parse");
+        let (bindings, warnings) = old.bindings();
+        assert_eq!(bindings.shop, Key::B);
+        assert_eq!(bindings.recall, None, "never one key for both");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let fixed: Settings =
+            toml::from_str("[controls]\nshop = \"B\"\nrecall = \"F\"\n").expect("parse");
+        assert_eq!(
+            fixed.bindings(),
+            (
+                Bindings {
+                    recall: Some(Key::F),
+                    ..bindings
+                },
+                vec![]
+            )
+        );
+        let invalid: Settings = toml::from_str("[controls]\nrecall = \"??\"\n").expect("parse");
+        let (bindings, warnings) = invalid.bindings();
+        assert_eq!((bindings.recall, warnings.len()), (Some(Key::B), 1));
     }
 
     #[test]
