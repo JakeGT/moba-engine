@@ -113,28 +113,42 @@ passes run in this order:
    `SHADOW_PASS` permutation of the skinned vertex shader) depth-only into one directional
    shadow map fitted to the camera's view of the board and texel-snapped (1024²–4096² by
    tier; absent when shadows are off, ADR-0011);
-4. `depth_prepass` (High and Ultra, [ADR-0016](adr/0016-lights-outlines-ao.md)) draws the
-   terrain (R3a's heightfield with its cliffs, or the plane), static, skinned and VAT units
-   depth-only into the frame's depth (no bias, `invariant` positions) plus, with screen-space
-   outlines, an `R8_UINT` outline-slot ID target;
-5. `contact_shadows` (High and Ultra) ray-marches that depth towards the sun into an
-   `R8_UNORM` visibility target; the pre-pass depth is sampled-capable here, the slot meant
-   for R6's GTAO;
+5. `prepass` (High and Ultra by default, [ADR-0015](adr/0015-post-processing.md)) renders the main view's depth only (R3a's
+   heightfield with its cliffs or the plane, static, skinned and VAT units; no bias,
+   `invariant` positions) and, with screen-space outlines
+   ([ADR-0016](adr/0016-lights-outlines-ao.md)), an `R8_UINT` outline-slot ID target (with
+   MSAA a multisampled one resolved from sample zero); it runs whenever AO, R2b's contact
+   shadows or its screen-space outlines are on. `contact_shadows` (R2b, High and Ultra) ray-marches
+   that depth towards the sun into an `R8_UNORM` visibility target, `ao` computes GTAO from
+   it at half render resolution and `ao_blur` filters it with a depth-aware 4×4 blur;
 6. `scene` renders into an HDR target (`R16G16B16A16_SFLOAT`, or `B10G11R11_UFLOAT_PACK32` on
-   the `Low` quality tier) with a sampled-capable depth buffer (loaded from the pre-pass with
-   `LESS_OR_EQUAL` when there is one, else cleared), sampling the shadow map, this frame's
-   fog-of-war image, the contact shadows and the light grid, drawing inverted-hull outlines on
-   Low and Medium, and the sky last on the far plane;
-7. `vfx_draw` draws the particles into the HDR target, testing the scene depth read-only and
-   sampling it for soft particles; alpha particles accumulate weighted blended OIT targets on
-   Medium and up, which
+   the `Low` quality tier) with a sampled-capable depth buffer (loaded after the prepass with
+   `LESS_OR_EQUAL`, else cleared), sampling the shadow map, this frame's fog-of-war image, the
+   contact shadows, the AO (ambient terms only), the map's baked AO and the clustered light
+   grid (R2b), drawing inverted-hull outlines on Low and Medium, and draws the sky last on
+   the far plane; with MSAA 4× (Ultra) it renders into multisampled attachments resolved
+   into the HDR target and the depth at the end of the pass;
+7. `vfx_draw` draws the particles into the single-sampled HDR target, testing the scene depth
+   read-only and sampling it for soft particles; alpha particles accumulate weighted blended
+   OIT targets on Medium and up, which
 8. `vfx_resolve` composites over the HDR target;
-9. `composite` applies exposure and an AgX tonemap into the swapchain image;
-10. `outline` (screen-space outlines, High and Ultra) dilates the ID target's slots into
-    palette-coloured silhouettes on the swapchain image;
-11. `ui` draws the HUD on top, so text is never tonemapped, and samples the offscreen images
-    and (the minimap's mask) the fog-of-war image;
-12. `capture` copies the swapchain image for readback, in capture frames only.
+9. `bloom_d0` … `bloom_d4` down-sample the HDR image into five mips (13-tap filter; Medium
+   and up), `exposure` meters the smallest into a persistent 1×1 adapted exposure (maps that
+   opt into eye adaptation) and `bloom_u3` … `bloom_u0` add the mips back up (tent filter);
+10. `composite` mixes in the bloom, applies exposure, the AgX tonemap, the map's 3D
+    colour-grading LUT and the gameplay screen effects (death desaturation, damage vignette,
+    low-health pulse), into the swapchain image or an LDR image when a later pass reads it;
+11. `outline` (R2b, screen-space outlines on High and Ultra) dilates the ID target's slots
+    into palette-coloured silhouettes over the composite's output, so FXAA smooths them and
+    the upscale scales them;
+12. `fxaa` anti-aliases the LDR image (every tier without MSAA) and `upscale` scales it to
+    the swapchain when the render scale is below 1 or dynamic resolution is on (Low): the
+    scene and post passes render a sub-rectangle of images allocated at the maximum scale,
+    so changing the scale never allocates;
+13. `ui` draws the HUD on top at native resolution, so text is never tonemapped, graded,
+    anti-aliased or scaled, and samples the offscreen images and (the minimap's mask) the
+    fog-of-war image;
+14. `capture` copies the swapchain image for readback, in capture frames only.
 
 The offscreen images are graph imports, not transients: they keep their contents across
 frames and start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, so a frame that does not
@@ -142,7 +156,9 @@ re-render one still samples last frame's contents with no transition. Every comb
 capture and offscreen passes is a variant compiled at creation (eight), and all share the
 transient slots (the shadow map included, which keeps its fixed-size image across resizes).
 Without VFX (`RenderConfig::vfx`, or no compute on the graphics queue) the VFX passes are
-absent, and without the fog-of-war texture (`MOBA_FOW=legacy|off`) the fog-of-war passes. The passes before `composite` are submitted ahead of the acquire-semaphore wait (they
+absent, and without the fog-of-war texture (`MOBA_FOW=legacy|off`) the fog-of-war passes; the
+post passes exist only when their feature is on (`RenderConfig::post`, fixed per renderer, so
+every variant shares the same transients). The passes before `composite` are submitted ahead of the acquire-semaphore wait (they
 never touch the swapchain), and the passes from `composite` on wait for the acquired image,
 in one `vkQueueSubmit`. Descriptors are plain per-pass sets plus one set per material, allocated at
 load from a pool sized by the registered content
@@ -180,11 +196,12 @@ can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
   rim) set per map and per material. R2b ([ADR-0016](adr/0016-lights-outlines-ao.md)) adds
   dynamic point lights (clustered forward: the CPU bins the frame's `Scene::lights` into a
   32×32 grid of columns over the camera's ground footprint, with per-tier caps), a baked
-  top-down AO map of the static occluders multiplying the ambient line (with a hook for
-  R6's SSAO) and the contact-shadow term multiplying the shadow map. The lighting set (set 3:
+  top-down AO map of the static occluders multiplying the ambient line (after R6's GTAO,
+  which takes the minimum with the surface occlusion) and the contact-shadow term multiplying the shadow map. The lighting set (set 3:
   shadow map, environment cube, BRDF LUT, ramp, then R3a's fog-of-war image, terrain arrays
-  and terrain block, then R2b's light list, light grid, baked AO and contact shadows; the
-  binding map and the per-stage sampler budget, 15 of 16, are in ADR-0014 §6 and ADR-0016 §6)
+  and terrain block, R6's AO, then R2b's light list, light grid, baked AO and contact
+  shadows; the binding map and the per-stage sampler budget, 16 of 16, are in ADR-0014 §6 and
+  ADR-0016 §6)
   is one set per frame in flight, written at load and resize only (the light buffers'
   contents change per frame);
 - team readability outlines on the units the client marks (`UnitInstance::outline`, a slot of

@@ -151,8 +151,8 @@ mod tests {
     }
 
     /// The scene layout (camera, instances + bones, material, lighting/world) and the VAT
-    /// layout fit the Vulkan minimum, so it runs on every conformant device; the headroom is what later
-    /// set-3 bindings (R2b, R6) may still add. Counted from the arrays the layouts use.
+    /// layout fit the Vulkan minimum, so it runs on every conformant device; the headroom (2) is what later
+    /// set-3 bindings (R2b) may still add. Counted from the arrays the layouts use.
     #[test]
     fn the_scene_layout_fits_the_vulkan_minimum() {
         let material = crate::material::set_layout_bindings();
@@ -166,10 +166,11 @@ mod tests {
         };
         assert!(check("scene", &sets, minimum).is_ok());
         let fragment = stage_totals(&sets, vk::ShaderStageFlags::FRAGMENT);
-        // Material 4 + set 3: lighting 5, fog of war 1, terrain 3, baked AO and contact
-        // shadows 2 (R2b; the light list and grid are storage buffers). R6's AO makes 16.
-        assert_eq!(fragment.samplers, 15);
-        assert_eq!(fragment.sampled_images, 15);
+        // Material 4 + set 3: lighting 5, fog of war 1, terrain 3, R6's AO 1 (binding 10),
+        // R2b's baked AO and contact shadows 2 (bindings 13, 14; the light list and grid are
+        // storage buffers): exactly the Vulkan minimum of 16.
+        assert_eq!(fragment.samplers, 16);
+        assert_eq!(fragment.sampled_images, 16);
         // The VAT layout (R4b) swaps set 2 for one vertex-stage VAT texture.
         let vat = crate::vat::set_layout_bindings();
         let vat_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 4] =
@@ -177,7 +178,7 @@ mod tests {
         assert!(check("VAT", &vat_sets, minimum).is_ok());
         assert_eq!(
             stage_totals(&vat_sets, vk::ShaderStageFlags::FRAGMENT).samplers,
-            11
+            12
         );
         assert_eq!(
             stage_totals(&vat_sets, vk::ShaderStageFlags::VERTEX).samplers,

@@ -10,9 +10,11 @@
 //! preprocessor defines, each its own module: the `*_TEXTURED` modules are the
 //! `MATERIAL_TEXTURED` builds that sample a material's texture set (ADR-0010), and the
 //! `*_shadow` modules are the `SHADOW_PASS` depth-only casters of the shadow map (ADR-0011),
-//! the `*_prepass` modules the `DEPTH_PREPASS` depth pre-pass and the `*_outline` modules the
-//! `OUTLINE_HULL` inverted-hull outlines (ADR-0016). `vat.vert` plays vertex-animation
-//! textures for minions (R4b, ADR-0012).
+//! the `*_prepass` modules the `DEPTH_PREPASS` vertex shaders of the depth prepass that also
+//! write R2b's outline IDs and the `*_outline` modules the `OUTLINE_HULL` inverted-hull
+//! outlines (ADR-0016). `vat.vert` plays vertex-animation textures for minions (R4b,
+//! ADR-0012). The R6 post-processing chain (ADR-0015) adds fullscreen passes sharing
+//! `include/post.glsl`.
 
 #![forbid(unsafe_code)]
 
@@ -80,8 +82,23 @@ pub const TERRAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrai
 pub const TERRAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrain.frag.spv"));
 /// Fullscreen-triangle vertex shader (no vertex buffer) for fullscreen passes.
 pub const FULLSCREEN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv"));
-/// Composite fragment shader: HDR scene colour, exposure and the `AgX` tonemap.
+/// Composite fragment shader: HDR scene colour, bloom, exposure, the `AgX` tonemap, the
+/// grading LUT and the gameplay screen effects (R6).
 pub const COMPOSITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composite.frag.spv"));
+/// Bloom down-sample (R6): the 13-tap filter, Karis average on the first level.
+pub const BLOOM_DOWN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom_down.frag.spv"));
+/// Bloom up-sample (R6): a 3x3 tent added into the larger mip.
+pub const BLOOM_UP_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bloom_up.frag.spv"));
+/// Auto exposure (R6): log-average metering of the last bloom mip, clamped.
+pub const EXPOSURE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/exposure.frag.spv"));
+/// FXAA (R6) on the tonemapped image at render resolution.
+pub const FXAA_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fxaa.frag.spv"));
+/// Render-scale upscale (R6): bilinear or Catmull-Rom bicubic.
+pub const UPSCALE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/upscale.frag.spv"));
+/// Ground-truth ambient occlusion (R6) at half resolution from the prepass depth.
+pub const GTAO_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gtao.frag.spv"));
+/// Depth-aware 4x4 AO blur (R6).
+pub const AO_BLUR_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ao_blur.frag.spv"));
 /// Sky backdrop vertex shader (R3a): a far-plane triangle with unprojected view rays.
 pub const SKY_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky.vert.spv"));
 /// Sky backdrop fragment shader (R3a): environment cube or gradient, horizon haze.
@@ -241,6 +258,34 @@ pub const MODULES: &[ShaderModule] = &[
         spirv: COMPOSITE_FRAG,
     },
     ShaderModule {
+        name: "bloom_down.frag",
+        spirv: BLOOM_DOWN_FRAG,
+    },
+    ShaderModule {
+        name: "bloom_up.frag",
+        spirv: BLOOM_UP_FRAG,
+    },
+    ShaderModule {
+        name: "exposure.frag",
+        spirv: EXPOSURE_FRAG,
+    },
+    ShaderModule {
+        name: "fxaa.frag",
+        spirv: FXAA_FRAG,
+    },
+    ShaderModule {
+        name: "upscale.frag",
+        spirv: UPSCALE_FRAG,
+    },
+    ShaderModule {
+        name: "gtao.frag",
+        spirv: GTAO_FRAG,
+    },
+    ShaderModule {
+        name: "ao_blur.frag",
+        spirv: AO_BLUR_FRAG,
+    },
+    ShaderModule {
         name: "ui.vert",
         spirv: UI_VERT,
     },
@@ -326,5 +371,25 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), MODULES.len(), "module names are unique");
+    }
+
+    /// The depth prepass (R6, ADR-0015) draws with the scene's own vertex shaders and the
+    /// scene tests `LESS_OR_EQUAL` against it, so every one must declare an invariant
+    /// position (the textured permutations are built from these sources).
+    #[test]
+    fn prepass_vertex_shaders_declare_an_invariant_position() {
+        for (name, source) in [
+            ("terrain.vert", include_str!("../shaders/terrain.vert")),
+            ("unit.vert", include_str!("../shaders/unit.vert")),
+            ("skinned.vert", include_str!("../shaders/skinned.vert")),
+            ("vat.vert", include_str!("../shaders/vat.vert")),
+        ] {
+            assert!(
+                source
+                    .lines()
+                    .any(|line| line.trim() == "invariant gl_Position;"),
+                "{name} must declare `invariant gl_Position;`"
+            );
+        }
     }
 }

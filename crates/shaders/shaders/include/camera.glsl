@@ -55,13 +55,17 @@ layout(set = 0, binding = 0) uniform CameraBlock {
                            // w 1 = the R2a distance fade instead
     vec4 sky_zenith;       // rgb zenith, w 1 = sample the environment cube
     vec4 sky_horizon;      // rgb horizon, w environment LOD
+    // R6 post-processing (ADR-0015).
+    vec4 post_params;      // x AO strength (0 = no AO fetch), yz 0.5 / AO image size (AO uv
+                           // per render pixel), w reserved
+    vec4 post_clamp;       // xy largest AO uv inside this frame's rendered sub-rectangle
     // R2b (ADR-0016): screen reconstruction, dynamic lights, occlusion and outlines.
     mat4 inv_view_proj;    // clip -> world (contact shadows)
     vec4 viewport;         // xy extent in pixels, zw 1 / extent
     vec4 light_grid;       // xy grid minimum (world x, z), zw 1 / cell size (x, z)
     uvec4 light_info;      // xy grid columns (x, z), z words per column, w lights (0 = none)
     vec4 occlusion;        // x baked AO strength (0 = off), y 1 = contact shadows bound,
-                           // z SSAO strength (R6; 0 = none), w reserved
+                           // zw reserved (R6's AO strength is post_params.x)
     vec4 baked_ao;         // xy AO map origin (world x, z), z 1 / map size, w height falloff
     vec4 contact;          // x ray steps, y ray length, z thickness, w fade-out distance
     vec4 outline_palette[MOBA_OUTLINE_SLOTS]; // rgb linear display colour, w width (pixels)

@@ -135,9 +135,15 @@ vec3 splat_terrain(vec3 geometric) {
         normal = normalize(normal_sum);
     }
     // Stylised occlusion: the layer cavity and the baked relief occlusion darken the albedo
-    // (the painterly convention; ADR-0011's R2b hook will move it to the ambient term).
-    float occlusion = mix(1.0, cavity * clamp(in_occlusion, 0.0, 1.0), 0.75);
+    // (the painterly convention; ADR-0011's R2b hook will move it to the ambient term). With
+    // R6's GTAO on (High, Ultra) the relief term instead joins the ambient occlusion as
+    // min(baked, GTAO): both see the same crevices, and stacking them would darken them twice
+    // (ADR-0015 §5). Low and Medium keep the baked term alone.
+    float relief = clamp(in_occlusion, 0.0, 1.0);
+    bool gtao = camera.post_params.x > 0.0;
+    float occlusion = mix(1.0, cavity * (gtao ? 1.0 : relief), 0.75);
     Surface surface = default_surface(albedo * occlusion, normal, in_world_pos, camera.rim_color.w);
+    surface.occlusion = gtao ? mix(1.0, relief, 0.75) : 1.0;
     surface.geometric_normal = geometric;
     surface.rim = 0.0;
     return shade(surface);

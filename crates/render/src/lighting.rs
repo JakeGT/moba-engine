@@ -778,6 +778,11 @@ pub(crate) struct FrameLighting {
     pub(crate) specular_tint: [f32; 4],
     pub(crate) ambient_ground: [f32; 4],
     pub(crate) sh: [[f32; 4]; 9],
+    /// R6 AO lookup (`camera.post_params`): strength, AO uv per render pixel; zero (no AO
+    /// fetch) unless the renderer sets it for the main view.
+    pub(crate) post_params: [f32; 4],
+    /// Largest AO uv inside the rendered sub-rectangle (`camera.post_clamp`).
+    pub(crate) post_clamp: [f32; 4],
     // R2b (ADR-0016).
     pub(crate) light_grid: [f32; 4],
     pub(crate) light_info: [u32; 4],
@@ -917,6 +922,8 @@ impl FrameLighting {
             ],
             ambient_ground: [ground[0], ground[1], ground[2], 0.0],
             sh,
+            post_params: [0.0; 4],
+            post_clamp: [0.0; 4],
             light_grid: crate::lights::GridParams::NONE.grid,
             light_info: crate::lights::GridParams::NONE.info,
             occlusion: [0.0; 4],
@@ -931,19 +938,19 @@ impl FrameLighting {
 const IMAGE_BINDINGS: u32 = 9;
 /// Binding of the terrain parameter block (a uniform buffer, `terrain.frag`).
 const TERRAIN_BLOCK_BINDING: u32 = IMAGE_BINDINGS;
-/// The R2b bindings (ADR-0016 §6), after R3a's and after binding 10, which R6's
-/// screen-space AO takes: the dynamic lights and their grid (storage buffers), the baked AO
-/// map and the contact-shadow visibility (combined image samplers).
-const LIGHT_LIST_BINDING: u32 = 11;
-const LIGHT_GRID_BINDING: u32 = 12;
-const BAKED_AO_BINDING: u32 = 13;
-const CONTACT_BINDING: u32 = 14;
-/// First binding after R3a's terrain block: R6's AO (not declared on this branch yet).
-const FIRST_R2B_BINDING: u32 = LIGHT_LIST_BINDING;
-/// Bindings of set 3: `0..=TERRAIN_BLOCK_BINDING` and `LIGHT_LIST_BINDING..=CONTACT_BINDING`.
-const SET_BINDINGS: usize = 14;
-/// Combined image samplers in set 3: R3a's nine, the baked AO and the contact term.
-const SET_IMAGES: u32 = IMAGE_BINDINGS + 2;
+/// Binding of the R6 ambient-occlusion image (`lighting.glsl`, ADR-0015 §5): the blurred GTAO
+/// transient on the main view, white elsewhere.
+const AO_BINDING: u32 = TERRAIN_BLOCK_BINDING + 1;
+/// The R2b bindings (ADR-0016 §6), after R6's AO: the dynamic lights and their grid (storage
+/// buffers), the baked AO map and the contact-shadow visibility (combined image samplers).
+const LIGHT_LIST_BINDING: u32 = AO_BINDING + 1;
+const LIGHT_GRID_BINDING: u32 = AO_BINDING + 2;
+const BAKED_AO_BINDING: u32 = AO_BINDING + 3;
+const CONTACT_BINDING: u32 = AO_BINDING + 4;
+/// Every binding of set 3 (`0..=CONTACT_BINDING`).
+const SET_BINDINGS: usize = CONTACT_BINDING as usize + 1;
+/// Combined image samplers in set 3: R3a's nine, R6's AO, the baked AO and the contact term.
+const SET_IMAGES: u32 = IMAGE_BINDINGS + 3;
 /// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image
 /// and light buffers.
 pub(crate) const MAIN_SETS: usize = 2;
@@ -953,19 +960,14 @@ const LIGHT_LIST_BYTES: u64 = (crate::lights::MAX_LIGHTS
 const LIGHT_GRID_WORDS: usize =
     crate::lights::GRID * crate::lights::GRID * crate::lights::CELL_WORDS;
 
-/// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6 and ADR-0016 §6):
-/// combined image samplers `0..IMAGE_BINDINGS`, the terrain block, the two light buffers and
-/// the baked AO and contact images, all fragment-only. Also counted by the scene layout's
-/// descriptor budget (`descriptor_budget`).
+/// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
+/// ADR-0015 §5, 11–14 in ADR-0016 §6): combined image samplers `0..IMAGE_BINDINGS`, the
+/// terrain block, the AO image, the two light buffers and the baked AO and contact images,
+/// all fragment-only. Also counted by the scene layout's descriptor budget
+/// (`descriptor_budget`).
 pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
     core::array::from_fn(|index| {
-        let index = index as u32;
-        // Skips binding 10 (R6's AO): `0..=9`, then `11..=14`.
-        let binding = if index <= TERRAIN_BLOCK_BINDING {
-            index
-        } else {
-            FIRST_R2B_BINDING + (index - TERRAIN_BLOCK_BINDING - 1)
-        };
+        let binding = index as u32;
         let kind = match binding {
             TERRAIN_BLOCK_BINDING => vk::DescriptorType::UNIFORM_BUFFER,
             LIGHT_LIST_BINDING | LIGHT_GRID_BINDING => vk::DescriptorType::STORAGE_BUFFER,
@@ -1047,6 +1049,8 @@ pub(crate) struct LightingResources {
     contact_view: Option<vk::ImageView>,
     /// The map's baked AO texture and placement.
     baked_ao: Option<(GpuImage, BakedAo)>,
+    /// The bound AO view (R6): the graph transient, or `default_ramp` (white).
+    ao_view: vk::ImageView,
     /// 1×1 `R8` white: fully visible (offscreen views, fog of war off), and the baked AO and
     /// contact image of views without one.
     default_visibility: GpuImage,
@@ -1257,6 +1261,7 @@ impl LightingResources {
             light_frames.push(LightFrame { lights, grid });
         }
         let shadow_view = default_shadow.view();
+        let ao_view = default_ramp.view();
         let resources = Self {
             sets,
             offscreen_set,
@@ -1276,6 +1281,7 @@ impl LightingResources {
             shadow_view,
             contact_view: None,
             baked_ao: None,
+            ao_view,
             default_visibility,
             default_terrain,
             terrain_block,
@@ -1370,6 +1376,13 @@ impl LightingResources {
         self.write(device);
     }
 
+    /// Points the main view's sets at `view` (the blurred AO transient, R6) or white. The
+    /// device must be idle or the sets unused by pending work (creation, resize).
+    pub(crate) fn bind_ao(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
+        self.ao_view = view.unwrap_or(self.default_ramp.view());
+        self.write(device);
+    }
+
     /// Points the world bindings at `world` (the fog-of-war images and the terrain, each
     /// owned elsewhere for as long as they are bound) and writes the terrain block. The
     /// device must be idle.
@@ -1417,14 +1430,20 @@ impl LightingResources {
                 device,
                 set,
                 &self.frames[frame],
-                [self.shadow_view, fog, self.contact_view.unwrap_or(white)],
+                [
+                    self.shadow_view,
+                    fog,
+                    self.contact_view.unwrap_or(white),
+                    self.ao_view,
+                ],
             );
         }
+        // Offscreen views: the default shadow image, full visibility and white AO.
         self.write_set(
             device,
             self.offscreen_set,
             &self.frames[0],
-            [self.default_shadow.view(), white, white],
+            [self.default_shadow.view(), white, white, white],
         );
     }
 
@@ -1433,7 +1452,7 @@ impl LightingResources {
         device: &DeviceContext,
         set: vk::DescriptorSet,
         frame: &LightFrame,
-        [shadow, fog, contact]: [vk::ImageView; 3],
+        [shadow, fog, contact, ao]: [vk::ImageView; 4],
     ) {
         let environment = self
             .environment
@@ -1462,6 +1481,7 @@ impl LightingResources {
             (6, self.linear_clamp.handle(), splat),
             (7, self.layer_sampler.handle(), albedo),
             (8, self.layer_sampler.handle(), normal),
+            (AO_BINDING, self.linear_clamp.handle(), ao),
             (BAKED_AO_BINDING, self.linear_clamp.handle(), baked),
             (CONTACT_BINDING, self.shadow_plain.handle(), contact),
         ];

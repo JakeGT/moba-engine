@@ -11,7 +11,7 @@
 // silhouettes readable against the terrain.
 //
 // R2b (ADR-0016) adds clustered dynamic point lights after the sun, an ambient-occlusion term
-// on the ambient line (material x baked map AO x, from R6, SSAO) and screen-space contact
+// on the ambient line (R6's min(relief, GTAO) x baked map AO) and screen-space contact
 // shadows multiplying the shadow-map term.
 //
 // Set 3 is the scene lighting set, one per frame in flight (crates/render/src/lighting.rs):
@@ -31,6 +31,9 @@ layout(set = 3, binding = 2) uniform samplerCube environment_specular;
 layout(set = 3, binding = 3) uniform sampler2D brdf_lut;
 // Stylisation ramp: N.L remapped from [-1, 1] to u, rgb multiplier.
 layout(set = 3, binding = 4) uniform sampler2D lighting_ramp;
+// Half-resolution ambient occlusion (R6 GTAO, ADR-0015); white 1x1 without AO. Bindings 5-9
+// are R3a's world bindings (atmosphere.glsl, terrain.frag; ADR-0014 §6).
+layout(set = 3, binding = 10) uniform sampler2D ambient_occlusion;
 // Dynamic point lights (R2b): two vec4 per light, xyz position + w radius, rgb colour.
 layout(std430, set = 3, binding = 11) readonly buffer LightList {
     vec4 lights[];
@@ -64,8 +67,9 @@ struct Surface {
     float ramp;
     vec4 specular;
     vec3 emissive;
-    // Ambient occlusion of the surface itself (material AO), 1 = open. The map's baked AO
-    // and (R6) SSAO multiply it in `ambient_occlusion`.
+    // Baked ambient occlusion (1 = open) that joins the screen-space AO as min(baked, GTAO):
+    // R3a's terrain relief while GTAO runs (ADR-0015 §5), 1 everywhere else. The map's baked
+    // AO (R2b) multiplies the result (ADR-0016).
     float occlusion;
 };
 
@@ -106,6 +110,22 @@ vec3 ambient_specular(vec3 r, float roughness) {
     }
     // Low tier: no cube fetch; the irradiance in the reflection direction stands in.
     return sh_irradiance(r) * intensity;
+}
+
+// Screen-space ambient occlusion under this fragment (1 = open), blended by the AO
+// strength. Main view only: offscreen views set the strength to 0 and skip the fetch.
+float ambient_occlusion_here() {
+    float strength = camera.post_params.x;
+    if (strength <= 0.0) {
+        return 1.0;
+    }
+    vec2 uv = min(gl_FragCoord.xy * camera.post_params.yz, camera.post_clamp.xy);
+    return mix(1.0, textureLod(ambient_occlusion, uv, 0.0).r, strength);
+}
+
+// Specular occlusion from ambient occlusion (Lagarde and de Rousiers 2014).
+float specular_occlusion(float n_dot_v, float ao, float roughness) {
+    return clamp(pow(n_dot_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
 float distribution_ggx(float n_dot_h, float alpha) {
@@ -210,13 +230,6 @@ float baked_occlusion(vec3 p) {
     float ao = textureLod(baked_ao_map, uv, 0.0).r;
     float fade = clamp(p.y / max(camera.baked_ao.w, 1e-3), 0.0, 1.0);
     return mix(1.0, mix(ao, 1.0, fade), strength);
-}
-
-// The ambient line's occlusion: material AO x baked map AO. R6's GTAO composes here as a
-// third factor (ambient x baked AO x SSAO, ADR-0016 section 4); `camera.occlusion.z` is
-// reserved for its strength.
-float ambient_occlusion(Surface surface) {
-    return surface.occlusion * baked_occlusion(surface.world_pos);
 }
 
 // Screen-space contact-shadow visibility of this fragment (1 = lit); 1 when not bound.
@@ -344,10 +357,12 @@ vec3 shade(Surface surface) {
     vec3 ambient_diffuse = kd_ambient * surface.albedo * ambient_irradiance(n);
     vec3 ambient_spec = ambient_specular(r, roughness) * (f0 * brdf.x + brdf.y)
         * surface.specular.rgb * surface.specular.w;
-    // Ambient occlusion touches only the ambient line (ADR-0016).
-    float occlusion = ambient_occlusion(surface);
-    ambient_diffuse *= occlusion;
-    ambient_spec *= occlusion;
+    // R6: AO occludes the ambient (indirect) terms only; direct light, rim and emissive
+    // keep their readability (ADR-0015). R2b's baked map AO multiplies it: the map's static
+    // occluders, which GTAO sees only on screen and at half resolution (ADR-0016).
+    float ao = min(surface.occlusion, ambient_occlusion_here()) * baked_occlusion(surface.world_pos);
+    ambient_diffuse *= ao;
+    ambient_spec *= specular_occlusion(n_dot_v, ao, roughness);
 
     // Rim: a coloured silhouette term, strongest where the surface turns away from the eye.
     // Half of it takes the surface's own hue (albedo normalised to its brightest channel), so

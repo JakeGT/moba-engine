@@ -49,6 +49,47 @@ MOBA_CAPTURE=/tmp/vfx.ppm MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40 cargo run -
 MOBA_VFX_PREVIEW=nova MOBA_CAPTURE=/tmp/nova.ppm MOBA_CAPTURE_FRAME=6 cargo run --release -p moba-client
 ```
 
+### Post-processing tiers (R6)
+![The teamfight on every tier](images/r6-tiers.png)
+
+The scripted teamfight replay at tick 355 on each tier's post defaults
+([ADR-0015](adr/0015-post-processing.md)), lavapipe at 1280×720 (shown at half size),
+validation and sync validation required, zero messages. Low: FXAA (fast preset), no bloom,
+dynamic resolution pinned for the capture; Medium: + bloom; High: + half-resolution GTAO;
+Ultra: MSAA 4× and 3-slice GTAO. The HUD is identical on every tier: it is drawn after the
+post chain at native resolution.
+
+![main (R5) against R6](images/r6-before-after.png)
+
+`main` at R5 (left) against R6 (right) on High: the networked golden frame (tick 120) and the
+ember map. R6 adds the map's colour grade (`meadow`, `ember`), bloom, FXAA and GTAO; the
+lighting, team colours and HUD are unchanged.
+
+![Gameplay screen effects](images/r6-screen-effects.png)
+
+The three gameplay effects held for a capture with `MOBA_SCREEN_EFFECTS_PREVIEW`: none, death
+desaturation (capped at 0.6, so the teams stay distinguishable), the damage vignette at its
+peak and the low-health pulse at its peak (a neutral dark in the outer corners only, never a
+team hue). Captured after the #334 review fixes. Each has
+its own setting (`death_desaturation`, `damage_vignette`, `low_health_pulse`) and
+`MOBA_SCREEN_EFFECTS=off` turns all three off; the HUD is never affected.
+
+![Anti-aliasing and AO crops](images/r6-aa-ao-crops.png)
+
+A 320×180 crop of the networked frame at 2× (nearest): every post feature off, High (FXAA +
+GTAO), High with `MOBA_AA=msaa4`, and Ultra with `MOBA_AO=off`. FXAA softens the tower and
+minion edges; MSAA resolves them geometrically; GTAO adds the contact darkening at the bases
+of the tower and the minions.
+
+The blind A/B readability set (`images/r6-ab-1.png` … `r6-ab-6.png`, `main` against R6 with
+shuffled sides) and its protocol are in [perf/0019](perf/0019-post.md#blind-ab-readability-check).
+
+```bash
+MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=345 MOBA_QUALITY=<tier> \
+MOBA_CAPTURE=/tmp/r6.ppm MOBA_CAPTURE_FRAME=10 MOBA_SMOKE_FRAMES=12 cargo run --release -p moba-client
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_SMOKE_FRAMES=100000 \
+MOBA_SCREEN_EFFECTS_PREVIEW=death MOBA_CAPTURE=/tmp/r6-death.ppm cargo run --release -p moba-client
+
 ### Terrain, fog of war v2 and atmosphere (R3a)
 ![Networked view before and after R3a](images/r3a-network-before-after.png)
 

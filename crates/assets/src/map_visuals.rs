@@ -54,6 +54,16 @@
 //! desaturate = 0.5               # 0..=1
 //! mist_height = 3.0              # metres, 0..=32: ground mist in unseen areas
 //! mist = 0.4                     # 0..=1
+//!
+//! [post]                         # optional post-processing (R6), every key optional
+//! exposure = 0.0                 # exposure compensation, EV stops, -4..=4 (default 0)
+//! auto_exposure = true           # opt in to eye adaptation (default off)
+//! exposure_min = -1.0            # auto-exposure EV clamp, -8..=8 (default -2)
+//! exposure_max = 1.0             # -8..=8, >= exposure_min (default 2)
+//! adaptation = 1.5               # adaptation rate per second, 0.1..=10 (default 1.5)
+//! bloom = 0.05                   # bloom strength, 0..=0.1 (default 0.04)
+//! grading = "ember"              # <root>/grading/ember.cube colour-grading LUT
+//! grading_strength = 0.9         # 0..=1 blend towards the graded colour
 //! ```
 //!
 //! For a heightfield terrain (ADR-0014), `terrain` is a table instead of the tint, with the
@@ -120,6 +130,20 @@ pub const MAX_SHADOW_STRENGTH: f32 = 0.9;
 /// shadows past what one fitted map covers well.
 pub const MIN_SUN_ELEVATION: f32 = 0.2;
 
+/// Bloom strength when `[post]` sets none (the renderer's default).
+pub const DEFAULT_BLOOM_STRENGTH: f32 = 0.04;
+/// Eye-adaptation rate when `[post]` sets none, per second.
+pub const DEFAULT_ADAPTATION: f32 = 1.5;
+/// Lowest auto-exposure compensation when `[post]` sets no `exposure_min`, EV stops.
+pub const DEFAULT_EXPOSURE_MIN: f32 = -2.0;
+/// Highest auto-exposure compensation when `[post]` sets no `exposure_max`, EV stops.
+pub const DEFAULT_EXPOSURE_MAX: f32 = 2.0;
+
+const EXPOSURE_RANGE: (f32, f32) = (-4.0, 4.0);
+const EXPOSURE_CLAMP_RANGE: (f32, f32) = (-8.0, 8.0);
+const ADAPTATION_RANGE: (f32, f32) = (0.1, 10.0);
+const MAX_BLOOM_STRENGTH: f32 = 0.1;
+
 /// Board relief amplitude when `[terrain]` sets none, metres.
 pub const DEFAULT_TERRAIN_RELIEF: f32 = 0.25;
 /// Edge height when `[terrain]` sets none, metres.
@@ -174,6 +198,8 @@ pub struct MapVisuals {
     pub atmosphere: MapAtmosphere,
     /// Fog-of-war styling (`[fog_of_war]`); unset keys keep the engine defaults.
     pub fog_of_war: MapFogStyle,
+    /// Post-processing overrides (`[post]`); unset keys keep the engine defaults.
+    pub post: MapPost,
 }
 
 /// How the ground outside the board rises (`[terrain] edge`).
@@ -461,6 +487,33 @@ impl MapFogStyle {
     }
 }
 
+/// The `[post]` table of a map visuals descriptor (R6 post-processing). Every field is
+/// optional: `None` keeps the renderer's default for that parameter.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MapPost {
+    /// Exposure compensation in EV stops, `-4..=4` (default 0).
+    pub exposure: Option<f32>,
+    /// The map opts in to eye adaptation (auto exposure; default off).
+    pub auto_exposure: Option<bool>,
+    /// Lowest auto-exposure compensation in EV stops, `-8..=8` (default
+    /// [`DEFAULT_EXPOSURE_MIN`]).
+    pub exposure_min: Option<f32>,
+    /// Highest auto-exposure compensation in EV stops, `-8..=8` and at least
+    /// `exposure_min` (default [`DEFAULT_EXPOSURE_MAX`]).
+    pub exposure_max: Option<f32>,
+    /// Eye-adaptation rate per second, `0.1..=10` (default [`DEFAULT_ADAPTATION`]).
+    pub adaptation: Option<f32>,
+    /// Bloom strength, `0..=0.1` (default [`DEFAULT_BLOOM_STRENGTH`]): more washes team
+    /// colours and silhouettes out (ADR-0015 §3).
+    pub bloom: Option<f32>,
+    /// Colour-grading LUT name: `<root>/grading/<name>.cube`
+    /// ([`grading_path`](crate::grading_path)).
+    pub grading: Option<String>,
+    /// Blend from the ungraded to the graded colour, `0..=1`.
+    pub grading_strength: Option<f32>,
+}
+
 /// The `[lighting]` table of a map visuals descriptor (ADR-0011). Every field is optional:
 /// `None` keeps the renderer's default for that parameter.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -543,6 +596,8 @@ struct RawMapVisuals {
     atmosphere: Option<RawAtmosphere>,
     #[serde(default)]
     fog_of_war: Option<RawFogStyle>,
+    #[serde(default)]
+    post: Option<RawPost>,
 }
 
 #[derive(Deserialize)]
@@ -616,6 +671,27 @@ struct RawFogStyle {
     mist_height: Option<f32>,
     #[serde(default)]
     mist: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPost {
+    #[serde(default)]
+    exposure: Option<f32>,
+    #[serde(default)]
+    auto_exposure: Option<bool>,
+    #[serde(default)]
+    exposure_min: Option<f32>,
+    #[serde(default)]
+    exposure_max: Option<f32>,
+    #[serde(default)]
+    adaptation: Option<f32>,
+    #[serde(default)]
+    bloom: Option<f32>,
+    #[serde(default)]
+    grading: Option<String>,
+    #[serde(default)]
+    grading_strength: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -831,6 +907,60 @@ fn check_lighting(raw: Option<RawLighting>) -> Result<MapLighting, MapVisualsErr
     };
     check_readability(&lighting)?;
     Ok(lighting)
+}
+
+fn check_post(raw: Option<RawPost>) -> Result<MapPost, MapVisualsError> {
+    let Some(raw) = raw else {
+        return Ok(MapPost::default());
+    };
+    let range = |value: Option<f32>, range, what| {
+        value
+            .map(|value| check_range(value, range, what))
+            .transpose()
+    };
+    let post = MapPost {
+        exposure: range(raw.exposure, EXPOSURE_RANGE, "exposure must be -4..=4 EV")?,
+        auto_exposure: raw.auto_exposure,
+        exposure_min: range(
+            raw.exposure_min,
+            EXPOSURE_CLAMP_RANGE,
+            "exposure_min must be -8..=8 EV",
+        )?,
+        exposure_max: range(
+            raw.exposure_max,
+            EXPOSURE_CLAMP_RANGE,
+            "exposure_max must be -8..=8 EV",
+        )?,
+        adaptation: range(
+            raw.adaptation,
+            ADAPTATION_RANGE,
+            "adaptation must be 0.1..=10 per second",
+        )?,
+        bloom: check_scalar(raw.bloom, MAX_BLOOM_STRENGTH, "bloom must be 0..=0.1")?,
+        grading: match raw.grading {
+            Some(name) if !valid_mesh_name(&name) => {
+                return Err(MapVisualsError::Invalid(
+                    "grading LUT names must be 1-32 of [A-Za-z0-9_-]",
+                ));
+            }
+            other => other,
+        },
+        grading_strength: check_scalar(
+            raw.grading_strength,
+            1.0,
+            "grading_strength must be 0..=1",
+        )?,
+    };
+    // An unset bound takes its default, so `exposure_min = 3` alone is as wrong as with an
+    // explicit `exposure_max = 2`.
+    if post.exposure_min.unwrap_or(DEFAULT_EXPOSURE_MIN)
+        > post.exposure_max.unwrap_or(DEFAULT_EXPOSURE_MAX)
+    {
+        return Err(MapVisualsError::Invalid(
+            "exposure_min must not exceed exposure_max (defaults -2 and 2)",
+        ));
+    }
+    Ok(post)
 }
 
 /// ADR-0011 readability rules 2 and 3 that a descriptor alone can break.
@@ -1095,6 +1225,7 @@ impl MapVisuals {
             ground,
             atmosphere: check_atmosphere(raw.atmosphere)?,
             fog_of_war: check_fog_style(raw.fog_of_war)?,
+            post: check_post(raw.post)?,
         };
         if visuals.mesh_names().count() > MAX_MAP_MESHES {
             return Err(MapVisualsError::Invalid(
@@ -1242,6 +1373,7 @@ color = [0.2, 0.2, 0.2]
         assert_eq!(minimal.wall_height, DEFAULT_WALL_HEIGHT);
         assert!(minimal.props.is_empty() && minimal.wall_mesh.is_none());
         assert_eq!(minimal.lighting, MapLighting::default());
+        assert_eq!(minimal.post, MapPost::default());
     }
 
     #[test]
@@ -1290,6 +1422,71 @@ color = [0.2, 0.2, 0.2]
             "specular_tint = [1, 1, 2]",
             "unit_roughness = inf",
             "exposure = 1",
+        ] {
+            assert!(MapVisuals::parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn post_table_is_optional_and_validated() {
+        let base = "terrain = [0.1, 0.1, 0.1]\nwall = [0.2, 0.2, 0.2]\n[post]\n";
+        let visuals = MapVisuals::parse(&format!(
+            "{base}exposure = -0.5\nauto_exposure = true\nexposure_min = -1\nexposure_max = 1.5\n\
+             adaptation = 2\nbloom = 0.05\ngrading = \"ember\"\ngrading_strength = 0.9\n"
+        ))
+        .expect("post");
+        let post = &visuals.post;
+        assert_eq!(post.exposure, Some(-0.5));
+        assert_eq!(post.auto_exposure, Some(true));
+        assert_eq!(
+            (post.exposure_min, post.exposure_max),
+            (Some(-1.0), Some(1.5))
+        );
+        assert_eq!(post.adaptation, Some(2.0));
+        assert_eq!(post.bloom, Some(0.05));
+        assert_eq!(post.grading.as_deref(), Some("ember"));
+        assert_eq!(post.grading_strength, Some(0.9));
+        assert_eq!(visuals.lighting, MapLighting::default());
+        // An empty table is all defaults; boundary values are accepted.
+        let empty = MapVisuals::parse(base).expect("empty post");
+        assert_eq!(empty.post, MapPost::default());
+        for ok in [
+            "exposure = 4",
+            "exposure = -4",
+            "exposure_min = -8\nexposure_max = 8",
+            "exposure_min = 1\nexposure_max = 1",
+            "exposure_max = -2",
+            "adaptation = 0.1",
+            "adaptation = 10",
+            "bloom = 0",
+            "bloom = 0.1",
+            "grading_strength = 0",
+            "auto_exposure = false",
+        ] {
+            assert!(MapVisuals::parse(&format!("{base}{ok}")).is_ok(), "{ok}");
+        }
+        for bad in [
+            "exposure = 4.5",
+            "exposure = -5",
+            "exposure = nan",
+            "auto_exposure = 1",
+            "exposure_min = -9",
+            "exposure_max = 8.5",
+            "exposure_min = 1\nexposure_max = 0.5",
+            "exposure_min = 3",
+            "exposure_max = -3",
+            "adaptation = 0",
+            "adaptation = 11",
+            "bloom = -0.01",
+            "bloom = 0.11",
+            "bloom = inf",
+            "grading = \"../ember\"",
+            "grading = \"ember.cube\"",
+            "grading = \"\"",
+            "grading_strength = 1.1",
+            "grading_strength = -0.1",
+            "vignette = 0.5",
+            "sun_intensity = 1",
         ] {
             assert!(MapVisuals::parse(&format!("{base}{bad}")).is_err(), "{bad}");
         }

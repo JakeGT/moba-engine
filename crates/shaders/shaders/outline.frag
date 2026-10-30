@@ -9,7 +9,8 @@
 layout(set = 0, binding = 0) uniform usampler2D outline_ids;
 
 layout(push_constant) uniform OutlinePush {
-    // Slot 0: x the widest slot (pixels, at most 4), y 1 = the target is *_SRGB.
+    // Slot 0: x the widest slot (pixels, at most 4), y 1 = the target is *_SRGB, zw the last
+    // pixel of this frame's rendered sub-rectangle (render scale): taps never read past it.
     // Slots 1..7: rgb linear display colour, w width in pixels (0 = off).
     vec4 palette[8];
 } push;
@@ -22,7 +23,7 @@ const vec2 DIRECTIONS[8] = vec2[8](
 
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
-    ivec2 last = textureSize(outline_ids, 0) - 1;
+    ivec2 last = min(ivec2(push.palette[0].zw), textureSize(outline_ids, 0) - 1);
     uint own = texelFetch(outline_ids, pixel, 0).r;
     int reach = min(int(ceil(push.palette[0].x)), 4);
     uint best = 0u;

@@ -125,13 +125,15 @@ frame, Low must hold on min-spec, and three things specific to this work:
 - **Shading.** `ambient_occlusion()` in `shade()` multiplies **only the ambient line**
   (diffuse and specular ambient): `surface.occlusion × baked × ssao`. The baked term is the
   map at the fragment's xz, faded to 1 over the falloff height (3 m), so terrain darkens
-  around walls and props and every unit's feet darken near them. `ssao` is 1 until R6's
-  GTAO writes it (see §5); the product keeps the three composable. Every tier samples it
+  around walls and props and every unit's feet darken near them. The `ssao` hook is where
+  R6's GTAO joins (§6: the merged term is `min(surface occlusion, GTAO) × baked`). Every
+  tier samples it
   (one fetch); it is the Low tier's main "lit" cue. Lightmaps were optional and are not
   done: the board has one sun and the shadow map is on every tier.
 
 ### 4. Depth pre-pass and contact shadows (High and up)
-- **`depth_prepass`** (High, Ultra; or whenever screen outlines are on) draws terrain, static,
+- **The depth pre-pass** (`prepass` since the R6 merge, §6; High, Ultra; or whenever screen
+  outlines or contact shadows are on) draws terrain, static,
   skinned and VAT units depth-only into the frame's `depth` (with the ID target when screen
   outlines are on), **without depth bias**. Vertex positions are `invariant` in every scene
   vertex shader (unit, skinned, terrain, VAT), so the pre-pass and the scene compute the same
@@ -147,15 +149,15 @@ frame, Low must hold on min-spec, and three things specific to this work:
   it before the shadow strength floor, so rule 2 (shadows never black out a unit) still
   holds. Offscreen views bind a 1×1 white default.
 - **For R6.** The pre-pass depth is complete and sampled-capable (`SHADER_READ_ONLY_OPTIMAL`
-  through `Access::SampledFragment`) between `depth_prepass` and `scene`. GTAO should run
-  there (after or beside `contact_shadows`), write its own screen-space AO target, and
-  multiply it in through the `ssao` hook of `ambient_occlusion()`; with GTAO on, the
-  pre-pass condition becomes "contact shadows, screen outlines or SSAO".
+  through `Access::SampledFragment`) between the pre-pass and `scene`, where GTAO runs beside
+  `contact_shadows`; the pre-pass condition is "AO, contact shadows or screen outlines" (done
+  on the merge, §6).
 
 ### 5. Frame, tiers and switches
 ```text
-(portraits, minimap) → vfx_simulate → (shadow) → (depth_prepass) → (contact_shadows) → scene
-  → vfx_draw → (vfx_resolve) → composite → (outline) → ui → (capture)
+(portraits, minimap) → (fow-raster → fow-resolve) → vfx_simulate → (shadow) → (prepass)
+  → (contact_shadows) → (ao → ao_blur) → scene → vfx_draw → (vfx_resolve)
+  → (bloom, exposure) → composite → (outline) → (fxaa) → (upscale) → ui → (capture)
 ```
 The graph's limits rise from 12 passes and 24 resources to 32 and 48 (a `u64` resource mask; the
 profiler's query pools follow the pass limit), the headroom R3a and R6 need as well.
@@ -182,69 +184,74 @@ hull draws (the VAT layout disturbs sets 2/3, and both only use sets 0/1). R3a (
 edge-mesh cliffs are static instances, drawn with the units) with `terrain.vert`'s own
 `invariant` position and its `Terrain` vertex layout; the sky stays a scene-pass draw on the
 far plane, which the loaded pre-pass depth leaves at 1; `ao-bake` places walls with
-`moba_assets::wall_box`, the client's own placement math. R6 (post, ADR-0015, #334) lands
-next. On its merge:
-- **One pre-pass.** R6 adds a depth `prepass` before `scene` (when its AO is on, High and
-  up) that writes the depth GTAO reads and the scene loads. R2b's `depth_prepass` folds into
-  it: R6's pass gains the optional outline-ID attachment, and its condition becomes "AO,
-  contact shadows or screen outlines". `contact_shadows` then runs beside R6's `ao` on the
-  same depth.
-- **MSAA 4× (Ultra).** R6's pre-pass renders a multisampled depth and resolves sample 0
-  into `depth`. The ID target is a 4× `R8_UINT` attachment, **not resolved**: the outline
-  pass reads sample 0 with `usampler2DMS` + `texelFetch(…, 0)` (an integer resolve is only
-  `SAMPLE_ZERO` anyway, and skipping it saves a pass and an image). 4× integer colour needs
-  `framebufferIntegerColorSampleCounts` to include 4: the renderer queries it, and a device
-  without it keeps MSAA for the scene and draws hull outlines instead (one log line).
-  Contact shadows read the resolved depth. Clustered lights are part of `shade()` and are
-  unchanged by MSAA. The hull pipelines (Low/Medium, the fallback, or `MOBA_OUTLINES=hull`)
-  take the scene pass's sample count like the other scene pipelines.
-- **Render scale, dynamic resolution, FXAA and the upscale.** Under R6 the scene renders
-  into a sub-rectangle (`scale × native`) of window-sized `Render { shift: 0 }` targets; the
-  composite writes `ldr`, then `fxaa` and/or `upscale` write the swapchain. R2b follows:
-  the ID target and the contact-shadow target are allocated as `Render { shift: 0 }`
-  (`Render { shift: 1 }` for the half-resolution contact term below); the pre-pass,
-  `contact_shadows` and `outline` set their viewport and scissor to the frame's render
-  sub-rectangle and clamp every tap (outline dilation, contact march) to it, so nothing
-  reads stale texels outside it. The `outline` pass runs **on `ldr` after the composite and
-  before `fxaa`** (render resolution, so the ID lookup is 1:1 and the outline is
-  anti-aliased and upscaled with the rest of the scene); its widths are scaled by the
-  render scale so they stay constant in output pixels. Without FXAA or a scale (composite
-  straight to the swapchain) it stays where it is now.
-- **AO composition.** `ambient × surface occlusion × baked × GTAO`: R6's GTAO term becomes
-  the `ssao` factor of `ambient_occlusion()`. With R3a's relief AO in the terrain's surface
-  occlusion as well, the merge measures the product on ember and frost (the darkest terrain
-  texel and the mean at wall bases, before and after) and, if the stack is over-dark, floors
-  the product (not each term) at the stylisation's ambient floor.
+`moba_assets::wall_box`, the client's own placement math. R6 (post, ADR-0015, #334) is
+merged as well:
+- **One pre-pass.** R6's depth `prepass` (before `scene`; the depth GTAO reads and the scene
+  loads) is the only one: R2b's `depth_prepass` folded into it. It gains the optional
+  outline-ID attachment, VAT units (`vat_prepass.vert`) and R2b's ID fragment shader, and it
+  runs when AO, contact shadows or screen outlines are on (`FrameSpec::has_prepass`; a
+  frame with only one of R2b's features gets only that feature's target).
+  `contact_shadows` runs after it on the same depth, beside R6's `ao`.
+- **MSAA 4× (Ultra).** R6's pre-pass renders a multisampled depth and resolves sample 0 into
+  `depth`. The ID target is a 4× `R8_UINT` attachment resolved the same way, with
+  `SAMPLE_ZERO` in the pre-pass's own dynamic-rendering resolve, into a single-sample
+  `outline-ids` image the outline pass reads with `texelFetch` (an integer resolve is only
+  `SAMPLE_ZERO` anyway, and it needs no extra pass). 4× integer colour needs the device's
+  `framebufferIntegerColorSampleCounts` to include 4: the renderer queries it for
+  `R8_UINT`, and a device without it keeps MSAA for the scene and draws hull outlines
+  instead (one log line). Contact shadows read the resolved depth. Clustered lights are part
+  of `shade()` and are unchanged by MSAA. The hull pipelines (Low/Medium, the fallback, or
+  `MOBA_OUTLINES=hull`) take the scene pass's sample count like the other scene pipelines.
+- **Render scale, dynamic resolution, FXAA and the upscale.** The scene renders into a
+  sub-rectangle (`scale × native`) of window-sized `Render { shift: 0 }` targets; the
+  composite writes `ldr`, then `fxaa` and/or `upscale` write the swapchain. The ID and
+  contact-shadow targets are `Render { shift: 0 }` too; the pre-pass, `contact_shadows` and
+  `outline` set their viewport and scissor to the frame's render sub-rectangle, and every
+  tap is clamped to it (the contact march to the camera's `viewport`, the outline dilation
+  to the sub-rectangle's last pixel in its push block), so nothing reads texels a larger
+  scale left outside it. `outline` runs **on `ldr` after the composite and before `fxaa`**
+  (render resolution, so the ID lookup is 1:1 and the outline is anti-aliased and upscaled
+  with the rest of the scene), blending with source alpha and keeping the destination alpha
+  (FXAA's luma, slightly stale on outline pixels); its widths are multiplied by the render
+  scale so they stay constant in output pixels. Without FXAA or a scale (Ultra's MSAA at
+  scale 1) it draws on the swapchain image.
+- **AO composition.** The ambient is multiplied by
+  `min(surface occlusion, GTAO) × baked`, with R6's specular occlusion from the result:
+  R6 takes the minimum of the surface's (and R3a's relief) occlusion and its GTAO, so the
+  screen-space term never darkens twice where both see the same crease, and the baked map
+  AO multiplies on top. The relief × baked product was measured on ember and frost
+  (perf/0020: frost overview at most 15/255 darker on 2.8 % of pixels, the darkest pixel
+  unchanged); GTAO entering by `min` cannot deepen it further, so no floor was added.
 - **Relief under the bake.** The bake's height field starts at 0, not at R3a's terrain
   heights: on the board the relief is at most 0.5 m against 3–5 m walls (a horizon change
   below the 8-bit AO's resolution), and the cliffs are outside the baked square, where R3a's
   own relief AO darkens them.
 - **Set 3 and the sampler budget.** Set 3 is `0–4` R2a lighting, `5` fog of war, `6–8`
-  terrain arrays, `9` the terrain block (R3a), `10` R6's AO (left free on this branch), then
-  R2b's `11` light list, `12` light grid (storage buffers), `13` baked AO and `14` contact
-  shadows (combined image samplers through the existing linear-clamp and plain shadow
-  samplers; no new sampler object). R3a's `descriptor_budget` counts every scene-layout
-  binding per stage from the same arrays the set layouts are built from: a unit test pins
-  the fragment stage at **15 of 16** (material 4, lighting 5, fog 1, terrain 3, R2b 2; the
-  VAT layout 11) against the Vulkan minimum of `maxPerStageDescriptorSamplers` and
+  terrain arrays, `9` the terrain block (R3a), `10` R6's AO, then R2b's `11` light list,
+  `12` light grid (storage buffers), `13` baked AO and `14` contact shadows (combined image
+  samplers through the existing linear-clamp and plain shadow samplers; no new sampler
+  object). R3a's `descriptor_budget` counts every scene-layout binding per stage from the
+  same arrays the set layouts are built from: a unit test pins the fragment stage at
+  **16 of 16** (material 4, lighting 5, fog 1, terrain 3, R6's AO 1, R2b 2; the VAT layout
+  12) against the Vulkan minimum of `maxPerStageDescriptorSamplers` and
   `maxPerStageDescriptorSampledImages`, and renderer creation fails with
-  `RenderError::DescriptorLimit` on a device below it. R6's AO makes it exactly 16, so the
-  contact term moving into R6's AO target (next item) is also what restores headroom: back
-  to 15 once `contact_shadows` and binding 14 are gone.
-- **Contact shadows go half resolution, inside R6's AO.** At full resolution they are the
-  largest R2b cost (perf/0020). R6's AO target is half resolution and bilaterally blurred,
-  so it cannot hold a full-resolution contact term as a second channel. Instead the contact
-  march moves **into R6's GTAO pass**: it already reconstructs each half-resolution
-  pixel's position from the pre-pass depth, so it marches towards the sun there too and
-  writes visibility into a second channel of `ao-raw` (RG16F becomes RGBA16F, or a second
-  `R8` target), which `ao_blur`'s depth-aware blur filters with the occlusion. The scene
-  samples one half-resolution target for both terms (one sampler, freeing binding and
-  budget), `contact_shadows` and its full-resolution target are removed, and with GTAO off
-  (`MOBA_AO=off` but contact shadows on) the same shader runs with the AO term disabled.
-- **Graph limits and frame log.** This branch raises the graph to 32 passes / 48 resources
-  with a `u64` mask, the same limits as R6, so the rebase keeps one copy; the frame-log lanes
-  take R6's layout, with `contact_shadows` and `outline` appended and R2b's
-  `depth_prepass` lane merged into R6's `prepass`.
+  `RenderError::DescriptorLimit` on a device below it. The budget is exactly full: the next
+  set-3 sampler needs the follow-up below (or another binding retired) first.
+- **Follow-up: contact shadows at half resolution, inside R6's AO.** At full resolution they
+  are the largest R2b cost (perf/0020). R6's AO target is half resolution and bilaterally
+  blurred, so it cannot hold a full-resolution contact term as a second channel. Instead the
+  contact march would move **into R6's GTAO pass**: it already reconstructs each
+  half-resolution pixel's position from the pre-pass depth, so it can march towards the sun
+  there too and write visibility into a second channel of `ao-raw` (or a second `R8`
+  target), which `ao_blur`'s depth-aware blur filters with the occlusion. The scene would
+  sample one half-resolution target for both terms (freeing binding 14 and one sampler of
+  the budget), `contact_shadows` and its full-resolution target would be removed, and with
+  GTAO off (`MOBA_AO=off` but contact shadows on) the same shader would run with the AO term
+  disabled. Not part of this change.
+- **Graph limits and frame log.** The graph is 32 passes / 48 resources with a `u64` mask,
+  as in R6. The frame log takes R6's lanes, R2b's `depth_prepass` lane merged into R6's
+  `prepass`, with `contact_shadows` and `outline` after R6's post lanes and the `lights`
+  statistic after the particle statistics.
 
 ## Alternatives considered
 - **View-space froxel clusters (16×9×24).** The textbook choice; on this camera most slices
@@ -262,7 +269,7 @@ next. On its merge:
 - **SSAO-only AO.** Low has no depth pre-pass; baked AO is what makes Low look lit.
 - **Contact shadows inline in the scene shader.** Would sample the depth attachment being
   written (a feedback loop) or force a read-only depth scene pass; a separate pass into a
-  small target is simpler and is the slot R6's GTAO needs anyway.
+  small target is simpler, and it shares the depth R6's GTAO reads.
 
 ## Consequences
 - New public API (additive, `#[non_exhaustive]` with builders): `PointLight`, `MAX_LIGHTS`,
@@ -274,7 +281,7 @@ next. On its merge:
   `VfxEffect::light`, `BakedAoDesc`, `ao_fingerprint`, `MapLighting::{baked_ao,
   ao_strength}`.
 - The instance record grows to 128 bytes (R4b's 112 plus the outline slot `params`); the
-  camera uniform from R3a's 1,376 to 1,664 bytes.
+  camera uniform from R6's 1,408 to 1,696 bytes.
 - No wire, replay, simulation-logic or content-hash change: effects, map visuals and bakes
   are client-local and cosmetic.
 - Cost, validation and goldens: [perf/0020](../perf/0020-lights-outlines-ao.md). Both

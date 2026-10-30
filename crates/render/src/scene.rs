@@ -8,6 +8,7 @@ use crate::ui::UiImage;
 
 use crate::lighting::{FrameLighting, SceneLighting};
 use crate::lights::PointLight;
+use crate::post::ScreenEffects;
 use crate::vfx::VfxFrame;
 use crate::world::{FogOfWar, SceneAtmosphere, WorldFrame};
 
@@ -283,14 +284,6 @@ impl OutlinePalette {
         }
         out
     }
-
-    /// The widest slot, pixels.
-    pub(crate) fn max_width(&self) -> f32 {
-        self.sanitized()
-            .iter()
-            .map(|slot| slot[3])
-            .fold(0.0, f32::max)
-    }
 }
 
 impl Default for OutlinePalette {
@@ -330,6 +323,10 @@ pub struct Scene<'a> {
     pub lights: &'a [PointLight],
     /// Outline colours and widths by slot ([`UnitInstance::outline`]); none by default.
     pub outlines: OutlinePalette,
+    /// Gameplay screen effects (R6, ADR-0015): death desaturation and the damage /
+    /// low-health vignette; [`ScreenEffects::NONE`] unless set. Ignored for offscreen
+    /// renders.
+    pub effects: ScreenEffects,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -479,6 +476,7 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            effects: ScreenEffects::NONE,
             fog_of_war: None,
             atmosphere: SceneAtmosphere::DEFAULT,
             lights: &[],
@@ -501,6 +499,7 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            effects: ScreenEffects::NONE,
             fog_of_war: None,
             atmosphere: SceneAtmosphere::DEFAULT,
             lights: &[],
@@ -540,6 +539,13 @@ impl<'a> Scene<'a> {
     #[must_use]
     pub const fn with_lighting(mut self, lighting: SceneLighting) -> Self {
         self.lighting = lighting;
+        self
+    }
+
+    /// Sets the gameplay screen effects ([`Scene::effects`]).
+    #[must_use]
+    pub const fn with_effects(mut self, effects: ScreenEffects) -> Self {
+        self.effects = effects;
         self
     }
 
@@ -603,6 +609,9 @@ pub(crate) struct CameraUniform {
     haze_params: [f32; 4],
     sky_zenith: [f32; 4],
     sky_horizon: [f32; 4],
+    // R6 (ADR-0015).
+    post_params: [f32; 4],
+    post_clamp: [f32; 4],
     // R2b (ADR-0016).
     inv_view_proj: [[f32; 4]; 4],
     viewport: [f32; 4],
@@ -670,6 +679,8 @@ impl CameraUniform {
             haze_params: world.haze_params,
             sky_zenith: world.sky_zenith,
             sky_horizon: world.sky_horizon,
+            post_params: lighting.post_params,
+            post_clamp: lighting.post_clamp,
             inv_view_proj: inverse.to_cols_array_2d(),
             viewport: [width, height, 1.0 / width, 1.0 / height],
             light_grid: lighting.light_grid,
@@ -754,12 +765,13 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, sh), 1120);
         assert_eq!(offset_of!(CameraUniform, fog_rect), 1264);
         assert_eq!(offset_of!(CameraUniform, sky_horizon), 1360);
-        // R2b (ADR-0016) members follow R3a's.
-        assert_eq!(offset_of!(CameraUniform, inv_view_proj), 1376);
-        assert_eq!(offset_of!(CameraUniform, light_info), 1472);
-        assert_eq!(offset_of!(CameraUniform, contact), 1520);
-        assert_eq!(offset_of!(CameraUniform, outline_palette), 1536);
-        assert_eq!(size_of::<CameraUniform>(), 1664);
+        // R6 (ADR-0015) appends after R3a's block, then R2b (ADR-0016).
+        assert_eq!(offset_of!(CameraUniform, post_params), 1376);
+        assert_eq!(offset_of!(CameraUniform, inv_view_proj), 1408);
+        assert_eq!(offset_of!(CameraUniform, light_info), 1504);
+        assert_eq!(offset_of!(CameraUniform, contact), 1552);
+        assert_eq!(offset_of!(CameraUniform, outline_palette), 1568);
+        assert_eq!(size_of::<CameraUniform>(), 1696);
     }
 
     #[test]
@@ -774,6 +786,11 @@ mod tests {
         let uploaded = palette.sanitized();
         assert_eq!(uploaded[0], [0.0; 4], "slot 0 is never drawn");
         assert_eq!(uploaded[2], [1.0, 0.0, 0.5, super::MAX_OUTLINE_WIDTH]);
-        assert!((palette.max_width() - super::MAX_OUTLINE_WIDTH).abs() < 1e-6);
+        let widest = palette
+            .sanitized()
+            .iter()
+            .map(|slot| slot[3])
+            .fold(0.0, f32::max);
+        assert!((widest - super::MAX_OUTLINE_WIDTH).abs() < 1e-6);
     }
 }

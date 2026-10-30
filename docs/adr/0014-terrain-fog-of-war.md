@@ -209,13 +209,14 @@ unit test pins the current total. Fragment stage today:
 | 3 | 7 | `terrain_albedo` (2D array) | R3a | 1 |
 | 3 | 8 | `terrain_normal` (2D array) | R3a | 1 |
 | 3 | 9 | `TerrainBlock` uniform | R3a | – |
-| 3 | 10 | (reserved: R6's screen-space AO) | R6 | (1) |
+| 3 | 10 | `ambient_occlusion` (screen-space AO) | R6 ([ADR-0015](0015-post-processing.md)) | 1 |
 | 3 | 11, 12 | light list, light grid (storage) | R2b ([ADR-0016](0016-lights-outlines-ao.md)) | – |
 | 3 | 13 | `baked_ao_map` | R2b | 1 |
 | 3 | 14 | `contact_map` | R2b | 1 |
-| | | | **Total** | **15 of 16** (16 with R6) |
+| | | | **Total** | **16 of 16** |
 
-R3a left three samplers for later set-3 work; R2b took two and R6's AO takes the last.
+R3a left three samplers for later set-3 work; R6's AO took one and R2b the other two, so the
+budget is full (ADR-0016 §6 has the follow-up that frees one).
 ADR-0016 §6 plans the headroom back: the contact term moves into R6's AO target. The terrain already packs its layers
 into arrays (three samplers for up to eight layers); the next step, if more room is needed,
 is to put the splat weights into the albedo array or to merge set-3 bindings into arrays of

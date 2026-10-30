@@ -3,7 +3,8 @@
 # pixels on both outline paths. The VFX preview arena stages an enemy-hero-outlined unit
 # (MOBA_OUTLINE_PROBE): `hidden` puts it behind a wall, and that capture must be
 # byte-identical to the same frame with MOBA_OUTLINES=off, on the hull path (Low) and the
-# screen-space path (High); `open` is the control, where each path must change the frame.
+# screen-space path (High with FXAA, Ultra with the 4x MSAA ID target); `open` is the
+# control, where each path must change the frame.
 #
 #   scripts/outline-probe.sh [client binary] [output dir]
 #
@@ -25,7 +26,7 @@ capture() {
 }
 status=0
 for probe in hidden open; do
-  for case in low:hull high:screen; do
+  for case in low:hull high:screen ultra:screen; do
     quality=${case%%:*}
     path=${case##*:}
     capture "$probe-$quality-off" MOBA_OUTLINE_PROBE="$probe" MOBA_QUALITY="$quality" \

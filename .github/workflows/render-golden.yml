@@ -165,6 +165,55 @@ jobs:
           status=$?
           cat vat-fingerprint.log
           exit $status
+      # Post topologies (R6, ADR-0015): Ultra (MSAA 4x + GTAO, with VAT minions through the
+      # multisampled pipelines and the depth prepass) and Low at a fixed render scale below 1
+      # (FXAA fast + the bilinear upscale). Captures pin dynres, eye adaptation and the
+      # screen effects off.
+      - name: Ultra capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          timeout 240 xvfb-run -a ./target/release/moba-client \
+            > ultra-capture.log 2>&1 || { cat ultra-capture.log; exit 1; }
+          test -s render-ultra-actual.ppm
+        env:
+          MOBA_QUALITY: ultra
+          MOBA_STRESS_MINIONS: "64"
+          MOBA_LOCAL_CAMERA_DISTANCE: "40"
+          MOBA_SMOKE_FRAMES: "120"
+          MOBA_CAPTURE: render-ultra-actual.ppm
+          MOBA_CAPTURE_FRAME: "90"
+      - name: Compare Ultra fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          ./target/release/image-check render-ultra-actual.ppm \
+            --expected tests/golden/render-ultra-fingerprint.rgb \
+            --diff render-ultra-diff.ppm > ultra-fingerprint.log 2>&1
+          status=$?
+          cat ultra-fingerprint.log
+          exit $status
+      - name: Low scaled capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          timeout 180 xvfb-run -a ./target/release/moba-client \
+            > low-capture.log 2>&1 || { cat low-capture.log; exit 1; }
+          test -s render-low-actual.ppm
+        env:
+          MOBA_QUALITY: low
+          MOBA_RENDER_SCALE: "0.75"
+          MOBA_SMOKE_FRAMES: "120"
+          MOBA_CAPTURE: render-low-actual.ppm
+          MOBA_CAPTURE_FRAME: "90"
+      - name: Compare Low scaled fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          ./target/release/image-check render-low-actual.ppm \
+            --expected tests/golden/render-low-fingerprint.rgb \
+            --diff render-low-diff.ppm > low-fingerprint.log 2>&1
+          status=$?
+          cat low-fingerprint.log
+          exit $status
       # R3a map coverage (ADR-0014): the terrain, fog of war, height fog, sky and map edge
       # from two more cameras. The whole-map overview is networked (fog of war from the blue
       # team's vision, pinned to tick 120); the horizon view is the local preview's low
@@ -216,6 +265,14 @@ jobs:
             ember-capture.log
             ember-fingerprint.log
             outline-probe/
+            render-ultra-actual.ppm
+            render-ultra-diff.ppm
+            ultra-capture.log
+            ultra-fingerprint.log
+            render-low-actual.ppm
+            render-low-diff.ppm
+            low-capture.log
+            low-fingerprint.log
             render-overview-actual.ppm
             render-overview-diff.ppm
             overview-capture.log

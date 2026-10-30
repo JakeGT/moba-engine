@@ -200,6 +200,13 @@ has_terrain}`, `UiDrawList::fog_mask` and `UiVertex::MODE_FOG`, `vision_sources_
 `MIN_/MAX_FOG_OF_WAR_RESOLUTION` and `FOG_OF_WAR_SETTLE_DT`. `Scene::vision`
 (`VisionCircles`) stays for the legacy mode and is used as a fallback when a scene sets no
 `fog_of_war`.
+R6 (ADR-0015) added post-processing: `PostConfig` (`for_tier`, `off`, a `with_*` per field, `sanitized`,
+`scaled`), `AntiAliasing` and `UpscaleFilter` (`name`, `from_name`), `PostLook` (`DEFAULT` +
+`with_*`, `sanitized`: per-map exposure, eye adaptation, bloom and grading strength),
+`ScreenEffects` (`NONE` + `with_desaturation`, `with_vignette`; `Scene::effects`/
+`with_effects`), `MIN_RENDER_SCALE`/`MAX_RENDER_SCALE`, `RenderConfig::post`/`with_post`/
+`effective_post`, `Renderer::{post_config, post_look, set_post_look, set_grading_lut,
+render_scale, render_extent}` and `GpuTimings::group_ms`.
 R2b (ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `PointLight` (`new`;
 `Scene::lights`/`with_lights`), `LightStats` (`Renderer::light_stats`), `MAX_LIGHTS`,
 `MAX_LIGHTS_PER_CELL`, `OutlineMode` (`name`, `from_name`), `OutlinePalette` (`NONE`,
@@ -211,7 +218,8 @@ with a `with_*` each.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm); (R3a) `TerrainShading`, `FogOfWarMode`.
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
-  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R2b): `OutlineMode`.
+  `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R6):
+  `AntiAliasing`, `UpscaleFilter`; (R2b): `OutlineMode`.
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
@@ -219,6 +227,9 @@ with a `with_*` each.
 - `#[non_exhaustive]` structs (R3a): `WorldConfig`, `SceneAtmosphere`, `TerrainData`,
   `FogOfWar`, `VisionSource` and `VisionWall`, each with a constructor and `with_*`
   builders.
+- `#[non_exhaustive]` structs (R6): `PostConfig` (`for_tier`/`Default` + `with_*`), `PostLook`
+  (`DEFAULT`/`Default` + `with_*`) and `ScreenEffects` (`NONE`/`Default` + `with_*`); every
+  value is clamped by `sanitized`, which the renderer applies.
 - `#[non_exhaustive]` structs (R2b): `PointLight` (public fields, `new`), `BakedAo` (`new` +
   `with_*`), `OutlinePalette` (`NONE` + `with_slot`; public `slots`, the uniform layout) and
   the read-only `LightStats`.
@@ -263,7 +274,7 @@ descriptors (ADR-0013: `VfxEffect`, `VfxEmitter`, `VfxBindings`, `VfxAbilityBind
 `VfxUnitEffects`, `VfxSprite`/`VFX_SPRITES`, `procedural_atlas`, `vfx_path`; the enums
 `VfxPrimitive`, `VfxBlend`, `VfxAnchor`, `VfxDirection`, `VfxShape`, `VfxImportance` and
 `VfxError` are `#[non_exhaustive]`, and the structs are validated, built by `parse`/`load_file`),
-and R4b's additions (ADR-0012 amendment): vertex-animation textures (`VatDescriptor`
+R4b's additions (ADR-0012 amendment): vertex-animation textures (`VatDescriptor`
 (`parse`/`load_file`/`to_toml`/`clip`/`check_texture`/`check_mesh`), `VatClip`,
 `VatPlaybackParams` (`validated`), `VatBakeClip::new`, `bake_vat`, `mesh_hash`, `vat_extent`, `vat_paths`,
 `VatAnimation::bind`, `VatPlayer`, `VatPose`/`VatSample`/`VatQuality` (`FULL`,
@@ -282,6 +293,14 @@ R3a added the terrain (ADR-0014:
 (with the mesh footprint), `edge_footprint_radius`, `board_edge_relief`,
 `MapConsistency`/`check_map_consistency`/`check_map_consistency_with_edge_footprint`,
 `AssetFileProblem::Texture` and the terrain constants, including `TERRAIN_GRID_SIZES`).
+R6 added the post-processing assets
+(ADR-0015: `MapPost`/`MapVisuals::post` with the `DEFAULT_BLOOM_STRENGTH`, `DEFAULT_ADAPTATION`, `DEFAULT_EXPOSURE_MIN`/`MAX` defaults, and the
+`.cube` grading LUT `GradingLut` (`identity`, `from_texels`, `parse`, `load_file`, `sample`,
+`to_cube_string`, `check_team_readability`), `GradingLutError` (`Unreadable` for the
+readability check), `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
+`MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`, and the readability rule's
+`READABILITY_TEAMS`, `MAX_TEAM_HUE_SHIFT`, `MIN_TEAM_CHROMA`, `MIN_TEAM_HUE_SEPARATION`; `GradingLut`, `GradingLutError` and `MapPost`
+are `#[non_exhaustive]`).
 R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
 `end`), `MAX_VFX_LIGHT_INTENSITY`/`MAX_VFX_LIGHT_RADIUS`, `BakedAoDesc` (`new`, `with_height`,
 `to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`, `PropMeshShape`,

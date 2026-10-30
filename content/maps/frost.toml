@@ -106,3 +106,9 @@ darken = 0.6
 desaturate = 0.6
 mist_height = 4.0
 mist = 0.5
+# Post-processing (R6): the cool, crisp frost grade; restrained bloom over bright snow.
+[post]
+exposure = 0.0                   # EV stops
+bloom = 0.04
+grading = "frost"                # grading/frost.cube: grade-bake bake --preset frost --size 17
+grading_strength = 0.85

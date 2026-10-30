@@ -122,16 +122,24 @@ impl OutlinePass {
         }
     }
 
-    /// Records the outlines over `target` (loaded), or nothing when every slot is off.
+    /// Records the outlines over the `extent` sub-rectangle of `target` (loaded), or nothing
+    /// when every slot is off. `scale` is the render scale: widths are output pixels, so they
+    /// shrink with the rendered sub-rectangle and the upscale brings them back.
     pub(crate) fn record(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
         target: vk::ImageView,
         extent: vk::Extent2D,
+        scale: f32,
         palette: &OutlinePalette,
     ) {
-        let push = push_block(palette, super::composite::is_srgb(self.swapchain_format));
+        let push = push_block(
+            palette,
+            super::composite::is_srgb(self.swapchain_format),
+            scale,
+            extent,
+        );
         if push.palette[0][0] <= 0.0 {
             return;
         }
@@ -179,10 +187,33 @@ impl OutlinePass {
     }
 }
 
-/// The push block for `palette`: the sanitised slots, slot 0 = (widest width, sRGB flag).
-fn push_block(palette: &OutlinePalette, srgb: bool) -> OutlinePush {
+/// The push block for `palette`: the sanitised slots with their widths times `scale`, and
+/// slot 0 = (widest scaled width, sRGB flag, the last pixel of the `extent` sub-rectangle,
+/// which every tap is clamped to: the ID texels past it are a larger scale's, not this
+/// frame's).
+fn push_block(
+    palette: &OutlinePalette,
+    srgb: bool,
+    scale: f32,
+    extent: vk::Extent2D,
+) -> OutlinePush {
+    let scale = if scale.is_finite() {
+        scale.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let mut slots = palette.sanitized();
-    slots[0] = [palette.max_width(), f32::from(u8::from(srgb)), 0.0, 0.0];
+    let mut widest = 0.0_f32;
+    for slot in slots.iter_mut().skip(1) {
+        slot[3] *= scale;
+        widest = widest.max(slot[3]);
+    }
+    slots[0] = [
+        widest,
+        f32::from(u8::from(srgb)),
+        extent.width.saturating_sub(1) as f32,
+        extent.height.saturating_sub(1) as f32,
+    ];
     OutlinePush { palette: slots }
 }
 
@@ -194,13 +225,13 @@ fn build_pipeline(
 ) -> RenderResult<GraphicsPipeline> {
     let vertex = shaders.module(device, "fullscreen.vert")?;
     let fragment = shaders.module(device, "outline.frag")?;
-    let handle = pipeline::create_fullscreen_blend(
+    let handle = pipeline::create_fullscreen(
         device,
         layout,
         vertex.handle(),
         fragment.handle(),
         swapchain_format,
-        true,
+        pipeline::FullscreenBlend::Alpha,
     )?;
     Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
 }
@@ -209,6 +240,7 @@ fn build_pipeline(
 mod tests {
     use super::{OutlinePush, push_block};
     use crate::scene::OutlinePalette;
+    use ash::vk;
     use moba_core::math::Vec3;
 
     #[test]
@@ -217,9 +249,19 @@ mod tests {
         let palette = OutlinePalette::NONE
             .with_slot(1, Vec3::new(0.1, 0.2, 1.0), 1.5)
             .with_slot(6, Vec3::ONE, 3.0);
-        let push = push_block(&palette, true);
-        assert_eq!(push.palette[0], [3.0, 1.0, 0.0, 0.0]);
+        let extent = vk::Extent2D {
+            width: 1440,
+            height: 810,
+        };
+        let push = push_block(&palette, true, 1.0, extent);
+        assert_eq!(push.palette[0], [3.0, 1.0, 1439.0, 809.0]);
         assert_eq!(push.palette[1], [0.1, 0.2, 1.0, 1.5]);
-        assert_eq!(push_block(&OutlinePalette::NONE, false).palette[0][0], 0.0);
+        // At render scale 0.5 the widths halve (the upscale doubles them back).
+        let half = push_block(&palette, false, 0.5, extent);
+        assert_eq!(half.palette[0][0], 1.5);
+        assert_eq!(half.palette[1][3], 0.75);
+        assert_eq!(half.palette[6][3], 1.5);
+        let off = push_block(&OutlinePalette::NONE, false, 1.0, extent);
+        assert_eq!(off.palette[0][0], 0.0);
     }
 }

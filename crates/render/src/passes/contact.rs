@@ -160,6 +160,7 @@ fn build_pipeline(
         vertex.handle(),
         fragment.handle(),
         CONTACT_FORMAT,
+        pipeline::FullscreenBlend::None,
     )?;
     Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
 }

@@ -2,8 +2,10 @@
 //!
 //! A frame is a precompiled render graph (ADR-0008, [`crate::frame_graph`]): the shadow pass
 //! renders the directional shadow map (when shadows are on), the scene pass renders into an
-//! HDR target with stylised PBR (ADR-0011), the composite pass tonemaps it into the swapchain
-//! image and the UI pass draws the HUD on top. Frames that re-render an offscreen image (R7b:
+//! HDR target with stylised PBR (ADR-0011) at the render resolution, the post chain (R6,
+//! ADR-0015: AO with its depth prepass, bloom, exposure, the composite's tonemap and grading,
+//! FXAA, the upscale) brings it to the swapchain image and the UI pass draws the HUD on top
+//! at native resolution. Frames that re-render an offscreen image (R7b:
 //! hero portraits, the baked minimap) run that image's pass first, with the scene pipelines,
 //! shadows off and the environment kept. With the fog-of-war texture (R3a, ADR-0014) two
 //! passes rasterise and resolve the team's vision before the shadow pass, and the scene
@@ -21,9 +23,10 @@ use moba_platform::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::device::DeviceContext;
+use crate::dynres::{self, DynamicResolution};
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::{
-    self, Binding, Bindings, DepthFeatures, FramePlan, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
+    self, Binding, Bindings, FramePlan, FrameSpec, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
     VfxMode,
 };
 use crate::instance::{InstanceContext, ValidationMode};
@@ -33,17 +36,18 @@ use crate::lighting::{
 };
 use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
-use crate::passes::composite::CompositePass;
 use crate::passes::contact::ContactPass;
 use crate::passes::fog::FogPass;
 use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
+use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
-    PrepassPipelineSpec, PrepassTarget, ScenePass, SceneTargets, ShadowPipelineSpec, ShadowTarget,
-    ViewBudget,
+    MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve, SceneTargets,
+    ShadowPipelineSpec, ShadowTarget, ViewBudget,
 };
 use crate::passes::vfx::{VfxPass, VfxTargets};
 use crate::pipeline_cache::PipelineCacheState;
+use crate::post::{AntiAliasing, PostConfig, PostLook};
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
@@ -51,7 +55,7 @@ use crate::scene::OutlinePalette;
 use crate::scene::{MeshId, OFFSCREEN_MAX_BONES, OFFSCREEN_MAX_INSTANCES, OffscreenRender, Scene};
 use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
-use crate::targets::{self, OffscreenTarget, TransientPool};
+use crate::targets::{self, OffscreenTarget, TargetExtents, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 use crate::world::{
@@ -132,6 +136,9 @@ pub struct RenderConfig {
     /// [`LightingConfig::for_tier`] of [`RenderConfig::quality_tier`]; set it to override a
     /// tier default or turn a feature off.
     pub lighting: Option<LightingConfig>,
+    /// Post-processing passes (ADR-0015). `None` (the default) uses
+    /// [`PostConfig::for_tier`] of [`RenderConfig::quality_tier`].
+    pub post: Option<PostConfig>,
     /// Terrain, fog-of-war and atmosphere features (ADR-0014). `None` (the default) uses
     /// [`WorldConfig::for_tier`] of [`RenderConfig::quality_tier`].
     pub world: Option<WorldConfig>,
@@ -162,6 +169,7 @@ impl Default for RenderConfig {
             vfx: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
             lighting: None,
+            post: None,
             world: None,
             max_vision_sources: DEFAULT_MAX_VISION_SOURCES,
         }
@@ -284,6 +292,22 @@ impl RenderConfig {
         self
     }
 
+    /// Returns this config with [`RenderConfig::post`] set.
+    #[must_use]
+    pub const fn with_post(mut self, post: Option<PostConfig>) -> Self {
+        self.post = post;
+        self
+    }
+
+    /// The post-processing passes this config asks for: [`RenderConfig::post`], else the
+    /// tier's defaults, sanitised.
+    #[must_use]
+    pub fn effective_post(&self) -> PostConfig {
+        self.post
+            .unwrap_or_else(|| PostConfig::for_tier(self.quality_tier))
+            .sanitized()
+    }
+
     /// Returns this config with [`RenderConfig::world`] set.
     #[must_use]
     pub const fn with_world(mut self, world: Option<WorldConfig>) -> Self {
@@ -361,11 +385,12 @@ impl Drop for Surface {
 ///
 /// Field order is load-bearing: GPU resources are declared before the device and the device
 /// before the surface/instance so that Rust drops them children-first.
+#[allow(clippy::struct_excessive_bools)] // Independent frame-state flags.
 pub struct Renderer {
     swapchain: Swapchain,
     transients: TransientPool,
     scene: ScenePass,
-    composite: CompositePass,
+    post: PostPass,
     ui: UiPass,
     /// The fog-of-war passes; `None` unless the fog of war uses the texture.
     fog: Option<FogPass>,
@@ -405,6 +430,22 @@ pub struct Renderer {
     lighting_config: LightingConfig,
     /// The shadow map, when shadows are on.
     shadow: Option<ShadowSpec>,
+    /// The post topology every plan shares (ADR-0015).
+    frame_spec: FrameSpec,
+    /// The post features in use (after device checks).
+    post_config: PostConfig,
+    /// The window-dependent transient sizes (swapchain and render allocation).
+    extents: TargetExtents,
+    /// The render sub-rectangle of the frame being recorded.
+    render_extent: vk::Extent2D,
+    /// Dynamic resolution, when on.
+    dynres: Option<DynamicResolution>,
+    /// When the previous frame was submitted (exposure adaptation's time step).
+    last_frame_at: Option<Instant>,
+    /// The next frame snaps the adapted exposure to the metered value.
+    exposure_reset: bool,
+    /// Adaptation time not yet applied (steps below the half-float minimum are deferred).
+    exposure_pending: f32,
     /// The world features in use (ADR-0014).
     world_config: WorldConfig,
     device: DeviceContext,
@@ -503,6 +544,26 @@ impl Renderer {
                  are clipped (the fit's lift covers 32 m casters)"
             );
         }
+        let mut post_config = config.effective_post();
+        if post_config.anti_aliasing == AntiAliasing::Msaa4
+            && !(device.msaa4 && targets::supports_msaa4(&device, hdr_format, depth_format))
+        {
+            eprintln!("[render] 4x MSAA unsupported for the scene targets; using FXAA");
+            post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
+        }
+        // Screen-space outlines under MSAA need a 4x integer (`R8_UINT`) ID attachment
+        // (`framebufferIntegerColorSampleCounts`); without it they fall back to the hull.
+        if post_config.anti_aliasing == AntiAliasing::Msaa4
+            && lighting_config.outlines == OutlineMode::Screen
+            && !targets::supports_msaa4_ids(&device)
+        {
+            eprintln!("[render] 4x integer colour MSAA unsupported; using hull outlines");
+            lighting_config = lighting_config.with_outlines(OutlineMode::Hull);
+        }
+        if post_config.dynamic_resolution && device.timestamp_valid_bits == 0 {
+            eprintln!("[render] dynamic resolution needs GPU timestamps; using a fixed scale");
+            post_config = post_config.with_dynamic_resolution(false);
+        }
         let world_config = config.effective_world();
         let world_config = world_config.with_fog_of_war_resolution(
             world_config
@@ -546,26 +607,31 @@ impl Renderer {
             Some(_) if budget.oit => VfxMode::Oit,
             Some(_) => VfxMode::Unsorted,
         };
-        let depth_features = DepthFeatures {
+        let frame_spec = FrameSpec {
+            hdr_format,
+            depth_format,
+            depth_aspect,
+            shadow,
+            fog: fog_resolution,
+            vfx: vfx_mode,
+            msaa: post_config.anti_aliasing == AntiAliasing::Msaa4,
+            // AO, R2b's contact shadows and its screen-space outlines each imply it.
+            prepass: false,
             outline_ids: lighting_config.outlines == OutlineMode::Screen,
-            contact: lighting_config.contact_steps() > 0,
+            contact_shadows: lighting_config.contact_steps() > 0,
+            ambient_occlusion: post_config.ambient_occlusion,
+            bloom: post_config.bloom,
+            auto_exposure: post_config.auto_exposure,
+            bloom_format: targets::choose_bloom_format(&device),
+            exposure_format: targets::choose_exposure_format(&device),
+            fxaa: post_config.anti_aliasing == AntiAliasing::Fxaa,
+            upscale: post_config.scaled(),
         };
         let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
         for capture in [false, true] {
             for offscreen in 0..OFFSCREEN_VARIANTS {
                 plans.push(
-                    frame_graph::build(
-                        hdr_format,
-                        depth_format,
-                        depth_aspect,
-                        shadow,
-                        fog_resolution,
-                        capture,
-                        offscreen,
-                        vfx_mode,
-                        depth_features,
-                    )
-                    .map_err(graph_error)?,
+                    frame_graph::build(&frame_spec, capture, offscreen).map_err(graph_error)?,
                 );
             }
         }
@@ -586,7 +652,8 @@ impl Renderer {
                 plans[0].graph.culled()
             );
         }
-        let transients = TransientPool::new(&device, plans[0].graph.slots(), swapchain.extent)?;
+        let extents = target_extents(swapchain.extent, post_config.render_scale);
+        let transients = TransientPool::new(&device, plans[0].graph.slots(), extents)?;
         let mut offscreen = Vec::with_capacity(UI_IMAGE_SLOTS);
         for (slot, size) in config.ui_image_sizes.into_iter().enumerate() {
             let [width, height] = size.map(|side| side.clamp(1, MAX_UI_IMAGE_SIZE));
@@ -654,22 +721,42 @@ impl Renderer {
             materials.set_layout(),
             lighting.set_layout(),
             &views,
+            MainViewSpec {
+                samples: if frame_spec.msaa {
+                    vk::SampleCountFlags::TYPE_4
+                } else {
+                    vk::SampleCountFlags::TYPE_1
+                },
+                prepass: frame_spec.has_prepass(),
+                outline_ids: frame_spec.outline_ids,
+                hull: lighting_config.outlines == OutlineMode::Hull,
+            },
             config.skinning,
-            depth_features.prepass().then_some(PrepassPipelineSpec {
-                outline_ids: depth_features.outline_ids,
-            }),
-            lighting_config.outlines == OutlineMode::Hull,
         )?;
         config.max_bones = scene.max_bones();
-        let contact = depth_features
-            .contact
+        let contact = frame_spec
+            .contact_shadows
             .then(|| ContactPass::new(&device, &shaders, scene.camera_set_layout()))
             .transpose()?;
-        let outline = depth_features
+        // The outlines draw on the composite's output: the LDR intermediate when FXAA or the
+        // upscale reads it, else the swapchain image.
+        let outline_format = if frame_spec.fxaa || frame_spec.upscale {
+            frame_graph::LDR_FORMAT
+        } else {
+            swapchain.format
+        };
+        let outline = frame_spec
             .outline_ids
-            .then(|| OutlinePass::new(&device, &shaders, swapchain.format))
+            .then(|| OutlinePass::new(&device, &shaders, outline_format))
             .transpose()?;
-        let composite = CompositePass::new(&device, &shaders, swapchain.format, config.exposure)?;
+        let post = PostPass::new(
+            &device,
+            &shaders,
+            frame_spec,
+            post_config,
+            swapchain.format,
+            config.exposure,
+        )?;
         let ui = UiPass::new(
             &device,
             FRAMES_IN_FLIGHT,
@@ -679,7 +766,7 @@ impl Renderer {
             &UiImages {
                 views: core::array::from_fn(|slot| offscreen[slot].color().view()),
                 fog: fog_views,
-                exposure: composite.exposure(),
+                exposure: post.exposure(),
             },
         )?;
         let profiler = GpuProfiler::new(
@@ -725,7 +812,7 @@ impl Renderer {
             swapchain,
             transients,
             scene,
-            composite,
+            post,
             ui,
             fog,
             terrain: None,
@@ -753,6 +840,20 @@ impl Renderer {
             depth_aspect,
             lighting_config,
             shadow,
+            frame_spec,
+            post_config,
+            extents,
+            render_extent: extents.render,
+            dynres: post_config.dynamic_resolution.then(|| {
+                DynamicResolution::new(
+                    post_config.min_render_scale,
+                    post_config.render_scale,
+                    post_config.dynamic_target_ms,
+                )
+            }),
+            last_frame_at: None,
+            exposure_reset: true,
+            exposure_pending: 0.0,
             world_config,
             device,
             surface,
@@ -854,6 +955,65 @@ impl Renderer {
     #[must_use]
     pub fn lighting_config(&self) -> LightingConfig {
         self.lighting_config
+    }
+
+    /// The post-processing features in use (ADR-0015): the configured ones, with MSAA falling
+    /// back to FXAA without 4× MSAA support and dynamic resolution off without timestamps.
+    #[must_use]
+    pub fn post_config(&self) -> PostConfig {
+        self.post_config
+    }
+
+    /// The map's post-processing art direction ([`PostLook`], sanitised).
+    #[must_use]
+    pub fn post_look(&self) -> PostLook {
+        self.post.look()
+    }
+
+    /// Sets the map's exposure, auto exposure, bloom and grading strength. Cheap (no device
+    /// wait): it takes effect on the next frame, and the adapted exposure restarts from the
+    /// metered value, so a map change never fades in from the previous map's exposure.
+    pub fn set_post_look(&mut self, look: PostLook) {
+        self.post.set_look(look);
+        self.exposure_reset = true;
+    }
+
+    /// Uses `lut` as the map's colour-grading LUT (ADR-0015), applied after the tonemap with
+    /// [`PostLook::grading_strength`] unless [`PostConfig::grading`] is off; `None` restores
+    /// the identity. Load time only: it waits for the device to idle and uploads a 3D
+    /// texture.
+    ///
+    /// # Errors
+    /// Allocation or Vulkan errors from the upload; then the previous LUT is dropped and the
+    /// identity is bound.
+    pub fn set_grading_lut(&mut self, lut: Option<&moba_assets::GradingLut>) -> RenderResult<()> {
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses the
+        // composite's descriptor set or the LUT image being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        let result = self
+            .post
+            .set_grading_lut(&self.device, lut.map(|lut| (lut.size(), lut.texels())));
+        if result.is_err() {
+            // Keep a valid set: the identity.
+            let _ = self.post.set_grading_lut(&self.device, None);
+        }
+        result
+    }
+
+    /// The current render scale: [`PostConfig::render_scale`], or dynamic resolution's
+    /// latest choice.
+    #[must_use]
+    pub fn render_scale(&self) -> f32 {
+        self.dynres
+            .as_ref()
+            .map_or(self.post_config.render_scale, DynamicResolution::scale)
+    }
+
+    /// The size the scene was rendered at in the latest frame, in pixels (the swapchain
+    /// size times [`Self::render_scale`]); the HUD is always native.
+    #[must_use]
+    pub fn render_extent(&self) -> [u32; 2] {
+        [self.render_extent.width, self.render_extent.height]
     }
 
     /// Sets the map's image-based lighting (ADR-0011): `desc`'s SH-L2 diffuse irradiance and
@@ -1255,7 +1415,7 @@ impl Renderer {
         self.pipeline_stats
     }
 
-    /// Dev builds: rebuilds the scene and composite pipelines (every permutation) from
+    /// Dev builds: rebuilds the scene and post pipelines (every permutation) from
     /// [`RenderConfig::shader_dir`] overrides, falling back to built-in modules per file.
     /// Waits for the device to idle first; a stall, so call it on a file change, not per
     /// frame. The UI pipeline is not reloaded. Returns `Ok(false)` when no shader directory
@@ -1274,7 +1434,7 @@ impl Renderer {
         // Build everything first and swap only when every pass succeeded, so a failed reload
         // never mixes new scene pipelines with an old composite (or drops one).
         let scene = self.scene.build_pipelines(&self.device, &self.shaders)?;
-        let composite = self.composite.build_pipeline(&self.device, &self.shaders)?;
+        let post = self.post.build_pipelines(&self.device, &self.shaders)?;
         let vfx = self
             .vfx
             .as_ref()
@@ -1291,7 +1451,7 @@ impl Renderer {
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
         self.scene.install_pipelines(scene);
-        self.composite.install_pipeline(composite);
+        self.post.install_pipelines(post);
         if let (Some(pass), Some(pipeline)) = (self.contact.as_mut(), contact) {
             pass.install_pipeline(pipeline);
         }
@@ -1397,50 +1557,51 @@ impl Renderer {
     /// Points passes that sample transients at the current pool images.
     fn bind_transients(&mut self) {
         let plan = &self.plans[0];
-        let hdr = plan
-            .graph
-            .slot_of(plan.resources.hdr)
-            .expect("the composite keeps the HDR target live");
-        self.composite
-            .bind_hdr(&self.device, self.transients.image(hdr).view());
-        let transient_view = |resource: Option<crate::graph::ResourceId>| {
+        let resources = plan.resources;
+        let transients = &self.transients;
+        let view = |resource: Option<crate::graph::ResourceId>| {
             resource
                 .and_then(|resource| plan.graph.slot_of(resource))
-                .map(|slot| self.transients.image(slot).view())
+                .map(|slot| transients.image(slot).view())
         };
-        let shadow = transient_view(plan.resources.shadow);
-        let contact = transient_view(plan.resources.contact);
-        let ids = transient_view(plan.resources.outline_ids);
-        let depth = transient_view(Some(plan.resources.depth));
+        let bloom = resources.bloom;
+        let views = PostViews {
+            hdr: view(Some(resources.hdr)),
+            depth: view(Some(resources.depth)),
+            ao_raw: view(resources.ao.map(|ao| ao.raw)),
+            bloom: core::array::from_fn(|level| view(bloom.map(|mips| mips[level]))),
+            ldr: view(resources.ldr),
+            ldr2: view(resources.ldr2),
+        };
+        let shadow = view(resources.shadow);
+        let ao = view(resources.ao.map(|ao| ao.blurred));
+        self.post.bind(&self.device, views);
+        let contact = view(resources.contact);
         self.lighting.bind_transients(&self.device, shadow, contact);
-        if let (Some(pass), Some(depth)) = (&self.contact, depth) {
+        self.lighting.bind_ao(&self.device, ao);
+        if let (Some(pass), Some(depth)) = (&self.contact, view(Some(resources.depth))) {
             pass.bind_depth(&self.device, depth);
         }
-        if let (Some(pass), Some(ids)) = (&self.outline, ids) {
+        if let (Some(pass), Some(ids)) = (
+            &self.outline,
+            view(resources.outline_ids.map(|ids| ids.ids)),
+        ) {
             pass.bind_ids(&self.device, ids);
         }
-        if let (Some(vfx), Some(resources)) = (self.vfx.as_mut(), plan.resources.vfx) {
-            let transients = &self.transients;
-            let view = |resource: Option<crate::graph::ResourceId>| {
-                resource
-                    .and_then(|resource| plan.graph.slot_of(resource))
-                    .map(|slot| transients.image(slot).view())
-            };
-            let depth = view(Some(plan.resources.depth)).expect("depth is live");
-            vfx.bind_targets(
-                &self.device,
-                depth,
-                view(resources.accum),
-                view(resources.reveal),
-            );
+        if let (Some(vfx), Some(ids)) = (self.vfx.as_mut(), resources.vfx) {
+            let depth = view(Some(resources.depth)).expect("depth is live");
+            vfx.bind_targets(&self.device, depth, view(ids.accum), view(ids.reveal));
         }
-        if let (Some(fog), Some(raw)) = (
-            &self.fog,
-            plan.resources
-                .fog
-                .and_then(|resources| plan.graph.slot_of(resources.raw)),
-        ) {
-            fog.bind_raw(&self.device, self.transients.image(raw).view());
+        if let (Some(fog), Some(raw)) = (&self.fog, view(resources.fog.map(|fog| fog.raw))) {
+            fog.bind_raw(&self.device, raw);
+        }
+    }
+
+    /// The render-resolution region of this frame.
+    fn render_region(&self) -> Region {
+        Region {
+            actual: self.render_extent,
+            alloc: self.extents.render,
         }
     }
 
@@ -1465,8 +1626,18 @@ impl Renderer {
     }
 
     /// The main view's lighting uniform values: the shadow map fitted to the camera (when
-    /// shadows are on), the scene's art direction and the environment.
+    /// shadows are on), the scene's art direction, the environment and the AO lookup.
     fn frame_lighting(&self, scene: &Scene<'_>) -> FrameLighting {
+        let mut lighting = self.frame_lighting_without_ao(scene);
+        if self.frame_spec.ambient_occlusion {
+            let (per_pixel, clamp) = self.render_region().shifted(1).ao_lookup();
+            lighting.post_params = [1.0, per_pixel[0], per_pixel[1], 0.0];
+            lighting.post_clamp = [clamp[0], clamp[1], 0.0, 0.0];
+        }
+        lighting
+    }
+
+    fn frame_lighting_without_ao(&self, scene: &Scene<'_>) -> FrameLighting {
         let fit = self.shadow.and_then(|spec| {
             lighting::fit_shadow(
                 scene.camera.view_proj,
@@ -1574,6 +1745,16 @@ impl Renderer {
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
 
+        if let Some(dynres) = self.dynres.as_mut()
+            && let Some(timings) = self.profiler.latest()
+        {
+            dynres.observe(timings.frame, timings.total_ms);
+        }
+        self.render_extent = dynres::render_extent(
+            self.swapchain.extent,
+            self.extents.render,
+            self.render_scale(),
+        );
         // Lights are binned into this frame slot's buffers (its fence was waited on above).
         let grid = self.lighting.upload_lights(
             frame_index,
@@ -1590,13 +1771,15 @@ impl Renderer {
         }
         self.frame_outlines = scene.outlines;
         let world_frame = self.world_frame(scene);
+        // The camera's viewport is this frame's rendered sub-rectangle (render scale and
+        // dynamic resolution), which the contact and outline passes work in.
         self.scene.prepare(
             0,
             frame_index,
             scene,
             &frame_lighting,
             &world_frame,
-            self.swapchain.extent,
+            self.render_extent,
         )?;
         if let Some(fog) = self.fog.as_mut() {
             fog.prepare(frame_index, scene.fog_of_war.as_ref());
@@ -1635,7 +1818,7 @@ impl Renderer {
         // Last of the uploads: its slot allocations are committed only when the frame is
         // submitted (`VfxPass::submitted`), and rolled back if anything below fails.
         if let Some(vfx) = self.vfx.as_mut() {
-            vfx.prepare(frame_index, scene, self.swapchain.extent);
+            vfx.prepare(frame_index, scene, self.render_extent);
         }
 
         let command_buffers = self.frames[frame_index].command_buffers;
@@ -1656,11 +1839,36 @@ impl Renderer {
                     .begin_command_buffer(command_buffer, &begin)
             }?;
         }
+        let now = Instant::now();
+        let dt = self
+            .last_frame_at
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.25));
+        let min_step = if self.frame_spec.exposure_format == vk::Format::R16_SFLOAT {
+            crate::post::MIN_HALF_ADAPTATION_STEP
+        } else {
+            0.0
+        };
+        let adaptation = crate::post::adaptation_step(
+            &mut self.exposure_pending,
+            dt,
+            self.post.look().adaptation,
+            min_step,
+            self.exposure_reset,
+        );
+        let post_frame = PostFrame {
+            render: self.render_region(),
+            swapchain: self.swapchain.extent,
+            adaptation,
+            effects: scene.effects,
+            view_proj: scene.camera.view_proj,
+            eye: scene.camera.position,
+        };
         self.record_frame(
             command_buffers,
             frame_index,
             image_index,
             (offscreen_mask, offscreen),
+            &post_frame,
         )?;
         for &command_buffer in &command_buffers {
             // SAFETY: the command buffer is recording and is ended exactly once.
@@ -1698,6 +1906,8 @@ impl Renderer {
         if let Some(vfx) = self.vfx.as_mut() {
             vfx.submitted(frame_index);
         }
+        self.last_frame_at = Some(now);
+        self.exposure_reset = false;
         if self.capture_pending {
             self.capture_pending = false;
             self.capture_ready = true;
@@ -1729,6 +1939,7 @@ impl Renderer {
         frame_index: usize,
         image_index: u32,
         (offscreen_mask, offscreen): (usize, &[OffscreenRender<'_>]),
+        post_frame: &PostFrame,
     ) -> RenderResult<()> {
         let capturing = self.capture_pending;
         let extent = self.swapchain.extent;
@@ -1756,11 +1967,22 @@ impl Renderer {
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
         let shadow_view = resources.shadow.map(|shadow| self.transient(shadow).view());
-        let contact_view = resources
-            .contact
-            .map(|contact| self.transient(contact).view());
-        let ids_view = resources.outline_ids.map(|ids| self.transient(ids).view());
+        let view_of = |resource: Option<crate::graph::ResourceId>| {
+            resource.map(|resource| self.transient(resource).view())
+        };
+        let msaa_color = view_of(resources.msaa.map(|msaa| msaa.color));
+        let msaa_depth = view_of(resources.msaa.map(|msaa| msaa.depth));
+        let ldr_view = view_of(resources.ldr);
+        let ldr2_view = view_of(resources.ldr2);
+        let render_extent = self.render_extent;
+        let render_scale = self.render_scale();
+        let contact_view = view_of(resources.contact);
+        let outline_ids = resources.outline_ids.map(|ids| OutlineIdTarget {
+            view: self.transient(ids.msaa.unwrap_or(ids.ids)).view(),
+            resolve: ids.msaa.map(|_| self.transient(ids.ids).view()),
+        });
         let hull_outlines = self.lighting_config.outlines == OutlineMode::Hull;
+        let prepass = self.frame_spec.has_prepass();
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);
@@ -1794,33 +2016,15 @@ impl Renderer {
                         );
                     }
                 }
-                PassKind::Scene => self.scene.record(
-                    &self.device,
-                    command_buffer,
-                    0,
-                    frame_index,
-                    &SceneTargets {
-                        color: hdr_view,
-                        depth: depth_view,
-                        extent,
-                        clear_color: self.config.clear_color,
-                        terrain: true,
-                        sky: self.world_config.sky,
-                        clear_rects: &[],
-                        lighting: self.lighting.set(frame_index),
-                        store_depth: resources.vfx.is_some(),
-                        load_depth: resources.prepass,
-                        hull_outlines,
-                    },
-                ),
-                PassKind::DepthPrepass => self.scene.record_prepass(
+                PassKind::Prepass => self.scene.record_prepass(
                     &self.device,
                     command_buffer,
                     frame_index,
                     &PrepassTarget {
-                        depth: depth_view,
-                        outline_ids: ids_view,
-                        extent,
+                        depth: msaa_depth.unwrap_or(depth_view),
+                        resolve: msaa_depth.map(|_| depth_view),
+                        outline_ids,
+                        extent: render_extent,
                     },
                 ),
                 PassKind::ContactShadows => {
@@ -1830,7 +2034,7 @@ impl Renderer {
                             command_buffer,
                             self.scene.camera_set(frame_index),
                             target,
-                            extent,
+                            render_extent,
                         );
                     }
                 }
@@ -1839,11 +2043,103 @@ impl Renderer {
                         pass.record(
                             &self.device,
                             command_buffer,
-                            swapchain_view,
-                            extent,
+                            ldr_view.unwrap_or(swapchain_view),
+                            render_extent,
+                            render_scale,
                             &self.frame_outlines,
                         );
                     }
+                }
+                PassKind::Ao => {
+                    if let Some(ao) = resources.ao {
+                        self.post.record_ao(
+                            &self.device,
+                            command_buffer,
+                            self.transient(ao.raw).view(),
+                            post_frame,
+                        );
+                    }
+                }
+                PassKind::AoBlur => {
+                    if let Some(ao) = resources.ao {
+                        self.post.record_ao_blur(
+                            &self.device,
+                            command_buffer,
+                            self.transient(ao.blurred).view(),
+                            post_frame,
+                        );
+                    }
+                }
+                PassKind::Scene => self.scene.record(
+                    &self.device,
+                    command_buffer,
+                    0,
+                    frame_index,
+                    &SceneTargets {
+                        color: msaa_color.unwrap_or(hdr_view),
+                        depth: msaa_depth.unwrap_or(depth_view),
+                        extent: render_extent,
+                        clear_color: self.config.clear_color,
+                        terrain: true,
+                        sky: self.world_config.sky,
+                        clear_rects: &[],
+                        lighting: self.lighting.set(frame_index),
+                        resolve: msaa_color.map(|_| SceneResolve {
+                            color: hdr_view,
+                            depth: (!prepass).then_some(depth_view),
+                        }),
+                        load_depth: prepass,
+                        // The particles test and sample the single-sampled depth after the
+                        // scene; with MSAA that is a resolve (or the prepass's), never this
+                        // attachment.
+                        store_depth: resources.vfx.is_some() && msaa_color.is_none(),
+                        hull_outlines,
+                    },
+                ),
+                PassKind::BloomDown(level) => {
+                    if let Some(mips) = resources.bloom {
+                        let level = usize::from(level);
+                        self.post.record_bloom_down(
+                            &self.device,
+                            command_buffer,
+                            level,
+                            self.transient(mips[level]).view(),
+                            post_frame,
+                        );
+                    }
+                }
+                PassKind::BloomUp(level) => {
+                    if let Some(mips) = resources.bloom {
+                        let level = usize::from(level);
+                        self.post.record_bloom_up(
+                            &self.device,
+                            command_buffer,
+                            level,
+                            self.transient(mips[level]).view(),
+                            post_frame,
+                        );
+                    }
+                }
+                PassKind::Exposure => {
+                    if let Some(view) = self.post.exposure_view() {
+                        self.post
+                            .record_exposure(&self.device, command_buffer, view, post_frame);
+                    }
+                }
+                PassKind::Fxaa => self.post.record_fxaa(
+                    &self.device,
+                    command_buffer,
+                    ldr2_view.unwrap_or(swapchain_view),
+                    ldr2_view.is_none(),
+                    post_frame,
+                ),
+                PassKind::Upscale => {
+                    self.post.record_upscale(
+                        &self.device,
+                        command_buffer,
+                        swapchain_view,
+                        post_frame,
+                    );
                 }
                 PassKind::VfxSimulate => {
                     if let Some(vfx) = &self.vfx {
@@ -1864,7 +2160,7 @@ impl Renderer {
                                 depth: depth_view,
                                 accum: view(ids.accum),
                                 reveal: view(ids.reveal),
-                                extent,
+                                extent: render_extent,
                             },
                             &self.scene,
                         );
@@ -1872,7 +2168,7 @@ impl Renderer {
                 }
                 PassKind::VfxResolve => {
                     if let Some(vfx) = &self.vfx {
-                        vfx.record_resolve(&self.device, command_buffer, hdr_view, extent);
+                        vfx.record_resolve(&self.device, command_buffer, hdr_view, render_extent);
                     }
                 }
                 PassKind::Offscreen(slot) => {
@@ -1896,17 +2192,21 @@ impl Renderer {
                                 sky: false,
                                 clear_rects: render.backdrops,
                                 lighting: self.lighting.offscreen_set(),
-                                store_depth: false,
+                                resolve: None,
                                 load_depth: false,
+                                store_depth: false,
                                 hull_outlines: false,
                             },
                         );
                     }
                 }
-                PassKind::Composite => {
-                    self.composite
-                        .record(&self.device, command_buffer, swapchain_view, extent);
-                }
+                PassKind::Composite => self.post.record_composite(
+                    &self.device,
+                    command_buffer,
+                    ldr_view.unwrap_or(swapchain_view),
+                    ldr_view.is_none(),
+                    post_frame,
+                ),
                 PassKind::Ui => {
                     self.ui.record(
                         &self.device,
@@ -1940,6 +2240,7 @@ impl Renderer {
     }
 
     /// This frame's handle for every resource of `plan`.
+    #[allow(clippy::too_many_lines)] // One binding per resource kind, in declaration order.
     fn bindings(
         &self,
         plan: &FramePlan,
@@ -1968,11 +2269,38 @@ impl Renderer {
         );
         bindings.set(resources.hdr, image(resources.hdr));
         bindings.set(resources.depth, image(resources.depth));
-        for resource in [resources.shadow, resources.contact, resources.outline_ids]
+        let transients = resources
+            .shadow
             .into_iter()
-            .flatten()
-        {
+            .chain(
+                resources
+                    .msaa
+                    .into_iter()
+                    .flat_map(|msaa| [msaa.color, msaa.depth]),
+            )
+            .chain(resources.ao.into_iter().flat_map(|ao| [ao.raw, ao.blurred]))
+            .chain(resources.bloom.into_iter().flatten())
+            .chain(resources.ldr)
+            .chain(resources.ldr2)
+            .chain(resources.contact)
+            .chain(
+                resources
+                    .outline_ids
+                    .into_iter()
+                    .flat_map(|ids| [Some(ids.ids), ids.msaa])
+                    .flatten(),
+            );
+        for resource in transients {
             bindings.set(resource, image(resource));
+        }
+        if let (Some(resource), Some(exposure)) = (resources.exposure, self.post.exposure_image()) {
+            bindings.set(
+                resource,
+                Binding::Image {
+                    image: exposure,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                },
+            );
         }
         if let (Some(fog), Some(pass)) = (resources.fog, &self.fog) {
             bindings.set(fog.raw, image(fog.raw));
@@ -2051,8 +2379,12 @@ impl Renderer {
         // Build the new swapchain-sized targets before replacing anything, so a failed
         // allocation cannot pair the new extent with old-size transients. Fixed-size slots
         // (the shadow map) are kept.
+        let extents = target_extents(swapchain.extent, self.post_config.render_scale);
         self.transients
-            .resize(&self.device, self.plans[0].graph.slots(), swapchain.extent)?;
+            .resize(&self.device, self.plans[0].graph.slots(), extents)?;
+        self.extents = extents;
+        self.render_extent =
+            dynres::render_extent(swapchain.extent, extents.render, self.render_scale());
         self.swapchain = swapchain;
         self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
@@ -2231,6 +2563,14 @@ impl Drop for Renderer {
                 path.display()
             );
         }
+    }
+}
+
+/// The swapchain extent and the render allocation for a maximum render scale.
+fn target_extents(swapchain: vk::Extent2D, render_scale: f32) -> TargetExtents {
+    TargetExtents {
+        swapchain,
+        render: dynres::render_extent(swapchain, swapchain, render_scale),
     }
 }
 

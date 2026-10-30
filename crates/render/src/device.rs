@@ -55,6 +55,9 @@ pub(crate) struct DeviceContext {
     pub(crate) min_uniform_offset_alignment: u64,
     /// `maxImageDimension2D`: bounds the shadow-map resolution.
     pub(crate) max_image_dimension_2d: u32,
+    /// Colour and depth attachments support 4x MSAA (`framebufferColorSampleCounts` and
+    /// `framebufferDepthSampleCounts`, R6).
+    pub(crate) msaa4: bool,
     /// `depthClamp` is supported and enabled: shadow casters nearer the light than the map's
     /// near plane are clamped onto it ("pancaking") instead of clipped.
     pub(crate) depth_clamp: bool,
@@ -198,7 +201,7 @@ impl DeviceContext {
         Self::create(context, surface_loader, &candidate)
     }
 
-    #[allow(clippy::too_many_lines)] // Feature selection, queues and the allocator.
+    #[allow(clippy::too_many_lines)] // Queues, features, allocator and limits, in order.
     fn create(
         context: &InstanceContext,
         surface: ash::khr::surface::Instance,
@@ -329,6 +332,16 @@ impl DeviceContext {
                 .min_uniform_buffer_offset_alignment
                 .max(1),
             max_image_dimension_2d: candidate.properties.limits.max_image_dimension2_d,
+            msaa4: candidate
+                .properties
+                .limits
+                .framebuffer_color_sample_counts
+                .contains(vk::SampleCountFlags::TYPE_4)
+                && candidate
+                    .properties
+                    .limits
+                    .framebuffer_depth_sample_counts
+                    .contains(vk::SampleCountFlags::TYPE_4),
             depth_clamp,
             comparison_samplers,
             cache_identity: CacheIdentity::of(&candidate.properties),

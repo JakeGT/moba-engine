@@ -57,4 +57,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "grading"
+path = "fuzz_targets/grading.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

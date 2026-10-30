@@ -38,6 +38,9 @@
 //! (`vfx/<name>.toml`, up to eight particle emitters), [`VfxBindings`] maps ability names and
 //! unit events to effects (`vfx/bindings.toml`), and [`procedural_atlas`] generates the
 //! built-in particle atlas.
+//! Post-processing (R6): [`MapPost`] is the descriptor's `[post]` table (exposure, eye
+//! adaptation, bloom, grading) and [`GradingLut`] is a bounded 3D colour-grading LUT parsed
+//! from the `.cube` text format (`grading/<name>.cube`).
 
 #![forbid(unsafe_code)]
 
@@ -46,6 +49,7 @@ mod baked_ao;
 mod environment;
 #[cfg(feature = "glb")]
 mod glb;
+mod grading;
 mod map_visuals;
 mod material;
 mod mesh;
@@ -78,13 +82,19 @@ pub use environment::{
 };
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
+pub use grading::{
+    GRADING_DIR, GradingLut, GradingLutError, MAX_GRADING_LUT_BYTES, MAX_GRADING_LUT_SIZE,
+    MAX_TEAM_HUE_SHIFT, MIN_GRADING_LUT_SIZE, MIN_TEAM_CHROMA, MIN_TEAM_HUE_SEPARATION,
+    READABILITY_TEAMS, grading_path,
+};
 pub use map_visuals::{
-    DEFAULT_EDGE_HEIGHT, DEFAULT_EDGE_MESH_HEIGHT, DEFAULT_EDGE_SPACING, DEFAULT_LANE_WIDTH,
+    DEFAULT_ADAPTATION, DEFAULT_BLOOM_STRENGTH, DEFAULT_EDGE_HEIGHT, DEFAULT_EDGE_MESH_HEIGHT,
+    DEFAULT_EDGE_SPACING, DEFAULT_EXPOSURE_MAX, DEFAULT_EXPOSURE_MIN, DEFAULT_LANE_WIDTH,
     DEFAULT_LAYER_TILING, DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_RELIEF, DEFAULT_TERRAIN_ROUGHNESS,
     DEFAULT_TERRAIN_SEED, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT, EdgeStyle, FOW_DARKEN_RANGE,
     MAX_FOG_OPACITY, MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MESH_NAME,
-    MAX_SHADOW_STRENGTH, MIN_SUN_ELEVATION, MapAtmosphere, MapFogStyle, MapLighting, MapProp,
-    MapTerrain, MapVisuals, MapVisualsError, TerrainLayer, valid_mesh_name,
+    MAX_SHADOW_STRENGTH, MIN_SUN_ELEVATION, MapAtmosphere, MapFogStyle, MapLighting, MapPost,
+    MapProp, MapTerrain, MapVisuals, MapVisualsError, TerrainLayer, valid_mesh_name,
 };
 pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,

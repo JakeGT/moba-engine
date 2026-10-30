@@ -265,24 +265,27 @@ the semver check):
     `[lighting] baked_ao`/`ao_strength` (`MapLighting`) name it, `maps/ao/<name>.{toml,ktx2}`.
     The client ignores a stale bake (fingerprint mismatch) with one log line;
     `Renderer::set_baked_ao`/`clear_baked_ao`/`has_baked_ao` bind it. `shade()` multiplies
-    only the ambient line by `material AO × baked × ssao` (the `ssao` hook is 1 until R6's
-    GTAO), faded out 3 m above the ground; every tier. Ships `content/maps/ao/ember-ao` and
+    only the ambient line by `min(material AO, R6's GTAO) × baked`, faded out 3 m above the
+    ground; every tier. Ships `content/maps/ao/ember-ao` and
     `frost-ao` (`scripts/bake-map-ao.sh`).
-  - **Depth pre-pass and contact shadows:** on High/Ultra (or when screen outlines or contact
-    shadows are forced on) a `depth_prepass` draws terrain and static, skinned and VAT units
-    depth-only (no depth bias, `invariant` positions) and the scene pass loads that depth (`Access::DepthReadWrite`,
-    `LESS_OR_EQUAL`) instead of clearing it. `contact_shadows` ray-marches the pre-pass depth
-    towards the sun (High 8 steps, Ultra 16, 0.8 m) into an `R8_UNORM` visibility that
-    multiplies the shadow-map term. The pre-pass depth is sampled-capable between the
-    pre-pass and the scene: the slot R6's GTAO is meant to use.
-  - **Frame and API:** the frame is `(portraits, minimap) → vfx_simulate → (shadow) →
-    (depth_prepass) → (contact_shadows) → scene → vfx_draw → (vfx_resolve) → composite →
-    (outline) → ui`; the graph's limits are 32 passes and 48 resources (a `u64` mask, as in
-    R6). The instance record is 128 bytes (R4b's 112 plus the outline slot),
-    the camera uniform 1,664 (R3a's 1,376 plus 288).
-    Set 3 gains bindings 11–14 (light list, light grid, baked AO, contact shadows; 10 is
-    R6's AO), and the scene's fragment stage uses 15 of the 16 samplers Vulkan guarantees
-    (R3a's `descriptor_budget`). New (additive) API: `PointLight`, `LightStats`,
+  - **Depth pre-pass and contact shadows:** R6's depth `prepass` also runs for contact
+    shadows and screen outlines (High/Ultra, or when forced on) and draws terrain and static,
+    skinned and VAT units depth-only (no depth bias, `invariant` positions) plus, with screen
+    outlines, the `R8_UINT` outline-slot IDs (4× on Ultra, resolved from sample zero, or hull
+    outlines on a device without 4× integer colour); the scene pass loads that depth
+    (`LESS_OR_EQUAL`) instead of clearing it. `contact_shadows` ray-marches the pre-pass
+    depth towards the sun (High 8 steps, Ultra 16, 0.8 m) into an `R8_UNORM` visibility that
+    multiplies the shadow-map term, beside R6's GTAO on the same depth. Both, and the
+    outlines, work in the frame's render-scale sub-rectangle.
+  - **Frame and API:** the frame is `… → (shadow) → (prepass) → (contact_shadows) →
+    (ao → ao_blur) → scene → vfx_draw → (vfx_resolve) → (bloom, exposure) → composite →
+    (outline) → (fxaa) → (upscale) → ui`: the outlines draw on R6's LDR image before FXAA and
+    the upscale (widths scaled by the render scale), or on the swapchain without them; the
+    graph's limits are 32 passes and 48 resources (a `u64` mask, as in R6). The instance
+    record is 128 bytes (R4b's 112 plus the outline slot), the camera uniform 1,696 (R6's
+    1,408 plus 288). Set 3 gains bindings 11–14 (light list, light grid, baked AO, contact
+    shadows, after R6's AO at 10), and the scene's fragment stage uses all 16 samplers
+    Vulkan guarantees (R3a's `descriptor_budget`; the VAT layout 12). New (additive) API: `PointLight`, `LightStats`,
     `MAX_LIGHTS`, `MAX_LIGHTS_PER_CELL`, `OutlineMode`, `OutlinePalette`, `OUTLINE_SLOTS`,
     `MAX_OUTLINE_WIDTH`, `BakedAo`, `MAX_CONTACT_SHADOW_STEPS`, `LightingConfig::{max_lights,
     lights_per_cell, outlines, baked_ao, contact_shadow_steps}` and their builders,
@@ -290,16 +293,18 @@ the semver check):
     `ao_fingerprint`, `PropMeshShape`, `baked_ao_paths`, `MapLighting::{baked_ao, ao_strength}`.
   - **Switches:** `MOBA_LIGHTS=off|<cap>`, `MOBA_OUTLINES=off|hull|screen`,
     `MOBA_BAKED_AO=off`, `MOBA_CONTACT_SHADOWS=off|<steps>`; the frame log gains
-    `gpu_depth_prepass_*`, `gpu_contact_shadows_*` and `gpu_outline_*`.
+    `gpu_contact_shadows_*`, `gpu_outline_*` and `lights_*` (R6's `gpu_prepass_*` covers the
+    pre-pass).
   - **Evidence** ([perf/0020](docs/perf/0020-lights-outlines-ao.md)): validation and
     synchronisation validation report 0 messages on lavapipe and the RTX 5070 Ti on every
     tier and every switch, with animated portraits, the minimap bake, `MOBA_VFX_SCALE=8` and
     the teamfight replay; per-pass GPU timings before/after at 1080p (median of 3 interleaved
     rounds: High +0.10 ms GPU, contact shadows 0.05 ms the largest pass; Low +0.01 ms). The
-    golden fingerprints were rebaselined deliberately (hero outlines and contact shadows on
-    High), two lavapipe runs byte-identical, and a new ember golden covers walls, baked AO
+    golden fingerprints (all seven with R3a's and R6's) were rebaselined deliberately (hero
+    outlines and contact shadows on High and Ultra), two lavapipe runs byte-identical, and a
+    new ember golden covers walls, baked AO
     and outlines beside walls. R3a's per-stage descriptor budget covers R2b's set-3
-    bindings (15 of 16 fragment samplers).
+    bindings (16 of 16 fragment samplers with R6's AO).
   - No wire, replay, simulation-logic or content-hash change (protocol v41, replay v5, logic
     v8): effects, map visuals and bakes are client-local.
 - **Animation runtime R4b: VAT minions, bone LOD, attachments (AAA roadmap R4, ADR-0012
@@ -405,6 +410,79 @@ the semver check):
     timings and the overdraw p95 are in `docs/perf/0016-vfx.md`; validation and sync
     validation are clean on lavapipe and the RTX. No wire, replay, logic or content-hash
     change; the goldens are unchanged.
+- **Post-processing and image quality (AAA roadmap R6, ADR-0015):**
+  - **Post chain:** the frame gains a five-level physically based bloom chain
+    (`bloom_d0`…`bloom_d4`, 13-tap down-sample with a Karis average on the first, tent
+    up-sample `bloom_u3`…`bloom_u0`; Medium and up), optional eye adaptation (`exposure`: the
+    1/32 bloom mip metered into a persistent 1×1 `R32_SFLOAT` image (`R16_SFLOAT` where that
+    cannot blend, with steps deferred to ≥ 1/32 so slow adaptation never stalls), clamped per
+    map, adapted with a constant blend and cleared on a reset, non-finite input metered as
+    black; no compute or read-back), and a composite that mixes the bloom, applies
+    exposure, AgX, a per-map **3D colour-grading LUT** and the gameplay screen effects. Per-map
+    settings live in the client-local `[post]` table of `maps/<name>.toml`
+    (`moba_assets::MapPost`: exposure EV, `auto_exposure` with its EV clamp and rate, bloom
+    strength, `grading = "<name>"` → `grading/<name>.cube`, grading strength). The `.cube`
+    parser (`GradingLut`, 2³…64³, ≤ 8 MiB, display-referred `0..1` domain only) has a new
+    `grading` fuzz target; `moba-tools grade-bake` bakes LUTs from documented
+    lift/gamma/gain, contrast, saturation and white-balance parameters (presets `ember`,
+    `frost`, `meadow`, shipped as 17³ LUTs and regenerated by
+    `scripts/bake-sample-textures.sh`), and prints or applies them to a PNG. Ember opts into
+    auto exposure (±1 EV). Map bloom is capped at 0.1. `GradingLut::check_team_readability`
+    (ADR-0011 rule 1) holds a grade to the standard and colour-blind team colours at the map's
+    strength and EV ± 1: `grade-bake` refuses a failing LUT and the client draws ungraded.
+  - **Anti-aliasing:** FXAA (own implementation of the FXAA 3.11 edge search, fast preset on
+    Low) on the tonemapped LDR image on Low–High, and **MSAA 4×** on Ultra: the scene (and the
+    AO prepass) render into 4× attachments resolved by dynamic rendering (colour average,
+    depth sample 0), so R5's particles, AO and every post pass stay single-sampled; the
+    multisampled colour is a transient attachment. A device whose HDR or depth format has no
+    4× sample count falls back to FXAA. R4b's VAT minions draw through the multisampled
+    pipelines and the prepass like every scene mesh. The HUD is never filtered. TAA and SMAA are not implemented (ADR-0015 §4).
+  - **Ambient occlusion:** GTAO at half render resolution (2 slices on High, 3 on Ultra;
+    world-space, depth-reconstructed normals, 4×4 interleaved rotation and a depth-aware 4×4
+    blur) from a new depth **prepass** of the main view (every scene vertex shader declares
+    `invariant gl_Position`, and the scene loads that depth). It occludes only the ambient
+    diffuse and specular terms (specular occlusion after Lagarde & de Rousiers), never direct
+    light, rim, emissive or particles. Offscreen views bind a white AO image. AO is set-3
+    binding 10, after R3a's world bindings (the scene's fragment stage uses 14 of 16
+    samplers). On High and Ultra, R3a's baked terrain relief AO joins GTAO as
+    `min(baked, gtao)` on the ambient term instead of darkening the albedo, so crevices are
+    not darkened twice; Low and Medium keep R3a's look.
+  - **Resolution scaling:** `render_scale` (0.5–1, setting and `MOBA_RENDER_SCALE`) renders
+    the scene and post chain below native and an `upscale` pass (bilinear on Low, Catmull-Rom
+    bicubic above) writes the swapchain before the native-resolution UI. Dynamic resolution
+    (Low by default, 14 ms GPU target, 0.6–1.0) adjusts the scale from the GPU timings with a
+    hold and hysteresis; images are allocated at the maximum scale and each frame renders a
+    sub-rectangle, so a scale change never allocates. FSR is not included.
+  - **Gameplay screen effects:** death desaturation, a damage vignette and a low-health pulse
+    from the local hero's snapshot health (`ScreenEffects` via `Scene::with_effects`), each
+    with an accessibility setting (`death_desaturation`, `damage_vignette`,
+    `low_health_pulse`); `MOBA_SCREEN_EFFECTS=off` turns them all off and
+    `MOBA_SCREEN_EFFECTS_PREVIEW=death|damage|lowhealth` holds one for captures. They keep
+    team colours readable: desaturation stops at 0.6 and the vignette is a neutral dark,
+    corners only, at most 0.45.
+  - **Render graph (ADR-0008 amendment):** `ImageSize::Render { shift }` (render-resolution
+    images; HDR, depth and R5's OIT targets use it), per-image sample counts, the
+    `DepthReadWrite`, `DepthWriteResolveSource` and `DepthResolveWrite` accesses, and limits
+    raised to 32 passes and 48 resources (a `u64` use mask). `FrameSpec::prepass` asks for the
+    depth prepass without AO (for R2b's contact shadows).
+  - **Tiers and switches:** `PostConfig::for_tier` (Low: FXAA fast, no bloom/AO, dynres;
+    Medium: + bloom, FXAA; High: + GTAO; Ultra: MSAA 4×, GTAO 3 slices), `RenderConfig::post`;
+    `MOBA_BLOOM`, `MOBA_AA=off|fxaa|msaa4`, `MOBA_AO`, `MOBA_RENDER_SCALE`,
+    `MOBA_DYNRES=off|on|<ms>`, `MOBA_UPSCALE`, `MOBA_GRADING=off`,
+    `MOBA_EXPOSURE=auto|fixed|<EV>`, `MOBA_SCREEN_EFFECTS=off`. Captures pin auto exposure,
+    dynamic resolution and the screen effects off unless set explicitly. The frame log gains `prepass`, `ao`,
+    `bloom`, `exposure`, `fxaa` and `upscale` lanes (printed when the pass exists) and `aa=`,
+    `bloom=`, `ao=`, `auto_exposure=`, `grading=`, `render=`, `dynres=` fields.
+  - **Evidence** ([perf/0019](docs/perf/0019-post.md)): validation and synchronisation
+    validation report 0 messages on lavapipe and on the RTX 5070 Ti for every tier and every
+    off switch, with and without particles; per-pass GPU timings before and after on the R5
+    teamfight replay are within every §7 budget. The default, networked and VAT golden
+    fingerprints were rebaselined deliberately (bloom, grading and FXAA change every scene
+    pixel; the HUD is unchanged), and two goldens are new: Ultra (MSAA 4× + GTAO with VAT
+    minions) and Low at render scale 0.75 (FXAA fast + the upscale).
+    Distortion / heat haze (roadmap R6 item 7, moved from R5) is not implemented yet.
+  - No wire, replay, simulation-logic or content-hash change: post settings and LUTs are
+    client-local map visuals.
 - **Materials, textures, pipeline cache and shader tooling (AAA roadmap R1b, ADR-0010):**
   - **Materials:** a model named `<m>` picks up a client-local descriptor
     `<MOBA_ASSET_ROOT>/materials/<m>.toml` (`moba_assets::MaterialDesc`, ≤ 4 KiB, range-checked):
