@@ -26,8 +26,9 @@ layout(set = 3, binding = 2) uniform samplerCube environment_specular;
 layout(set = 3, binding = 3) uniform sampler2D brdf_lut;
 // Stylisation ramp: N.L remapped from [-1, 1] to u, rgb multiplier.
 layout(set = 3, binding = 4) uniform sampler2D lighting_ramp;
-// Half-resolution ambient occlusion (R6 GTAO, ADR-0015); white 1x1 without AO.
-layout(set = 3, binding = 5) uniform sampler2D ambient_occlusion;
+// Half-resolution ambient occlusion (R6 GTAO, ADR-0015); white 1x1 without AO. Bindings 5-9
+// are R3a's world bindings (atmosphere.glsl, terrain.frag; ADR-0014 §6).
+layout(set = 3, binding = 10) uniform sampler2D ambient_occlusion;
 
 const float MOBA_PI = 3.14159265;
 const float MOBA_MIN_ROUGHNESS = 0.045;
@@ -49,6 +50,9 @@ struct Surface {
     float ramp;
     vec4 specular;
     vec3 emissive;
+    // Baked ambient occlusion (1 = open) that joins the screen-space AO as min(baked, GTAO):
+    // R3a's terrain relief while GTAO runs (ADR-0015 §5), 1 everywhere else.
+    float occlusion;
 };
 
 // SH-L2 irradiance / pi in direction `n` (crates/tools env-bake convention).
@@ -248,7 +252,7 @@ vec3 shade(Surface surface) {
         * surface.specular.rgb * surface.specular.w;
     // R6: AO occludes the ambient (indirect) terms only; direct light, rim and emissive
     // keep their readability (ADR-0015).
-    float ao = ambient_occlusion_here();
+    float ao = min(surface.occlusion, ambient_occlusion_here());
     ambient_diffuse *= ao;
     ambient_spec *= specular_occlusion(n_dot_v, ao, roughness);
 
@@ -280,6 +284,7 @@ Surface default_surface(vec3 albedo, vec3 normal, vec3 world_pos, float roughnes
     surface.ramp = camera.style.z;
     surface.specular = camera.specular_tint;
     surface.emissive = vec3(0.0);
+    surface.occlusion = 1.0;
     return surface;
 }
 

@@ -189,21 +189,29 @@ Options measured in [perf/0019](../perf/0019-post.md); defaults:
   `maxPerStageDescriptorSamplers` (16 on the Vulkan minimum and MoltenVK, which set 3 and
   the material set approach once R3a and R2b land). Applying AO in the composite instead
   would remove that sampler but darken direct light (see Alternatives).
-- **Composition with R3a and R2b.** R6 merges after R3a and before R2b. On `main` today AO
-  is set 3 binding 5, the first free one; R3a takes set-3 bindings 5–9, so when R6 catches
-  up with it AO moves to **binding 10** (`lighting.glsl` and the set-3 layout's binding
-  list) and keeps R3a's per-stage sampler-budget check passing; both PRs append `vec4`s
-  after `sh[9]` in `CameraBlock`, merged in the same std140 order as `FrameLighting`, and
-  R3a's sky gets an MSAA twin through `view_pipelines` like every scene pipeline. R2b then
-  appends its bindings after AO. **The frame has one depth prepass, R6's** (main view,
-  High and up; multisample depth with a `SAMPLE_ZERO` resolve under MSAA): R2b's contact
-  shadows reuse it rather than adding their own. `FrameSpec::prepass` requests it without
-  AO (AO implies it), and an extra prepass output such as R2b's `R8_UINT` outline IDs is
-  one more graph access and one colour attachment in `ScenePass::record_prepass`.
-- **R3a's baked relief AO and GTAO** are not stacked on the terrain: on High and Ultra the
-  terrain's ambient takes `min(baked, gtao)`, since both see the same crevices and their
-  product would darken them twice; units take GTAO only. Low and Medium keep the baked
-  term alone. (Implemented when R6 catches up with R3a.)
+- **Composition with R3a and R2b.** R6 merged after R3a and before R2b. R3a holds set-3
+  bindings 5–9 (fog-of-war visibility, the terrain splat and layer arrays, the terrain
+  block), so AO is **binding 10** (`lighting.glsl`, `lighting::set_layout_bindings`); the
+  scene layout's fragment stage then uses 14 of the 16 samplers the Vulkan minimum allows,
+  which R3a's `descriptor_budget` check enforces at renderer creation and its unit test
+  pins. `CameraBlock` keeps one std140 order: R3a's `fog_rect` … `sky_horizon` after
+  `sh[9]`, then R6's `post_params` and `post_clamp` (1408 bytes, checked by
+  `camera_uniform_matches_the_std140_block`). R3a's sky is built per scene pipeline set with
+  the set's samples, so the main view's MSAA set has its own, drawn through
+  `view_pipelines`; the prepass draws the map's terrain mesh (`VertexLayout::Terrain`).
+  R3a's `fow-raster` and `fow-resolve` passes are part of `FrameSpec` (`fog`), and the
+  frame-graph topology test covers them with every post switch (27 passes at most).
+  R2b then appends its bindings after AO. **The frame has one depth prepass, R6's** (main
+  view, High and up; multisample depth with a `SAMPLE_ZERO` resolve under MSAA): R2b's
+  contact shadows reuse it rather than adding their own. `FrameSpec::prepass` requests it
+  without AO (AO implies it), and an extra prepass output such as R2b's `R8_UINT` outline IDs
+  is one more graph access and one colour attachment in `ScenePass::record_prepass`.
+- **R3a's baked relief AO and GTAO** are not stacked on the terrain. Without GTAO (Low,
+  Medium) the terrain keeps R3a's look: the layer cavity and the baked relief occlusion
+  darken the albedo together. With GTAO (High, Ultra) the cavity still darkens the albedo,
+  but the relief term moves to the ambient term as `min(baked, gtao)` (`Surface::occlusion`
+  in `lighting.glsl`), since both see the same crevices and their product would darken them
+  twice. Units take GTAO only.
 - **Low/Medium:** off; Low will rely on baked AO (R2b). `MOBA_AO=off`.
 
 ### 6. Resolution scaling

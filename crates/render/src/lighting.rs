@@ -6,7 +6,9 @@
 //! pipeline): the shadow map with a comparison and a plain sampler, the prefiltered specular
 //! environment cube, the BRDF LUT and the stylisation ramp. The set is written at creation, on
 //! resize (the shadow map is a render-graph transient) and when an environment or ramp is set
-//! (both load time, after a device-idle wait), never per frame. A second set with the same
+//! (both load time, after a device-idle wait), never per frame (R3a adds the fog-of-war
+//! visibility, one main set per frame in flight, and the terrain splat, layers and block;
+//! ADR-0014). A second set with the same
 //! layout serves the offscreen views (R7b portraits and minimap): its shadow binding is a
 //! persistent default image, so those passes, which run before the shadow pass, never touch
 //! the shadow transient, and their camera uniform turns shadows off
@@ -18,7 +20,7 @@ use moba_core::math::{Mat4, Vec3, Vec4, look_at_rh};
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::quality::QualityTier;
-use crate::resources::{DescriptorPool, DescriptorSetLayout, GpuImage, Sampler};
+use crate::resources::{DescriptorPool, DescriptorSetLayout, GpuBuffer, GpuImage, Sampler};
 use crate::texture;
 
 /// How the directional shadow map is filtered (ADR-0011).
@@ -685,19 +687,81 @@ impl FrameLighting {
     }
 }
 
-/// Bindings of the lighting set (set 3), as in `lighting.glsl`.
-const BINDINGS: u32 = 6;
+/// Combined-image-sampler bindings of the scene set (set 3): 0-4 lighting (`lighting.glsl`),
+/// 5 fog-of-war visibility (`atmosphere.glsl`), 6-8 terrain splat and layers (`terrain.frag`).
+const IMAGE_BINDINGS: u32 = 9;
+/// Binding of the terrain parameter block (a uniform buffer, `terrain.frag`).
+const TERRAIN_BLOCK_BINDING: u32 = IMAGE_BINDINGS;
+/// Binding of the R6 ambient-occlusion image (`lighting.glsl`, ADR-0015 §5): the blurred GTAO
+/// transient on the main view, white elsewhere.
+const AO_BINDING: u32 = TERRAIN_BLOCK_BINDING + 1;
+/// Every binding of set 3.
+const SET_BINDINGS: usize = AO_BINDING as usize + 1;
+/// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image.
+pub(crate) const MAIN_SETS: usize = 2;
 
-/// The scene lighting descriptor set and the images it names besides the shadow transient.
+/// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
+/// ADR-0015 §5): combined image samplers `0..IMAGE_BINDINGS`, the terrain block and the AO
+/// image, all fragment-only. Also counted by the scene layout's descriptor budget
+/// (`descriptor_budget`).
+pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
+    let mut bindings: [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] =
+        core::array::from_fn(|index| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(index as u32)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+        });
+    bindings[TERRAIN_BLOCK_BINDING as usize] = vk::DescriptorSetLayoutBinding::default()
+        .binding(TERRAIN_BLOCK_BINDING)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+    bindings
+}
+
+/// The terrain parameter block (`TerrainBlock` in `terrain.frag`, std140, `vec4`s only).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct TerrainBlock {
+    /// xy world x, z of the splat square's corner, zw 1 / size.
+    pub(crate) rect: [f32; 4],
+    /// x layers sampled (0 = flat), y normal maps, z triplanar, w normal strength.
+    pub(crate) params: [f32; 4],
+    /// x layers of the splat array (1: layers 5-8 get no weight, 2), yzw reserved.
+    pub(crate) splat: [f32; 4],
+    /// 1 / metres per repeat, per layer.
+    pub(crate) tiling: [[f32; 4]; 2],
+    /// Layer tints (rgb).
+    pub(crate) tint: [[f32; 4]; 8],
+}
+
+/// Views the world bindings of set 3 name (R3a): the fog-of-war images and the terrain.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorldViews {
+    /// The fog-of-war image each main-view set (by frame in flight) samples.
+    pub(crate) fog: Option<[vk::ImageView; MAIN_SETS]>,
+    /// Splat array, layer albedo array, layer normal array (`None` entries: the defaults).
+    pub(crate) terrain: Option<[Option<vk::ImageView>; 3]>,
+}
+
+/// The scene descriptor set (set 3) and the images it names besides the transients: the R2a
+/// lighting (shadow map, environment, BRDF LUT, ramp) and the R3a world (fog-of-war
+/// visibility, terrain splat and layers, the terrain block).
 pub(crate) struct LightingResources {
-    set: vk::DescriptorSet,
-    /// The offscreen views' set: the same bindings, the default shadow image.
+    /// Main-view sets, one per frame in flight (each names that frame's fog-of-war image).
+    sets: [vk::DescriptorSet; MAIN_SETS],
+    /// The offscreen views' set: the same bindings, the default shadow and a white
+    /// visibility image.
     offscreen_set: vk::DescriptorSet,
     _pool: DescriptorPool,
     set_layout: DescriptorSetLayout,
     shadow_compare: Sampler,
     shadow_plain: Sampler,
     linear_clamp: Sampler,
+    /// Terrain layers: linear, repeat, anisotropic by tier.
+    layer_sampler: Sampler,
     /// 1×1 depth image at depth 1 (fully lit), bound when shadows are off.
     default_shadow: GpuImage,
     /// 1×1 black cube, bound without an environment.
@@ -712,34 +776,43 @@ pub(crate) struct LightingResources {
     shadow_view: vk::ImageView,
     /// The bound AO view (R6): the graph transient, or `default_ramp` (white).
     ao_view: vk::ImageView,
+    /// 1×1 `R8` white: fully visible (offscreen views, fog of war off).
+    default_visibility: GpuImage,
+    /// 1×1 defaults for the terrain arrays (flat terrain): splat, albedo, normal.
+    default_terrain: [GpuImage; 3],
+    /// The terrain block, written when the terrain changes (device idle).
+    terrain_block: GpuBuffer,
+    world: WorldViews,
     state: EnvironmentState,
 }
 
 impl LightingResources {
-    /// The set layout, samplers, default images, the BRDF LUT and the set.
-    /// `shadow_format` is the shadow map's format (or the depth format when shadows are off)
-    /// and `shadow_filter_linear` whether it can be sampled with linear filtering.
+    /// The set layout, samplers, default images, the BRDF LUT and the sets.
+    /// `shadow_format` is the shadow map's format (or the depth format when shadows are off),
+    /// `shadow_filter_linear` whether it can be sampled with linear filtering and
+    /// `anisotropy` the terrain layers' maximum anisotropy.
     #[allow(clippy::too_many_lines)] // Layout, samplers and default images, in order.
     pub(crate) fn new(
         device: &DeviceContext,
         shadow_format: vk::Format,
         shadow_filter_linear: bool,
+        anisotropy: Option<f32>,
     ) -> RenderResult<Self> {
-        let bindings: [vk::DescriptorSetLayoutBinding<'_>; BINDINGS as usize] =
-            core::array::from_fn(|index| {
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(index as u32)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-            });
+        let bindings = set_layout_bindings();
         let set_layout = DescriptorSetLayout::new(device.device.clone(), &bindings)?;
-        let pool_sizes = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(2 * BINDINGS)];
-        let pool = DescriptorPool::new(device.device.clone(), &pool_sizes, 2)?;
-        let sets = pool.allocate(&device.device, &[set_layout.handle(); 2])?;
-        let (set, offscreen_set) = (sets[0], sets[1]);
+        let set_count = MAIN_SETS as u32 + 1;
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(set_count * (IMAGE_BINDINGS + 1)),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(set_count),
+        ];
+        let pool = DescriptorPool::new(device.device.clone(), &pool_sizes, set_count)?;
+        let allocated = pool.allocate(&device.device, &[set_layout.handle(); MAIN_SETS + 1])?;
+        let sets = [allocated[0], allocated[1]];
+        let offscreen_set = allocated[MAIN_SETS];
         let filter = if shadow_filter_linear {
             vk::Filter::LINEAR
         } else {
@@ -784,6 +857,25 @@ impl LightingResources {
                 .min_lod(0.0)
                 .max_lod(vk::LOD_CLAMP_NONE),
         )?;
+        let anisotropy = anisotropy
+            .zip(device.max_anisotropy)
+            .map(|(wanted, limit)| wanted.min(limit))
+            .filter(|&value| value > 1.0);
+        let repeat = vk::SamplerAddressMode::REPEAT;
+        let layer_sampler = Sampler::new(
+            device.device.clone(),
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                .address_mode_u(repeat)
+                .address_mode_v(repeat)
+                .address_mode_w(clamp)
+                .anisotropy_enable(anisotropy.is_some())
+                .max_anisotropy(anisotropy.unwrap_or(1.0))
+                .min_lod(0.0)
+                .max_lod(vk::LOD_CLAMP_NONE),
+        )?;
         let default_shadow = texture::default_depth(device, shadow_format)?;
         let default_environment = texture::upload_raw(
             device,
@@ -794,8 +886,7 @@ impl LightingResources {
                     width: 1,
                     height: 1,
                 },
-                cube: true,
-                depth: 1,
+                layers: texture::RawLayers::Cube,
                 levels: &[(0, 24)],
                 bytes: &[0, 0, 0, 255].repeat(6),
             },
@@ -810,23 +901,74 @@ impl LightingResources {
                     width: BRDF_LUT_SIZE,
                     height: BRDF_LUT_SIZE,
                 },
-                cube: false,
-                depth: 1,
+                layers: texture::RawLayers::Plain,
                 levels: &[(0, lut.len())],
                 bytes: &lut,
             },
         )?;
         let default_ramp = texture::upload_rgba(device, "default-ramp", 1, 1, &[255; 4])?;
+        let tiny = |name, format, layers, bytes: &[u8]| {
+            texture::upload_raw(
+                device,
+                name,
+                &texture::RawImage {
+                    format,
+                    extent: vk::Extent2D {
+                        width: 1,
+                        height: 1,
+                    },
+                    layers,
+                    levels: &[(0, bytes.len())],
+                    bytes,
+                },
+            )
+        };
+        let default_visibility = tiny(
+            "default-visibility",
+            vk::Format::R8_UNORM,
+            texture::RawLayers::Plain,
+            &[255],
+        )?;
+        let default_terrain = [
+            tiny(
+                "default-terrain-splat",
+                vk::Format::R8G8B8A8_UNORM,
+                texture::RawLayers::Array(2),
+                &[255, 0, 0, 0, 0, 0, 0, 0],
+            )?,
+            tiny(
+                "default-terrain-albedo",
+                vk::Format::R8G8B8A8_SRGB,
+                texture::RawLayers::Array(1),
+                &[255; 4],
+            )?,
+            tiny(
+                "default-terrain-normal",
+                vk::Format::R8G8_UNORM,
+                texture::RawLayers::Array(1),
+                &[128, 128],
+            )?,
+        ];
+        let mut terrain_block = GpuBuffer::new(
+            device.device.clone(),
+            device.allocator(),
+            "terrain-block",
+            core::mem::size_of::<TerrainBlock>() as u64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+        )?;
+        terrain_block.write_bytes(0, bytemuck::bytes_of(&TerrainBlock::default()));
         let shadow_view = default_shadow.view();
         let ao_view = default_ramp.view();
         let resources = Self {
-            set,
+            sets,
             offscreen_set,
             _pool: pool,
             set_layout,
             shadow_compare,
             shadow_plain,
             linear_clamp,
+            layer_sampler,
             default_shadow,
             default_environment,
             environment: None,
@@ -835,6 +977,10 @@ impl LightingResources {
             ramp: None,
             shadow_view,
             ao_view,
+            default_visibility,
+            default_terrain,
+            terrain_block,
+            world: WorldViews::default(),
             state: EnvironmentState::NONE,
         };
         resources.write(device);
@@ -845,9 +991,10 @@ impl LightingResources {
         self.set_layout.handle()
     }
 
-    /// The main view's lighting set (names the shadow map).
-    pub(crate) fn set(&self) -> vk::DescriptorSet {
-        self.set
+    /// The main view's scene set for frame-in-flight `frame` (names the shadow map and that
+    /// frame's fog-of-war image).
+    pub(crate) fn set(&self, frame: usize) -> vk::DescriptorSet {
+        self.sets[frame % MAIN_SETS]
     }
 
     /// The offscreen views' lighting set (names the default shadow image).
@@ -866,10 +1013,24 @@ impl LightingResources {
         self.write(device);
     }
 
-    /// Points the main view's set at `view` (the blurred AO transient, R6) or white. The
-    /// device must be idle or the set unused by pending work (creation, resize).
+    /// Points the main view's sets at `view` (the blurred AO transient, R6) or white. The
+    /// device must be idle or the sets unused by pending work (creation, resize).
     pub(crate) fn bind_ao(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
         self.ao_view = view.unwrap_or(self.default_ramp.view());
+        self.write(device);
+    }
+
+    /// Points the world bindings at `world` (the fog-of-war images and the terrain, each
+    /// owned elsewhere for as long as they are bound) and writes the terrain block. The
+    /// device must be idle.
+    pub(crate) fn bind_world(
+        &mut self,
+        device: &DeviceContext,
+        world: WorldViews,
+        block: &TerrainBlock,
+    ) {
+        self.world = world;
+        self.terrain_block.write_bytes(0, bytemuck::bytes_of(block));
         self.write(device);
     }
 
@@ -893,12 +1054,19 @@ impl LightingResources {
     }
 
     fn write(&self, device: &DeviceContext) {
-        self.write_set(device, self.set, self.shadow_view, self.ao_view);
-        // Offscreen views: the default shadow image and white AO.
+        for (frame, &set) in self.sets.iter().enumerate() {
+            let fog = self
+                .world
+                .fog
+                .map_or(self.default_visibility.view(), |views| views[frame]);
+            self.write_set(device, set, self.shadow_view, fog, self.ao_view);
+        }
+        // Offscreen views: the default shadow image, full visibility and white AO.
         self.write_set(
             device,
             self.offscreen_set,
             self.default_shadow.view(),
+            self.default_visibility.view(),
             self.default_ramp.view(),
         );
     }
@@ -908,12 +1076,18 @@ impl LightingResources {
         device: &DeviceContext,
         set: vk::DescriptorSet,
         shadow: vk::ImageView,
+        fog: vk::ImageView,
         ao: vk::ImageView,
     ) {
         let environment = self
             .environment
             .as_ref()
             .map_or(self.default_environment.view(), GpuImage::view);
+        let defaults = self.default_terrain.each_ref().map(GpuImage::view);
+        let [splat, albedo, normal] = match self.world.terrain {
+            Some(views) => [0, 1, 2].map(|index| views[index].unwrap_or(defaults[index])),
+            None => defaults,
+        };
         let entries = [
             (self.shadow_compare.handle(), shadow),
             (self.shadow_plain.handle(), shadow),
@@ -923,16 +1097,27 @@ impl LightingResources {
                 self.linear_clamp.handle(),
                 self.ramp.unwrap_or(self.default_ramp.view()),
             ),
-            (self.linear_clamp.handle(), ao),
+            (self.linear_clamp.handle(), fog),
+            (self.linear_clamp.handle(), splat),
+            (self.layer_sampler.handle(), albedo),
+            (self.layer_sampler.handle(), normal),
         ];
-        let infos: [[vk::DescriptorImageInfo; 1]; BINDINGS as usize] =
+        let infos: [[vk::DescriptorImageInfo; 1]; IMAGE_BINDINGS as usize] =
             core::array::from_fn(|index| {
                 [vk::DescriptorImageInfo::default()
                     .sampler(entries[index].0)
                     .image_view(entries[index].1)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
             });
-        let writes: [vk::WriteDescriptorSet<'_>; BINDINGS as usize] =
+        let ao_info = [vk::DescriptorImageInfo::default()
+            .sampler(self.linear_clamp.handle())
+            .image_view(ao)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let block = [vk::DescriptorBufferInfo::default()
+            .buffer(self.terrain_block.handle())
+            .offset(0)
+            .range(core::mem::size_of::<TerrainBlock>() as u64)];
+        let images: [vk::WriteDescriptorSet<'_>; IMAGE_BINDINGS as usize] =
             core::array::from_fn(|index| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
@@ -940,9 +1125,26 @@ impl LightingResources {
                     .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                     .image_info(&infos[index])
             });
-        // SAFETY: the set, samplers and views are live, and the callers guarantee no pending
-        // command buffer uses the set (creation, or after a device-idle wait).
-        unsafe { device.device.update_descriptor_sets(&writes, &[]) };
+        let buffer = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(TERRAIN_BLOCK_BINDING)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&block);
+        let ao_write = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(AO_BINDING)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&ao_info);
+        // SAFETY: the set, samplers, views and the terrain block are live, and the callers
+        // guarantee no pending command buffer uses the set (creation, or after a device-idle
+        // wait).
+        unsafe { device.device.update_descriptor_sets(&images, &[]) };
+        // SAFETY: as above.
+        unsafe {
+            device
+                .device
+                .update_descriptor_sets(&[buffer, ao_write], &[]);
+        }
     }
 }
 

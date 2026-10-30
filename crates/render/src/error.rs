@@ -76,6 +76,24 @@ pub enum RenderError {
     /// texture or mesh does not match its descriptor, every VAT slot is used, or the VAT
     /// pipeline failed to build); the text says which. Draw the unit another way.
     InvalidVat(&'static str),
+    /// A terrain passed to [`Renderer::set_terrain`](crate::Renderer::set_terrain) is
+    /// unusable (heightfield size or values, layer or splat counts, formats or sizes); the
+    /// text says which (ADR-0014).
+    InvalidTerrain(&'static str),
+    /// A pipeline layout needs more samplers or sampled images in one shader stage than the
+    /// device allows (`maxPerStageDescriptorSamplers`/`SampledImages`); `layout` names it.
+    DescriptorLimit {
+        /// The pipeline layout (`"scene"`).
+        layout: &'static str,
+        /// The shader stage (`"fragment"`, ...).
+        stage: &'static str,
+        /// `"samplers"` or `"sampled images"`.
+        kind: &'static str,
+        /// How many the layout needs.
+        needed: u32,
+        /// The device's limit.
+        limit: u32,
+    },
 }
 
 impl fmt::Display for RenderError {
@@ -108,6 +126,18 @@ impl fmt::Display for RenderError {
             Self::InvalidVat(reason) => {
                 write!(f, "invalid vertex-animation texture: {reason}")
             }
+            Self::InvalidTerrain(reason) => write!(f, "invalid terrain: {reason}"),
+            Self::DescriptorLimit {
+                layout,
+                stage,
+                kind,
+                needed,
+                limit,
+            } => write!(
+                f,
+                "the {layout} pipeline layout needs {needed} {kind} in the {stage} stage; the \
+                 device allows {limit}"
+            ),
             Self::InvalidTexture => f.write_str("invalid texture dimensions"),
             Self::TooManyMeshes => write!(
                 f,

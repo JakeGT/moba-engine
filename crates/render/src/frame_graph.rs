@@ -1,29 +1,32 @@
 //! The engine's frame, declared as a render graph, and barrier recording.
 //!
 //! ```text
-//! portraits  (R7b; frames that update them) hero models → portrait atlas (persistent)
-//! minimap    (R7b; frames that bake it) top-down map → minimap image (persistent)
+//! portraits     (R7b; frames that update them) hero models → portrait atlas (persistent)
+//! minimap       (R7b; frames that bake it) top-down map → minimap image (persistent)
+//! fow-raster    (R3a; fog of war on) vision sources → fixed-size R8 transient (MAX blend)
+//! fow-resolve   (R3a) raw (sampled, blurred) + the other frame's image (history) → this
+//!               frame's fog-of-war image (persistent, ping-pong by frame in flight)
 //! vfx_simulate  compute: spawn, age, integrate and compact particles; indirect args (R5)
-//! shadow     (R2a; when shadows are on) the main view's units + skinned, depth only →
-//!            shadow map (fixed size)
-//! prepass    (R6, AO on) main view depth only → depth (msaa-depth + resolve with MSAA)
-//! ao         depth → ao-raw (half render resolution): GTAO
-//! ao_blur    ao-raw → ao: 4×4 depth-aware blur
-//! scene      terrain + units + skinned → hdr (colour, cleared; msaa-hdr resolved into it
-//!            with MSAA) + depth (sampled-capable; loaded after the prepass), sampling the
-//!            shadow map and ao
-//! vfx_draw   particles → hdr (+ OIT accum/reveal), single-sampled after any MSAA resolve;
-//!            depth read-only + sampled (soft particles)
-//! vfx_resolve  OIT accum/reveal (sampled) blended over hdr (Medium and up)
-//! bloom_d*   hdr → bloom0 … bloom4 (R6, bloom or auto exposure): 13-tap down-samples
-//! exposure   bloom4 → exposure (1×1, persistent; auto exposure)
-//! bloom_u*   bloom[i+1] tent-filtered and added into bloom[i] (bloom)
-//! composite  hdr + bloom0 + exposure → AgX + grading + screen effects → ldr | swapchain
-//! fxaa       ldr → ldr2 | swapchain (FXAA)
-//! upscale    ldr | ldr2 → swapchain (render scale < 1 or dynamic resolution)
-//! ui         HUD batch blended over the swapchain (not tonemapped); samples both
-//!            offscreen images
-//! capture    swapchain → readback buffer (only in the capture variant)
+//! shadow        (R2a; when shadows are on) the main view's units + skinned, depth only →
+//!               shadow map (fixed size)
+//! prepass       (R6, AO on) main view depth only → depth (msaa-depth + resolve with MSAA)
+//! ao            depth → ao-raw (half render resolution): GTAO
+//! ao_blur       ao-raw → ao: 4×4 depth-aware blur
+//! scene         terrain + units + skinned + sky → hdr (colour, cleared; msaa-hdr resolved
+//!               into it with MSAA) + depth (sampled-capable; loaded after the prepass),
+//!               sampling the shadow map, this frame's fog-of-war image and ao
+//! vfx_draw      particles → hdr (+ OIT accum/reveal), single-sampled after any MSAA
+//!               resolve; depth read-only + sampled (soft particles)
+//! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
+//! bloom_d*      hdr → bloom0 … bloom4 (R6, bloom or auto exposure): 13-tap down-samples
+//! exposure      bloom4 → exposure (1×1, persistent; auto exposure)
+//! bloom_u*      bloom[i+1] tent-filtered and added into bloom[i] (bloom)
+//! composite     hdr + bloom0 + exposure → AgX + grading + screen effects → ldr | swapchain
+//! fxaa          ldr → ldr2 | swapchain (FXAA)
+//! upscale       ldr | ldr2 → swapchain (render scale < 1 or dynamic resolution)
+//! ui            HUD batch blended over the swapchain (not tonemapped); samples both
+//!               offscreen images and (the minimap mask) the fog-of-war image
+//! capture       swapchain → readback buffer (only in the capture variant)
 //! ```
 //!
 //! The offscreen images are imports owned by the renderer, not transients: their contents
@@ -78,6 +81,8 @@ pub(crate) const AO_FORMAT: vk::Format = vk::Format::R8_UNORM;
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PassKind {
+    FogRaster,
+    FogResolve,
     Shadow,
     VfxSimulate,
     Prepass,
@@ -146,6 +151,17 @@ pub(crate) struct AoResources {
     pub(crate) blurred: ResourceId,
 }
 
+/// Resource ids of the fog-of-war passes (R3a).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FogResources {
+    /// This frame's raw raster (a fixed-size transient).
+    pub(crate) raw: ResourceId,
+    /// The persistent image this frame writes (frame slot `f`: image `f`).
+    pub(crate) current: ResourceId,
+    /// The persistent image the previous frame wrote (image `1 - f`).
+    pub(crate) history: ResourceId,
+}
+
 /// Resource ids of the engine frame graph.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrameResources {
@@ -170,6 +186,8 @@ pub(crate) struct FrameResources {
     pub(crate) ldr: Option<ResourceId>,
     /// FXAA's output when the upscale reads it.
     pub(crate) ldr2: Option<ResourceId>,
+    /// The fog-of-war resources; `None` unless the fog of war uses the texture.
+    pub(crate) fog: Option<FogResources>,
 }
 
 /// The shadow map a frame renders, when shadows are on.
@@ -189,6 +207,9 @@ pub(crate) struct FrameSpec {
     pub(crate) depth_aspect: vk::ImageAspectFlags,
     /// The shadow pass and map, when shadows are on.
     pub(crate) shadow: Option<ShadowSpec>,
+    /// The fog-of-war texture's edge in texels (R3a, ADR-0014), adding the `fow-raster` and
+    /// `fow-resolve` passes; `None` unless the fog of war uses the texture.
+    pub(crate) fog: Option<u32>,
     /// The GPU particle passes (ADR-0013).
     pub(crate) vfx: VfxMode,
     /// MSAA 4× scene attachments.
@@ -225,6 +246,7 @@ impl FrameSpec {
             depth_format,
             depth_aspect,
             shadow: None,
+            fog: None,
             vfx: VfxMode::Off,
             msaa: false,
             prepass: false,
@@ -270,7 +292,8 @@ const fn image(format: vk::Format, size: ImageSize) -> ImageDesc {
 
 /// Builds and compiles the frame graph for `spec`. Bit `s` of `offscreen` adds the pass that
 /// renders offscreen image `s` this frame; `capture` adds the readback. Every variant of one
-/// renderer passes the same `spec`, so they share transients.
+/// renderer passes the same `spec` (shadows, the fog of war's texture edge, the post chain),
+/// so they share transients.
 ///
 /// # Errors
 /// Only if the declaration below is inconsistent (covered by unit tests).
@@ -346,6 +369,36 @@ pub(crate) fn build(
                 extra_usage: vk::ImageUsageFlags::empty(),
             },
         )
+    });
+    // R3a fog of war: the raw raster is fixed-size (never aliases swapchain-sized targets);
+    // the two persistent images start and end every frame sampled, like R7b's.
+    let fog_resources = spec.fog.map(|resolution| FogResources {
+        raw: graph.transient_image(
+            "fow-raw",
+            image(
+                crate::passes::fog::FOG_FORMAT,
+                ImageSize::Fixed {
+                    width: resolution,
+                    height: resolution,
+                },
+            ),
+        ),
+        current: graph.import_image(
+            "fow-current",
+            ImportState::persistent(
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            Some(Access::SampledFragment),
+        ),
+        history: graph.import_image(
+            "fow-history",
+            ImportState::persistent(
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            Some(Access::SampledFragment),
+        ),
     });
     let bloom: Option<[ResourceId; BLOOM_LEVELS]> = spec.bloom_chain().then(|| {
         core::array::from_fn(|level| {
@@ -448,6 +501,16 @@ pub(crate) fn build(
             .access(resources.depth, Access::DepthWrite)
             .access(resources.bones, Access::VertexStorageRead);
     }
+    if let Some(fog) = fog_resources {
+        let _ = graph
+            .pass("fow-raster", PassKind::FogRaster)
+            .access(fog.raw, Access::ColorWrite);
+        let _ = graph
+            .pass("fow-resolve", PassKind::FogResolve)
+            .access(fog.raw, Access::SampledFragment)
+            .access(fog.history, Access::SampledFragment)
+            .access(fog.current, Access::ColorWrite);
+    }
     if let Some(vfx) = vfx {
         let _ = graph
             .pass("vfx_simulate", PassKind::VfxSimulate)
@@ -515,6 +578,9 @@ pub(crate) fn build(
     };
     if let Some(shadow_map) = shadow_map {
         scene = scene.access(shadow_map, Access::SampledFragment);
+    }
+    if let Some(fog) = fog_resources {
+        scene = scene.access(fog.current, Access::SampledFragment);
     }
     if let Some(ao) = ao {
         scene = scene.access(ao.blurred, Access::SampledFragment);
@@ -606,6 +672,9 @@ pub(crate) fn build(
     for resources in &offscreen_resources {
         ui = ui.access(resources.color, Access::SampledFragment);
     }
+    if let Some(fog) = fog_resources {
+        ui = ui.access(fog.current, Access::SampledFragment);
+    }
     let _ = ui;
     if let Some(buffer) = capture_buffer {
         let _ = graph
@@ -633,6 +702,7 @@ pub(crate) fn build(
             exposure,
             ldr,
             ldr2,
+            fog: fog_resources,
         },
     })
 }
@@ -742,7 +812,7 @@ mod tests {
     use super::{
         BLOOM_LEVELS, FrameSpec, OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode, build,
     };
-    use crate::graph::ImageSize;
+    use crate::graph::{ImageSize, ResourceId};
     use ash::vk;
     use vk::ImageLayout as L;
 
@@ -773,7 +843,8 @@ mod tests {
     }
 
     /// Every post topology the renderer can build (2^8 switch combinations, the standalone
-    /// prepass included) with each particle mode: off, unsorted (Low) and OIT.
+    /// prepass included) with each particle mode: off, unsorted (Low) and OIT. The shadowed
+    /// half also runs R3a's fog-of-war passes, as every tier with shadows does.
     fn post_specs() -> Vec<FrameSpec> {
         (0..768u32)
             .map(|bits| FrameSpec {
@@ -791,7 +862,10 @@ mod tests {
                 upscale: bits & 32 != 0,
                 bloom_format: vk::Format::B10G11R11_UFLOAT_PACK32,
                 ..if bits & 64 != 0 {
-                    shadowed_spec()
+                    FrameSpec {
+                        fog: Some(256),
+                        ..shadowed_spec()
+                    }
                 } else {
                     plain()
                 }
@@ -1009,13 +1083,20 @@ mod tests {
             assert_eq!(has(PassKind::Exposure), spec.auto_exposure);
             assert_eq!(has(PassKind::Fxaa), spec.fxaa);
             assert_eq!(has(PassKind::Upscale), spec.upscale);
-            // Order: [shadow] [prepass ao ao_blur] scene [bloom_d* exposure bloom_u*]
+            assert_eq!(has(PassKind::FogRaster), spec.fog.is_some());
+            assert_eq!(has(PassKind::FogResolve), spec.fog.is_some());
+            // Order: [fow-raster fow-resolve] [shadow] [prepass ao ao_blur] scene [bloom_d* exposure bloom_u*]
             // composite [fxaa] [upscale] ui.
             let at = |kind| passes.iter().position(|&pass| pass == kind);
             let scene = at(PassKind::Scene).expect("scene");
             let composite = at(PassKind::Composite).expect("composite");
             let ui = at(PassKind::Ui).expect("ui");
             assert!(at(PassKind::AoBlur).is_none_or(|blur| blur < scene));
+            assert!(at(PassKind::FogResolve).is_none_or(|resolve| {
+                at(PassKind::FogRaster) == Some(resolve - 1)
+                    && at(PassKind::Prepass).is_none_or(|prepass| resolve < prepass)
+                    && resolve < scene
+            }));
             assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > scene));
             // Particles land in the HDR target after the scene and before any post pass
             // reads it (bloom, exposure metering, composite).
@@ -1060,11 +1141,12 @@ mod tests {
             let finals = 1 + usize::from(spec.vfx != VfxMode::Off);
             assert_eq!(base.graph.final_barriers().len(), finals, "{spec:?}");
             assert!(base.graph.passes().len() <= crate::graph::MAX_PASSES);
-            // Slots: hdr + depth, [shadow], [msaa x2], [ao x2], [bloom x5], [ldr], [ldr2],
-            // [OIT accum + reveal].
+            // Slots: hdr + depth, [shadow], [fog-of-war raw], [msaa x2], [ao x2], [bloom x5],
+            // [ldr], [ldr2], [OIT accum + reveal].
             let expected = 2
                 + 2 * usize::from(spec.vfx == VfxMode::Oit)
                 + usize::from(spec.shadow.is_some())
+                + usize::from(spec.fog.is_some())
                 + 2 * usize::from(spec.msaa)
                 + 2 * usize::from(spec.ambient_occlusion)
                 + BLOOM_LEVELS * usize::from(spec.bloom_chain())
@@ -1315,5 +1397,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn world(capture: bool, offscreen: usize) -> super::FramePlan {
+        let spec = FrameSpec {
+            fog: Some(256),
+            ..shadowed_spec()
+        };
+        build(&spec, capture, offscreen).expect("the frame graph with fog of war compiles")
+    }
+
+    fn barrier(
+        pass: &crate::graph::CompiledPass<PassKind>,
+        resource: ResourceId,
+    ) -> crate::graph::Barrier {
+        *pass
+            .barriers
+            .iter()
+            .find(|barrier| barrier.resource == resource)
+            .expect("barrier")
+    }
+
+    /// R3a: the raster writes the raw transient, the resolve samples it and the history
+    /// image and writes this frame's image, which the scene and the UI then sample. Both
+    /// persistent images end the frame where they started, so no final barriers.
+    #[test]
+    fn fog_of_war_passes_raster_then_resolve_before_the_scene() {
+        let plain = world(false, 0);
+        for capture in [false, true] {
+            for offscreen in 0..OFFSCREEN_VARIANTS {
+                let frame = world(capture, offscreen);
+                assert!(frame.graph.shares_transients_with(&plain.graph));
+                assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                let count = offscreen.count_ones() as usize;
+                let passes = frame.graph.passes();
+                let kinds: Vec<_> = passes[count..count + 4]
+                    .iter()
+                    .map(|pass| pass.tag)
+                    .collect();
+                assert_eq!(
+                    kinds,
+                    [
+                        PassKind::FogRaster,
+                        PassKind::FogResolve,
+                        PassKind::Shadow,
+                        PassKind::Scene
+                    ]
+                );
+                // Every pass before the composite stays ahead of the acquire wait.
+                assert_eq!(frame.acquire_split, count + 4);
+                let fog = frame.resources.fog.expect("fog resources");
+                let raster = &passes[count];
+                let raw = barrier(raster, fog.raw);
+                assert_eq!(raw.new_layout, L::COLOR_ATTACHMENT_OPTIMAL);
+                let resolve = &passes[count + 1];
+                let read_raw = barrier(resolve, fog.raw);
+                assert_eq!(
+                    (read_raw.old_layout, read_raw.new_layout),
+                    (L::COLOR_ATTACHMENT_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL)
+                );
+                assert_eq!(
+                    read_raw.src_access,
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                );
+                // The history image is already sampled: an execution dependency at most.
+                let history = barrier(resolve, fog.history);
+                assert_eq!(history.old_layout, L::SHADER_READ_ONLY_OPTIMAL);
+                assert_eq!(history.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+                // This frame's image: write-after-read against the previous frames' samples.
+                let write = barrier(resolve, fog.current);
+                assert_eq!(
+                    (write.old_layout, write.new_layout),
+                    (L::SHADER_READ_ONLY_OPTIMAL, L::COLOR_ATTACHMENT_OPTIMAL)
+                );
+                assert_eq!(write.src_stage, vk::PipelineStageFlags2::FRAGMENT_SHADER);
+                let scene = &passes[count + 3];
+                let read = barrier(scene, fog.current);
+                assert_eq!(
+                    (read.old_layout, read.new_layout),
+                    (L::COLOR_ATTACHMENT_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL)
+                );
+                assert_eq!(read.dst_access, vk::AccessFlags2::SHADER_SAMPLED_READ);
+                let ui = passes
+                    .iter()
+                    .find(|pass| pass.tag == PassKind::Ui)
+                    .expect("ui");
+                assert!(ui.uses(fog.current));
+                assert!(
+                    frame
+                        .graph
+                        .final_barriers()
+                        .iter()
+                        .all(|barrier| barrier.resource != fog.current
+                            && barrier.resource != fog.history)
+                );
+            }
+        }
+        // Shadow map, raw fog raster, hdr and depth: four slots, the fixed-size ones apart.
+        assert_eq!(plain.graph.slots().len(), 4);
+        assert!(plain.graph.passes().len() <= crate::graph::MAX_PASSES);
     }
 }

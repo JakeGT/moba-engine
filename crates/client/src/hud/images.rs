@@ -22,6 +22,32 @@ pub(crate) struct HudImages {
     pub(crate) portrait_cells: u8,
     /// The minimap image holds the current map.
     pub(crate) minimap: bool,
+    /// How the minimap shows the fog of war (R3a): it follows the renderer's mode.
+    pub(crate) fog: MinimapFog,
+}
+
+/// The minimap's fog of war, by the renderer's [`moba_render::FogOfWarMode`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MinimapFog {
+    /// The pre-R3a 24×24 grid from the units the client was sent (`MOBA_FOW=legacy`, or no
+    /// renderer).
+    #[default]
+    Grid,
+    /// The scene's fog-of-war texture (walls respected, faded like the world).
+    Texture,
+    /// No fog (`MOBA_FOW=off`): the minimap matches the world.
+    Off,
+}
+
+impl MinimapFog {
+    /// The minimap fog for a renderer fog-of-war mode.
+    pub(crate) fn from_mode(mode: moba_render::FogOfWarMode) -> Self {
+        match mode {
+            moba_render::FogOfWarMode::Texture => Self::Texture,
+            moba_render::FogOfWarMode::Off => Self::Off,
+            _ => Self::Grid,
+        }
+    }
 }
 
 /// The portrait cell of a team's hero slot, or `None` past [`PORTRAIT_SLOTS_PER_TEAM`].
@@ -82,9 +108,28 @@ pub(crate) fn draw_portrait(
 
 #[cfg(test)]
 mod tests {
-    use super::{HudImages, PORTRAIT_CELLS, draw_portrait, portrait_cell};
+    use super::{HudImages, MinimapFog, PORTRAIT_CELLS, draw_portrait, portrait_cell};
     use moba_core::math::Vec4;
-    use moba_render::{UiDrawList, UiVertex};
+    use moba_render::{FogOfWarMode, UiDrawList, UiVertex};
+
+    /// Review fix: `MOBA_FOW=off` turns the minimap's fog off too; legacy keeps the grid.
+    #[test]
+    fn the_minimap_fog_follows_the_renderer_mode() {
+        assert_eq!(
+            MinimapFog::from_mode(FogOfWarMode::Texture),
+            MinimapFog::Texture
+        );
+        assert_eq!(
+            MinimapFog::from_mode(FogOfWarMode::Legacy),
+            MinimapFog::Grid
+        );
+        assert_eq!(MinimapFog::from_mode(FogOfWarMode::Off), MinimapFog::Off);
+        assert_eq!(
+            MinimapFog::default(),
+            MinimapFog::Grid,
+            "no renderer: the grid"
+        );
+    }
 
     #[test]
     fn portrait_cells_split_the_strip_by_team_and_slot() {
@@ -96,6 +141,7 @@ mod tests {
             portraits: 1 << 12,
             portrait_cells: u8::try_from(PORTRAIT_CELLS).expect("fits"),
             minimap: false,
+            fog: MinimapFog::Grid,
         };
         assert_eq!(
             images.portrait_uv(1, 4),

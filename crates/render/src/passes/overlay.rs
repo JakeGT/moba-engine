@@ -63,6 +63,8 @@ pub(crate) struct UiPass {
     _font_atlas: GpuImage,
     _font_sampler: Sampler,
     _image_sampler: Sampler,
+    /// 1×1 white, the fog mask's image without a fog-of-war texture.
+    _no_fog: GpuImage,
     pipeline_layout: PipelineLayout,
     pipeline: GraphicsPipeline,
     max_vertices: usize,
@@ -78,6 +80,8 @@ pub(crate) struct UiImages {
     /// One view per [`UiImage`](crate::UiImage) slot, kept in `SHADER_READ_ONLY_OPTIMAL`
     /// between frames and outliving the pass.
     pub(crate) views: [vk::ImageView; UI_IMAGE_SLOTS],
+    /// The fog-of-war image each frame slot samples (R3a), or `None` (a white image).
+    pub(crate) fog: Option<[vk::ImageView; 2]>,
     /// Exposure applied before the tonemap (the composite's).
     pub(crate) exposure: f32,
 }
@@ -97,7 +101,8 @@ impl UiPass {
         // Binding 0: the RGBA pixel-art atlas (nearest). Binding 1: the MSDF font (linear).
         // Binding 2: the offscreen images, an array with one element per slot (linear).
         let image_slots = u32::try_from(UI_IMAGE_SLOTS).expect("slot count fits u32");
-        let binding = [(0, 1), (1, 1), (2, image_slots)].map(|(binding, count)| {
+        // Binding 3: the fog-of-war visibility (R3a), per frame slot.
+        let binding = [(0, 1), (1, 1), (2, image_slots), (3, 1)].map(|(binding, count)| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(binding)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -146,7 +151,7 @@ impl UiPass {
         let frame_count = u32::try_from(frames).expect("frame count fits u32");
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(frame_count * (2 + image_slots))];
+            .descriptor_count(frame_count * (3 + image_slots))];
         let descriptor_pool = DescriptorPool::new(device.device.clone(), &pool_sizes, frame_count)?;
         let set_layouts = vec![set_layout.handle(); frames];
         let sets = descriptor_pool.allocate(&device.device, &set_layouts)?;
@@ -164,9 +169,36 @@ impl UiPass {
                 .image_view(view)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         });
+        let no_fog = texture::upload_raw(
+            device,
+            "ui-no-fog",
+            &texture::RawImage {
+                format: vk::Format::R8_UNORM,
+                extent: vk::Extent2D {
+                    width: 1,
+                    height: 1,
+                },
+                layers: texture::RawLayers::Plain,
+                levels: &[(0, 1)],
+                bytes: &[255],
+            },
+        )?;
+        let fog_info: Vec<[vk::DescriptorImageInfo; 1]> = (0..frames)
+            .map(|frame| {
+                [vk::DescriptorImageInfo::default()
+                    .sampler(image_sampler.handle())
+                    .image_view(
+                        images
+                            .fog
+                            .map_or(no_fog.view(), |views| views[frame % views.len()]),
+                    )
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
+            })
+            .collect();
         let writes: Vec<vk::WriteDescriptorSet<'_>> = sets
             .iter()
-            .flat_map(|set| {
+            .zip(&fog_info)
+            .flat_map(|(set, fog_info)| {
                 [
                     vk::WriteDescriptorSet::default()
                         .dst_set(*set)
@@ -184,6 +216,11 @@ impl UiPass {
                         .dst_array_element(0)
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(&offscreen_info),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(*set)
+                        .dst_binding(3)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(fog_info),
                 ]
             })
             .collect();
@@ -233,6 +270,7 @@ impl UiPass {
             _font_atlas: font_atlas,
             _font_sampler: font_sampler,
             _image_sampler: image_sampler,
+            _no_fog: no_fog,
             pipeline_layout,
             pipeline,
             max_vertices,

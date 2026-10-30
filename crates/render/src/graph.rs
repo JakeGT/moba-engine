@@ -18,7 +18,8 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this). R6's
-/// post chain (ADR-0015) brings a frame with everything on to 25.
+/// post chain (ADR-0015) and R3a's two fog-of-war passes bring a frame with everything on
+/// (both offscreen passes and the capture included) to 27.
 pub(crate) const MAX_PASSES: usize = 32;
 /// Most resources (imported + transient) one graph may declare (at most 64: a pass's
 /// resource set is a `u64` bit mask).

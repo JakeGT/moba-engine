@@ -1,11 +1,11 @@
 # Map visuals descriptor for `visuals = "ember"` (content/ember-map.toml), #287.
 # Client-local and cosmetic: never hashed or sent. See docs/content-authoring.md#map-visuals.
-terrain = [0.24, 0.09, 0.05]   # scorched ground (linear RGB, 0..=1)
 wall = [0.55, 0.20, 0.08]      # rust-red ramparts
 wall_height = 6.0
 wall_mesh = "rampart"          # models/rampart.glb, stretched along each wall
 
-# Ember crystals around the crossing.
+# Ember crystals around the crossing (tall props stay off the lane corridor and away from
+# the towers: content-check warns about anything that looks like an obstacle on a lane).
 [[props]]
 position = [96, 72]
 color = [1.0, 0.42, 0.10]
@@ -20,7 +20,7 @@ yaw = 180.0
 mesh = "crystal"
 
 [[props]]
-position = [128, 128]
+position = [121, 138]          # beside the mid lane, which crosses [128, 128]
 color = [1.0, 0.62, 0.18]
 height = 16.0
 yaw = 45.0
@@ -55,6 +55,56 @@ rim = 0.45
 rim_color = [1.0, 0.75, 0.5]
 specular_tint = [1.0, 0.8, 0.6]
 
+# Terrain (R3a, ADR-0014): scorched ground in a basin of terraced basalt cliffs.
+[terrain]
+tint = [0.24, 0.09, 0.05]        # the flat plane's tint (scorched ground, linear RGB 0..=1)
+relief = 0.4                     # metres, at most 0.5 on the board
+edge = "cliffs"
+edge_height = 26.0
+lane_width = 12.0
+seed = 3
+
+[[terrain.layers]]               # 1: base ground, dark ash and brown
+albedo = "terrain-dirt"
+normal = "terrain-dirt-normal"
+tint = [0.42, 0.32, 0.27]
+tiling = 7.0
+
+[[terrain.layers]]               # 2: the rust-red trodden path
+albedo = "terrain-pebbles"
+normal = "terrain-pebbles-normal"
+tint = [0.95, 0.52, 0.32]
+tiling = 4.0
+
+[[terrain.layers]]               # 3: dark basalt on the cliffs and at the ramparts
+albedo = "terrain-rock"
+normal = "terrain-rock-normal"
+tint = [0.42, 0.39, 0.39]
+tiling = 12.0
+
+[[terrain.layers]]               # 4: ember-lit moss in patches
+albedo = "terrain-moss"
+normal = "terrain-moss-normal"
+tint = [1.35, 0.60, 0.30]
+tiling = 8.0
+
+# Smoky orange haze, thick at the horizon, and a smoke-dark sky above.
+[atmosphere]
+fog_color = [0.55, 0.30, 0.16]
+fog_density = 0.003
+fog_height = 25.0
+fog_start = 80.0
+fog_max = 0.72
+sky_zenith = [0.20, 0.10, 0.07]
+sky_horizon = [0.75, 0.38, 0.16]
+
+# Unseen ground sinks into smoke; tall ramparts stay readable above the mist.
+[fog_of_war]
+color = [0.06, 0.03, 0.02]
+darken = 0.72
+desaturate = 0.55
+mist_height = 3.5
+mist = 0.45
 # Post-processing (R6): the warm ember grade, a little more bloom for the glowing crystals,
 # and eye adaptation (the bright crystals make this the auto-exposure demo). Captures and
 # goldens pin auto exposure off.

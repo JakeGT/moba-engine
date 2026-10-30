@@ -350,6 +350,7 @@ impl HudFx {
                 portraits: 0,
                 portrait_cells: 0,
                 minimap: false,
+                fog: super::images::MinimapFog::Grid,
             },
         }
     }

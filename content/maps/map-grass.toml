@@ -1,8 +1,8 @@
 # Map visuals descriptor for the built-in grass theme (`visuals` unset, theme "grass"), so
-# the default map gets image-based lighting (R2a, ADR-0011). The terrain and wall colours are
-# the built-in theme table's, so only the lighting differs from having no file.
-# Client-local and cosmetic: never hashed or sent. See docs/content-authoring.md#lighting.
-terrain = [0.10, 0.16, 0.11]
+# the default map gets image-based lighting (R2a, ADR-0011) and a meadow terrain, sky and fog
+# of war (R3a, ADR-0014). The flat-plane tint and the wall colour are the built-in theme
+# table's, so a client without the terrain textures draws the R2a look.
+# Client-local and cosmetic: never hashed or sent. See docs/content-authoring.md#terrain.
 wall = [0.24, 0.21, 0.16]
 
 [lighting]
@@ -16,6 +16,63 @@ wrap = 0.2
 rim = 0.25
 rim_color = [0.85, 0.92, 1.0]
 
+# A meadow basin: gentle relief on the board, rolling hills beyond the edge.
+[terrain]
+tint = [0.10, 0.16, 0.11]        # the flat plane's tint (no layer textures: the R2a plane)
+relief = 0.3                     # metres, at most 0.5 on the board
+edge = "hills"
+edge_height = 20.0
+lane_width = 12.0
+seed = 1
+
+[[terrain.layers]]               # 1: base ground
+albedo = "terrain-grass"
+normal = "terrain-grass-normal"
+tint = [0.85, 1.0, 0.80]
+tiling = 6.0
+
+[[terrain.layers]]               # 2: lanes, bases and towers
+albedo = "terrain-dirt"
+normal = "terrain-dirt-normal"
+tint = [1.0, 0.88, 0.72]         # warm trodden earth
+tiling = 5.0
+
+[[terrain.layers]]               # 3: slopes and the feet of walls
+albedo = "terrain-rock"
+normal = "terrain-rock-normal"
+tint = [0.86, 0.86, 0.88]
+tiling = 10.0
+
+[[terrain.layers]]               # 4: variation patches on the grass
+albedo = "terrain-moss"
+normal = "terrain-moss-normal"
+tint = [0.80, 1.0, 0.70]
+tiling = 7.0
+
+[[terrain.layers]]               # 5: sparse pebble patches
+albedo = "terrain-pebbles"
+normal = "terrain-pebbles-normal"
+tint = [0.95, 0.95, 0.90]
+tiling = 4.0
+
+# A light blue haze: barely there on the board at the player camera (fog starts 80 m out),
+# thicker towards the low horizon, where it meets the sky's horizon colour.
+[atmosphere]
+fog_color = [0.62, 0.72, 0.85]
+fog_density = 0.0018
+fog_height = 25.0
+fog_start = 80.0
+fog_max = 0.65
+sky_zenith = [0.18, 0.36, 0.75]
+sky_horizon = [0.62, 0.72, 0.85]
+
+# Unseen ground: a cool, dimmed meadow with a thin ground mist.
+[fog_of_war]
+color = [0.03, 0.05, 0.08]
+darken = 0.65
+desaturate = 0.45
+mist_height = 2.5
+mist = 0.3
 # Post-processing (R6): the neutral-warm meadow grade and the default-level bloom.
 [post]
 exposure = 0.0                   # EV stops
