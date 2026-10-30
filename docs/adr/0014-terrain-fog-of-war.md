@@ -4,7 +4,8 @@
 [AAA graphics roadmap](../plans/aaa-graphics-roadmap.md#r3--terrain-and-environment-l):
 items 1, 5 and 6). Builds on [ADR-0008](0008-render-graph.md) (render graph),
 [ADR-0010](0010-texture-pipeline.md) (KTX2 textures) and
-[ADR-0011](0011-art-style-lighting.md) (lighting). Decals, foliage and water are R3b.
+[ADR-0011](0011-art-style-lighting.md) (lighting). Decals, foliage and water are R3b
+([ADR-0017](0017-decals-foliage-water.md), which adds set-3 binding 20 to §6).
 
 ## Context
 Until R3a the ground was one 300 m plane with a procedural grid and a per-map tint. Fog of

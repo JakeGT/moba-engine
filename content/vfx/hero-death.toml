@@ -49,3 +49,11 @@ intensity = 6.0
 radius = 8.0
 duration = 0.2
 fade_out = 0.8
+
+[[decals]]                       # R3b: a splat where it fell (ADR-0017 §1)
+shape = "splat"
+radius = 2.0
+color = [0.10, 0.03, 0.02, 0.7]
+lifetime = 10.0
+fade_out = 3.0
+stamp = true

@@ -58,3 +58,21 @@ scale_with_radius = true
 fade_in = 0.2
 fade_out = 0.4
 flicker = 0.35
+
+[[decals]]                       # R3b: the area telegraph on the ground (ADR-0017 §1)
+shape = "ring"
+radius = 1.0
+width = 0.1
+color = [2.2, 0.8, 0.2, 0.45]
+telegraph = true
+progress = true
+scale_with_radius = true
+
+[[decals]]                       # scorched ground while the zone burns
+shape = "disc"
+style = "paint"
+radius = 0.9
+scale_with_radius = true
+color = [0.06, 0.03, 0.02, 0.55]
+fade_in = 0.3
+fade_out = 0.6

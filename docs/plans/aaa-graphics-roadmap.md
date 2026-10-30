@@ -20,7 +20,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Shaders | **R1b:** 9 GLSL sources sharing `#include` files (camera block, instance buffer, lighting, material set) plus `MATERIAL_TEXTURED` permutations and (R2a) two `SHADOW_PASS` depth-only casters: 14 SPIR-V modules validated with `spirv-val`. Every pipeline is built at load through a persistent `VkPipelineCache` (9 with shadows on). Hot reload of SPIR-V overrides in debug builds (`MOBA_SHADER_DIR`). |
 | Lighting | **R2a** ([ADR-0011](../adr/0011-art-style-lighting.md)): stylised PBR (GGX, Smith-GGX, Schlick, energy-conserving diffuse) with wrap/ramp/painted-specular/rim set per map and material; per-map IBL (SH-L2 diffuse + prefiltered specular cube, split-sum LUT) from `env-bake`'s analytic skies; one fitted, texel-snapped directional shadow map with hard/PCF/PCSS-lite filtering by tier, skinned heroes casting. **R2b** ([ADR-0016](../adr/0016-lights-outlines-ao.md)): clustered forward point lights (ground-aligned 32×32 grid, per-tier caps) fed by effect `[light]` blocks, team/hover/target outlines (screen-space ID-buffer on High+, inverted hull on Low/Medium) in the colour-blind-capable team palette, baked top-down AO from `ao-bake` on the ambient line, and a depth pre-pass with screen-space contact shadows on High+. |
 | Geometry | Instanced cubes. Heroes are a 6-cube rig posed on the CPU (`push_hero_rig`). The instance SSBO is capped at 4,096. Mesh loading is in progress (WP-3.2, #286). |
-| Terrain | **R3a** ([ADR-0014](../adr/0014-terrain-fog-of-war.md)): a per-map heightfield mesh (board relief ≤ 0.5 m, hills or cliffs beyond the edge) with 1–8 splat-textured layers (texture arrays, triplanar on slopes, layer normal maps and cavity AO, baked relief AO), generated from the simulation's map by `moba_assets::generate_terrain`; `content-check` verifies the visuals against the simulation's map. Height fog and a sky close every view. Decals, foliage and water are R3b. |
+| Terrain | **R3a** ([ADR-0014](../adr/0014-terrain-fog-of-war.md)): a per-map heightfield mesh (board relief ≤ 0.5 m, hills or cliffs beyond the edge) with 1–8 splat-textured layers (texture arrays, triplanar on slopes, layer normal maps and cavity AO, baked relief AO), generated from the simulation's map by `moba_assets::generate_terrain`; `content-check` verifies the visuals against the simulation's map. Height fog and a sky close every view. **R3b** ([ADR-0017](../adr/0017-decals-foliage-water.md), 2026-10-30): ground decals binned in a 32×32 world grid (telegraphs with a guaranteed-contrast rim, scorch, splats), GPU-instanced wind-animated foliage pushed aside only by drawn units, and rivers and pools with flow, depth fade, foam and refraction on High; `content-check` keeps water wadeable. |
 | Fog of war | **R3a:** a GPU visibility texture (`R8`, 128²–512² by tier) rasterised every frame from the own team's vision with line-of-sight walls, blurred and faded; no 16/32 caps; styled per map; also masks the minimap. |
 | Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
 | Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. R4b (2026-10-29, [perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions (baked by `vat-bake`, instanced, shadow-casting, cube fallback), tiered bone-count LOD, visible socket attachments, 2D blend spaces and the local preview/replays on the same runtime; 200 VAT minions ≈ 0.01 ms CPU per frame. |
@@ -180,9 +180,30 @@ perf/0020 for an art director to sign.
   spectator cameras.
 - Every feature is tiered with an off switch (`MOBA_TERRAIN=flat`, `MOBA_FOW=legacy|off`,
   `MOBA_FOG=off`, `MOBA_SKY=off`). Goldens now cover the map from four cameras.
-- **Left for R3b:** decals (item 2), foliage and props that react to units (item 3) and
-  water (item 4). "One fully art-directed map" still needs an art director: the sample maps
-  are engine-authored.
+- **R3b done (2026-10-30)** — items 2, 3 and 4 and the exit
+  ([ADR-0017](../adr/0017-decals-foliage-water.md),
+  [perf/0021](../perf/0021-decals-foliage-water.md)):
+  - **Decals:** projected in the terrain shader from a 32×32 world-grid binning of up to 128
+    decals a frame (a set-3 storage buffer, no sampler, no extra pass): telegraph rings and
+    discs with a progress sweep, scorch and splats stamped on impacts and deaths, from
+    client-local `[[decals]]` in the effect descriptors. Enemy telegraphs are listed first,
+    never dropped, keep R5's 35 % floor and get a two-tone rim whose contrast a unit test
+    holds over any ground. They augment R5's particle rings.
+  - **Foliage:** GPU-instanced procedural grass, brush, reeds and flowers from a per-map
+    `[foliage]` table (`generate_foliage` scatters all three sample maps), wind-animated and pushed
+    aside by the units the client draws only (a test: hidden units produce no displacement).
+    Decorative: the simulation has no brush.
+  - **Water:** `[[water]]` rivers and pools carved into the heightfield, with flow-map normals,
+    depth fade, shoreline foam and (High and up) screen-space refraction; `content-check`
+    rejects water a unit could not visibly wade through (the simulation lets every unit walk
+    everywhere) and warns about water near structures and brush over lanes.
+  - Tiered with switches (`MOBA_DECALS=off`, `MOBA_FOLIAGE=off`,
+    `MOBA_WATER=off|simple|full`). The grass map is the showcase; goldens cover it from seven
+    cameras (default, networked, overview, horizon, the river close up on High and Low, and
+    the decal teamfight) plus the VAT, Ultra and Low-scale captures.
+  - **Exit:** the showcase renders well inside every tier's budget (perf/0021). Art sign-off
+    of "one fully art-directed map" is a maintainer item: the sample maps are
+    engine-authored.
 - **Wards** do not exist in the simulation yet; the texture takes any source, and the test
   uses ward-like sources.
 
@@ -303,6 +324,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0013 | VFX runtime | **Accepted** (R5, [ADR-0013](../adr/0013-vfx-runtime.md)): GPU compute particles over a fixed per-tier buffer with a CPU slot allocator; WBOIT with log revealage (no `independentBlend`); client-local effects bound to presentation events and sockets |
 | ADR-0014 | Terrain and fog of war | **Accepted** (R3a, [ADR-0014](../adr/0014-terrain-fog-of-war.md)): a generated heightfield with splat-textured layers, a GPU fog-of-war visibility texture from own-team vision, height fog and a sky; visual-vs-simulation rules in content-check |
 | ADR-0015 | Post-processing | **Accepted** (R6, [ADR-0015](../adr/0015-post-processing.md)): post chain fixed per renderer; grading after AgX on display-referred `.cube` LUTs; FXAA below Ultra, MSAA 4× on Ultra (single-sample VFX after the resolve); GTAO from a depth prepass on ambient only; sub-rectangle dynamic resolution |
+| ADR-0017 | Decals, foliage and water | **Accepted** (R3b, [ADR-0017](../adr/0017-decals-foliage-water.md)): decals projected in the receiving shaders from a world-grid binned storage buffer (no sampler, no pass), enemy telegraphs first with a two-tone contrast rim; procedural instanced foliage displaced only by drawn units; water carved into the heightfield, simple in the scene pass or full with a copy-based refraction pass |
 | — | Quality tiers | Low = min-spec 1080p/60; High = mid-range 1440p/144 |
 
 ## 7. Performance targets and evidence

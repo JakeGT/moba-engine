@@ -128,6 +128,10 @@ passes run in this order:
    grid (R2b), drawing inverted-hull outlines on Low and Medium, and draws the sky last on
    the far plane; with MSAA 4× (Ultra) it renders into multisampled attachments resolved
    into the HDR target and the depth at the end of the pass;
+   - with full water (High and up, [ADR-0017](adr/0017-decals-foliage-water.md))
+     `water_copy` copies the HDR render region into a refraction image and `water` draws the
+     water surface over the single-sampled HDR target, testing the scene depth read-only and
+     sampling it and the copy for depth fade and refraction;
 7. `vfx_draw` draws the particles into the single-sampled HDR target, testing the scene depth
    read-only and sampling it for soft particles; alpha particles accumulate weighted blended
    OIT targets on Medium and up, which
@@ -199,7 +203,12 @@ nightly perf workflow gates a 10-minute replay per tier on a self-hosted GPU run
   which follows the simulation's map (paths along lanes, rock on slopes and at wall feet) and
   keeps the board within ±0.5 m (the simulation is flat) while the margin rises into hills or
   cliffs. Without a `[terrain]` table (or with `MOBA_TERRAIN=flat`) the R2a procedural grid
-  plane draws instead. Then instanced units; heroes
+  plane draws instead. Ground decals (R3b, [ADR-0017](adr/0017-decals-foliage-water.md)) are
+  projected in the terrain shader: the frame's decals (ability telegraphs, scorch, splats;
+  enemy telegraphs first and never dropped, with a contrast-guaranteed two-tone rim) are
+  binned into a 32×32 world grid in a set-3 storage buffer, so paint decals tint the albedo
+  before lighting and glow decals add light after it, with no extra pass or sampler. Then
+  instanced units; heroes
   use a client-local `.glb` model when one is configured (GPU-skinned when the file has a
   skin: a per-frame bone SSBO plus a push-constant bone range, ADR-0007; posed on the CPU by
   the animation runtime of ADR-0012 when the model has an animation set, else by its run clip
@@ -222,14 +231,25 @@ nightly perf workflow gates a 10-minute replay per tier on a self-hosted GPU run
   which takes the minimum with the surface occlusion) and the contact-shadow term multiplying the shadow map. The lighting set (set 3:
   shadow map, environment cube, BRDF LUT, ramp, then R3a's fog-of-war image, terrain arrays
   and terrain block, R6's AO, then R2b's light list, light grid, baked AO and contact
-  shadows; the binding map and the per-stage sampler budget, 16 of 16, are in ADR-0014 §6 and
-  ADR-0016 §6)
-  is one set per frame in flight, written at load and resize only (the light buffers'
-  contents change per frame);
+  shadows, and R3b's decal buffer at binding 20; the binding map and the per-stage sampler
+  budget, 16 of 16, are in ADR-0014 §6, ADR-0016 §6 and ADR-0017 §6)
+  is one set per frame in flight, written at load and resize only (the light and decal
+  buffers' contents change per frame);
 - team readability outlines on the units the client marks (`UnitInstance::outline`, a slot of
   the client's `OutlinePalette` in its team palette): screen-space from the pre-pass ID
   target on High and Ultra, an inverted hull in this pass on Low and Medium, depth-tested
   either way;
+- foliage (R3b): GPU-instanced procedural grass, brush, reeds and flowers (no vertex buffer:
+  the vertex shader builds each clump's blades), scattered per map by
+  `moba_assets::generate_foliage`, culled by chunk and draw distance, bent by wind and pushed
+  aside by up to 32 drawn units (the client builds the displacers from the units it renders,
+  so hidden units bend nothing). Foliage is decorative: the simulation has no brush. It is
+  not in the depth pre-pass and writes no outline IDs, so it never hides a unit's
+  screen-space outline;
+- water (R3b): shallow rivers and pools from the map visuals' `[[water]]` bodies over a bed
+  carved into the heightfield (`generate_terrain_with_water`), with flow-map normals, depth
+  fade, shoreline foam and decals on the surface; Low and Medium blend it at the end of the
+  scene pass, High and up draw it in the `water` pass with screen-space refraction;
 - the fog of war (R3a): two graph passes before the shadow pass rasterise the client's
   own-team vision sources (no cap of 16 or 32: up to 1,024 sources and 256 walls a frame)
   into a fixed-size `R8` texture with line-of-sight walls, then blur it and ease it from the

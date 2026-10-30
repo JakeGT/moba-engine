@@ -25,6 +25,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::cull::{CullMode, CullStats, LodConfig};
 use crate::device::DeviceContext;
 use crate::dynres::{self, DynamicResolution};
+use crate::environment::{DecalUpload, EnvironmentConfig, FoliageData, WaterData, WaterMode};
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::{
     self, Binding, Bindings, FramePlan, FrameSpec, OFFSCREEN_VARIANTS, PassKind, ShadowSpec,
@@ -45,7 +46,7 @@ use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
     CullSettings, MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve,
-    SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget,
+    SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget, WaterTargets,
 };
 use crate::passes::vfx::{VfxPass, VfxTargets};
 use crate::pipeline_cache::PipelineCacheState;
@@ -121,6 +122,11 @@ pub struct RenderConfig {
     /// [`Renderer::reload_shaders`]. Release builds ignore it, because an override that does
     /// not match its pipeline's interface is invalid Vulkan usage. Default `None`.
     pub shader_dir: Option<PathBuf>,
+    /// Enable `VK_KHR_pipeline_executable_properties` when the device has it and log the
+    /// terrain pipeline's compiled statistics (register count and the like) at creation as
+    /// `[render] pipeline-stats terrain ...` lines. A development and perf-check aid
+    /// (`scripts/terrain-decal-check.sh`, ADR-0017 §1); default `false`, where nothing changes.
+    pub pipeline_stats: bool,
     /// Upload BC7/BC5/BC4 textures as is when the device supports them. When `false`, or on
     /// devices without `textureCompressionBC`, they are decoded on the CPU at load. Default
     /// `true`.
@@ -158,6 +164,9 @@ pub struct RenderConfig {
     /// [`LodConfig::for_tier`] of [`RenderConfig::quality_tier`]; [`LodConfig::OFF`] draws
     /// every mesh at LOD0.
     pub mesh_lod: Option<LodConfig>,
+    /// Decal, foliage and water features (ADR-0017). `None` (the default) uses
+    /// [`EnvironmentConfig::for_tier`] of [`RenderConfig::quality_tier`].
+    pub environment: Option<EnvironmentConfig>,
 }
 
 impl Default for RenderConfig {
@@ -175,6 +184,7 @@ impl Default for RenderConfig {
             exposure: 1.0,
             pipeline_cache: None,
             shader_dir: None,
+            pipeline_stats: false,
             compressed_textures: true,
             vfx: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
@@ -184,6 +194,7 @@ impl Default for RenderConfig {
             max_vision_sources: DEFAULT_MAX_VISION_SOURCES,
             culling: CullMode::Cpu,
             mesh_lod: None,
+            environment: None,
         }
     }
 }
@@ -270,6 +281,13 @@ impl RenderConfig {
     #[must_use]
     pub fn with_shader_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.shader_dir = dir;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::pipeline_stats`] set.
+    #[must_use]
+    pub fn with_pipeline_stats(mut self, enabled: bool) -> Self {
+        self.pipeline_stats = enabled;
         self
     }
 
@@ -362,6 +380,23 @@ impl RenderConfig {
         match self.world {
             Some(world) => world,
             None => WorldConfig::for_tier(self.quality_tier),
+        }
+    }
+
+    /// Returns this config with [`RenderConfig::environment`] set.
+    #[must_use]
+    pub const fn with_environment(mut self, environment: Option<EnvironmentConfig>) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    /// The decal, foliage and water features this config asks for:
+    /// [`RenderConfig::environment`], else the tier's defaults.
+    #[must_use]
+    pub const fn effective_environment(&self) -> EnvironmentConfig {
+        match self.environment {
+            Some(environment) => environment,
+            None => EnvironmentConfig::for_tier(self.quality_tier),
         }
     }
 
@@ -481,6 +516,10 @@ pub struct Renderer {
     exposure_pending: f32,
     /// The world features in use (ADR-0014).
     world_config: WorldConfig,
+    /// This frame's decal buffer contents, built on the CPU (R3b; boxed once).
+    decal_upload: Box<DecalUpload>,
+    /// Usable decals the latest frame could not bind.
+    decals_dropped: u32,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -532,7 +571,7 @@ impl Renderer {
             handle: surface_handle,
         };
 
-        let mut device = DeviceContext::new(&instance, surface_handle)?;
+        let mut device = DeviceContext::new(&instance, surface_handle, config.pipeline_stats)?;
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
         let shaders = ShaderSource::new(config.shader_dir.clone());
@@ -642,6 +681,9 @@ impl Renderer {
             Some(_) if budget.oit => VfxMode::Oit,
             Some(_) => VfxMode::Unsorted,
         };
+        let environment_config = config.effective_environment().sanitized();
+        // MoltenVK: the full water samples the depth it tests against, like soft particles.
+        let full_water = environment_config.water == WaterMode::Full && !device.portability_subset;
         let frame_spec = FrameSpec {
             hdr_format,
             depth_format,
@@ -661,6 +703,7 @@ impl Renderer {
             exposure_format: targets::choose_exposure_format(&device),
             fxaa: post_config.anti_aliasing == AntiAliasing::Fxaa,
             upscale: post_config.scaled(),
+            water: full_water,
         };
         let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
         for capture in [false, true] {
@@ -775,6 +818,7 @@ impl Renderer {
                 lod: config.effective_mesh_lod(),
                 model_triangles: config.quality_tier.budget().model_triangles,
             },
+            environment_config,
         )?;
         config.max_bones = scene.max_bones();
         let contact = frame_spec
@@ -898,6 +942,8 @@ impl Renderer {
             exposure_reset: true,
             exposure_pending: 0.0,
             world_config,
+            decal_upload: DecalUpload::boxed(),
+            decals_dropped: 0,
             device,
             surface,
             instance,
@@ -986,6 +1032,85 @@ impl Renderer {
         );
         self.terrain = None;
         Ok(())
+    }
+
+    /// The decal, foliage and water features in use (ADR-0017), with [`WaterMode::Full`]
+    /// reported as [`WaterMode::Simple`] on devices that cannot sample the depth they test.
+    #[must_use]
+    pub fn environment_config(&self) -> EnvironmentConfig {
+        let config = self.scene.environment().config();
+        if config.water == WaterMode::Full && !self.scene.environment().full_water() {
+            config.with_water(WaterMode::Simple)
+        } else {
+            config
+        }
+    }
+
+    /// Sets the map's foliage (ADR-0017 §2), replacing any: at most
+    /// [`EnvironmentConfig::max_foliage`] instances are uploaded, sorted into culling chunks.
+    /// With foliage off the data is still uploaded (so a later config can draw it) but never
+    /// drawn. Load-time only: it waits for the device to idle.
+    ///
+    /// # Errors
+    /// Allocation and Vulkan errors from the upload; the previous foliage is then gone.
+    pub fn set_foliage(&mut self, data: &FoliageData<'_>) -> RenderResult<()> {
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses the
+        // instance buffer or the foliage sets being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.scene.environment_mut().set_foliage(&self.device, data)
+    }
+
+    /// Removes the foliage. Waits for the device to idle.
+    ///
+    /// # Errors
+    /// Vulkan errors from the idle wait.
+    pub fn clear_foliage(&mut self) -> RenderResult<()> {
+        // SAFETY: as in `set_foliage`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.scene.environment_mut().clear_foliage(&self.device);
+        Ok(())
+    }
+
+    /// Foliage instances uploaded by [`Self::set_foliage`].
+    #[must_use]
+    pub fn foliage_instances(&self) -> usize {
+        self.scene.environment().foliage_instances()
+    }
+
+    /// Sets the map's water surface (ADR-0017 §3), replacing any. Load-time only: it waits
+    /// for the device to idle.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidWater`] for an unusable mesh (the previous water stays), or
+    /// allocation and Vulkan errors from the upload.
+    pub fn set_water(&mut self, data: &WaterData<'_>) -> RenderResult<()> {
+        // SAFETY: as in `set_foliage`, for the water mesh.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.scene.environment_mut().set_water(&self.device, data)
+    }
+
+    /// Removes the water. Waits for the device to idle.
+    ///
+    /// # Errors
+    /// Vulkan errors from the idle wait.
+    pub fn clear_water(&mut self) -> RenderResult<()> {
+        // SAFETY: as in `set_foliage`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.scene.environment_mut().clear_water();
+        Ok(())
+    }
+
+    /// Whether a water surface is set.
+    #[must_use]
+    pub fn has_water(&self) -> bool {
+        self.scene.environment().has_water()
+    }
+
+    /// Usable [`Scene::decals`] the latest frame could not bind (past the tier's cap, or past
+    /// [`MAX_DECALS`](crate::MAX_DECALS) enemy telegraphs).
+    #[must_use]
+    pub fn decals_dropped(&self) -> u32 {
+        self.decals_dropped
     }
 
     /// Whether a map terrain is set (else the R2a plane draws).
@@ -1684,6 +1809,14 @@ impl Renderer {
         if let (Some(fog), Some(raw)) = (&self.fog, view(resources.fog.map(|fog| fog.raw))) {
             fog.bind_raw(&self.device, raw);
         }
+        // R3b: the full water samples the refraction copy and the single-sampled depth.
+        if let (Some(refraction), Some(depth)) =
+            (view(resources.refraction), view(Some(resources.depth)))
+        {
+            self.scene
+                .environment()
+                .bind_targets(&self.device, refraction, depth);
+        }
     }
 
     /// The render-resolution region of this frame.
@@ -1871,6 +2004,23 @@ impl Renderer {
             self.render_extent,
             self.extents.render.height,
         )?;
+        // R3b: this frame's decals (enemy telegraphs first) and the environment block.
+        let environment = self.scene.environment().config();
+        let decals = if environment.decals {
+            scene.decals
+        } else {
+            &[]
+        };
+        self.decals_dropped = self.decal_upload.build(
+            decals,
+            environment.max_decals as usize,
+            self.config.quality_tier.vfx_budget().telegraph_floor,
+            crate::lights::ground_footprint(scene.camera.view_proj),
+        );
+        self.lighting.write_decals(frame_index, &self.decal_upload);
+        self.scene
+            .environment_mut()
+            .prepare(frame_index, scene, self.render_extent);
         if let Some(fog) = self.fog.as_mut() {
             fog.prepare(frame_index, scene.fog_of_war.as_ref());
         }
@@ -2177,14 +2327,63 @@ impl Renderer {
                         lighting: self.lighting.set(frame_index),
                         resolve: msaa_color.map(|_| SceneResolve {
                             color: hdr_view,
-                            depth: (!prepass).then_some(depth_view),
+                            // After the prepass the depth resolves again when the full
+                            // water or the particles read it, so they see the foliage.
+                            depth: (!prepass
+                                || resources.vfx.is_some()
+                                || resources.refraction.is_some())
+                            .then_some(depth_view),
                         }),
                         load_depth: prepass,
-                        // The particles test and sample the single-sampled depth after the
-                        // scene; with MSAA that is a resolve (or the prepass's), never this
-                        // attachment.
-                        store_depth: resources.vfx.is_some() && msaa_color.is_none(),
+                        // The particles and the full water (R3b) test and sample the
+                        // single-sampled depth after the scene; with MSAA that is a resolve (or
+                        // the prepass's), never this attachment.
+                        store_depth: (resources.vfx.is_some() || resources.refraction.is_some())
+                            && msaa_color.is_none(),
                         hull_outlines,
+                    },
+                ),
+                PassKind::WaterCopy => {
+                    if let Some(refraction) = resources.refraction
+                        && self.scene.environment().has_water()
+                    {
+                        let layers = vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1);
+                        // The render region only (render scale and dynamic resolution draw
+                        // into the top-left corner of the render-sized targets).
+                        let region = vk::ImageCopy::default()
+                            .src_subresource(layers)
+                            .dst_subresource(layers)
+                            .extent(vk::Extent3D {
+                                width: render_extent.width,
+                                height: render_extent.height,
+                                depth: 1,
+                            });
+                        // SAFETY: both transients are render-sized images of the HDR format,
+                        // transitioned by the graph to TRANSFER_SRC/DST_OPTIMAL, and the
+                        // region lies within them.
+                        unsafe {
+                            self.device.device.cmd_copy_image(
+                                command_buffer,
+                                self.transient(resources.hdr).image(),
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                self.transient(refraction).image(),
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                &[region],
+                            );
+                        }
+                    }
+                }
+                PassKind::Water => self.scene.record_water_pass(
+                    &self.device,
+                    command_buffer,
+                    frame_index,
+                    &WaterTargets {
+                        hdr: hdr_view,
+                        depth: depth_view,
+                        extent: render_extent,
+                        lighting: self.lighting.set(frame_index),
                     },
                 ),
                 PassKind::BloomDown(level) => {
@@ -2429,6 +2628,9 @@ impl Renderer {
         }
         if let (Some(resource), Some(buffer)) = (resources.capture, capture_buffer) {
             bindings.set(resource, Binding::Buffer(buffer));
+        }
+        if let Some(refraction) = resources.refraction {
+            bindings.set(refraction, image(refraction));
         }
         if let (Some(ids), Some(vfx)) = (resources.vfx, &self.vfx) {
             let [particles, alive, args] = vfx.buffers();

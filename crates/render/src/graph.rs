@@ -18,8 +18,9 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this). R6's
-/// post chain (ADR-0015) and R3a's two fog-of-war passes bring a frame with everything on
-/// (both offscreen passes and the capture included) to 27.
+/// post chain (ADR-0015), R3a's two fog-of-war passes and R3b's two full-water passes
+/// (ADR-0017) bring a frame with everything on (both offscreen passes and the capture
+/// included) to 29.
 pub(crate) const MAX_PASSES: usize = 32;
 /// Most resources (imported + transient) one graph may declare (at most 64: a pass's
 /// resource set is a `u64` bit mask).
@@ -55,6 +56,10 @@ pub(crate) enum Access {
     /// depth resolve: the resolve reads it at `COLOR_ATTACHMENT_OUTPUT` with
     /// `COLOR_ATTACHMENT_READ`, which a later writer must wait for.
     DepthWriteResolveSource,
+    /// [`Self::DepthReadWrite`] on a multisampled attachment that is also the source of a
+    /// depth resolve (the Ultra scene after the MSAA prepass when a later pass reads the
+    /// single-sample depth, R3b): loads, tests, writes, then resolves.
+    DepthReadWriteResolveSource,
     /// Single-sample depth written by a multisample depth resolve at the end of a rendering
     /// scope. Resolves run at `COLOR_ATTACHMENT_OUTPUT` with `COLOR_ATTACHMENT_WRITE`; the
     /// fragment-test stages and depth write are included so the access is conservative.
@@ -142,6 +147,16 @@ impl Access {
             Self::DepthReadWrite => (
                 S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
                 A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                true,
+                U::DEPTH_STENCIL_ATTACHMENT,
+            ),
+            Self::DepthReadWriteResolveSource => (
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS | S::COLOR_ATTACHMENT_OUTPUT,
+                A::DEPTH_STENCIL_ATTACHMENT_READ
+                    | A::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | A::COLOR_ATTACHMENT_READ,
                 A::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 true,

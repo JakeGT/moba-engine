@@ -27,6 +27,12 @@
 //! style ([`MapLibrary::scene_atmosphere`]). A missing or invalid layer texture falls back to
 //! the flat plane, logged once per bind.
 //!
+//! R3b (ADR-0017): with the terrain, the descriptor's `[[water]]` bodies carve their beds
+//! (`moba_assets::generate_terrain_with_water`) and become the renderer's water mesh, and its
+//! `[foliage]` table is scattered by `moba_assets::generate_foliage` at the tier's density
+//! and cap. Both are decorative: the simulation has no brush or water, so neither changes what
+//! a unit can do or see (`content-check` rejects water that would contradict walkability).
+//!
 //! Everything here is cosmetic and client-local: nothing feeds the simulation, the wire or
 //! the content hash. Files are read and meshes uploaded only in [`MapLibrary::bind`]
 //! (startup and content updates); the per-frame [`MapLibrary::push_instances`] copies a
@@ -35,15 +41,15 @@
 use std::path::{Path, PathBuf};
 
 use moba_assets::{
-    DEFAULT_WALL_HEIGHT, MapAtmosphere, MapFogStyle, MapLighting, MapPost, MapTerrain, MapVisuals,
-    TerrainSite, valid_mesh_name,
+    DEFAULT_WALL_HEIGHT, Heightfield, MapAtmosphere, MapFogStyle, MapFoliage, MapLighting, MapPost,
+    MapTerrain, MapVisuals, MapWater, TerrainSite, valid_mesh_name,
 };
 use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_game::{MapSpec, MapTheme};
 use moba_net::protocol::WireMap;
 use moba_render::{
-    Camera, MeshData, MeshId, PostLook, SceneAtmosphere, SceneLighting, TerrainData, TextureId,
-    UnitInstance,
+    Camera, FoliageData, FoliageInstanceData, MeshData, MeshId, PostLook, SceneAtmosphere,
+    SceneLighting, TerrainData, TextureId, UnitInstance, WaterData, WaterStyle, WaterVertexData,
 };
 
 use crate::app::models::model_path;
@@ -266,7 +272,10 @@ pub(crate) struct MapLibrary {
     /// The terrain last built on the renderer: descriptor name, table, simulation site and
     /// grid size. A rebind of the same map (reconnect, content update without a map change)
     /// skips the rebuild; `None` until the first build after a (re)created renderer.
-    applied_terrain: Option<(Option<String>, MapTerrain, TerrainSite, u32)>,
+    applied_terrain: Option<AppliedTerrain>,
+    /// The active descriptor's `[foliage]` table and `[[water]]` bodies (R3b).
+    foliage: Option<MapFoliage>,
+    water: Vec<MapWater>,
     /// The active descriptor's `[atmosphere]` and `[fog_of_war]` tables.
     atmosphere: MapAtmosphere,
     fog_style: MapFogStyle,
@@ -295,6 +304,8 @@ impl MapLibrary {
             applied_ao: None,
             ground: None,
             applied_terrain: None,
+            foliage: None,
+            water: Vec::new(),
             atmosphere: MapAtmosphere::default(),
             fog_style: MapFogStyle::default(),
         }
@@ -314,40 +325,61 @@ impl MapLibrary {
         renderer: &mut moba_render::Renderer,
         site: &TerrainSite,
     ) {
-        let Some(ground) = &self.ground else {
+        let flat = renderer.world_config().terrain == moba_render::TerrainShading::Flat;
+        let Some(ground) = self.ground.as_ref().filter(|_| !flat) else {
             if renderer.has_terrain() {
                 let _ = renderer.clear_terrain();
             }
+            clear_environment(renderer);
             self.applied_terrain = None;
             return;
         };
-        if renderer.world_config().terrain == moba_render::TerrainShading::Flat {
-            return;
-        }
         let grid = renderer.world_config().terrain_grid;
-        if let Some((name, applied, applied_site, applied_grid)) = &self.applied_terrain
-            && *name == self.active
-            && applied == ground
-            && applied_site == site
-            && *applied_grid == grid
-            && renderer.has_terrain()
-        {
+        let key = AppliedTerrain {
+            name: self.active.clone(),
+            ground: ground.clone(),
+            foliage: self.foliage.clone(),
+            water: self.water.clone(),
+            site: site.clone(),
+            grid,
+        };
+        if self.applied_terrain.as_ref() == Some(&key) && renderer.has_terrain() {
             return;
         }
         let started = std::time::Instant::now();
-        let result = build_terrain(&self.root, ground, site, renderer);
-        self.applied_terrain = result
-            .is_ok()
-            .then(|| (self.active.clone(), ground.clone(), site.clone(), grid));
+        let result = build_terrain(&self.root, ground, &self.water, site, renderer);
         match result {
-            Ok(layers) => eprintln!(
-                "[assets] terrain: {layers} layers, {} cells, built in {:.1} ms",
-                renderer.world_config().terrain_grid,
-                started.elapsed().as_secs_f32() * 1_000.0
-            ),
+            Ok((layers, heightfield)) => {
+                eprintln!(
+                    "[assets] terrain: {layers} layers, {grid} cells, built in {:.1} ms",
+                    started.elapsed().as_secs_f32() * 1_000.0
+                );
+                let started = std::time::Instant::now();
+                build_environment(
+                    ground,
+                    self.foliage.as_ref(),
+                    &self.water,
+                    site,
+                    &heightfield,
+                    renderer,
+                );
+                let config = renderer.environment_config();
+                eprintln!(
+                    "[assets] foliage: {} instances, water: {} ({}), decals: {}, built in \
+                     {:.1} ms",
+                    renderer.foliage_instances(),
+                    if renderer.has_water() { "yes" } else { "no" },
+                    config.water.name(),
+                    if config.decals { "on" } else { "off" },
+                    started.elapsed().as_secs_f32() * 1_000.0
+                );
+                self.applied_terrain = Some(key);
+            }
             Err(reason) => {
                 eprintln!("[assets] terrain: {reason}; using the flat plane");
                 let _ = renderer.clear_terrain();
+                clear_environment(renderer);
+                self.applied_terrain = None;
             }
         }
     }
@@ -599,6 +631,13 @@ impl MapLibrary {
         self.ground = descriptor
             .as_ref()
             .and_then(|visuals| visuals.ground.clone());
+        self.foliage = descriptor
+            .as_ref()
+            .and_then(|visuals| visuals.foliage.clone());
+        self.water = descriptor
+            .as_ref()
+            .map(|visuals| visuals.water.clone())
+            .unwrap_or_default();
         self.atmosphere = descriptor
             .as_ref()
             .map_or_else(MapAtmosphere::default, |visuals| visuals.atmosphere);
@@ -982,9 +1021,10 @@ pub(crate) fn scene_atmosphere(map: &MapAtmosphere, fog: &MapFogStyle) -> SceneA
 fn build_terrain(
     root: &Path,
     ground: &MapTerrain,
+    water: &[MapWater],
     site: &TerrainSite,
     renderer: &mut moba_render::Renderer,
-) -> Result<usize, String> {
+) -> Result<(usize, Heightfield), String> {
     let load = |name: &str| -> Result<moba_render::TextureData, String> {
         let path = moba_assets::texture_path(root, name)
             .ok_or_else(|| format!("invalid texture name '{name}'"))?;
@@ -1017,9 +1057,10 @@ fn build_terrain(
         }
         (None, _) => None,
     };
-    let generated = moba_assets::generate_terrain(
+    let generated = moba_assets::generate_terrain_with_water(
         ground,
         site,
+        water,
         cells,
         if explicit_splat.is_some() {
             16
@@ -1055,7 +1096,118 @@ fn build_terrain(
     renderer
         .set_terrain(&data)
         .map_err(|error| format!("the renderer rejected it: {error}"))?;
-    Ok(ground.layers.len())
+    Ok((ground.layers.len(), generated.heightfield))
+}
+
+/// What the terrain, foliage and water last built on the renderer came from.
+#[derive(Clone, Debug, PartialEq)]
+struct AppliedTerrain {
+    name: Option<String>,
+    ground: MapTerrain,
+    foliage: Option<MapFoliage>,
+    water: Vec<MapWater>,
+    site: TerrainSite,
+    grid: u32,
+}
+
+fn clear_environment(renderer: &mut moba_render::Renderer) {
+    if renderer.foliage_instances() > 0 {
+        let _ = renderer.clear_foliage();
+    }
+    if renderer.has_water() {
+        let _ = renderer.clear_water();
+    }
+}
+
+/// Scatters `foliage` and meshes `water` over the carved `heightfield` and sets both on
+/// `renderer` (or clears them), at the renderer's tier density and cap. Load time only.
+fn build_environment(
+    ground: &MapTerrain,
+    foliage: Option<&MapFoliage>,
+    water: &[MapWater],
+    site: &TerrainSite,
+    heightfield: &Heightfield,
+    renderer: &mut moba_render::Renderer,
+) {
+    let config = renderer.environment_config();
+    let center = site.extent * 0.5;
+    match foliage.filter(|_| config.foliage && config.max_foliage > 0) {
+        Some(foliage) => {
+            let instances: Vec<FoliageInstanceData> = moba_assets::generate_foliage(
+                foliage,
+                ground,
+                site,
+                heightfield,
+                water,
+                config.foliage_density,
+                config.max_foliage as usize,
+            )
+            .iter()
+            .map(|clump| {
+                FoliageInstanceData::new(
+                    [
+                        clump.position[0] - center,
+                        clump.position[1],
+                        clump.position[2] - center,
+                    ],
+                    clump.yaw,
+                    clump.scale,
+                    clump.kind.index(),
+                    clump.tint,
+                )
+            })
+            .collect();
+            let data = FoliageData::new(&instances)
+                .with_colors(foliage.base_color, foliage.tip_color, foliage.flower_color)
+                .with_wind(foliage.wind, foliage.wind_speed);
+            if let Err(error) = renderer.set_foliage(&data) {
+                eprintln!("[assets] foliage: the renderer rejected it: {error}");
+                let _ = renderer.clear_foliage();
+            }
+        }
+        None => {
+            if renderer.foliage_instances() > 0 {
+                let _ = renderer.clear_foliage();
+            }
+        }
+    }
+    let mesh = if config.water == moba_render::WaterMode::Off {
+        moba_assets::WaterMesh::default()
+    } else {
+        moba_assets::generate_water(water, heightfield)
+    };
+    if mesh.is_empty() {
+        if renderer.has_water() {
+            let _ = renderer.clear_water();
+        }
+        return;
+    }
+    let vertices: Vec<WaterVertexData> = mesh
+        .vertices
+        .iter()
+        .map(|vertex| {
+            WaterVertexData::new(
+                [
+                    vertex.position[0] - center,
+                    vertex.position[1],
+                    vertex.position[2] - center,
+                ],
+                vertex.depth,
+                vertex.flow,
+                vertex.body,
+            )
+        })
+        .collect();
+    let styles: Vec<WaterStyle> = water
+        .iter()
+        .take(moba_render::MAX_WATER_BODIES)
+        .map(|body| WaterStyle::new(body.color, body.shallow_color, body.clarity, body.foam))
+        .collect();
+    let data = WaterData::new(&vertices, &mesh.indices, &styles);
+    if let Err(error) = renderer.set_water(&data) {
+        eprintln!("[assets] water: the renderer rejected it: {error}");
+        let _ = renderer.clear_water();
+    }
 }
 
 /// Loads `<root>/environments/<name>.{toml,ktx2}`: the SH/intensity descriptor and the

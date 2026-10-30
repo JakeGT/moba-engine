@@ -17,3 +17,11 @@ size_end = 1.5
 offset = [0, 1.0, 0]
 color = [0.14, 0.13, 0.12, 0.65]
 color_end = [0.1, 0.1, 0.1, 0.0]
+
+[[decals]]                       # R3b: a splat where it fell (ADR-0017 §1)
+shape = "splat"
+radius = 1.2
+color = [0.10, 0.03, 0.02, 0.65]
+lifetime = 6.0
+fade_out = 2.0
+stamp = true

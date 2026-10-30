@@ -24,8 +24,8 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Simulation logic | **v8** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
-| Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **775 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
+| Tests | **810 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -160,6 +160,7 @@ cargo run --release -p moba-tools --bin grade-bake -- bake --preset ember out.cu
 cargo run --release --locked --manifest-path crates/tools/font-bake/Cargo.toml   # MSDF HUD font (R7a)
 cargo run --release -p moba-tools --bin teamfight     # regenerate tests/replays/teamfight-5v5.mbr
 MOBA_VFX_PREVIEW=nova cargo run -p moba-client        # live-reload effect preview (content/vfx/)
+scripts/terrain-decal-check.sh                          # terrain decal-cost guard: timing + registers (after decals.glsl/terrain.frag changes; real GPU)
 cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/render-fingerprint.rgb
 cargo run -p moba-tools --bin vulkan-probe
 scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)

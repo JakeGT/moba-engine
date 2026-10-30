@@ -112,3 +112,15 @@ exposure = 0.0                   # EV stops
 bloom = 0.04
 grading = "frost"                # grading/frost.cube: grade-bake bake --preset frost --size 17
 grading_strength = 0.85
+# Foliage (R3b, ADR-0017): a thin scatter of frosted tundra grass poking through the snow.
+# Decorative only: the simulation has no brush.
+[foliage]
+density = 1.5
+height = [0.15, 0.35]
+base_color = [0.10, 0.13, 0.12]
+tip_color = [0.62, 0.70, 0.72]
+flower_color = [0.85, 0.9, 1.0]
+wind = [-0.8, 0.5]
+wind_speed = 1.4
+reeds = false
+seed = 23

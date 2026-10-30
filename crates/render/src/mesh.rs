@@ -434,6 +434,109 @@ struct MeshShape {
     bounds: [f32; 4],
 }
 
+/// Uploads raw interleaved vertex bytes and `u32` indices (the R3b water mesh).
+pub(crate) fn upload_raw(
+    device: &DeviceContext,
+    vertex_bytes: &[u8],
+    indices: &[u32],
+) -> RenderResult<GpuMesh> {
+    let index_count = u32::try_from(indices.len()).map_err(|_| {
+        crate::RenderError::NoSuitableDevice(String::from("water mesh has too many indices"))
+    })?;
+    upload_bytes(
+        device,
+        vertex_bytes,
+        indices,
+        MeshShape {
+            joint_count: 0,
+            has_uvs: false,
+            lods: MeshLodTable::single(index_count),
+            // Water is drawn whole, never culled by its sphere.
+            bounds: [0.0, 0.0, 0.0, f32::MAX],
+        },
+    )
+}
+
+/// Uploads `bytes` into a new device-local storage buffer read by vertex shaders (the R3b
+/// foliage instances), through a staging buffer, and waits for the copy. Load time only.
+pub(crate) fn upload_storage(
+    device: &DeviceContext,
+    name: &str,
+    bytes: &[u8],
+) -> RenderResult<GpuBuffer> {
+    let allocator = device.allocator();
+    let mut staging = GpuBuffer::new(
+        device.device.clone(),
+        allocator.clone(),
+        "storage-staging",
+        bytes.len() as u64,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        MemoryLocation::CpuToGpu,
+    )?;
+    staging.write_bytes(0, bytes);
+    crate::memory::count_upload();
+    let buffer = GpuBuffer::new(
+        device.device.clone(),
+        allocator,
+        name,
+        bytes.len() as u64,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        MemoryLocation::GpuOnly,
+    )?;
+    let pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
+    let command = pool.allocate_one()?;
+    let begin =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    // SAFETY: the command buffer is allocated and not recording.
+    unsafe { device.device.begin_command_buffer(command, &begin) }?;
+    let copy = vk::BufferCopy::default().size(bytes.len() as u64);
+    // SAFETY: both buffers are valid, large enough, and created for transfer use.
+    unsafe {
+        device.device.cmd_copy_buffer(
+            command,
+            staging.handle(),
+            buffer.handle(),
+            core::slice::from_ref(&copy),
+        );
+    }
+    let barrier = vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::VERTEX_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .buffer(buffer.handle())
+        .offset(0)
+        .size(vk::WHOLE_SIZE);
+    let dependency =
+        vk::DependencyInfo::default().buffer_memory_barriers(core::slice::from_ref(&barrier));
+    device.cmd_pipeline_barrier2(command, &dependency);
+    // SAFETY: the command buffer is recording and is ended once.
+    unsafe { device.device.end_command_buffer(command) }?;
+    let commands = [command];
+    let submit = vk::SubmitInfo::default().command_buffers(&commands);
+    // SAFETY: as in `upload_bytes`: the queue is externally synchronised by `&DeviceContext`
+    // borrowed from the renderer, and the command buffer is executable.
+    unsafe {
+        device
+            .device
+            .queue_submit(device.graphics_queue, &[submit], vk::Fence::null())
+    }?;
+    // SAFETY: as in `upload_bytes`.
+    if let Err(error) = unsafe { device.device.queue_wait_idle(device.graphics_queue) } {
+        // SAFETY: the device handle is live.
+        if unsafe { device.device.device_wait_idle() }.is_err() {
+            core::mem::forget(pool);
+            core::mem::forget(staging);
+            core::mem::forget(buffer);
+        }
+        return Err(error.into());
+    }
+    drop(staging);
+    Ok(buffer)
+}
+
 /// Uploads interleaved vertex bytes and `u32` indices through staging buffers.
 #[allow(clippy::too_many_lines)] // One-time upload sequence; splitting hides the barriers.
 fn upload_bytes(

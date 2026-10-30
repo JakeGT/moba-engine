@@ -6,6 +6,7 @@ use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, persp
 
 use crate::ui::UiImage;
 
+use crate::environment::{Decal, EnvironmentFrame};
 use crate::lighting::{FrameLighting, SceneLighting};
 use crate::lights::PointLight;
 use crate::post::ScreenEffects;
@@ -327,6 +328,11 @@ pub struct Scene<'a> {
     /// low-health vignette; [`ScreenEffects::NONE`] unless set. Ignored for offscreen
     /// renders.
     pub effects: ScreenEffects,
+    /// This frame's projected decals (R3b, ADR-0017): only from effects the client plays.
+    /// Enemy telegraphs are always kept; the rest up to the tier's cap.
+    pub decals: &'a [Decal],
+    /// This frame's environment animation time and foliage displacers (R3b).
+    pub environment: EnvironmentFrame<'a>,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -481,6 +487,11 @@ impl<'a> Scene<'a> {
             atmosphere: SceneAtmosphere::DEFAULT,
             lights: &[],
             outlines: OutlinePalette::NONE,
+            decals: &[],
+            environment: EnvironmentFrame {
+                time: 0.0,
+                displacers: &[],
+            },
         }
     }
 
@@ -504,6 +515,11 @@ impl<'a> Scene<'a> {
             atmosphere: SceneAtmosphere::DEFAULT,
             lights: &[],
             outlines: OutlinePalette::NONE,
+            decals: &[],
+            environment: EnvironmentFrame {
+                time: 0.0,
+                displacers: &[],
+            },
         }
     }
 
@@ -567,6 +583,20 @@ impl<'a> Scene<'a> {
     #[must_use]
     pub const fn with_vfx(mut self, vfx: VfxFrame<'a>) -> Self {
         self.vfx = vfx;
+        self
+    }
+
+    /// Sets this frame's projected decals (R3b).
+    #[must_use]
+    pub const fn with_decals(mut self, decals: &'a [Decal]) -> Self {
+        self.decals = decals;
+        self
+    }
+
+    /// Sets this frame's environment time and foliage displacers (R3b).
+    #[must_use]
+    pub const fn with_environment(mut self, environment: EnvironmentFrame<'a>) -> Self {
+        self.environment = environment;
         self
     }
 

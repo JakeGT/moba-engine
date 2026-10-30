@@ -105,6 +105,19 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "vat_outline.vert",
         defines: &["OUTLINE_HULL"],
     },
+    // The terrain with the decal code compiled out (`MOBA_DECALS=off`, ADR-0017 §1): saves
+    // its fixed cost, and is the baseline `scripts/terrain-decal-check.sh` times against.
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_nodecals.frag",
+        defines: &["MOBA_NO_DECALS"],
+    },
+    // Water with screen-space refraction (High and up, ADR-0017).
+    Permutation {
+        source: "water.frag",
+        output: "water_refraction.frag",
+        defines: &["WATER_REFRACTION"],
+    },
 ];
 
 fn main() {

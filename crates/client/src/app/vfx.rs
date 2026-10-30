@@ -37,6 +37,14 @@
 //!   enemy ones. A light belongs to an effect
 //!   instance the client already plays, so it never shows anything the client was not sent.
 //!
+//! **Ground decals** (R3b, ADR-0017): an effect's `[[decals]]` become this frame's
+//! [`moba_render::Decal`]s ([`VfxSystem::decals`]) under the same rules: enemy telegraph
+//! decals first, never culled, kept at the telegraph floor until the last 15 % of their life;
+//! the others culled with their effect and dimmed for allies. A stamped decal (scorch, goo)
+//! is copied at its delay into a fixed ring of [`MAX_STAMPS`] that outlives the effect. Decals
+//! exist only for effects the client plays, which only events it was sent start, so they
+//! reveal nothing the client does not already show.
+//!
 //! Every buffer is preallocated: steady-state frames do not allocate.
 
 mod events;
@@ -45,15 +53,16 @@ mod library;
 use moba_core::math::{Mat4, Quat, TAU, Vec3, Vec4};
 use moba_core::rng::Rng;
 use moba_render::{
-    ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, PointLight, UnitInstance, VfxBudget,
-    VfxFrame,
+    Decal, DecalRole, DecalShape, DecalStyle, ParticleBlend, ParticleRole, ParticleShape,
+    ParticleSpawn, PointLight, UnitInstance, VfxBudget, VfxFrame,
 };
 
 pub(crate) use events::{Trigger, VfxEvent, from_net, from_sim, world};
 pub(crate) use library::{EffectId, VfxLibrary};
 
 use moba_assets::{
-    VfxAnchor, VfxBlend, VfxDirection, VfxEmitter, VfxImportance, VfxLight, VfxPrimitive, VfxShape,
+    VfxAnchor, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle, VfxDirection, VfxEmitter,
+    VfxImportance, VfxLight, VfxPrimitive, VfxShape,
 };
 
 /// Most live effect instances.
@@ -85,6 +94,10 @@ const DEFAULT_CAMERA_DISTANCE: f32 = 46.0;
 const MAX_PLACEHOLDERS: usize = 64;
 /// Anchor ids below this are found through a direct table; others by a scan.
 const ANCHOR_TABLE: usize = 1 << 16;
+/// Persistent stamped decals (scorch marks, splats); the oldest is replaced when full.
+pub(crate) const MAX_STAMPS: usize = 96;
+/// Decals one frame may list (the renderer binds at most `MAX_DECALS`).
+const MAX_FRAME_DECALS: usize = 2 * moba_render::MAX_DECALS;
 
 /// Environment variable that turns VFX off (`off`/`0`).
 pub(crate) const VFX_ENV: &str = "MOBA_VFX";
@@ -146,6 +159,11 @@ impl Anchors {
             }
         }
         self.units.clear();
+    }
+
+    /// This frame's units, in push order.
+    pub(crate) fn units(&self) -> &[UnitAnchor] {
+        &self.units
     }
 
     /// Adds a unit; past the preallocated capacity it is ignored (no allocation).
@@ -288,6 +306,8 @@ struct Instance {
     tint: Vec3,
     rate_accumulator: [f32; moba_assets::MAX_VFX_EMITTERS],
     bursts: u8,
+    /// Decals already copied into the stamp ring, one bit per `[[decals]]` entry.
+    stamped: u8,
 }
 
 impl Instance {
@@ -314,6 +334,7 @@ impl Instance {
         tint: Vec3::ONE,
         rate_accumulator: [0.0; moba_assets::MAX_VFX_EMITTERS],
         bursts: 0,
+        stamped: 0,
     };
 }
 
@@ -388,6 +409,8 @@ pub(crate) struct VfxSystem {
     lights: Vec<PointLight>,
     /// This frame's own and allied effect lights.
     ally_lights: Vec<PointLight>,
+    /// This frame's decals and the stamp ring (R3b).
+    decal_lists: DecalLists,
     rng: Rng,
     time: f32,
     dt: f32,
@@ -398,6 +421,222 @@ pub(crate) struct VfxSystem {
     scale: u32,
     load: LoadEstimate,
     counters: VfxCounters,
+}
+
+/// This frame's decals and the persistent stamp ring (preallocated).
+#[derive(Debug)]
+struct DecalLists {
+    /// Enemy telegraphs, then (at the end of the frame) the rest.
+    decals: Vec<Decal>,
+    deferred_decals: Vec<Decal>,
+    stamps: Vec<Stamp>,
+    stamp_cursor: usize,
+}
+
+impl DecalLists {
+    fn new() -> Self {
+        Self {
+            decals: Vec::with_capacity(MAX_FRAME_DECALS),
+            deferred_decals: Vec::with_capacity(MAX_FRAME_DECALS),
+            stamps: Vec::with_capacity(MAX_STAMPS),
+            stamp_cursor: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.begin_frame();
+        self.stamps.clear();
+        self.stamp_cursor = 0;
+    }
+
+    fn begin_frame(&mut self) {
+        self.decals.clear();
+        self.deferred_decals.clear();
+    }
+
+    /// Lists (or stamps) decal `index` of an instance for this frame.
+    fn effect_decal(
+        &mut self,
+        (index, decal): (usize, &VfxDecal),
+        instance: &mut Instance,
+        frame: DecalFrame,
+        time: f32,
+        ally_opacity: f32,
+    ) {
+        let seconds = decal.seconds(frame.emit).max(0.05);
+        let local = frame.age - decal.delay;
+        let enemy = decal.telegraph && instance.relation == Relation::Enemy;
+        let Some(placed) = place_decal(decal, instance, frame.seed, ally_opacity) else {
+            return;
+        };
+        if decal.stamp {
+            // Copied once, when its delay passes; the ring outlives the effect.
+            let bit = 1u8 << index;
+            if instance.stamped & bit == 0 && frame.age >= decal.delay {
+                instance.stamped |= bit;
+                let stamp = Stamp {
+                    decal: placed,
+                    start: time - local,
+                    seconds,
+                    fade_in: decal.fade_in,
+                    fade_out: decal.fade_out,
+                };
+                if self.stamps.len() < MAX_STAMPS {
+                    self.stamps.push(stamp);
+                } else {
+                    self.stamps[self.stamp_cursor] = stamp;
+                    self.stamp_cursor = (self.stamp_cursor + 1) % MAX_STAMPS;
+                }
+            }
+            return;
+        }
+        if local < 0.0 || local > seconds || (frame.culled && !enemy) {
+            return;
+        }
+        let fade = if enemy {
+            // ADR-0013: an enemy telegraph keeps full strength (and the renderer's floor)
+            // until the last 15 % of its life.
+            ((seconds - local) / (0.15 * seconds)).clamp(0.0, 1.0)
+        } else {
+            decal_fade(local, seconds, decal.fade_in, decal.fade_out)
+        };
+        let progress = decal.progress.then(|| (local / seconds).clamp(0.0, 1.0));
+        let placed = placed.with_fade(fade).with_progress(progress);
+        let list = if enemy {
+            &mut self.decals
+        } else {
+            &mut self.deferred_decals
+        };
+        if list.len() < list.capacity() {
+            list.push(placed);
+        }
+    }
+
+    /// Appends the live stamps (distance-culled like effects), then the deferred decals after
+    /// the enemy telegraphs.
+    fn finish_frame(&mut self, now: f32, focus: Vec3, limit: f32) {
+        for stamp in &self.stamps {
+            let local = now - stamp.start;
+            if local < 0.0 || local > stamp.seconds {
+                continue;
+            }
+            if focus.distance(stamp.decal.position) > limit + stamp.decal.radius {
+                continue;
+            }
+            if self.deferred_decals.len() < self.deferred_decals.capacity() {
+                let fade = decal_fade(local, stamp.seconds, stamp.fade_in, stamp.fade_out);
+                self.deferred_decals.push(stamp.decal.with_fade(fade));
+            }
+        }
+        let room = self.decals.capacity() - self.decals.len();
+        let take = self.deferred_decals.len().min(room);
+        self.decals.extend_from_slice(&self.deferred_decals[..take]);
+    }
+}
+
+/// A stamped decal in the persistent ring.
+#[derive(Clone, Copy, Debug)]
+struct Stamp {
+    decal: Decal,
+    /// Time it appeared.
+    start: f32,
+    seconds: f32,
+    fade_in: f32,
+    fade_out: f32,
+}
+
+/// An instance's timing for its decals this frame.
+#[derive(Clone, Copy, Debug)]
+struct DecalFrame {
+    age: f32,
+    emit: f32,
+    culled: bool,
+    seed: u32,
+}
+
+/// Fade of a decal `local` seconds into its `seconds`, with linear fade-in and fade-out.
+fn decal_fade(local: f32, seconds: f32, fade_in: f32, fade_out: f32) -> f32 {
+    let rise = if fade_in > 0.0 { local / fade_in } else { 1.0 };
+    let fall = if fade_out > 0.0 {
+        (seconds - local) / fade_out
+    } else {
+        1.0
+    };
+    rise.min(fall).clamp(0.0, 1.0)
+}
+
+/// The renderer decal for `decal` of `instance` (placement, size, colour and role), before
+/// its fade and progress; `None` without a usable position.
+fn place_decal(
+    decal: &VfxDecal,
+    instance: &Instance,
+    seed: u32,
+    ally_opacity: f32,
+) -> Option<Decal> {
+    let ground = |point: Vec3| Vec3::new(point.x, 0.0, point.z);
+    let source = ground(instance.source_position);
+    let target = ground(instance.target);
+    let toward = target - source;
+    let yaw = if toward.length_squared() > 1e-6 {
+        toward.z.atan2(toward.x)
+    } else {
+        0.0
+    };
+    let scale = if decal.scale_with_radius {
+        instance.radius
+    } else {
+        1.0
+    };
+    let mut radius = decal.radius * scale;
+    let width = decal.width * scale;
+    let position = match decal.anchor {
+        VfxAnchor::Source | VfxAnchor::Line => source,
+        _ => target,
+    };
+    let shape = match decal.shape {
+        VfxDecalShape::Ring => {
+            // The asset's ring band lies just inside the radius; the renderer's is centred.
+            radius = (radius - width * 0.5).max(width * 0.5);
+            DecalShape::Ring
+        }
+        VfxDecalShape::Cone => DecalShape::Cone,
+        VfxDecalShape::Line => {
+            if decal.anchor == VfxAnchor::Line {
+                radius = toward.length();
+            }
+            DecalShape::Line
+        }
+        VfxDecalShape::Splat => DecalShape::Splat,
+        _ => DecalShape::Disc,
+    };
+    if !position.is_finite() || !radius.is_finite() || radius <= 0.0 {
+        return None;
+    }
+    let [r, g, b, a] = decal.color;
+    let tint = team_color(instance.team);
+    let rgb = Vec3::new(r, g, b).lerp(
+        tint * Vec3::new(r, g, b).max_element().max(1.0),
+        decal.team_tint,
+    );
+    let (role, alpha) = match instance.relation {
+        Relation::Enemy if decal.telegraph => (DecalRole::EnemyTelegraph, a),
+        Relation::Ally => (DecalRole::Ally, a * ally_opacity),
+        _ if decal.telegraph => (DecalRole::Ally, a),
+        _ => (DecalRole::Cosmetic, a),
+    };
+    let style = match decal.style {
+        VfxDecalStyle::Paint => DecalStyle::Paint,
+        _ => DecalStyle::Glow,
+    };
+    Some(
+        Decal::new(position, shape, radius, rgb.extend(alpha))
+            .with_yaw(yaw)
+            .with_width(width)
+            .with_angle(decal.angle.to_radians())
+            .with_style(style)
+            .with_role(role)
+            .with_seed(seed),
+    )
 }
 
 /// Uniform in `[low, high]`.
@@ -514,6 +753,7 @@ impl VfxSystem {
             placeholders: Vec::with_capacity(MAX_PLACEHOLDERS),
             lights: Vec::with_capacity(moba_render::MAX_LIGHTS),
             ally_lights: Vec::with_capacity(moba_render::MAX_LIGHTS),
+            decal_lists: DecalLists::new(),
             rng: Rng::from_seed(0x7f4a_7c15_9e37_79b9),
             time: 0.0,
             dt: 0.0,
@@ -577,6 +817,7 @@ impl VfxSystem {
     /// Drops every effect and pending event (content reload, rematch).
     pub(crate) fn clear(&mut self) {
         self.instances.fill(Instance::DEAD);
+        self.decal_lists.clear();
         self.pending.clear();
         self.unstamped.clear();
         self.casts = [(u32::MAX, 0, f32::NEG_INFINITY); MAX_CASTS];
@@ -621,6 +862,12 @@ impl VfxSystem {
         &self.lights
     }
 
+    /// This frame's ground decals, for [`moba_render::Scene::with_decals`]: enemy telegraphs
+    /// first.
+    pub(crate) fn decals(&self) -> &[Decal] {
+        &self.decal_lists.decals
+    }
+
     /// The particles to spawn this frame, for [`moba_render::Scene::with_vfx`].
     pub(crate) fn frame(&self) -> VfxFrame<'_> {
         VfxFrame::new(&self.spawns, self.dt).with_ally_opacity(self.ally_opacity)
@@ -641,6 +888,7 @@ impl VfxSystem {
         self.placeholders.clear();
         self.lights.clear();
         self.ally_lights.clear();
+        self.decal_lists.begin_frame();
         self.counters.spawned = 0;
         let dt = if dt.is_finite() {
             dt.clamp(0.0, 0.1)
@@ -683,6 +931,8 @@ impl VfxSystem {
             self.advance_instance(slot, dt, view, anchors, socket, up);
         }
         self.counters.instances = live;
+        let limit = view.cull_distance(&self.budget);
+        self.decal_lists.finish_frame(self.time, view.focus, limit);
         // Exempt spawns first: past the renderer's per-frame cap, spawns drop in list order.
         let room = self.spawns.capacity() - self.spawns.len();
         let take = self.deferred.len().min(room);
@@ -877,6 +1127,7 @@ impl VfxSystem {
             tint,
             rate_accumulator: [0.0; moba_assets::MAX_VFX_EMITTERS],
             bursts: 0,
+            stamped: 0,
         };
     }
 
@@ -1065,6 +1316,23 @@ impl VfxSystem {
                 }
                 self.counters.spawned += 1;
                 instance.last_spawn = self.time;
+            }
+        }
+        if !loaded.effect.decals.is_empty() {
+            let frame = DecalFrame {
+                age,
+                emit: emit_end,
+                culled,
+                seed: (slot as u32).wrapping_mul(2_654_435_761) ^ instance.start.to_bits(),
+            };
+            for entry in loaded.effect.decals.iter().enumerate() {
+                self.decal_lists.effect_decal(
+                    entry,
+                    &mut instance,
+                    frame,
+                    self.time,
+                    self.ally_opacity,
+                );
             }
         }
         if moved {

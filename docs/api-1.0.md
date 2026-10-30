@@ -222,12 +222,27 @@ R8 (ADR-0018) added culling, mesh LODs and memory budgets: `CullMode` (`Off`, `C
 `Renderer::{lock_uploads, unlock_uploads, uploads_locked}`, `RenderConfig::{culling, mesh_lod}` with
 `with_culling`/`with_mesh_lod` and `effective_mesh_lod`, `QualityTier::budget` and
 `RenderError::OverBudget`.
+
+R3b (ADR-0017) added decals, foliage and water: `Decal` (`new` + `with_role`, `with_style`,
+`with_colors`, `with_angle`, `with_width`, `with_progress`, `with_fade`, `with_yaw`,
+`with_seed`), `DecalShape`, `DecalStyle`, `DecalRole`, `MAX_DECALS`, `EnvironmentConfig`
+(`for_tier`/`Default` + `with_decals`, `with_max_decals`, `with_foliage`, `with_water`,
+`with_wind`), `WaterMode` (`name`, `from_name`), `FoliageData`, `FoliageInstanceData` (16-byte
+GPU instance, `kind` a `u32` 0–3), `FoliageDisplacer`, `EnvironmentFrame` (`new`;
+`Scene::environment`/`with_environment`), `Scene::decals`/`with_decals`, `WaterData`,
+`WaterVertexData` (`Pod`, exhaustive like the other vertex types), `WaterStyle`,
+`glow_reference` (the CPU twin of the glow-decal shader for one decal at a point),
+`RenderConfig::pipeline_stats`/`with_pipeline_stats`, the limits `MAX_FOLIAGE_DISPLACERS`,
+`MAX_FOLIAGE_INSTANCES`, `MAX_WATER_BODIES`, `MAX_WATER_VERTICES`,
+`RenderConfig::environment`/`with_environment`/`effective_environment`,
+`Renderer::{environment_config, set_foliage, clear_foliage, foliage_instances, set_water,
+clear_water, has_water, decals_dropped}` and `RenderError::InvalidWater`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm); (R3a) `TerrainShading`, `FogOfWarMode`.
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
   `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R6):
-  `AntiAliasing`, `UpscaleFilter`; (R2b): `OutlineMode`; (R8): `CullMode` (a GPU-driven
-  variant may be added).
+  `AntiAliasing`, `UpscaleFilter`; (R2b): `OutlineMode`; (R3b): `DecalShape`, `DecalStyle`,
+  `DecalRole`, `WaterMode`; (R8): `CullMode` (a GPU-driven variant may be added).
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
@@ -241,6 +256,9 @@ R8 (ADR-0018) added culling, mesh LODs and memory budgets: `CullMode` (`Off`, `C
 - `#[non_exhaustive]` structs (R2b): `PointLight` (public fields, `new`), `BakedAo` (`new` +
   `with_*`), `OutlinePalette` (`NONE` + `with_slot`; public `slots`, the uniform layout) and
   the read-only `LightStats`.
+- `#[non_exhaustive]` structs (R3b): `Decal`, `EnvironmentConfig`, `EnvironmentFrame`,
+  `FoliageData`, `FoliageInstanceData`, `FoliageDisplacer`, `WaterData` and `WaterStyle`,
+  each with a constructor and `with_*` builders.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
@@ -323,6 +341,15 @@ R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::
 `to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`, `PropMeshShape`,
 `baked_ao_paths`, `BAKED_AO_DIR`, `MAX_BAKED_AO_BYTES`, `MAX_BAKED_AO_TEXELS`,
 `DEFAULT_BAKED_AO_HEIGHT` and `MapLighting::{baked_ao, ao_strength}`.
+
+R3b added decals, foliage and water (ADR-0017: `VfxDecal`, `VfxDecalShape`, `VfxDecalStyle`,
+`VfxEffect::decals` and the `DEFAULT_DECAL_*`, `MAX_DECAL_SECONDS` and `MAX_VFX_DECALS`
+constants; `MapFoliage`, `FoliagePatch`, `FoliageKind`, `MapWater`, `MapVisuals::{foliage,
+water}`, `MAX_FOLIAGE_PATCHES`, `MAX_MAP_WATER`, `MAX_WATER_POINTS`, `MAX_WATER_LEVEL`,
+`MAX_WADE_DEPTH`, `MAX_WATER_MESH_VERTICES`, `STAMP_LATCH_SECONDS`; the generators `generate_terrain_with_water`, `generate_water` (`WaterMesh`,
+`WaterVertex`) and `generate_foliage` (`FoliageInstance`, `MAX_FOLIAGE_INSTANCES`); the
+consistency checker's water and brush rules. Every new struct and enum is
+`#[non_exhaustive]`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,

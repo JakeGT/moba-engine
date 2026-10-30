@@ -8,6 +8,10 @@
 //! which shares sets 0, 1 and 3): [`check`] sums them from the
 //! same binding arrays the set layouts are created from and fails renderer creation with
 //! [`RenderError::DescriptorLimit`] instead of a driver error or undefined behaviour.
+//!
+//! R3b (ADR-0017) also counts storage buffers per stage
+//! (`maxPerStageDescriptorStorageBuffers`, 4 on the minimum): the decal buffer is a set-3
+//! storage buffer, and the foliage layout adds its instance buffer to the vertex stage.
 
 use ash::vk;
 
@@ -18,6 +22,7 @@ use crate::error::{RenderError, RenderResult};
 pub(crate) struct StageTotals {
     pub(crate) samplers: u32,
     pub(crate) sampled_images: u32,
+    pub(crate) storage_buffers: u32,
 }
 
 /// Totals for `stage` over every binding of every set in `sets`.
@@ -40,14 +45,17 @@ pub(crate) fn stage_totals(
             vk::DescriptorType::SAMPLED_IMAGE | vk::DescriptorType::UNIFORM_TEXEL_BUFFER => {
                 totals.sampled_images += count;
             }
+            vk::DescriptorType::STORAGE_BUFFER | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => {
+                totals.storage_buffers += count;
+            }
             _ => {}
         }
     }
     totals
 }
 
-/// Fails when any graphics or compute stage of the layout made of `sets` needs more samplers
-/// or sampled images than `limits` allow. `layout` names it in the error.
+/// Fails when any graphics or compute stage of the layout made of `sets` needs more samplers,
+/// sampled images or storage buffers than `limits` allow. `layout` names it in the error.
 pub(crate) fn check(
     layout: &'static str,
     sets: &[&[vk::DescriptorSetLayoutBinding<'_>]],
@@ -65,6 +73,11 @@ pub(crate) fn check(
                 "sampled images",
                 totals.sampled_images,
                 limits.sampled_images,
+            ),
+            (
+                "storage buffers",
+                totals.storage_buffers,
+                limits.storage_buffers,
             ),
         ] {
             if needed > limit {
@@ -89,6 +102,8 @@ mod tests {
 
     /// The Vulkan minimum of `maxPerStageDescriptorSamplers` and `...SampledImages`.
     const VULKAN_MINIMUM_PER_STAGE: u32 = 16;
+    /// The Vulkan minimum of `maxPerStageDescriptorStorageBuffers`.
+    const VULKAN_MINIMUM_STORAGE_BUFFERS: u32 = 4;
 
     fn binding(
         ty: vk::DescriptorType,
@@ -122,7 +137,8 @@ mod tests {
             stage_totals(&sets, fragment),
             StageTotals {
                 samplers: 4,
-                sampled_images: 5
+                sampled_images: 5,
+                storage_buffers: 0,
             }
         );
         assert_eq!(
@@ -132,11 +148,13 @@ mod tests {
         let limits = StageTotals {
             samplers: 4,
             sampled_images: 5,
+            storage_buffers: 0,
         };
         assert!(check("test", &sets, limits).is_ok());
         let tight = StageTotals {
             samplers: 4,
             sampled_images: 4,
+            storage_buffers: 0,
         };
         assert!(matches!(
             check("test", &sets, tight),
@@ -163,14 +181,21 @@ mod tests {
         let minimum = StageTotals {
             samplers: VULKAN_MINIMUM_PER_STAGE,
             sampled_images: VULKAN_MINIMUM_PER_STAGE,
+            storage_buffers: VULKAN_MINIMUM_STORAGE_BUFFERS,
         };
         assert!(check("scene", &sets, minimum).is_ok());
         let fragment = stage_totals(&sets, vk::ShaderStageFlags::FRAGMENT);
         // Material 4 + set 3: lighting 5, fog of war 1, terrain 3, R6's AO 1 (binding 10),
         // R2b's baked AO and contact shadows 2 (bindings 13, 14; the light list and grid are
-        // storage buffers): exactly the Vulkan minimum of 16.
+        // storage buffers): exactly the Vulkan minimum of 16. R3b adds no sampler: the decals
+        // are a third fragment storage buffer (binding 20; the minimum is 4).
         assert_eq!(fragment.samplers, 16);
         assert_eq!(fragment.sampled_images, 16);
+        assert_eq!(fragment.storage_buffers, 3);
+        assert_eq!(
+            stage_totals(&sets, vk::ShaderStageFlags::VERTEX).storage_buffers,
+            2
+        );
         // The VAT layout (R4b) swaps set 2 for one vertex-stage VAT texture.
         let vat = crate::vat::set_layout_bindings();
         let vat_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 4] =
@@ -183,6 +208,28 @@ mod tests {
         assert_eq!(
             stage_totals(&vat_sets, vk::ShaderStageFlags::VERTEX).samplers,
             1
+        );
+        // R3b: the foliage layout swaps set 2 for its block and instance buffer, the water
+        // layout for its block and (full water) the refraction copy and the scene depth. Both
+        // keep set 3 (lighting 5, fog of war 1, terrain 3, AO 1, R2b's baked AO and contact
+        // shadows 2): 12 and 14 samplers of 16.
+        let foliage = crate::passes::environment::foliage_set_bindings();
+        let foliage_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 4] =
+            [&scene.0, &scene.1, &foliage, &lighting];
+        assert!(check("foliage", &foliage_sets, minimum).is_ok());
+        let foliage_vertex = stage_totals(&foliage_sets, vk::ShaderStageFlags::VERTEX);
+        assert_eq!(foliage_vertex.storage_buffers, 3);
+        assert_eq!(
+            stage_totals(&foliage_sets, vk::ShaderStageFlags::FRAGMENT).samplers,
+            12
+        );
+        let water = crate::passes::environment::water_set_bindings();
+        let water_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 4] =
+            [&scene.0, &scene.1, &water, &lighting];
+        assert!(check("water", &water_sets, minimum).is_ok());
+        assert_eq!(
+            stage_totals(&water_sets, vk::ShaderStageFlags::FRAGMENT).samplers,
+            14
         );
     }
 }
