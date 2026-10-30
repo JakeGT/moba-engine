@@ -179,6 +179,14 @@ validation off, each after a 30-frame run that warms the pipeline cache. Every f
 10 minutes is in the log (≈ 142 k frames per tier). `perf-gate --warm-cache` checked all four
 logs: **ok**.
 
+These runs predate the review fixes (pose-measured skin bounds, re-baked LODs, the cap after
+culling) and R3b. Their logs have no `frames_dropped`, which the stricter gate now requires,
+although every frame was logged (the counts above are the whole run). The re-run on the
+merged build, with `tests/perf/baseline.toml` refreshed from it, is pending: at the time of
+the review the shared RTX 5070 Ti had 15.6 of its 16 GiB held by another process, and the
+client could not allocate. The committed baseline keeps these p95 values, now bound to
+`gpu = "NVIDIA GeForce RTX 5070 Ti"`.
+
 | Tier | Frames | Frame p50 / p95 / p99 / max (ms) | p99 ÷ p50 | GPU total p50 / p95 / p99 (ms) | §7 GPU budget | CPU p95 | render p95 | mid-match uploads / pipelines | cache |
 |---|---|---|---|---|---|---|---|---|---|
 | Low | 143,427 | 4.177 / 4.194 / 4.203 / 13.957 | 1.006 | 0.382 / 0.423 / 0.439 | 14 ms | 0.032 | 0.279 | 0 / 0 | warm |
