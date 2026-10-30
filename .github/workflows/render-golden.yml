@@ -18,7 +18,9 @@ jobs:
   renderer-gate:
     name: renderer-gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Twelve lavapipe captures, the outline probe and the R8 culling probe (ten captures,
+    # about 10 minutes) run in sequence: about 25 minutes on a hosted runner.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
