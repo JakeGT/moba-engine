@@ -9,8 +9,11 @@
 - [API stability](API-STABILITY.md) — pre-1.0 tiers, breakage rules and publishing policy.
 - [Finish plan](plans/finish-plan-2026-10-20.md) — current work packages, review protocol and
   maintainer decisions for the remaining milestones.
-- [AAA graphics roadmap](plans/aaa-graphics-roadmap.md) — proposal: phases R0–R8 from the
-  preview renderer to AAA-quality, readable, scalable MOBA visuals, plus art-production needs.
+- [AAA graphics roadmap](plans/aaa-graphics-roadmap.md) — phases R0–R8 from the preview
+  renderer to AAA-quality, readable, scalable MOBA visuals; engine work complete.
+- [Next-gen graphics roadmap](plans/next-gen-graphics-roadmap.md) — proposal: photoreal,
+  ray-traced five-tier renderer (Low–Overdrive), vendor stack, phases N0–N11 and the
+  licence-clean asset and AI-generation pipeline.
 - [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — completed
   security-first remediation; post-1.0 asset/skinning work is in #276.
 - [First audit remediation plan](plans/audit-remediation-2026-10.md) — the W0–W5 train that
