@@ -1,6 +1,7 @@
 # Roadmap: next-gen photoreal graphics
 
-Written 2026-10-30. Status: **proposal, awaiting maintainer review**. Owner: maintainer.
+Written 2026-10-30. Status: **accepted plan**; maintainer decisions in §1, one open question
+in §13. Owner: maintainer.
 
 **Follows:** [the AAA graphics roadmap](aaa-graphics-roadmap.md), whose engine work (R0–R8) is
 complete.
@@ -43,14 +44,17 @@ date and **must be re-checked when each phase starts**: this area moves monthly.
 | Camera range | Invest in **zoomed views, spectator cinematics and a hero showcase** (champion select, victory). Gameplay budgets are still set by the 46 m camera. |
 | Asset licences | **CC0 and CC-BY**, with attribution in THIRD_PARTY.md and credits. No NC, ND or SA licences, and no engine-restricted terms such as Megascans/Fab Standard. **Listed exceptions:** CMU mocap; outputs from the NVIDIA Open Model License (Kimodo). |
 | AI 3D generation | **Local open-weight models** on the RTX 5070 Ti, with permissive licences that hold in the UK (Hunyuan3D's licence excludes the UK). Every output passes the remesh and bake pipeline (§9). |
+| Compat renderer | **Keep today's renderer as Compat**, give it one refresh (C1, §8) so photoreal content still looks good on it, then **freeze** it. It serves macOS, NVK and GPUs without hardware RT. |
+| NVIDIA SDKs | **Use NVIDIA's SDKs** (RTXDI, SHaRC, NRD, and RTXPT as reference) rather than clean-room versions: matching their quality would take years. |
+| Platforms and hardware | **Linux and Windows** are the targets for the tiered renderer. macOS is Compat only: its hardware can't reach the new Medium, or arguably Low. The reference-GPU matrix is **brought forward** from pre-1.0, with Windows tested in a GPU-passthrough VM (§10). |
 
 **Consequence: macOS and non-RT GPUs.**
 - MoltenVK and KosmicKrisp expose neither ray tracing nor mesh shaders on Apple Silicon
   (MoltenVK PR #2771 is still a work-in-progress opt-in). NVK has no RT either.
 - With RT required on every tier, these platforms can't meet any tier.
-- **Proposal:** freeze today's renderer as a **Compat** path. It gets bug fixes only and no new
-  features. It covers macOS, NVK and the older GPUs that main supports today.
-- This needs a maintainer decision (§13).
+- **Decided:** today's renderer becomes the **Compat** path. It gets one refresh (C1, §8), then
+  freezes: bug fixes and content-format compatibility only. It covers macOS, NVK and the older
+  GPUs (Pascal, Polaris) that main supports today.
 
 ## 2. What "next-gen" means at a MOBA camera
 
@@ -98,9 +102,9 @@ One 4K pixel at the focus point covers about 2.5 cm. The consequences:
 - Budgets are measured on the R5 teamfight replay (`tests/replays/teamfight-5v5.mbr`), with
   frame generation off, as today.
 - Frame generation is reported separately, as presented fps plus added latency (Reflex/PCL).
-- The per-tier perf-gate baselines become **one baseline per reference GPU**. This needs the
-  hardware matrix that is deferred to pre-1.0 (#9/#127), and the runner must hold a fixed
-  power state (the lesson of perf/0022).
+- The per-tier perf-gate baselines become **one baseline per reference GPU**. That needs the
+  reference-GPU matrix (§10), which is now brought forward from pre-1.0 (#9/#127). The runner
+  must hold a fixed power state (the lesson of perf/0022).
 
 ### Feature matrix
 
@@ -298,9 +302,8 @@ measured on the reference GPUs in its phase.
 - **Local and ability lights:**
   - clustered deferred lighting with LTC area lights for beams and capsules;
   - RT shadow rays for the top-N lights per tile (High);
-  - **ReSTIR DI** for hundreds of emissive VFX lights on Ultra and Overdrive. Use RTXDI
-    (Vulkan via HLSL→SPIR-V), or a clean-room version to keep the repo licence simple. About
-    1.5–3 ms.
+  - **ReSTIR DI** for hundreds of emissive VFX lights on Ultra and Overdrive, using **RTXDI**
+    (HLSL shader library compiled to SPIR-V through Slang or DXC). About 1.5–3 ms.
 - VFX register light-list entries under a hard per-frame budget (e.g. 256 lights, 16
   shadowed).
 
@@ -315,8 +318,8 @@ measured on the reference GPUs in its phase.
   world radiance cache plus a ½–¼-res per-pixel final gather with a bilateral upscale.
   - It's **~1.7 ms measured** on PC in Doom: The Dark Ages, and less when seeded from the
     baked GI.
-  - SHaRC is NVIDIA's packaged hash cache: any RT GPU, RTX SDKs License. A clean-room cache
-    from the published papers keeps the repo clean.
+  - Built on **SHaRC**, NVIDIA's packaged hash radiance cache (any RT GPU, RTX SDKs License),
+    with the idTech 8 per-pixel gather on top.
 - **Overdrive:** path-traced GI with SHaRC. NRC (neural radiance cache) is optional: it's
   Windows plus CUDA only, experimental, and Turing+.
   - ReSTIR GI is **A/B-tested, not assumed**: Bevy 0.20 (Oct 2026) made it off by default
@@ -437,13 +440,20 @@ resolution are part of N0.
 | **FSR 4.1.2 / FSR 4 FG** | AMD ML upscaler (RX 6000+) and FG (RX 9000, Windows 11) | Yes, since SDK 2.4 | Signed DLLs, binary-only |
 | **XeSS-SR** | Intel upscaler | Yes (XeSS-FG and XeLL are DX12-only) | Intel licence, binary |
 | **NRD** | Cross-vendor denoiser | Yes | NVIDIA RTX SDKs License (attribution) |
-| **RTXDI, SHaRC** | References or SDKs for ReSTIR DI and the hash cache | Yes | RTX SDKs License. **Prefer clean-room implementations** of the published algorithms so the repo stays MIT/Apache. |
+| **RTXDI, SHaRC** | ReSTIR DI and the hash radiance cache (Ultra, Overdrive) | Yes (HLSL headers → SPIR-V) | RTX SDKs License. Unlike DLSS and Reflex, they are **not** restricted to NVIDIA GPUs; the app must stay interoperable with NVIDIA hardware. Credits attribution. |
 | **RTX NTC, RTXNS, NRC** | Later or optional | NV-specific paths | RTX SDKs License |
 
 **How closed SDKs are handled.**
-- No proprietary SDK source or binary is committed.
-- They are fetched at build time behind cargo features (`dlss`, `fsr4`, `xess`, `streamline`),
-  with checksums pinned. The default build stays fully open.
+- No proprietary SDK source or binary is committed. The RTX SDKs License (clause 4e) forbids
+  making the SDK subject to an open-source licence, so the SDKs stay out of the MIT/Apache tree.
+- They are fetched at build time behind cargo features (`dlss`, `streamline`, `rtxdi`,
+  `sharc`, `nrd`, `fsr4`, `xess`), with checksums pinned, and compiled into release builds.
+- **The default open build** (no SDK features) runs Low to High with in-house denoising and
+  shadow-ray lighting. Ultra and Overdrive need the SDK features and say so in the settings
+  menu.
+- Licence check (RTXDI and RTXGI `LICENSE.txt`, read 2026-10-30): the "NVIDIA GPUs only"
+  clause covers the DLSS, Reflex, NGX and Dynamic Vibrance SDKs, not RTXDI, SHaRC or NRD.
+  Re-read the licence at each SDK bump.
 - `THIRD_PARTY.md` and the in-game credits gain the required notices.
 - The release checklist gains "notify NVIDIA".
 
@@ -485,11 +495,12 @@ Rendering never touches determinism. Every phase:
 | **N9 Overdrive** | Path tracer reusing hit shading; SHaRC (NRC optional); ReSTIR DI (GI A/B); DLSS RR (NRD elsewhere); FG via Streamline / FSR 3.1 FG; DLSS 5 opt-in once its SDK exists | L–XL | N1, N4, N8 |
 | **N10 Characters and showcase** | Skin, eyes, cloth, hair cards; showcase mode (LOD class, streamed mip 0, strands, path-traced SSS, DOF, motion blur); champion select and victory screens | L–XL | N2; parts on N9 |
 | **N11 Content scale** | Mip streaming (≤ 512² resident in match), software feedback, NTC load mode; virtual texturing only if needed | M–L | N0 |
+| **C1 Compat refresh, then freeze** | Bring today's forward renderer up to photoreal content: GGX with multiscatter compensation and the N2 material parameters (dropping the stylised ramps); sample N3's baked lightmaps, probes and reflection probes (the biggest win, and it needs no RT); Hillaire sky and improved height fog from N6; loading the shared content packs at capped LODs and mips; the §4 readability tests. Targets: 1080p60 on GTX 1060 / RX 580; Apple M1-class at a reduced render scale. Then **freeze**: bug fixes and content-format compatibility only. | M | N2 (material spec), N3 (bakes), N6 (sky) |
 | **A-track** (parallel from N0) | Asset pipeline and content (§9): A0 licence gate, A1 ingest tools, A2 AI workstation, A3 vertical slice, A4 roster | XL, continuous | A3 needs N2 + N3 |
 
 **Critical path:** N0 → N1 → N2 → (N3 ∥ N4) → N5 → N8 → N9.
 
-N6, N7 and N11 run alongside. **The vertical slice (A3)** is one photoreal map section, one
+N6, N7, N11 and C1 run alongside. **The vertical slice (A3)** is one photoreal map section, one
 hero and the minions, shown at Medium and Overdrive. It is the go/no-go point, as §8 of the
 previous roadmap had it: it proves the look and the budgets before scaling the roster.
 
@@ -665,15 +676,32 @@ incoherent assets. That is the main failure mode of pure-AI content.
   - `locked_uploads=0` and `locked_pipelines=0`.
 - **Lavapipe** supports ray query, but slowly. Golden captures for RT tiers use small
   resolutions and fixed frames. CI keeps a raster-only Low golden set plus a few RT goldens.
+- **Platforms:** Linux and Windows for the tiered renderer. macOS is Compat only (C1).
 - **Reference GPUs**, needed per tier:
   - RTX 2060, RX 6600;
   - RTX 3060;
   - RTX 4070, RX 7700 XT;
   - RTX 5070 Ti (owned), RX 9070 XT;
   - RTX 4080 / 5080.
-  - This is the pre-1.0 hardware matrix (#9/#127), brought forward. Until it exists, the
-    5070 Ti measures every tier and the others are estimated. **Estimates never close a
+  - This is the pre-1.0 hardware matrix (#9/#127), **brought forward** (decided 2026-10-30).
+    Until a card is on hand, its tier is estimated from the 5070 Ti. **Estimates never close a
     target**, as before.
+  - The cheapest route is used cards for Low and Medium (RTX 2060, RTX 3060, RX 6600) plus an
+    AMD card for the RX 7700 XT / 9070 XT rows, because the AMD paths (FSR 4, Anti-Lag, NRD on
+    RDNA) need real AMD hardware.
+- **Windows: a GPU-passthrough VM on the dev box.**
+  - The box suits it: the Ryzen 9800X3D's Radeon 610M iGPU can drive the Linux desktop while
+    the RTX 5070 Ti is bound to `vfio-pci` and passed to a Windows 11 VM (KVM/QEMU, OVMF, a
+    pinned CPU set). IOMMU is already enabled (27 groups); check that the 5070 Ti and its audio
+    function sit in their own group. NVIDIA has allowed GeForce passthrough since driver R465.
+  - While the VM owns the 5070 Ti, Linux runs on the iGPU, so Linux-side RT work pauses.
+  - **VM timings carry a small overhead** (CPU scheduling, interrupts), so evidence from the VM
+    is labelled `windows-vm`. A target closes only on a bare-metal run: dual-boot, or a
+    dedicated Windows test machine.
+  - The Windows run covers what Linux can't: Streamline frame generation, FSR 4, XeSS, the
+    DLSS DLL path and Windows present and pacing.
+  - The Radeon 610M (RDNA2, RADV ray query) doubles as a correctness smoke test for the AMD RT
+    path. It is not a performance reference.
 - **Frame-generation evidence:** presented fps, added latency (Reflex PCL), and a ghosting
   review of fast units and telegraphs.
 - **Readability tests** (§4) run every phase and gate merges.
@@ -684,31 +712,33 @@ incoherent assets. That is the main failure mode of pure-AI content.
 |---|---|
 | Photoreal hurts readability | The §4 contract, automated contrast tests, and ranked locks; vertical-slice go/no-go |
 | Ghosting from TAA, DLSS or FG on fast units | Exact motion vectors, reactive masks, the post-upscale overlay layer, debug views |
-| Vendor SDK churn (DLSS 5 SDK, Mega Geometry, cooperative vectors are NV-only, DX12-first features) | Abstractions per feature; re-verify status at each phase start; clean-room implementations where licences bite |
+| Vendor SDK churn (DLSS 5 SDK, Mega Geometry, cooperative vectors are NV-only, DX12-first features) | Abstractions per feature; re-verify status and licences at each phase start; SDKs pinned by checksum |
+| Dependence on NVIDIA SDK licences (RTX SDKs License terms can change) | SDKs isolated behind cargo features and traits; the open build stays playable up to High; licence re-read on every bump |
+| Compat bit-rot once frozen | Compat keeps its golden captures in CI and must load every content pack; content-format changes ship a Compat fallback in the same PR |
 | `ash` on a git revision | Pinned revision, `deny.toml` allow entry, periodic bumps |
 | Bake times and disk per map | Incremental bakes, compression, per-tier bake resolution |
-| Raising min-spec to RTX 2060 drops players | The Compat path keeps older GPUs and macOS playable (if approved) |
+| Raising min-spec to RTX 2060 drops players | The Compat path (C1) keeps older GPUs and macOS playable |
 | AI asset licence drift (repos pulling NC dependencies) | A dependency grep in the AI workstation scripts; provenance manifests; the licence gate |
 | Scope: photoreal content is the long pole | The A-track starts at N0; the vertical slice before the roster; art direction stays a human role |
 
 ## 12. Next concrete steps
 
-1. Maintainer review of this plan, and decisions on §13.
+1. Decide the art-bible owner (§13).
 2. **ADR-0020 (N0):** bindings, capability gate and Compat, bindless, Slang, tier presets and
-   budgets.
+   budgets, and the cargo-feature layout for the NVIDIA, AMD and Intel SDKs.
 3. **ADR-0021 (N1):** the temporal foundation, the upscaler interface and the overlay layer.
 4. **A0:** the licence and provenance gate in `content-check`, and the MikkTSpace tangent fix.
 5. Set up the local AI workstation (ComfyUI + TRELLIS.2, Z-Image, StableMaterials, Kimodo) and
    produce a first test hero through the full §9.4 pipeline. That measures where the human
    effort actually goes.
+6. Set up the Windows passthrough VM (§10), and source used Low and Medium reference cards plus
+   one AMD card.
 
 ## 13. Open questions for the maintainer
 
-1. **Compat path:** keep today's renderer, frozen, for macOS, NVK and non-RT GPUs, or drop
-   those platforms from the next-gen client?
-2. **Clean-room or vendor SDK** for ReSTIR DI (RTXDI) and the hash cache (SHaRC)? Clean-room
-   keeps the repo MIT/Apache and is cross-vendor by construction; the SDKs are faster to
-   integrate but under the RTX SDKs License.
-3. **Art bible:** who owns it? It's the one artefact the agentic pipeline can't produce.
-4. **Hardware:** should the reference-GPU matrix be brought forward from pre-1.0 now that
-   tiers depend on RT performance?
+Resolved on 2026-10-30 (now in §1): the Compat path (keep, refresh, freeze), NVIDIA SDKs over
+clean-room versions, and the reference-GPU matrix brought forward for Linux and Windows.
+
+Still open:
+
+1. **Art bible:** who owns it? It's the one artefact the agentic pipeline can't produce.
