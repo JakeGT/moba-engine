@@ -261,6 +261,9 @@ pub(crate) struct EnvironmentLayouts {
     pub(crate) foliage: vk::PipelineLayout,
     pub(crate) water: vk::PipelineLayout,
     pub(crate) full_water: bool,
+    /// Decals are on (`EnvironmentConfig::decals`); off, the terrain uses
+    /// `terrain_nodecals.frag`, its decal code compiled out.
+    pub(crate) decals: bool,
 }
 
 /// Attachments of the full water pass (R3b).
@@ -312,7 +315,11 @@ impl ScenePipelines {
         let textured_vertex = module("unit_textured.vert")?;
         let textured_fragment = module("unit_textured.frag")?;
         let terrain_vertex = module("terrain.vert")?;
-        let terrain_fragment = module("terrain.frag")?;
+        let terrain_fragment = module(if environment.decals {
+            "terrain.frag"
+        } else {
+            "terrain_nodecals.frag"
+        })?;
         let build = |vertex_layout, vertex: vk::ShaderModule, fragment: vk::ShaderModule| {
             pipeline::create(
                 device,
@@ -345,6 +352,15 @@ impl ScenePipelines {
             terrain_vertex.handle(),
             terrain_fragment.handle(),
         )?;
+        // `RenderConfig::pipeline_stats`: the terrain shader carries the decal code and sits
+        // near a register step on some GPUs (ADR-0017 §1), so its compiled statistics are
+        // logged for `scripts/terrain-decal-check.sh`.
+        for line in device.pipeline_statistics(terrain.handle()) {
+            eprintln!(
+                "[render] pipeline-stats terrain samples={} {line}",
+                samples.as_raw()
+            );
+        }
         let sky_vertex = module("sky.vert")?;
         let sky_fragment = module("sky.frag")?;
         let sky = pipeline::create_vertexless(

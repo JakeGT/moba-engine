@@ -51,9 +51,10 @@
 use crate::map_visuals::{
     DEFAULT_EDGE_MESH_HEIGHT, DEFAULT_EDGE_SPACING, DEFAULT_LANE_WIDTH, EDGE_MESH_HEIGHT_RANGE,
     EDGE_SPACING_RANGE, EdgeStyle, FoliageKind, LANE_WIDTH_RANGE, MAX_WADE_DEPTH, MAX_WATER_LEVEL,
-    MapTerrain, MapVisuals, MapWater,
+    MIN_WATER_LEVEL, MapTerrain, MapVisuals, MapWater,
 };
 use crate::texture::{TextureData, TextureFormat, full_mip_chain};
+use crate::water::MAX_WATER_MESH_VERTICES;
 
 /// Largest relief inside the board, metres (`|height| <=` this).
 pub const MAX_PLAY_RELIEF: f32 = 0.5;
@@ -1192,8 +1193,9 @@ pub fn check_map_consistency_with_edge_footprint(
 /// Rule 1 on the generated heightfield, at every render grid size: the samples, plus the
 /// interpolated surface of the cells that straddle the board edge (their outside corners may
 /// rise, and the drawn surface must still stay within the limit on the board).
-/// With water, every grid has the beds carved, and no board sample under a body may lie
-/// deeper than [`MAX_WADE_DEPTH`] below its surface.
+/// With water, every grid has the beds carved, no board sample under a body may lie
+/// deeper than [`MAX_WADE_DEPTH`] below its surface, and the water mesh generated on that
+/// grid must fit the renderer's [`MAX_WATER_MESH_VERTICES`] (the finest grid has the most).
 fn check_relief(
     terrain: &MapTerrain,
     site: &TerrainSite,
@@ -1202,8 +1204,20 @@ fn check_relief(
 ) {
     let mut relief_reported = false;
     let mut wade_reported = vec![false; water.len()];
+    let mut mesh_reported = water.is_empty();
     for cells in TERRAIN_GRID_SIZES {
         let field = heightfield(terrain, site, water, cells);
+        if !mesh_reported {
+            let vertices = crate::water::generate_water(water, &field).vertices.len();
+            if vertices > MAX_WATER_MESH_VERTICES {
+                report.errors.push(format!(
+                    "water: the {cells}-cell terrain grid gives a {vertices}-vertex water mesh, \
+                     over the renderer's {MAX_WATER_MESH_VERTICES}: narrow or shorten the \
+                     bodies (that tier would draw no water)"
+                ));
+                mesh_reported = true;
+            }
+        }
         if !relief_reported {
             let before = report.errors.len();
             check_relief_grid(&field, site.extent, cells, report);
@@ -1215,7 +1229,7 @@ fn check_relief(
                 wade_reported[index] = check_wade_depth(&field, body, index, site.extent, report);
             }
         }
-        if relief_reported && wade_reported.iter().all(|&done| done) {
+        if relief_reported && mesh_reported && wade_reported.iter().all(|&done| done) {
             return;
         }
     }
@@ -1308,10 +1322,11 @@ fn check_water_and_foliage(visuals: &MapVisuals, site: &TerrainSite, report: &mu
         .collect();
     for (index, body) in visuals.water.iter().enumerate() {
         let name = format!("water {index}");
-        if !(body.level.is_finite() && (-MAX_PLAY_RELIEF..=MAX_WATER_LEVEL).contains(&body.level)) {
+        if !(body.level.is_finite() && (MIN_WATER_LEVEL..=MAX_WATER_LEVEL).contains(&body.level)) {
             report.errors.push(format!(
-                "{name}: level {} m is outside [-{MAX_PLAY_RELIEF}, {MAX_WATER_LEVEL}]: the \
-                 surface must stay within wading height of the ground units stand on",
+                "{name}: level {} m is outside [{MIN_WATER_LEVEL}, {MAX_WATER_LEVEL}]: the \
+                 surface must be at or above the ground units stand on (height 0), within \
+                 wading height",
                 body.level
             ));
         }
@@ -2135,6 +2150,50 @@ mod tests {
         ));
         assert!(has("brush patch 1 at [20, 136] (radius 4 m) comes within"));
         assert!(!has("patch 2"), "flowers are not cover");
+    }
+
+    /// A map whose water mesh outgrows the renderer's vertex cap on some grid (the finest
+    /// has the most) is an error, not a tier that silently draws no water; the shipped
+    /// rivers stay far under it.
+    #[test]
+    fn water_meshes_over_the_renderer_cap_are_reported() {
+        // A 512 m board: the finest grid's cells are larger, so its water covers more of them.
+        let site = TerrainSite::new(512.0);
+        let terrain = "[terrain]\ntint = [0.1, 0.1, 0.1]\n[[terrain.layers]]\nalbedo = \"a\"\n";
+        let clean = visuals(&format!(
+            "{terrain}[[water]]\npoints = [[140, 220], [200, 224]]\n"
+        ));
+        let largest = TERRAIN_GRID_SIZES[TERRAIN_GRID_SIZES.len() - 1];
+        let ground = clean.ground.as_ref().expect("terrain");
+        let count = |water: &[MapWater]| {
+            crate::water::generate_water(water, &heightfield(ground, &site, water, largest))
+                .vertices
+                .len()
+        };
+        let small = count(&clean.water);
+        assert!(small > 0 && small < MAX_WATER_MESH_VERTICES / 20, "{small}");
+        // Water over most of the board in eight overlapping bodies (overlap is only a
+        // warning): a 60 m river zigzagging across it, eight times. (On a 256 m board even
+        // this stays under the cap.)
+        let zigzag: Vec<[f32; 2]> = (0..32)
+            .map(|row| {
+                [
+                    if row % 2 == 0 { 31.0 } else { 481.0 },
+                    31.0 + 14.5 * row as f32,
+                ]
+            })
+            .collect();
+        let flood = vec![MapWater::new(zigzag).with_width(60.0); 8];
+        assert!(count(&flood) > MAX_WATER_MESH_VERTICES, "{}", count(&flood));
+        let report = check_map_consistency(&clean.clone().with_water(flood), &site);
+        let over: Vec<&String> = report
+            .errors
+            .iter()
+            .filter(|e| e.contains("-vertex water mesh"))
+            .collect();
+        assert_eq!(over.len(), 1, "reported once: {report:?}");
+        assert!(over[0].contains("-cell terrain grid"), "{over:?}");
+        assert!(check_map_consistency(&clean, &site).is_ok());
     }
 
     #[test]

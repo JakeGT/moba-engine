@@ -29,8 +29,10 @@ Constraints:
   fragment stage uses 13 of the 16 samplers Vulkan guarantees per stage (ADR-0014 §6); R6
   adds one and R2b two more. Nothing in R3b may add a sampler to the scene layout.
 - **Readability:** telegraphs stay legible over any ground (ADR-0013's enemy-telegraph rules
-  apply to decals too); foliage never hides a unit and never moves for a unit the client does
-  not draw; water never suggests ground the simulation would not let a unit walk on.
+  apply to decals too); foliage never hides a unit's screen-space outline (High and up),
+  flattens around the 32 drawn units nearest the camera focus on every tier (in a larger
+  crowd the farthest can be partly covered by brush on Low and Medium, where the hull
+  outline is depth-tested, §7) and never moves for a unit the client does not draw; water never suggests ground the simulation would not let a unit walk on.
 - Every feature is tiered, has an off switch and allocates nothing per frame.
 
 ## Decision
@@ -49,8 +51,11 @@ Constraints:
   foliage. Units, walls and props never take decals: a telegraph must not paint the enemy
   standing in it. There is no decal box geometry and no extra pass: every receiving shader
   calls `apply_paint_decals()` / `apply_glow_decals()` from `decals.glsl`.
-- **Binning.** Per frame the CPU sorts nothing and allocates nothing: it takes the frame's
-  decals into a fixed list of at most `MAX_DECALS` (128) — **enemy telegraphs first**, then
+- **Binning.** Per frame the CPU sorts nothing and allocates nothing: it skips the decals
+  whose footprint lies outside the ground the main camera shows (R2b's
+  `lights::ground_footprint`; they cannot be seen, and a far-off one, a global ultimate or a
+  fight across the map, would otherwise stretch the grid and coarsen every cell), then takes
+  the frame's decals into a fixed list of at most `MAX_DECALS` (128) — **enemy telegraphs first**, then
   the rest in the caller's order, up to the tier's cap (enemy telegraphs may use the whole
   128) — computes the xz bounding box of their footprints, divides it into a **32 × 32
   grid** and sets, per cell, a 128-bit mask of the decals whose footprint overlaps it. List,
@@ -65,7 +70,16 @@ Constraints:
   shape code and pushed the terrain shader past a register step on NVIDIA, doubling every
   terrain pixel's cost with or without decals in view (the Ultra overview's scene pass
   0.30 → 0.62 ms, [perf/0021](../perf/0021-decals-foliage-water.md)). Any change to
-  `decals.glsl` needs that overview measured again.
+  `decals.glsl` or `terrain.frag` needs that overview measured again, and
+  `scripts/terrain-decal-check.sh` does it. `MOBA_DECALS=off` builds the terrain from a
+  `terrain_nodecals.frag` permutation with the decal code compiled out, so the script times
+  the networked Ultra overview (no decal in view) with decals on and off from one binary
+  and fails when the scene pass with decals costs more than 1.15× the one without. It also
+  logs the terrain pipeline's compiled statistics (`MOBA_PIPELINE_STATS=1`,
+  `RenderConfig::pipeline_stats`, through `VK_KHR_pipeline_executable_properties` where the
+  driver has it) and fails above 64 registers, the RTX 5070 Ti's count at R3b. The
+  register count alone is not enough: today's driver compiles the record copy to 64
+  registers too, yet it still costs 1.6× on the overview, which the timing check catches.
 - **Telegraph contrast (enemy telegraphs).** The client marks an enemy's telegraph decal
   `DecalRole::EnemyTelegraph` (an ally's `Ally`, the rest `Cosmetic`). For that role the
   renderer (1) never drops it before any other decal, (2) floors its alpha at
@@ -74,10 +88,18 @@ Constraints:
   bright band whose colour is scaled up until its luminance is at least `1.8 ×` the
   background's plus 0.05, and a dark halo just inside it that takes the background to 20 %
   (both at `min(2 × alpha, 1)`, so the rim reads at the floor). One of the two always
-  contrasts with any ground, lit or fogged, bright snow or dark ash;
-  `moba_render::glow_reference` is the CPU twin of the shader, and a unit test holds the
-  luminance ratio over backgrounds from black to 16× white. Ally telegraphs keep
-  the rim but not the floor and are dimmed by the allied-VFX opacity, like their particles.
+  contrasts with any ground, lit or fogged, bright snow or dark ash. Every shape gets both:
+  a ring is evaluated as the disc out to its band's outer edge, so the band is that disc's
+  rim and the halo lies just inside the band; its cast timer fills the inside from the centre
+  out to `radius × progress` (a ring without a timer leaves its inside alone).
+  `moba_render::glow_reference` is the CPU twin of the shader's per-shape coverage and glow
+  composite, and unit tests hold the luminance ratio for every shape, timer or not, over
+  backgrounds from black to 16× white, and the timer's fill for rings and discs. Over water
+  an enemy telegraph is composited over everything the pixel shows (the `Full` water applies
+  it after mixing in the refracted bed) or its rim and halo are drawn opaque (the `Simple`
+  water's blend), so the bed's copy of the ring under the surface never weakens it. Ally
+  telegraphs keep the rim but not the floor and are dimmed by the allied-VFX opacity, like
+  their particles.
 - **From effects** (`[[decals]]` in `vfx/<effect>.toml`, up to four per effect, parsed and
   range-checked by `moba_assets::VfxDecal`): shape, style, anchor (`target`, `source`, or
   `line` from the source to the target), radius, width, angle, delay, lifetime (default:
@@ -86,6 +108,8 @@ Constraints:
   scorch mark, a goo splat; never a telegraph) is copied at its delay into a fixed ring of 96
   persistent decals with its own lifetime (≤ 30 s), so it outlives the effect without holding
   one of the 256 effect instances; when the ring is full the oldest stamp is replaced. The
+  effect lives `STAMP_LATCH_SECONDS` (0.125 s, longer than the client's largest VFX step)
+  past a stamp's delay, so a stamp whose delay is the effect's longest part still fires. The
   client's `VfxSystem` builds the frame's decal list next to its particle spawns, with the
   same rules: enemy telegraph decals are exempt from distance, visibility and budget culling
   and listed first; others are culled by distance from the camera focus like their effect.
@@ -112,11 +136,14 @@ Constraints:
   map adds a few patches.
 - **Rendering.** One storage buffer of instances, uploaded at map bind
   (`Renderer::set_foliage`), sorted into 16 m chunks. Each frame the CPU frustum-tests the
-  chunks (and drops those beyond the tier's draw distance from the camera focus) and records
+  chunks (and drops those beyond the tier's draw distance, measured from the eye or from the
+  camera's focus on the ground, the screen centre's ray met with `y = 0`, whichever is
+  nearer: the high MOBA camera keeps foliage to the top of the screen) and records
   one non-indexed instanced draw per run of visible chunks inside the **scene pass**, after
   the opaque units. There is no vertex buffer: `foliage.vert` builds each clump's blades
-  (2 segments, 7 vertices as 5 triangles each) from `gl_VertexIndex`; blade count, width and
-  stiffness by kind; far clumps collapse their extra blades to zero area. **Wind** is two
+  (2 segments, 9 vertices as 3 triangles each) from `gl_VertexIndex`; blade count, width and
+  stiffness by kind; far clumps (by the same eye-or-focus distance) collapse their extra
+  blades to zero area. **Wind** is two
   sine gusts along the map's wind direction plus a per-instance phase, scaled by the square
   of the height along the blade. Shading is `shade()` with a normal bent towards up (soft,
   painterly grass), a base-to-tip gradient, back-light translucency, the fog of war, height
@@ -133,19 +160,24 @@ Constraints:
   from the units it draws this frame** (`foliage::Displacers::build` over the frame's unit
   anchors — the units the server sent and the client interpolates; nothing else), nearest to
   the camera focus first, structures excluded. A hidden enemy is not in the snapshot, so it
-  is not drawn, so it bends nothing; a unit test feeds a snapshot whose hidden enemy is
-  withheld (and one with a dead unit) and asserts no displacement near it. The renderer only
+  is not drawn, so it bends nothing; a unit test drives the app's own
+  `scene_build::rebuild_network_units` with snapshots that withhold a hidden enemy and keep a
+  hero dead past its death clip, and asserts no displacement where either stands (and that
+  both bend the grass while drawn). Every tier uses all 32, so in any ordinary fight every
+  drawn unit flattens the brush around it. The renderer only
   uses what `Scene::environment` carries. Brush therefore never reveals anyone; and because the
   simulation has no brush areas there is also no "unit inside a bush" state to hide:
   foliage is decorative (if the simulation gains brush, its areas become `brush` patches and
   the server's vision rules decide what is drawn, as today).
 - **Tiers:** density Low 0.3, Medium 0.6, High 1.0, Ultra 1.0 of the descriptor's; most
   instances 8k / 24k / 48k / 64k; blades per clump 3 / 4 / 5 / 6; draw distance 60 / 90 / 130 /
-  180 m; displacers 8 / 16 / 32 / 32. `MOBA_FOLIAGE=off` draws none.
+  180 m; displacers 32 on every tier. `MOBA_FOLIAGE=off` draws none.
 
 ### 3. Water: shallow rivers and pools over a carved bed
 - **Data.** Up to eight `[[water]]` bodies in the map visuals (`moba_assets::MapWater`):
-  a centre polyline (1–32 points; one point is a round pool), width, surface `level`, bed
+  a centre polyline (1–32 points; one point is a round pool), width, surface `level`
+  (0 to `MAX_WATER_LEVEL`: never below the ground units stand on, or they would hover over
+  it), bed
   `depth`, `flow` speed along the polyline, deep and shallow colours, `clarity` and `foam`.
   It needs the `[terrain]` table.
 - **The bed is carved into the terrain** by the generator
@@ -195,7 +227,9 @@ Constraints:
 ### 4. Visual-versus-simulation rules for water and foliage (`content-check`)
 `check_map_consistency` gains these, on the same generated heightfields as ADR-0014 §2
 (every tier's grid, with the water carved):
-- **Errors:** a body's level outside `[−MAX_PLAY_RELIEF, MAX_WATER_LEVEL]`; any part of a
+- **Errors:** a body's level outside `[0, MAX_WATER_LEVEL]` (the parser rejects it too); a
+  water mesh over `MAX_WATER_MESH_VERTICES` (262,144, the renderer's cap) on any terrain
+  grid, which would leave that tier with no water; any part of a
   body (its polyline widened by half its width) outside the board, where the ground only
   rises; any board sample deeper than `MAX_WADE_DEPTH` below a surface (no water a unit could
   not visibly wade through: the simulation lets every unit walk everywhere). The relief rule
@@ -211,8 +245,10 @@ Constraints:
   → (water_copy → water)   [Full only]
   → vfx_draw → (vfx_resolve) → composite → ui → (capture)
 ```
-The scene stores depth when either the water pass or the particles read it (single-sampled:
-with MSAA they read the resolve or the prepass's depth). R3b adds two passes and one
+The scene stores depth when either the water pass or the particles read it. They read the
+single-sampled depth; with MSAA the scene resolves its multisampled depth into it, after the
+prepass too (the prepass's resolve has no foliage, so water and particles would otherwise
+draw over the brush in front of them; the Ultra river golden covers it). R3b adds two passes and one
 resource to R6's graph (`MAX_PASSES` 32, `MAX_RESOURCES` 48 with a `u64` mask): the
 largest frame (both offscreen passes, fog of war, shadow, the prepass and AO, the scene, the
 two water passes, the three VFX passes, the bloom chain, exposure, composite, FXAA, upscale,
@@ -243,7 +279,8 @@ and water layouts are checked at creation like the scene's and VAT's.
   particles; the `water_copy` copies the resolved HDR.
 - **Depth prepass (R6/R2b, High and up):** foliage and water are not in the prepass (GTAO
   and the outline IDs ignore them; foliage still writes depth in the scene pass, which tests
-  `LESS_OR_EQUAL` against the loaded prepass depth, so it shades correctly). They write no
+  `LESS_OR_EQUAL` against the loaded prepass depth, so it shades correctly; with MSAA the
+  scene re-resolves its depth for the water and particles, so they see it). They write no
   outline IDs, and the terrain's decals change only its colour. A unit standing in brush
   therefore keeps its screen-space outline (High and up) over the blades: deliberate, since
   the brush is decorative and the simulation does not hide units in it, so foliage must
@@ -296,6 +333,7 @@ and water layouts are checked at creation like the scene's and VAT's.
   0–3), `EnvironmentFrame`, `FoliageDisplacer`, `MAX_FOLIAGE_DISPLACERS`,
   `MAX_FOLIAGE_INSTANCES`, `MAX_WATER_BODIES`, `MAX_WATER_VERTICES`, `WaterData`,
   `WaterVertexData`, `WaterStyle`, `glow_reference`, `RenderError::InvalidWater`,
+  `RenderConfig::pipeline_stats`/`with_pipeline_stats`,
   `Scene::decals`/`with_decals`/`environment`/`with_environment`,
   `RenderConfig::environment`/`with_environment`/`effective_environment`,
   `Renderer::{set_foliage, clear_foliage, foliage_instances, set_water, clear_water,
@@ -304,11 +342,12 @@ and water layouts are checked at creation like the scene's and VAT's.
   `VfxEffect::decals`, `MapFoliage`, `FoliagePatch`, `FoliageKind`, `MapWater`,
   `MapVisuals::{foliage, water}`, `FoliageInstance`, `generate_foliage`, `WaterMesh`,
   `WaterVertex`, `generate_water`, `generate_terrain_with_water`, `MAX_WATER_LEVEL`,
-  `MAX_WADE_DEPTH`.
+  `MAX_WADE_DEPTH`, `MAX_WATER_MESH_VERTICES`, `STAMP_LATCH_SECONDS`.
 - No wire, replay, simulation-logic or content-hash change: effects and map visuals are
   client-local.
 - Goldens: the default grass map becomes the showcase (a river with fords across the middle,
   pools, reeds, brush and grass), so every golden that shows it is rebaselined deliberately;
-  new goldens cover the river from a low camera on High and on Low, and the decals (telegraph
+  new goldens cover the river from a low camera on High and on Low, through the bank's reeds
+  on Ultra (MSAA with the prepass), and the decals (telegraph
   rings, scorch and splats) with water and foliage from the 5v5 teamfight replay at tick 360.
 - Costs and validation: [perf/0021](../perf/0021-decals-foliage-water.md).

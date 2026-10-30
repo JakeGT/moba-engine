@@ -144,9 +144,13 @@ void main() {
     foam_surface.rim = 0.0;
     vec3 foam_lit = atmosphere(shade(foam_surface));
 
-    // The surface (water and foam) and how much of the pixel it covers; glow decals go on
-    // the surface only: what shows through (the bed, in the copy or under the blend) already
-    // has them from the scene pass.
+    // The surface (water and foam) and how much of the pixel it covers. Glow decals other
+    // than enemy telegraphs go on the surface only: what shows through (the bed, in the copy
+    // or under the blend) already has them from the scene pass. Enemy telegraphs are
+    // composited over everything the pixel shows (the full water) or made opaque in their
+    // rim and halo (the simple water), so the bed's refracted copy of the ring never doubles
+    // or weakens it (ADR-0017 §1).
+    float rim_cover = 0.0;
 #ifdef WATER_REFRACTION
     float cover = 1.0 - (1.0 - opacity) * (1.0 - foam);
     vec3 top = (lit * (opacity * (1.0 - foam)) + foam_lit * foam) / max(cover, 1e-4);
@@ -154,12 +158,16 @@ void main() {
     float cover = clamp(mix(0.18, 0.95, opacity) + foam, 0.0, 1.0);
     vec3 top = mix(lit, foam_lit, foam / max(cover, 1e-3));
 #endif
-    top = apply_glow_decals(top, in_world_pos, aa);
+    top = apply_glow_decals_role(top, in_world_pos, aa, false, rim_cover);
 #ifdef WATER_REFRACTION
     // The bed seen through the water, tinted by the shallow colour as it deepens.
     vec3 transmitted = behind * mix(vec3(1.0), shallow.rgb * 2.0, opacity * 0.6);
-    out_color = vec4(mix(transmitted, top, cover), 1.0);
+    vec3 shown = apply_glow_decals_role(mix(transmitted, top, cover), in_world_pos, aa, true,
+        rim_cover);
+    out_color = vec4(shown, 1.0);
 #else
+    top = apply_glow_decals_role(top, in_world_pos, aa, true, rim_cover);
+    cover = max(cover, rim_cover);
     // Premultiplied: ONE, ONE_MINUS_SRC_ALPHA.
     out_color = vec4(top * cover, cover);
 #endif

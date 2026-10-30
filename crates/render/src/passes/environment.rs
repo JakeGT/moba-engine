@@ -15,7 +15,7 @@ use crate::device::DeviceContext;
 use crate::environment::{
     EnvironmentBlock, EnvironmentConfig, FOLIAGE_BLADE_VERTICES, FoliageChunk, FoliageData,
     FoliageLook, MAX_FOLIAGE_DISPLACERS, MAX_WATER_BODIES, MAX_WATER_VERTICES, WaterData,
-    WaterMode, chunk_foliage, frustum_planes, visible_runs,
+    WaterMode, chunk_foliage, frustum_planes, ground_focus, visible_runs,
 };
 use crate::error::{RenderError, RenderResult};
 use crate::mesh::{self, GpuMesh};
@@ -258,6 +258,7 @@ impl EnvironmentResources {
             foliage: self.foliage_pipeline_layout(),
             water: self.water_pipeline_layout(),
             full_water: self.full_water(),
+            decals: self.config.decals,
         }
     }
 
@@ -501,6 +502,8 @@ impl EnvironmentResources {
             REFRACTION_STRENGTH,
             if self.full_water { 1.0 } else { 0.0 },
         ];
+        let focus = ground_focus(scene.camera.view_proj, scene.camera.position);
+        block.focus = [focus.x, focus.y, focus.z, 0.0];
         block.water_deep = self.water_styles.0;
         block.water_shallow = self.water_styles.1;
         self.frames[frame]
@@ -516,6 +519,7 @@ impl EnvironmentResources {
                 &foliage.chunks,
                 &planes,
                 scene.camera.position,
+                focus,
                 config.foliage_distance,
                 &mut self.draws,
             );

@@ -147,12 +147,12 @@ pub use vfx::{
     DEFAULT_DECAL_WIDTH, MAX_DECAL_SECONDS, MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS,
     MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES, MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_DECALS,
     MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY, MAX_VFX_LIGHT_RADIUS, MAX_VFX_NAME, MAX_VFX_RATE,
-    VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES, VfxAbilityBinding, VfxAnchor,
-    VfxBindings, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle, VfxDirection, VfxEffect,
-    VfxEmitter, VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape, VfxSprite,
-    VfxUnitEffects, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
+    STAMP_LATCH_SECONDS, VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES,
+    VfxAbilityBinding, VfxAnchor, VfxBindings, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle,
+    VfxDirection, VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape,
+    VfxSprite, VfxUnitEffects, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
 };
-pub use water::{WaterMesh, WaterVertex, generate_water};
+pub use water::{MAX_WATER_MESH_VERTICES, WaterMesh, WaterVertex, generate_water};
 
 /// One asset entry.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

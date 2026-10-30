@@ -1027,7 +1027,9 @@ stamp = false             # persist after the effect (scorch marks), for `lifeti
   ring is full the oldest stamp goes. A stamp can be neither a telegraph nor a progress fill.
 - **Telegraphs** must use `glow`. An enemy's telegraph decal is never culled, keeps at least
   35 % opacity until the last 15 % of its life, and gets a two-tone contrast rim (a bright
-  band and a dark halo) so it reads on any ground; an ally's keeps the rim. Decals exist only
+  band and a dark halo just inside it) so it reads on any ground, over water too; on a
+  `ring` the band is the ring itself and `progress` fills its inside from the centre. An
+  ally's keeps the rim. Decals exist only
   for effects the client plays, so they reveal nothing the server did not send.
 - **Tiers.** At most 48 (Low), 96 (Medium) or 128 (High, Ultra) decals a frame, enemy
   telegraphs first and exempt. `MOBA_DECALS=off` draws none (particles still play).
@@ -1251,7 +1253,7 @@ With a `[terrain]` table, up to eight `[[water]]` bodies add shallow rivers and 
 [[water]]
 points = [[40, 210], [128, 200], [216, 214]]  # required, 1..=32; one point is a round pool
 width = 12.0                     # metres across (a pool's diameter), 2..=60
-level = 0.1                      # surface height, metres, -0.5..=0.3
+level = 0.1                      # surface height, metres, 0..=0.3 (never below the ground)
 depth = 0.45                     # bed depth below the surface, 0.05..=0.8
 flow = 1.0                       # flow speed along the points, m/s, 0..=8 (pools do not flow)
 color = [0.02, 0.12, 0.16]       # deep colour, linear RGB 0..=1
@@ -1291,7 +1293,8 @@ warning: map visuals 'ember': prop 2 at [128, 128] (16 m tall, footprint radius 
 | An edge prop whose footprint (from `models/<edge_mesh>.glb`'s bounds, as the client places it) reaches the board | error | edge props mark the end of the walkable space |
 | A missing or mis-formatted terrain texture, or layers that disagree on size or mip count | error (file check) | the client would fall back to the flat plane |
 | A prop at least 2 m tall whose footprint (radius `height × 0.225`) overlaps a lane corridor (`lane_width / 2`, 12 m wide without `[terrain]`) or comes within 4 m of a structure | warning | it looks like an obstacle units walk through (props elsewhere are decoration by design) |
-| A water body whose `level` is outside -0.5..=0.3 m, or that (its points widened by `width / 2`) leaves the board | error | units stand at height 0 and must visibly wade; outside the board the ground only rises |
+| A water body whose `level` is outside 0..=0.3 m, or that (its points widened by `width / 2`) leaves the board | error | units stand at height 0 and must visibly wade (a lower surface leaves them standing over it); outside the board the ground only rises |
+| A water mesh over 262,144 vertices (`MAX_WATER_MESH_VERTICES`) on any terrain grid (every tier's, bed carved) | error | the renderer rejects a larger mesh, so that tier would draw no water |
 | A board sample under a water body more than 0.8 m below its surface (every tier's grid, bed carved), or the relief rule above failing with the beds carved | error | the simulation lets every unit walk everywhere, so no water may look too deep to cross |
 | `[foliage]` or `[[water]]` without `[terrain]` (code-built descriptors; the parser rejects it) | error | both stand on the heightfield |
 | Water within 4 m of a structure or covering a spawn; water crossing a wall; two bodies that overlap | warning | structures and spawns read as dry ground; a wall in water or merged beds look broken |

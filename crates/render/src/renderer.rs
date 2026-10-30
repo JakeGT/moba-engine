@@ -120,6 +120,11 @@ pub struct RenderConfig {
     /// [`Renderer::reload_shaders`]. Release builds ignore it, because an override that does
     /// not match its pipeline's interface is invalid Vulkan usage. Default `None`.
     pub shader_dir: Option<PathBuf>,
+    /// Enable `VK_KHR_pipeline_executable_properties` when the device has it and log the
+    /// terrain pipeline's compiled statistics (register count and the like) at creation as
+    /// `[render] pipeline-stats terrain ...` lines. A development and perf-check aid
+    /// (`scripts/terrain-decal-check.sh`, ADR-0017 §1); default `false`, where nothing changes.
+    pub pipeline_stats: bool,
     /// Upload BC7/BC5/BC4 textures as is when the device supports them. When `false`, or on
     /// devices without `textureCompressionBC`, they are decoded on the CPU at load. Default
     /// `true`.
@@ -169,6 +174,7 @@ impl Default for RenderConfig {
             exposure: 1.0,
             pipeline_cache: None,
             shader_dir: None,
+            pipeline_stats: false,
             compressed_textures: true,
             vfx: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
@@ -263,6 +269,13 @@ impl RenderConfig {
     #[must_use]
     pub fn with_shader_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.shader_dir = dir;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::pipeline_stats`] set.
+    #[must_use]
+    pub fn with_pipeline_stats(mut self, enabled: bool) -> Self {
+        self.pipeline_stats = enabled;
         self
     }
 
@@ -523,7 +536,7 @@ impl Renderer {
             handle: surface_handle,
         };
 
-        let mut device = DeviceContext::new(&instance, surface_handle)?;
+        let mut device = DeviceContext::new(&instance, surface_handle, config.pipeline_stats)?;
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
         let shaders = ShaderSource::new(config.shader_dir.clone());
@@ -1912,6 +1925,7 @@ impl Renderer {
             decals,
             environment.max_decals as usize,
             self.config.quality_tier.vfx_budget().telegraph_floor,
+            crate::lights::ground_footprint(scene.camera.view_proj),
         );
         self.lighting.write_decals(frame_index, &self.decal_upload);
         self.scene
@@ -2222,7 +2236,12 @@ impl Renderer {
                         lighting: self.lighting.set(frame_index),
                         resolve: msaa_color.map(|_| SceneResolve {
                             color: hdr_view,
-                            depth: (!prepass).then_some(depth_view),
+                            // After the prepass the depth resolves again when the full
+                            // water or the particles read it, so they see the foliage.
+                            depth: (!prepass
+                                || resources.vfx.is_some()
+                                || resources.refraction.is_some())
+                            .then_some(depth_view),
                         }),
                         load_depth: prepass,
                         // The particles and the full water (R3b) test and sample the

@@ -652,12 +652,20 @@ pub(crate) fn build(
     } else {
         Access::DepthWrite
     };
+    // The full water and the particles test and sample the single-sample depth after the
+    // scene, so with MSAA it must hold what the scene drew: the prepass's resolve has only
+    // the units and terrain, not the foliage (R3b).
+    let depth_read_later = refraction.is_some() || vfx.is_some();
     scene = match msaa {
-        // Colour resolves into `hdr`; without the prepass the depth resolves too (with it,
-        // `depth` already holds the prepass's resolved depth, which the scene reproduces).
+        // Colour resolves into `hdr`; the depth resolves too, except after the prepass when
+        // nothing reads it later (`depth` then keeps the prepass's resolved depth).
         Some(msaa) => {
             let scene = scene.access(msaa.color, Access::ColorWrite);
-            if prepass {
+            if prepass && depth_read_later {
+                scene
+                    .access(msaa.depth, Access::DepthReadWriteResolveSource)
+                    .access(depth, Access::DepthResolveWrite)
+            } else if prepass {
                 scene.access(msaa.depth, scene_depth)
             } else {
                 scene
@@ -1624,6 +1632,58 @@ mod tests {
                 assert_eq!(
                     pass.uses(shadow),
                     matches!(pass.tag, PassKind::Shadow | PassKind::Scene)
+                );
+            }
+        }
+    }
+
+    /// R3b review: with MSAA and the prepass, the prepass resolves only what it drew (no
+    /// foliage, which is not in the prepass), so when the full water or the particles test
+    /// the single-sampled depth the scene resolves its multisampled depth into it again,
+    /// and they test the scene's depth (foliage included). Without a later reader the scene
+    /// leaves the prepass's resolve alone.
+    #[test]
+    fn the_scene_re_resolves_depth_after_the_prepass_for_water_and_particles() {
+        for (water, vfx) in [
+            (false, VfxMode::Off),
+            (true, VfxMode::Off),
+            (false, VfxMode::Oit),
+            (true, VfxMode::Oit),
+        ] {
+            let spec = FrameSpec {
+                vfx,
+                water,
+                msaa: true,
+                ambient_occlusion: true,
+                ..shadowed_spec()
+            };
+            let frame = build(&spec, false, 0).expect("compiles");
+            let passes = frame.graph.passes();
+            let scene = passes
+                .iter()
+                .find(|pass| pass.tag == PassKind::Scene)
+                .expect("scene");
+            let msaa = frame.resources.msaa.expect("msaa");
+            assert!(scene.uses(msaa.depth));
+            let later = water || vfx != VfxMode::Off;
+            assert_eq!(scene.uses(frame.resources.depth), later, "{water} {vfx:?}");
+            if later {
+                assert_eq!(
+                    barrier(scene, frame.resources.depth).new_layout,
+                    L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    "the resolve target"
+                );
+                let reader = passes
+                    .iter()
+                    .find(|pass| matches!(pass.tag, PassKind::Water | PassKind::VfxDraw))
+                    .expect("a depth reader");
+                let read = barrier(reader, frame.resources.depth);
+                assert_eq!(
+                    (read.old_layout, read.new_layout),
+                    (
+                        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        L::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                    )
                 );
             }
         }

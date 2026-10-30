@@ -138,6 +138,9 @@ pub const FOLIAGE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/foliag
 pub const WATER_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/water.vert.spv"));
 /// Water fragment shader (R3b): flow-mapped normals, depth fade, foam; premultiplied alpha.
 pub const WATER_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/water.frag.spv"));
+/// The terrain without the decal code (`terrain.frag` + `MOBA_NO_DECALS`; decals off).
+pub const TERRAIN_NODECALS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_nodecals.frag.spv"));
 /// Water with screen-space refraction and contact foam (`water.frag` + `WATER_REFRACTION`).
 pub const WATER_REFRACTION_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/water_refraction.frag.spv"));
@@ -172,6 +175,10 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "water_refraction.frag",
         spirv: WATER_REFRACTION_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_nodecals.frag",
+        spirv: TERRAIN_NODECALS_FRAG,
     },
     ShaderModule {
         name: "sky.vert",

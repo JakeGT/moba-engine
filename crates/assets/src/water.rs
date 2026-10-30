@@ -49,6 +49,12 @@ impl WaterMesh {
     }
 }
 
+/// Most vertices one map's water mesh may have: the renderer rejects a larger mesh
+/// (`moba_render::MAX_WATER_VERTICES` is this), and the map consistency check
+/// ([`crate::check_map_consistency`]) reports a map whose water exceeds it on any terrain
+/// grid size, so a map never loses its water on one quality tier only.
+pub const MAX_WATER_MESH_VERTICES: usize = 262_144;
+
 /// Lowest flow speed factor on the banks (so the shoreline foam still drifts).
 const BANK_FLOW: f32 = 0.15;
 

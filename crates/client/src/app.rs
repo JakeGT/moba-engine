@@ -617,6 +617,7 @@ impl App for ClientApp {
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
             .with_shader_dir(self.shader_dir.clone())
+            .with_pipeline_stats(std::env::var_os("MOBA_PIPELINE_STATS").is_some_and(|v| v == "1"))
             .with_compressed_textures(launch::compressed_textures())
             .with_lighting(Some(launch::lighting_config(self.quality)))
             .with_vfx(self.vfx.enabled())

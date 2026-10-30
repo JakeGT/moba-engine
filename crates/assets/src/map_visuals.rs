@@ -118,7 +118,8 @@
 //! [[water]]                      # optional, at most 8 bodies
 //! points = [[40, 90], [128, 120], [210, 150]]  # 1..=32; one point is a round pool
 //! width = 12.0                   # metres, 2..=60
-//! level = 0.1                    # surface height, metres, -0.5..=0.3
+//! level = 0.1                    # surface height, metres, 0..=0.3 (never below the
+//!                                # ground units stand on)
 //! depth = 0.45                   # bed depth below the surface, 0.05..=0.8
 //!                                # (level - depth >= -0.5: the bed stays in the relief limit)
 //! flow = 1.0                     # flow speed along the points, metres per second, 0..=8
@@ -249,6 +250,9 @@ pub const MAX_MAP_WATER: usize = 8;
 pub const MAX_WATER_POINTS: usize = 32;
 /// Highest water surface above the ground units stand on (height 0), metres.
 pub const MAX_WATER_LEVEL: f32 = 0.3;
+/// Lowest water surface, metres: the ground units stand on (height 0). A lower surface would
+/// leave wading units standing on air above it (ADR-0017 §3).
+pub(crate) const MIN_WATER_LEVEL: f32 = 0.0;
 /// Deepest water allowed above the carved bed, metres: a 2 m hero visibly wades, never swims.
 pub const MAX_WADE_DEPTH: f32 = 0.8;
 /// Most `[[foliage.patches]]` one descriptor may have.
@@ -274,7 +278,8 @@ pub struct MapWater {
     pub points: Vec<[f32; 2]>,
     /// Width across the river (the pool's diameter), metres, `2..=60`.
     pub width: f32,
-    /// Surface height, metres, `-0.5..=`[`MAX_WATER_LEVEL`].
+    /// Surface height, metres, `0..=`[`MAX_WATER_LEVEL`]: never below the ground units
+    /// stand on (height 0).
     pub level: f32,
     /// Bed depth below the surface at the centre line, metres, `0.05..=`[`MAX_WADE_DEPTH`].
     pub depth: f32,
@@ -376,7 +381,7 @@ impl MapWater {
     pub(crate) fn surface(&self) -> f32 {
         crate::terrain::finite_clamp(
             self.level,
-            -MAX_PLAY_RELIEF,
+            MIN_WATER_LEVEL,
             MAX_WATER_LEVEL,
             Self::DEFAULT_LEVEL,
         )
@@ -1699,8 +1704,9 @@ fn check_water(raw: Vec<RawWater>) -> Result<Vec<MapWater>, MapVisualsError> {
         }
         let level = check_range(
             body.level.unwrap_or(MapWater::DEFAULT_LEVEL),
-            (-MAX_PLAY_RELIEF, MAX_WATER_LEVEL),
-            "water level must be -0.5..=0.3 metres (units stand at height 0 and wade)",
+            (MIN_WATER_LEVEL, MAX_WATER_LEVEL),
+            "water level must be 0..=0.3 metres (units stand at height 0 and wade: the surface \
+             is never below them)",
         )?;
         let depth = check_range(
             body.depth.unwrap_or(MapWater::DEFAULT_DEPTH),
@@ -2476,10 +2482,12 @@ mist = 0.4
             water("width = 61"),
             water("level = 0.31"),
             water("level = -0.6"),
+            // Below the ground units stand on.
+            water("level = -0.01"),
             water("depth = 0.01"),
             water("depth = 0.9"),
             // The bed would sink below the relief limit.
-            water("level = -0.2\ndepth = 0.4"),
+            water("level = 0\ndepth = 0.6"),
             water("flow = -1"),
             water("flow = 9"),
             water("color = [2, 0, 0]"),

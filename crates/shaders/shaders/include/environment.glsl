@@ -15,6 +15,7 @@ layout(set = 2, binding = 0) uniform EnvironmentBlock {
     vec4 tip_color;     // foliage tips (rgb)
     vec4 flower_color;  // flower heads (rgb)
     vec4 screen;        // xy 1 / target size, z refraction strength, w 1 = full water
+    vec4 focus;         // xyz the camera's focus on the ground (foliage distance)
     vec4 displacers[MOBA_FOLIAGE_DISPLACERS]; // xz, radius, strength
     vec4 water_deep[MOBA_WATER_BODIES];       // rgb deep colour, w clarity (m)
     vec4 water_shallow[MOBA_WATER_BODIES];    // rgb shallow colour, w foam

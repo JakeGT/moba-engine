@@ -49,8 +49,11 @@ void main() {
     vec2 corner = BLADE[uint(gl_VertexIndex) % 9u];
 
     // Distance LOD: fewer blades far away, and the whole clump shrinks over the last 20 %.
+    // Measured from the eye or the camera's focus on the ground, whichever is nearer, as the
+    // CPU chunk culling does (`visible_runs`): a high camera keeps foliage to the top of
+    // the screen.
     float distance_max = environment.time.w;
-    float distance = length(camera.camera_pos.xyz - root);
+    float distance = min(length(camera.camera_pos.xyz - root), length(environment.focus.xyz - root));
     float lod = clamp(distance / distance_max, 0.0, 1.0);
     float blades = environment.time.z;
     float live_blades = max(1.0, floor(blades * (1.0 - 0.65 * lod) + 0.5));

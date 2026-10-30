@@ -244,19 +244,25 @@ jobs:
           done
           exit $status
       # R3b environment coverage (ADR-0017): the showcase river close up from a low camera on
-      # the default tier (full water with refraction, foliage, reeds, the carved bed) and on
-      # Low (simple water, thinned foliage), and the 5v5 teamfight replay at tick 360 (ground
-      # decals: telegraph rings, scorch and splats, with water and foliage). Local captures
-      # advance one tick and one VFX step per frame, so the replay frame is repeatable.
+      # the default tier (full water with refraction, foliage, reeds, the carved bed), on Low
+      # (simple water, thinned foliage) and on Ultra through the reeds on the bank (4x MSAA
+      # with the prepass: the scene re-resolves its depth, so the water stays behind the
+      # reeds in front of it), and the 5v5 teamfight replay at tick 360 (ground decals:
+      # telegraph rings, scorch and splats, with water and foliage). Local captures advance
+      # one tick and one VFX step per frame, so the replay frame is repeatable.
       - name: Environment captures with validation + sync validation
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
-          for quality in default low; do
+          for quality in default low ultra; do
             name=river
             extra=""
+            camera=0.9,0.3,14,4,-62
             if [ "$quality" = low ]; then name=river-low; extra="MOBA_QUALITY=low"; fi
+            if [ "$quality" = ultra ]; then
+              name=river-ultra; extra="MOBA_QUALITY=ultra"; camera=4.04,0.2,9,4,-62
+            fi
             env $extra MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 \
-              MOBA_PREVIEW_CAMERA=0.9,0.3,14,4,-62 MOBA_CAPTURE=render-$name-actual.ppm \
+              MOBA_PREVIEW_CAMERA=$camera MOBA_CAPTURE=render-$name-actual.ppm \
               timeout 180 xvfb-run -a ./target/release/moba-client \
               > $name-capture.log 2>&1 || { cat $name-capture.log; exit 1; }
             test -s render-$name-actual.ppm
@@ -272,7 +278,7 @@ jobs:
         run: |
           set +e
           status=0
-          for view in river river-low decals; do
+          for view in river river-low river-ultra decals; do
             ./target/release/image-check render-$view-actual.ppm \
               --expected tests/golden/render-$view-fingerprint.rgb \
               --diff render-$view-diff.ppm > $view-fingerprint.log 2>&1 || status=1
@@ -325,6 +331,10 @@ jobs:
             render-river-low-diff.ppm
             river-low-capture.log
             river-low-fingerprint.log
+            render-river-ultra-actual.ppm
+            render-river-ultra-diff.ppm
+            river-ultra-capture.log
+            river-ultra-fingerprint.log
             render-decals-actual.ppm
             render-decals-diff.ppm
             decals-capture.log

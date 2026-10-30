@@ -10,7 +10,8 @@
 // - `apply_glow_decals` composites glow decals over the shaded, fogged colour. Enemy
 //   telegraphs keep a two-tone rim: a band brightened to at least 1.8x the ground's
 //   luminance and a dark halo inside it, so one of them contrasts with any ground
-//   (`glow_reference` is the CPU twin, unit-tested).
+//   (`glow_reference` is the CPU twin of `decal_coverage` and this composite, unit-tested
+//   per shape).
 //
 // `aa` is the world-space size of a pixel, computed by the caller in uniform control flow.
 #ifndef MOBA_DECALS_GLSL
@@ -70,8 +71,10 @@ int decal_cell(vec3 world) {
 // 0.62 ms; perf/0021).
 #define MOBA_DECAL(index) decal_buffer.decals[index]
 
-// Coverage of decal `index` at `world`: x the filled area, y the rim band, z the progress
-// fill, w the halo band just inside the rim. Zero outside.
+// Coverage of decal `index` at `world`: x the washed area, y the rim band, z the progress
+// fill, w the halo band just inside the rim. Zero outside. A ring is evaluated as the disc
+// out to its band's outer edge, so its band is the disc's rim, its halo lies just inside
+// the band and its cast timer fills the inside; only its wash (x) is the band alone.
 vec4 decal_coverage(uint index, vec3 world, float aa) {
     if (abs(world.y - MOBA_DECAL(index).size.w) > MOBA_DECAL_REACH) {
         return vec4(0.0);
@@ -90,9 +93,9 @@ vec4 decal_coverage(uint index, vec3 world, float aa) {
         sd = length(p) - radius;
         along = length(p) / radius;
     } else if (shape < 1.5) {
-        sd = abs(length(p) - radius) - MOBA_DECAL(index).size.y * 0.5;
         rim_width = MOBA_DECAL(index).size.y;
-        along = 1.0;
+        sd = length(p) - (radius + 0.5 * rim_width);
+        along = length(p) / radius;
     } else if (shape < 2.5) {
         // Sector about +x with half angle size.z (iq's sdPie with the axis swapped).
         vec2 q = vec2(abs(p.y), p.x);
@@ -133,10 +136,16 @@ vec4 decal_coverage(uint index, vec3 world, float aa) {
         float sweep = MOBA_DECAL(index).params.z;
         progress = fill * (1.0 - smoothstep(sweep - 0.01, sweep + 0.01, along));
     }
-    return vec4(fill, rim, progress, halo);
+    // Rings wash only their band; every other shape washes its whole area.
+    float wash = (shape > 0.5 && shape < 1.5) ? rim : fill;
+    return vec4(wash, rim, progress, halo);
 }
 
 vec3 apply_paint_decals(vec3 albedo, vec3 world, float aa) {
+#ifdef MOBA_NO_DECALS
+    // Decals off (`terrain_nodecals.frag`): no decal code at all.
+    return albedo;
+#endif
     int cell = decal_cell(world);
     if (cell < 0) {
         return albedo;
@@ -162,6 +171,9 @@ vec3 apply_paint_decals(vec3 albedo, vec3 world, float aa) {
 }
 
 vec3 apply_glow_decals(vec3 color, vec3 world, float aa) {
+#ifdef MOBA_NO_DECALS
+    return color;
+#endif
     int cell = decal_cell(world);
     if (cell < 0) {
         return color;
@@ -178,7 +190,7 @@ vec3 apply_glow_decals(vec3 color, vec3 world, float aa) {
                 continue;
             }
             vec4 coverage = decal_coverage(index, world, aa);
-            if (coverage.x <= 0.0) {
+            if (coverage.x + coverage.z + coverage.w <= 0.0) {
                 continue;
             }
             float alpha = clamp(MOBA_DECAL(index).color.a * MOBA_DECAL(index).params.w, 0.0, 1.0);
@@ -191,6 +203,48 @@ vec3 apply_glow_decals(vec3 color, vec3 world, float aa) {
                 float ground = decal_luma(color);
                 rim *= max(1.0, (1.8 * ground + 0.05) / max(decal_luma(tint), 1e-3));
                 color = mix(color, color * 0.2, band * coverage.w);
+            }
+            color = mix(color, rim, band * coverage.y);
+        }
+    }
+    return color;
+}
+
+// The water's variant (R3b): only the glow decals of one role (`enemy` telegraphs or every
+// other), so the water can composite enemy telegraphs over everything it shows (the
+// transmitted bed included) and the rest on its surface. `rim_cover` returns the strongest
+// enemy rim band drawn, so the blended simple water can make its rims opaque. A separate
+// function, so the terrain's `apply_glow_decals` is untouched (register budget, §1).
+vec3 apply_glow_decals_role(vec3 color, vec3 world, float aa, bool enemy, inout float rim_cover) {
+    int cell = decal_cell(world);
+    if (cell < 0) {
+        return color;
+    }
+    uvec4 mask = decal_buffer.cells[cell];
+    for (int word = 3; word >= 0; word--) {
+        uint bits = mask[word];
+        while (bits != 0u) {
+            int bit = findMSB(bits);
+            bits &= ~(1u << uint(bit));
+            uint index = uint(word * 32 + bit);
+            uint flags = uint(MOBA_DECAL(index).params.y);
+            if ((flags & MOBA_DECAL_GLOW) == 0u || (((flags & MOBA_DECAL_ENEMY) != 0u) != enemy)) {
+                continue;
+            }
+            vec4 coverage = decal_coverage(index, world, aa);
+            if (coverage.x + coverage.z + coverage.w <= 0.0) {
+                continue;
+            }
+            float alpha = clamp(MOBA_DECAL(index).color.a * MOBA_DECAL(index).params.w, 0.0, 1.0);
+            float band = min(2.0 * alpha, 1.0);
+            vec3 tint = MOBA_DECAL(index).color.rgb;
+            color = mix(color, tint, alpha * (0.3 * coverage.x + 0.35 * coverage.z));
+            vec3 rim = tint;
+            if (enemy) {
+                float ground = decal_luma(color);
+                rim *= max(1.0, (1.8 * ground + 0.05) / max(decal_luma(tint), 1e-3));
+                color = mix(color, color * 0.2, band * coverage.w);
+                rim_cover = max(rim_cover, band * max(coverage.y, coverage.w));
             }
             color = mix(color, rim, band * coverage.y);
         }

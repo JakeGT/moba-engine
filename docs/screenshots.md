@@ -103,10 +103,11 @@ pebbles. Shoreline foam follows the carved bank; grass is denser on the higher t
 
 ![Ground decals in the teamfight](images/r3b-decals.png)
 
-The 5v5 teamfight replay at tick 360 (the decal golden's frame), High: with decals (left) and
-`MOBA_DECALS=off` (right). The enemy telegraph rings sweep with their cast progress and keep
-their two-tone rim on grass, dirt and water; scorch and splats stay where impacts and deaths
-happened. R5's particles and R2b's outlines and effect lights are the same on both
+The 5v5 teamfight replay at tick 360 (the decal golden's frame), High, on lavapipe
+(recaptured after the review's ring rework, when the RTX was unavailable): with decals (left) and
+`MOBA_DECALS=off` (right). The enemy telegraph rings keep their two-tone rim (the bright
+band with a dark halo just inside it) on grass, dirt and water, and their cast timer fills
+their inside from the centre; scorch and splats stay where impacts and deaths happened. R5's particles and R2b's outlines and effect lights are the same on both
 sides.
 
 ![Before and after R3b](images/r3b-before-after.png)

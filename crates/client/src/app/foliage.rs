@@ -81,9 +81,20 @@ pub(crate) fn displacement_at(displacers: &[FoliageDisplacer], x: f32, z: f32) -
 
 #[cfg(test)]
 mod tests {
+    use moba_assets::VatQuality;
     use moba_core::math::Vec3;
+    use moba_net::protocol::{ENTITY_FLAG_DEAD, MatchPhase, NetEntity, NetProgress, SnapshotState};
+    use moba_render::MeshId;
 
     use super::{Displacers, displacement_at};
+    use crate::app::NetworkView;
+    use crate::app::animation::{AnimLod, AnimationDriver};
+    use crate::app::bone_lod::BoneLod;
+    use crate::app::map_visuals::MapLibrary;
+    use crate::app::minions::{MinionDriver, MinionLibrary};
+    use crate::app::models::{ModelBindings, ModelLibrary};
+    use crate::app::scene_build::{AnimationFrame, animated_rig, rebuild_network_units};
+    use crate::app::skinning::BonePool;
     use crate::app::vfx::{Anchors, UnitAnchor};
 
     fn anchor(id: u32, x: f32, z: f32, height: f32) -> UnitAnchor {
@@ -95,36 +106,170 @@ mod tests {
         }
     }
 
-    /// ADR-0017 §2: displacement comes only from drawn units. The snapshot the server sends a
-    /// team withholds an enemy it cannot see (in brush or the fog of war); the anchors are
-    /// rebuilt from that snapshot, so the hidden enemy bends no blade where it stands, while
-    /// the same unit, once visible and drawn, does.
+    fn hero(net_id: u16, team: u8, x: f32, y: f32, dead: bool) -> NetEntity {
+        let quantize = |value: f32| (value * 16.0) as u16;
+        NetEntity {
+            net_id,
+            kind: 0,
+            team,
+            hero_slot: (net_id % 5) as u8,
+            hero_pick: 0,
+            flags: if dead { ENTITY_FLAG_DEAD } else { 0 },
+            status_bits: 0,
+            max_health: 600,
+            max_mana: 0,
+            x: quantize(x),
+            y: quantize(y),
+            health: if dead { 0 } else { 600 },
+            mana: 0,
+            cooldowns: [0; 3],
+            progress: NetProgress::default(),
+        }
+    }
+
+    /// One client frame at snapshot `tick` (pinned, as in a capture): the snapshot arrives,
+    /// the animation driver sees its death edges, and `rebuild_network_units` rebuilds the
+    /// drawn units and the anchors the displacers are built from.
+    struct Frame {
+        network: NetworkView,
+        models: ModelLibrary,
+        map: MapLibrary,
+        minion_library: MinionLibrary,
+        driver: AnimationDriver,
+        minions: MinionDriver,
+        units: Vec<moba_render::UnitInstance>,
+        bones: BonePool,
+        anchors: Anchors,
+        displacers: Displacers,
+    }
+
+    impl Frame {
+        fn step(&mut self, tick: u32, entities: Vec<NetEntity>) -> Vec<(u32, Vec3)> {
+            let mut state = SnapshotState::default();
+            state.tick = tick;
+            state.entities = entities;
+            let models = &self.models;
+            self.driver.on_snapshot(&state, |pick| {
+                (pick == 0)
+                    .then(|| animated_rig(models, models.hero(0)))
+                    .flatten()
+            });
+            self.network.interpolator.push(state);
+            self.network.last_tick = tick;
+            self.network.capture_tick = Some(tick);
+            rebuild_network_units(
+                &self.network,
+                &self.models,
+                &self.map,
+                &mut self.units,
+                &mut self.bones,
+                AnimationFrame {
+                    driver: &mut self.driver,
+                    view: None,
+                    minions: &mut self.minions,
+                    minion_library: &self.minion_library,
+                    bone_lod: BoneLod::for_tier(moba_render::QualityTier::Low),
+                    far_attachments: false,
+                },
+                &mut self.anchors,
+                false,
+            );
+            self.displacers.build(&self.anchors, Vec3::ZERO);
+            self.anchors
+                .units()
+                .iter()
+                .map(|anchor| (anchor.id, anchor.position))
+                .collect()
+        }
+    }
+
+    /// ADR-0017 §2, end to end: the displacers are built from the anchors that
+    /// `rebuild_network_units` makes of the team's snapshot, as in the app. The server
+    /// withholds an enemy the team cannot see (in brush or the fog of war), so where it
+    /// stands no blade bends, while the same unit bends the grass while it is in the
+    /// snapshot; a dead hero bends it while its death clip plays and not once the clip and
+    /// linger are over (it is no longer drawn).
     #[test]
-    fn hidden_units_produce_no_foliage_displacement() {
-        let ally = anchor(1, -20.0, 0.0, 3.6);
-        let hidden_enemy = anchor(2, 10.0, 5.0, 3.6);
-        let tower = anchor(3, 30.0, 0.0, 9.0);
-        // What the client draws: the ally and the tower; the hidden enemy is not in the
-        // snapshot, so it is never anchored.
-        let mut anchors = Anchors::new();
-        anchors.push(ally);
-        anchors.push(tower);
-        let mut displacers = Displacers::new();
-        displacers.build(&anchors, Vec3::ZERO);
-        assert_eq!(
-            displacers.as_slice().len(),
-            1,
-            "structures never bend foliage"
+    fn hidden_and_long_dead_units_produce_no_foliage_displacement() {
+        let content =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
+        let mut models = ModelLibrary::new(content.clone(), ModelBindings::default());
+        models.bind_heroes([Some("sentinel-skinned")], |_, _| Ok(MeshId::CUBE));
+        assert!(
+            models.graph(0).is_some(),
+            "the sample's animation set binds"
         );
-        assert_eq!(displacement_at(displacers.as_slice(), 10.0, 5.0), 0.0);
-        assert_eq!(displacement_at(displacers.as_slice(), 10.5, 5.0), 0.0);
-        assert!(displacement_at(displacers.as_slice(), -20.0, 0.0) > 0.9);
-        // Revealed (in the snapshot and drawn): now it bends the grass.
-        anchors.clear();
-        anchors.push(ally);
-        anchors.push(hidden_enemy);
-        displacers.build(&anchors, Vec3::ZERO);
-        assert!(displacement_at(displacers.as_slice(), 10.0, 5.0) > 0.9);
+        let mut network = NetworkView::test_stub();
+        network.phase = MatchPhase::Playing;
+        let mut frame = Frame {
+            network,
+            models,
+            map: MapLibrary::new(content.clone()),
+            minion_library: MinionLibrary::new(content, false, VatQuality::FULL),
+            driver: AnimationDriver::new(AnimLod::parse("off"), 30),
+            minions: MinionDriver::new(30),
+            units: Vec::new(),
+            bones: BonePool::new(4_096),
+            anchors: Anchors::new(),
+            displacers: Displacers::new(),
+        };
+        let (ally, enemy, fallen) = (1, 2, 3);
+        let bends =
+            |frame: &Frame, at: Vec3| displacement_at(frame.displacers.as_slice(), at.x, at.z);
+        let find = |anchors: &[(u32, Vec3)], id: u16| {
+            anchors
+                .iter()
+                .find(|(other, _)| *other == u32::from(id))
+                .map(|(_, position)| *position)
+        };
+
+        // Tick 100: everyone in the snapshot and alive.
+        let seen = frame.step(
+            100,
+            vec![
+                hero(ally, 0, 100.0, 100.0, false),
+                hero(enemy, 1, 112.0, 104.0, false),
+                hero(fallen, 1, 90.0, 94.0, false),
+            ],
+        );
+        let enemy_at = find(&seen, enemy).expect("a visible enemy is anchored");
+        let fallen_at = find(&seen, fallen).expect("anchored while alive");
+        assert!(
+            bends(&frame, enemy_at) > 0.9,
+            "a visible enemy bends the grass"
+        );
+        assert!(bends(&frame, fallen_at) > 0.9);
+
+        // Tick 101: the enemy steps into brush, so the snapshot withholds it; the third
+        // hero dies (its death clip starts).
+        let entities = || {
+            vec![
+                hero(ally, 0, 100.0, 100.0, false),
+                hero(fallen, 1, 90.0, 94.0, true),
+            ]
+        };
+        let seen = frame.step(101, entities());
+        assert_eq!(
+            find(&seen, enemy),
+            None,
+            "a withheld enemy is never anchored"
+        );
+        assert_eq!(
+            bends(&frame, enemy_at),
+            0.0,
+            "no blade bends where it stands"
+        );
+        assert_eq!(bends(&frame, enemy_at + Vec3::new(0.5, 0.0, 0.0)), 0.0);
+        assert!(
+            find(&seen, fallen).is_some() && bends(&frame, fallen_at) > 0.9,
+            "a dying hero is drawn and bends the grass while its death clip plays"
+        );
+
+        // A minute later: still dead, the clip and linger long over, so it is not drawn.
+        let seen = frame.step(101 + 60 * 30, entities());
+        assert_eq!(find(&seen, fallen), None, "a long-dead hero is not drawn");
+        assert_eq!(bends(&frame, fallen_at), 0.0, "and bends nothing");
+        assert!(find(&seen, ally).is_some_and(|at| bends(&frame, at) > 0.9));
     }
 
     #[test]

@@ -247,6 +247,46 @@ fn effect_decals_list_enemy_telegraphs_first_and_stamps_outlive_their_effect() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A stamp whose delay is the effect's longest part (a scorch left after a short flash)
+/// still fires: the effect lives past the delay by `STAMP_LATCH_SECONDS`, longer than the
+/// largest frame step, so it is not retired on the frame its delay passes. At 10 fps and
+/// 30 fps no frame lands exactly on the delay.
+#[test]
+fn late_stamps_fire_before_their_effect_ends() {
+    use moba_render::DecalShape;
+    for (step, tag) in [(0.1, "late10"), (1.0 / 30.0, "late30")] {
+        let root = root(tag);
+        std::fs::write(
+            root.join("vfx/late.toml"),
+            "duration = 0.1\n[[emitters]]\nburst = 1\nlifetime = [0.2, 0.2]\nsize = [1, 1]\n\
+             color = [1, 1, 1, 1]\n[[decals]]\nshape = \"splat\"\ndelay = 0.45\nlifetime = 4\n\
+             stamp = true\ncolor = [0.1, 0.1, 0.1, 1]\n",
+        )
+        .expect("write");
+        let library = VfxLibrary::preview(root.clone(), "late");
+        let effect = library.preview_effect().expect("the late effect loads");
+        let mut vfx = VfxSystem::new(library, QualityTier::High.vfx_budget(), true);
+        let view = view(Some(0));
+        let anchors = anchors();
+        let mut late = event(Trigger::Cast, 0, Some(1));
+        late.effect = Some(effect);
+        vfx.trigger(&late, &view, &anchors);
+        for frame in 1..=20 {
+            vfx.update(step, frame as f32, &view, &anchors, NO_SOCKET);
+        }
+        assert_eq!(vfx.counters().instances, 0, "the effect ended");
+        assert_eq!(
+            vfx.decals()
+                .iter()
+                .filter(|decal| decal.shape == DecalShape::Splat)
+                .count(),
+            1,
+            "its late stamp fired ({step} s frames)"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 #[test]
 fn casts_projectiles_and_hits_spawn_their_bound_effects() {
     let (mut vfx, root) = system("cast");

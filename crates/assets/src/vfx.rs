@@ -138,6 +138,14 @@ pub const DEFAULT_DECAL_ANGLE: f32 = 90.0;
 pub const DEFAULT_DECAL_FADE_IN: f32 = 0.1;
 /// Fade-out when a `[[decals]]` entry gives none, seconds.
 pub const DEFAULT_DECAL_FADE_OUT: f32 = 0.25;
+/// How long past a stamped decal's delay its effect lives, seconds
+/// ([`VfxEffect::lifespan`]): longer than the client's largest VFX frame step (0.1 s), so
+/// some frame always lands between the delay and the effect's end and copies the stamp.
+pub const STAMP_LATCH_SECONDS: f32 = 0.125;
+const _: () = assert!(
+    STAMP_LATCH_SECONDS > 0.1,
+    "longer than the client's largest VFX step"
+);
 
 /// One named region of the particle atlas: a single cell or a flipbook strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1167,7 +1175,9 @@ impl VfxEffect {
     /// The longest time after the start at which a particle or an unstamped decal can still
     /// be alive, seconds (`event_seconds` stands in for `duration` when
     /// [`Self::event_duration`] is set). A stamped decal needs the effect only until its
-    /// delay; the stamp ring keeps it after that.
+    /// delay has passed on some frame (the stamp ring keeps it after that), so it counts
+    /// as its delay plus [`STAMP_LATCH_SECONDS`]: a stamp whose delay is the effect's
+    /// longest part still fires.
     #[must_use]
     pub fn lifespan(&self, event_seconds: f32) -> f32 {
         let duration = self.emit_seconds(event_seconds);
@@ -1176,7 +1186,7 @@ impl VfxEffect {
             .iter()
             .map(|decal| {
                 if decal.stamp {
-                    decal.delay
+                    decal.delay + STAMP_LATCH_SECONDS
                 } else {
                     decal.delay + decal.seconds(duration)
                 }
@@ -1967,6 +1977,19 @@ lifetime = 12
 color = [0.05, 0.03, 0.02, 0.9]
 stamp = true
 "#;
+
+    /// A stamp whose delay is the effect's longest part keeps the effect alive past the
+    /// delay by the latch, so a frame lands inside it whatever the frame step.
+    #[test]
+    fn late_stamps_extend_the_lifespan_past_their_delay() {
+        let effect = VfxEffect::parse(
+            "duration = 0.1\n[[emitters]]\nburst = 1\nlifetime = [0.2, 0.2]\nsize = [1, 1]\n\
+             color = [1, 1, 1, 1]\n[[decals]]\nshape = \"splat\"\ndelay = 0.45\nlifetime = 4\n\
+             stamp = true\ncolor = [0.1, 0.1, 0.1, 1]",
+        )
+        .expect("a late stamp");
+        assert!((effect.lifespan(0.0) - (0.45 + STAMP_LATCH_SECONDS)).abs() < 1e-6);
+    }
 
     #[test]
     fn decals_parse_with_defaults_and_count_towards_lifespan() {

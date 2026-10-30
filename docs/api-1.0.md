@@ -224,7 +224,8 @@ R3b (ADR-0017) added decals, foliage and water: `Decal` (`new` + `with_role`, `w
 GPU instance, `kind` a `u32` 0–3), `FoliageDisplacer`, `EnvironmentFrame` (`new`;
 `Scene::environment`/`with_environment`), `Scene::decals`/`with_decals`, `WaterData`,
 `WaterVertexData` (`Pod`, exhaustive like the other vertex types), `WaterStyle`,
-`glow_reference` (the telegraph rim's CPU reference), the limits `MAX_FOLIAGE_DISPLACERS`,
+`glow_reference` (the CPU twin of the glow-decal shader for one decal at a point),
+`RenderConfig::pipeline_stats`/`with_pipeline_stats`, the limits `MAX_FOLIAGE_DISPLACERS`,
 `MAX_FOLIAGE_INSTANCES`, `MAX_WATER_BODIES`, `MAX_WATER_VERTICES`,
 `RenderConfig::environment`/`with_environment`/`effective_environment`,
 `Renderer::{environment_config, set_foliage, clear_foliage, foliage_instances, set_water,
@@ -329,7 +330,7 @@ R3b added decals, foliage and water (ADR-0017: `VfxDecal`, `VfxDecalShape`, `Vfx
 `VfxEffect::decals` and the `DEFAULT_DECAL_*`, `MAX_DECAL_SECONDS` and `MAX_VFX_DECALS`
 constants; `MapFoliage`, `FoliagePatch`, `FoliageKind`, `MapWater`, `MapVisuals::{foliage,
 water}`, `MAX_FOLIAGE_PATCHES`, `MAX_MAP_WATER`, `MAX_WATER_POINTS`, `MAX_WATER_LEVEL`,
-`MAX_WADE_DEPTH`; the generators `generate_terrain_with_water`, `generate_water` (`WaterMesh`,
+`MAX_WADE_DEPTH`, `MAX_WATER_MESH_VERTICES`, `STAMP_LATCH_SECONDS`; the generators `generate_terrain_with_water`, `generate_water` (`WaterMesh`,
 `WaterVertex`) and `generate_foliage` (`FoliageInstance`, `MAX_FOLIAGE_INSTANCES`); the
 consistency checker's water and brush rules. Every new struct and enum is
 `#[non_exhaustive]`).

@@ -15,7 +15,7 @@
 //! plays, displacers only from units it draws, and nothing reaches the simulation or the wire.
 
 use bytemuck::{Pod, Zeroable};
-use moba_core::math::{Mat4, Vec3, Vec4};
+use moba_core::math::{Mat4, Vec2, Vec3, Vec4};
 
 use crate::quality::QualityTier;
 
@@ -30,8 +30,9 @@ pub const MAX_FOLIAGE_INSTANCES: usize = 65_536;
 /// Most water bodies one map may upload (each [`WaterVertexData::body`] indexes
 /// [`WaterData::styles`]).
 pub const MAX_WATER_BODIES: usize = 8;
-/// Most water vertices one map may upload.
-pub const MAX_WATER_VERTICES: usize = 262_144;
+/// Most water vertices one map may upload (`moba_assets::MAX_WATER_MESH_VERTICES`, which
+/// the map consistency check holds every terrain grid to).
+pub const MAX_WATER_VERTICES: usize = moba_assets::MAX_WATER_MESH_VERTICES;
 /// Edge of a foliage culling chunk, metres.
 pub(crate) const FOLIAGE_CHUNK: f32 = 16.0;
 /// Vertices per foliage blade (two segments: three triangles).
@@ -95,7 +96,8 @@ pub struct EnvironmentConfig {
     pub max_foliage: u32,
     /// Blades per clump at close range, `1..=8`.
     pub foliage_blades: u32,
-    /// Foliage draw distance from the camera, metres.
+    /// Foliage draw distance, metres, from the eye or the camera's focus on the ground,
+    /// whichever is nearer.
     pub foliage_distance: f32,
     /// Most foliage displacers used per frame, `0..=`[`MAX_FOLIAGE_DISPLACERS`].
     pub max_displacers: u32,
@@ -110,8 +112,8 @@ impl EnvironmentConfig {
     #[must_use]
     pub const fn for_tier(tier: QualityTier) -> Self {
         let (max_decals, density, max_foliage, blades, distance, displacers) = match tier {
-            QualityTier::Low => (48, 0.3, 8_192, 3, 60.0, 8),
-            QualityTier::Medium => (96, 0.6, 24_576, 4, 90.0, 16),
+            QualityTier::Low => (48, 0.3, 8_192, 3, 60.0, 32),
+            QualityTier::Medium => (96, 0.6, 24_576, 4, 90.0, 32),
             QualityTier::High => (128, 1.0, 49_152, 5, 130.0, 32),
             QualityTier::Ultra => (128, 1.0, 65_536, 6, 180.0, 32),
         };
@@ -383,6 +385,8 @@ impl Decal {
 /// Glow-decal flag bits (`params.y`), shared with `decals.glsl`.
 const FLAG_GLOW: u32 = 1;
 const FLAG_ENEMY: u32 = 2;
+/// Height band within which a receiver takes a decal (`MOBA_DECAL_REACH` in `decals.glsl`).
+const DECAL_REACH: f32 = 4.0;
 const FLAG_PROGRESS: u32 = 4;
 
 /// One decal on the GPU (`DecalRecord` in `decals.glsl`, std430, 64 bytes).
@@ -437,9 +441,18 @@ impl DecalUpload {
 
     /// Fills the upload from `decals`: enemy telegraphs first (all of them, up to
     /// [`MAX_DECALS`]), then the others in order up to `cap` in total, then bins them into
-    /// the grid. Opacity of enemy telegraphs is floored at `floor`. Returns how many usable
-    /// decals did not fit.
-    pub(crate) fn build(&mut self, decals: &[Decal], cap: usize, floor: f32) -> u32 {
+    /// the grid. Opacity of enemy telegraphs is floored at `floor`. With `view`, the xz
+    /// bounds `[min x, min z, max x, max z]` of the ground the main camera shows, decals whose
+    /// footprint lies outside it are skipped: they cannot be seen, and an off-screen one (a
+    /// distant or global telegraph) would otherwise stretch the grid and coarsen every cell.
+    /// Returns how many usable, visible decals did not fit.
+    pub(crate) fn build(
+        &mut self,
+        decals: &[Decal],
+        cap: usize,
+        floor: f32,
+        view: Option<[f32; 4]>,
+    ) -> u32 {
         let floor = if floor.is_finite() {
             floor.clamp(0.0, 1.0)
         } else {
@@ -457,12 +470,20 @@ impl DecalUpload {
                 if enemy != pass || !decal.usable() {
                     continue;
                 }
+                let reach = decal.reach();
+                if let Some([x0, z0, x1, z1]) = view
+                    && (decal.position.x + reach < x0
+                        || decal.position.x - reach > x1
+                        || decal.position.z + reach < z0
+                        || decal.position.z - reach > z1)
+                {
+                    continue;
+                }
                 let limit = if enemy { MAX_DECALS } else { cap };
                 if count >= limit {
                     dropped += 1;
                     continue;
                 }
-                let reach = decal.reach();
                 min[0] = min[0].min(decal.position.x - reach);
                 min[1] = min[1].min(decal.position.z - reach);
                 max[0] = max[0].max(decal.position.x + reach);
@@ -572,22 +593,138 @@ fn luminance(color: Vec3) -> f32 {
     color.dot(Vec3::new(0.2126, 0.7152, 0.0722))
 }
 
-/// The CPU twin of `decals.glsl`'s glow composite: the colours a glow decal of `color`
-/// (linear, `w` opacity after any floor) and `fade` leaves over `background` in its rim band
-/// and in its halo band, for an enemy telegraph (`enemy`) or not. ADR-0017 §1.
-#[must_use]
-pub fn glow_reference(background: Vec3, color: Vec4, fade: f32, enemy: bool) -> (Vec3, Vec3) {
-    let alpha = color.w.clamp(0.0, 1.0) * fade.clamp(0.0, 1.0);
-    let band = (2.0 * alpha).min(1.0);
-    let mut rim = color.truncate();
-    let mut halo = background;
-    if enemy {
-        let target = 1.8 * luminance(background) + 0.05;
-        let own = luminance(rim).max(1e-3);
-        rim *= (target / own).max(1.0);
-        halo = background.lerp(background * 0.2, band);
+/// GLSL `smoothstep`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// `decals.glsl`'s `decal_hash` (GLSL `fract` is `x - floor(x)`).
+#[allow(clippy::excessive_precision)] // The shader's constant, written as it is there.
+fn decal_hash(n: f32) -> f32 {
+    let x = n.sin() * 43758.5453;
+    x - x.floor()
+}
+
+/// The CPU twin of `decals.glsl`'s `decal_coverage`: x the washed area, y the rim band, z the
+/// progress fill, w the halo just inside the rim, for `decal` at `world` with antialiasing
+/// width `aa` (metres).
+#[allow(clippy::many_single_char_names)] // The shader's names, so the two read side by side.
+fn decal_coverage(decal: &GpuDecal, world: Vec3, aa: f32) -> Vec4 {
+    if (world.y - decal.size[3]).abs() > DECAL_REACH {
+        return Vec4::ZERO;
     }
-    (background.lerp(rim, band), halo)
+    let offset = Vec2::new(world.x - decal.placement[0], world.z - decal.placement[1]);
+    let axis = Vec2::new(decal.placement[2], decal.placement[3]);
+    let p = Vec2::new(offset.dot(axis), offset.dot(Vec2::new(-axis.y, axis.x)));
+    let shape = decal.params[0].rem_euclid(8.0);
+    let seed = (decal.params[0] / 8.0).floor();
+    let radius = decal.size[0];
+    let mut rim_width = (radius * 0.08).clamp(0.12, 0.35);
+    let (sd, along) = if shape < 0.5 {
+        (p.length() - radius, p.length() / radius)
+    } else if shape < 1.5 {
+        rim_width = decal.size[1];
+        (p.length() - (radius + 0.5 * rim_width), p.length() / radius)
+    } else if shape < 2.5 {
+        let q = Vec2::new(p.y.abs(), p.x);
+        let c = Vec2::new(decal.size[2].sin(), decal.size[2].cos());
+        let l = q.length() - radius;
+        let m = (q - c * q.dot(c).clamp(0.0, radius)).length();
+        let side = c.y * q.x - c.x * q.y;
+        // GLSL `sign` is 0 at 0.
+        let sign = if side > 0.0 {
+            1.0
+        } else if side < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        (l.max(m * sign), p.length() / radius)
+    } else if shape < 3.5 {
+        let half = Vec2::new(radius * 0.5, decal.size[1] * 0.5);
+        let b = (p - Vec2::new(half.x, 0.0)).abs() - half;
+        rim_width = (decal.size[1] * 0.15).clamp(0.08, 0.3);
+        (
+            b.max(Vec2::ZERO).length() + b.x.max(b.y).min(0.0),
+            (p.x / radius.max(1e-3)).clamp(0.0, 1.0),
+        )
+    } else {
+        let angle = p.y.atan2(p.x);
+        let wobble = 0.78
+            + 0.12 * (5.0 * angle + seed).sin()
+            + 0.07 * (11.0 * angle + seed * 1.7).sin()
+            + 0.04 * (23.0 * angle + seed * 3.1).sin();
+        let mut sd = p.length() - radius * wobble;
+        for i in 0..3 {
+            let i = i as f32;
+            let a = decal_hash(seed + i * 7.0) * core::f32::consts::TAU;
+            let r = radius * (1.05 + 0.25 * decal_hash(seed + i * 13.0));
+            let s = radius * (0.08 + 0.08 * decal_hash(seed + i * 19.0));
+            sd = sd.min((p - Vec2::new(a.cos(), a.sin()) * r).length() - s);
+        }
+        (sd, 1.0)
+    };
+    let fill = 1.0 - smoothstep(-aa, aa, sd);
+    if fill <= 0.0 {
+        return Vec4::ZERO;
+    }
+    let rim = fill * (1.0 - smoothstep(rim_width - aa, rim_width + aa, -sd));
+    let halo =
+        fill * (1.0 - rim) * (1.0 - smoothstep(2.0 * rim_width - aa, 2.0 * rim_width + aa, -sd));
+    let mut progress = 0.0;
+    if (decal.params[1] as u32) & FLAG_PROGRESS != 0 {
+        let sweep = decal.params[2];
+        progress = fill * (1.0 - smoothstep(sweep - 0.01, sweep + 0.01, along));
+    }
+    let wash = if shape > 0.5 && shape < 1.5 {
+        rim
+    } else {
+        fill
+    };
+    Vec4::new(wash, rim, progress, halo)
+}
+
+/// The CPU twin of one step of `decals.glsl`'s `apply_glow_decals`.
+fn glow_over(color: Vec3, decal: &GpuDecal, coverage: Vec4) -> Vec3 {
+    if coverage.x + coverage.z + coverage.w <= 0.0 {
+        return color;
+    }
+    let alpha = (decal.color[3] * decal.params[3]).clamp(0.0, 1.0);
+    let band = (2.0 * alpha).min(1.0);
+    let tint = Vec3::new(decal.color[0], decal.color[1], decal.color[2]);
+    let mut color = color.lerp(tint, alpha * (0.3 * coverage.x + 0.35 * coverage.z));
+    let mut rim = tint;
+    if (decal.params[1] as u32) & FLAG_ENEMY != 0 {
+        let ground = luminance(color);
+        rim *= ((1.8 * ground + 0.05) / luminance(tint).max(1e-3)).max(1.0);
+        color = color.lerp(color * 0.2, band * coverage.w);
+    }
+    color.lerp(rim, band * coverage.y)
+}
+
+/// The CPU twin of `decals.glsl` for one glow decal (ADR-0017 §1): the colour `decal` leaves
+/// over a shaded ground of `background` at `point`, with a pixel `pixel` metres wide (the
+/// edges' antialiasing) and enemy telegraphs' opacity floored at `floor` as the renderer does.
+/// The same shape coverage (rim band, halo, cast-timer fill and wash) as the shader, so tests
+/// can check the telegraph contrast per shape. A paint decal returns `background`.
+#[must_use]
+pub fn glow_reference(
+    background: Vec3,
+    decal: &Decal,
+    floor: f32,
+    point: Vec3,
+    pixel: f32,
+) -> Vec3 {
+    if decal.style != DecalStyle::Glow || !decal.usable() {
+        return background;
+    }
+    let record = gpu_decal(decal, floor.clamp(0.0, 1.0));
+    glow_over(
+        background,
+        &record,
+        decal_coverage(&record, point, pixel.max(1e-4)),
+    )
 }
 
 /// A map's foliage, uploaded once ([`Renderer::set_foliage`](crate::Renderer::set_foliage)).
@@ -845,6 +982,8 @@ pub(crate) struct EnvironmentBlock {
     pub(crate) flower_color: [f32; 4],
     /// xy 1 / target size, z refraction strength, w 1 = full water.
     pub(crate) screen: [f32; 4],
+    /// xyz the camera's focus on the ground ([`ground_focus`]), for the foliage distance.
+    pub(crate) focus: [f32; 4],
     /// xz, radius, strength.
     pub(crate) displacers: [[f32; 4]; MAX_FOLIAGE_DISPLACERS],
     /// rgb deep, w clarity.
@@ -981,19 +1120,42 @@ pub(crate) fn box_visible(planes: &[Vec4; 6], min: Vec3, max: Vec3) -> bool {
     })
 }
 
+/// Where the camera looks on the ground: the screen centre's ray met with the `y = 0`
+/// plane, or `eye` when that ray does not reach the ground (a level or upward view).
+/// ADR-0017 §2: foliage distance is measured from here as well as from the eye, so a high
+/// MOBA camera (46 m back by default) keeps foliage to the top of the screen.
+pub(crate) fn ground_focus(view_proj: Mat4, eye: Vec3) -> Vec3 {
+    let inverse = view_proj.inverse();
+    let near = inverse.project_point3(Vec3::new(0.0, 0.0, 0.0));
+    let far = inverse.project_point3(Vec3::new(0.0, 0.0, 1.0));
+    let direction = far - near;
+    if !near.is_finite() || !far.is_finite() || direction.y >= -1e-4 {
+        return eye;
+    }
+    let t = -near.y / direction.y;
+    if (0.0..=1.0).contains(&t) {
+        near + direction * t
+    } else {
+        eye
+    }
+}
+
 /// Appends the visible chunks of `chunks` to `draws` as merged `(first, count)` runs, within
-/// `distance` of `eye`. `draws` must have capacity for every chunk (it never reallocates).
+/// `distance` of `eye` or of `focus` (the camera's focus on the ground, [`ground_focus`]).
+/// `draws` must have capacity for every chunk (it never reallocates).
 pub(crate) fn visible_runs(
     chunks: &[FoliageChunk],
     planes: &[Vec4; 6],
     eye: Vec3,
+    focus: Vec3,
     distance: f32,
     draws: &mut Vec<(u32, u32)>,
 ) {
     draws.clear();
     for chunk in chunks {
-        let nearest = eye.clamp(chunk.min, chunk.max);
-        if nearest.distance(eye) > distance || !box_visible(planes, chunk.min, chunk.max) {
+        let from_eye = eye.clamp(chunk.min, chunk.max).distance(eye);
+        let from_focus = focus.clamp(chunk.min, chunk.max).distance(focus);
+        if from_eye.min(from_focus) > distance || !box_visible(planes, chunk.min, chunk.max) {
             continue;
         }
         if let Some(run) = draws.last_mut()
@@ -1037,7 +1199,7 @@ mod tests {
         let mut decals = vec![disc(0.0, DecalRole::Cosmetic); 10];
         decals.push(disc(5.0, DecalRole::EnemyTelegraph));
         decals.push(disc(6.0, DecalRole::Ally));
-        let dropped = upload.build(&decals, 4, 0.35);
+        let dropped = upload.build(&decals, 4, 0.35, None);
         assert_eq!(upload.count(), 4);
         assert_eq!(dropped, 8);
         // The enemy telegraph is record 0 and its opacity is floored.
@@ -1048,7 +1210,7 @@ mod tests {
             color: Vec4::new(1.0, 0.0, 0.0, 0.05),
             ..faint
         };
-        let _ = upload.build(&[faint], 0, 0.35);
+        let _ = upload.build(&[faint], 0, 0.35, None);
         assert_eq!(
             upload.count(),
             1,
@@ -1060,7 +1222,7 @@ mod tests {
             color: Vec4::new(1.0, 0.0, 0.0, 0.05),
             ..disc(1.0, DecalRole::Ally)
         };
-        let _ = upload.build(&[ally], 8, 0.35);
+        let _ = upload.build(&[ally], 8, 0.35, None);
         assert!((upload.decals[0].color[3] - 0.05).abs() < 1e-6);
     }
 
@@ -1070,9 +1232,37 @@ mod tests {
         let decals: Vec<Decal> = (0..200)
             .map(|index| disc(index as f32, DecalRole::EnemyTelegraph))
             .collect();
-        let dropped = upload.build(&decals, 16, 0.35);
+        let dropped = upload.build(&decals, 16, 0.35, None);
         assert_eq!(upload.count(), MAX_DECALS);
         assert_eq!(dropped, 200 - MAX_DECALS as u32);
+    }
+
+    /// A telegraph far off screen (a global ultimate, a fight 900 m away) is skipped instead
+    /// of stretching the grid: the visible decals keep metre-scale cells.
+    #[test]
+    fn decals_outside_the_view_are_skipped_and_do_not_stretch_the_grid() {
+        let mut upload = DecalUpload::boxed();
+        let decals = [
+            disc(-10.0, DecalRole::Cosmetic),
+            disc(900.0, DecalRole::EnemyTelegraph),
+            disc(10.0, DecalRole::Ally),
+        ];
+        let view = Some([-40.0, -40.0, 40.0, 40.0]);
+        let dropped = upload.build(&decals, 8, 0.35, view);
+        assert_eq!(dropped, 0, "an unseen decal is not a dropped one");
+        assert_eq!(upload.count(), 2);
+        let rect = upload.header.rect;
+        assert!(
+            rect[2] >= 1.0 && rect[3] >= 1.0,
+            "cells stay a metre or finer: {rect:?}"
+        );
+        // A decal straddling the view edge is kept.
+        let edge = [disc(41.5, DecalRole::Cosmetic)];
+        let _ = upload.build(&edge, 8, 0.35, view);
+        assert_eq!(upload.count(), 1);
+        // Without a view (a degenerate camera) nothing is culled.
+        let _ = upload.build(&decals, 8, 0.35, None);
+        assert_eq!(upload.count(), 3);
     }
 
     #[test]
@@ -1082,7 +1272,7 @@ mod tests {
             disc(-50.0, DecalRole::Cosmetic),
             disc(50.0, DecalRole::Cosmetic),
         ];
-        let _ = upload.build(&decals, 8, 0.35);
+        let _ = upload.build(&decals, 8, 0.35, None);
         let rect = upload.header.rect;
         let cell_of = |x: f32, z: f32| {
             let column = ((x - rect[0]) * rect[2]).floor() as usize;
@@ -1093,7 +1283,7 @@ mod tests {
         assert_eq!(cell_of(50.0, 0.0)[0], 2);
         assert_eq!(cell_of(0.0, 0.0)[0], 0, "nothing between them");
         // A rebuild with nothing clears the grid and the count.
-        let _ = upload.build(&[], 8, 0.35);
+        let _ = upload.build(&[], 8, 0.35, None);
         assert_eq!(upload.count(), 0);
         assert!(upload.cells.iter().all(|cell| *cell == [0; 4]));
     }
@@ -1107,13 +1297,16 @@ mod tests {
             disc(0.0, DecalRole::Cosmetic).with_fade(0.0),
             disc(0.0, DecalRole::Cosmetic).with_progress(Some(f32::NAN)),
         ];
-        assert_eq!(upload.build(&bad, 8, 0.35), 0);
+        assert_eq!(upload.build(&bad, 8, 0.35, None), 0);
         assert_eq!(upload.count(), 0);
     }
 
-    /// ADR-0017 §1: over any background from black to 16× white, an enemy telegraph at the
-    /// floor opacity leaves either a rim at least 1.5× brighter than the ground or a halo at
-    /// most 1/1.5 of it, so it is always readable.
+    /// ADR-0017 §1: over any background from black to 16× white, every enemy telegraph shape
+    /// at the floor opacity leaves a rim band at least 1.5× brighter than the ground or a
+    /// halo just inside it at most 1/1.5 of it, the rim always lifts, and on any ground
+    /// bright enough to darken the halo is there. Evaluated through the shader's coverage
+    /// (`glow_reference`), cast-timer wash included, so a shape whose band and halo
+    /// coincide fails here.
     #[test]
     fn enemy_telegraph_rims_contrast_with_any_background() {
         let colours = [
@@ -1122,25 +1315,94 @@ mod tests {
             Vec3::new(0.9, 0.9, 0.9),
             Vec3::new(0.1, 0.4, 1.0),
         ];
-        for colour in colours {
-            for step in 0..=64 {
-                let level = 16.0 * (step as f32 / 64.0).powi(2);
-                for tint in [
-                    Vec3::ONE,
-                    Vec3::new(0.3, 1.0, 0.2),
-                    Vec3::new(1.0, 0.5, 0.1),
-                ] {
-                    let background = tint * level;
-                    let lb = luminance(background);
-                    let (rim, halo) = glow_reference(background, colour.extend(0.35), 1.0, true);
-                    let rim_ratio = (luminance(rim) + 0.05) / (lb + 0.05);
-                    let halo_ratio = (lb + 0.05) / (luminance(halo) + 0.05);
-                    assert!(
-                        rim_ratio >= 1.5 || halo_ratio >= 1.5,
-                        "{colour:?} over {background:?}: rim {rim_ratio}, halo {halo_ratio}"
-                    );
-                    assert!(rim_ratio >= 1.2, "the rim alone always lifts: {rim_ratio}");
+        let centre = Vec3::new(10.0, 0.0, -4.0);
+        // (shape, radius, width, the band's middle and the halo's middle along +x).
+        let shapes = [
+            (DecalShape::Ring, 7.0, 0.35, 7.0, 7.0 - 0.35),
+            (DecalShape::Ring, 3.0, 0.2, 3.0, 3.0 - 0.2),
+            (DecalShape::Disc, 3.0, 0.5, 3.0 - 0.12, 3.0 - 0.36),
+            (DecalShape::Cone, 6.0, 0.5, 6.0 - 0.17, 6.0 - 0.5),
+            (DecalShape::Line, 8.0, 1.5, 8.0 - 0.11, 8.0 - 0.34),
+        ];
+        for (shape, radius, width, band_at, halo_at) in shapes {
+            for progress in [None, Some(0.3), Some(0.97)] {
+                for colour in colours {
+                    // Faint (below the floor), so the floor sets the opacity.
+                    let decal = Decal::new(centre, shape, radius, colour.extend(0.05))
+                        .with_width(width)
+                        .with_angle(1.2)
+                        .with_role(DecalRole::EnemyTelegraph)
+                        .with_progress(progress);
+                    for step in 0..=64 {
+                        let level = 16.0 * (step as f32 / 64.0).powi(2);
+                        for tint in [
+                            Vec3::ONE,
+                            Vec3::new(0.3, 1.0, 0.2),
+                            Vec3::new(1.0, 0.5, 0.1),
+                        ] {
+                            let background = tint * level;
+                            let lb = luminance(background);
+                            let at = |x: f32| {
+                                glow_reference(background, &decal, 0.35, centre + Vec3::X * x, 0.01)
+                            };
+                            let rim = at(band_at);
+                            let halo = at(halo_at);
+                            let rim_ratio = (luminance(rim) + 0.05) / (lb + 0.05);
+                            let halo_ratio = (lb + 0.05) / (luminance(halo) + 0.05);
+                            let what =
+                                format!("{shape:?} {progress:?} {colour:?} over {background:?}");
+                            assert!(
+                                rim_ratio >= 1.5 || halo_ratio >= 1.5,
+                                "{what}: rim {rim_ratio}, halo {halo_ratio}"
+                            );
+                            assert!(rim_ratio >= 1.2, "{what}: the rim alone lifts: {rim_ratio}");
+                            if lb >= 0.5 {
+                                assert!(
+                                    halo_ratio >= 1.5,
+                                    "{what}: a dark halo inside the band: {halo_ratio}"
+                                );
+                            }
+                        }
+                    }
                 }
+            }
+        }
+    }
+
+    /// ADR-0017 §1: a telegraph's cast timer fills its inside from the centre out to
+    /// `radius × progress`, rings included; without a timer a ring leaves its inside alone.
+    #[test]
+    fn telegraph_progress_fills_rings_and_discs() {
+        let centre = Vec3::new(-3.0, 0.2, 5.0);
+        let background = Vec3::splat(0.3);
+        let colour = Vec4::new(1.0, 0.2, 0.1, 0.6);
+        for shape in [DecalShape::Ring, DecalShape::Disc] {
+            let timed = Decal::new(centre, shape, 6.0, colour)
+                .with_width(0.3)
+                .with_role(DecalRole::EnemyTelegraph)
+                .with_progress(Some(0.5));
+            let at = |decal: &Decal, x: f32| {
+                glow_reference(background, decal, 0.35, centre + Vec3::Z * x, 0.01)
+            };
+            let filled = at(&timed, 1.5);
+            let ahead = at(&timed, 4.2);
+            assert!(
+                (filled - background).length() > 0.05,
+                "{shape:?}: the filled part is washed: {filled:?}"
+            );
+            assert!(
+                (filled - ahead).length() > 0.02,
+                "{shape:?}: the fill stops at the sweep: {filled:?} vs {ahead:?}"
+            );
+            if shape == DecalShape::Ring {
+                let untimed = timed.with_progress(None);
+                assert_eq!(
+                    at(&untimed, 1.5),
+                    background,
+                    "an untimed ring's inside is clear"
+                );
+                assert_eq!(at(&untimed, 4.2), background);
+                assert_ne!(at(&untimed, 6.0), background, "but its band shows");
             }
         }
     }
@@ -1189,15 +1451,76 @@ mod tests {
             1_000.0,
         );
         let planes = frustum_planes(camera.view_proj);
+        let focus = ground_focus(camera.view_proj, camera.position);
+        assert!(
+            focus.distance(Vec3::new(16.0, 0.0, 8.0)) < 1e-3,
+            "{focus:?}"
+        );
         let mut draws = Vec::with_capacity(chunks.len());
-        visible_runs(&chunks, &planes, camera.position, 130.0, &mut draws);
+        visible_runs(&chunks, &planes, camera.position, focus, 130.0, &mut draws);
         assert_eq!(
             draws,
             [(0, 20)],
             "far chunk culled by distance, the rest merged"
         );
-        visible_runs(&chunks, &planes, camera.position, 5.0, &mut draws);
-        assert_eq!(draws, []);
+        visible_runs(&chunks, &planes, camera.position, focus, 5.0, &mut draws);
+        assert_eq!(draws, [(0, 20)], "the chunks under the focus stay");
+        visible_runs(
+            &chunks,
+            &planes,
+            camera.position,
+            camera.position,
+            5.0,
+            &mut draws,
+        );
+        assert_eq!(
+            draws,
+            [],
+            "measured from the eye alone, 5 m reaches nothing"
+        );
+    }
+
+    /// ADR-0017 §2: with the client's player camera (`Camera::orbit`, 46 m back at pitch
+    /// 0.95), the ground at the top of the screen is over 90 m from the eye but under 60 m
+    /// from the focus, so the Low tier's 60 m keeps foliage to the top of the screen.
+    #[test]
+    fn foliage_distance_counts_from_the_focus_too() {
+        let target = Vec3::new(5.0, 0.0, 5.0);
+        let camera = crate::Camera::orbit(target, 46.0, -0.7, 0.95, 16.0 / 9.0);
+        let eye = camera.position;
+        let focus = ground_focus(camera.view_proj, camera.position);
+        assert!(focus.distance(target) < 1e-2, "{focus:?}");
+        // The ground at the top edge of the screen.
+        let inverse = camera.view_proj.inverse();
+        let near = inverse.project_point3(Vec3::new(0.0, 1.0, 0.0));
+        let far = inverse.project_point3(Vec3::new(0.0, 1.0, 1.0));
+        let top = near + (far - near) * (-near.y / (far - near).y);
+        assert!(top.distance(eye) > 90.0, "{}", top.distance(eye));
+        assert!(top.distance(focus) < 58.0, "{}", top.distance(focus));
+        let chunk = FoliageChunk {
+            first: 0,
+            count: 4,
+            min: top - Vec3::new(1.0, 0.0, 1.0),
+            max: top + Vec3::new(1.0, 1.0, 1.0),
+        };
+        let planes = frustum_planes(camera.view_proj);
+        let mut draws = Vec::with_capacity(1);
+        visible_runs(&[chunk], &planes, eye, focus, 60.0, &mut draws);
+        assert_eq!(draws, [(0, 4)]);
+        // A level camera (the horizon preview) has no ground focus: the eye is used.
+        let level = crate::Camera::perspective(
+            Vec3::new(0.0, 2.0, 0.0),
+            Vec3::new(0.0, 2.0, -10.0),
+            Vec3::Y,
+            0.8,
+            1.0,
+            0.5,
+            400.0,
+        );
+        assert_eq!(
+            ground_focus(level.view_proj, level.position),
+            level.position
+        );
     }
 
     #[test]
