@@ -11,6 +11,9 @@ Captured 2026-10-30 on the development workstation, not a CI runner, for
   and GTAO with the prepass on High and up, over R3a's terrain); **after** = this branch
   rebased on it. A first full set against `df2dea6` (R6 only, before R2b merged) gave the
   same deltas within 0.01 ms on Ultra (teamfight +0.101, view +0.091, overview +0.056 ms).
+- **Re-run on `main` at `197857b`** (later the same day, no other GPU client): the per-feature
+  costs ([below](#where-the-cost-goes-re-measured-on-main-rtx-5070-ti)), the RTX validation
+  and `terrain-decal-check.sh`.
 - The GPU was shared with another agent's builds and captures, so every configuration ran
   **three rounds**, interleaved before/after, and the tables give the **median** of the three
   (the `p50 range` column shows all three rounds' GPU totals).
@@ -107,31 +110,84 @@ The frame interval is the 240 Hz cap in every run, so on this GPU every tier has
 magnitude to spare. The budgets are written for the §7 reference machines, which this note
 does not cover (see the end).
 
-## Where the cost goes (after only)
+## Where the cost goes, re-measured on `main` (RTX 5070 Ti)
 
-The teamfight and the overview on Ultra with each feature switched off, measured on the PR's
-first version (before the review fixes, the same `a0d2e10` base, three interleaved rounds, all
-in one memory-clock state). These runs predate `terrain_nodecals.frag`, so `decals-off`
-still ran the decal code over an empty buffer:
+The per-feature breakdown was first measured on the PR's first version (before the review
+fixes and before `terrain_nodecals.frag`, so `decals-off` still ran the decal code over an
+empty buffer: teamfight decals 0.007 ms, foliage 0.030, full against simple water 0.029,
+simple water against none 0.025 ms). It was re-run on `main` at `197857b` (R3b with R8's
+culling and LODs and the distortion pass merged), release, 1920×1080, vsync off, validation
+off, no pipeline cache, 3,000 frames, **three rounds interleaved over every row** (17:43–17:58
+UTC), the median of the three in each cell (`p50 range`: the rounds' GPU totals).
 
-| run | shadow | prepass | ao | scene | water_copy | water | vfx | bloom | composite | fxaa | ui | GPU total p50 / p95 | p50 range |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| replay-ultra after | 0.012 | 0.087 | 0.059 | 0.270 | 0.020 | 0.031 | 0.036 | 0.042 | 0.022 | — | 0.005 | **0.729** / 0.741 | 0.727–0.730 |
-| replay-ultra-decals-off after | 0.012 | 0.087 | 0.059 | 0.265 | 0.020 | 0.031 | 0.036 | 0.042 | 0.022 | — | 0.005 | **0.722** / 0.733 | 0.719–0.723 |
-| replay-ultra-foliage-off after | 0.012 | 0.087 | 0.059 | 0.243 | 0.020 | 0.030 | 0.036 | 0.042 | 0.022 | — | 0.005 | **0.699** / 0.709 | 0.698–0.700 |
-| replay-ultra-water-simple after | 0.012 | 0.078 | 0.059 | 0.302 | — | — | 0.039 | 0.042 | 0.022 | — | 0.005 | **0.700** / 0.711 | 0.700–0.702 |
-| replay-ultra-water-off after | 0.013 | 0.077 | 0.059 | 0.275 | — | — | 0.039 | 0.042 | 0.022 | — | 0.005 | **0.675** / 0.685 | 0.672–0.679 |
-| replay-ultra-all-off after | 0.013 | 0.076 | 0.059 | 0.236 | — | — | 0.039 | 0.042 | 0.022 | — | 0.005 | **0.634** / 0.644 | 0.634–0.634 |
-| replay-ultra-vfx8 after | 0.012 | 0.087 | 0.059 | 0.271 | 0.020 | 0.031 | 0.039 | 0.042 | 0.022 | — | 0.005 | **0.734** / 0.749 | 0.734–0.736 |
-| overview-ultra after | 0.012 | 0.124 | 0.054 | 0.358 | 0.020 | 0.020 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.761** / 0.789 | 0.758–0.761 |
-| overview-ultra-decals-off after | 0.012 | 0.124 | 0.054 | 0.360 | 0.020 | 0.020 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.761** / 0.784 | 0.761–0.761 |
-| overview-ultra-foliage-off after | 0.012 | 0.124 | 0.055 | 0.360 | 0.020 | 0.020 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.762** / 0.790 | 0.761–0.762 |
-| overview-ultra-water-simple after | 0.012 | 0.118 | 0.055 | 0.378 | — | — | 0.033 | 0.042 | 0.022 | — | 0.010 | **0.737** / 0.760 | 0.734–0.739 |
-| overview-ultra-water-off after | 0.012 | 0.118 | 0.055 | 0.359 | — | — | 0.032 | 0.042 | 0.022 | — | 0.010 | **0.718** / 0.746 | 0.717–0.719 |
-| overview-ultra-all-off after | 0.012 | 0.118 | 0.055 | 0.359 | — | — | 0.032 | 0.042 | 0.022 | — | 0.010 | **0.718** / 0.740 | 0.716–0.720 |
-| overview-ultra-vfx8 after | 0.012 | 0.124 | 0.055 | 0.360 | 0.020 | 0.020 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.761** / 0.790 | 0.760–0.764 |
+- **The GPU had no other client.** Before and after the set: 1.5–2.3 GB of 16.3 GB used, all
+  of it the desktop (`kwin_wayland`, `plasmashell`, a browser and, from 17:42, the session's
+  screen locker `kscreenlocker_greet`), utilisation 0–3 %. The frame interval stayed at the
+  240 Hz cap (4.18 ms p50) in every run, locker or not.
+- **Clocks.** They cannot be locked without root (`nvidia-smi -lgc`); `nvidia-smi -q -d
+  CLOCK` before the set: graphics 1762 MHz, memory 7001 MHz (P3; maxima 3090 / 14001 MHz). A
+  1,500-frame Ultra warm-up ran first, and a sampler logged the P-state and clocks every
+  250 ms during each run: the last column is each round's dominant memory clock. The
+  driver held 7001 MHz for every High and Ultra row in rounds 2 and 3, and in all three
+  rounds from `replay-ultra-foliage-off` on (round 1 of the first five rows ran at 14001 MHz
+  after the warm-up), so **every Ultra median below is from the same memory clock** and
+  their differences are the features. Low and Medium dropped to 405 MHz after
+  round 1, which is why their p95 and ranges are wide.
 
-**Ultra** is the clean comparison (the same memory clock in every round of both builds):
+| run (`main` 197857b) | shadow | prepass | ao | contact | scene | water_copy | water | vfx | bloom | composite | fxaa | ui | GPU total p50 / p95 | p50 range | mem clock per round (MHz) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| replay-low | 0.004 | — | — | — | 0.131 | — | — | 0.010 | — | 0.017 | 0.017 | 0.003 | **0.224** / 0.372 | 0.200–0.230 | 14001 / 405 / 405 |
+| replay-medium | 0.006 | — | — | — | 0.215 | — | — | 0.028 | 0.040 | 0.020 | 0.023 | 0.004 | **0.367** / 0.740 | 0.288–0.415 | 14001 / 405 / 405 |
+| replay-high | 0.006 | 0.018 | 0.047 | 0.052 | 0.158 | 0.019 | 0.024 | 0.024 | 0.040 | 0.020 | 0.024 | 0.004 | **0.481** / 0.494 | 0.481–0.490 | 14001 / 7001 / 7001 |
+| replay-ultra | 0.011 | 0.062 | 0.059 | 0.091 | 0.275 | 0.022 | 0.030 | 0.037 | 0.042 | 0.022 | — | 0.005 | **0.712** / 0.724 | 0.658–0.716 | 14001 / 7001 / 7001 |
+| replay-ultra-decals-off | 0.011 | 0.062 | 0.058 | 0.091 | 0.253 | 0.022 | 0.029 | 0.036 | 0.042 | 0.022 | — | 0.005 | **0.692** / 0.703 | 0.637–0.695 | 14001 / 7001 / 7001 |
+| replay-ultra-foliage-off | 0.011 | 0.062 | 0.059 | 0.091 | 0.240 | 0.021 | 0.030 | 0.035 | 0.042 | 0.022 | — | 0.005 | **0.678** / 0.689 | 0.671–0.680 | 7001 / 7001 / 7001 |
+| replay-ultra-water-simple | 0.011 | 0.060 | 0.059 | 0.091 | 0.301 | — | — | 0.038 | 0.049 | 0.022 | — | 0.005 | **0.691** / 0.703 | 0.683–0.695 | 7001 / 7001 / 7001 |
+| replay-ultra-water-off | 0.011 | 0.060 | 0.059 | 0.091 | 0.275 | — | — | 0.038 | 0.049 | 0.022 | — | 0.005 | **0.668** / 0.679 | 0.660–0.668 | 7001 / 7001 / 7001 |
+| replay-ultra-all-off | 0.011 | 0.060 | 0.059 | 0.091 | 0.223 | — | — | 0.038 | 0.048 | 0.022 | — | 0.005 | **0.614** / 0.624 | 0.611–0.614 | 7001 / 7001 / 7001 |
+| replay-ultra-vfx8 | 0.011 | 0.062 | 0.059 | 0.091 | 0.282 | 0.023 | 0.030 | 0.040 | 0.042 | 0.022 | — | 0.005 | **0.717** / 0.731 | 0.712–0.721 | 7001 / 7001 / 7001 |
+| view-low | 0.003 | — | — | — | 0.100 | — | — | 0.007 | — | 0.017 | 0.017 | 0.004 | **0.181** / 0.238 | 0.177–0.190 | 405 / 405 / 405 |
+| view-high | 0.005 | 0.024 | 0.044 | 0.036 | 0.182 | 0.018 | 0.021 | 0.022 | 0.041 | 0.020 | 0.022 | 0.005 | **0.497** / 0.515 | 0.485–0.498 | 7001 / 7001 / 7001 |
+| view-ultra | 0.011 | 0.083 | 0.057 | 0.061 | 0.372 | 0.020 | 0.025 | 0.032 | 0.042 | 0.022 | — | 0.005 | **0.783** / 0.806 | 0.783–0.786 | 7001 / 7001 / 7001 |
+| overview-high | 0.006 | 0.038 | 0.040 | 0.010 | 0.201 | 0.018 | 0.013 | 0.022 | 0.041 | 0.020 | 0.020 | 0.009 | **0.492** / 0.512 | 0.491–0.497 | 7001 / 7001 / 7001 |
+| overview-ultra | 0.010 | 0.125 | 0.054 | 0.011 | 0.415 | 0.021 | 0.017 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.816** / 0.841 | 0.815–0.820 | 7001 / 7001 / 7001 |
+| overview-ultra-decals-off | 0.010 | 0.125 | 0.055 | 0.010 | 0.398 | 0.021 | 0.017 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.800** / 0.820 | 0.799–0.802 | 7001 / 7001 / 7001 |
+| overview-ultra-foliage-off | 0.010 | 0.126 | 0.054 | 0.011 | 0.360 | 0.021 | 0.018 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.762** / 0.786 | 0.760–0.765 | 7001 / 7001 / 7001 |
+| overview-ultra-water-simple | 0.011 | 0.123 | 0.055 | 0.010 | 0.427 | — | — | 0.033 | 0.046 | 0.022 | — | 0.010 | **0.793** / 0.817 | 0.792–0.800 | 7001 / 7001 / 7001 |
+| overview-ultra-water-off | 0.010 | 0.123 | 0.055 | 0.011 | 0.415 | — | — | 0.033 | 0.047 | 0.022 | — | 0.010 | **0.783** / 0.804 | 0.777–0.788 | 7001 / 7001 / 7001 |
+| overview-ultra-all-off | 0.011 | 0.122 | 0.055 | 0.011 | 0.346 | — | — | 0.033 | 0.047 | 0.022 | — | 0.010 | **0.715** / 0.732 | 0.709–0.715 | 7001 / 7001 / 7001 |
+| overview-ultra-vfx8 | 0.010 | 0.126 | 0.055 | 0.010 | 0.414 | 0.021 | 0.017 | 0.031 | 0.042 | 0.022 | — | 0.010 | **0.817** / 0.841 | 0.816–0.821 | 7001 / 7001 / 7001 |
+| river-high | 0.005 | 0.021 | 0.077 | 0.045 | 0.157 | 0.018 | 0.070 | 0.022 | 0.041 | 0.020 | 0.022 | 0.004 | **0.549** / 0.568 | 0.544–0.558 | 7001 / 7001 / 7001 |
+| river-ultra | 0.009 | 0.073 | 0.104 | 0.077 | 0.346 | 0.021 | 0.081 | 0.032 | 0.042 | 0.022 | — | 0.005 | **0.865** / 0.872 | 0.865–0.873 | 7001 / 7001 / 7001 |
+
+`contact` is R2b's contact-shadow pass; `vfx` sums R5's three passes. Distortion is idle in
+all of these scenes (no hazy effect in view; [perf/0023](0023-distortion.md)).
+
+- **R3b's whole cost on Ultra** (everything on against `MOBA_DECALS=off MOBA_FOLIAGE=off
+  MOBA_WATER=off`): teamfight **+0.098 ms** (0.614 → 0.712), overview **+0.101 ms** (0.715 →
+  0.816).
+- **Decals** (now compiled out with `MOBA_DECALS=off`): 0.020 ms in the teamfight (every
+  telegraph, scorch and splat of a 5v5 fight on screen, scene pass 0.253 → 0.275 ms) and
+  0.016 ms on the overview, where no decal is in view: that is the decal code's fixed cost,
+  scene 0.398 → 0.415 ms (1.04×, the same ratio `terrain-decal-check.sh` measured below).
+- **Foliage**: 0.034 ms in the teamfight, 0.054 ms on the overview (it draws the grass and
+  reeds around the ground focus, see the review fixes below).
+- **Water**: full against simple 0.021 / 0.023 ms (teamfight / overview), simple against
+  none 0.023 / 0.010 ms.
+- **`MOBA_VFX_SCALE=8`** adds 0.005 ms in the teamfight and 0.001 ms on the overview (the
+  decal budget is fixed at 128).
+- **The river close-up**, the worst R3b case (water fills the screen, GTAO, contact shadows
+  and refraction over it): 0.549 / 0.568 ms on High and **0.865 / 0.872 ms** on Ultra
+  (p50 / p95), against 0.556 and 0.896 ms in the table above.
+- **Budgets.** The heaviest row per tier against §7 at p95: Low 0.372 ms (teamfight, 97 %
+  headroom of 14 ms), Medium 0.740 ms (teamfight, its 405 MHz rounds; 88 % of 6.0 ms), High
+  0.568 ms (river; 91 %), Ultra 0.872 ms (river; 88 % of 7.5 ms). Every tier meets its
+  budget with an order of magnitude to spare on this GPU.
+
+### Reading the before/after table
+
+**Ultra** is the clean comparison in the per-tier table (the same memory clock in every round
+of both builds):
 
 - With the review fixes in, the teamfight costs **+0.109 ms** (0.564 → 0.673), the 60 m
   view **+0.133 ms** and the whole-map overview **+0.145 ms**. The full water's two passes
@@ -139,14 +195,6 @@ still ran the decal code over an empty buffer:
   foliage, the water's carved bed, the decals and the depth re-resolve) and the prepass (up
   to +0.011 ms, the river bed's extra relief). The first version measured +0.106 / +0.091 /
   +0.056 ms; the difference is the review fixes below.
-- Switching features off in the teamfight (first version): decals 0.007 ms (every telegraph, scorch and
-  splat of a 5v5 fight on screen), foliage 0.030 ms, the full water against the simple one
-  0.029 ms and the simple water against none 0.025 ms. With all three off the frame is
-  within 0.011 ms of `main`, so the switches recover R3b's cost.
-- `MOBA_VFX_SCALE=8` adds 0.005 ms over R3b in the teamfight (R5's particles; the decal
-  budget is fixed at 128).
-- The river close-up, the worst R3b case (water fills the screen, GTAO, contact shadows and
-  refraction over it), is 0.870 ms.
 
 **Low and Medium** ran mostly at the lowest memory clock, but a round now and then caught a
 higher one, so their totals wander between rounds (the `p50 range` column). The scene pass
@@ -173,9 +221,8 @@ With each fix the Ultra overview's scene pass went from 0.358 ms (first version)
 - The ring rework, the role-split water glow and the view cull of the decal grid are inside
   the noise (`MOBA_DECALS=off` on the overview: 0.443 ms against 0.440).
 
-The rows with features off in this second set (`fin3`) ran partly in other memory-clock
-states (the teamfight's untouched passes: prepass 0.066 ms with everything on, 0.076–0.087
-with a feature off; bloom 0.050 with the water off), so they are not quoted as deltas.
+The rows with features off in this second set ran partly in other memory-clock states, so
+they were not quoted as deltas; the re-run on `main` above has every Ultra row in one state.
 
 ### A register step in the terrain shader
 
@@ -211,10 +258,12 @@ teamfight's 0.34 against 0.30). A register threshold alone would have passed it,
 terrain from `terrain_nodecals.frag` (the decal code compiled out), and the script times the
 local Ultra overview with decals on and off from one binary, failing above 1.15×; it then
 checks the register count (≤ 64). On the shipped shader it passes: scene p50 0.250 ms with
-decals against 0.245 ms without (1.02×), 64 registers at 1 and 4 samples. The script could
-not be run on the record-copy build: by then another process held 15.6 of the card's 16 GB
-and every client start failed to allocate. The copy's 1.6× on the networked overview above
-is the same comparison the script makes, well past its 1.15× limit.
+decals against 0.245 ms without (1.02×), 64 registers at 1 and 4 samples. **Re-run on `main`
+at `197857b`** (after R8 and distortion, the GPU otherwise idle): `terrain-decal-check: ok
+scene p50 0.241 ms with decals, 0.232 ms without (<= x1.15)` (1.04×), `ok samples=1
+registers=64 <= 64`, `ok samples=4 registers=64 <= 64`. The record-copy build is a modified
+shader and was not rebuilt for this; its 1.6× on the networked overview above is the same
+comparison the script makes, well past the 1.15× limit.
 
 ## Validation and synchronisation validation
 
@@ -224,8 +273,12 @@ messenger. **0 messages and exit 0 in every run on both devices**. On lavapipe, 
 code: the 35 matrix configurations below plus 13 extra ones, and every golden capture. On the
 RTX 5070 Ti, the same 35 configurations with the review fixes in, before the last change
 (`terrain_nodecals.frag` for `MOBA_DECALS=off`), and the 13 extra ones on the PR's first
-version; the RTX was unavailable after that (another process held 15.6 of its 16 GB), so
-the compiled-out terrain ran on it only in the guard above, without validation:
+version. **Re-run on `main` at `197857b`** with the final code on the RTX 5070 Ti: the river
+showcase on all four tiers, the reeds over the full water on Ultra, the networked overview on
+High and Ultra (Ultra also with `MOBA_DECALS=off`, the compiled-out terrain), the decal
+teamfight on all four tiers and High with `MOBA_DECALS=off`, 300 frames each: 0 messages
+([perf/0022](0022-r8-scaling-pacing.md#validation) has the whole 37-run matrix). The
+configurations:
 
 | Group | Configurations |
 |---|---|
@@ -281,13 +334,14 @@ replay frame and the wind and flow are repeatable.
 
 ## Not measured here
 
-- The other §7 reference GPUs (UHD 620, GTX 1060 and RTX 3060 classes, Apple M1) are still
-  unowned (#9/#127). Low's simple water and thinned foliage on a UHD 620 are the open
+- The other §7 reference GPUs (UHD 620, GTX 1060 and RTX 3060 classes, Apple M1) are
+  deferred to pre-1.0 by the maintainer (#9/#127). Low's simple water and thinned foliage on a UHD 620 are the open
   question: the foliage vertex shader builds 3 blades per clump on Low, and the
   `MOBA_FOLIAGE=off` / `MOBA_WATER=simple` switches are the fall-backs.
 - 1440p and 4K: the window caps at 2560×1380 on this display; the foliage and water costs
   are per-pixel (decals, water) and per-instance (foliage), so the 1080p deltas are the
   per-pixel lower bound.
-- **Art sign-off** of the showcase map (roadmap R3 exit, "one fully art-directed map") is a
-  maintainer item: the sample maps are engine-authored. The screenshots are in
+- **Art sign-off** of the showcase map (roadmap R3 exit, "one fully art-directed map") is
+  deferred to pre-1.0 by the maintainer: the sample maps are engine-authored. The screenshots
+  (RTX 5070 Ti captures on `main` at `197857b`) are in
   [screenshots](../screenshots.md#decals-foliage-and-water-r3b).

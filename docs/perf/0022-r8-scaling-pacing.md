@@ -12,18 +12,22 @@ Captured 2026-10-30 on the development workstation, not a CI runner, for
   on the same GPU), so every comparison is interleaved and taken as the median of three
   rounds. Frame intervals are display-paced (240 Hz, 4.18 ms) as in
   [perf/0011](0011-render-graph.md), so frame p50 does not show GPU savings at this size.
+- **RTX re-run on `main` at `197857b`** (later on 2026-10-30, once the GPU was free; no other
+  GPU client): the [validation matrix](#validation) and the
+  [10-minute replay and baseline refresh](#frame-pacing-10-minute-replay). Clocks were
+  recorded, not locked (that needs root).
 
 ## Summary
 
 | Item | Result |
 |---|---|
-| Validation + sync validation | 0 messages, every tier, culling on and off, on the RTX 5070 Ti and lavapipe ([below](#validation)) |
+| Validation + sync validation | 0 messages, every tier, culling on and off, on the RTX 5070 Ti and lavapipe; re-run on `main` after R3b and distortion: 37 RTX configurations including Ultra MSAA, Low at render scale 0.75, the R3b showcase scenes and the haze, all 0 ([below](#validation)) |
 | Culling exactness | byte-identical frames with culling on and `MOBA_GPU_CULL=off` in five scenes on lavapipe (`scripts/cull-probe.sh`, now a render-golden step) |
 | Culling and LOD gains | 512-minion stress (Ultra): GPU total 0.816 → 0.730 ms p50 (−11 %), shadow −40 %, scene −13 %; teamfight Ultra 0.621 → 0.593 ms (−5 %) |
 | CPU cost | the render call grows by 0.009–0.027 ms p50 (culling, level selection, the caster list); the stress scene's whole per-frame cull + select over 612 units is inside that |
 | VRAM | 58 MB (Low) to 263 MB (Ultra) at 1080p, every tier far inside its budget; texture bytes 6.8–7.5 MB |
 | Mid-match uploads / pipeline builds | 0 / 0 in every run (`locked_uploads`, `locked_pipelines`) |
-| 10-minute pacing (p99 ≤ 1.5 × p50) | p99 ÷ p50 = 1.006 (Low), 1.044 (Medium), 1.289 (High), 1.248 (Ultra); GPU p99 0.44–1.08 ms, every tier inside its §7 budget ([below](#frame-pacing-10-minute-replay)) |
+| 10-minute pacing (p99 ≤ 1.5 × p50) | re-run on `main` (`197857b`): p99 ÷ p50 = 1.103 (Low), 1.011 (Medium), 1.180 (High), 1.109 (Ultra); GPU p95 0.21–0.66 ms, every tier inside its §7 budget; `tests/perf/baseline.toml` refreshed from it (Ultra render p95 0.171 → 0.254 ms, see [below](#frame-pacing-10-minute-replay)) |
 | Goldens | culling: unchanged; LODs: deliberate rebaseline of every fingerprint (silhouette pixels only; twelve after R3b) |
 
 ## GPU-driven culling: the measurement that decided it
@@ -173,19 +177,90 @@ persistent cache (`pipeline_cache=warm` in every run here).
 
 ## Frame pacing (10-minute replay)
 
-`scripts/perf-replay.sh` on the RTX 5070 Ti: `teamfight --ticks 18000` recorded once (a
-10-minute, 5v5 scripted match), then played once per tier at 1920×1080 with vsync off and
-validation off, each after a 30-frame run that warms the pipeline cache. Every frame of the
-10 minutes is in the log (≈ 142 k frames per tier). `perf-gate --warm-cache` checked all four
-logs: **ok**.
+`scripts/perf-replay.sh` on the RTX 5070 Ti, `main` at `197857b` (R3b, R8 and distortion
+merged), 2026-10-30: `teamfight --ticks 18000` recorded once (a 10-minute, 5v5 scripted
+match), then played once per tier at a physical 1920×1080 with vsync off and validation off,
+each after a 30-frame run that warms the pipeline cache. Every frame of the 10 minutes is in
+the log (`frames_dropped=0`, ≈ 143 k frames per tier). No other GPU client ran: the GPU held
+1.5–2.7 GB, all of it the desktop (compositor, shell, a browser). Clocks cannot be locked
+without root; a sampler logged them every second (below).
 
-These runs predate the review fixes (pose-measured skin bounds, re-baked LODs, the cap after
-culling) and R3b. Their logs have no `frames_dropped`, which the stricter gate now requires,
-although every frame was logged (the counts above are the whole run). The re-run on the
-merged build, with `tests/perf/baseline.toml` refreshed from it, is pending: at the time of
-the review the shared RTX 5070 Ti had 15.6 of its 16 GiB held by another process, and the
-client could not allocate. The committed baseline keeps these p95 values, now bound to
-`gpu = "NVIDIA GeForce RTX 5070 Ti"`.
+| Tier | §7 GPU budget (p95) | GPU p95 | p99 ÷ p50 (limit 1.5) | Budget and pacing met | `perf-gate --warm-cache` |
+|---|---|---|---|---|---|
+| Low | 14 ms | 0.206 ms | 1.103 | yes | ok |
+| Medium | 6.0 ms | 0.301 ms | 1.011 | yes | ok |
+| High | 6.0 ms | 0.490 ms | 1.180 | yes | ok |
+| Ultra | 7.5 ms | 0.664 ms | 1.109 | yes | ok |
+
+| Tier | Frames (dropped) | Frame p50 / p95 / p99 / max (ms) | p99 ÷ p50 | GPU total p50 / p95 / p99 (ms) | §7 GPU budget | CPU p95 | render p95 | VRAM peak | mid-match uploads / pipelines | cache | drawn / candidates | terrain chunks |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Low | 143,031 (0) | 4.178 / 4.191 / 4.608 / 19.813 | 1.103 | 0.193 / 0.206 / 0.210 | 14 ms | 0.031 | 0.191 | 84.3 MB | 0 / 0 | warm | 46 / 58 | 5/16 |
+| Medium | 143,335 (0) | 4.178 / 4.189 / 4.222 / 55.755 | 1.011 | 0.287 / 0.301 / 0.305 | 6.0 ms | 0.031 | 0.218 | 125.5 MB | 0 / 0 | warm | 46 / 58 | 7/36 |
+| High | 142,781 (0) | 4.178 / 4.192 / 4.930 / 18.990 | 1.180 | 0.475 / 0.490 / 0.495 | 6.0 ms | 0.032 | 0.199 | 136.0 MB | 0 / 0 | warm | 46 / 58 | 9/64 |
+| Ultra | 143,014 (0) | 4.178 / 4.192 / 4.633 / 9.759 | 1.109 | 0.649 / 0.664 / 0.671 | 7.5 ms | 0.035 | 0.254 | 292.9 MB | 0 / 0 | warm | 46 / 58 | 13/144 |
+
+```bash
+cargo build --release --locked -p moba-client -p moba-tools
+BASELINE= scripts/perf-replay.sh perf-replay           # 4 × 10 minutes, then perf-gate
+./target/release/perf-gate --warm-cache --baseline tests/perf/baseline.toml perf-replay/frames-*.log
+```
+
+- **Every tier meets its budget and the pacing target**, with no dropped frame, no mid-match
+  upload or pipeline build and a warm cache. The frame interval is compositor-paced at 240 Hz
+  (4.18 ms) even with vsync off, so p50 is the display interval and p99 counts the frames
+  that missed it; CPU p95 ≤ 0.035 ms and GPU p99 ≤ 0.67 ms, far inside it. The max spikes
+  (one frame of 55.8 ms on Medium) come with flat CPU and GPU p99 and no upload or build:
+  the desktop, not the client (`perf-gate` gates p99, not max).
+- **The display configuration changed during the first attempt**, so that set is not the
+  baseline. At about 18:20, while the desktop was back in use, a second display (scale 1.5)
+  was enabled. From then on the driver held the memory clock at **P0, 14001 MHz** (before: P8,
+  405 MHz), and the client's windows, sized in logical pixels, opened on that display at
+  2880×1620 (High and Ultra). The set above was re-run tier by tier with each window's
+  physical size checked (`extent=1920x1080` in every log; logical 1280×720 on the scaled
+  display, 1920×1080 on the primary), with the memory clock at 14001 MHz in all 2,550
+  samples. The first attempt's numbers, for the record (each also passed `perf-gate
+  --warm-cache` without a baseline):
+
+  | Tier | Conditions | Frame p99 ÷ p50 | GPU p50 / p95 / p99 (ms) | render p95 |
+  |---|---|---|---|---|
+  | Low | 1920×1080, P8 (405 MHz) throughout | 1.006 | 0.323 / 0.362 / 0.391 | 0.280 |
+  | Medium | 1920×1080, P8 then P0 at 18:20 | 1.283 | 0.297 / 0.701 / 0.730 | 0.289 |
+  | High | **2880×1620**, P0 | 1.261 | 0.930 / 0.955 / 0.983 | 0.203 |
+  | Ultra | **2880×1620**, P0 | 1.352 | 0.657 / 1.530 / 1.681 | 0.261 |
+
+- **The memory clock alone moves the GPU p95 by up to 1.75×** at these loads: Low 0.362 ms
+  at 405 MHz against 0.206 ms at 14001 MHz, and the Medium run that crossed the switch is
+  bimodal (p50 0.297, p95 0.701). The refreshed baseline is the P0 set. Against it, the P8
+  Low and Medium logs **fail** the regression check (GPU 0.362 > 0.258 ms and 0.701 >
+  0.376 ms; render 0.280 > 0.239 and 0.289 > 0.273 ms), so a runner must measure in the
+  baseline's power state (one display configuration, or clocks locked as root with
+  `nvidia-smi --lock-memory-clocks`). The baseline was not widened to cover both states.
+- **Against the old baseline** (the R8 branch's run below, before R3b), the set passes the
+  GPU checks on every tier and **fails one CPU check: Ultra `render_p95_ms` 0.254 ms against
+  0.171 ms (+49 %, allowed 0.214 ms)**. Low, Medium and High went down (0.279 → 0.191, 0.302
+  → 0.218, 0.315 → 0.199 ms). The first attempt's Ultra measured 0.261 ms, so the value is
+  repeatable today. R3b's features account for about 0.02 ms of it: in the interleaved
+  Ultra teamfight rounds of [perf/0021](0021-decals-foliage-water.md) the render p95 median
+  is 0.238 ms with everything on and 0.213 ms with decals, foliage and water off. The rest
+  is inside this host's round-to-round spread for one configuration (0.18–0.77 ms in those
+  rounds). The R8 run's 0.171 ms is the low outlier of its own set (its Low–High were
+  0.279–0.315 ms). The refreshed baseline records 0.254 ms; this is the one value it raises.
+
+**Baseline refresh** (`tests/perf/baseline.toml`, `gpu = "NVIDIA GeForce RTX 5070 Ti"`):
+
+| Tier | `gpu_total_p95_ms` old → new | `render_p95_ms` old → new |
+|---|---|---|
+| Low | 0.423 → 0.206 | 0.279 → 0.191 |
+| Medium | 0.578 → 0.301 | 0.302 → 0.218 |
+| High | 1.037 → 0.490 | 0.315 → 0.199 |
+| Ultra | 0.599 → 0.664 | 0.171 → **0.254** |
+
+`perf-gate --warm-cache --baseline tests/perf/baseline.toml` on the four logs: **ok** on every
+tier, and `cargo test -p moba-tools --bin perf-gate` passes (5 tests).
+
+**History.** The R8 branch's own run (before the review fixes and R3b, the GPU shared with
+another session's client; its logs predate `frames_dropped`) passed the gate and was the
+first baseline:
 
 | Tier | Frames | Frame p50 / p95 / p99 / max (ms) | p99 ÷ p50 | GPU total p50 / p95 / p99 (ms) | §7 GPU budget | CPU p95 | render p95 | mid-match uploads / pipelines | cache |
 |---|---|---|---|---|---|---|---|---|---|
@@ -194,44 +269,36 @@ client could not allocate. The committed baseline keeps these p95 values, now bo
 | High | 142,035 | 4.181 / 4.375 / 5.391 / 92.207 | 1.289 | 0.673 / 1.037 / 1.078 | 6.0 ms | 0.028 | 0.315 | 0 / 0 | warm |
 | Ultra | 142,357 | 4.181 / 4.279 / 5.217 / 9.844 | 1.248 | 0.551 / 0.599 / 0.604 | 7.5 ms | 0.027 | 0.171 | 0 / 0 | warm |
 
-```bash
-cargo build --release --locked -p moba-client -p moba-tools
-BASELINE= scripts/perf-replay.sh perf-replay           # 4 × 10 minutes, then perf-gate
-./target/release/perf-gate --warm-cache --baseline tests/perf/baseline.toml perf-replay/frames-*.log
-```
-
-- **p99 ≤ 1.5 × p50 holds on every tier** (1.006–1.289). The frame interval is
-  compositor-paced at 240 Hz (4.18 ms) even with vsync off, so p50 is the display interval
-  and p99 counts the frames that missed it.
-- **No compile or allocation hitch.** `locked_pipelines=0` and `locked_uploads=0` over all
-  four 10-minute runs: no pipeline was built and no mesh, texture or terrain uploaded after
-  the first measured frame, and every tier started from a warm cache. CPU p95 is ≤ 0.032 ms
-  and GPU p99 ≤ 1.08 ms, so neither side of the frame came near the interval.
-- **The max spikes** (Medium 60.6 ms and High 92.2 ms, one or a few frames each) are not the
-  client's own work. CPU and GPU p99 stay flat through them, and no upload or pipeline build
-  happened. The GPU and the compositor were shared with another session's client running at
-  the same time; a dedicated runner should not show them. `perf-gate` gates p99, not max.
-- **The committed baseline** (`tests/perf/baseline.toml`) is these runs' `gpu_total_p95_ms`
-  and `render_p95_ms`, and the same logs pass the gate against it. The High p95 (1.037 ms) is
-  the noisiest baseline value (see the High p95 note above).
-- 10 minutes of the scripted teamfight draws 46 of 58 units in view and LOD0 throughout at
-  1080p (the camera follows the fight); terrain 5/16 (Low) to 12/144 (Ultra) chunks.
-
-
 ## Validation
 
 `MOBA_VULKAN_VALIDATION=required` (Khronos validation with synchronization validation, which
-the renderer enables; the run fails if the layer is missing), 1280×720, LODs on:
+the renderer enables; the run fails if the layer is missing), 1280×720, LODs on. Every cell is
+the number of `[vulkan …]` messages (errors, warnings and performance warnings).
 
-| Device | Scene | Low | Medium | High | Ultra |
-|---|---|---|---|---|---|
-| RTX 5070 Ti | teamfight replay, culling on / off, 300 frames | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
-| RTX 5070 Ti | 64 VAT minions, culling on / off | | | | 0 / 0 |
-| lavapipe | teamfight replay, culling on / off, 90 frames | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
-| lavapipe | 64 VAT minions, culling on / off | | | | 0 / 0 |
+**RTX 5070 Ti, `main` at `197857b` (after R3b and distortion), 2026-10-30.** The GPU was idle
+apart from the desktop compositor (`kwin_wayland`, 185 MiB; 1.47 GB used, 3 % utilisation
+before and after the matrix). 37 configurations, 300 frames each, **0 messages and exit 0 in
+every one**; each frame log names `gpu="NVIDIA GeForce RTX 5070 Ti"`:
 
-Every cell is the number of `[vulkan …]` messages. Also 0 on lavapipe: `scripts/cull-probe.sh`
-(five scenes, culling on and off) and the eight golden captures with LODs on and off. The nightly perf workflow repeats the
+| Scene | Low | Medium | High | Ultra (MSAA 4×) |
+|---|---|---|---|---|
+| teamfight replay (tick 330), culling on / off | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| teamfight replay, Low at `MOBA_RENDER_SCALE=0.75` (960×540), culling on / off | 0 / 0 | | | |
+| 64 VAT minions, culling on / off | | | | 0 / 0 |
+| R3b river showcase (`MOBA_PREVIEW_CAMERA=0.9,0.3,14,4,-62`) | 0 | 0 | 0 | 0 |
+| R3b reeds over the full water (`4.04,0.2,9,4,-62`, the depth re-resolve) | | | | 0 |
+| R3b networked overview; Ultra also with `MOBA_DECALS=off` | | | 0 | 0 / 0 |
+| R3b decal teamfight (tick 360, 30 m); High also with `MOBA_DECALS=off` | 0 | 0 | 0 / 0 | 0 |
+| `cinder-zone` haze, on / `nodraw` / render scale 0.75 | | | 0 / 0 / 0 | 0 / 0 / 0 |
+| Ember crystal (local, `MOBA_CONTENT=content/ember-map.toml`, `MOBA_PREVIEW_CAMERA=0.6,0.35,24,-7,10`), on / `nodraw` | | | 0 / 0 | 0 / 0 |
+| Ember map, networked (24 m) | | | 0 | 0 |
+
+The haze was live in every distortion run (`vfx_distortion_max` 8 in `cinder-zone`, 21 at
+the crystal, 238 of 240 logged frames with the distortion passes; none with `nodraw`).
+
+Earlier the same day (R8's own branch, before R3b merged) the teamfight rows also passed on
+the RTX and on lavapipe (90 frames), as did `scripts/cull-probe.sh` (five scenes) and the
+golden captures with LODs on and off on lavapipe. The nightly perf workflow repeats the
 teamfight rows on its runner before the timed runs.
 
 ## Goldens
@@ -267,18 +334,19 @@ messages; `scripts/cull-probe.sh` and `scripts/outline-probe.sh` pass on the mer
 
 ## Hardware matrix (#9/#127)
 
-The roadmap's §7 reference machines are maintainer items: this environment has one real GPU
-(the RTX 5070 Ti above) and hosted CI has none on Windows or macOS. Each machine below gets a
+The roadmap's §7 reference machines are maintainer items, deferred to the pre-1.0 milestone
+by the maintainer (2026-10-30): this environment has one real GPU (the RTX 5070 Ti above) and
+hosted CI has none on Windows or macOS. Each machine below gets a
 copy of this checklist filled in, committed as a section of this note (or a follow-up perf
 note), before its tier's target can be called met. Estimates never close a target.
 
 | Machine | Tier | Target (§7) | Status |
 |---|---|---|---|
-| Intel UHD 620 (Windows or Linux) | Low | 60 fps p95, GPU ≤ 14 ms, 1080p (render scale allowed) | open (#127) |
-| Apple M1, MoltenVK | Low | 60 fps p95, GPU ≤ 14 ms, 1080p | open (#9, #127) |
-| GTX 1060 / RX 580 class | Medium | 144 fps p95, GPU ≤ 6.0 ms, 1080p | open (#127) |
-| RTX 3060 class | High | 144 fps p95, GPU ≤ 6.0 ms, 1440p | open (#127) |
-| RTX 4070+ class | Ultra | 120 fps p95, GPU ≤ 7.5 ms, 4K | open (#127); the RTX 5070 Ti above is above this class at 1080p only |
+| Intel UHD 620 (Windows or Linux) | Low | 60 fps p95, GPU ≤ 14 ms, 1080p (render scale allowed) | deferred to pre-1.0 by the maintainer (#127) |
+| Apple M1, MoltenVK | Low | 60 fps p95, GPU ≤ 14 ms, 1080p | deferred to pre-1.0 by the maintainer (#9, #127) |
+| GTX 1060 / RX 580 class | Medium | 144 fps p95, GPU ≤ 6.0 ms, 1080p | deferred to pre-1.0 by the maintainer (#127) |
+| RTX 3060 class | High | 144 fps p95, GPU ≤ 6.0 ms, 1440p | deferred to pre-1.0 by the maintainer (#127) |
+| RTX 4070+ class | Ultra | 120 fps p95, GPU ≤ 7.5 ms, 4K | deferred to pre-1.0 by the maintainer (#127); the RTX 5070 Ti above is above this class at 1080p only |
 
 Per machine:
 
