@@ -440,7 +440,8 @@ impl Materials {
                     .ok_or(RenderError::InvalidTexture)?;
                 crate::memory::note_degraded();
                 eprintln!(
-                    "[vram] texture {}x{} over the tier's texture budget ({} MiB free):                      uploaded without its {drop} largest mip level(s), {}x{}",
+                    "[vram] texture {}x{} over the tier's texture budget ({} MiB free): \
+                     uploaded without its {drop} largest mip level(s), {}x{}",
                     upload.width(),
                     upload.height(),
                     free >> 20,
