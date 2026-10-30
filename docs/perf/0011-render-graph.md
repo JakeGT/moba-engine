@@ -100,11 +100,16 @@ frame. The parts that are *graph* overhead are within it:
 - inter-pass barriers: below 1 µs;
 - CPU-side `render_*`: within run-to-run noise.
 
-The maintainer should decide whether the criterion means one of these:
+The maintainer was asked to decide whether the criterion means one of these:
 
 1. graph and barrier overhead for the same work, which is met;
 2. an absolute budget, which is met for any reasonable value: +0.016–0.021 ms;
 3. the literal relative figure, which is not met and cannot be with HDR.
+
+**Decision (maintainer, 2026-10-30): option 1.** The criterion covers the graph's own
+overhead for the same work, which is met. The HDR target and tonemap are feature costs and
+count against each tier's §7 GPU budget, which every tier meets
+([perf/0022](0022-r8-scaling-pacing.md)).
 
 The relative figure should be re-measured on the R5 teamfight scene and on the §7 reference
 GPUs at their real clocks. Low/min-spec numbers (UHD 620, MoltenVK) do not exist yet (#9/#127).
