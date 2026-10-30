@@ -122,6 +122,15 @@ about 10 k instances, or GPU-resident instance data (static props uploaded once)
   is the only place meshoptimizer is linked, and only behind the `moba-tools` feature
   `mesh-bake` (`required-features`): the default workspace build, the client and the renderer
   never compile it; `just ci-tools` builds it, re-bakes every sample and fails on any diff.
+- **Reproducible bakes.** meshoptimizer's attribute-weighted path is sensitive to fused
+  multiply-adds: a C++ build allowed to contract `a * b + c` (GCC and Clang do by default when
+  the target has FMA) bakes different bits, and on CI it changed both textured samples.
+  `scripts/bake-mesh-lods.sh` therefore compiles the C/C++ with `-ffp-contract=off`. With it,
+  GCC 16, Clang and `-march=native` builds bake byte-identical files, which CI checks against
+  the committed ones. A bake outside the script (another flag set, MSVC) is reproducible on
+  its own toolchain but may differ in low bits. Either way the runtime validates every file
+  against its mesh (hash, vertex count, index range, error order; the committed files in
+  `mesh_lod::tests`), so a stale or broken file never loads.
 - **Seams and attributes.** The sample meshes are flat-shaded (split vertices per face), so
   every edge is an attribute seam and meshoptimizer's default (seam-preserving) mode removes
   almost nothing; the baker runs in `Permissive` mode, which may collapse across seams, and
