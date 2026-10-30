@@ -26,7 +26,7 @@ feature, recall, which is protocol v42 and sim logic v9 (replay format still v5)
 | R1 Renderer architecture | done | #323 (R1a), #327 (R1b) | the ≤ 5 % criterion's reading (below) |
 | R2 Lighting and materials | done | #330 (R2a), #335 (R2b) | timings on the three §7 reference GPUs; art-direction readability sign-off |
 | R3 Terrain and environment | done | #333 (R3a), #336 (R3b) | sign-off of "one fully art-directed map" (the sample maps are engine-authored) |
-| R4 Animation runtime | done; exit met with recall ([perf/0024](../perf/0024-recall.md)) | #324 (R4a), #325 (R4b-1), #332 (R4b), recall PR | — |
+| R4 Animation runtime | done; exit met with recall ([perf/0024](../perf/0024-recall.md)) | #324 (R4a), #325 (R4b-1), #332 (R4b), #340 | — |
 | R5 VFX | done | #329 | §7 reference-GPU timings (#9/#127) |
 | R6 Post and image quality | done, including item 7 (distortion) | #334, #338 | the blind A/B readability sign-off (image set in perf/0019) |
 | R7 UI and presentation | done | #326 (R7a), #328 (R7b) | — (champion select does not exist yet) |
