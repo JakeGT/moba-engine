@@ -15,7 +15,8 @@ the semver check):
 
 - **`moba-game`**
   - New public fields on exhaustively constructible structs (#296, #317): `HeroSpec::model`,
-    `MapSpec::visuals`, `GameContent::assets`. Struct literals must set them;
+    `MapSpec::visuals`, `GameContent::assets`, and `RulesSpec::recall_ticks` (recall). Struct
+    literals must set them;
     `..Default::default()` works where `Default` exists. The content schema stays exhaustive by
     design ([api-1.0.md](docs/api-1.0.md#why-the-content-schema-stays-exhaustive)).
   - `#[non_exhaustive]`: `ContentError` (which also gained `BadMapCoordinate` and
@@ -113,6 +114,37 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
+  [perf/0024](docs/perf/0024-recall.md)):**
+  - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).
+    A settings file saved before recall (no `recall` key) with the old `shop = "B"` is
+    migrated to shop P, recall B, with a note on stderr; one with another shop key keeps it.
+    A recall key another action (or the camera, item, shop or page keys) uses leaves recall
+    unbound, with a warning. New `Key::P`.
+  - **Prediction:** pressing recall sends the order only (none when the pack disables recall
+    or the hero is dead); the predicted hero stops when a snapshot's recall flag confirms the
+    channel, unless another order was given since. A recall that never starts (a stun the
+    client is not told about, a lost packet) no longer stops the drawn hero while the
+    server's walks on.
+  - **Animation:** `EVENT_RECALL` starts the set's `recall` loop on its snapshot tick and a
+    cancel or completion fades it out; the recall flag starts or ends it when those events
+    are lost. Interpolation no longer slides a hero across the map on a teleport: between two
+    snapshots where a living hero's recall flag cleared or a dead hero came back alive
+    (`moba_net::interpolation::is_teleport`, `Interpolator::teleported_between`) it holds the
+    old position until the later snapshot's tick and then snaps. It decides from those flags,
+    not a distance, so a pack's long dashes or fast heroes still interpolate. The hero's
+    facing and run speed ignore that step. The local preview and replays map the
+    recall events too.
+  - **VFX:** a `recall` default binding (`[defaults] recall = "recall"` in
+    `vfx/bindings.toml`) plays `content/vfx/recall.toml` at the hero for the channel
+    (`event_duration`): a contracting ground ring, a rising column of motes and a soft light,
+    with no telegraph styling. A cancel or completion stops it emitting, and so do the hero's
+    death and its recall flag clearing (or the hero leaving the snapshot); the flag also
+    starts it when the start event was lost. One channel plays one effect.
+  - **HUD:** a "RECALLING" channel bar above the hero panel while the local hero channels.
+  - **Evidence runs:** `MOBA_DEMO_ORDERS=<order>@<tick>,...` (`recall`, `stop`, `attack`,
+    `q`/`w`/`e`, `move:<x>:<y>`) scripts the local player; such runs log every recall event
+    they receive (`[recall] ...`).
 - **Distortion / heat haze (AAA roadmap R6 item 7, ADR-0019;
   [perf/0023](docs/perf/0023-distortion.md)):**
   - **Content:** `blend = "distortion"` emitters (`VfxBlend::Distortion`, `VfxDistortion`:
@@ -900,6 +932,24 @@ the semver check):
 - After the v8 fixes (below), the same sweep measures blue at **49.81 %** (95 % CI 48.42–51.20 %), so the bias is gone. `match-soak` now reports `cap_draws` and `same_tick_draws` separately (2 of 5,000 matches were same-tick draws) and `peak_units`. Peak units were 183 of `MAX_UNITS` 512, so wave starvation never occurs.
 
 ### Simulation
+- **Recall** (AAA roadmap R4 exit; **simulation logic v9**). `PlayerCommand::Recall` starts an
+  8 s channel (`rules.recall_ticks`, default 240 ticks; `0` disables recall) that teleports
+  the hero to its team's spawn (`MapSpec::hero_spawn` for its slot) and clears its orders.
+  The channel is cancelled by an obeyed move order (not while rooted), an attack order, stop,
+  a cast that goes off, any damage left after armour or magic resist (a shield absorbing
+  it still cancels), a stun, and death. Slows, roots, silences, buying, using an item and
+  surrendering do not cancel it. Recalling again while channelling has no effect (it does not
+  restart); dead or stunned heroes cannot start one. New `SimEvent::RecallStarted { hero,
+  team, position, duration_ticks }` and `SimEvent::RecallEnded { hero, team, position, end }`
+  with `RecallEnd::{Cancelled(RecallCancel), Completed { destination }}` and
+  `RecallCancel::{Order, Cast, Damage, Stun, Death}` (all `#[non_exhaustive]`),
+  `ObservedUnit::recalling`, `Simulation::recall_remaining(slot)`, and a hashed `Recall`
+  component (state hash tag 31). Replays keep format **v5** (the command is replay tag 7, as
+  `UseItem` was added as tag 6 without a version bump), but logic-v8 replays are rejected by
+  this build. The golden state hash is now `0x59e062c6037e76ac` (every hero carries the new
+  hashed component); the fixture is `crates/sim/tests/fixtures/seed-v9.mbr` (state hash
+  `0x88a26326d20d5c41`), and the teamfight replay was re-recorded (same events, state hash
+  `0x8945433b3adbd4ce`). Bots do not recall.
 - **`SimEvent::BasicAttack { attacker, team, target, interval_ticks }`** is emitted when a
   basic attack lands (R4b-1). Events are outputs: no state, hash, replay or logic change
   (golden state hash `0x8db35a0f5aab5190` and `seed-v8.mbr` unchanged). Attacks fill at most
@@ -922,6 +972,25 @@ the semver check):
     is `Option<Team>` (`None` for a draw).
 
 ### Content and networking
+- **Protocol v42** (not wire-compatible with v41): recall.
+  - `WireCommand::Recall` (input tag 8). The input decoder also gained the missing arm for
+    `WireCommand::UseItem` (tag 7): before v42 the server rejected every item active a
+    client sent as a bad value.
+  - `ENTITY_FLAG_RECALL` (bit 7 of the entity flags, `NetEntity::is_recalling`) is set while a
+    hero channels. It travels with the entity, so fog of war filters it like the rest of the
+    entity, and it survives lost events.
+  - `EVENT_RECALL` (9), a full 26-byte event: `value` is `RECALL_STARTED` (`aux` = the channel
+    length in ticks), `RECALL_CANCELLED` or `RECALL_COMPLETED` (`x2`/`y2` = the spawn it
+    arrived at); `x`/`y` is where the hero channelled. A start is sent only to viewers who see
+    the hero in that tick; a cancel or completion only to viewers who saw it in their previous
+    snapshot (where it stood still on `x`/`y`), whether or not they see it now: it may have
+    teleported to its spawn, or a dash that cancelled it may have carried it out of the fog,
+    in that tick. An enemy recalling out of vision is never reported, not even to a viewer
+    watching its spawn. Priority: with casts and zones.
+  - `WireRules::recall_ticks` (u32) carries the content rule in the catalogue.
+- **Content:** `[rules] recall_ticks` (0..=900, i.e. up to 30 s, the longest effect the
+  client plays; default 240). It is hashed and signed only
+  when it is not the default, so every existing pack keeps its content hash and attestation.
 - **Protocol v41** (not wire-compatible with v40). Snapshots carry **`EVENT_ATTACK`** (8), one
   per visible basic attack (R4b-1): `source`/`target` net ids and hero slots, `team`,
   `value` = the attacker's attack interval in ticks and `aux` = the hit's age, so the hit

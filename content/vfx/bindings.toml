@@ -12,6 +12,7 @@ hero_death = "hero-death"
 minion_death = "minion-death"
 structure_destroyed = "collapse"
 attack = "attack-hit"
+recall = "recall"
 
 # Built-in heroes (crates/game/src/ability.rs).
 [[abilities]]

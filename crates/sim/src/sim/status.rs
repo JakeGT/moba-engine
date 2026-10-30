@@ -9,7 +9,7 @@ use crate::components::{
     Modifier, Modifiers, MoveSpeed, Regen,
 };
 
-use super::Simulation;
+use super::{RecallCancel, Simulation};
 
 impl Simulation {
     pub(super) fn recompute_move_speed(&mut self, entity: Entity) {
@@ -97,6 +97,10 @@ impl Simulation {
         }
         if matches!(kind, ModifierKind::Slow | ModifierKind::Haste) {
             self.recompute_move_speed(entity);
+        }
+        if kind == ModifierKind::Stun {
+            // Hard crowd control interrupts a recall.
+            self.cancel_recall(entity, RecallCancel::Stun);
         }
     }
 

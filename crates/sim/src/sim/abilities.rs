@@ -6,7 +6,9 @@ use moba_game::{AreaEffect, AreaEffectList, Effect, ModifierKind, Targeting, Tea
 
 use crate::components::{Cooldowns, Health, HeroIdentity, Mana, Modifiers, Position};
 
-use super::{MAX_PROJECTILES, MAX_ZONES, ONE_TICK, Projectile, SimEvent, Simulation, Zone};
+use super::{
+    MAX_PROJECTILES, MAX_ZONES, ONE_TICK, Projectile, RecallCancel, SimEvent, Simulation, Zone,
+};
 
 impl Simulation {
     fn gather_enemies(&mut self, team: Team, target: FixVec2, radius: Fix) {
@@ -96,6 +98,8 @@ impl Simulation {
                 }
             }
         }
+        // The cast passed validation: it interrupts a recall channel.
+        self.cancel_recall(caster, RecallCancel::Cast);
         self.push_event(SimEvent::AbilityCast {
             caster,
             team,

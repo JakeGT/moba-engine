@@ -320,6 +320,11 @@ impl RulesSpec {
         if self.score_limit > 1_000 {
             return Some("score_limit");
         }
+        // Up to 30 s at 30 Hz, the longest effect the client plays for the channel
+        // (`moba_assets::MAX_EFFECT_SECONDS`); 0 disables recall.
+        if self.recall_ticks > super::spec::MAX_RECALL_TICKS {
+            return Some("recall_ticks");
+        }
         if self.melee_vision != self.melee_minion.vision_range {
             return Some("melee_vision");
         }

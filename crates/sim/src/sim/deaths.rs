@@ -9,7 +9,7 @@ use crate::components::{
     Position, Progression, Resistances, UnitKind,
 };
 
-use super::{MAX_PLAYERS, SimEvent, Simulation};
+use super::{MAX_PLAYERS, RecallCancel, SimEvent, Simulation};
 
 impl Simulation {
     pub(super) fn resolve_deaths(&mut self) {
@@ -28,6 +28,7 @@ impl Simulation {
                 if self.world.has::<Dead>(entity) {
                     continue;
                 }
+                self.cancel_recall(entity, RecallCancel::Death);
                 let level = self
                     .world
                     .get::<Progression>(entity)

@@ -3,11 +3,11 @@
 use moba_sim::Replay;
 
 #[test]
-fn checked_in_v8_replay_fixture_verifies() {
-    let bytes = include_bytes!("fixtures/seed-v8.mbr");
+fn checked_in_v9_replay_fixture_verifies() {
+    let bytes = include_bytes!("fixtures/seed-v9.mbr");
     let replay = Replay::decode(bytes).expect("decode fixture");
     assert_eq!(replay.frames.len(), 300);
     let result = replay.play().expect("fixture replay");
     assert_eq!(result.ticks, 300);
-    assert_eq!(result.state_hash, 0x43dd_e0e1_0fcc_5d45);
+    assert_eq!(result.state_hash, 0x88a2_6326_d20d_5c41);
 }

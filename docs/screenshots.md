@@ -198,7 +198,15 @@ tick 300.
 The R4 exit run: `moba-server` with 10 bots, a spectator client following blue slot 0 through
 `moba-tools link-proxy --rtt 150 --jitter 30 --loss 5` (RTX 5070 Ti). Captures at the render
 ticks where the hero's animation log (`MOBA_ANIM_LOG`) shows run, cast 3, cast 1, a basic
-attack, idle, cast 2, death and the respawned run. The simulation has no recall.
+attack, idle, cast 2, death and the respawned run. The simulation had no recall then.
+
+![Recall sequence](images/r4-recall-sequence.png)
+
+Recall (protocol v42, [perf/0024](perf/0024-recall.md)): a player client scripted with
+`MOBA_DEMO_ORDERS` through the same 150/30/5 % link, on lavapipe. Cast 1; recalling with the
+HUD channel bar and the recall effect at the hero's feet; the last channel tick; idle at the
+spawn one tick after the teleport (snapped, not slid); a basic attack beside the red tower;
+the death.
 
 ```bash
 MOBA_STRESS_MINIONS=200 MOBA_LOCAL_CAMERA_DISTANCE=40 MOBA_CAPTURE=/tmp/stress.ppm \

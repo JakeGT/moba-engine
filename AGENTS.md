@@ -19,13 +19,13 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Item | Current value | Source of truth |
 |---|---|---|
 | Workspace version | `0.4.0` | `Cargo.toml` |
-| Wire protocol | **v41** | `crates/net/src/protocol/mod.rs::PROTOCOL_VERSION` |
+| Wire protocol | **v42** | `crates/net/src/protocol/mod.rs::PROTOCOL_VERSION` |
 | Replay format | **v5** | `crates/sim/src/replay.rs::VERSION` |
-| Simulation logic | **v8** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
+| Simulation logic | **v9** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
-| Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
+| Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **826 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **855 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 

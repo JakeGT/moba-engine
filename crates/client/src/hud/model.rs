@@ -751,6 +751,9 @@ fn build_match_hud(
             &footer,
         );
     }
+    if let Some(progress) = own.and_then(|entity| recall_progress(network, entity)) {
+        draw_recall_bar(ui, width_f, height_f, progress);
+    }
     if own.is_some_and(|entity| entity.is_dead()) {
         ui.text_shadowed(
             (width_f - UiDrawList::text_width("RESPAWNING", 5.0)) * 0.5,
@@ -765,6 +768,39 @@ fn build_match_hud(
     if loading > 0.0 {
         draw_loading_screen(ui, width_f, height_f, loading, fx.clock, map_line, "READY");
     }
+}
+
+/// How far the own hero's recall channel is (0..=1), while the snapshot shows it recalling.
+fn recall_progress(network: &NetworkView, own: &moba_net::NetEntity) -> Option<f32> {
+    let started = network.own_recall.filter(|_| own.is_recalling())?;
+    let total = network.client.rules().recall_ticks.max(1) as f32;
+    Some((network.last_tick.saturating_sub(started) as f32 / total).clamp(0.0, 1.0))
+}
+
+/// The local player's recall channel bar, above the hero panel.
+fn draw_recall_bar(ui: &mut UiDrawList, width: f32, height: f32, progress: f32) {
+    const BAR_WIDTH: f32 = 260.0;
+    const BAR_HEIGHT: f32 = 10.0;
+    let x = (width - BAR_WIDTH) * 0.5;
+    // Just above the hero panel (196 px tall, 24 px from the bottom).
+    let y = (height - 268.0).max(30.0);
+    ui.panel(
+        x - 8.0,
+        y - 26.0,
+        BAR_WIDTH + 16.0,
+        BAR_HEIGHT + 34.0,
+        theme::PANEL_BG,
+        theme::PANEL_CHROME,
+    );
+    ui.text(
+        (width - UiDrawList::text_width("RECALLING", 2.0)) * 0.5,
+        y - 20.0,
+        2.0,
+        theme::TEXT,
+        "RECALLING",
+    );
+    ui.rect(x, y, BAR_WIDTH, BAR_HEIGHT, theme::TRACK);
+    ui.rect(x, y, BAR_WIDTH * progress, BAR_HEIGHT, theme::MANA);
 }
 
 /// Width the hero panel grows by for its portrait column (R7b).

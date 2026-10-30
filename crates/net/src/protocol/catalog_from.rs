@@ -363,6 +363,7 @@ impl From<&GameContent> for WireCatalog {
             structure_heroes_first,
             nexus_win,
             score_limit,
+            recall_ticks,
         } = content_rules;
         // The nested destructures guard reward kinds and per-unit scalars as well: a new
         // `RewardsSpec` kind or `UnitRewardsSpec` field fails to compile here until it is wired.
@@ -415,6 +416,7 @@ impl From<&GameContent> for WireCatalog {
             structure_heroes_first: *structure_heroes_first,
             nexus_win: *nexus_win,
             score_limit: *score_limit,
+            recall_ticks: *recall_ticks,
         };
         // Map geometry, counts and names below are exact for content that passed
         // `GameContent::validate` (#296): it rejects every coordinate `MapSpec::wire_point` /

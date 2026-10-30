@@ -7,7 +7,7 @@ use moba_game::{DamageType, EMPTY_ITEM, HeroId, Team};
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
     HeroIdentity, HeroSlot, ItemCooldowns, LaneWalker, LastHitBy, Mana, Modifiers, MoveSpeed,
-    MoveTarget, Position, Progression, Regen, Resistances, UnitKind, VisionRange,
+    MoveTarget, Position, Progression, Recall, Regen, Resistances, UnitKind, VisionRange,
 };
 
 use super::{MAX_UNITS, ONE_TICK, SimEvent, Simulation};
@@ -138,6 +138,7 @@ impl Simulation {
             .world
             .insert(entity, AttackDamageType(DamageType::Physical));
         let _ = self.world.insert(entity, Modifiers::default());
+        let _ = self.world.insert(entity, Recall::default());
         entity
     }
 
@@ -277,6 +278,9 @@ impl Simulation {
         }
         if let Some(stats) = self.world.get_mut::<AttackStats>(entity) {
             stats.cooldown = 0;
+        }
+        if let Some(recall) = self.world.get_mut::<Recall>(entity) {
+            recall.remaining = 0;
         }
         if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
             target.0 = None;

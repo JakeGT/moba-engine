@@ -2,8 +2,8 @@
 
 use crate::protocol::{
     EVENT_ATTACK, EVENT_CAST, EVENT_MATCH_ENDED, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN,
-    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, MATCH_ENDED_DRAW, NetEvent,
-    quantize_position,
+    EVENT_RECALL, EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, MATCH_ENDED_DRAW,
+    NetEvent, RECALL_CANCELLED, RECALL_COMPLETED, RECALL_STARTED, quantize_position,
 };
 
 use super::clients::ClientConn;
@@ -205,6 +205,55 @@ impl RawEvent {
                 arc: moba_core::Fix::ZERO,
                 tick,
             },
+            moba_sim::SimEvent::RecallStarted {
+                hero,
+                team,
+                position,
+                duration_ticks,
+            } => Self {
+                kind: EVENT_RECALL,
+                team,
+                source: Some(hero),
+                target: None,
+                source_slot: slot(hero),
+                target_slot: 0xFF,
+                position,
+                end: position,
+                direction: moba_core::FixVec2::ZERO,
+                value: RECALL_STARTED,
+                aux: u16::try_from(duration_ticks).unwrap_or(u16::MAX),
+                arc: moba_core::Fix::ZERO,
+                tick,
+            },
+            moba_sim::SimEvent::RecallEnded {
+                hero,
+                team,
+                position,
+                end,
+            } => {
+                let (value, arrival) = match end {
+                    moba_sim::RecallEnd::Completed { destination } => {
+                        (RECALL_COMPLETED, destination)
+                    }
+                    // A cancel (and any later end kind) leaves the hero where it was.
+                    _ => (RECALL_CANCELLED, position),
+                };
+                Self {
+                    kind: EVENT_RECALL,
+                    team,
+                    source: Some(hero),
+                    target: None,
+                    source_slot: slot(hero),
+                    target_slot: 0xFF,
+                    position,
+                    end: arrival,
+                    direction: moba_core::FixVec2::ZERO,
+                    value,
+                    aux: 0,
+                    arc: moba_core::Fix::ZERO,
+                    tick,
+                }
+            }
             // `WaveSpawned` and `HeroRespawned` are not replicated. `SimEvent` is
             // `#[non_exhaustive]`: a new simulation event is not sent to clients until it
             // gets a wire mapping here.
@@ -223,9 +272,19 @@ impl RawEvent {
         if spectator || self.kind == EVENT_MATCH_ENDED {
             return true;
         }
+        // The end of a recall (a cancel or a completion) reports where the hero channelled,
+        // which is not where it may be now: it teleported to its spawn, or a dash cancelled
+        // the channel and moved it in the same tick. So it goes only to a viewer that saw the
+        // hero in its previous snapshot, standing still on that spot, whether or not it sees
+        // it now; being visible now is not enough (a viewer watching the spawn would learn the
+        // hidden channel spot).
+        if self.kind == EVENT_RECALL && self.value != RECALL_STARTED {
+            return self.source.is_some_and(known);
+        }
         // A basic attack or a death may name a unit the viewer saw in its previous snapshot
         // but no longer sees: the victim of a killing blow is despawned (or, an enemy hero,
-        // hidden) in the same tick. Anything else needs an endpoint observed now.
+        // hidden) in the same tick. Anything else (a recall start included) needs an endpoint
+        // observed now.
         let recent = matches!(self.kind, EVENT_ATTACK | EVENT_UNIT_DIED);
         let visible = |entity: moba_ecs::Entity| {
             units.iter().any(|unit| unit.entity == entity) || (recent && known(entity))

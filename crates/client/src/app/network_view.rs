@@ -59,6 +59,15 @@ pub(crate) struct NetworkView {
     pub(crate) demo_bought: bool,
     /// `MOBA_DEMO_CAST`: ability slot and the tick to cast it at, cleared once sent.
     pub(crate) demo_cast: Option<(u8, u32)>,
+    /// `MOBA_DEMO_ORDERS`: scripted `(tick, order)`s in tick order, and the next to send.
+    pub(crate) demo_orders: Vec<(u32, super::launch::DemoOrder)>,
+    pub(crate) demo_next: usize,
+    /// Snapshot tick the own hero's recall channel started on (for the HUD bar), while
+    /// snapshots show it recalling.
+    pub(crate) own_recall: Option<u32>,
+    /// The predicted move target and attack target when the player last asked to recall,
+    /// until a snapshot confirms the channel ([`Self::recall_confirmed`]).
+    pub(crate) recall_requested: Option<(Option<FixVec2>, Option<u16>)>,
     pub(crate) shop_page: usize,
     /// The unit under the cursor (R2b hover outline): picked from the previous frame's
     /// camera, so it lags one frame. Only units in the latest snapshot can be picked.
@@ -106,6 +115,10 @@ impl NetworkView {
             demo_buy: None,
             demo_bought: false,
             demo_cast: None,
+            demo_orders: Vec::new(),
+            demo_next: 0,
+            own_recall: None,
+            recall_requested: None,
             shop_page: 0,
             hover: None,
             attack_target: None,
@@ -120,6 +133,23 @@ impl NetworkView {
             projectiles: Vec::with_capacity(32),
             audio: crate::audio::Audio::headless(),
         }
+    }
+
+    /// Tracks the own hero's recall flag from a snapshot at `tick`. When it shows a channel
+    /// starting, the hero stands still on the server: the prediction drops the move (and
+    /// the attack target) it had when the player pressed recall, unless the player has
+    /// given another order since (which cancels the channel on the server too).
+    pub(crate) fn recall_confirmed(&mut self, recalling: bool, tick: u32) {
+        if recalling
+            && self.own_recall.is_none()
+            && let Some((target, attack)) = self.recall_requested.take()
+            && self.prediction.target() == target
+            && self.attack_target == attack
+        {
+            self.prediction.set_target(None);
+            self.attack_target = None;
+        }
+        self.own_recall = recalling.then(|| self.own_recall.unwrap_or(tick));
     }
 
     /// The tick units are interpolated and animated at this frame.
@@ -142,6 +172,37 @@ impl NetworkView {
 
     #[allow(clippy::too_many_lines)] // Event-to-HUD/audio mapping is linear.
     pub(crate) fn handle_game_event(&mut self, event: NetEvent) {
+        if event.kind == moba_net::protocol::EVENT_RECALL
+            && Some(event.source) == self.own_net_id
+            && event.value == moba_net::protocol::RECALL_STARTED
+        {
+            // A new channel (perhaps a restart between two snapshots): the snapshot that
+            // carries this event stamps its start.
+            self.own_recall = None;
+        }
+        if event.kind == moba_net::protocol::EVENT_RECALL && !self.demo_orders.is_empty() {
+            // Evidence runs (`MOBA_DEMO_ORDERS`): every recall edge this client is sent.
+            let what = match event.value {
+                moba_net::protocol::RECALL_STARTED => "started",
+                moba_net::protocol::RECALL_CANCELLED => "cancelled",
+                _ => "completed",
+            };
+            let (from, to) = (
+                dequantize_position(event.x, event.y),
+                dequantize_position(event.x2, event.y2),
+            );
+            eprintln!(
+                "[recall] after tick {} net id {} (team {} slot {}) {what} at ({:.1}, {:.1}) -> ({:.1}, {:.1})",
+                self.last_tick,
+                event.source,
+                event.team,
+                event.source_slot,
+                from.x.to_f32(),
+                from.y.to_f32(),
+                to.x.to_f32(),
+                to.y.to_f32()
+            );
+        }
         match event.kind {
             EVENT_CAST => self.audio.play(crate::audio::Sound::Cast),
             EVENT_PROJECTILE_SPAWN => {
@@ -222,5 +283,44 @@ impl NetworkView {
             entry.life = entry.life.saturating_sub(1);
         }
         self.kill_feed.retain(|entry| entry.life > 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moba_core::FixVec2;
+
+    use super::NetworkView;
+
+    #[test]
+    fn only_a_confirmed_recall_stops_the_predicted_hero() {
+        let mut network = NetworkView::test_stub();
+        let walk = Some(FixVec2::from_ints(100, 128));
+        network.prediction.set_target(walk);
+        network.attack_target = Some(7);
+        // Asked to recall: nothing stops until the server confirms it (a recall that never
+        // starts, e.g. while stunned, never stops it) ...
+        network.recall_requested = Some((walk, Some(7)));
+        network.recall_confirmed(false, 10);
+        assert_eq!(network.prediction.target(), walk, "not yet");
+        // ... then the flag stops it.
+        network.recall_confirmed(true, 14);
+        assert_eq!(
+            (network.prediction.target(), network.attack_target),
+            (None, None)
+        );
+        assert_eq!(network.own_recall, Some(14));
+        network.recall_confirmed(true, 15);
+        assert_eq!(network.own_recall, Some(14), "the channel's start tick");
+        network.recall_confirmed(false, 30);
+        assert_eq!(network.own_recall, None);
+
+        // An order given after the recall keeps its prediction: it cancels the channel.
+        network.recall_requested = Some((None, None));
+        let order = Some(FixVec2::from_ints(70, 128));
+        network.prediction.set_target(order);
+        network.recall_confirmed(true, 40);
+        assert_eq!(network.prediction.target(), order);
+        assert_eq!(network.recall_requested, None, "used up");
     }
 }

@@ -176,7 +176,25 @@ fn commands_round_trip() {
             x: 500,
             y: 600,
         },
+        WireCommand::BuyItem { item: 3 },
+        WireCommand::Ready { ready: true },
+        WireCommand::Surrender,
+        // `UseItem` had no decoder arm before v42.
+        WireCommand::UseItem { slot: 5 },
+        WireCommand::Recall,
     ];
+    // One byte per kind: a new variant must be added here (and to the decoder).
+    let tags: Vec<u8> = commands
+        .iter()
+        .map(|command| {
+            encode_input(&InputMessage {
+                client_tick: 0,
+                input_seq: 0,
+                command: *command,
+            })[8]
+        })
+        .collect();
+    assert_eq!(tags, (0..=8).collect::<Vec<u8>>());
     for command in commands {
         let message = InputMessage {
             client_tick: 123,
@@ -505,6 +523,7 @@ fn wire_rules_parity_covers_every_hashed_field() {
         structure_heroes_first,
         nexus_win,
         score_limit,
+        recall_ticks,
     } = RulesSpec::default();
     // Same exhaustive-destructure guard for the nested rewards.
     let moba_game::RewardsSpec {
@@ -686,6 +705,10 @@ fn wire_rules_parity_covers_every_hashed_field() {
         (
             "score_limit",
             Box::new(move |rules| rules.score_limit = score_limit + 1),
+        ),
+        (
+            "recall_ticks",
+            Box::new(move |rules| rules.recall_ticks = recall_ticks + 1),
         ),
     ];
     let base = GameContent::default();
@@ -1195,6 +1218,53 @@ fn observed_unit_conversion() {
     assert!(entity.status_bits & STATUS_SHIELD != 0);
     assert!(entity.status_bits & STATUS_BURN != 0);
     assert!(entity.status_bits & STATUS_HASTE != 0);
+    assert!(!entity.is_recalling());
+    unit.recalling = true;
+    let recalling = NetEntity::from_observed(4, &unit);
+    assert!(recalling.is_recalling());
+    assert_eq!(recalling.flags, entity.flags | ENTITY_FLAG_RECALL);
+    // Starting or ending a recall is a changed flag in the delta.
+    assert_eq!(recalling.diff(&entity).flags, Some(recalling.flags));
+}
+
+#[test]
+fn recall_events_round_trip_as_full_events() {
+    let event = NetEvent {
+        kind: EVENT_RECALL,
+        team: 1,
+        source: 9,
+        target: 0xFFFF,
+        source_slot: 5,
+        target_slot: 0xFF,
+        x: 1_000,
+        y: 1_600,
+        x2: 3_600,
+        y2: 2_048,
+        value: RECALL_COMPLETED,
+        aux: 0,
+        dx: 0,
+        dy: 0,
+        arc: 0,
+    };
+    let start = NetEvent {
+        value: RECALL_STARTED,
+        aux: 240,
+        x2: 1_000,
+        y2: 1_600,
+        ..event
+    };
+    let cancel = NetEvent {
+        value: RECALL_CANCELLED,
+        ..start
+    };
+    let delta = SnapshotDelta {
+        tick: 77,
+        events: vec![start, cancel, event],
+        ..SnapshotDelta::default()
+    };
+    let mut payload = Vec::new();
+    encode_snapshot(&delta, &mut payload).expect("encode");
+    assert_eq!(decode_snapshot(&payload), Ok(delta));
 }
 
 #[test]

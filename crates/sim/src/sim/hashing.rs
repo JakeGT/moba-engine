@@ -7,7 +7,7 @@ use moba_game::{AreaEffect, AreaEffectList, Team};
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
     HeroIdentity, HeroSlot, ItemCooldowns, LaneWalker, LastHitBy, Mana, Modifiers, MoveSpeed,
-    MoveTarget, Position, Progression, Regen, Resistances, UnitKind, VisionRange,
+    MoveTarget, Position, Progression, Recall, Regen, Resistances, UnitKind, VisionRange,
 };
 
 use super::{MatchOutcome, Simulation};
@@ -37,6 +37,7 @@ const HASH_ATTACK_DAMAGE_TYPE: u32 = 27;
 const HASH_PROJECTILE: u32 = 28;
 const HASH_ZONE: u32 = 29;
 const HASH_ITEM_COOLDOWNS: u32 = 30;
+const HASH_RECALL: u32 = 31;
 
 impl Simulation {
     /// Deterministic hash of the complete authoritative state.
@@ -228,6 +229,10 @@ impl Simulation {
             if let Some(damage_type) = self.world.get::<AttackDamageType>(entity) {
                 hasher.write_u32(HASH_ATTACK_DAMAGE_TYPE);
                 hasher.write_u32(damage_type.0 as u32);
+            }
+            if let Some(recall) = self.world.get::<Recall>(entity) {
+                hasher.write_u32(HASH_RECALL);
+                hasher.write_u32(recall.remaining);
             }
         }
         hasher.finish64()

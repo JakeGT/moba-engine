@@ -23,6 +23,15 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
   - Since **v41** snapshots carry `EVENT_ATTACK` (8), one compact 12-byte record per visible
     basic attack (source, target, attack interval, hit age), at the lowest event priority,
     for animation hit-frame sync (R4b-1, ADR-0012).
+  - Since **v42** recall: `WireCommand::Recall` (input tag 8; the decoder also gained the
+    `UseItem` arm, tag 7, it had been missing), `ENTITY_FLAG_RECALL` (entity flag bit 7) while
+    a hero channels, `EVENT_RECALL` (9; `value` `RECALL_STARTED`/`RECALL_CANCELLED`/
+    `RECALL_COMPLETED`, `aux` the channel length on a start, `x2`/`y2` the arrival on a
+    completion) and `WireRules::recall_ticks`. A start needs the hero in the viewer's vision
+    now; a cancel or completion needs it in the viewer's previous snapshot (on the reported
+    channel spot), since it may teleport or dash out of vision that tick. Interpolation snaps
+    when the recall flag clears or a dead hero respawns (`interpolation::is_teleport`) instead
+    of lerping.
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.
 - **Server**: handshake and slot assignment, session tokens, input sequencing, bot fill for
@@ -37,7 +46,7 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
 - **interpolation** (`moba-net::interpolation`): a 4-tick (133 ms) snapshot buffer lerps
   remote entity positions and deduplicates retransmitted/out-of-order snapshots.
 - **playable network client**: `MOBA_SERVER=<addr|local>` renders snapshots with the local
-  hero predicted; right-click move, left-click attack, Q/W/E cast, Space stop.
+  hero predicted; right-click move, left-click attack, Q/W/E cast, Space stop, B recall.
 - **netsim**: per-client UDP link conditioner with base latency, jitter, seeded loss and
   reordering; optional one-way/round-trip shaping.
 - **tools**: `soak` binary (10 clients, 150 ms RTT, 5% loss, 30 ms jitter, default 5 min).

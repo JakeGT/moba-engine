@@ -10,7 +10,7 @@ use crate::components::{
 };
 
 use super::vision::cross;
-use super::{AttackerSnapshot, SimEvent, Simulation};
+use super::{AttackerSnapshot, RecallCancel, SimEvent, Simulation};
 
 impl Simulation {
     pub(super) fn modifier_armor(&self, entity: Entity) -> i32 {
@@ -252,6 +252,10 @@ impl Simulation {
             resistances.armor.saturating_add(bonus_armor),
             resistances.magic_resist,
         );
+        if dealt > 0 {
+            // Any damage that reaches the unit (before shields) interrupts a recall.
+            self.cancel_recall(target, RecallCancel::Damage);
+        }
         let mut damage = dealt;
         if let Some(modifiers) = self.world.get_mut::<Modifiers>(target) {
             let mut index = 0;

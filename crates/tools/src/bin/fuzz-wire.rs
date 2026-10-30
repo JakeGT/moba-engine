@@ -111,6 +111,8 @@ fn fuzz_once(rng: &mut Rng, catalog: &WireCatalog) {
         command: random_command(rng),
     };
     let mut input = encode_input(&message);
+    // Every command kind round-trips (a missing decoder arm fails here).
+    assert_eq!(decode_input(&input), Ok(message), "clean input round trip");
     mutate(rng, &mut input);
     let _ = decode_input(&input);
 
@@ -191,7 +193,8 @@ fn valid_snapshot(rng: &mut Rng) -> Vec<u8> {
             .despawns
             .push(rng.gen_range_u32(u32::from(delta.spawns[0].net_id) + 1) as u16);
     }
-    // Presentation events of every kind, the compact EVENT_ATTACK (v41) among them.
+    // Presentation events of every kind (0..=9: EVENT_RECALL, v42, is 9), the compact
+    // EVENT_ATTACK (v41) among them.
     for _ in 0..rng.gen_range_u32(MAX_SNAPSHOT_EVENTS as u32 + 1) {
         delta.events.push(random_event(rng));
     }
@@ -235,8 +238,20 @@ fn random_event(rng: &mut Rng) -> NetEvent {
     event
 }
 
+/// A random command of every kind (`Recall` and `UseItem` since v42's decoder fix).
 fn random_command(rng: &mut Rng) -> WireCommand {
-    match rng.gen_range_u32(4) {
+    match rng.gen_range_u32(9) {
+        4 => WireCommand::BuyItem {
+            item: rng.next_u32() as u8,
+        },
+        5 => WireCommand::Ready {
+            ready: rng.next_bool(),
+        },
+        6 => WireCommand::Surrender,
+        7 => WireCommand::UseItem {
+            slot: rng.next_u32() as u8,
+        },
+        8 => WireCommand::Recall,
         0 => WireCommand::Stop,
         1 => WireCommand::MoveTo {
             x: rng.next_u32() as u16,

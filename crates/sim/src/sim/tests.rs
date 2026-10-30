@@ -7,8 +7,8 @@ use moba_game::{AreaEffect, EMPTY_ITEM, Effect, EffectList, ModifierKind, Target
 use super::*;
 use crate::components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, HeroIdentity, HeroSlot,
-    ItemCooldowns, LaneWalker, LastHitBy, Mana, Modifier, Modifiers, MoveSpeed, MoveTarget, Regen,
-    Resistances, VisionRange,
+    ItemCooldowns, LaneWalker, LastHitBy, Mana, Modifier, Modifiers, MoveSpeed, MoveTarget, Recall,
+    Regen, Resistances, VisionRange,
 };
 
 fn idle(picks: [u8; MAX_PLAYERS]) -> Simulation {
@@ -812,6 +812,7 @@ fn every_registered_component_is_hashed() {
     );
     let _ = world.insert(entity, AttackDamageType(DamageType::Physical));
     let _ = world.insert(entity, ItemCooldowns::default());
+    let _ = world.insert(entity, Recall { remaining: 1 });
 
     let mut actual = sim.world().registered_component_types();
     actual.sort_unstable();
@@ -839,6 +840,7 @@ fn every_registered_component_is_hashed() {
         TypeId::of::<BaseMoveSpeed>(),
         TypeId::of::<LastHitBy>(),
         TypeId::of::<AttackDamageType>(),
+        TypeId::of::<Recall>(),
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);

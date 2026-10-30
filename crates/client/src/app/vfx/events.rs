@@ -4,8 +4,9 @@
 use moba_core::FixVec2;
 use moba_core::math::Vec3;
 use moba_net::protocol::{
-    EVENT_ATTACK, EVENT_CAST, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN,
-    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, NetEvent, dequantize_position,
+    EVENT_ATTACK, EVENT_CAST, EVENT_PROJECTILE_HIT, EVENT_PROJECTILE_SPAWN, EVENT_RECALL,
+    EVENT_STRUCTURE_DESTROYED, EVENT_UNIT_DIED, EVENT_ZONE_SPAWNED, NetEvent, RECALL_STARTED,
+    dequantize_position,
 };
 use moba_sim::{SimEvent, UnitKind};
 
@@ -20,6 +21,10 @@ pub(crate) enum Trigger {
     MinionDeath,
     StructureDestroyed,
     Attack,
+    /// A hero started recalling: the recall effect plays at it for the channel.
+    Recall,
+    /// A hero's recall was cancelled or completed: its recall effect stops emitting.
+    RecallEnd,
 }
 
 /// One trigger with everything an effect needs, in world space (metres, map centred on the
@@ -55,7 +60,7 @@ pub(crate) struct VfxEvent {
 }
 
 impl VfxEvent {
-    fn new(trigger: Trigger, team: u8, position: Vec3) -> Self {
+    pub(crate) fn new(trigger: Trigger, team: u8, position: Vec3) -> Self {
         Self {
             trigger,
             team,
@@ -71,6 +76,14 @@ impl VfxEvent {
             ability: None,
             effect: None,
         }
+    }
+
+    /// A recall start for `source`, channelling `seconds` at `position`.
+    pub(crate) fn recall(source: u32, team: u8, position: Vec3, seconds: f32) -> Self {
+        let mut event = Self::new(Trigger::Recall, team, position);
+        event.source = Some(source);
+        event.seconds = seconds;
+        event
     }
 }
 
@@ -141,6 +154,12 @@ pub(crate) fn from_net(
         }
         // Basic attacks carry only the two units; the hit lands at the target.
         EVENT_ATTACK => VfxEvent::new(Trigger::Attack, event.team, Vec3::ZERO),
+        EVENT_RECALL if event.value == RECALL_STARTED => {
+            let mut out = VfxEvent::new(Trigger::Recall, event.team, at(event.x, event.y));
+            out.seconds = f32::from(event.aux) / tick_rate.max(1.0);
+            out
+        }
+        EVENT_RECALL => VfxEvent::new(Trigger::RecallEnd, event.team, at(event.x, event.y)),
         _ => return None,
     };
     out.source = id(event.source);
@@ -261,6 +280,28 @@ pub(crate) fn from_sim(
             out.target = Some(entity(target));
             out
         }
+        SimEvent::RecallStarted {
+            hero,
+            team: hero_team,
+            position,
+            duration_ticks,
+        } => {
+            let mut out = VfxEvent::new(Trigger::Recall, team(hero_team), world(position, center));
+            out.source = Some(entity(hero));
+            out.seconds = duration_ticks as f32 / tick_rate.max(1.0);
+            out
+        }
+        SimEvent::RecallEnded {
+            hero,
+            team: hero_team,
+            position,
+            ..
+        } => {
+            let mut out =
+                VfxEvent::new(Trigger::RecallEnd, team(hero_team), world(position, center));
+            out.source = Some(entity(hero));
+            out
+        }
         _ => return None,
     };
     Some(out)
@@ -325,6 +366,29 @@ mod tests {
             ..event
         };
         assert!(from_net(&tower, 128.0, 30.0, |_, _| None).is_none());
+        let recall = NetEvent {
+            kind: EVENT_RECALL,
+            value: RECALL_STARTED,
+            aux: 240,
+            ..event
+        };
+        let mapped = from_net(&recall, 128.0, 30.0, |_, _| None).expect("recall");
+        assert_eq!(
+            (mapped.trigger, mapped.seconds, mapped.source),
+            (Trigger::Recall, 8.0, Some(7))
+        );
+        assert!((mapped.position - Vec3::new(10.0, 0.0, -10.0)).length() < 0.1);
+        for value in [
+            moba_net::protocol::RECALL_CANCELLED,
+            moba_net::protocol::RECALL_COMPLETED,
+        ] {
+            let end = NetEvent { value, ..recall };
+            let mapped = from_net(&end, 128.0, 30.0, |_, _| None).expect("recall end");
+            assert_eq!(
+                (mapped.trigger, mapped.source),
+                (Trigger::RecallEnd, Some(7))
+            );
+        }
         let unknown = NetEvent { kind: 99, ..event };
         assert!(from_net(&unknown, 128.0, 30.0, |_, _| None).is_none());
     }

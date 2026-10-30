@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use libfuzzer_sys::fuzz_target;
 use moba_net::protocol::{
     WireCatalog, decode_content_update, decode_hello, decode_input, decode_packet, decode_snapshot,
-    decode_welcome, encode_content_update, encode_snapshot,
+    decode_welcome, encode_content_update, encode_input, encode_snapshot,
 };
 
 /// A valid `ContentUpdate` for the built-in catalogue, encoded once.
@@ -37,7 +37,10 @@ fuzz_target!(|data: &[u8]| {
         encode_snapshot(&snapshot, &mut payload).expect("a decoded snapshot re-encodes");
         assert_eq!(decode_snapshot(&payload), Ok(snapshot));
     }
-    let _ = decode_input(data);
+    if let Ok(input) = decode_input(data) {
+        // Whatever command decodes re-encodes to the same message (v42: `Recall`).
+        assert_eq!(decode_input(&encode_input(&input)), Ok(input));
+    }
     let _ = decode_hello(data);
     let _ = decode_welcome(data);
     let _ = decode_content_update(data);

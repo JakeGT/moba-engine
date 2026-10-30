@@ -222,6 +222,7 @@ shared_xp_percent = 130
 structure_heroes_first = false
 nexus_win = true
 score_limit = 0
+recall_ticks = 240            # recall channel, ticks (0..=900; 0 disables recall)
 
 [rules.rewards.melee_minion]
 xp = 32
@@ -292,8 +293,12 @@ paths are supplied (empty-lobby rotation). Minion/tower combat stat blocks are e
 Every hashed `[rules]` field is carried in the handshake (since protocol **v38**): the economy fields
 (`starting_gold`, `gold_per_interval`, `gold_tick_interval`, `xp_radius`, `shop_radius`,
 `shared_xp_percent`, `[rules.rewards.*]`) and the win-condition fields (`structure_heroes_first`,
-`nexus_win`, `score_limit`) reach a joining client, so its rules match the server's instead of
-falling back to defaults. `content/economy-override.toml` is the regression pack;
+`nexus_win`, `score_limit`) and the recall channel (`recall_ticks`, since **v42**) reach a
+joining client, so its rules match the server's instead of falling back to defaults.
+`recall_ticks` is the channel a recall (**B**) runs before the hero teleports to its spawn;
+it is cancelled by moving, attacking, stopping, casting, taking damage, a stun or death. At
+most 900 ticks (30 s), the longest the client's recall effect plays. It is hashed and signed only when it differs from 240, so packs written before recall keep their
+content hash and attestation. `content/economy-override.toml` is the regression pack;
 `cargo test -p moba-net --test content` joins a real UDP client against it and compares the
 client's rules and content hash with the server's. Adding a `RulesSpec` field fails to compile
 until it is hashed (`feed_catalogue` in `crates/game/src/content/hash.rs`) and carried (`impl From<&GameContent> for WireCatalog` in `crates/net/src/protocol/catalog_from.rs`),
@@ -653,8 +658,10 @@ TOML puts every key after a `[[table]]` header into that table, so keep `move_sp
   attacks come from the server's attack events (protocol v41): the `attack` state's `release`
   lands on the tick the hit landed, and the next swing is started one attack interval ahead
   so its wind-up plays in full (it fades out if the hero stops attacking). An attack faster
-  than the clip speeds the clip up to fit. The simulation has no recall, so `recall` is
-  reserved.
+  than the clip speeds the clip up to fit. `recall` plays from the server's recall events
+  (protocol v42): it starts on the tick the channel started (make it a `loop` with
+  `interrupt_on_move = true`) and fades out (`fade_out`) on the tick it was cancelled or
+  completed; the recall flag in snapshots stands in for a lost start or end event.
 - **Limits.** A set is at most 16 KiB. Unknown keys, wrong types, out-of-range or non-finite
   numbers and names that the model does not have are errors.
 
@@ -978,6 +985,7 @@ hero_death = "hero-death"
 minion_death = "minion-death"
 structure_destroyed = "collapse"  # a tower or nexus
 attack = "attack-hit"             # a basic attack lands (at the target)
+recall = "recall"                 # a hero channels a recall, at the hero, until it ends (its recall flag clears, or it dies)
 
 [[abilities]]                     # at most 128
 name = "Arc Bolt"
@@ -999,7 +1007,7 @@ emitters and up to four ground decals (below), at least one of either:
 ```toml
 duration = 0.6            # seconds the effect emits (0..=30)
 importance = "high"       # low | normal | high: which effects budgets cull first
-event_duration = false    # zones: emit for the zone's lifetime instead of `duration`
+event_duration = false    # zones and recalls: emit for the zone's lifetime (the recall channel) instead of `duration`
 
 [[emitters]]
 primitive = "sprite"      # sprite | flipbook | trail | beam | ring | mesh
