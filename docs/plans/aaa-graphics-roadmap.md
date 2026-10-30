@@ -1,7 +1,7 @@
 # Roadmap: from preview renderer to AAA-quality MOBA visuals
 
 Written 2026-10-27. Status: **engine work complete** (2026-10-30): every phase R0–R8 is merged
-on `main`. The open items are the maintainer and art items listed in
+on `main`. The remaining maintainer and art items, deferred to pre-1.0, are listed in
 [Completion status](#completion-status-2026-10-30). Owner: maintainer.
 
 This plan covers **graphics only**: the renderer, the asset and animation pipeline, VFX, art
@@ -24,13 +24,13 @@ feature, recall, which is protocol v42 and sim logic v9 (replay format still v5)
 |---|---|---|---|
 | R0 Asset foundation | done | #317, #309, #319, #316, #318 | — |
 | R1 Renderer architecture | done | #323 (R1a), #327 (R1b) | the ≤ 5 % criterion's reading (below) |
-| R2 Lighting and materials | done | #330 (R2a), #335 (R2b) | timings on the three §7 reference GPUs; art-direction readability sign-off |
-| R3 Terrain and environment | done | #333 (R3a), #336 (R3b) | sign-off of "one fully art-directed map" (the sample maps are engine-authored) |
+| R2 Lighting and materials | done | #330 (R2a), #335 (R2b) | deferred to pre-1.0 by the maintainer: timings on the three §7 reference GPUs; art-direction readability sign-off |
+| R3 Terrain and environment | done | #333 (R3a), #336 (R3b) | deferred to pre-1.0 by the maintainer: sign-off of "one fully art-directed map" (the sample maps are engine-authored) |
 | R4 Animation runtime | done; exit met with recall ([perf/0024](../perf/0024-recall.md)) | #324 (R4a), #325 (R4b-1), #332 (R4b), #340 | — |
-| R5 VFX | done | #329 | §7 reference-GPU timings (#9/#127) |
-| R6 Post and image quality | done, including item 7 (distortion) | #334, #338 | the blind A/B readability sign-off (image set in perf/0019) |
+| R5 VFX | done | #329 | deferred to pre-1.0 by the maintainer: §7 reference-GPU timings (#9/#127) |
+| R6 Post and image quality | done, including item 7 (distortion) | #334, #338 | deferred to pre-1.0 by the maintainer: the blind A/B readability sign-off (image set in perf/0019) |
 | R7 UI and presentation | done | #326 (R7a), #328 (R7b) | — (champion select does not exist yet) |
-| R8 Performance and scaling | done | #337 | reference-machine matrix and min-spec/MoltenVK evidence (#9/#127); a self-hosted GPU runner for `nightly-perf.yml` |
+| R8 Performance and scaling | done | #337 | deferred to pre-1.0 by the maintainer: reference-machine matrix and min-spec/MoltenVK evidence (#9/#127); a self-hosted GPU runner for `nightly-perf.yml` |
 
 **R1's "≤ 5 % GPU-time overhead".** As [perf/0011](../perf/0011-render-graph.md) shows, the
 literal relative figure cannot hold for any design that adds the HDR target R1 itself asks for:
@@ -47,9 +47,16 @@ each tier's §7 GPU budget, where every later phase was measured.
   `HAS_GPU_RUNNER=true` so `nightly-perf.yml` gates budgets every night. Every real-GPU number
   so far is from one RTX 5070 Ti.
 - **Sign-offs**: R2's readability review, R3's art-directed map, R6's blind A/B.
-- **RTX re-runs** that a full GPU blocked on 2026-10-30: R8's validation matrix, 10-minute
-  `perf-replay.sh` and `tests/perf/baseline.toml` refresh, R3b's `terrain-decal-check.sh`, and
-  the distortion on/off timings (perf/0022, perf/0023 list the commands).
+
+**Deferred to the pre-1.0 milestone (maintainer decision, 2026-10-30).** The art-direction
+sign-offs (R2 readability, R3 art-directed map, R6 blind A/B), the §7 reference-GPU matrix
+(#9/#127) and the self-hosted GPU runner are explicitly deferred by the maintainer to the
+pre-1.0 milestone, alongside the 10-client playtest and the independent external review. They
+are not open engine work. The RTX 5070 Ti evidence that a full GPU blocked earlier the same
+day (R8's validation matrix, the 10-minute `perf-replay.sh` and baseline refresh, R3b's
+`terrain-decal-check.sh` and the distortion timings) has been re-run on `main`
+([perf/0021](../perf/0021-decals-foliage-water.md), [perf/0022](../perf/0022-r8-scaling-pacing.md),
+[perf/0023](../perf/0023-distortion.md)).
 
 **Optional or deferred engine work** (not exit items): GPU-driven indirect culling (ADR-0018 §2
 sets the triggers), TAA, SMAA and FSR (ADR-0015), hero and skin streaming at champion select
@@ -195,9 +202,9 @@ top-down AO for walls and props (`moba-tools ao-bake`, fingerprinted against the
 on the ambient line, composable with R6's SSAO; and a depth pre-pass with screen-space
 contact shadows on High+, reusable by R6's GTAO. Lightmaps were not needed (one sun, shadows
 on every tier). **R2 is done** as engineering work. The exit's "all three reference GPUs"
-and the **art-direction readability sign-off** remain maintainer items: the RTX 5070 Ti is
-the only measured GPU, and the review evidence (captures per tier, palette checks) is in
-perf/0020 for an art director to sign.
+and the **art-direction readability sign-off** are deferred to pre-1.0 by the maintainer: the
+RTX 5070 Ti is the only measured GPU, and the review evidence (captures per tier, palette
+checks) is in perf/0020 for an art director to sign.
 
 ### R3 — Terrain and environment (L)
 1. **Terrain.** Heightfield or authored mesh with splat-map texturing (4–8 layers, triplanar on slopes), plus normal and AO maps. Walls and cliffs are props from the asset manifest. The simulation's map geometry stays authoritative and is validated against the visual mesh by content-check.
@@ -253,8 +260,8 @@ perf/0020 for an art director to sign.
     cameras (default, networked, overview, horizon, the river close up on High and Low, and
     the decal teamfight) plus the VAT, Ultra and Low-scale captures.
   - **Exit:** the showcase renders well inside every tier's budget (perf/0021). Art sign-off
-    of "one fully art-directed map" is a maintainer item: the sample maps are
-    engine-authored.
+    of "one fully art-directed map" is deferred to pre-1.0 by the maintainer: the sample maps
+    are engine-authored.
 - **Wards** do not exist in the simulation yet; the texture takes any source, and the test
   uses ward-like sources.
 
@@ -299,7 +306,7 @@ rather than a separate tool. Effects are client-local and unhashed like every ot
 bound by name in `vfx/bindings.toml`. The exit scene is `tests/replays/teamfight-5v5.mbr`
 (`moba-tools teamfight`, all 15 built-in abilities cast, verified by a test), played with
 `MOBA_REPLAY` and measured on every tier on the RTX 5070 Ti; the other §7 reference GPUs are
-still unowned (#9/#127).
+deferred to pre-1.0 by the maintainer (#9/#127).
 
 ### R6 — Post-processing and image quality (M)
 1. **Tonemapping** (AgX or ACES-fitted) with exposure, and per-map colour-grading LUTs.
@@ -316,8 +323,8 @@ still unowned (#9/#127).
 [perf/0019](../perf/0019-post.md)): every feature tiered with an off switch, validation and sync
 validation clean on lavapipe and the RTX 5070 Ti, per-pass GPU timings before/after on the R5
 teamfight replay inside every §7 budget, reference captures per tier and the blind A/B image
-set with its protocol in perf/0019. The A/B **sign-off is a maintainer item**. Item 7
-done 2026-10-30 ([ADR-0019](../adr/0019-distortion.md), [perf/0023](../perf/0023-distortion.md)):
+set with its protocol in perf/0019. The A/B **sign-off is deferred to pre-1.0 by the
+maintainer**. Item 7 done 2026-10-30 ([ADR-0019](../adr/0019-distortion.md), [perf/0023](../perf/0023-distortion.md)):
 distortion particles (`blend = "distortion"`) refract a copy of the HDR target taken after the
 water and before the particles, on High (6 px at 1080p) and Ultra (8 px), off on Low, Medium,
 `MOBA_DISTORTION=off` and portability-subset devices; units are masked through the prepass ID
@@ -351,12 +358,14 @@ offline (`mesh-bake`), picked by screen-space error per tier, with `MOBA_MESH_LO
 they combine with the R4b bone LOD. Per-tier VRAM and texture budgets are accounted in the
 frame log and at startup; over-budget textures drop mips instead of failing. Loads happen
 only at load time (`locked_uploads=0`, `locked_pipelines=0` in every run), and content-check
-reports per-tier fits. The 10-minute replay holds p99 ≤ 1.29 × p50 on every tier on the RTX
-5070 Ti. `nightly-perf.yml` gates it on a `[self-hosted, gpu]` runner once
+reports per-tier fits. The 10-minute replay holds p99 ≤ 1.18 × p50 on every tier on the RTX
+5070 Ti (re-run on `main` after R3b and distortion, which refreshed `tests/perf/baseline.toml`).
+`nightly-perf.yml` gates it on a `[self-hosted, gpu]` runner once
 `HAS_GPU_RUNNER=true`. Texture formats (BC7/BC5 in KTX2) shipped in R1b; Basis transcoding is
 not needed yet. Not done: hero and skin streaming at champion select waits for a
 champion-select flow (today everything loads before the match). The reference-machine
-matrix (§7) is a **maintainer item** (#9/#127); perf/0022 has the checklist.
+matrix (§7) and the self-hosted runner are **deferred to pre-1.0 by the maintainer** (#9/#127);
+perf/0022 has the checklist.
 
 ## 5. Sequencing at a glance
 
@@ -444,7 +453,6 @@ done or superseded. What remains is the maintainer list in
 1. Acquire or borrow the §7 reference hardware and register one self-hosted GPU runner
    (`HAS_GPU_RUNNER=true`), then run `scripts/perf-replay.sh` on each and refresh
    `tests/perf/baseline.toml` (#9/#127).
-2. Re-run the RTX evidence that a full GPU blocked on 2026-10-30 (perf/0022, perf/0023).
-3. Hire or commission the art direction and production in §8, and sign off R2's readability
+2. Hire or commission the art direction and production in §8, and sign off R2's readability
    review, R3's art-directed map and R6's blind A/B against the first art-complete hero and map
    (the §8 vertical slice).

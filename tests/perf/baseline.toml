@@ -1,27 +1,31 @@
 # perf-gate baseline (R8, ADR-0018 §6; docs/perf/0022-r8-scaling-pacing.md).
 #
-# Measured 2026-10-30 with scripts/perf-replay.sh (teamfight --ticks 18000, 1920x1080, vsync
-# off, validation off, warm pipeline cache) on an NVIDIA GeForce RTX 5070 Ti (driver
-# 615.78.08), AMD Ryzen 7 9800X3D, CachyOS Linux 7.3. perf-gate fails a run whose
-# gpu_total_p95_ms or render_p95_ms grows past these by more than --max-regression (25 %,
-# with a 0.05 ms noise floor). The gate fails a run on any other GPU (the log's gpu=), so a
-# different runner needs its own baseline: run `BASELINE= scripts/perf-replay.sh` there
-# and replace this file. Every tier table needs both keys; unknown keys are an error.
+# Measured 2026-10-30 on `main` at 197857b (after R3b, R8 and distortion) with
+# scripts/perf-replay.sh (teamfight --ticks 18000, a physical 1920x1080, vsync off,
+# validation off, warm pipeline cache) on an NVIDIA GeForce RTX 5070 Ti (driver 615.78.08),
+# AMD Ryzen 7 9800X3D, CachyOS Linux 7.3, with the GPU's memory clock at P0 (14001 MHz)
+# throughout: two displays were attached. At the idle memory clock (405 MHz, one display) the
+# same replay's GPU p95 is up to 1.75x higher on Low and Medium (perf/0022), so compare runs
+# in the same power state. perf-gate fails a run whose gpu_total_p95_ms or render_p95_ms
+# grows past these by more than --max-regression (25 %, with a 0.05 ms noise floor). The gate
+# fails a run on any other GPU (the log's gpu=), so a different runner needs its own
+# baseline: run `BASELINE= scripts/perf-replay.sh` there and replace this file. Every tier
+# table needs both keys; unknown keys are an error.
 
 gpu = "NVIDIA GeForce RTX 5070 Ti"
 
 [low]
-gpu_total_p95_ms = 0.423
-render_p95_ms = 0.279
+gpu_total_p95_ms = 0.206
+render_p95_ms = 0.191
 
 [medium]
-gpu_total_p95_ms = 0.578
-render_p95_ms = 0.302
+gpu_total_p95_ms = 0.301
+render_p95_ms = 0.218
 
 [high]
-gpu_total_p95_ms = 1.037
-render_p95_ms = 0.315
+gpu_total_p95_ms = 0.490
+render_p95_ms = 0.199
 
 [ultra]
-gpu_total_p95_ms = 0.599
-render_p95_ms = 0.171
+gpu_total_p95_ms = 0.664
+render_p95_ms = 0.254

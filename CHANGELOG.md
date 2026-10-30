@@ -101,6 +101,13 @@ the semver check):
 - Recorded maintainer decisions (2026-10-28): the content schema stays exhaustive (breaking
   changes are fine until 1.0), and the playtest, external review, Windows/macOS GPU runs and
   crates.io publication happen just before the 1.0 release.
+- RTX 5070 Ti evidence for R3b, R8 and distortion, re-run on `main` once the GPU was free
+  (perf/0021, perf/0022, perf/0023): the validation matrix (37 configurations, 0 messages),
+  the 10-minute `perf-replay.sh` on every tier with `tests/perf/baseline.toml` refreshed from
+  it, `terrain-decal-check.sh`, the R3b per-feature costs and the distortion on/no-draw
+  timings (median of three interleaved rounds), and RTX captures of the R3b screenshots.
+  Recorded the maintainer decision (2026-10-30) that the art-direction sign-offs, the §7
+  reference-GPU matrix and the self-hosted GPU runner are deferred to the pre-1.0 milestone.
 
 ### Planning
 - Added `docs/plans/aaa-graphics-roadmap.md`: graphics roadmap (R0–R8), quality tiers,

@@ -5,7 +5,8 @@ Captured 2026-10-30 on the development workstation, not a CI runner, for
 
 - Software: lavapipe (`llvmpipe (LLVM 23.1.3, 256 bits)`) from
   `/home/jaket/Projects/MOBA/.tools` with the bundled Khronos validation layer
-- GPU: NVIDIA GeForce RTX 5070 Ti (16 GB), driver 615.78.08 — **not measured, see below**
+- GPU: NVIDIA GeForce RTX 5070 Ti (16 GB), driver 615.78.08, measured on `main` at `197857b`
+  ([below](#rtx-5070-ti-timings))
 - CPU: AMD Ryzen 7 9800X3D; OS: Linux 7.3.0-2-cachyos, Wayland
 - Build: release, this branch (`feat/r6-distortion`, based on `main` at `db29264`).
   "No-draw" is the same build with `MOBA_DISTORTION=nodraw`, which spawns and simulates every
@@ -15,33 +16,63 @@ Captured 2026-10-30 on the development workstation, not a CI runner, for
   diff mixed different particles with the real refraction. Every number below is against
   no-draw.)
 
-## RTX 5070 Ti timings: pending
+## RTX 5070 Ti timings
 
-The brief asks for RTX timings (median of three interleaved on/off rounds of the teamfight
-replay at High and Ultra). They could not be taken: another process held 15.6 of the GPU's
-16.3 GB (`nvidia-smi --query-gpu=memory.used,memory.total`: `15623 MiB, 16303 MiB`), and the
-client fails at start-up with `renderer initialisation failed: GPU allocation error: Out of
-memory`; re-checked before this revision's runs: still `15625 MiB, 16303 MiB`. That
-process was left alone. **Follow-up:** rerun the commands below on the RTX
-when its memory is free and add the table here.
+The PR's RTX run was blocked (another process held 15.6 of the card's 16.3 GB and the client
+could not allocate). Re-run on `main` at `197857b` the same day (17:58–18:06 UTC),
+release, 1920×1080, vsync off, validation off, no pipeline cache, 3,000 frames per
+run, **three rounds interleaved on / no-draw over every row**, the median of the three in
+each cell; `p50 range` is the rounds' GPU totals.
+
+- **The GPU had no other client**: 2.3 GB of 16.3 GB used before the set (the desktop:
+  `kwin_wayland`, `plasmashell`, a browser and the session's screen locker), 0 % utilisation.
+  The frame interval was the 240 Hz cap (4.18 ms) in every run.
+- **Clocks** cannot be locked without root. `nvidia-smi -q -d CLOCK` was recorded before the
+  set, a 1,500-frame Ultra warm-up ran first, and a sampler logged the clocks every 250 ms;
+  the last column is each round's dominant memory clock. Every row ran at 7001 MHz except the
+  High Ember crystal pair (810 and 405 MHz, a lighter scene the driver clocks down): its
+  totals wander between rounds, so only its pass times are quoted.
 
 ```bash
-MOBA_QUALITY=<high|ultra> MOBA_WINDOW_SIZE=1920x1080 MOBA_REPLAY=tests/replays/teamfight-5v5.mbr \
-MOBA_WARMUP_TICKS=330 MOBA_SMOKE_FRAMES=3000 MOBA_VSYNC=0 MOBA_PIPELINE_CACHE=off \
-MOBA_FRAME_LOG=/tmp/r19.log [MOBA_DISTORTION=nodraw] cargo run --release -p moba-client
+MOBA_QUALITY=<high|ultra> MOBA_WINDOW_SIZE=1920x1080 MOBA_SMOKE_FRAMES=3000 MOBA_VSYNC=0 \
+MOBA_PIPELINE_CACHE=off MOBA_FRAME_LOG=r19.log [MOBA_DISTORTION=nodraw] <scene> \
+  ./target/release/moba-client
+# <scene>: MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330
+#          MOBA_VFX_PREVIEW=cinder-zone
+#          MOBA_CONTENT=content/ember-map.toml MOBA_PREVIEW_CAMERA=0.6,0.35,24,-7,10
 ```
 
-**What to expect, from the pass structure.** The teamfight at tick 330 has no haze in view
-(see below), so it runs the frame-graph variant in which both passes are only reserved:
-no commands, no timestamps and no barriers. With haze in view the copy is one
-`R16G16B16A16_SFLOAT` region copy of the haze's projected bounding box plus the cap (at
-most the full 1080p frame, 16.6 MB; R3b's full-frame `water_copy` measured 0.01–0.02 ms on
-this RTX in [perf/0021](0021-decals-foliage-water.md)), and the draw, scissored to the same
-box, shades only the haze sprites' pixels with seven texture reads each (a bilinear copy
-tap, a depth, an ID and an alpha fetch, and 2×2 gathers of the IDs, alpha and depth under
-the tap), well under the
-particles' own `vfx_draw` cost at the same coverage. On lavapipe, where every pass is
-CPU-rasterised, both together are 0.4–0.6 % of the frame.
+| scene, tier, distortion | scene | water_copy | water | vfx | distortion_copy | distortion | bloom | composite | fxaa | GPU total p50 / p95 | p50 range | mem clock per round (MHz) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| teamfight, High, on | 0.159 | 0.019 | 0.023 | 0.025 | — | — | 0.042 | 0.020 | 0.024 | **0.493** / 0.506 | 0.487–0.494 | 7001 / 7001 / 7001 |
+| teamfight, High, no-draw | 0.158 | 0.019 | 0.026 | 0.024 | — | — | 0.042 | 0.020 | 0.024 | **0.491** / 0.503 | 0.489–0.491 | 7001 / 7001 / 7001 |
+| `cinder-zone`, High, on | 0.168 | 0.018 | 0.019 | 0.029 | 0.007 | 0.010 | 0.042 | 0.020 | 0.024 | **0.524** / 0.546 | 0.521–0.527 | 7001 / 7001 / 7001 |
+| `cinder-zone`, High, no-draw | 0.168 | 0.019 | 0.019 | 0.029 | — | — | 0.042 | 0.020 | 0.024 | **0.508** / 0.526 | 0.506–0.509 | 7001 / 7001 / 7001 |
+| Ember crystal, High, on | 0.219 | — | — | 0.029 | 0.011 | 0.005 | 0.058 | 0.026 | 0.028 | **0.638** / 0.769 | 0.481–0.656 | 810 / 810 / 810 |
+| Ember crystal, High, no-draw | 0.228 | — | — | 0.030 | — | — | 0.060 | 0.024 | 0.029 | **0.633** / 1.042 | 0.587–0.710 | 405 / 810 / 810 |
+| teamfight, Ultra, on | 0.282 | 0.022 | 0.030 | 0.036 | — | — | 0.042 | 0.022 | — | **0.719** / 0.730 | 0.718–0.719 | 7001 / 7001 / 7001 |
+| teamfight, Ultra, no-draw | 0.283 | 0.022 | 0.030 | 0.037 | — | — | 0.042 | 0.022 | — | **0.720** / 0.731 | 0.720–0.721 | 7001 / 7001 / 7001 |
+| `cinder-zone`, Ultra, on | 0.285 | 0.022 | 0.025 | 0.040 | 0.007 | 0.012 | 0.042 | 0.022 | — | **0.758** / 0.776 | 0.757–0.758 | 7001 / 7001 / 7001 |
+| `cinder-zone`, Ultra, no-draw | 0.285 | 0.022 | 0.026 | 0.041 | — | — | 0.042 | 0.022 | — | **0.742** / 0.756 | 0.742–0.742 | 7001 / 7001 / 7001 |
+| Ember crystal, Ultra, on | 0.306 | — | — | 0.032 | 0.011 | 0.008 | 0.045 | 0.023 | — | **0.751** / 0.761 | 0.751–0.751 | 7001 / 7001 / 7001 |
+| Ember crystal, Ultra, no-draw | 0.306 | — | — | 0.033 | — | — | 0.048 | 0.022 | — | **0.737** / 0.747 | 0.736–0.738 | 7001 / 7001 / 7001 |
+
+- **Teamfight:** no hazy effect plays from tick 330, so every frame runs the idle variant (no
+  distortion lanes in the log); on and no-draw agree within 0.002 ms on both tiers.
+- **`cinder-zone` with the haze live** (68–71 live particles, `vfx_distortion_max` 9–10,
+  the distortion passes in 2,522–2,598 of the 2,940 logged frames as the zone cycles): the
+  bounding-box copy costs **0.007 ms** and the draw **0.010 ms (High) / 0.012 ms (Ultra)**;
+  the total moves by +0.016 ms on both tiers. The scene pass is unchanged (0.168 / 0.168,
+  0.285 / 0.285 ms).
+- **Ember crystal** (the map's heat vents, `vfx_distortion_max` 21, distortion in 2,938
+  of 2,940 frames): copy 0.011 ms and draw 0.005 ms (High) / 0.008 ms (Ultra); Ultra's total +0.014 ms.
+- **Against the budgets:** the heaviest row, `cinder-zone` on Ultra, is 0.758 / 0.776 ms (p50
+  / p95) against 7.5 ms; High's is 0.524 / 0.546 ms against 6.0 ms. The haze costs at most
+  0.02 ms of either. This matches the expectation from the pass structure (one region copy
+  of the haze's box, a scissored draw of its sprites; R3b's full-frame `water_copy` is
+  0.018–0.022 ms on the same GPU in [perf/0021](0021-decals-foliage-water.md)).
+- **Memory:** `vram_mb` 134.5 (High) and 286.7 (Ultra) with the haze on and with no-draw
+  alike (`targets_mb` 87.5 / 231.3); `locked_uploads=0`, `locked_pipelines=0` in every run.
 
 ## Lavapipe timings (1280×720)
 
@@ -88,10 +119,18 @@ accounting rounds away. `uploads` stays at the load-time count and `locked_uploa
 `locked_pipelines=0` in every run: the distortion pipeline is built with the other VFX
 pipelines at renderer creation.
 
-## Validation and sync validation (lavapipe, `MOBA_VULKAN_VALIDATION=required`)
+## Validation and sync validation (`MOBA_VULKAN_VALIDATION=required`)
 
-Zero `VUID`/`SYNC-` messages in every run below (validation and synchronisation validation
-on, as in `render-golden.yml`):
+**RTX 5070 Ti** (`main` at `197857b`, 1280×720, 300 frames each, part of the 37-run matrix in
+[perf/0022](0022-r8-scaling-pacing.md#validation)): **0 messages and exit 0** for
+`cinder-zone` on High and Ultra (MSAA 4×), each also with `MOBA_DISTORTION=nodraw` and at
+`MOBA_RENDER_SCALE=0.75`; the Ember crystal (`MOBA_CONTENT=content/ember-map.toml
+MOBA_PREVIEW_CAMERA=0.6,0.35,24,-7,10`) on High and Ultra, drawn and no-draw; the networked
+Ember map on High and Ultra; and the teamfight replay on every tier. Every live run logged
+the distortion passes in 238 of its 240 measured frames, every no-draw run none.
+
+**Lavapipe:** zero `VUID`/`SYNC-` messages in every run below (validation and synchronisation
+validation on, as in `render-golden.yml`):
 
 - all twelve existing render-golden captures (default High, network, ember, VAT, Ultra
   with MSAA 4×, Low at 0.75 render scale, overview, horizon, river on High, Low and Ultra,

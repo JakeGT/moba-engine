@@ -297,5 +297,6 @@ already shows, by a few pixels. Nothing hidden is drawn, so nothing hidden can b
   because it blurs the haze's HDR change tens of pixels past the haze at 1–2 LSB, onto unit
   faces the haze never touched; the unit mask is what the boxes test. No existing golden changed: their pixels' colour is the
   same, and the telegraph mark lives only in the HDR alpha, which nothing downstream reads.
-- Costs and validation: [perf/0023](../perf/0023-distortion.md) (lavapipe; the RTX 5070 Ti
-  timings are pending, its memory was held by another process).
+- Costs and validation: [perf/0023](../perf/0023-distortion.md) (lavapipe and the RTX 5070 Ti:
+  the haze's two passes cost 0.016–0.019 ms together at 1080p on High and Ultra, 0 validation
+  messages).
