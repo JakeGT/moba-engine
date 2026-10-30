@@ -123,6 +123,10 @@ pub struct ModelBudgetReport {
     pub texture_bytes: u64,
     /// Per tier, Low first.
     pub tiers: [TierFit; 4],
+    /// Why the model's `.lod` file was not used (stale: baked from another version of the
+    /// model, or malformed); `None` when it loaded or there is none. The model then draws
+    /// LOD0 only, and the tiers above count no baked levels.
+    pub lod_problem: Option<String>,
 }
 
 /// Checks one model (LOD0 triangles, baked levels, joints, material texture bytes) against
@@ -153,6 +157,7 @@ pub fn model_report(
         joints,
         texture_bytes,
         tiers,
+        lod_problem: None,
     }
 }
 

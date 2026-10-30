@@ -160,8 +160,9 @@ The offline mesh LOD baker (`moba-tools mesh-bake lod`, `crates/tools/src/bin/me
 simplifies meshes with the `meshopt` crate 0.7.0 (MIT OR Apache-2.0), which compiles and
 statically links the bundled C++ [meshoptimizer](https://github.com/zeux/meshoptimizer)
 library, version 1.3 (MIT, Copyright (C) 2016-2026 Arseny Kapoulkine), and its
-dependency `float-cmp` (MIT). Only the tools crate links it: the client and renderer read
-the baked `models/<model>.lod` files and never link meshoptimizer. The generated
+dependency `float-cmp` (MIT). Only the tools crate links it, and only with its optional
+`mesh-bake` feature: the client and renderer read the baked `models/<model>.lod` files and
+never link meshoptimizer. The generated
 `content/models/*.lod` files are derived from this repository's own sample meshes and carry
 the repository's MIT OR Apache-2.0 licence. See [ADR-0018](docs/adr/0018-culling-lods-memory.md).
 

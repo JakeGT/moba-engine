@@ -4,8 +4,16 @@
 //! adds its allocation's size to one of three classes when it is created and removes it when it
 //! is dropped: **textures** (sampled images that are not attachments: material textures,
 //! terrain layers, VAT, environment, LUTs, baked AO), **targets** (attachments: transients,
-//! offscreen images, the shadow map) and **buffers**. The counters are process-wide atomics,
-//! like the renderer's other diagnostics counters; a process runs one renderer.
+//! offscreen images, the shadow map) and **buffers**. The **swapchain** images are owned by
+//! the WSI, which reports no memory requirements; they are estimated as width × height ×
+//! texel size × image count. The allocator's **reserved** bytes (every device memory block it
+//! holds, including free space in them) are reported beside the live total. The counters are
+//! process-wide atomics, like the renderer's other diagnostics counters; a process runs one
+//! renderer at a time, and [`begin_renderer`] resets the per-renderer state.
+//!
+//! **Budget.** The first time the live total exceeds the tier's total budget, a warning is
+//! logged (once per renderer); the peak is in the frame log and `perf-gate` fails a run whose
+//! peak is over the budget.
 //!
 //! **Uploads.** Every staging upload (meshes, textures, terrain) calls [`count_upload`] and
 //! every pipeline build [`count_pipelines`]. Between [`set_locked`]`(true)` (the match is
@@ -17,6 +25,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use ash::vk;
 
 static TEXTURE_BYTES: AtomicU64 = AtomicU64::new(0);
+static SWAPCHAIN_BYTES: AtomicU64 = AtomicU64::new(0);
+static TOTAL_BUDGET: AtomicU64 = AtomicU64::new(0);
+static OVER_BUDGET_LOGGED: AtomicBool = AtomicBool::new(false);
 static TARGET_BYTES: AtomicU64 = AtomicU64::new(0);
 static BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -34,6 +45,8 @@ pub(crate) enum MemoryClass {
     Texture,
     Target,
     Buffer,
+    /// Swapchain images (estimated: the WSI owns their memory).
+    Swapchain,
 }
 
 impl MemoryClass {
@@ -56,6 +69,7 @@ impl MemoryClass {
             Self::Texture => &TEXTURE_BYTES,
             Self::Target => &TARGET_BYTES,
             Self::Buffer => &BUFFER_BYTES,
+            Self::Swapchain => &SWAPCHAIN_BYTES,
         }
     }
 }
@@ -65,6 +79,36 @@ pub(crate) fn track_alloc(class: MemoryClass, bytes: u64) {
     class.counter().fetch_add(bytes, Ordering::Relaxed);
     let total = current_total();
     PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
+    let budget = TOTAL_BUDGET.load(Ordering::Relaxed);
+    if budget > 0 && total > budget && !OVER_BUDGET_LOGGED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[vram] warning: {:.1} MiB allocated, over the tier's {:.1} MiB budget \
+             (ADR-0018 §4: lower the quality tier or the content's texture sizes)",
+            total as f64 / MIB,
+            budget as f64 / MIB,
+        );
+    }
+}
+
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// Starts a renderer's accounting: the uploads are unlocked (a new renderer loads its assets;
+/// a lock left by a previous renderer must not count them), the lock and over-budget
+/// warnings are re-armed, and `total_budget` is the budget the warning compares against.
+/// The byte counters stay: they follow live objects, which free themselves.
+pub(crate) fn begin_renderer(total_budget: u64) {
+    LOCKED.store(false, Ordering::Relaxed);
+    LOCKED_LOGGED.store(false, Ordering::Relaxed);
+    OVER_BUDGET_LOGGED.store(false, Ordering::Relaxed);
+    TOTAL_BUDGET.store(total_budget, Ordering::Relaxed);
+}
+
+/// Bytes per texel of a swapchain format (4 unless it is a 64-bit format).
+pub(crate) fn swapchain_texel_bytes(format: vk::Format) -> u64 {
+    match format {
+        vk::Format::R16G16B16A16_SFLOAT | vk::Format::R16G16B16A16_UNORM => 8,
+        _ => 4,
+    }
 }
 
 /// Records that an allocation of `bytes` in `class` was freed.
@@ -77,6 +121,7 @@ fn current_total() -> u64 {
     TEXTURE_BYTES.load(Ordering::Relaxed)
         + TARGET_BYTES.load(Ordering::Relaxed)
         + BUFFER_BYTES.load(Ordering::Relaxed)
+        + SWAPCHAIN_BYTES.load(Ordering::Relaxed)
 }
 
 /// Bytes of textures allocated now.
@@ -115,6 +160,11 @@ pub(crate) fn set_locked(locked: bool) {
     LOCKED.store(locked, Ordering::Relaxed);
 }
 
+/// Whether uploads are locked now.
+pub(crate) fn locked() -> bool {
+    LOCKED.load(Ordering::Relaxed)
+}
+
 /// Records a texture uploaded with its largest mips dropped to fit the budget.
 pub(crate) fn note_degraded() {
     DEGRADED_TEXTURES.fetch_add(1, Ordering::Relaxed);
@@ -135,6 +185,11 @@ pub struct MemoryStats {
     pub target_bytes: u64,
     /// Buffers (meshes, per-frame uniforms and instances, staging while it lives), bytes.
     pub buffer_bytes: u64,
+    /// Swapchain images, bytes (estimated: width × height × texel size × images).
+    pub swapchain_bytes: u64,
+    /// Device memory the allocator holds in blocks, including their free space, bytes (the
+    /// driver-side cost of the live total; the swapchain is not in it).
+    pub reserved_bytes: u64,
     /// The largest total seen so far, bytes.
     pub peak_bytes: u64,
     /// The tier's texture budget, bytes.
@@ -156,19 +211,27 @@ pub struct MemoryStats {
 }
 
 impl MemoryStats {
-    /// Every allocation now, bytes.
+    /// Every allocation now, swapchain included, bytes.
     #[must_use]
     pub const fn total_bytes(&self) -> u64 {
-        self.texture_bytes + self.target_bytes + self.buffer_bytes
+        self.texture_bytes + self.target_bytes + self.buffer_bytes + self.swapchain_bytes
+    }
+
+    /// Whether the peak went over the tier's total budget.
+    #[must_use]
+    pub const fn over_budget(&self) -> bool {
+        self.peak_bytes > self.total_budget
     }
 }
 
-/// The counters now, against `budget`.
-pub(crate) fn stats(budget: &moba_assets::TierBudget) -> MemoryStats {
+/// The counters now, against `budget`, with the allocator's `reserved_bytes`.
+pub(crate) fn stats(budget: &moba_assets::TierBudget, reserved_bytes: u64) -> MemoryStats {
     MemoryStats {
         texture_bytes: TEXTURE_BYTES.load(Ordering::Relaxed),
         target_bytes: TARGET_BYTES.load(Ordering::Relaxed),
         buffer_bytes: BUFFER_BYTES.load(Ordering::Relaxed),
+        swapchain_bytes: SWAPCHAIN_BYTES.load(Ordering::Relaxed),
+        reserved_bytes,
         peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
         texture_budget: budget.texture_bytes,
         total_budget: budget.total_bytes,
@@ -214,6 +277,37 @@ pub(crate) fn without_top_mips(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R8 review: a lock left set (a renderer dropped mid-match, or a client that never
+    /// unlocked) must not count the next renderer's load-time uploads as mid-match ones.
+    #[test]
+    fn a_new_renderer_starts_unlocked() {
+        set_locked(true);
+        LOCKED_LOGGED.store(true, Ordering::Relaxed);
+        OVER_BUDGET_LOGGED.store(true, Ordering::Relaxed);
+        begin_renderer(1 << 30);
+        assert!(!locked());
+        assert!(!LOCKED_LOGGED.load(Ordering::Relaxed));
+        assert!(!OVER_BUDGET_LOGGED.load(Ordering::Relaxed));
+        assert_eq!(TOTAL_BUDGET.load(Ordering::Relaxed), 1 << 30);
+        let before = LOCKED_UPLOADS.load(Ordering::Relaxed);
+        count_upload();
+        assert_eq!(
+            LOCKED_UPLOADS.load(Ordering::Relaxed),
+            before,
+            "a load-time upload"
+        );
+    }
+
+    #[test]
+    fn swapchain_texels_follow_the_format() {
+        assert_eq!(swapchain_texel_bytes(vk::Format::B8G8R8A8_SRGB), 4);
+        assert_eq!(
+            swapchain_texel_bytes(vk::Format::A2B10G10R10_UNORM_PACK32),
+            4
+        );
+        assert_eq!(swapchain_texel_bytes(vk::Format::R16G16B16A16_SFLOAT), 8);
+    }
     use moba_assets::{TextureData, TextureFormat};
 
     fn mipped(size: u32) -> TextureData {

@@ -217,8 +217,9 @@ R2b (ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `Po
 with a `with_*` each.
 R8 (ADR-0018) added culling, mesh LODs and memory budgets: `CullMode` (`Off`, `Cpu`; `name`,
 `from_name`), `LodConfig` (`OFF`, `for_tier`, `with_tolerance`), `CullStats`
-(`Renderer::cull_stats`), `MemoryStats` (`total_bytes`; `Renderer::memory_stats`),
-`Renderer::{lock_uploads, unlock_uploads}`, `RenderConfig::{culling, mesh_lod}` with
+(`Renderer::cull_stats`; `dropped`), `MemoryStats` (`total_bytes`, `over_budget`,
+`swapchain_bytes`, `reserved_bytes`; `Renderer::memory_stats`),
+`Renderer::{lock_uploads, unlock_uploads, uploads_locked}`, `RenderConfig::{culling, mesh_lod}` with
 `with_culling`/`with_mesh_lod` and `effective_mesh_lod`, `QualityTier::budget` and
 `RenderError::OverBudget`.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
@@ -311,9 +312,11 @@ are `#[non_exhaustive]`).
 R8's additions (ADR-0018): mesh LODs and tier budgets: `MeshLods` (`new`, `parse`, `to_bytes`,
 `levels`, `into_levels`), `MeshLod` (`error`, `indices`, `triangle_count`), `LodError`
 (`#[non_exhaustive]`), `MAX_MESH_LODS`, `MAX_LOD_FILE_BYTES`, `lod_path`, `load_lods_for`,
-`load_glb_file_with_lods` (`glb`), `MeshData::{with_lods, lods, bounding_sphere}`, the free
-`bounding_sphere`, `VatDescriptor::position_bounds`, `TierBudget`, `TIER_BUDGETS`,
-`tier_budget`, `finest_level_within`, `TierFit`, `ModelBudgetReport`, `model_report` and
+`load_glb_file_with_lods` (`glb`), `MeshData::{with_lods, lods, bounding_sphere, cull_sphere}`,
+the free `bounding_sphere`, `for_each_sampled_pose` with `POSE_SAMPLE_FPS`, `MAX_POSE_SAMPLES`
+and `SKINNED_CULL_FLOOR`, `VatDescriptor::position_bounds`, `TierBudget`, `TIER_BUDGETS`,
+`tier_budget`, `finest_level_within`, `TierFit`, `ModelBudgetReport` (`lod_problem`),
+`model_report` and
 `AssetManifest::budget_report` (`glb`).
 R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
 `end`), `MAX_VFX_LIGHT_INTENSITY`/`MAX_VFX_LIGHT_RADIUS`, `BakedAoDesc` (`new`, `with_height`,

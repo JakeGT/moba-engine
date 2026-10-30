@@ -498,6 +498,8 @@ impl Renderer {
     pub fn new(window: &Window, mut config: RenderConfig) -> RenderResult<Self> {
         assert!(config.max_instances > 0, "max_instances must be positive");
         let started = Instant::now();
+        // R8: a new renderer loads its assets unlocked, whatever a previous one left.
+        crate::memory::begin_renderer(config.quality_tier.budget().total_bytes);
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
         // SAFETY: ash-window returns the static list of surface extensions for this
@@ -1474,7 +1476,19 @@ impl Renderer {
     /// (R8, ADR-0018 §4).
     #[must_use]
     pub fn memory_stats(&self) -> MemoryStats {
-        crate::memory::stats(self.config.quality_tier.budget())
+        let reserved = self
+            .device
+            .allocator()
+            .lock()
+            .map_or(0, |allocator| allocator.capacity());
+        crate::memory::stats(self.config.quality_tier.budget(), reserved)
+    }
+
+    /// Whether uploads are locked now (cheap: no allocator query, unlike
+    /// [`Self::memory_stats`]).
+    #[must_use]
+    pub fn uploads_locked(&self) -> bool {
+        crate::memory::locked()
     }
 
     /// Marks the start of the match: from now until [`Self::unlock_uploads`] every asset
@@ -1855,6 +1869,7 @@ impl Renderer {
             &frame_lighting,
             &world_frame,
             self.render_extent,
+            self.extents.render.height,
         )?;
         if let Some(fog) = self.fog.as_mut() {
             fog.prepare(frame_index, scene.fog_of_war.as_ref());
@@ -1887,6 +1902,7 @@ impl Renderer {
                 &view_lighting,
                 &WorldFrame::OFFSCREEN,
                 extent,
+                extent.height,
             )?;
         }
         self.ui.prepare(frame_index, ui)?;
@@ -2630,6 +2646,7 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
+        crate::memory::set_locked(false);
         if let Some(path) = &self.config.pipeline_cache
             && let Err(error) = self.device.save_pipeline_cache(path)
         {

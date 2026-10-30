@@ -124,20 +124,30 @@ This branch's build only, Ultra, interleaved per round (on, culling off, LODs of
 
 ## Mesh LOD bake
 
-`scripts/bake-mesh-lods.sh` (meshoptimizer 1.3 through `meshopt` 0.7.0, `--permissive`,
-ratios 50/25/12.5 %). Errors are object-space, in model units:
+`scripts/bake-mesh-lods.sh` (meshoptimizer 1.3 through `meshopt` 0.7.0, `--features
+mesh-bake`, ratios 50/25/12.5 %): `Permissive` with normal (0.5) and UV (1.0) attribute
+weights, and each level's error the largest of meshoptimizer's estimate and the measured
+distance from every dropped LOD0 vertex to the level's surface (over the bind pose and 31
+sampled clip poses for the skinned model). Errors are object-space, in model units; two
+bakes are byte-identical.
 
-| Model | Vertices | LOD0 | LOD1 (error) | LOD2 (error) | LOD3 (error) | `.lod` bytes |
-|---|---|---|---|---|---|---|
-| crystal | 288 | 138 | 68 (0.091) | 34 (0.163) | 16 (0.252) | 1,464 |
-| rampart | 144 | 72 | 36 (0.304) | 18 (0.412) | 8 (0.765) | 792 |
-| sentinel | 902 | 462 | 230 (0.094) | 114 (0.148) | 56 (0.245) | 4,848 |
-| sentinel-skinned (heroes, VAT minions) | 974 | 498 | 248 (0.084) | 124 (0.147) | 62 (0.241) | 5,256 |
+| Model | Vertices | UV-seam vertices | LOD0 | LOD1 (error) | LOD2 (error) | LOD3 (error) | `.lod` bytes |
+|---|---|---|---|---|---|---|---|
+| crystal | 288 | 184 | 138 | 68 (0.191) | 34 (0.327) | 16 (0.577) | 1,464 |
+| rampart | 144 | 144 | 72 | 36 (0.982) | 18 (1.218) | 8 (2.123) | 792 |
+| sentinel | 902 | 750 | 462 | 230 (0.206) | 114 (0.372) | 56 (0.555) | 4,848 |
+| sentinel-skinned (heroes, VAT minions) | 974 | 0 (no UVs) | 498 | 248 (0.206) | 124 (0.430) | 62 (0.550) | 5,256 |
 
-With `LockBorder` (or no flag) meshoptimizer removes almost nothing from these flat-shaded
-meshes (every face edge is an attribute seam), so the script bakes `--permissive`. The sample
-meshes are tiny; the point is the pipeline. A production hero at 20–40 k triangles gets the
-same three levels.
+The first bake (plain `--permissive`, meshoptimizer's error only) had the same triangle
+counts with errors of 0.084–0.765: the measured errors are 2–3× meshoptimizer's own estimate,
+so levels now switch about twice as far away (and the golden captures changed accordingly).
+Seam-preserving mode (`--keep-seams`) removes almost nothing from these flat-shaded meshes
+(every face edge is an attribute seam), and locking the UV-seam vertices
+(`--protect-uv-seams`) bakes no levels for rampart and sentinel and one 88-triangle level for
+crystal, because 64–100 % of their vertices are on a UV seam (per-face palette mapping). The
+UV weight is checked by a test that measures the texture-coordinate distortion of a level
+(it fails with the weight set to 0). The sample meshes are tiny; the point is the pipeline.
+A production hero at 20–40 k triangles gets the same three levels.
 
 ## VRAM accounting (1920×1080, teamfight replay)
 

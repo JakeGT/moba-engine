@@ -4,8 +4,11 @@
 # off, validation off, warm pipeline cache) on an NVIDIA GeForce RTX 5070 Ti (driver
 # 615.78.08), AMD Ryzen 7 9800X3D, CachyOS Linux 7.3. perf-gate fails a run whose
 # gpu_total_p95_ms or render_p95_ms grows past these by more than --max-regression (25 %,
-# with a 0.05 ms noise floor). A different runner GPU needs its own baseline: run
-# `BASELINE= scripts/perf-replay.sh` there and replace these values.
+# with a 0.05 ms noise floor). The gate fails a run on any other GPU (the log's gpu=), so a
+# different runner needs its own baseline: run `BASELINE= scripts/perf-replay.sh` there
+# and replace this file. Every tier table needs both keys; unknown keys are an error.
+
+gpu = "NVIDIA GeForce RTX 5070 Ti"
 
 [low]
 gpu_total_p95_ms = 0.423

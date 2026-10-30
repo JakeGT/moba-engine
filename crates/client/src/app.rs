@@ -239,6 +239,9 @@ struct ClientApp {
     network_warmup: Option<u32>,
     /// Frames counted towards `MOBA_SMOKE_FRAMES` and logged (after any warm-up).
     measured_frames: u64,
+    /// Measured frames the frame log had no room for (`MOBA_FRAME_LOG_FRAMES`); the frame
+    /// log reports them and `perf-gate` fails a run that dropped any.
+    frames_dropped: u64,
 }
 
 impl ClientApp {
@@ -427,6 +430,7 @@ impl ClientApp {
                 })
                 .flatten(),
             measured_frames: 0,
+            frames_dropped: 0,
         };
 
         match std::env::var("MOBA_SERVER") {
@@ -770,10 +774,12 @@ impl App for ClientApp {
         });
         if measuring {
             self.measured_frames += 1;
-            if let Some(samples) = self.frame_log.as_mut()
-                && samples.len() < samples.capacity()
-            {
-                samples.push(raw_ms);
+            if let Some(samples) = self.frame_log.as_mut() {
+                if samples.len() < samples.capacity() {
+                    samples.push(raw_ms);
+                } else {
+                    self.frames_dropped += 1;
+                }
             }
         }
         self.frame_ms = if self.frame_ms == 0.0 {
@@ -1472,13 +1478,21 @@ impl App for ClientApp {
         }
 
         // R8 (ADR-0018 §4): every asset is loaded before the match plays; from the first
-        // measured frame on, any upload or pipeline build is counted and logged. A content
-        // reload or dev reload unlocks; the next measured frame locks again.
-        if measuring
-            && let Some(renderer) = self.renderer.as_mut()
-            && !renderer.memory_stats().locked
+        // measured frame of a playing match on, any upload or pipeline build is counted and
+        // logged. Leaving the match (or a content or dev reload) unlocks; the next measured
+        // frame of a playing match locks again.
+        let lock_wanted = launch::upload_lock_wanted(
+            measuring,
+            self.network.as_ref().map(|network| network.phase),
+        );
+        if let Some(renderer) = self.renderer.as_mut()
+            && renderer.uploads_locked() != lock_wanted
         {
-            renderer.lock_uploads();
+            if lock_wanted {
+                renderer.lock_uploads();
+            } else if self.network.is_some() {
+                renderer.unlock_uploads();
+            }
         }
         if measuring
             && let (Some(started), Some(work)) = (render_started, self.work_log.as_mut())

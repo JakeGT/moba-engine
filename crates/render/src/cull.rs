@@ -101,12 +101,15 @@ impl LodConfig {
 pub struct CullStats {
     /// The mode in use (after any fallback).
     pub mode: CullMode,
-    /// Units the scene handed in (after the instance cap).
+    /// Units the scene handed in.
     pub candidates: u32,
     /// Units in the camera list (drawn by the prepass and the scene).
     pub drawn: u32,
     /// Units in the shadow caster list (0 without shadows).
     pub casters: u32,
+    /// Units a list would draw that did not fit the instance cap (`max_instances`), applied
+    /// after culling; 0 unless the scene has more visible units than the renderer holds.
+    pub dropped: u32,
     /// Terrain chunks of the drawn terrain, and how many the main view drew.
     pub terrain_chunks: u32,
     /// Terrain chunks drawn by the main view.

@@ -179,11 +179,15 @@ Both lists bucket by mesh and level in scene order, so a culled frame draws a su
 unculled draws in the same order and is byte-identical (`scripts/cull-probe.sh` in the golden
 workflow). The heightfield's index buffer is ordered in 32 × 32-cell chunks with bounds, and
 every view draws the merged runs of its visible chunks. Levels come from the asset baker
-(`mesh-bake lod`, meshoptimizer; `models/<model>.lod`) as index lists appended to the mesh's
-index buffer. Every image and buffer is counted by class (textures, targets, buffers) against
-the tier's VRAM budgets (`Renderer::memory_stats`); textures over the texture budget upload
-without their largest mips. Assets load before play: the client locks uploads on the first
-frame of the match and any later upload or pipeline build is counted and logged. The
+(`mesh-bake lod`, meshoptimizer behind the tools' `mesh-bake` feature; `models/<model>.lod`)
+as index lists appended to the mesh's index buffer. A skinned mesh culls with a sphere
+measured over its clips' sampled poses (at least twice its bind sphere). Every image and
+buffer, and the swapchain's images, is counted by class (textures, targets, buffers,
+swapchain) against the tier's VRAM budgets (`Renderer::memory_stats`, with the allocator's
+reserved bytes); textures over the texture budget upload without their largest mips, and the
+first allocation over the total budget logs a warning. Assets load before play: the client
+locks uploads on the first measured frame of a `Playing` match (unlocking when it leaves
+`Playing`), and any later upload or pipeline build is counted and logged. The
 nightly perf workflow gates a 10-minute replay per tier on a self-hosted GPU runner
 (`perf-gate`). The scene pass draws:
 

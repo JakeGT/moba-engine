@@ -101,6 +101,14 @@ fn main() {
         match report {
             Err(error) => errors.push(format!("models/{model}.glb: {error}")),
             Ok(report) => {
+                // A stale or malformed `.lod` is not fatal (the model draws LOD0 only), but it
+                // is never silent.
+                if let Some(problem) = &report.lod_problem {
+                    budget_warnings.push(format!(
+                        "models/{model}.lod is not used ({problem}): the model draws LOD0 only; \
+                         re-bake it (scripts/bake-mesh-lods.sh)"
+                    ));
+                }
                 for (budget, fit) in moba_assets::TIER_BUDGETS.iter().zip(report.tiers) {
                     match fit {
                         moba_assets::TierFit::Over if budget.name == "ultra" => {

@@ -304,6 +304,26 @@ pub fn load_glb_file_with_lods(
 mod tests {
     use super::*;
 
+    /// The committed `content/models/*.lod` files must match their models: a model changed
+    /// without a re-bake would silently draw LOD0 only. Every sample model has levels, and
+    /// they load against its current mesh hash.
+    #[cfg(feature = "glb")]
+    #[test]
+    fn committed_lod_files_match_their_models() {
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/models");
+        for name in ["crystal", "rampart", "sentinel", "sentinel-skinned"] {
+            let glb = models.join(format!("{name}.glb"));
+            let mesh = crate::load_glb_file(&glb).expect("sample model loads");
+            let lods = load_lods_for(&glb, &mesh)
+                .unwrap_or_else(|error| {
+                    panic!("{name}.lod: {error}; run scripts/bake-mesh-lods.sh")
+                })
+                .unwrap_or_else(|| panic!("{name}.lod is missing; run scripts/bake-mesh-lods.sh"));
+            assert!(!lods.is_empty(), "{name}");
+            assert!(lods.levels()[0].triangle_count() < mesh.triangle_count());
+        }
+    }
+
     /// A 2×2 grid of quads (9 vertices, 8 triangles).
     fn grid() -> MeshData {
         let mut positions = Vec::new();

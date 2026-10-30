@@ -429,15 +429,21 @@ heroes it matches. Map visuals resolve the same way, to a descriptor (next secti
 coarser levels in `models/<model>.lod` beside its `.glb`. Bake them with meshoptimizer:
 
 ```text
-$ cargo run --release -p moba-tools --bin mesh-bake -- lod content/models/knight.glb --permissive
+$ cargo run --release -p moba-tools --features mesh-bake --bin mesh-bake -- lod content/models/knight.glb
 $ scripts/bake-mesh-lods.sh        # every content/models/*.glb
-$ cargo run -p moba-tools --bin mesh-bake -- info content/models/knight.glb
+$ cargo run -p moba-tools --features mesh-bake --bin mesh-bake -- info content/models/knight.glb
 ```
 
 The default ratios are 50 %, 25 % and 12.5 % of the triangles (`--ratios 0.5,0.25,0.125`); a
-level is kept only if it removes at least 20 % of the previous one. `--permissive` lets
-meshoptimizer collapse attribute seams, which flat-shaded meshes need (every edge is a seam);
-`--lock-border` keeps open borders in place. A level is an index list over the model's own
+level is kept only if it removes at least 20 % of the previous one. The baker (behind the
+`mesh-bake` feature, so plain workspace builds never compile meshoptimizer) may collapse
+across attribute seams, which flat-shaded meshes need (every edge is a seam), but weights each
+collapse by how far it moves the normals and, on a textured mesh, the UVs, so it avoids
+smearing the texture. `--protect-uv-seams` locks every UV-seam vertex instead (exact seams,
+but a mesh whose faces are all UV islands gets no levels); `--keep-seams` turns seam collapses
+off for smooth-shaded meshes; `--lock-border` keeps open borders in place. Each level's error
+is measured against the full mesh (and, for a skinned mesh, over poses sampled from its
+clips), so a level that folds at a joint is not picked up close. A level is an index list over the model's own
 vertices, so one file serves the static mesh, the GPU-skinned mesh (and every bone-LOD
 reduced skin) and a VAT minion. The file records the mesh's hash: **re-bake after changing the
 `.glb`**. A stale or malformed file is logged (`[lod] ... drawing LOD0 only`) and ignored; a

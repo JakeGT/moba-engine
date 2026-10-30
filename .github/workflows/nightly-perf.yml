@@ -7,8 +7,9 @@ name: nightly perf
 # The job only runs where a GPU runner exists: set the repository variable
 # HAS_GPU_RUNNER=true once a runner labelled [self-hosted, gpu] is registered (with a
 # desktop session or xvfb, Vulkan drivers and the validation layers). Without it the job is
-# skipped rather than queued forever. A new runner GPU needs its own baseline: run
-# scripts/perf-replay.sh with BASELINE= on it and commit the gpu_total_p95_ms values.
+# skipped rather than queued forever. The baseline is bound to the GPU it was recorded on
+# (`gpu = "..."`), so a runner with another GPU fails until it has its own: run
+# scripts/perf-replay.sh with BASELINE= on it and commit its gpu name and p95 values.
 
 on:
   workflow_dispatch:

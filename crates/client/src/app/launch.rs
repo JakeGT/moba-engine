@@ -148,22 +148,37 @@ fn mesh_lod_from(value: Option<&str>) -> Option<moba_render::LodConfig> {
 pub(crate) fn memory_summary(stats: &moba_render::MemoryStats) -> String {
     let mib = |bytes: u64| bytes as f64 / f64::from(1u32 << 20);
     format!(
-        "vram_mb={:.1} vram_budget_mb={:.0} vram_peak_mb={:.1} texture_mb={:.1} \
-         texture_budget_mb={:.0} targets_mb={:.1} buffers_mb={:.1} degraded_textures={} \
-         refused_textures={} uploads={} locked_uploads={} locked_pipelines={}",
+        "vram_mb={:.1} vram_budget_mb={:.0} vram_peak_mb={:.1} vram_over_budget={} \
+         vram_reserved_mb={:.1} texture_mb={:.1} texture_budget_mb={:.0} targets_mb={:.1} \
+         buffers_mb={:.1} swapchain_mb={:.1} degraded_textures={} refused_textures={} \
+         uploads={} locked_uploads={} locked_pipelines={}",
         mib(stats.total_bytes()),
         mib(stats.total_budget),
         mib(stats.peak_bytes),
+        u8::from(stats.over_budget()),
+        mib(stats.reserved_bytes),
         mib(stats.texture_bytes),
         mib(stats.texture_budget),
         mib(stats.target_bytes),
         mib(stats.buffer_bytes),
+        mib(stats.swapchain_bytes),
         stats.degraded_textures,
         stats.refused_textures,
         stats.uploads,
         stats.locked_uploads,
         stats.locked_pipelines,
     )
+}
+
+/// Whether the mid-match upload lock should be armed (R8, ADR-0018 §4): only while a match
+/// is playing and frames are measured. A networked client loads in the lobby and loading
+/// phases, so it locks only in [`MatchPhase::Playing`]. The local preview and replays load
+/// everything before their first frame and have no phase (`None`).
+pub(crate) fn upload_lock_wanted(
+    measuring: bool,
+    phase: Option<moba_net::protocol::MatchPhase>,
+) -> bool {
+    measuring && phase.is_none_or(|phase| phase == moba_net::protocol::MatchPhase::Playing)
 }
 
 pub(crate) fn compressed_textures() -> bool {
@@ -820,13 +835,14 @@ impl Drop for ClientApp {
                 .collect::<Vec<_>>()
                 .join("/");
             format!(
-                "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} \
+                "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} cull_dropped={} \
                  terrain_chunks={}/{} lod_instances={lods} ",
                 memory_summary(&renderer.memory_stats()),
                 cull.mode,
                 cull.candidates,
                 cull.drawn,
                 cull.casters,
+                cull.dropped,
                 cull.terrain_chunks_drawn,
                 cull.terrain_chunks,
             )
@@ -844,11 +860,12 @@ impl Drop for ClientApp {
             })
             .unwrap_or_default();
         let report = format!(
-            "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
+            "frames={} frames_dropped={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
              {gpu_columns}{stress}{memory}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
+            self.frames_dropped,
             percentile(0.50),
             percentile(0.95),
             percentile(0.99),
@@ -1051,8 +1068,27 @@ mod tests {
     use super::{
         cull_mode_from, frame_log_frames_from, gpu_report, lighting_config_from, mesh_lod_from,
         parse_hex32, parse_preview_camera, parse_window_size, pipeline_cache_path_from,
-        post_config_from, world_config_from,
+        post_config_from, upload_lock_wanted, world_config_from,
     };
+
+    #[test]
+    fn the_upload_lock_arms_only_while_a_match_plays() {
+        use moba_net::protocol::MatchPhase;
+        assert!(upload_lock_wanted(true, None), "preview and replays");
+        assert!(upload_lock_wanted(true, Some(MatchPhase::Playing)));
+        assert!(
+            !upload_lock_wanted(false, Some(MatchPhase::Playing)),
+            "warm-up"
+        );
+        assert!(!upload_lock_wanted(false, None));
+        for phase in [
+            MatchPhase::Lobby,
+            MatchPhase::Countdown,
+            MatchPhase::Results,
+        ] {
+            assert!(!upload_lock_wanted(true, Some(phase)), "{phase:?}");
+        }
+    }
 
     #[test]
     fn r8_switches_parse_with_safe_fallbacks() {

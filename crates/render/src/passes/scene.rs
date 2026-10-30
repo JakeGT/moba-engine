@@ -247,17 +247,18 @@ impl DrawList {
     fn bucket(
         &mut self,
         units: &[crate::UnitInstance],
-        decisions: &[u8],
+        decisions: &[(u32, u8)],
         bit: u8,
         mesh_count: usize,
     ) {
         self.counts.fill(0);
         self.outlined.fill(0);
         self.skinned.clear();
-        for (unit, &decision) in units.iter().zip(decisions) {
+        for &(index, decision) in decisions {
             if decision & bit == 0 {
                 continue;
             }
+            let unit = &units[index as usize];
             let bucket = bucket_of(mesh_slot(unit.mesh, mesh_count), decision);
             self.counts[bucket] += 1;
             self.outlined[bucket] += u32::from(is_outlined(unit));
@@ -286,6 +287,31 @@ impl DrawList {
     }
 }
 
+/// Keeps, in scene order, the `(unit index, decision)` of every unit `decide` puts in a list
+/// (camera or casters), up to `capacity` (R8 review: the instance cap applies after culling,
+/// so off-screen units never push visible ones out at the cap). Returns how many units a
+/// list wanted that did not fit. `out` is cleared first and never grows past `capacity`.
+fn keep_drawn(
+    units: &[crate::UnitInstance],
+    capacity: usize,
+    out: &mut Vec<(u32, u8)>,
+    mut decide: impl FnMut(&crate::UnitInstance) -> u8,
+) -> u32 {
+    out.clear();
+    let mut dropped = 0u32;
+    for (index, unit) in units.iter().enumerate() {
+        let decision = decide(unit);
+        if decision & (IN_CAMERA | IN_CASTERS) == 0 {
+            continue;
+        }
+        match u32::try_from(index) {
+            Ok(index) if out.len() < capacity.min(out.capacity()) => out.push((index, decision)),
+            _ => dropped = dropped.saturating_add(1),
+        }
+    }
+    dropped
+}
+
 /// The bucket of a unit of mesh `slot` with `decision`'s level.
 fn bucket_of(slot: usize, decision: u8) -> usize {
     slot * MAX_LODS + usize::from(decision >> LOD_SHIFT) % MAX_LODS
@@ -300,7 +326,9 @@ struct SceneView {
     casters: Option<DrawList>,
     /// Per unit this frame: [`IN_CAMERA`], [`IN_CASTERS`] and the level; capacity
     /// `max_instances`, never grown.
-    decisions: Vec<u8>,
+    /// `(unit index, decision bits)` of the units some list draws, in scene order, at most
+    /// `max_instances` (capacity fixed at creation).
+    decisions: Vec<(u32, u8)>,
     /// The terrain's visible index runs this frame; capacity [`MAX_TERRAIN_CHUNKS`].
     terrain_runs: Vec<(u32, u32)>,
     /// Units handed in for the frame being recorded (after the cap).
@@ -1246,6 +1274,7 @@ impl ScenePass {
         lighting: &FrameLighting,
         world: &WorldFrame,
         extent: vk::Extent2D,
+        lod_height: u32,
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
         let culling = self.culling;
@@ -1260,7 +1289,7 @@ impl ScenePass {
             ..
         } = self;
         let state = &mut views[view];
-        let unit_count = scene.units.len().min(state.max_instances);
+        let unit_count = scene.units.len();
         let bone_count = scene.bones.len().min(state.max_bones);
         if view == 0 {
             BONES_TRUNCATED.store(
@@ -1308,7 +1337,9 @@ impl ScenePass {
         } else {
             Frustum::EVERYTHING
         };
-        let metric = LodMetric::new(scene.camera.view_proj, extent.height, culling.lod);
+        // `lod_height` is the view's height at its configured render scale, not this frame's
+        // dynamic-resolution extent, so dynres never flips a unit between levels.
+        let metric = LodMetric::new(scene.camera.view_proj, lod_height, culling.lod);
         let casters = state.casters.is_some();
 
         // The terrain's visible runs: every chunk of the map's heightfield, or the plane.
@@ -1335,27 +1366,27 @@ impl ScenePass {
             }
         }
 
-        let units = &scene.units[..unit_count];
-        state.decisions.clear();
-        let mut lod_instances = [0u32; MAX_LODS];
-        for unit in units {
+        let units = scene.units;
+        // Every unit is tested; the instance cap applies to the ones a list draws.
+        let dropped = keep_drawn(units, state.max_instances, &mut state.decisions, |unit| {
             let slot = mesh_slot(unit.mesh, mesh_count);
             let mesh = &meshes[slot];
             let (center, radius) = crate::cull::world_sphere(&unit.transform, mesh.bounds);
             let in_camera =
                 !culled || is_outlined(unit) || camera_frustum.sphere_visible(center, radius);
             let in_casters = casters && (!culled || caster_frustum.sphere_visible(center, radius));
+            if !in_camera && !in_casters {
+                return 0;
+            }
             let scale = crate::cull::max_axis_scale(&unit.transform);
             let lod = metric.select(&mesh.lods, mesh_finest[slot], center, scale);
-            if in_camera {
-                lod_instances[usize::from(lod)] += 1;
-            }
-            // `decisions` has `max_instances >= unit_count` capacity: never reallocates.
-            state.decisions.push(
-                (u8::from(in_camera) * IN_CAMERA)
-                    | (u8::from(in_casters) * IN_CASTERS)
-                    | (lod << LOD_SHIFT),
-            );
+            (u8::from(in_camera) * IN_CAMERA)
+                | (u8::from(in_casters) * IN_CASTERS)
+                | (lod << LOD_SHIFT)
+        });
+        let mut lod_instances = [0u32; MAX_LODS];
+        for &(_, decision) in state.decisions.iter().filter(|(_, d)| d & IN_CAMERA != 0) {
+            lod_instances[usize::from(decision >> LOD_SHIFT) % MAX_LODS] += 1;
         }
         state
             .camera
@@ -1369,12 +1400,13 @@ impl ScenePass {
                 candidates: u32::try_from(unit_count).unwrap_or(u32::MAX),
                 drawn: state.camera.len,
                 casters: state.casters.as_ref().map_or(0, |list| list.len),
+                dropped,
                 lod_instances,
                 ..*stats
             };
         }
         let lists = state.casters.as_ref().map_or(1, |_| 2);
-        if unit_count > 0 {
+        if !state.decisions.is_empty() {
             let mapped = target
                 .instance_buffer
                 .mapped_slice_mut::<GpuInstance>(state.max_instances * lists)
@@ -1386,7 +1418,8 @@ impl ScenePass {
             // Each bucket's instances land contiguously at its `starts` slot, so one draw per
             // bucket reads them through `firstInstance` (gl_InstanceIndex); the outlined ones
             // first, so the hulls draw only them.
-            for (unit, &decision) in units.iter().zip(&state.decisions) {
+            for &(index, decision) in &state.decisions {
+                let unit = &units[index as usize];
                 let slot = mesh_slot(unit.mesh, mesh_count);
                 let bucket = bucket_of(slot, decision);
                 let joints = meshes[slot].joint_count;
@@ -2426,7 +2459,7 @@ fn is_outlined(unit: &crate::UnitInstance) -> bool {
 mod tests {
     use super::{
         BUCKETS, DrawList, IN_CAMERA, IN_CASTERS, LOD_SHIFT, MAX_LODS, SkinPush, SkinnedDraw,
-        clamp_rect, skinned_draw,
+        clamp_rect, keep_drawn, skinned_draw,
     };
     use crate::{BoneRange, MeshId, UnitInstance};
     use moba_core::math::{Mat4, Vec4};
@@ -2483,8 +2516,52 @@ mod tests {
     /// Buckets the units with every decision in the camera list at LOD0.
     fn camera_list(units: &[UnitInstance], mesh_count: usize) -> DrawList {
         let mut list = DrawList::new(0, 4);
-        list.bucket(units, &vec![IN_CAMERA; units.len()], IN_CAMERA, mesh_count);
+        let decisions: Vec<(u32, u8)> = (0..units.len())
+            .map(|index| (u32::try_from(index).expect("small"), IN_CAMERA))
+            .collect();
+        list.bucket(units, &decisions, IN_CAMERA, mesh_count);
         list
+    }
+
+    /// R8 review: the instance cap applies after culling. With room for 3, a scene of 3
+    /// off-screen units followed by 4 visible ones draws the first 3 visible ones (not 0), in
+    /// scene order, and reports the 4th as dropped; the decisions never grow past the cap.
+    #[test]
+    fn the_instance_cap_applies_after_culling() {
+        let units = [
+            unit(0),
+            unit(0),
+            unit(0),
+            unit(1),
+            unit(1),
+            unit(1),
+            unit(1),
+        ];
+        let mut decisions = Vec::with_capacity(3);
+        let visible = |unit: &UnitInstance| {
+            if unit.mesh == MeshId::from_index(1) {
+                IN_CAMERA
+            } else {
+                0
+            }
+        };
+        let dropped = keep_drawn(&units, 3, &mut decisions, visible);
+        assert_eq!(decisions, [(3, IN_CAMERA), (4, IN_CAMERA), (5, IN_CAMERA)]);
+        assert_eq!(dropped, 1);
+        assert_eq!(decisions.capacity(), 3, "no growth");
+        // A caster-only unit takes a slot too (the shadow pass draws it).
+        let caster = |unit: &UnitInstance| {
+            if unit.mesh == MeshId::from_index(0) {
+                IN_CASTERS
+            } else {
+                IN_CAMERA
+            }
+        };
+        let dropped = keep_drawn(&units, 3, &mut decisions, caster);
+        assert_eq!(decisions.len(), 3);
+        assert_eq!(dropped, 4);
+        let none = keep_drawn(&units, 3, &mut decisions, |_| 0);
+        assert_eq!((decisions.len(), none), (0, 0));
     }
 
     #[test]
@@ -2521,11 +2598,11 @@ mod tests {
         let units = [unit(1), unit(1), unit(0), unit(1), unit(1)];
         let both = IN_CAMERA | IN_CASTERS;
         let decisions = [
-            both,
-            IN_CASTERS,
-            IN_CAMERA,
-            both | (2 << LOD_SHIFT),
-            IN_CAMERA,
+            (0, both),
+            (1, IN_CASTERS),
+            (2, IN_CAMERA),
+            (3, both | (2 << LOD_SHIFT)),
+            (4, IN_CAMERA),
         ];
         let mut camera = DrawList::new(0, 4);
         camera.bucket(&units, &decisions, IN_CAMERA, 2);

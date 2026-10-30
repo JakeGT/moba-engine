@@ -136,10 +136,10 @@ pub use texture::{
     load_ktx2_file, mip_size, write_ktx2,
 };
 pub use vat::{
-    DEFAULT_VAT_FPS, MAX_VAT_BYTES, MAX_VAT_CLIPS, MAX_VAT_FRAMES, MAX_VAT_TEXELS,
-    VAT_DEATH_LINGER, VAT_DIR, VatAnimation, VatBakeClip, VatClip, VatDescriptor, VatError,
-    VatPlaybackParams, VatPlayer, VatPose, VatQuality, VatSample, bake_vat, mesh_hash, vat_extent,
-    vat_paths,
+    DEFAULT_VAT_FPS, MAX_POSE_SAMPLES, MAX_VAT_BYTES, MAX_VAT_CLIPS, MAX_VAT_FRAMES,
+    MAX_VAT_TEXELS, POSE_SAMPLE_FPS, SKINNED_CULL_FLOOR, VAT_DEATH_LINGER, VAT_DIR, VatAnimation,
+    VatBakeClip, VatClip, VatDescriptor, VatError, VatPlaybackParams, VatPlayer, VatPose,
+    VatQuality, VatSample, bake_vat, for_each_sampled_pose, mesh_hash, vat_extent, vat_paths,
 };
 pub use vfx::{
     MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS, MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES,
@@ -493,19 +493,21 @@ impl AssetManifest {
             }
             let report = load_glb_file_with_lods(&root.join(&entry.path))
                 .map_err(|error| error.to_string())
-                .map(|(mesh, _)| {
+                .map(|(mesh, lod_problem)| {
                     let texture_bytes = check_material(root, None, model)
                         .ok()
                         .flatten()
                         .map_or(0, |stats| {
                             stats.textures.iter().map(|(_, bytes)| *bytes as u64).sum()
                         });
-                    model_report(
+                    let mut report = model_report(
                         mesh.triangle_count(),
                         mesh.lods(),
                         mesh.skin().map_or(0, |skin| skin.skeleton().joint_count()),
                         texture_bytes,
-                    )
+                    );
+                    report.lod_problem = lod_problem.map(|error| error.to_string());
+                    report
                 });
             out.push((model.to_owned(), report));
         }
@@ -888,6 +890,51 @@ fallback = "a"
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("models/dir.glb")).expect("temp dir");
         root
+    }
+
+    /// R8 review: a `.lod` the model cannot use (baked from another model, or malformed) is
+    /// reported, not silently dropped; a good one counts its levels; none is fine.
+    #[cfg(feature = "glb")]
+    #[test]
+    fn budget_reports_name_unusable_lod_files() {
+        let root = temp_root("lods");
+        let model = include_bytes!("../../../content/models/sentinel.glb");
+        for name in ["good", "stale", "broken", "none"] {
+            std::fs::write(root.join(format!("models/{name}.glb")), model).expect("write");
+        }
+        let lods = |name: &str| {
+            std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../content/models/{name}.lod")),
+            )
+            .expect("committed .lod")
+        };
+        std::fs::write(root.join("models/good.lod"), lods("sentinel")).expect("write");
+        std::fs::write(root.join("models/stale.lod"), lods("rampart")).expect("write");
+        std::fs::write(root.join("models/broken.lod"), b"MLOD\x01").expect("write");
+        let manifest = AssetManifest {
+            units: ["good", "stale", "broken", "none"]
+                .map(|name| AssetEntry::new(name, format!("models/{name}.glb")))
+                .to_vec(),
+            maps: Vec::new(),
+        };
+        let reports = manifest.budget_report(&root);
+        let report = |name: &str| {
+            reports
+                .iter()
+                .find(|(model, _)| model == name)
+                .and_then(|(_, report)| report.as_ref().ok())
+                .expect("the model loads")
+        };
+        assert!(report("good").lod_problem.is_none());
+        assert!(report("good").triangles.len() > 1, "levels counted");
+        assert!(report("none").lod_problem.is_none());
+        assert_eq!(report("none").triangles.len(), 1);
+        for unusable in ["stale", "broken"] {
+            assert!(report(unusable).lod_problem.is_some(), "{unusable}");
+            assert_eq!(report(unusable).triangles.len(), 1, "{unusable}: LOD0 only");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(feature = "glb")]

@@ -146,6 +146,8 @@ impl SkinLod {
         }
         // Same vertices in the same order: the mesh LODs (R8) index the reduced skin too.
         out.lods = mesh.lods().to_vec();
+        // The reduced skeleton has no clips: cull with the full mesh's posed sphere.
+        out.cull_sphere = Some(mesh.cull_sphere());
         Some(Self {
             mesh: out.with_skin(reduced_skin).ok()?,
             joints,

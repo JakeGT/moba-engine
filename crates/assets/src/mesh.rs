@@ -93,6 +93,9 @@ pub struct MeshData {
     skin: Option<MeshSkin>,
     /// Baked index-only levels of detail (R8, ADR-0018), LOD1 first; empty without a `.lod`.
     pub(crate) lods: Vec<crate::mesh_lod::MeshLod>,
+    /// A culling sphere computed from another mesh with the same vertices (a reduced skin's
+    /// full mesh, whose skeleton has the clips); see [`Self::cull_sphere`].
+    pub(crate) cull_sphere: Option<[f32; 4]>,
 }
 
 impl MeshData {
@@ -147,6 +150,7 @@ impl MeshData {
             tangents: None,
             skin: None,
             lods: Vec::new(),
+            cull_sphere: None,
         })
     }
 
@@ -282,6 +286,46 @@ impl MeshData {
     #[must_use]
     pub fn bounding_sphere(&self) -> [f32; 4] {
         bounding_sphere(&self.positions)
+    }
+
+    /// The sphere `[centre x, y, z, radius]` the renderer culls this mesh with (R8,
+    /// ADR-0018 §1). A static mesh's is its [`Self::bounding_sphere`]. A skinned mesh's is
+    /// centred on the bind-pose sphere, with the radius
+    /// `max(farthest vertex over every clip's sampled poses × 1.05, bind radius ×`
+    /// [`crate::SKINNED_CULL_FLOOR`]`)`: a clip with root motion or long reach widens it, and
+    /// the floor covers spring bones, additive layers and clip blends, which sampling the
+    /// clips does not see. Skins every vertex in up to [`crate::MAX_POSE_SAMPLES`] poses, so
+    /// call it once, at load.
+    #[must_use]
+    pub fn cull_sphere(&self) -> [f32; 4] {
+        if let Some(sphere) = self.cull_sphere {
+            return sphere;
+        }
+        let [x, y, z, bind] = self.bounding_sphere();
+        if self.skin.is_none() {
+            return [x, y, z, bind];
+        }
+        let centre = [x, y, z];
+        let mut farthest = 0.0f32;
+        crate::for_each_sampled_pose(
+            self,
+            crate::POSE_SAMPLE_FPS,
+            crate::MAX_POSE_SAMPLES,
+            |positions| {
+                for position in positions {
+                    let distance = (0..3)
+                        .map(|axis| (position[axis] - centre[axis]).powi(2))
+                        .sum::<f32>()
+                        .sqrt();
+                    if distance.is_finite() {
+                        farthest = farthest.max(distance);
+                    }
+                }
+            },
+        );
+        let radius =
+            (farthest * crate::vat::POSE_SAMPLE_MARGIN).max(bind * crate::SKINNED_CULL_FLOOR);
+        [x, y, z, radius]
     }
 
     /// The skin, if the mesh is skinned.

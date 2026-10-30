@@ -74,6 +74,8 @@ pub(crate) struct CpuSkinnedMesh {
     pub(crate) joint_count: u32,
     pub(crate) has_uvs: bool,
     pub(crate) lods: MeshLodTable,
+    /// Culling sphere over the clips' sampled poses ([`moba_assets::MeshData::cull_sphere`]).
+    pub(crate) bounds: [f32; 4],
 }
 
 impl CpuSkinnedMesh {
@@ -120,6 +122,7 @@ impl CpuSkinnedMesh {
             joint_count: u32::try_from(joint_count).ok()?,
             has_uvs: base.has_uvs,
             lods: base.lods,
+            bounds: data.cull_sphere(),
         })
     }
 }
@@ -383,10 +386,6 @@ fn with_levels(data: &moba_assets::MeshData) -> Option<(Vec<u32>, MeshLodTable)>
     Some((indices, table))
 }
 
-/// Skinned meshes are posed on the GPU from joint matrices the renderer never inspects, so
-/// their bind-pose sphere is widened by this factor for culling (a hero is one instance).
-pub(crate) const SKINNED_BOUNDS_SCALE: f32 = 2.0;
-
 fn sphere_of<T>(vertices: &[T], position: impl Fn(&T) -> [f32; 3]) -> [f32; 4] {
     let positions: Vec<[f32; 3]> = vertices.iter().map(position).collect();
     moba_assets::bounding_sphere(&positions)
@@ -413,7 +412,6 @@ pub(crate) fn upload_skinned(
     device: &DeviceContext,
     data: &CpuSkinnedMesh,
 ) -> RenderResult<GpuMesh> {
-    let [x, y, z, radius] = sphere_of(&data.vertices, |vertex| vertex.position);
     upload_bytes(
         device,
         bytemuck::cast_slice(&data.vertices),
@@ -422,7 +420,7 @@ pub(crate) fn upload_skinned(
             joint_count: data.joint_count,
             has_uvs: data.has_uvs,
             lods: data.lods,
-            bounds: [x, y, z, radius * SKINNED_BOUNDS_SCALE],
+            bounds: data.bounds,
         },
     )
 }
