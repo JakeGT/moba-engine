@@ -243,6 +243,14 @@ the full-resolution 1280×720 captures differ from LOD-off in 0.01–0.86 % of p
 deliberately with the render-golden commands on lavapipe; two complete runs gave
 byte-identical captures. The comparison image is in [screenshots](../screenshots.md).
 
+**Review re-bake.** The attribute-weighted, pose-measured levels (larger errors, so each unit
+keeps a finer level to a greater distance) moved the fingerprints against the first R8
+baseline by mean 0.000–0.026 and at most 7/255 (the networked match and the VAT close-up most);
+all eight were rebaselined again on lavapipe, two complete runs byte-identical with 0
+validation messages, and `scripts/cull-probe.sh` still reports all five scenes byte-identical
+with culling on and off with the measured skinned spheres (Ultra VAT units 131/164, networked
+32/43).
+
 ## Hardware matrix (#9/#127)
 
 The roadmap's §7 reference machines are maintainer items: this environment has one real GPU
