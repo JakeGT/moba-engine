@@ -295,7 +295,10 @@ impl ClientApp {
         {
             eprintln!("settings: save failed: {error}");
         }
-        let bindings = settings.bindings().0;
+        let (bindings, binding_warnings) = settings.bindings();
+        for warning in binding_warnings {
+            eprintln!("{warning}");
+        }
         let env_scale = std::env::var("MOBA_UI_SCALE")
             .ok()
             .and_then(|value| value.parse::<f32>().ok());
@@ -483,6 +486,7 @@ impl ClientApp {
                         demo_orders: launch::parse_demo_orders(),
                         demo_next: 0,
                         own_recall: None,
+                        recall_requested: None,
                         shop_page: 0,
                         hover: None,
                         attack_target: None,
@@ -1011,14 +1015,13 @@ impl App for ClientApp {
                             animated_rig(models, models.hero(usize::from(hero)))
                         });
                         minions.on_snapshot(&snapshot);
+                        sync_network_recalls(vfx, network, &snapshot);
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
                             entity.hero_slot == network.own_slot
                                 && entity.team == network.client.team().index() as u8
                         }) {
                             network.own_net_id = Some(own.net_id);
-                            network.own_recall = own
-                                .is_recalling()
-                                .then(|| network.own_recall.unwrap_or(snapshot.tick));
+                            network.recall_confirmed(own.is_recalling(), snapshot.tick);
                             network.prediction.set_dead(own.is_dead());
                             screen_fx.observe(own.health, own.max_health, own.is_dead());
                             network.prediction.reconcile(own.position());
@@ -1687,6 +1690,29 @@ fn queue_network_vfx(
     if let Some(mapped) = mapped {
         vfx.queue_unstamped(mapped);
     }
+}
+
+/// Starts and stops the recall effects from the snapshot's recall flags, behind the
+/// unreliable recall events ([`vfx::VfxSystem::sync_recalls`]).
+fn sync_network_recalls(vfx: &mut vfx::VfxSystem, network: &NetworkView, snapshot: &SnapshotState) {
+    let center = crate::hud::map_center(network);
+    let rules = network.client.rules();
+    let seconds = rules.recall_ticks as f32 / f32::from(network.client.tick_rate().max(1));
+    vfx.sync_recalls(
+        snapshot.tick,
+        snapshot
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == 0 && entity.is_recalling() && !entity.is_dead())
+            .map(|entity| {
+                vfx::VfxEvent::recall(
+                    u32::from(entity.net_id),
+                    entity.team,
+                    vfx::world(entity.position(), center),
+                    seconds,
+                )
+            }),
+    );
 }
 
 /// Queues this tick's local simulation events for the effects (the preview and replays).

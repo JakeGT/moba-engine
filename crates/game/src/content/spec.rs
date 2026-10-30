@@ -263,6 +263,8 @@ pub struct StructureStatsSpec {
 
 /// Default recall channel length: 240 ticks (8 s at 30 Hz).
 pub(crate) const DEFAULT_RECALL_TICKS: u32 = 240;
+/// Longest recall channel a pack may set: 900 ticks (30 s at 30 Hz).
+pub(crate) const MAX_RECALL_TICKS: u32 = 900;
 
 /// Tunable match rules shared by simulation and server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

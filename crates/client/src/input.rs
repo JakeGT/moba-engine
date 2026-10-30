@@ -247,12 +247,20 @@ pub(crate) fn handle_network_input(
     }
 }
 
-/// Sends a recall order. Recalling stands the hero still, so the local prediction drops its
-/// movement order too (the server cancels the channel if a later order moves it).
+/// Sends a recall order (none when the pack disables recall or the hero is dead).
+///
+/// The local prediction is not stopped here: the order may not start a channel (a stun the
+/// client is not told about, a lost packet), and a predicted stop the server never makes
+/// would drag the drawn hero back to the server's. The replicated recall flag stops it
+/// instead, one round trip later ([`NetworkView::recall_confirmed`]), when the server
+/// confirms the channel; by then the hero has drifted at most half a round trip of
+/// movement, which reconciliation eases out.
 pub(crate) fn request_recall(network: &mut NetworkView) {
+    if network.client.rules().recall_ticks == 0 || network.prediction.is_dead() {
+        return;
+    }
     if network.client.send_command(WireCommand::Recall).is_ok() {
-        network.prediction.set_target(None);
-        network.attack_target = None;
+        network.recall_requested = Some((network.prediction.target(), network.attack_target));
     }
 }
 

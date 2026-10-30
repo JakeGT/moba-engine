@@ -43,8 +43,10 @@ pub(crate) struct Controls {
     pub(crate) scoreboard: String,
     pub(crate) ready: String,
     pub(crate) surrender: String,
-    /// Recall to base (since protocol v42). Older settings files lack it and get `B`.
-    pub(crate) recall: String,
+    /// Recall to base (since protocol v42). `None` only for a file saved before recall
+    /// existed; [`Settings::sanitize`] migrates it (see [`Settings::migrate_recall`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recall: Option<String>,
     pub(crate) attack_button: String,
     pub(crate) camera_left: String,
     pub(crate) camera_right: String,
@@ -69,7 +71,7 @@ impl Default for Controls {
             scoreboard: String::from("Tab"),
             ready: String::from("R"),
             surrender: String::from("F5"),
-            recall: String::from("B"),
+            recall: Some(String::from("B")),
             attack_button: String::from("left"),
             camera_left: String::from("Left"),
             camera_right: String::from("Right"),
@@ -325,18 +327,18 @@ impl Settings {
     }
 
     /// The recall key: the configured one (or `B` if it does not parse), unless another
-    /// action already uses it. A settings file saved before recall existed binds the shop
-    /// to `B`, the new recall default; the shop keeps its key and recall is left unbound,
-    /// with a warning, rather than one key doing both.
+    /// key already uses it: then recall is left unbound, with a warning, rather than one key
+    /// doing both.
     fn recall_binding(&self, bindings: &Bindings, warnings: &mut Vec<String>) -> Option<Key> {
-        let defaults = Controls::default();
-        let key = parse_key(&self.controls.recall).unwrap_or_else(|| {
-            warnings.push(format!(
-                "settings: invalid binding recall={:?}",
-                self.controls.recall
-            ));
-            parse_key(&defaults.recall).unwrap_or(Key::B)
-        });
+        let key = match self.controls.recall.as_deref() {
+            Some(value) => parse_key(value).unwrap_or_else(|| {
+                warnings.push(format!("settings: invalid binding recall={value:?}"));
+                Key::B
+            }),
+            None => Key::B,
+        };
+        // The movement keys pan only a spectator's camera, which cannot recall; the digits
+        // use items (1-6) and buy from the open shop (1-8), whose page keys are the arrows.
         let taken = [
             (bindings.cast_q, "cast_q"),
             (bindings.cast_w, "cast_w"),
@@ -346,6 +348,20 @@ impl Settings {
             (bindings.scoreboard, "scoreboard"),
             (bindings.ready, "ready"),
             (bindings.surrender, "surrender"),
+            (bindings.camera_left, "camera_left"),
+            (bindings.camera_right, "camera_right"),
+            (bindings.camera_up, "camera_up"),
+            (bindings.camera_down, "camera_down"),
+            (Key::Digit1, "item and shop key 1"),
+            (Key::Digit2, "item and shop key 2"),
+            (Key::Digit3, "item and shop key 3"),
+            (Key::Digit4, "item and shop key 4"),
+            (Key::Digit5, "item and shop key 5"),
+            (Key::Digit6, "item and shop key 6"),
+            (Key::Digit7, "shop key 7"),
+            (Key::Digit8, "shop key 8"),
+            (Key::ArrowLeft, "shop page"),
+            (Key::ArrowRight, "shop page"),
         ];
         if let Some((_, name)) = taken.iter().find(|(other, _)| *other == key) {
             warnings.push(format!(
@@ -434,7 +450,27 @@ impl Settings {
             self.ally_vfx_opacity = self.ally_vfx_opacity.clamp(0.0, 1.0);
             warnings.push(String::from("settings: ally_vfx_opacity clamped"));
         }
+        self.migrate_recall(&mut warnings);
         warnings
+    }
+
+    /// A file saved before recall existed has no `recall` key and, unless the player changed
+    /// it, the old default `shop = "B"`. B is the recall key now, so such a file moves the
+    /// shop to P (the new default) and recalls on B, with a note; any other shop key is
+    /// kept, and recall gets B unless that is taken ([`Self::bindings`] then warns).
+    fn migrate_recall(&mut self, warnings: &mut Vec<String>) {
+        if self.controls.recall.is_some() {
+            return;
+        }
+        let defaults = Controls::default();
+        if parse_key(&self.controls.shop) == Some(Key::B) {
+            warnings.push(String::from(
+                "settings: B now recalls (protocol v42); the shop moved from B to P \
+                 (set controls.shop and controls.recall to choose)",
+            ));
+            self.controls.shop = defaults.shop;
+        }
+        self.controls.recall = defaults.recall;
     }
 
     /// Default settings path, overridable with `MOBA_SETTINGS`.
@@ -602,13 +638,54 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_file_from_before_recall_keeps_its_shop_key() {
-        // Saved before recall existed: the shop on B and no `recall` key.
-        let old: Settings = toml::from_str("[controls]\nshop = \"B\"\n").expect("parse");
-        let (bindings, warnings) = old.bindings();
-        assert_eq!(bindings.shop, Key::B);
-        assert_eq!(bindings.recall, None, "never one key for both");
+    fn a_settings_file_from_before_recall_moves_the_shop_to_p() {
+        let dir = std::env::temp_dir().join(format!("moba-recall-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("settings.toml");
+        // Saved before recall existed: the shop on B (the old default), no `recall` key.
+        std::fs::write(&path, "[controls]\nshop = \"B\"\n").expect("write");
+        let (migrated, warnings) = Settings::load(&path);
+        assert_eq!(warnings.len(), 1, "a note: {warnings:?}");
+        assert!(warnings[0].contains("shop moved from B to P"));
+        let (bindings, warnings) = migrated.bindings();
+        assert_eq!((bindings.recall, bindings.shop), (Some(Key::B), Key::P));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Saved again, it says so, and loads without a note.
+        migrated.save(&path).expect("save");
+        let (again, warnings) = Settings::load(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(again.controls.recall.as_deref(), Some("B"));
+        // An old file with another shop key keeps it, and recalls on B.
+        std::fs::write(&path, "[controls]\nshop = \"M\"\n").expect("write");
+        let (kept, warnings) = Settings::load(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            (kept.bindings().0.recall, kept.bindings().0.shop),
+            (Some(Key::B), Key::M)
+        );
+        // ... unless B is taken: then recall is unbound, with a warning.
+        std::fs::write(&path, "[controls]\nshop = \"M\"\nstop = \"B\"\n").expect("write");
+        let (taken, _) = Settings::load(&path);
+        let (bindings, warnings) = taken.bindings();
+        assert_eq!((bindings.recall, bindings.stop), (None, Key::B));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_recall_key_another_key_uses_leaves_recall_unbound() {
+        // Explicitly both on B (a hand-edited file): never one key for both.
+        let both: Settings =
+            toml::from_str("[controls]\nshop = \"B\"\nrecall = \"B\"\n").expect("parse");
+        let (bindings, warnings) = both.bindings();
+        assert_eq!((bindings.recall, bindings.shop), (None, Key::B));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        // The camera keys and the hard-wired item, shop and page keys are taken too.
+        for key in ["Left", "Down", "1", "8"] {
+            let clash: Settings =
+                toml::from_str(&format!("[controls]\nrecall = \"{key}\"\n")).expect("parse");
+            assert_eq!(clash.bindings().0.recall, None, "{key}");
+        }
         let fixed: Settings =
             toml::from_str("[controls]\nshop = \"B\"\nrecall = \"F\"\n").expect("parse");
         assert_eq!(

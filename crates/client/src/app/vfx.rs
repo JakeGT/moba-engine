@@ -452,7 +452,14 @@ pub(crate) struct VfxSystem {
     ambient: Vec<Ambient>,
     /// The map generation `ambient` was resolved for; `None` to resolve again.
     ambient_generation: Option<u32>,
+    /// Heroes the last snapshot showed recalling ([`Self::sync_recalls`]); capacity
+    /// [`MAX_RECALLING`], swapped with `recalling_next` each snapshot.
+    recalling: Vec<u32>,
+    recalling_next: Vec<u32>,
 }
+
+/// Heroes tracked as recalling at once (every hero of a match, with room to spare).
+const MAX_RECALLING: usize = 16;
 
 /// This frame's decals and the persistent stamp ring (preallocated).
 #[derive(Debug)]
@@ -796,6 +803,8 @@ impl VfxSystem {
             counters: VfxCounters::default(),
             ambient: Vec::with_capacity(moba_assets::MAX_MAP_EFFECTS),
             ambient_generation: None,
+            recalling: Vec::with_capacity(MAX_RECALLING),
+            recalling_next: Vec::with_capacity(MAX_RECALLING),
         }
     }
 
@@ -854,6 +863,7 @@ impl VfxSystem {
         self.pending.clear();
         self.unstamped.clear();
         self.casts = [(u32::MAX, 0, f32::NEG_INFINITY); MAX_CASTS];
+        self.recalling.clear();
         // A content reload may renumber the effects: resolve the map's again.
         self.ambient.clear();
         self.ambient_generation = None;
@@ -975,6 +985,41 @@ impl VfxSystem {
         self.unstamped.clear();
     }
 
+    /// Follows the replicated recall flag (`ENTITY_FLAG_RECALL`) of the snapshot for `tick`:
+    /// `starts` holds a [`Trigger::Recall`] event for every living hero it shows recalling.
+    /// The recall events are unreliable (a lost packet) and an enemy's end is not always
+    /// sent (a killer does not see the corpse it leaves), so the flag backs them up, as it
+    /// does for the animators: a hero newly flagged starts its effect (unless its start
+    /// event already did), and one no longer flagged (cancelled, arrived, dead, or out of
+    /// sight) stops it, at that snapshot's tick.
+    pub(crate) fn sync_recalls(&mut self, tick: u32, starts: impl IntoIterator<Item = VfxEvent>) {
+        if !self.enabled {
+            return;
+        }
+        self.recalling_next.clear();
+        for start in starts {
+            let Some(source) = start.source else {
+                continue;
+            };
+            if self.recalling_next.len() == MAX_RECALLING {
+                break;
+            }
+            self.recalling_next.push(source);
+            if !self.recalling.contains(&source) {
+                self.queue(tick, start);
+            }
+        }
+        for index in 0..self.recalling.len() {
+            let source = self.recalling[index];
+            if !self.recalling_next.contains(&source) {
+                let mut end = VfxEvent::new(Trigger::RecallEnd, 0, Vec3::ZERO);
+                end.source = Some(source);
+                self.queue(tick, end);
+            }
+        }
+        core::mem::swap(&mut self.recalling, &mut self.recalling_next);
+    }
+
     /// Queues an event for the frame whose render tick reaches `tick`.
     pub(crate) fn queue(&mut self, tick: u32, event: VfxEvent) {
         if !self.enabled {
@@ -1077,9 +1122,16 @@ impl VfxSystem {
     /// Starts the effects an event triggers.
     pub(crate) fn trigger(&mut self, event: &VfxEvent, view: &VfxView, anchors: &Anchors) {
         let defaults = *self.library.defaults();
-        if event.trigger == Trigger::RecallEnd {
-            self.end_recall(event.source, defaults.recall);
-            return;
+        match event.trigger {
+            Trigger::RecallEnd => {
+                self.end_recall(event.source, defaults.recall);
+                return;
+            }
+            // A dead hero's channel is over, whether or not its end reached this client.
+            Trigger::HeroDeath => self.end_recall(event.target, defaults.recall),
+            // One channel plays one effect: the start event and the flag both report it.
+            Trigger::Recall if self.recall_playing(event.source, defaults.recall) => return,
+            _ => {}
         }
         let ability = match event.trigger {
             Trigger::Cast => {
@@ -1133,6 +1185,19 @@ impl VfxSystem {
             .filter(|(caster, _, _)| *caster == source)
             .max_by(|a, b| a.2.total_cmp(&b.2))
             .map(|&(_, binding, _)| binding)
+    }
+
+    /// Whether `source`'s recall effect is playing (still emitting).
+    fn recall_playing(&self, source: Option<u32>, recall: Option<EffectId>) -> bool {
+        let now = self.time;
+        source.is_some()
+            && recall.is_some()
+            && self.instances.iter().any(|instance| {
+                instance.alive
+                    && instance.source == source
+                    && instance.effect == recall
+                    && now - instance.start < instance.emit
+            })
     }
 
     /// Stops `source`'s recall effect (a cancel or a completion): it stops emitting and its

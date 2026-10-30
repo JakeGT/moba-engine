@@ -803,10 +803,11 @@ fn recall_ticks_defaults_parses_validates_and_is_hashed() {
     let explicit = load_toml("[rules]\nrecall_ticks = 240\n").expect("parse");
     assert_eq!(explicit.hash(), default.hash());
     let mut too_long = GameContent::default();
-    too_long.rules.recall_ticks = 3_601;
+    too_long.rules.recall_ticks = 901;
     assert_eq!(
         too_long.validate(),
         Err(ContentError::BadRules("recall_ticks"))
     );
-    assert!(load_toml("[rules]\nrecall_ticks = 3601\n").is_err());
+    assert!(load_toml("[rules]\nrecall_ticks = 901\n").is_err());
+    assert!(load_toml("[rules]\nrecall_ticks = 900\n").is_ok());
 }

@@ -65,6 +65,9 @@ pub(crate) struct NetworkView {
     /// Snapshot tick the own hero's recall channel started on (for the HUD bar), while
     /// snapshots show it recalling.
     pub(crate) own_recall: Option<u32>,
+    /// The predicted move target and attack target when the player last asked to recall,
+    /// until a snapshot confirms the channel ([`Self::recall_confirmed`]).
+    pub(crate) recall_requested: Option<(Option<FixVec2>, Option<u16>)>,
     pub(crate) shop_page: usize,
     /// The unit under the cursor (R2b hover outline): picked from the previous frame's
     /// camera, so it lags one frame. Only units in the latest snapshot can be picked.
@@ -115,6 +118,7 @@ impl NetworkView {
             demo_orders: Vec::new(),
             demo_next: 0,
             own_recall: None,
+            recall_requested: None,
             shop_page: 0,
             hover: None,
             attack_target: None,
@@ -129,6 +133,23 @@ impl NetworkView {
             projectiles: Vec::with_capacity(32),
             audio: crate::audio::Audio::headless(),
         }
+    }
+
+    /// Tracks the own hero's recall flag from a snapshot at `tick`. When it shows a channel
+    /// starting, the hero stands still on the server: the prediction drops the move (and
+    /// the attack target) it had when the player pressed recall, unless the player has
+    /// given another order since (which cancels the channel on the server too).
+    pub(crate) fn recall_confirmed(&mut self, recalling: bool, tick: u32) {
+        if recalling
+            && self.own_recall.is_none()
+            && let Some((target, attack)) = self.recall_requested.take()
+            && self.prediction.target() == target
+            && self.attack_target == attack
+        {
+            self.prediction.set_target(None);
+            self.attack_target = None;
+        }
+        self.own_recall = recalling.then(|| self.own_recall.unwrap_or(tick));
     }
 
     /// The tick units are interpolated and animated at this frame.
@@ -262,5 +283,44 @@ impl NetworkView {
             entry.life = entry.life.saturating_sub(1);
         }
         self.kill_feed.retain(|entry| entry.life > 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moba_core::FixVec2;
+
+    use super::NetworkView;
+
+    #[test]
+    fn only_a_confirmed_recall_stops_the_predicted_hero() {
+        let mut network = NetworkView::test_stub();
+        let walk = Some(FixVec2::from_ints(100, 128));
+        network.prediction.set_target(walk);
+        network.attack_target = Some(7);
+        // Asked to recall: nothing stops until the server confirms it (a recall that never
+        // starts, e.g. while stunned, never stops it) ...
+        network.recall_requested = Some((walk, Some(7)));
+        network.recall_confirmed(false, 10);
+        assert_eq!(network.prediction.target(), walk, "not yet");
+        // ... then the flag stops it.
+        network.recall_confirmed(true, 14);
+        assert_eq!(
+            (network.prediction.target(), network.attack_target),
+            (None, None)
+        );
+        assert_eq!(network.own_recall, Some(14));
+        network.recall_confirmed(true, 15);
+        assert_eq!(network.own_recall, Some(14), "the channel's start tick");
+        network.recall_confirmed(false, 30);
+        assert_eq!(network.own_recall, None);
+
+        // An order given after the recall keeps its prediction: it cancels the channel.
+        network.recall_requested = Some((None, None));
+        let order = Some(FixVec2::from_ints(70, 128));
+        network.prediction.set_target(order);
+        network.recall_confirmed(true, 40);
+        assert_eq!(network.prediction.target(), order);
+        assert_eq!(network.recall_requested, None, "used up");
     }
 }

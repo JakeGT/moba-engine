@@ -60,7 +60,7 @@ pub(crate) struct VfxEvent {
 }
 
 impl VfxEvent {
-    fn new(trigger: Trigger, team: u8, position: Vec3) -> Self {
+    pub(crate) fn new(trigger: Trigger, team: u8, position: Vec3) -> Self {
         Self {
             trigger,
             team,
@@ -76,6 +76,14 @@ impl VfxEvent {
             ability: None,
             effect: None,
         }
+    }
+
+    /// A recall start for `source`, channelling `seconds` at `position`.
+    pub(crate) fn recall(source: u32, team: u8, position: Vec3, seconds: f32) -> Self {
+        let mut event = Self::new(Trigger::Recall, team, position);
+        event.source = Some(source);
+        event.seconds = seconds;
+        event
     }
 }
 
