@@ -6,7 +6,7 @@
 //! ```toml
 //! duration = 0.6           # seconds the effect emits (0..=30)
 //! importance = "high"      # low | normal | high: budget priority (default normal)
-//! event_duration = false   # zones: emit for the event's lifetime instead of `duration`
+//! event_duration = false   # zones and recalls: emit for the event's lifetime instead of `duration`
 //!
 //! [[emitters]]
 //! primitive = "sprite"     # sprite | flipbook | trail | beam | ring | mesh
@@ -1557,6 +1557,8 @@ pub struct VfxUnitEffects {
     pub structure_destroyed: Option<String>,
     /// A basic attack lands (at the target).
     pub attack: Option<String>,
+    /// A hero channels a recall, at the hero, for the channel (or until it is cancelled).
+    pub recall: Option<String>,
 }
 
 /// A validated `vfx/bindings.toml`.
@@ -1571,6 +1573,7 @@ pub struct VfxUnitEffects {
 /// minion_death = "puff"
 /// structure_destroyed = "collapse"
 /// attack = "attack-hit"
+/// recall = "recall"
 ///
 /// [[abilities]]            # at most 128
 /// name = "Arc Bolt"        # the catalogue ability name
@@ -1609,6 +1612,8 @@ struct RawDefaults {
     structure_destroyed: Option<String>,
     #[serde(default)]
     attack: Option<String>,
+    #[serde(default)]
+    recall: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1671,6 +1676,7 @@ impl VfxBindings {
             minion_death: effect_name(defaults.minion_death)?,
             structure_destroyed: effect_name(defaults.structure_destroyed)?,
             attack: effect_name(defaults.attack)?,
+            recall: effect_name(defaults.recall)?,
         };
         let mut abilities = Vec::with_capacity(raw.abilities.len());
         for ability in raw.abilities {
@@ -1737,6 +1743,7 @@ impl VfxBindings {
             &defaults.minion_death,
             &defaults.structure_destroyed,
             &defaults.attack,
+            &defaults.recall,
         ]
         .into_iter()
         .filter_map(Option::as_deref)
@@ -2163,6 +2170,7 @@ scale_with_radius = true
 cast = "flash"
 hero_death = "death"
 attack = "spark"
+recall = "recall"
 
 [[abilities]]
 name = "Arc Bolt"
@@ -2183,9 +2191,12 @@ zone = "cinder"
         assert_eq!(arc.cast_socket.as_deref(), Some("spear_tip"));
         assert_eq!(arc.tint, [0.5, 1.0, 2.0]);
         assert!(bindings.ability("Nova").is_none());
+        assert_eq!(bindings.defaults.recall.as_deref(), Some("recall"));
         assert_eq!(
             bindings.effect_names().collect::<Vec<_>>(),
-            ["flash", "death", "spark", "arc-bolt", "arc-hit", "cinder"]
+            [
+                "flash", "death", "spark", "recall", "arc-bolt", "arc-hit", "cinder"
+            ]
         );
         for bad in [
             "[defaults]\ncast = \"../escape\"",

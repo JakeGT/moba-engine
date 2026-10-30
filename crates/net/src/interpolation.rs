@@ -7,6 +7,17 @@ use moba_core::{Fix, FixVec2};
 
 use crate::protocol::{NetEntity, NetId, SnapshotState};
 
+/// Whether an entity's move from snapshot `before` to snapshot `after` is a teleport, not
+/// movement: a recall ended between them (the recall flag cleared on a living hero; a
+/// completion puts it at its spawn) or it respawned (dead, then alive). Decided from those
+/// replicated signals, not from the distance, so no dash or speed a content pack allows is
+/// mistaken for one. A recall cancelled by a move or dash snaps too, which shows only when
+/// snapshots between them were lost (the walked part of the gap then appears at once).
+#[must_use]
+pub fn is_teleport(before: &NetEntity, after: &NetEntity) -> bool {
+    !after.is_dead() && (before.is_dead() || (before.is_recalling() && !after.is_recalling()))
+}
+
 /// Interpolates entity positions between the last few snapshots.
 #[derive(Debug)]
 pub struct Interpolator {
@@ -73,7 +84,31 @@ impl Interpolator {
         latest.tick as f32 + elapsed * self.tick_rate - self.delay_ticks
     }
 
+    /// Whether the entity teleported ([`is_teleport`]) after `from` and up to `to` (render
+    /// ticks): [`Self::position`] jumps then, which is neither a speed nor a facing.
+    #[must_use]
+    pub fn teleported_between(&self, net_id: NetId, from: f32, to: f32) -> bool {
+        let mut before: Option<&NetEntity> = None;
+        for state in &self.states {
+            let Some(entity) = state.get(net_id) else {
+                continue;
+            };
+            let tick = state.tick as f32;
+            if tick > to {
+                break;
+            }
+            if tick > from && before.is_some_and(|before| is_teleport(before, entity)) {
+                return true;
+            }
+            before = Some(entity);
+        }
+        false
+    }
+
     /// Returns the interpolated position of an entity at `render_tick`.
+    ///
+    /// A teleport between the two snapshots around `render_tick` ([`is_teleport`]) is not
+    /// interpolated: the earlier position holds until the later snapshot's tick.
     ///
     /// Returns `None` if the entity is not present in any buffered snapshot.
     #[must_use]
@@ -95,6 +130,9 @@ impl Interpolator {
         match (before, after) {
             (Some((before_tick, before)), Some((after_tick, after))) => {
                 let span = after_tick - before_tick;
+                if is_teleport(before, after) {
+                    return Some(before.position());
+                }
                 let alpha = if span <= 0.0 {
                     0.0
                 } else {
@@ -168,6 +206,55 @@ mod tests {
             FixVec2::from_ints(0, 0)
         );
         assert!(interpolator.position(2, 11.0).is_none());
+    }
+
+    #[test]
+    fn a_teleport_snaps_instead_of_sliding_across_the_map() {
+        let flagged = |mut entity: NetEntity, flags: u8| {
+            entity.flags = flags;
+            entity
+        };
+        let recall = crate::protocol::ENTITY_FLAG_RECALL;
+        let dead = crate::protocol::ENTITY_FLAG_DEAD;
+        let lane = FixVec2::from_ints(100, 100);
+        let spawn = FixVec2::from_ints(24, 128);
+        // A completed recall: one tick from the lane (100, 100) to the spawn (24, 128).
+        let mut interpolator = Interpolator::new(0.0, 30.0);
+        interpolator.push(state(1, 9, vec![flagged(entity(1, 1_600, 1_600), recall)]));
+        interpolator.push(state(2, 10, vec![flagged(entity(1, 1_600, 1_600), recall)]));
+        interpolator.push(state(3, 11, vec![entity(1, 384, 2_048)]));
+        assert_eq!(interpolator.position(1, 10.0), Some(lane));
+        assert_eq!(interpolator.position(1, 10.5), Some(lane), "no slide");
+        assert_eq!(interpolator.position(1, 10.99), Some(lane));
+        assert_eq!(interpolator.position(1, 11.0), Some(spawn));
+        assert!(interpolator.teleported_between(1, 9.5, 11.0));
+        assert!(!interpolator.teleported_between(1, 9.0, 10.5), "not yet");
+        assert!(!interpolator.teleported_between(1, 11.0, 12.0), "over");
+        // So does a respawn (dead at the death spot, then alive at the spawn).
+        let mut interpolator = Interpolator::new(0.0, 30.0);
+        interpolator.push(state(1, 10, vec![flagged(entity(1, 1_600, 1_600), dead)]));
+        interpolator.push(state(2, 11, vec![entity(1, 384, 2_048)]));
+        assert_eq!(interpolator.position(1, 10.5), Some(lane));
+        // A dash interpolates, however long a content pack makes it (30 units in a tick),
+        // and so does fast movement across a gap of lost snapshots.
+        let mut interpolator = Interpolator::new(0.0, 30.0);
+        interpolator.push(state(1, 10, vec![entity(1, 0, 0)]));
+        interpolator.push(state(2, 11, vec![entity(1, 480, 0)]));
+        interpolator.push(state(3, 41, vec![entity(1, 2_080, 0)]));
+        assert_eq!(
+            interpolator.position(1, 10.5),
+            Some(FixVec2::from_ints(15, 0))
+        );
+        assert_eq!(
+            interpolator.position(1, 26.0),
+            Some(FixVec2::from_ints(80, 0))
+        );
+        assert!(!interpolator.teleported_between(1, 0.0, 41.0));
+        // Starting a recall, or dying, is no teleport.
+        let still = entity(1, 0, 0);
+        assert!(!is_teleport(&still, &flagged(still, recall)));
+        assert!(!is_teleport(&still, &flagged(still, dead)));
+        assert!(!is_teleport(&flagged(still, recall), &flagged(still, dead)));
     }
 
     #[test]

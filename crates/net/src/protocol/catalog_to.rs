@@ -345,6 +345,7 @@ impl WireCatalog {
                 structure_heroes_first: self.rules.structure_heroes_first,
                 nexus_win: self.rules.nexus_win,
                 score_limit: self.rules.score_limit,
+                recall_ticks: self.rules.recall_ticks,
             },
             attestation: None,
             // Clients never receive pack files; visual names resolve against a local root.

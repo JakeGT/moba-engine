@@ -17,7 +17,8 @@ engineering item below is merged, tiered (Low/Medium/High/Ultra) with an off swi
 under validation and sync validation on lavapipe, and covered by goldens. Rendering stays
 purely presentational: the only wire changes were R0's WP-3.1 (protocol v40, asset references)
 and R4b-1 (protocol v41, basic-attack events for hit-frame sync); sim logic v8, replay v5 and
-the golden state hash were untouched by every phase.
+the golden state hash were untouched by every rendering phase. R4's exit needed a gameplay
+feature, recall, which is protocol v42 and sim logic v9 (replay format still v5).
 
 | Phase | Engine work | Merged in | Exit items left to the maintainer or the art team |
 |---|---|---|---|
@@ -25,7 +26,7 @@ the golden state hash were untouched by every phase.
 | R1 Renderer architecture | done | #323 (R1a), #327 (R1b) | the ≤ 5 % criterion's reading (below) |
 | R2 Lighting and materials | done | #330 (R2a), #335 (R2b) | timings on the three §7 reference GPUs; art-direction readability sign-off |
 | R3 Terrain and environment | done | #333 (R3a), #336 (R3b) | sign-off of "one fully art-directed map" (the sample maps are engine-authored) |
-| R4 Animation runtime | done | #324 (R4a), #325 (R4b-1), #332 (R4b) | recall plays only once the simulation has recall |
+| R4 Animation runtime | done; exit met with recall ([perf/0024](../perf/0024-recall.md)) | #324 (R4a), #325 (R4b-1), #332 (R4b), #340 | — |
 | R5 VFX | done | #329 | §7 reference-GPU timings (#9/#127) |
 | R6 Post and image quality | done, including item 7 (distortion) | #334, #338 | the blind A/B readability sign-off (image set in perf/0019) |
 | R7 UI and presentation | done | #326 (R7a), #328 (R7b) | — (champion select does not exist yet) |
@@ -70,7 +71,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Terrain | **R3a** ([ADR-0014](../adr/0014-terrain-fog-of-war.md)): a per-map heightfield mesh (board relief ≤ 0.5 m, hills or cliffs beyond the edge) with 1–8 splat-textured layers (texture arrays, triplanar on slopes, layer normal maps and cavity AO, baked relief AO), generated from the simulation's map by `moba_assets::generate_terrain`; `content-check` verifies the visuals against the simulation's map. Height fog and a sky close every view. **R3b** ([ADR-0017](../adr/0017-decals-foliage-water.md), 2026-10-30): ground decals binned in a 32×32 world grid (telegraphs with a guaranteed-contrast rim, scorch, splats), GPU-instanced wind-animated foliage pushed aside only by drawn units, and rivers and pools with flow, depth fade, foam and refraction on High; `content-check` keeps water wadeable. |
 | Fog of war | **R3a:** a GPU visibility texture (`R8`, 128²–512² by tier) rasterised every frame from the own team's vision with line-of-sight walls, blurred and faded; no 16/32 caps; styled per map; also masks the minimap. |
 | Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
-| Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. R4b (2026-10-29, [perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions (baked by `vat-bake`, instanced, shadow-casting, cube fallback), tiered bone-count LOD, visible socket attachments, 2D blend spaces and the local preview/replays on the same runtime; 200 VAT minions ≈ 0.01 ms CPU per frame. |
+| Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. R4b (2026-10-29, [perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions (baked by `vat-bake`, instanced, shadow-casting, cube fallback), tiered bone-count LOD, visible socket attachments, 2D blend spaces and the local preview/replays on the same runtime; 200 VAT minions ≈ 0.01 ms CPU per frame. Recall (2026-10-30, protocol v42, [perf/0024](../perf/0024-recall.md)): the recall loop from `EVENT_RECALL` and the recall flag, teleports snapped instead of interpolated. |
 | VFX | **R5** ([ADR-0013](../adr/0013-vfx-runtime.md), 2026-10-29): compute-simulated GPU particles in a fixed per-tier buffer (sprites, flipbooks, trails, beams, ground rings, mesh particles), additive plus weighted blended OIT (unsorted on Low), soft particles from the scene depth, client-local effect descriptors bound to presentation events and animation sockets, per-tier particle/overdraw budgets with distance culling and enemy-telegraph/ally-dimming rules, and a live-reload preview. Distortion moved to R6. |
 | Image quality | **R6** ([ADR-0015](../adr/0015-post-processing.md), 2026-10-29): AgX with per-map exposure and opt-in eye adaptation, per-map 3D colour-grading LUTs, a physically based 5-level bloom chain (Medium+), FXAA (Low–High) and MSAA 4× (Ultra), half-resolution GTAO from a depth prepass on the ambient terms (High+), render scale with dynamic resolution (Low) and a native-resolution HUD, and accessibility-toggleable death desaturation, damage vignette and low-health pulse. Heat-haze distortion particles (High+, [ADR-0019](../adr/0019-distortion.md), 2026-10-30): a refraction draw over a copy of the HDR target before the particles, capped per tier and resolution, depth-aware and masked off every unit. No TAA, SMAA or FSR yet. |
 | UI | **R7a:** MSDF font (Open Sans Condensed, baked offline by `bake-ui-font`) with derivative anti-aliasing, outlines and soft shadows; the RGBA atlas keeps pixel-art icons. Styled health bars (damage ghost, shield, ticks, colour-blind palette), pooled floating combat text, cooldown sweeps, screen fades and a loading screen ([perf/0014](../perf/0014-ui.md)). **R7b:** render-to-texture through the graph (persistent offscreen images the UI samples): 3D hero portraits (animated idle above `Low`) and a minimap baked from a top-down render of the map at load. |
@@ -263,10 +264,13 @@ perf/0020 for an art director to sign.
 protocol v41), so attack wind-up and release follow the simulation's attack timer and the hit
 frame lands on the hit tick. **R4b is done** (2026-10-29, ADR-0012 amendment,
 [perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions, bone-count LOD, visible socket
-attachments, 2D blend spaces and local preview/replay animation. Exit: a skinned hero ran
-idle, run, attack, three casts and death in a networked match at 150 ms RTT (30 ms jitter,
-5 % loss); recall does not exist in the simulation, so it is bound but never triggered.
-200 VAT minions cost ≈ 0.01 ms of CPU per frame against a 0.5 ms budget.
+attachments, 2D blend spaces and local preview/replay animation. 200 VAT minions cost
+≈ 0.01 ms of CPU per frame against a 0.5 ms budget. **Recall exists and the exit is met**
+(2026-10-30, protocol v42, simulation logic v9, ADR-0012 recall amendment,
+[perf/0024](../perf/0024-recall.md)): in a networked match through a 150 ms RTT / 30 ms jitter
+/ 5 % loss link, on lavapipe, the local skinned hero played idle, run, three casts, recall
+(two cancels and a completed recall that snapped it to its spawn), a basic attack and death,
+and the other nine played attacks, casts and deaths, in the order the server ran them.
 
 1. **Clips and blending.** Multiple clips per hero, 1D/2D blend spaces for locomotion, crossfades, additive hit reactions and an upper/lower-body mask (cast while moving).
 2. **Animation state machine** defined in content, driven by snapshot state and presentation events:

@@ -4,7 +4,7 @@
 //! plays the same animations as a network match, each simulated tick is turned into what a
 //! spectator client would receive: a [`SnapshotState`] of every unit, quantised exactly like
 //! the wire ([`NetEntity::from_observed`]), and the tick's [`SimEvent`]s as the `NetEvent`s the
-//! server would send (`EVENT_CAST`, `EVENT_ATTACK`, `EVENT_UNIT_DIED`). The app then drives the
+//! server would send (`EVENT_CAST`, `EVENT_ATTACK`, `EVENT_UNIT_DIED`, `EVENT_RECALL`). The app then drives the
 //! hero `AnimationDriver` and the `MinionDriver` with them exactly as it does in a match.
 //!
 //! This is a local adapter only: the wire, the server and the simulation are untouched (it
@@ -13,10 +13,10 @@
 
 use moba_core::FixVec2;
 use moba_net::protocol::{
-    EVENT_ATTACK, EVENT_CAST, EVENT_UNIT_DIED, NetEntity, NetEvent, SnapshotState,
-    dequantize_position, quantize_position,
+    EVENT_ATTACK, EVENT_CAST, EVENT_RECALL, EVENT_UNIT_DIED, NetEntity, NetEvent, RECALL_CANCELLED,
+    RECALL_COMPLETED, RECALL_STARTED, SnapshotState, dequantize_position, quantize_position,
 };
-use moba_sim::{ObservedUnit, SimEvent, Simulation};
+use moba_sim::{ObservedUnit, RecallEnd, SimEvent, Simulation};
 
 /// Events kept per tick (the simulation's queue holds 256).
 const MAX_EVENTS: usize = 256;
@@ -88,6 +88,7 @@ impl LocalFeed {
     }
 
     /// The `NetEvent` the server sends for `event` (only the kinds animation reads).
+    #[allow(clippy::too_many_lines)] // One SimEvent mapping.
     fn convert(event: &SimEvent) -> Option<NetEvent> {
         let none = u16::MAX;
         Some(match *event {
@@ -144,6 +145,52 @@ impl LocalFeed {
                     x,
                     y,
                     value: kind as u16,
+                    ..NetEvent::default()
+                }
+            }
+            SimEvent::RecallStarted {
+                hero,
+                team,
+                position,
+                duration_ticks,
+            } => {
+                let (x, y) = quantize_position(position);
+                NetEvent {
+                    kind: EVENT_RECALL,
+                    team: team.index() as u8,
+                    source: net_id(hero.index()),
+                    target: none,
+                    x,
+                    y,
+                    x2: x,
+                    y2: y,
+                    value: RECALL_STARTED,
+                    aux: u16::try_from(duration_ticks).unwrap_or(u16::MAX),
+                    ..NetEvent::default()
+                }
+            }
+            SimEvent::RecallEnded {
+                hero,
+                team,
+                position,
+                end,
+            } => {
+                let (value, arrival) = match end {
+                    RecallEnd::Completed { destination } => (RECALL_COMPLETED, destination),
+                    _ => (RECALL_CANCELLED, position),
+                };
+                let (x, y) = quantize_position(position);
+                let (x2, y2) = quantize_position(arrival);
+                NetEvent {
+                    kind: EVENT_RECALL,
+                    team: team.index() as u8,
+                    source: net_id(hero.index()),
+                    target: none,
+                    x,
+                    y,
+                    x2,
+                    y2,
+                    value,
                     ..NetEvent::default()
                 }
             }
@@ -240,5 +287,50 @@ mod tests {
             .expect("a hero");
         assert_eq!(feed.hero_pick(hero.net_id), Some(hero.hero_pick));
         assert!(feed.previous_position(hero.net_id).is_some());
+    }
+
+    #[test]
+    fn recalls_become_recall_events_and_the_flag() {
+        use moba_net::protocol::{EVENT_RECALL, RECALL_COMPLETED, RECALL_STARTED};
+        use moba_sim::{PlayerCommand, TickInputs};
+        let mut simulation = Simulation::new(SimConfig::default());
+        let mut feed = LocalFeed::new();
+        let mut inputs = TickInputs::new();
+        inputs.set(0, PlayerCommand::Recall);
+        simulation.tick(&inputs);
+        feed.capture(&mut simulation);
+        simulation.clear_events();
+        let hero = simulation.hero_entity(0).expect("hero");
+        let id = super::net_id(hero.index());
+        let started: Vec<_> = feed
+            .events()
+            .iter()
+            .filter(|event| event.kind == EVENT_RECALL)
+            .map(|event| (event.source, event.value, event.aux))
+            .collect();
+        assert_eq!(started, vec![(id, RECALL_STARTED, 240)]);
+        let flagged = |feed: &LocalFeed| {
+            feed.snapshot()
+                .entities
+                .iter()
+                .find(|entity| entity.net_id == id)
+                .is_some_and(|entity| entity.is_recalling())
+        };
+        assert!(flagged(&feed));
+        let idle = TickInputs::new();
+        let mut completed = None;
+        for _ in 0..240 {
+            simulation.tick(&idle);
+            feed.capture(&mut simulation);
+            simulation.clear_events();
+            completed = completed.or_else(|| {
+                feed.events()
+                    .iter()
+                    .find(|event| event.kind == EVENT_RECALL)
+                    .map(|event| event.value)
+            });
+        }
+        assert_eq!(completed, Some(RECALL_COMPLETED));
+        assert!(!flagged(&feed));
     }
 }

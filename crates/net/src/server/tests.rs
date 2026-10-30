@@ -1523,3 +1523,265 @@ fn a_full_attack_queue_evicts_minion_attacks_before_hero_attacks() {
     assert_eq!(heroes.front().map(|event| event.tick), Some(1));
     assert_eq!(heroes.back().map(|event| event.tick), Some(3_000));
 }
+
+/// A bot policy that keeps every bot still and makes one slot recall at one tick (and,
+/// optionally, cast its Q toward a point at a later tick).
+struct ScriptedRecall {
+    slot: usize,
+    at: u32,
+    dash_at: Option<(u32, moba_core::FixVec2)>,
+}
+
+impl moba_sim::BotPolicy for ScriptedRecall {
+    fn inputs(&mut self, simulation: &mut moba_sim::Simulation) -> moba_sim::TickInputs {
+        let mut inputs = moba_sim::TickInputs::new();
+        let tick = simulation.current_tick().get();
+        if tick == self.at {
+            inputs.set(self.slot, moba_sim::PlayerCommand::Recall);
+        }
+        if let Some((at, target)) = self.dash_at
+            && tick == at
+        {
+            inputs.set(
+                self.slot,
+                moba_sim::PlayerCommand::CastAbility { slot: 0, target },
+            );
+        }
+        inputs
+    }
+}
+
+/// A playing server whose only client is blue slot 0, with red slot 5 placed at `red_at`
+/// (blue hero 0 at `blue_at`) and scripted to recall on the next tick.
+fn recall_server(
+    blue_at: moba_core::FixVec2,
+    red_at: moba_core::FixVec2,
+) -> (NetServer, moba_ecs::Entity) {
+    let (mut server, _) = playing_server(false);
+    let tick = server.simulation.current_tick().get();
+    server
+        .simulation
+        .set_bot_policy(Some(Box::new(ScriptedRecall {
+            slot: 5,
+            at: tick,
+            dash_at: None,
+        })));
+    let blue = server.simulation.hero_entity(0).expect("blue hero");
+    let red = server.simulation.hero_entity(5).expect("red hero");
+    let world = server.simulation.world_mut();
+    world.get_mut::<moba_sim::Position>(blue).expect("blue").0 = blue_at;
+    world.get_mut::<moba_sim::Position>(red).expect("red").0 = red_at;
+    (server, red)
+}
+
+/// Runs `ticks` server ticks with a snapshot each; returns blue's recall events and
+/// whether any snapshot showed the red hero recalling.
+fn run_recall(
+    server: &mut NetServer,
+    red: moba_ecs::Entity,
+    ticks: u32,
+) -> (Vec<crate::protocol::NetEvent>, u32) {
+    let mut events = Vec::new();
+    let mut flagged = 0;
+    for _ in 0..ticks {
+        server.tick_simulation();
+        server.send_snapshots();
+        events.extend(
+            server
+                .delta
+                .events
+                .iter()
+                .filter(|event| event.kind == crate::protocol::EVENT_RECALL)
+                .copied(),
+        );
+        let client = server.clients[0].as_ref().expect("client");
+        if let Some(id) = client.net_ids.get(red)
+            && client
+                .baseline(client.snapshot_seq)
+                .is_some_and(|entities| {
+                    entities
+                        .iter()
+                        .any(|entity| entity.net_id == id && entity.is_recalling())
+                })
+        {
+            flagged += 1;
+        }
+    }
+    (events, flagged)
+}
+
+#[test]
+fn an_enemy_recall_out_of_vision_is_never_reported() {
+    // Red hero 5 deep in red's half, far from every blue unit and structure.
+    let hidden = moba_core::FixVec2::from_ints(200, 60);
+    let (mut server, red) = recall_server(moba_core::FixVec2::from_ints(64, 100), hidden);
+    let (events, flagged) = run_recall(&mut server, red, 260);
+    let spawn = server
+        .simulation
+        .content()
+        .map
+        .hero_spawn(moba_game::Team::Red, 0);
+    assert_eq!(
+        server.simulation.hero_position(5),
+        Some(spawn),
+        "it recalled"
+    );
+    assert!(events.is_empty(), "leaked: {events:?}");
+    assert_eq!(flagged, 0);
+    let client = server.clients[0].as_ref().expect("client");
+    assert!(client.net_ids.get(red).is_none(), "never even seen");
+}
+
+#[test]
+fn a_visible_enemy_recall_is_reported_from_start_to_completion() {
+    let spot = moba_core::FixVec2::from_ints(64, 100);
+    let (mut server, red) = recall_server(spot, spot + moba_core::FixVec2::from_ints(2, 0));
+    let (events, flagged) = run_recall(&mut server, red, 260);
+    let red_spawn = server
+        .simulation
+        .content()
+        .map
+        .hero_spawn(moba_game::Team::Red, 0);
+    assert_eq!(server.simulation.hero_position(5), Some(red_spawn));
+    let client = server.clients[0].as_ref().expect("client");
+    let red_id = client.net_ids.get(red).expect("seen");
+    let kinds: Vec<u16> = events.iter().map(|event| event.value).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            crate::protocol::RECALL_STARTED,
+            crate::protocol::RECALL_COMPLETED
+        ]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.source == red_id && event.source_slot == 5 && event.team == 1)
+    );
+    assert_eq!(events[0].aux, 240, "channel length");
+    let at = crate::protocol::quantize_position(spot + moba_core::FixVec2::from_ints(2, 0));
+    assert_eq!(
+        (events[1].x, events[1].y),
+        at,
+        "completed where it channelled"
+    );
+    assert_eq!(
+        (events[1].x2, events[1].y2),
+        crate::protocol::quantize_position(red_spawn),
+        "arrived at its spawn"
+    );
+    // The flag is set in every snapshot of the channel but the one the teleport is in.
+    assert_eq!(flagged, 239);
+    // The red hero left blue's vision with the teleport.
+    assert!(
+        !client
+            .baseline(client.snapshot_seq)
+            .expect("history")
+            .iter()
+            .any(|entity| entity.net_id == red_id)
+    );
+}
+
+#[test]
+fn a_recall_start_needs_the_hero_in_view_and_its_end_needs_it_seen_before() {
+    let hero = moba_ecs::Entity::from_parts(40, 1);
+    let started = RawEvent::from_sim(
+        &moba_sim::SimEvent::RecallStarted {
+            hero,
+            team: moba_game::Team::Red,
+            position: moba_core::FixVec2::from_ints(200, 60),
+            duration_ticks: 240,
+        },
+        &playing_server(false).0.simulation,
+    )
+    .expect("recall events are replicated");
+    assert_eq!(started.kind, crate::protocol::EVENT_RECALL);
+    let seen_now = [observed(hero, moba_game::Team::Red)];
+    // A start needs the hero in view now; seen a snapshot ago is not enough.
+    assert!(started.visible_to(moba_game::Team::Blue, false, &seen_now, |_| false));
+    assert!(!started.visible_to(moba_game::Team::Blue, false, &[], |_| true));
+    // An end (cancel or completion) reports the channel spot: only a viewer that saw the
+    // hero in its previous snapshot gets it, in view now or not ...
+    for value in [
+        crate::protocol::RECALL_CANCELLED,
+        crate::protocol::RECALL_COMPLETED,
+    ] {
+        let end = RawEvent { value, ..started };
+        assert!(end.visible_to(moba_game::Team::Blue, false, &[], |_| true));
+        // ... never one that sees it only now (at its spawn, or where a dash put it) ...
+        assert!(!end.visible_to(moba_game::Team::Blue, false, &seen_now, |_| false));
+        assert!(!end.visible_to(moba_game::Team::Blue, false, &[], |_| false));
+        // ... unless spectating.
+        assert!(end.visible_to(moba_game::Team::Blue, true, &[], |_| false));
+    }
+}
+
+#[test]
+fn a_recall_completed_in_hiding_is_not_reported_to_a_spawn_watcher() {
+    // Red hero 5 channels deep in red's half, unseen, while blue hero 0 stands beside red's
+    // spawn: after the teleport blue sees red, but must not learn where it channelled.
+    let hidden = moba_core::FixVec2::from_ints(200, 60);
+    let red_spawn = playing_server(false)
+        .0
+        .simulation
+        .content()
+        .map
+        .hero_spawn(moba_game::Team::Red, 0);
+    let watcher = red_spawn - moba_core::FixVec2::from_ints(4, 0);
+    let (mut server, red) = recall_server(watcher, hidden);
+    let (events, flagged) = run_recall(&mut server, red, 245);
+    assert_eq!(
+        server.simulation.hero_position(5),
+        Some(red_spawn),
+        "recalled"
+    );
+    assert!(events.is_empty(), "leaked: {events:?}");
+    assert_eq!(flagged, 0);
+    let client = server.clients[0].as_ref().expect("client");
+    let red_id = client.net_ids.get(red).expect("seen at its spawn");
+    assert!(
+        client
+            .baseline(client.snapshot_seq)
+            .expect("history")
+            .iter()
+            .any(|entity| entity.net_id == red_id),
+        "blue sees red at its spawn now"
+    );
+}
+
+#[test]
+fn a_dash_out_of_fog_does_not_reveal_where_a_recall_was_cancelled() {
+    // Red hero 5 (Blade) channels unseen 19 units from blue hero 0 (vision 14), then dashes 7
+    // units toward it: the dash cancels the recall at the hidden spot and lands in view.
+    let spot = moba_core::FixVec2::from_ints(64, 100);
+    let hidden = spot + moba_core::FixVec2::from_ints(19, 0);
+    let (mut server, red) = recall_server(spot, hidden);
+    let tick = server.simulation.current_tick().get();
+    server
+        .simulation
+        .set_bot_policy(Some(Box::new(ScriptedRecall {
+            slot: 5,
+            at: tick,
+            // A direction cast aims within its range: 7 units toward blue.
+            dash_at: Some((tick + 30, hidden - moba_core::FixVec2::from_ints(7, 0))),
+        })));
+    let (events, flagged) = run_recall(&mut server, red, 40);
+    assert_eq!(server.simulation.recall_remaining(5), Some(0), "cancelled");
+    let landed = server.simulation.hero_position(5).expect("red");
+    assert!(
+        landed.distance(hidden) > moba_core::Fix::from_i32(6),
+        "dashed"
+    );
+    let client = server.clients[0].as_ref().expect("client");
+    let red_id = client.net_ids.get(red).expect("seen after the dash");
+    assert!(
+        client
+            .baseline(client.snapshot_seq)
+            .expect("history")
+            .iter()
+            .any(|entity| entity.net_id == red_id && !entity.is_recalling()),
+        "blue sees red where it landed"
+    );
+    assert!(events.is_empty(), "leaked: {events:?}");
+    assert_eq!(flagged, 0);
+}

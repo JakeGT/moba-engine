@@ -295,7 +295,10 @@ impl ClientApp {
         {
             eprintln!("settings: save failed: {error}");
         }
-        let bindings = settings.bindings().0;
+        let (bindings, binding_warnings) = settings.bindings();
+        for warning in binding_warnings {
+            eprintln!("{warning}");
+        }
         let env_scale = std::env::var("MOBA_UI_SCALE")
             .ok()
             .and_then(|value| value.parse::<f32>().ok());
@@ -480,6 +483,10 @@ impl ClientApp {
                             .and_then(|value| value.parse().ok()),
                         demo_bought: false,
                         demo_cast: parse_demo_cast(),
+                        demo_orders: launch::parse_demo_orders(),
+                        demo_next: 0,
+                        own_recall: None,
+                        recall_requested: None,
                         shop_page: 0,
                         hover: None,
                         attack_target: None,
@@ -1008,11 +1015,13 @@ impl App for ClientApp {
                             animated_rig(models, models.hero(usize::from(hero)))
                         });
                         minions.on_snapshot(&snapshot);
+                        sync_network_recalls(vfx, network, &snapshot);
                         if let Some(own) = snapshot.entities.iter().find(|entity| {
                             entity.hero_slot == network.own_slot
                                 && entity.team == network.client.team().index() as u8
                         }) {
                             network.own_net_id = Some(own.net_id);
+                            network.recall_confirmed(own.is_recalling(), snapshot.tick);
                             network.prediction.set_dead(own.is_dead());
                             screen_fx.observe(own.health, own.max_health, own.is_dead());
                             network.prediction.reconcile(own.position());
@@ -1038,6 +1047,14 @@ impl App for ClientApp {
                                 {
                                     network.demo_cast = None;
                                 }
+                            }
+                            while network.phase == MatchPhase::Playing
+                                && let Some(&(tick, order)) =
+                                    network.demo_orders.get(network.demo_next)
+                                && snapshot.tick >= tick
+                            {
+                                network.demo_next += 1;
+                                send_demo_order(network, order, own.position());
                             }
                             if let Some(target) = network.demo_move.filter(|_| {
                                 !network.demo_sent && network.phase == MatchPhase::Playing
@@ -1602,6 +1619,53 @@ pub(crate) use scene_build::{
     animated_rig, network_camera, rebuild_local_units, rebuild_network_units,
 };
 
+/// Sends one scripted `MOBA_DEMO_ORDERS` order for the own hero standing at `own`.
+fn send_demo_order(network: &mut NetworkView, order: launch::DemoOrder, own: moba_core::FixVec2) {
+    match order {
+        launch::DemoOrder::Recall => crate::input::request_recall(network),
+        launch::DemoOrder::Stop => {
+            if network.client.send_command(WireCommand::Stop).is_ok() {
+                network.prediction.set_target(None);
+            }
+        }
+        launch::DemoOrder::Cast(slot) => {
+            let (x, y) = quantize_position(own + moba_core::FixVec2::from_ints(4, 4));
+            let _ = network
+                .client
+                .send_command(WireCommand::CastAbility { slot, x, y });
+        }
+        launch::DemoOrder::Attack => {
+            let team = network.client.team().index() as u8;
+            let nearest = network.client.snapshot().and_then(|snapshot| {
+                snapshot
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.team != team && entity.team <= 1 && !entity.is_dead())
+                    .min_by_key(|entity| entity.position().distance(own).to_bits())
+                    .map(|entity| entity.net_id)
+            });
+            if let Some(net_id) = nearest
+                && network
+                    .client
+                    .send_command(WireCommand::Attack { net_id })
+                    .is_ok()
+            {
+                network.attack_target = Some(net_id);
+            }
+        }
+        launch::DemoOrder::Move(target) => {
+            let (x, y) = quantize_position(target);
+            if network
+                .client
+                .send_command(WireCommand::MoveTo { x, y })
+                .is_ok()
+            {
+                network.prediction.set_target(Some(target));
+            }
+        }
+    }
+}
+
 /// Queues a replicated event's effects until its snapshot's tick is known.
 fn queue_network_vfx(
     vfx: &mut vfx::VfxSystem,
@@ -1626,6 +1690,29 @@ fn queue_network_vfx(
     if let Some(mapped) = mapped {
         vfx.queue_unstamped(mapped);
     }
+}
+
+/// Starts and stops the recall effects from the snapshot's recall flags, behind the
+/// unreliable recall events ([`vfx::VfxSystem::sync_recalls`]).
+fn sync_network_recalls(vfx: &mut vfx::VfxSystem, network: &NetworkView, snapshot: &SnapshotState) {
+    let center = crate::hud::map_center(network);
+    let rules = network.client.rules();
+    let seconds = rules.recall_ticks as f32 / f32::from(network.client.tick_rate().max(1));
+    vfx.sync_recalls(
+        snapshot.tick,
+        snapshot
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == 0 && entity.is_recalling() && !entity.is_dead())
+            .map(|entity| {
+                vfx::VfxEvent::recall(
+                    u32::from(entity.net_id),
+                    entity.team,
+                    vfx::world(entity.position(), center),
+                    seconds,
+                )
+            }),
+    );
 }
 
 /// Queues this tick's local simulation events for the effects (the preview and replays).

@@ -946,3 +946,102 @@ fn looping_map_effects_never_starve_events_or_fake_telegraphs() {
     assert!(fake.decals().is_empty() && fake.frame().spawns.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Recall (protocol v42): the shipped recall effect plays at the hero for the channel, is
+/// not an area telegraph, and stops when the recall ends (a cancel or the arrival).
+#[test]
+fn recall_plays_for_the_channel_and_stops_when_it_ends() {
+    let content = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
+    let library = VfxLibrary::load(content);
+    assert!(library.defaults().recall.is_some(), "the shipped binding");
+    let mut vfx = VfxSystem::new(library, QualityTier::High.vfx_budget(), true);
+    let view = view(Some(1));
+    let anchors = anchors();
+    let mut start = event(Trigger::Recall, 0, Some(3));
+    start.target = None;
+    start.position = Vec3::ZERO;
+    start.seconds = 8.0;
+    vfx.queue(1, start);
+    let mut spawned = 0;
+    for tick in 1..=60 {
+        vfx.update(1.0 / 30.0, tick as f32, &view, &anchors, NO_SOCKET);
+        let frame = vfx.frame();
+        spawned += frame.spawns.len();
+        assert!(
+            frame
+                .spawns
+                .iter()
+                .all(|spawn| spawn.role != ParticleRole::EnemyTelegraph),
+            "not a telegraph"
+        );
+        assert!(vfx.decals().is_empty(), "no telegraph decals");
+    }
+    assert!(spawned > 30, "it plays: {spawned}");
+    assert_eq!(vfx.counters().instances, 1, "still channelling at 2 s");
+    // Another hero's recall ending changes nothing; this hero's stops it.
+    let mut other = event(Trigger::RecallEnd, 0, Some(1));
+    other.target = None;
+    vfx.queue(61, other);
+    vfx.update(1.0 / 30.0, 61.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(vfx.counters().instances, 1);
+    let mut end = event(Trigger::RecallEnd, 0, Some(3));
+    end.target = None;
+    vfx.queue(62, end);
+    vfx.update(1.0 / 30.0, 62.0, &view, &anchors, NO_SOCKET);
+    vfx.update(1.0 / 30.0, 63.0, &view, &anchors, NO_SOCKET);
+    assert!(vfx.frame().spawns.is_empty(), "stopped emitting");
+    // Gone once the last mote (1.3 s) and the light's fade (0.4 s) have finished.
+    for tick in 64..=110 {
+        vfx.update(1.0 / 30.0, tick as f32, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(vfx.counters().instances, 0, "ended long before 8 s");
+}
+
+#[test]
+fn the_recall_flag_backs_up_lost_recall_events_and_deaths_end_the_effect() {
+    let content = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
+    let mut vfx = VfxSystem::new(
+        VfxLibrary::load(content),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let recall = vfx.library().defaults().recall;
+    let view = view(Some(1));
+    let anchors = anchors();
+    let flagged = |source: u32| VfxEvent::recall(source, 0, Vec3::ZERO, 8.0);
+    let run = |vfx: &mut VfxSystem, ticks: core::ops::RangeInclusive<u32>| {
+        for tick in ticks {
+            vfx.update(1.0 / 30.0, tick as f32, &view, &anchors, NO_SOCKET);
+        }
+    };
+    // The start event was lost: the flag starts the effect. Its start event arriving as
+    // well (both in one snapshot) does not start a second one.
+    vfx.sync_recalls(1, [flagged(3)]);
+    let mut start = event(Trigger::Recall, 0, Some(3));
+    start.target = None;
+    start.seconds = 8.0;
+    vfx.queue(1, start);
+    run(&mut vfx, 1..=30);
+    assert_eq!(vfx.counters().instances, 1, "one effect per channel");
+    // Still flagged: nothing changes.
+    vfx.sync_recalls(31, [flagged(3)]);
+    run(&mut vfx, 31..=40);
+    assert_eq!(vfx.counters().instances, 1);
+    assert!(vfx.recall_playing(Some(3), recall));
+    // The cancel (or completion) event was lost: the flag clearing stops the effect.
+    vfx.sync_recalls(41, []);
+    run(&mut vfx, 41..=100);
+    assert!(!vfx.recall_playing(Some(3), recall));
+    assert_eq!(vfx.counters().instances, 0, "stopped with the flag");
+
+    // A killer sees the death but no cancel, and the corpse may leave its snapshots in the
+    // same tick: the death stops the effect.
+    vfx.sync_recalls(101, [flagged(5)]);
+    run(&mut vfx, 101..=110);
+    assert!(vfx.recall_playing(Some(5), recall));
+    let mut died = event(Trigger::HeroDeath, 1, Some(9));
+    died.target = Some(5);
+    vfx.queue(111, died);
+    run(&mut vfx, 111..=112);
+    assert!(!vfx.recall_playing(Some(5), recall), "stopped by the death");
+}

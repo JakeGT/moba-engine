@@ -52,6 +52,7 @@ pub(crate) struct UnitEffects {
     pub(crate) minion_death: Option<EffectId>,
     pub(crate) structure_destroyed: Option<EffectId>,
     pub(crate) attack: Option<EffectId>,
+    pub(crate) recall: Option<EffectId>,
 }
 
 /// Every loaded effect, resolved by name.
@@ -136,6 +137,7 @@ impl VfxLibrary {
             minion_death: resolve(&defaults.minion_death),
             structure_destroyed: resolve(&defaults.structure_destroyed),
             attack: resolve(&defaults.attack),
+            recall: resolve(&defaults.recall),
         };
         let mut abilities = Vec::with_capacity(bindings.abilities.len());
         for binding in &bindings.abilities {
@@ -400,6 +402,7 @@ mod tests {
             ("minion death", defaults.minion_death),
             ("structure", defaults.structure_destroyed),
             ("attack", defaults.attack),
+            ("recall", defaults.recall),
             ("cast", defaults.cast),
             ("projectile", defaults.projectile),
             ("hit", defaults.hit),

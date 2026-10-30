@@ -312,8 +312,51 @@ simulation (`MOBA_REPLAY`, R5) gets the same animation. The local VFX anchors us
 net ids, so local effects attach to the animated heroes' sockets as in a match.
 
 ### Exit criterion
-The simulation has no recall, so the recall state stays bound but untriggered (as in R4a);
-the exit evidence records it instead of adding a simulation feature.
+The simulation had no recall when R4b landed, so the recall state stayed bound but
+untriggered; the amendment below adds it.
+
+## Amendment: recall (R4 exit; protocol v42, simulation logic v9)
+Recall is a simulation feature (an 8 s channel, `rules.recall_ticks`, that teleports the hero
+to its spawn; cancelled by orders, casts, damage, stun and death) replicated two ways, both
+read by the driver:
+
+- **`EVENT_RECALL`** (9) marks the edges: `RECALL_STARTED` triggers
+  `AnimationEvent::Recall` stamped with the carrying snapshot's tick (the `recall` state
+  loops), and `RECALL_CANCELLED` / `RECALL_COMPLETED` withdraw that trigger with
+  `Animator::cancel(.., at = start, stop_at = tick)`, so the loop fades out (`fade_out`) from
+  the tick the channel ended. The driver keeps each hero's start tick for that.
+- **`ENTITY_FLAG_RECALL`** in every snapshot of the channel. Events are not retransmitted, so
+  a hero seen recalling with no start (a lost event, or one that walked into vision
+  mid-channel) starts the loop on that snapshot's tick, and one no longer recalling ends it.
+  Over the R4 exit run (5 % loss) the completion event of one recall was lost and the flag
+  ended the loop on the same tick.
+
+Fog of war comes from the server: the flag is part of the entity (only sent while the viewer
+sees the hero), a start is sent only to viewers who see the hero, and a cancel or completion
+only to those who saw it in their previous snapshot, standing on the channel spot the event
+reports (seeing it now is not enough: at its spawn, or where a dash put it, it would reveal
+a spot the viewer never saw).
+
+The recall effect (ADR-0013) follows the same flag: it starts when the start event was lost,
+and stops when the flag clears, the hero leaves the snapshot or dies (a killer never gets the
+cancel of the hero it killed), as well as on the events.
+
+**Teleports.** The interpolator used to lerp every step, so a recall (or a respawn) slid the
+hero across the map for one tick and the driver saw a run speed and a facing towards the
+spawn. `moba_net::interpolation::is_teleport` now treats the step between two snapshots as a
+teleport when a living hero's recall flag cleared (a completion; a cancel moves it at most a
+tick's walk or a dash) or a dead hero came back alive: the earlier position holds until the
+later snapshot's tick, then the hero appears at the new one. It reads those replicated
+signals rather than a distance (an earlier draft snapped steps over 10 units plus 0.5 per
+tick), so a content pack's long dash or fast hero still interpolates. The network scene ignores such a step for the hero's speed and facing, so
+the recall loop is not cut short by `interrupt_on_move` and the hero does not turn on
+arrival. The own hero's prediction already snapped corrections over 8 units; it stops for a
+recall only when the flag confirms the channel, so a recall that never starts does not
+rubber-band it.
+
+The local preview and replays map `SimEvent::RecallStarted` / `RecallEnded` to the same
+events, and the flag comes from `ObservedUnit::recalling` through `NetEntity::from_observed`.
+Evidence: [perf/0024](../perf/0024-recall.md).
 
 ## Alternatives considered
 - **A third-party animation runtime** (an engine's animation module such as Bevy's or

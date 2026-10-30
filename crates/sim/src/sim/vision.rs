@@ -5,8 +5,8 @@ use moba_ecs::Entity;
 use moba_game::{EMPTY_ITEM, ModifierKind, Team};
 
 use crate::components::{
-    Cooldowns, Health, HeroIdentity, HeroSlot, Mana, Modifiers, Position, Progression, UnitKind,
-    VisionRange,
+    Cooldowns, Health, HeroIdentity, HeroSlot, Mana, Modifiers, Position, Progression, Recall,
+    UnitKind, VisionRange,
 };
 
 use super::{MAX_UNITS, ObservedCandidate, ObservedUnit, Simulation, VisionSource};
@@ -142,6 +142,10 @@ impl Simulation {
                 silenced: modifiers.is_some_and(|m| m.has(ModifierKind::Silence)),
                 burning: modifiers.is_some_and(|m| m.has(ModifierKind::Burn)),
                 hasted: modifiers.is_some_and(|m| m.has(ModifierKind::Haste)),
+                recalling: self
+                    .world
+                    .get::<Recall>(entity)
+                    .is_some_and(|recall| recall.active()),
                 status_bits: modifiers.map_or(0, |modifiers| {
                     modifiers
                         .entries()

@@ -4,7 +4,7 @@ use moba_game::{ModifierKind, Team};
 
 use crate::components::{AttackTarget, Dead, Modifiers, MoveTarget};
 
-use super::{MAX_PLAYERS, PlayerCommand, Simulation, TickInputs};
+use super::{MAX_PLAYERS, PlayerCommand, RecallCancel, Simulation, TickInputs};
 
 impl Simulation {
     /// Deterministic scheduling phase: half the seeds resolve blue first, half red first.
@@ -33,6 +33,7 @@ impl Simulation {
             };
             match command {
                 PlayerCommand::Stop => {
+                    self.cancel_recall(entity, RecallCancel::Order);
                     if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
                         target.0 = None;
                     }
@@ -46,6 +47,7 @@ impl Simulation {
                         .get::<Modifiers>(entity)
                         .is_none_or(|m| !m.has(ModifierKind::Root) && !m.has(ModifierKind::Stun))
                     {
+                        self.cancel_recall(entity, RecallCancel::Order);
                         let destination = self.clamp_position(position);
                         if let Some(target) = self.world.get_mut::<MoveTarget>(entity) {
                             target.0 = Some(destination);
@@ -56,6 +58,7 @@ impl Simulation {
                     }
                 }
                 PlayerCommand::Attack(target) => {
+                    self.cancel_recall(entity, RecallCancel::Order);
                     if let Some(order) = self.world.get_mut::<AttackTarget>(entity) {
                         order.0 = Some(target);
                     }
@@ -75,6 +78,7 @@ impl Simulation {
                 PlayerCommand::UseItem(slot) => {
                     self.use_item(entity, slot);
                 }
+                PlayerCommand::Recall => self.start_recall(entity),
                 PlayerCommand::Surrender => {
                     if let Some(team) = self.world.get::<Team>(entity).copied() {
                         self.queue_win(team.enemy());

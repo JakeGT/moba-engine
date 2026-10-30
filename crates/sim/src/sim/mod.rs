@@ -18,6 +18,7 @@ mod hashing;
 mod inputs;
 mod items;
 mod movement;
+mod recall;
 mod spawn;
 mod status;
 mod vision;
@@ -137,6 +138,10 @@ pub enum PlayerCommand {
     UseItem(u8),
     /// Concedes the match for the sender's team.
     Surrender,
+    /// Starts recalling to the team's spawn (`rules.recall_ticks` of channelling; see
+    /// [`Simulation`]'s "Recall" section). Ignored while already recalling, stunned, dead,
+    /// or when the pack disables recall (`recall_ticks = 0`).
+    Recall,
 }
 
 /// One tick of input for every player.
@@ -310,11 +315,64 @@ pub enum SimEvent {
         /// Ticks until the attacker's next attack (its attack interval).
         interval_ticks: u32,
     },
+    /// A hero started recalling. Presentation only (animation, VFX, HUD); like every event
+    /// it never feeds the simulation, the state hash or replays.
+    RecallStarted {
+        /// Recalling hero.
+        hero: Entity,
+        /// Its team.
+        team: Team,
+        /// Where it channels (it stands still until the recall ends).
+        position: FixVec2,
+        /// Channel length in ticks: it completes at the end of the tick
+        /// `duration_ticks - 1` ticks after this one, unless cancelled.
+        duration_ticks: u32,
+    },
+    /// A hero's recall ended, cancelled or completed. Presentation only.
+    RecallEnded {
+        /// Recalling hero.
+        hero: Entity,
+        /// Its team.
+        team: Team,
+        /// Where it channelled (for a completed recall: where it left from).
+        position: FixVec2,
+        /// How it ended.
+        end: RecallEnd,
+    },
     /// The match ended (nexus destroyed, score limit reached or surrender).
     MatchEnded {
         /// Winning team, or `None` when the match ended in a draw.
         winner: Option<Team>,
     },
+}
+
+/// How a recall ended ([`SimEvent::RecallEnded`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecallEnd {
+    /// The channel was interrupted; the hero stays where it was.
+    Cancelled(RecallCancel),
+    /// The channel finished and the hero teleported to `destination` (its team's spawn).
+    Completed {
+        /// Where the hero arrived.
+        destination: FixVec2,
+    },
+}
+
+/// What interrupted a recall.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecallCancel {
+    /// A move, attack or stop order.
+    Order,
+    /// A successful ability cast.
+    Cast,
+    /// The hero took damage.
+    Damage,
+    /// The hero was stunned (hard crowd control).
+    Stun,
+    /// The hero died.
+    Death,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -438,6 +496,8 @@ pub struct ObservedUnit {
     pub burning: bool,
     /// Whether a movement haste is active.
     pub hasted: bool,
+    /// Whether the hero is channelling a recall.
+    pub recalling: bool,
     /// Generic replicated status bits from active modifiers.
     pub status_bits: u16,
 }
@@ -475,6 +535,7 @@ impl ObservedUnit {
             silenced: false,
             burning: false,
             hasted: false,
+            recalling: false,
             status_bits: 0,
         }
     }
@@ -500,6 +561,25 @@ impl BotPolicy for DefaultBotPolicy {
 }
 
 /// The authoritative MOBA simulation.
+///
+/// # Recall
+/// [`PlayerCommand::Recall`] starts a channel of `rules.recall_ticks` ticks (240, 8 s, by
+/// default; `0` disables recall) on a living hero that is not stunned: the hero drops its
+/// move and attack orders and stands still. The tick the channel runs out the hero
+/// teleports to its team's spawn ([`moba_game::MapSpec::hero_spawn`] for its slot) with no
+/// orders. Recalling again while channelling has no effect (it neither restarts nor
+/// cancels). The channel is cancelled ([`RecallCancel`]) by:
+///
+/// - a `MoveTo` the hero obeys (not while rooted), an `Attack` or a `Stop` order;
+/// - an ability cast that passes validation (a cast refused for cooldown, mana, range or
+///   silence does not cancel);
+/// - any damage that reaches the hero (after mitigation, before shields), from any source;
+/// - a stun (hard crowd control); a root, slow or silence does not cancel;
+/// - death.
+///
+/// Buying, using an item and surrendering do not cancel it. Every start and end is
+/// reported as [`SimEvent::RecallStarted`] / [`SimEvent::RecallEnded`]; the channel itself
+/// is the hashed [`crate::Recall`] component.
 pub struct Simulation {
     world: World,
     tick: Tick,
@@ -751,6 +831,8 @@ impl Simulation {
         self.update_projectiles();
         self.tick_zones();
         self.resolve_deaths();
+        // After deaths: damage or a death this tick has already cancelled a channel.
+        self.tick_recalls();
         self.resolve_outcome();
         if self.tick.get() >= self.next_wave_tick && self.config.spawn_waves {
             self.spawn_wave();
@@ -852,5 +934,7 @@ impl fmt::Debug for Simulation {
     }
 }
 
+#[cfg(test)]
+mod recall_tests;
 #[cfg(test)]
 mod tests;

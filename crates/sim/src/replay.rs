@@ -27,7 +27,7 @@ const MAGIC: &[u8; 8] = b"MOBARPL1";
 const VERSION: u8 = 5;
 /// Simulation logic contract. Bump when tick behaviour changes enough that old inputs no
 /// longer reproduce the recorded state.
-pub const SIM_LOGIC_VERSION: u8 = 8;
+pub const SIM_LOGIC_VERSION: u8 = 9;
 /// Minimum bytes per frame on the wire (`present` bitmask, no commands).
 const MIN_FRAME_BYTES: usize = 4;
 /// Upper bound on decoded frame memory (64 MiB).
@@ -421,6 +421,7 @@ fn encode_command(command: &PlayerCommand, out: &mut Vec<u8>) {
             out.push(6);
             out.push(*slot);
         }
+        PlayerCommand::Recall => out.push(7),
     }
 }
 
@@ -436,6 +437,7 @@ fn decode_command(reader: &mut Reader<'_>) -> Result<PlayerCommand, ReplayError>
         4 => PlayerCommand::BuyItem(reader.u8()?),
         5 => PlayerCommand::Surrender,
         6 => PlayerCommand::UseItem(reader.u8()?),
+        7 => PlayerCommand::Recall,
         _ => return Err(ReplayError::BadData),
     })
 }
@@ -567,6 +569,51 @@ mod tests {
                 .iter()
                 .any(|frame| frame.purchases[0] == Some(0))
         );
+        let result = decoded.play().expect("replay verifies");
+        assert_eq!(result.state_hash, sim.state_hash());
+    }
+
+    #[test]
+    fn recall_commands_round_trip_and_replay_deterministically() {
+        let config = SimConfig::default()
+            .with_seed(0x000E_C411)
+            .with_bot_mask(0)
+            .with_spawn_waves(false);
+        let mut sim = Simulation::new(config);
+        let mut replay = Replay::new(config);
+        let walk = PlayerCommand::MoveTo(FixVec2::from_ints(70, 110));
+        let mut ended = 0;
+        for tick in 0..700u32 {
+            let mut inputs = TickInputs::new();
+            // Walk; recall, cancel it by walking, recall again and let it complete (the
+            // recall at 350, while channelling, has no effect).
+            match tick {
+                0 | 260 => inputs.set(0, walk),
+                200 | 300 | 350 => inputs.set(0, PlayerCommand::Recall),
+                _ => {}
+            }
+            replay.push(inputs);
+            sim.tick(&inputs);
+            ended += sim
+                .events()
+                .iter()
+                .filter(|event| matches!(event, crate::SimEvent::RecallEnded { .. }))
+                .count();
+            sim.clear_events();
+        }
+        assert_eq!(ended, 2, "one cancel, one completion");
+        let spawn = sim.content().map.hero_spawn(moba_game::Team::Blue, 0);
+        assert_eq!(sim.hero_position(0), Some(spawn));
+        replay.expected_hash = Some(sim.state_hash());
+        replay.checkpoints.push((320, 0));
+        // Checkpoint inside the channel: record the real hash.
+        let mut probe = Simulation::new(config);
+        for frame in &replay.frames[..320] {
+            probe.tick(frame);
+        }
+        replay.checkpoints[0].1 = probe.state_hash();
+        let decoded = Replay::decode(&replay.encode()).expect("decode");
+        assert_eq!(decoded.frames[200].players[0], Some(PlayerCommand::Recall));
         let result = decoded.play().expect("replay verifies");
         assert_eq!(result.state_hash, sim.state_hash());
     }

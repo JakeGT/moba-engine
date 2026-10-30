@@ -33,8 +33,10 @@ pub enum Key {
     R,
     /// Reserved key F.
     F,
-    /// Open shop.
+    /// Recall (default binding).
     B,
+    /// Open shop (default binding).
+    P,
     /// Reserved map key.
     M,
     /// Digit 1 (shop slot 1).
@@ -91,7 +93,7 @@ pub enum Key {
 
 impl Key {
     /// Number of variants; used to size bit sets.
-    pub const COUNT: usize = 35;
+    pub const COUNT: usize = 36;
 
     /// Dense index of this key.
     #[inline]
@@ -143,6 +145,7 @@ pub(crate) fn map_key(code: KeyCode) -> Option<Key> {
         KeyCode::KeyR => Key::R,
         KeyCode::KeyF => Key::F,
         KeyCode::KeyB => Key::B,
+        KeyCode::KeyP => Key::P,
         KeyCode::KeyM => Key::M,
         KeyCode::Digit1 => Key::Digit1,
         KeyCode::Digit2 => Key::Digit2,

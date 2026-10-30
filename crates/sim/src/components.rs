@@ -250,6 +250,27 @@ pub struct Cooldowns(pub [u32; 3]);
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ItemCooldowns(pub [u16; 6]);
 
+/// A hero's recall channel. Every hero has one; `remaining == 0` means it is not recalling.
+///
+/// While `remaining > 0` the hero stands still channelling; the tick it reaches zero the
+/// hero teleports to its team's spawn (`MapSpec::hero_spawn`). Moving, attacking, a
+/// successful cast, a stop order, taking damage, a stun or dying cancels it
+/// (`Simulation` docs, "Recall").
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Recall {
+    /// Ticks left in the channel (`0` when not recalling).
+    pub remaining: u32,
+}
+
+impl Recall {
+    /// Whether the hero is channelling a recall.
+    #[inline]
+    #[must_use]
+    pub const fn active(self) -> bool {
+        self.remaining > 0
+    }
+}
+
 /// Marks a dead hero waiting to respawn.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Dead {

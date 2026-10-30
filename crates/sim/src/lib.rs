@@ -18,13 +18,14 @@ mod sim;
 pub use components::{
     AttackDamageType, AttackStats, AttackTarget, BaseMoveSpeed, Cooldowns, Dead, Health,
     HeroIdentity, HeroSlot, ItemCooldowns, LaneWalker, LastHitBy, MAX_MODIFIERS, Mana, Modifier,
-    Modifiers, MoveSpeed, MoveTarget, Position, Progression, Regen, Resistances, UnitKind,
+    Modifiers, MoveSpeed, MoveTarget, Position, Progression, Recall, Regen, Resistances, UnitKind,
     VisionRange,
 };
 pub use moba_game::ModifierKind;
 pub use replay::{Replay, ReplayError, ReplayResult, SIM_LOGIC_VERSION};
 pub use sim::{
     BotPolicy, DefaultBotPolicy, HERO_RESPAWN_TICKS, MAX_ATTACK_EVENTS, MAX_EVENTS, MAX_PLAYERS,
-    MAX_PROJECTILES, MAX_UNITS, MAX_ZONES, MatchOutcome, ObservedUnit, PlayerCommand, SimConfig,
-    SimEvent, Simulation, TICK_DURATION, TickInputs, WAVE_DELAY_TICKS, WAVE_INTERVAL_TICKS,
+    MAX_PROJECTILES, MAX_UNITS, MAX_ZONES, MatchOutcome, ObservedUnit, PlayerCommand, RecallCancel,
+    RecallEnd, SimConfig, SimEvent, Simulation, TICK_DURATION, TickInputs, WAVE_DELAY_TICKS,
+    WAVE_INTERVAL_TICKS,
 };

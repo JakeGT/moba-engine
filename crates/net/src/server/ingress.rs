@@ -396,5 +396,6 @@ pub(super) fn wire_to_command(
         WireCommand::UseItem { slot } => PlayerCommand::UseItem(slot),
         WireCommand::Ready { .. } => return None,
         WireCommand::Surrender => PlayerCommand::Surrender,
+        WireCommand::Recall => PlayerCommand::Recall,
     })
 }
