@@ -410,6 +410,68 @@ MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-client
 # turn individual features off or override the tier.
 ```
 
+### R2b lights, outlines, baked AO and contact shadows
+Clustered forward point lights, team outlines, baked map AO and a depth pre-pass with
+contact shadows ([ADR-0016](adr/0016-lights-outlines-ao.md),
+[perf/0020](perf/0020-lights-outlines-ao.md)). Every capture is 1280×720 on lavapipe with
+validation and synchronisation validation required (0 messages). **Before:** `main` at
+`74f3087`; **after:** this branch, High tier unless noted.
+
+![Networked golden frame before (left) and after (right) R2b](images/r2b-network-before-after.png)
+
+**The networked golden frame** (tick 120, GPU-skinned heroes, halved). The own hero carries
+a green screen-space outline (High: dilated from the pre-pass ID target, drawn after the
+tonemap so its colour is the HUD palette's exactly) and a small contact shadow under its
+feet. Nothing else changes: no effect light is live at tick 120 and the default grass map
+has no static occluders, so it has no AO bake. This is the deliberate rebaseline of both
+golden fingerprints.
+
+![Ember close-up before (left) and after (right)](images/r2b-ember-before-after.png)
+
+**Ember at a 24 m camera** (`MOBA_CONTENT=content/ember-map.toml MOBA_CAMERA_DISTANCE=24`,
+halved): the outline reads against the warm ground the hero's grey albedo blends into.
+
+![Cinder Zone before (left) and after (right)](images/r2b-lights-before-after.png)
+![Nova before (left) and after (right)](images/r2b-nova-before-after.png)
+
+**Effect lights** (`MOBA_VFX_PREVIEW=cinder-zone`, `nova`; full-resolution crops): each
+effect's `[light]` block lights the ground and the nearby units in its colour, inside the
+windowed radius, so a zone reads as a source of light rather than a decal. The particles
+differ between columns only because the preview loop's phase differs.
+
+![A hit unit under Judgement Hit and Cinder Zone lights: off, old falloff, new falloff; zone off, on](images/r2b-hit-readability.png)
+
+**Readability under effect lights** (`MOBA_VFX_PREVIEW=judgement-hit` frame 3 and
+`cinder-zone` frame 20, `MOBA_OUTLINE_PROBE=hit` stands an outlined enemy a metre behind the
+light, High, crops): lights off; the review-round-1 falloff (`max(d², 0.25)`, no clamp), with
+a near-white hot spot at the unit's base; the shipped falloff (`max(d², 1)`, the summed
+irradiance clamped to 1.5× the sun), where the unit brightens but keeps its team colour
+(saturation 0.36 off, 0.39 on); the zone with lights off and on, where the telegraph ring
+keeps its contrast. [perf/0020](perf/0020-lights-outlines-ao.md) has the numbers.
+
+![Frost walls: baked AO off, on, and the difference ×6](images/r2b-frost-ao-off-on.png)
+
+**Baked AO** (`MOBA_CONTENT=content/frost-map.toml MOBA_CAMERA=overview`, crop; left
+`MOBA_BAKED_AO=off`, middle on, right the absolute difference ×6): the `ao-bake` map darkens
+the ambient where walls and props meet the ground (max delta 22 of 255 on 1.4 % of the
+frame). It is deliberately subtle in sunlit areas, where the sun dominates; it is strongest
+in shade and on Low, where it stands in for contact shadows.
+
+![Outlines: before, Low hull, High screen-space, colour-blind palette](images/r2b-outlines-low-high-cb.png)
+
+**Outline modes** (networked frame, crops): `main` (no outline), Low (an unlit inverted hull
+drawn in the scene pass, before the tonemap), High (screen-space) and High with
+`MOBA_TEAM_PALETTE=colorblind`, where the own-hero outline follows the HUD's blue/yellow
+palette with the health bar.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 \
+MOBA_SMOKE_FRAMES=100000 MOBA_CAPTURE=/tmp/r2b.ppm MOBA_VULKAN_VALIDATION=required \
+cargo run --release -p moba-client
+# MOBA_LIGHTS=off|<cap>, MOBA_OUTLINES=off|hull|screen, MOBA_BAKED_AO=off and
+# MOBA_CONTACT_SHADOWS=off|<steps> turn individual features off or override the tier.
+```
+
 ### HUD polish (R7a): before and after
 ![HUD before (left) and after (right) R7a](images/r7-hud-before-after.png)
 

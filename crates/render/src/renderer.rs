@@ -31,15 +31,19 @@ use crate::frame_graph::{
 };
 use crate::instance::{InstanceContext, ValidationMode};
 use crate::lighting::{
-    self, EnvironmentState, FrameLighting, LightingConfig, LightingResources, ShadowFilter,
+    self, BakedAo, EnvironmentState, FrameLighting, LightingConfig, LightingResources, OutlineMode,
+    ShadowFilter,
 };
+use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
+use crate::passes::contact::ContactPass;
 use crate::passes::fog::FogPass;
+use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
-    MainViewSpec, PrepassTarget, ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec,
-    ShadowTarget, ViewBudget,
+    MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve, SceneTargets,
+    ShadowPipelineSpec, ShadowTarget, ViewBudget,
 };
 use crate::passes::vfx::{VfxPass, VfxTargets};
 use crate::pipeline_cache::PipelineCacheState;
@@ -47,6 +51,7 @@ use crate::post::{AntiAliasing, PostConfig, PostLook};
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
+use crate::scene::OutlinePalette;
 use crate::scene::{MeshId, OFFSCREEN_MAX_BONES, OFFSCREEN_MAX_INSTANCES, OffscreenRender, Scene};
 use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
@@ -394,6 +399,12 @@ pub struct Renderer {
     lighting: LightingResources,
     /// GPU particles; `None` when disabled or unsupported (the frame then has no VFX passes).
     vfx: Option<VfxPass>,
+    /// Screen-space contact shadows (R2b); `None` when off.
+    contact: Option<ContactPass>,
+    /// Screen-space outlines (R2b); `None` unless outlines are `screen`.
+    outline: Option<OutlinePass>,
+    /// This frame's outline palette, for the outline pass.
+    frame_outlines: OutlinePalette,
     materials: Materials,
     shaders: ShaderSource,
     pipeline_stats: PipelineStats,
@@ -540,6 +551,15 @@ impl Renderer {
             eprintln!("[render] 4x MSAA unsupported for the scene targets; using FXAA");
             post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
         }
+        // Screen-space outlines under MSAA need a 4x integer (`R8_UINT`) ID attachment
+        // (`framebufferIntegerColorSampleCounts`); without it they fall back to the hull.
+        if post_config.anti_aliasing == AntiAliasing::Msaa4
+            && lighting_config.outlines == OutlineMode::Screen
+            && !targets::supports_msaa4_ids(&device)
+        {
+            eprintln!("[render] 4x integer colour MSAA unsupported; using hull outlines");
+            lighting_config = lighting_config.with_outlines(OutlineMode::Hull);
+        }
         if post_config.dynamic_resolution && device.timestamp_valid_bits == 0 {
             eprintln!("[render] dynamic resolution needs GPU timestamps; using a fixed scale");
             post_config = post_config.with_dynamic_resolution(false);
@@ -595,8 +615,10 @@ impl Renderer {
             fog: fog_resolution,
             vfx: vfx_mode,
             msaa: post_config.anti_aliasing == AntiAliasing::Msaa4,
-            // Only AO asks for the prepass today; R2b's contact shadows will too.
+            // AO, R2b's contact shadows and its screen-space outlines each imply it.
             prepass: false,
+            outline_ids: lighting_config.outlines == OutlineMode::Screen,
+            contact_shadows: lighting_config.contact_steps() > 0,
             ambient_occlusion: post_config.ambient_occlusion,
             bloom: post_config.bloom,
             auto_exposure: post_config.auto_exposure,
@@ -706,10 +728,27 @@ impl Renderer {
                     vk::SampleCountFlags::TYPE_1
                 },
                 prepass: frame_spec.has_prepass(),
+                outline_ids: frame_spec.outline_ids,
+                hull: lighting_config.outlines == OutlineMode::Hull,
             },
             config.skinning,
         )?;
         config.max_bones = scene.max_bones();
+        let contact = frame_spec
+            .contact_shadows
+            .then(|| ContactPass::new(&device, &shaders, scene.camera_set_layout()))
+            .transpose()?;
+        // The outlines draw on the composite's output: the LDR intermediate when FXAA or the
+        // upscale reads it, else the swapchain image.
+        let outline_format = if frame_spec.fxaa || frame_spec.upscale {
+            frame_graph::LDR_FORMAT
+        } else {
+            swapchain.format
+        };
+        let outline = frame_spec
+            .outline_ids
+            .then(|| OutlinePass::new(&device, &shaders, outline_format))
+            .transpose()?;
         let post = PostPass::new(
             &device,
             &shaders,
@@ -779,6 +818,9 @@ impl Renderer {
             terrain: None,
             lighting,
             vfx,
+            contact,
+            outline,
+            frame_outlines: OutlinePalette::NONE,
             materials,
             shaders,
             pipeline_stats,
@@ -1042,6 +1084,69 @@ impl Renderer {
     #[must_use]
     pub fn has_environment(&self) -> bool {
         self.lighting.state().intensity > 0.0
+    }
+
+    /// Sets the map's baked ambient occlusion (ADR-0016): `texture`, a 2D single-channel map
+    /// (`R8_UNORM` or BC4 from `moba-tools ao-bake`, 1 = open), placed over the world by
+    /// `placement`. It multiplies the ambient line of every lit surface unless
+    /// [`LightingConfig::baked_ao`] is off. Replaces the previous one. Load-time only: it
+    /// waits for the device to idle and uploads through a staging buffer.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidTexture`] for a cube, a format other than `R8Unorm`/`Bc4Unorm`
+    /// (or one the device cannot sample) or an unusable placement; allocation or Vulkan
+    /// errors from the upload. On error the previous AO stays.
+    pub fn set_baked_ao(
+        &mut self,
+        texture: &crate::TextureData,
+        placement: BakedAo,
+    ) -> RenderResult<()> {
+        let single_channel = matches!(
+            texture.format(),
+            crate::TextureFormat::R8Unorm | crate::TextureFormat::Bc4Unorm
+        );
+        if texture.is_cube()
+            || !single_channel
+            || placement.uniform().is_none()
+            || !crate::texture::sampleable(
+                &self.device,
+                crate::texture::vk_format(texture.format()),
+            )
+        {
+            return Err(RenderError::InvalidTexture);
+        }
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses the
+        // lighting sets or the AO image being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        let image = crate::texture::upload(&self.device, "baked-ao", texture)?;
+        self.lighting
+            .set_baked_ao(&self.device, Some((image, placement)));
+        Ok(())
+    }
+
+    /// Removes the baked AO. Waits for the device to idle.
+    ///
+    /// # Errors
+    /// Vulkan errors from the idle wait.
+    pub fn clear_baked_ao(&mut self) -> RenderResult<()> {
+        // SAFETY: as in `set_baked_ao`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.lighting.set_baked_ao(&self.device, None);
+        Ok(())
+    }
+
+    /// Whether a baked AO map is set (it is applied unless [`LightingConfig::baked_ao`] is
+    /// off).
+    #[must_use]
+    pub fn has_baked_ao(&self) -> bool {
+        self.lighting.baked_ao().is_some()
+    }
+
+    /// What happened to the most recent frame's [`Scene::lights`]: uploaded, dropped by the
+    /// tier's caps, culled (ADR-0016).
+    #[must_use]
+    pub fn light_stats(&self) -> LightStats {
+        self.lighting.light_stats()
     }
 
     /// Binds a registered 2D colour texture as the stylisation ramp (`None` removes it), used
@@ -1335,8 +1440,24 @@ impl Renderer {
             .as_ref()
             .map(|vfx| vfx.build_pipelines(&self.device, &self.shaders))
             .transpose()?;
+        let contact = self
+            .contact
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
+        let outline = self
+            .outline
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
         self.scene.install_pipelines(scene);
         self.post.install_pipelines(post);
+        if let (Some(pass), Some(pipeline)) = (self.contact.as_mut(), contact) {
+            pass.install_pipeline(pipeline);
+        }
+        if let (Some(pass), Some(pipeline)) = (self.outline.as_mut(), outline) {
+            pass.install_pipeline(pipeline);
+        }
         if let (Some(pass), Some(pipelines)) = (self.vfx.as_mut(), vfx) {
             pass.install_pipelines(pipelines);
         }
@@ -1455,8 +1576,18 @@ impl Renderer {
         let shadow = view(resources.shadow);
         let ao = view(resources.ao.map(|ao| ao.blurred));
         self.post.bind(&self.device, views);
-        self.lighting.bind_shadow(&self.device, shadow);
+        let contact = view(resources.contact);
+        self.lighting.bind_transients(&self.device, shadow, contact);
         self.lighting.bind_ao(&self.device, ao);
+        if let (Some(pass), Some(depth)) = (&self.contact, view(Some(resources.depth))) {
+            pass.bind_depth(&self.device, depth);
+        }
+        if let (Some(pass), Some(ids)) = (
+            &self.outline,
+            view(resources.outline_ids.map(|ids| ids.ids)),
+        ) {
+            pass.bind_ids(&self.device, ids);
+        }
         if let (Some(vfx), Some(ids)) = (self.vfx.as_mut(), resources.vfx) {
             let depth = view(Some(resources.depth)).expect("depth is live");
             vfx.bind_targets(&self.device, depth, view(ids.accum), view(ids.reveal));
@@ -1624,10 +1755,32 @@ impl Renderer {
             self.extents.render,
             self.render_scale(),
         );
-        let frame_lighting = self.frame_lighting(scene);
+        // Lights are binned into this frame slot's buffers (its fence was waited on above).
+        let grid = self.lighting.upload_lights(
+            frame_index,
+            scene.lights,
+            scene.camera.view_proj,
+            self.lighting_config,
+        );
+        let mut frame_lighting = self
+            .frame_lighting(scene)
+            .with_lights(grid)
+            .with_baked_ao(self.lighting.baked_ao(), self.lighting_config);
+        if self.contact.is_some() {
+            frame_lighting = frame_lighting.with_contact_shadows(self.lighting_config);
+        }
+        self.frame_outlines = scene.outlines;
         let world_frame = self.world_frame(scene);
-        self.scene
-            .prepare(0, frame_index, scene, &frame_lighting, &world_frame)?;
+        // The camera's viewport is this frame's rendered sub-rectangle (render scale and
+        // dynamic resolution), which the contact and outline passes work in.
+        self.scene.prepare(
+            0,
+            frame_index,
+            scene,
+            &frame_lighting,
+            &world_frame,
+            self.render_extent,
+        )?;
         if let Some(fog) = self.fog.as_mut() {
             fog.prepare(frame_index, scene.fog_of_war.as_ref());
         }
@@ -1640,17 +1793,25 @@ impl Renderer {
             offscreen_mask |= 1 << slot;
             // Offscreen views never sample the shadow map (it is the main view's, and their
             // pass runs before the shadow pass): shadows off, the environment kept.
+            // No dynamic lights or contact shadows; the map's baked AO only where the map is
+            // drawn (the minimap), not in the portrait studio.
             let view_lighting = FrameLighting::offscreen(
                 &render.scene.lighting,
                 self.lighting_config,
                 self.lighting.state(),
+            )
+            .with_baked_ao(
+                self.lighting.baked_ao().filter(|_| render.terrain),
+                self.lighting_config,
             );
+            let extent = self.offscreen[slot].extent();
             self.scene.prepare(
                 1 + slot,
                 frame_index,
                 &render.scene,
                 &view_lighting,
                 &WorldFrame::OFFSCREEN,
+                extent,
             )?;
         }
         self.ui.prepare(frame_index, ui)?;
@@ -1814,6 +1975,13 @@ impl Renderer {
         let ldr_view = view_of(resources.ldr);
         let ldr2_view = view_of(resources.ldr2);
         let render_extent = self.render_extent;
+        let render_scale = self.render_scale();
+        let contact_view = view_of(resources.contact);
+        let outline_ids = resources.outline_ids.map(|ids| OutlineIdTarget {
+            view: self.transient(ids.msaa.unwrap_or(ids.ids)).view(),
+            resolve: ids.msaa.map(|_| self.transient(ids.ids).view()),
+        });
+        let hull_outlines = self.lighting_config.outlines == OutlineMode::Hull;
         let prepass = self.frame_spec.has_prepass();
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
@@ -1855,9 +2023,33 @@ impl Renderer {
                     &PrepassTarget {
                         depth: msaa_depth.unwrap_or(depth_view),
                         resolve: msaa_depth.map(|_| depth_view),
+                        outline_ids,
                         extent: render_extent,
                     },
                 ),
+                PassKind::ContactShadows => {
+                    if let (Some(pass), Some(target)) = (&self.contact, contact_view) {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            self.scene.camera_set(frame_index),
+                            target,
+                            render_extent,
+                        );
+                    }
+                }
+                PassKind::Outline => {
+                    if let Some(pass) = &self.outline {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            ldr_view.unwrap_or(swapchain_view),
+                            render_extent,
+                            render_scale,
+                            &self.frame_outlines,
+                        );
+                    }
+                }
                 PassKind::Ao => {
                     if let Some(ao) = resources.ao {
                         self.post.record_ao(
@@ -1901,6 +2093,7 @@ impl Renderer {
                         // scene; with MSAA that is a resolve (or the prepass's), never this
                         // attachment.
                         store_depth: resources.vfx.is_some() && msaa_color.is_none(),
+                        hull_outlines,
                     },
                 ),
                 PassKind::BloomDown(level) => {
@@ -2002,6 +2195,7 @@ impl Renderer {
                                 resolve: None,
                                 load_depth: false,
                                 store_depth: false,
+                                hull_outlines: false,
                             },
                         );
                     }
@@ -2087,7 +2281,15 @@ impl Renderer {
             .chain(resources.ao.into_iter().flat_map(|ao| [ao.raw, ao.blurred]))
             .chain(resources.bloom.into_iter().flatten())
             .chain(resources.ldr)
-            .chain(resources.ldr2);
+            .chain(resources.ldr2)
+            .chain(resources.contact)
+            .chain(
+                resources
+                    .outline_ids
+                    .into_iter()
+                    .flat_map(|ids| [Some(ids.ids), ids.msaa])
+                    .flatten(),
+            );
         for resource in transients {
             bindings.set(resource, image(resource));
         }

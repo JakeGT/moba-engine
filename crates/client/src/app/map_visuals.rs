@@ -12,7 +12,11 @@
 //! - a missing, malformed or unuploadable mesh: that wall or prop draws the built-in block
 //!   with the descriptor's colours;
 //! - a missing or invalid environment (`[lighting] environment`, R2a/ADR-0011): the
-//!   hemispheric ambient; a missing ramp: no ramp.
+//!   hemispheric ambient; a missing ramp: no ramp;
+//! - a missing, invalid or stale baked AO (`[lighting] baked_ao`, R2b/ADR-0016): no baked
+//!   AO. A bake is stale when its fingerprint ([`moba_assets::ao_fingerprint`] of the extent,
+//!   walls, wall height, props and each prop mesh's bounds and counts) differs from the map actually bound, so a visuals name
+//!   reused by a pack with other walls never shows wrong occlusion.
 //!
 //! The descriptor's `[lighting]` table sets the sun, ambient and stylisation
 //! ([`MapLibrary::scene_lighting`], [`MapLibrary::light_camera`]); unset keys keep the
@@ -177,23 +181,25 @@ pub(crate) fn spec_walls(map: &MapSpec) -> impl Iterator<Item = (Vec2, Vec2)> + 
     })
 }
 
-/// A registered mesh and its model-space bounds.
+/// A registered mesh, its model-space bounds and its shape for the AO fingerprint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FittedMesh {
     mesh: MeshId,
     min: Vec3,
     max: Vec3,
+    shape: moba_assets::PropMeshShape,
 }
 
 impl FittedMesh {
+    /// `None` for a mesh with an unusable extent, by the same rule as the AO baker's
+    /// ([`moba_assets::PropMeshShape::of`]), so both fall back to the block together.
     fn new(mesh: MeshId, data: &MeshData) -> Option<Self> {
-        let (min, max) = data.bounds();
-        let (min, max) = (Vec3::from_array(min), Vec3::from_array(max));
-        let size = max - min;
-        (size.is_finite() && size.y > 1e-4 && size.max_element() > 1e-4).then_some(Self {
+        let shape = moba_assets::PropMeshShape::of(data)?;
+        Some(Self {
             mesh,
-            min,
-            max,
+            min: Vec3::from_array(shape.min),
+            max: Vec3::from_array(shape.max),
+            shape,
         })
     }
 
@@ -243,6 +249,18 @@ pub(crate) struct MapLibrary {
     applied: Option<(Option<String>, Option<String>, Option<String>)>,
     /// Ramp textures uploaded to this renderer (texture slots are never freed).
     ramps: Vec<(String, Option<TextureId>)>,
+    /// The bound map's walls, `[ax, ay, bx, by]` world units (for the AO fingerprint).
+    walls: Vec<[f32; 4]>,
+    /// The bound map's extent, world units.
+    extent: f32,
+    /// [`moba_assets::ao_fingerprint`] of the bound map and descriptor.
+    ao_fingerprint: u64,
+    /// Each bound prop's mesh shape (`None`: the block), for the fingerprint; reused.
+    prop_shapes: Vec<Option<moba_assets::PropMeshShape>>,
+    /// The baked AO last applied (name, fingerprint, strength bits; `None`: none); `None`
+    /// until the first [`MapLibrary::apply_lighting`] after a (re)created renderer.
+    #[allow(clippy::option_option)] // Outer: applied yet; inner: which bake (or none).
+    applied_ao: Option<Option<(String, u64, u32)>>,
     /// The active descriptor's `[terrain]` table (R3a), `None` for the flat plane.
     ground: Option<MapTerrain>,
     /// The terrain last built on the renderer: descriptor name, table, simulation site and
@@ -270,6 +288,11 @@ impl MapLibrary {
             exposure: ExposureOverride::default(),
             applied: None,
             ramps: Vec::new(),
+            walls: Vec::with_capacity(MAX_WALLS),
+            extent: 0.0,
+            ao_fingerprint: 0,
+            prop_shapes: Vec::new(),
+            applied_ao: None,
             ground: None,
             applied_terrain: None,
             atmosphere: MapAtmosphere::default(),
@@ -361,13 +384,14 @@ impl MapLibrary {
         }
     }
 
-    /// Loads and binds the active map's environment and ramp on `renderer` when they changed
+    /// Loads and binds the active map's environment, ramp and baked AO on `renderer` when they changed
     /// since the last call (load time: startup and content updates). Failures are logged
     /// and fall back to the hemispheric ambient / no ramp.
     pub(crate) fn apply_lighting(&mut self, renderer: &mut moba_render::Renderer) {
         // Cheap and per map: the look (exposure, bloom, grading strength) is always re-sent,
         // which also restarts eye adaptation from the new map's metering.
         renderer.set_post_look(self.post_look());
+        self.apply_baked_ao(renderer);
         let wanted = (
             self.lighting.environment.clone(),
             self.lighting.ramp.clone(),
@@ -426,6 +450,48 @@ impl MapLibrary {
             eprintln!("[assets] grading '{name}' loaded ({0}x{0}x{0})", lut.size());
         }
         self.applied = Some(wanted);
+    }
+
+    /// Loads and binds the active map's baked AO when it changed since the last call (load
+    /// time). A missing, invalid or stale bake is logged and leaves no baked AO.
+    fn apply_baked_ao(&mut self, renderer: &mut moba_render::Renderer) {
+        let strength = self.lighting.ao_strength.unwrap_or(1.0);
+        let wanted = self
+            .lighting
+            .baked_ao
+            .clone()
+            .map(|name| (name, self.ao_fingerprint, strength.to_bits()));
+        if self.applied_ao.as_ref() == Some(&wanted) {
+            return;
+        }
+        let result = match &wanted {
+            Some((name, fingerprint, _)) => {
+                load_baked_ao(&self.root, name, self.extent, *fingerprint).and_then(
+                    |(texture, height)| {
+                        let center = self.extent * 0.5;
+                        let placement = moba_render::BakedAo::new([-center, -center], self.extent)
+                            .with_height(height)
+                            .with_strength(strength);
+                        renderer
+                            .set_baked_ao(&texture, placement)
+                            .map_err(|error| format!("renderer rejected it: {error}"))
+                    },
+                )
+            }
+            None => renderer.clear_baked_ao().map_err(|error| error.to_string()),
+        };
+        match (result, &wanted) {
+            (Ok(()), Some((name, ..))) => eprintln!("[assets] baked AO '{name}' loaded"),
+            (Ok(()), None) => {}
+            (Err(reason), wanted) => {
+                eprintln!(
+                    "[assets] baked AO '{}': {reason}; no baked AO",
+                    wanted.as_ref().map_or("", |(name, ..)| name.as_str())
+                );
+                let _ = renderer.clear_baked_ao();
+            }
+        }
+        self.applied_ao = Some(wanted);
     }
 
     /// The uploaded ramp texture for `name`, loading it the first time.
@@ -492,6 +558,7 @@ impl MapLibrary {
         self.instances.clear();
         self.ramps.clear();
         self.applied = None;
+        self.applied_ao = None;
         self.applied_terrain = None;
     }
 
@@ -541,8 +608,11 @@ impl MapLibrary {
         self.active = descriptor.as_ref().and(key.visuals.map(str::to_owned));
         self.generation = self.generation.wrapping_add(1);
         self.instances.clear();
+        self.walls.clear();
         let center = key.center;
+        self.extent = center * 2.0;
         for (a, b) in walls.into_iter().take(MAX_WALLS) {
+            self.walls.push([a.x, a.y, b.x, b.y]);
             // The placement `content-check` verifies covers the simulation's wall (ADR-0014).
             let wall = moba_assets::wall_box(a.to_array(), b.to_array(), wall_height);
             let transform = Mat4::from_scale_rotation_translation(
@@ -561,8 +631,10 @@ impl MapLibrary {
             });
         }
         let Some(visuals) = descriptor else {
+            self.ao_fingerprint = 0;
             return;
         };
+        self.prop_shapes.clear();
         // Cliffs as props: the descriptor's edge mesh around the board, outside it.
         if let Some(ground) = &visuals.ground
             && let Some(fitted) = ground
@@ -605,6 +677,7 @@ impl MapLibrary {
                 .mesh
                 .as_deref()
                 .and_then(|name| self.mesh(name, &mut register));
+            self.prop_shapes.push(fitted.map(|fitted| fitted.shape));
             self.instances.push(match fitted {
                 Some(fitted) => UnitInstance::new(
                     Mat4::from_rotation_translation(rotation, ground)
@@ -622,6 +695,13 @@ impl MapLibrary {
                 ),
             });
         }
+        self.ao_fingerprint = moba_assets::ao_fingerprint(
+            self.extent,
+            &self.walls,
+            visuals.wall_height,
+            &visuals.props,
+            &self.prop_shapes,
+        );
     }
 
     /// The cached descriptor for `name`, loading (and logging) it the first time.
@@ -996,6 +1076,37 @@ fn load_environment(
     Ok((desc, specular))
 }
 
+/// The baked AO texture for `name` and its falloff height, checked against the bound map:
+/// an R8/BC4 square matching the sidecar, the same extent and the same fingerprint.
+fn load_baked_ao(
+    root: &Path,
+    name: &str,
+    extent: f32,
+    fingerprint: u64,
+) -> Result<(moba_render::TextureData, f32), String> {
+    let (toml, ktx2) = moba_assets::baked_ao_paths(root, name)
+        .ok_or_else(|| String::from("invalid baked AO name (use 1-32 of [A-Za-z0-9_-])"))?;
+    let desc = moba_assets::BakedAoDesc::load_file(&toml)
+        .map_err(|error| format!("{}: {error}", toml.display()))?;
+    if desc.fingerprint != fingerprint || (desc.extent - extent).abs() > 1e-3 {
+        return Err(format!(
+            "stale: baked for fingerprint {:#018x} over {} units, the bound map is {fingerprint:#018x} \
+             over {extent} (re-run scripts/bake-map-ao.sh)",
+            desc.fingerprint, desc.extent
+        ));
+    }
+    let texture = moba_assets::load_ktx2_file(&ktx2)
+        .map_err(|error| format!("{}: {error}", ktx2.display()))?;
+    if texture.is_cube() || texture.width() != desc.texels || texture.height() != desc.texels {
+        return Err(format!(
+            "{}: expected a {}² 2D map",
+            ktx2.display(),
+            desc.texels
+        ));
+    }
+    Ok((texture, desc.height))
+}
+
 fn rgba(rgb: [f32; 3]) -> [f32; 4] {
     [rgb[0], rgb[1], rgb[2], 1.0]
 }
@@ -1278,6 +1389,45 @@ mod tests {
                 PathBuf::from("out/map-2.ppm")
             ]
         );
+    }
+
+    #[test]
+    fn shipped_baked_ao_matches_its_maps_and_stale_bakes_are_refused() {
+        let content = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
+        let pack = |name: &str| {
+            moba_game::load_content_file(&content.join(name)).expect("example pack loads")
+        };
+        let ember = pack("ember-map.toml");
+        let frost = pack("frost-map.toml");
+        for (spec, bake) in [(&ember.map, "ember-ao"), (&frost.map, "frost-ao")] {
+            let mut library = MapLibrary::new(content.to_path_buf());
+            library.bind(MapKey::from_spec(spec), spec_walls(spec), |_: &MeshData| {
+                Ok(MeshId::CUBE)
+            });
+            assert_eq!(library.lighting.baked_ao.as_deref(), Some(bake));
+            let (texture, height) =
+                load_baked_ao(content, bake, library.extent, library.ao_fingerprint)
+                    .unwrap_or_else(|error| {
+                        panic!("{bake} is stale or broken (run scripts/bake-map-ao.sh): {error}")
+                    });
+            assert_eq!(texture.format(), moba_render::TextureFormat::R8Unorm);
+            assert!(texture.width() >= 256 && (height - 3.0).abs() < 1e-6);
+        }
+        // The ember visuals bound to the frost walls: same name, other occluders.
+        let mut library = MapLibrary::new(content.to_path_buf());
+        library.bind(
+            MapKey {
+                visuals: Some("ember"),
+                theme: 0,
+                center: frost.map.extent.to_f32() * 0.5,
+            },
+            spec_walls(&frost.map),
+            |_: &MeshData| Ok(MeshId::CUBE),
+        );
+        let stale = load_baked_ao(content, "ember-ao", library.extent, library.ao_fingerprint);
+        assert!(stale.is_err_and(|error| error.starts_with("stale")));
+        assert!(load_baked_ao(content, "../ember-ao", 256.0, 0).is_err());
+        assert!(load_baked_ao(content, "missing-ao", 256.0, 0).is_err());
     }
 
     #[test]

@@ -54,6 +54,9 @@ wrap = 0.3
 rim = 0.45
 rim_color = [1.0, 0.75, 0.5]
 specular_tint = [1.0, 0.8, 0.6]
+# Baked AO (R2b, ADR-0016): maps/ao/ember-ao.{toml,ktx2}, scripts/bake-map-ao.sh.
+baked_ao = "ember-ao"
+ao_strength = 0.85
 
 # Terrain (R3a, ADR-0014): scorched ground in a basin of terraced basalt cliffs.
 [terrain]

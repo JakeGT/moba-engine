@@ -52,6 +52,9 @@ rim = 0.3
 rim_color = [0.6, 0.85, 1.0]
 unit_roughness = 0.45
 terrain_roughness = 0.7
+# Baked AO (R2b, ADR-0016): maps/ao/frost-ao.{toml,ktx2}, scripts/bake-map-ao.sh.
+baked_ao = "frost-ao"
+ao_strength = 0.8
 
 # Terrain (R3a, ADR-0014): packed snow in a ring of drifts, icy lanes, blue-grey rock.
 [terrain]

@@ -207,11 +207,19 @@ R6 (ADR-0015) added post-processing: `PostConfig` (`for_tier`, `off`, a `with_*`
 `with_effects`), `MIN_RENDER_SCALE`/`MAX_RENDER_SCALE`, `RenderConfig::post`/`with_post`/
 `effective_post`, `Renderer::{post_config, post_look, set_post_look, set_grading_lut,
 render_scale, render_extent}` and `GpuTimings::group_ms`.
+R2b (ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `PointLight` (`new`;
+`Scene::lights`/`with_lights`), `LightStats` (`Renderer::light_stats`), `MAX_LIGHTS`,
+`MAX_LIGHTS_PER_CELL`, `OutlineMode` (`name`, `from_name`), `OutlinePalette` (`NONE`,
+`with_slot`; `Scene::outlines`/`with_outlines`), `OUTLINE_SLOTS`, `MAX_OUTLINE_WIDTH`,
+`UnitInstance::outline`/`with_outline`, `BakedAo` (`new`, `with_height`, `with_strength`;
+`Renderer::{set_baked_ao, clear_baked_ao, has_baked_ao}`), `MAX_CONTACT_SHADOW_STEPS` and
+`LightingConfig::{max_lights, lights_per_cell, outlines, baked_ao, contact_shadow_steps}`
+with a `with_*` each.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
   `_` arm); (R3a) `TerrainShading`, `FogOfWarMode`.
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
   `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R6):
-  `AntiAliasing`, `UpscaleFilter`.
+  `AntiAliasing`, `UpscaleFilter`; (R2b): `OutlineMode`.
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
@@ -222,6 +230,9 @@ render_scale, render_extent}` and `GpuTimings::group_ms`.
 - `#[non_exhaustive]` structs (R6): `PostConfig` (`for_tier`/`Default` + `with_*`), `PostLook`
   (`DEFAULT`/`Default` + `with_*`) and `ScreenEffects` (`NONE`/`Default` + `with_*`); every
   value is clamped by `sanitized`, which the renderer applies.
+- `#[non_exhaustive]` structs (R2b): `PointLight` (public fields, `new`), `BakedAo` (`new` +
+  `with_*`), `OutlinePalette` (`NONE` + `with_slot`; public `slots`, the uniform layout) and
+  the read-only `LightStats`.
 - `#[non_exhaustive]` structs: `RenderConfig` (`Default` + a `with_*` per field),
   `CapturedFrame`, `VulkanProbe`, `GpuTimings`, `PassTiming`, `PipelineStats` and
   `MaterialStats` (read-only stats), `MaterialData` (`new`, `from_desc`, `with_texture`,
@@ -290,6 +301,11 @@ readability check), `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
 `MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`, and the readability rule's
 `READABILITY_TEAMS`, `MAX_TEAM_HUE_SHIFT`, `MIN_TEAM_CHROMA`, `MIN_TEAM_HUE_SEPARATION`; `GradingLut`, `GradingLutError` and `MapPost`
 are `#[non_exhaustive]`).
+R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
+`end`), `MAX_VFX_LIGHT_INTENSITY`/`MAX_VFX_LIGHT_RADIUS`, `BakedAoDesc` (`new`, `with_height`,
+`to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`, `PropMeshShape`,
+`baked_ao_paths`, `BAKED_AO_DIR`, `MAX_BAKED_AO_BYTES`, `MAX_BAKED_AO_TEXELS`,
+`DEFAULT_BAKED_AO_HEIGHT` and `MapLighting::{baked_ao, ao_strength}`.
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.
 - `#[non_exhaustive]` enums: `AssetError`, `AssetManifestError`, `AssetFileProblem`,

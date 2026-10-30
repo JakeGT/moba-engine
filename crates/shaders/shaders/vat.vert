@@ -12,7 +12,11 @@
 // below `vertex_count` (the renderer registers a VAT mesh only when its vertex count equals
 // the descriptor's), and `2 * frame_count * vertex_count <= width * height`.
 //
-// Permutation (crates/shaders/build.rs): `SHADOW_PASS` is the depth-only shadow caster.
+// Permutations (crates/shaders/build.rs): `SHADOW_PASS` is the depth-only shadow caster;
+// `DEPTH_PREPASS` (R2b) writes the main view's depth and the instance's outline slot before
+// shading; `OUTLINE_HULL` (R2b) draws the inverted-hull outline of outlined instances.
+// `gl_Position` is invariant in every permutation, as in unit.vert, so the pre-pass depth
+// matches the scene pass's exactly (ADR-0016).
 
 #include "camera.glsl"
 
@@ -20,6 +24,15 @@
 // pass then tests LESS_OR_EQUAL against that depth, so both must compute the same position.
 invariant gl_Position;
 #include "instance.glsl"
+#ifdef OUTLINE_HULL
+#include "outline.glsl"
+#endif
+
+#if defined(SHADOW_PASS) || defined(DEPTH_PREPASS)
+#define VAT_POSITION_ONLY
+#endif
+
+invariant gl_Position;
 
 layout(set = 2, binding = 0) uniform sampler2D vat_texture;
 
@@ -31,9 +44,15 @@ layout(push_constant) uniform VatBlock {
 } vat;
 
 layout(location = 0) in vec3 in_position;
-#ifndef SHADOW_PASS
+#ifndef VAT_POSITION_ONLY
 layout(location = 1) in vec3 in_normal;
+#endif
 
+#if defined(DEPTH_PREPASS)
+layout(location = 0) flat out uint out_outline;
+#elif defined(OUTLINE_HULL)
+layout(location = 0) flat out vec4 out_outline_color;
+#elif !defined(SHADOW_PASS)
 layout(location = 0) out vec3 out_world_normal;
 layout(location = 1) out vec3 out_color;
 layout(location = 2) out vec3 out_world_pos;
@@ -43,12 +62,12 @@ vec4 fetch(uint texel) {
     return texelFetch(vat_texture, ivec2(int(texel % vat.width), int(texel / vat.width)), 0);
 }
 
-// Position (xyz) and, unless SHADOW_PASS, normal of `vertex` at frame `frame`.
+// Position (xyz) and, unless position-only, normal of `vertex` at frame `frame`.
 void frame_data(uint frame, uint vertex, out vec3 position, out vec3 normal) {
     uint clamped = min(frame, vat.frame_count - 1u);
     uint texel = clamped * vat.vertex_count + vertex;
     position = fetch(texel).xyz;
-#ifdef SHADOW_PASS
+#ifdef VAT_POSITION_ONLY
     normal = vec3(0.0, 1.0, 0.0);
 #else
     normal = fetch(vat.frame_count * vat.vertex_count + texel).xyz;
@@ -70,7 +89,7 @@ void sample_clip(float frame, float next, float t, uint vertex, out vec3 positio
 void main() {
     Instance instance = instance_data.instances[gl_InstanceIndex];
     vec3 position = in_position;
-#ifndef SHADOW_PASS
+#ifndef VAT_POSITION_ONLY
     vec3 normal = in_normal;
 #else
     vec3 normal = vec3(0.0, 1.0, 0.0);
@@ -88,8 +107,16 @@ void main() {
         }
     }
     vec4 world = instance.model * vec4(position, 1.0);
-#ifdef SHADOW_PASS
+#if defined(SHADOW_PASS)
     gl_Position = camera.light_view_proj * world;
+#elif defined(DEPTH_PREPASS)
+    gl_Position = camera.view_proj * world;
+    out_outline = instance.params.x;
+#elif defined(OUTLINE_HULL)
+    // VAT meshes are smooth-shaded skins: extrude along the animated normal.
+    gl_Position = outline_hull_position(world.xyz, mat3(transpose(inverse(instance.model))) * normal,
+        instance.params.x);
+    out_outline_color = outline_color(instance.params.x);
 #else
     gl_Position = camera.view_proj * world;
     out_world_normal = normalize(mat3(transpose(inverse(instance.model))) * normal);

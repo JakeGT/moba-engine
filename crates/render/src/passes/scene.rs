@@ -128,6 +128,8 @@ pub(crate) struct SceneTargets<'a> {
     pub(crate) load_depth: bool,
     /// Keep the depth contents for a later pass (soft particles); otherwise `DONT_CARE`.
     pub(crate) store_depth: bool,
+    /// Draw the inverted-hull outlines of outlined units (the main view, `hull` mode, R2b).
+    pub(crate) hull_outlines: bool,
 }
 
 /// The depth prepass's attachment (R6, ADR-0015).
@@ -136,7 +138,19 @@ pub(crate) struct PrepassTarget {
     pub(crate) depth: vk::ImageView,
     /// The single-sample depth the MSAA depth resolves into, for the AO pass.
     pub(crate) resolve: Option<vk::ImageView>,
+    /// R2b's `R8_UINT` outline ID target (cleared to 0), with screen-space outlines.
+    pub(crate) outline_ids: Option<OutlineIdTarget>,
     pub(crate) extent: vk::Extent2D,
+}
+
+/// The prepass's outline ID attachment (R2b, ADR-0016).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutlineIdTarget {
+    /// The attachment (the multisampled one with MSAA).
+    pub(crate) view: vk::ImageView,
+    /// The single-sample ID image the MSAA one resolves into (`SAMPLE_ZERO`, the integer
+    /// resolve mode, so the IDs match the resolved depth's sample), for the outline pass.
+    pub(crate) resolve: Option<vk::ImageView>,
 }
 
 /// The shadow map the shadow pass renders into.
@@ -165,6 +179,11 @@ struct SceneView {
     mesh_counts: [u32; MAX_MESHES],
     mesh_starts: [u32; MAX_MESHES],
     mesh_cursors: [u32; MAX_MESHES],
+    /// Outlined instances per mesh (R2b): they lead the mesh's range, so the hull pipelines
+    /// draw exactly `mesh_outlined[slot]` instances from `mesh_starts[slot]`.
+    mesh_outlined: [u32; MAX_MESHES],
+    /// Write cursor of the non-outlined instances (after the outlined ones).
+    mesh_plain_cursors: [u32; MAX_MESHES],
     /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
     skinned_draws: Vec<SkinnedDraw>,
     /// Units uploaded for the frame being recorded.
@@ -196,18 +215,26 @@ pub(crate) struct ScenePipelines {
     /// The far-plane sky (R3a): depth test only, no vertex input; built with the set's
     /// samples, so the MSAA set has its own (R6).
     sky: GraphicsPipeline,
-    /// The depth prepass (R6); `None` without AO.
+    /// The depth prepass (R6); `None` without one (AO, contact shadows or screen-space
+    /// outlines ask for it).
     prepass: Option<PrepassPipelines>,
+    /// Inverted-hull outlines (R2b): static, skinned and VAT; `None` unless this set draws
+    /// the main view with `hull` outlines (the skinned and VAT ones also without skinning or
+    /// VAT).
+    hull_unit: Option<GraphicsPipeline>,
+    hull_skinned: Option<GraphicsPipeline>,
+    hull_vat: Option<GraphicsPipeline>,
 }
 
-/// Depth-only pipelines of the prepass: the scene's own vertex shaders (`invariant
-/// gl_Position`) with no fragment stage, so the scene pass reproduces the depth exactly.
+/// Pipelines of the depth prepass: depth plus, with screen-space outlines, the units' outline
+/// slots into the ID target (R2b). The `*_prepass.vert` shaders compute the same `invariant
+/// gl_Position` as the scene's, so the scene pass reproduces the depth exactly.
 pub(crate) struct PrepassPipelines {
     terrain: GraphicsPipeline,
     unit: GraphicsPipeline,
-    unit_textured: GraphicsPipeline,
+    /// `None` without skinning, or if it failed to build (skinned meshes are then drawn by
+    /// the scene pass alone: correct, without early rejection, AO depth or an outline ID).
     skinned: Option<GraphicsPipeline>,
-    skinned_textured: Option<GraphicsPipeline>,
     /// `None` with [`ScenePipelines::vat`] (uses the VAT layout).
     vat: Option<GraphicsPipeline>,
 }
@@ -218,8 +245,13 @@ pub(crate) struct SceneSetSpec {
     pub(crate) samples: vk::SampleCountFlags,
     /// Build the shadow casters (the single-sample set only).
     pub(crate) shadow: Option<ShadowPipelineSpec>,
-    /// Build the prepass pipelines (the main view's set, with AO).
+    /// Build the prepass pipelines (the main view's set, with AO, contact shadows or
+    /// screen-space outlines).
     pub(crate) prepass: bool,
+    /// The prepass also writes the outline ID target (R2b's screen-space outlines).
+    pub(crate) outline_ids: bool,
+    /// Build the inverted-hull outline pipelines (the main view's set, R2b's `hull` mode).
+    pub(crate) hull: bool,
 }
 
 impl ScenePipelines {
@@ -238,6 +270,8 @@ impl ScenePipelines {
             samples,
             shadow,
             prepass,
+            outline_ids,
+            hull,
         } = set;
         let module = |name| shaders.module(device, name);
         let unit_vertex = module("unit.vert")?;
@@ -258,6 +292,7 @@ impl ScenePipelines {
                     depth_format,
                     cull_mode: vk::CullModeFlags::NONE,
                     samples,
+                    depth_write: true,
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -352,6 +387,7 @@ impl ScenePipelines {
                         depth_format,
                         cull_mode: vk::CullModeFlags::NONE,
                         samples,
+                        depth_write: true,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -404,51 +440,129 @@ impl ScenePipelines {
             None => (None, None),
         };
         let prepass = if prepass {
-            let depth_only_with = |layout, vertex: vk::ShaderModule, vertex_layout| {
-                pipeline::create_depth_only(
+            let id_format = outline_ids.then_some(crate::frame_graph::OUTLINE_ID_FORMAT);
+            let id_fragment = if outline_ids {
+                Some(module("prepass.frag")?)
+            } else {
+                None
+            };
+            let fragment = id_fragment
+                .as_ref()
+                .map(crate::resources::ShaderModule::handle);
+            let prepass_with = |layout, vertex: vk::ShaderModule, vertex_layout, fragment| {
+                pipeline::create_prepass(
                     device,
                     layout,
                     vertex_layout,
                     vertex,
+                    fragment,
+                    id_format,
                     depth_format,
-                    DepthOnly::prepass(samples),
+                    samples,
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
             };
-            let depth_only = |vertex, vertex_layout| depth_only_with(layout, vertex, vertex_layout);
-            // Each depth-only twin exists exactly when its shaded pipeline does.
-            let skinned_depth = match &skinned {
-                Some(_) => Some(depth_only(
-                    module("skinned.vert")?.handle(),
-                    VertexLayout::Skinned,
-                )?),
-                None => None,
+            // The terrain has no outline: depth only, the ID target keeps its clear (0).
+            let terrain =
+                prepass_with(layout, terrain_vertex.handle(), VertexLayout::Terrain, None)?;
+            let unit_prepass = module("unit_prepass.vert")?;
+            let unit = prepass_with(
+                layout,
+                unit_prepass.handle(),
+                VertexLayout::StaticShadow,
+                fragment,
+            )?;
+            let skinned = if skinned.is_some() {
+                module("skinned_prepass.vert")
+                    .and_then(|vertex| {
+                        prepass_with(
+                            layout,
+                            vertex.handle(),
+                            VertexLayout::SkinnedShadow,
+                            fragment,
+                        )
+                    })
+                    .inspect_err(|error| {
+                        eprintln!("[render] skinned prepass pipeline unavailable ({error})");
+                    })
+                    .ok()
+            } else {
+                None
             };
-            let skinned_textured_depth = match &skinned_textured {
-                Some(_) => Some(depth_only(
-                    module("skinned_textured.vert")?.handle(),
-                    VertexLayout::SkinnedTextured,
-                )?),
-                None => None,
-            };
-            let vat_depth = match &vat {
-                Some(_) => Some(depth_only_with(
+            // Minions (R4b) are in the prepass too: their depth feeds GTAO, contact shadows
+            // and the particles, occludes outlines, and their slot reaches the ID target.
+            let vat_prepass = match &vat {
+                Some(_) => Some(prepass_with(
                     vat_layout,
-                    module("vat.vert")?.handle(),
-                    VertexLayout::Static,
+                    module("vat_prepass.vert")?.handle(),
+                    VertexLayout::StaticShadow,
+                    fragment,
                 )?),
                 None => None,
             };
             Some(PrepassPipelines {
-                terrain: depth_only(terrain_vertex.handle(), VertexLayout::Terrain)?,
-                unit: depth_only(unit_vertex.handle(), VertexLayout::Static)?,
-                unit_textured: depth_only(textured_vertex.handle(), VertexLayout::StaticTextured)?,
-                skinned: skinned_depth,
-                skinned_textured: skinned_textured_depth,
-                vat: vat_depth,
+                terrain,
+                unit,
+                skinned,
+                vat: vat_prepass,
             })
         } else {
             None
+        };
+        let (hull_unit, hull_skinned, hull_vat) = if hull {
+            let fragment = module("outline_hull.frag")?;
+            let hull_pipeline = |layout, vertex_layout, vertex: vk::ShaderModule| {
+                pipeline::create(
+                    device,
+                    &PipelineSpec {
+                        layout,
+                        vertex_layout,
+                        vertex,
+                        fragment: fragment.handle(),
+                        color_format,
+                        depth_format,
+                        cull_mode: vk::CullModeFlags::NONE,
+                        samples,
+                        depth_write: false,
+                    },
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+            };
+            let unit_vertex = module("unit_outline.vert")?;
+            let unit = hull_pipeline(layout, VertexLayout::Static, unit_vertex.handle())?;
+            let skinned = if skinned.is_some() {
+                module("skinned_outline.vert")
+                    .and_then(|vertex| {
+                        hull_pipeline(layout, VertexLayout::Skinned, vertex.handle())
+                    })
+                    .inspect_err(|error| {
+                        eprintln!(
+                            "[render] skinned outline pipeline unavailable ({error}); \
+                             skinned meshes are not outlined"
+                        );
+                    })
+                    .ok()
+            } else {
+                None
+            };
+            let vat_hull = if vat.is_some() {
+                module("vat_outline.vert")
+                    .and_then(|vertex| {
+                        hull_pipeline(vat_layout, VertexLayout::Static, vertex.handle())
+                    })
+                    .inspect_err(|error| {
+                        eprintln!(
+                            "[render] VAT outline pipeline unavailable ({error}); \
+                             VAT meshes are not outlined"
+                        );
+                    })
+                    .ok()
+            } else {
+                None
+            };
+            (Some(unit), skinned, vat_hull)
+        } else {
+            (None, None, None)
         };
         Ok(Self {
             unit,
@@ -462,6 +576,9 @@ impl ScenePipelines {
             vat_shadow,
             sky,
             prepass,
+            hull_unit,
+            hull_skinned,
+            hull_vat,
         })
     }
 }
@@ -491,6 +608,9 @@ pub(crate) struct ScenePass {
     _descriptor_pool: DescriptorPool,
     _camera_layout: DescriptorSetLayout,
     _instance_layout: DescriptorSetLayout,
+    /// Per-frame-in-flight camera uniform layout (set 0), for passes that read the main
+    /// view's camera (R2b's contact shadows).
+    camera_layout_handle: vk::DescriptorSetLayout,
     pipeline_layout: PipelineLayout,
     /// Single-sample pipelines: the offscreen views, the shadow casters and, without MSAA,
     /// the main view (and its prepass).
@@ -517,6 +637,10 @@ pub(crate) struct ScenePass {
 pub(crate) struct MainViewSpec {
     pub(crate) samples: vk::SampleCountFlags,
     pub(crate) prepass: bool,
+    /// The prepass writes R2b's outline IDs (screen-space outlines).
+    pub(crate) outline_ids: bool,
+    /// The scene draws R2b's inverted-hull outlines.
+    pub(crate) hull: bool,
 }
 
 impl MainViewSpec {
@@ -526,11 +650,15 @@ impl MainViewSpec {
             samples: vk::SampleCountFlags::TYPE_1,
             shadow,
             prepass: self.prepass && !msaa,
+            outline_ids: self.outline_ids && !msaa,
+            hull: self.hull && !msaa,
         };
         let main = msaa.then_some(SceneSetSpec {
             samples: self.samples,
             shadow: None,
             prepass: self.prepass,
+            outline_ids: self.outline_ids,
+            hull: self.hull,
         });
         (base, main)
     }
@@ -698,6 +826,7 @@ impl ScenePass {
             mesh_material_sets: [vk::DescriptorSet::null(); MAX_MESHES],
             views: scene_views,
             _descriptor_pool: descriptor_pool,
+            camera_layout_handle: camera_layout.handle(),
             _camera_layout: camera_layout,
             _instance_layout: instance_layout,
             pipeline_layout,
@@ -712,6 +841,16 @@ impl ScenePass {
             vat_pipeline_layout,
             mesh_vat: [u8::MAX; MAX_MESHES],
         })
+    }
+
+    /// The camera uniform's set layout (set 0 of every scene pipeline).
+    pub(crate) fn camera_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.camera_layout_handle
+    }
+
+    /// The main view's camera set for `frame` (written by [`Self::prepare`]).
+    pub(crate) fn camera_set(&self, frame: usize) -> vk::DescriptorSet {
+        self.views[0].frames[frame].camera_set
     }
 
     /// Builds a replacement for every pipeline from `shaders` (dev shader reload) without
@@ -742,6 +881,15 @@ impl ScenePass {
             new.skinned.is_some() != old.skinned.is_some()
                 || new.skinned_textured.is_some() != old.skinned_textured.is_some()
                 || new.skinned_shadow.is_some() != old.skinned_shadow.is_some()
+                || new.hull_skinned.is_some() != old.hull_skinned.is_some()
+                || new
+                    .prepass
+                    .as_ref()
+                    .map(|prepass| prepass.skinned.is_some())
+                    != old
+                        .prepass
+                        .as_ref()
+                        .map(|prepass| prepass.skinned.is_some())
         };
         let lost_vat = |new: &ScenePipelines, old: &ScenePipelines| {
             new.vat.is_some() != old.vat.is_some()
@@ -927,6 +1075,7 @@ impl ScenePass {
         scene: &Scene<'_>,
         lighting: &FrameLighting,
         world: &WorldFrame,
+        extent: vk::Extent2D,
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
         let Self { views, meshes, .. } = self;
@@ -949,6 +1098,8 @@ impl ScenePass {
             scene.terrain_tint,
             lighting,
             world,
+            &scene.outlines,
+            [extent.width, extent.height],
         );
         target.camera_buffer.write_bytes(0, bytes_of(&uniform));
         if bone_count > 0 {
@@ -968,8 +1119,10 @@ impl ScenePass {
                 units,
                 mesh_count,
                 &mut state.mesh_counts,
+                &mut state.mesh_outlined,
                 &mut state.mesh_starts,
                 &mut state.mesh_cursors,
+                &mut state.mesh_plain_cursors,
             );
             let mapped = target
                 .instance_buffer
@@ -980,10 +1133,15 @@ impl ScenePass {
                     ))
                 })?;
             // Each mesh's instances land contiguously at its `mesh_starts` slot, so one draw
-            // per mesh reads them through `firstInstance` (gl_InstanceIndex).
+            // per mesh reads them through `firstInstance` (gl_InstanceIndex); the outlined
+            // ones first, so the hulls draw only them.
             for unit in units {
                 let slot = mesh_slot(unit.mesh, mesh_count);
-                let cursor = &mut state.mesh_cursors[slot];
+                let cursor = if is_outlined(unit) {
+                    &mut state.mesh_cursors[slot]
+                } else {
+                    &mut state.mesh_plain_cursors[slot]
+                };
                 let instance = *cursor;
                 mapped[instance as usize] = GpuInstance::from(*unit);
                 *cursor += 1;
@@ -1150,12 +1308,54 @@ impl ScenePass {
             // triangle, and its sets (camera, lighting) are bound with the shared layout.
             unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
         }
-        // Last: the VAT pipelines re-bind sets 2/3 with their own layout, which would
-        // invalidate set 3 for any scene-layout draw after them.
+        // Then the VAT minions (R4b): their layout re-binds sets 2/3, which would invalidate
+        // set 3 for any scene-layout draw after them. The hulls below use only sets 0/1.
         if state.unit_count > 0
             && let Some(vat) = &pipelines.vat
         {
-            self.draw_vat(device, command_buffer, state, vat, Some(targets.lighting));
+            self.draw_vat(
+                device,
+                command_buffer,
+                state,
+                vat,
+                Some(targets.lighting),
+                false,
+            );
+        }
+
+        // Inverted-hull outlines last (R2b): depth-tested against everything above (minions
+        // included), never written, so each hull shows only as its unit's silhouette ring
+        // (ADR-0016). Only the outlined instances are drawn.
+        if targets.hull_outlines && state.unit_count > 0 {
+            if let Some(pipeline) = &pipelines.hull_unit {
+                for textured in [false, true] {
+                    self.draw_static_with(
+                        device,
+                        command_buffer,
+                        state,
+                        pipeline,
+                        textured,
+                        false,
+                        true,
+                    );
+                }
+            }
+            if let Some(pipeline) = &pipelines.hull_skinned {
+                for textured in [false, true] {
+                    self.draw_skinned(
+                        device,
+                        command_buffer,
+                        state,
+                        pipeline,
+                        textured,
+                        false,
+                        true,
+                    );
+                }
+            }
+            if let Some(pipeline) = &pipelines.hull_vat {
+                self.draw_vat(device, command_buffer, state, pipeline, None, true);
+            }
         }
 
         device.cmd_end_rendering(command_buffer);
@@ -1240,21 +1440,33 @@ impl ScenePass {
             }
             if let Some(pipeline) = &self.pipelines.skinned_shadow {
                 for textured in [false, true] {
-                    self.draw_skinned(device, command_buffer, state, pipeline, textured, false);
+                    self.draw_skinned(
+                        device,
+                        command_buffer,
+                        state,
+                        pipeline,
+                        textured,
+                        false,
+                        false,
+                    );
                 }
             }
             if let Some(pipeline) = &self.pipelines.vat_shadow {
-                self.draw_vat(device, command_buffer, state, pipeline, None);
+                self.draw_vat(device, command_buffer, state, pipeline, None, false);
             }
         }
         device.cmd_end_rendering(command_buffer);
     }
 
-    /// Records the main view's depth prepass (R6, ADR-0015): terrain, static, skinned and VAT
-    /// meshes with the depth-only twins of the scene pipelines into `target` (cleared to 1
-    /// and stored for the scene, which loads it), resolving sample 0 into the single-sample
-    /// depth with MSAA. Uses the main view's camera, instances and bones prepared for the
-    /// scene; materials are not bound (the vertex shaders do not read them).
+    /// Records the main view's depth prepass (R6, ADR-0015; R2b, ADR-0016): terrain, static,
+    /// skinned and VAT meshes into `target` (cleared to 1 and stored for the scene, which
+    /// loads it), resolving sample 0 into the single-sample depth with MSAA, plus the units'
+    /// outline slots into the ID target (cleared to 0, resolved the same way). **Unbiased**:
+    /// every scene vertex shader's `gl_Position` is `invariant`, so the scene pass reproduces
+    /// these depths and its `LESS_OR_EQUAL` test passes where the prepass drew; a bias would
+    /// make the ID target's depth test disagree with the scene's at grazing occluders,
+    /// leaking a hidden unit's outline over a wall. Uses the main view's camera, instances
+    /// and bones prepared for the scene; materials are not bound.
     pub(crate) fn record_prepass(
         &self,
         device: &DeviceContext,
@@ -1283,12 +1495,30 @@ impl ScenePass {
                 .resolve_image_view(resolve)
                 .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         }
+        let id_attachment = target.outline_ids.map(|ids| {
+            let attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(ids.view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue { uint32: [0; 4] },
+                });
+            match ids.resolve {
+                Some(resolve) => attachment
+                    .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+                    .resolve_image_view(resolve)
+                    .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+                None => attachment,
+            }
+        });
         let render_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: target.extent,
             })
             .layer_count(1)
+            .color_attachments(id_attachment.as_slice())
             .depth_attachment(&depth_attachment);
         device.cmd_begin_rendering(command_buffer, &render_info);
         super::set_viewport_scissor(
@@ -1308,26 +1538,41 @@ impl ScenePass {
                 .device
                 .cmd_draw_indexed(command_buffer, terrain.index_count, 1, 0, 0, 0);
         }
+        // The position-only prepass shaders read no material, so one pipeline draws both
+        // the vertex-colour and the textured meshes.
         if state.unit_count > 0 {
-            for (textured, pipeline) in [(false, &prepass.unit), (true, &prepass.unit_textured)] {
-                self.draw_static(device, command_buffer, state, pipeline, textured, false);
+            for textured in [false, true] {
+                self.draw_static(
+                    device,
+                    command_buffer,
+                    state,
+                    &prepass.unit,
+                    textured,
+                    false,
+                );
             }
         }
         if !state.skinned_draws.is_empty()
             && let Some(skinned) = &prepass.skinned
         {
-            // The same fallback as the shaded pass: textured skinned meshes without their
-            // permutation draw with the vertex-colour pipeline.
-            let textured = prepass.skinned_textured.as_ref().unwrap_or(skinned);
-            self.draw_skinned(device, command_buffer, state, skinned, false, false);
-            self.draw_skinned(device, command_buffer, state, textured, true, false);
+            for textured in [false, true] {
+                self.draw_skinned(
+                    device,
+                    command_buffer,
+                    state,
+                    skinned,
+                    textured,
+                    false,
+                    false,
+                );
+            }
         }
-        // VAT minions (R4b) with their depth-only twin, so GTAO and the particles' depth
-        // test see them; last, as in `record` (the VAT layout re-binds set 2).
+        // VAT minions (R4b), so GTAO, contact shadows, outlines and the particles' depth test
+        // see them; last, as in `record` (the VAT layout re-binds set 2).
         if state.unit_count > 0
             && let Some(vat) = &prepass.vat
         {
-            self.draw_vat(device, command_buffer, state, vat, None);
+            self.draw_vat(device, command_buffer, state, vat, None, false);
         }
         device.cmd_end_rendering(command_buffer);
     }
@@ -1343,10 +1588,39 @@ impl ScenePass {
         textured: bool,
         bind_materials: bool,
     ) {
+        self.draw_static_with(
+            device,
+            command_buffer,
+            state,
+            pipeline,
+            textured,
+            bind_materials,
+            false,
+        );
+    }
+
+    /// [`Self::draw_static`]; with `hull` (the outline pipeline) each draw first pushes
+    /// whether its mesh is the built-in cube, which extrudes from its centre.
+    #[allow(clippy::too_many_arguments)] // The draw loop's switches.
+    fn draw_static_with(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        state: &SceneView,
+        pipeline: &GraphicsPipeline,
+        textured: bool,
+        bind_materials: bool,
+        hull: bool,
+    ) {
         let mut bound = false;
         {
             for (slot, mesh) in self.meshes.iter().enumerate() {
-                let count = state.mesh_counts[slot];
+                // The hull draws only the outlined instances, which lead the mesh's range.
+                let count = if hull {
+                    state.mesh_outlined[slot]
+                } else {
+                    state.mesh_counts[slot]
+                };
                 let set = self.mesh_material_sets[slot];
                 // Skinned meshes are drawn per instance below, and VAT meshes instanced, each
                 // with their own pipeline.
@@ -1365,6 +1639,24 @@ impl ScenePass {
                     bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
                 }
                 bind_mesh(device, command_buffer, mesh);
+                if hull {
+                    let push = SkinPush {
+                        first_bone: 0,
+                        joint_count: 0,
+                        reserved: [u32::from(slot == 0), 0],
+                    };
+                    // SAFETY: the shared pipeline layout declares exactly this 16-byte
+                    // vertex-stage range at offset 0.
+                    unsafe {
+                        device.device.cmd_push_constants(
+                            command_buffer,
+                            self.pipeline_layout.handle(),
+                            vk::ShaderStageFlags::VERTEX,
+                            0,
+                            bytes_of(&push),
+                        );
+                    }
+                }
                 // SAFETY: indices: `index_count == indices.len()`, so firstIndex 0 +
                 // indexCount fits the index buffer, and every index is below the vertex
                 // count (cube by construction; registered meshes re-checked in
@@ -1397,11 +1689,17 @@ impl ScenePass {
         state: &SceneView,
         pipeline: &GraphicsPipeline,
         lighting: Option<vk::DescriptorSet>,
+        hull: bool,
     ) {
         let layout = self.vat_pipeline_layout.handle();
         let mut bound = false;
         for (slot, mesh) in self.meshes.iter().enumerate() {
-            let count = state.mesh_counts[slot];
+            // The hull draws only the outlined instances, which lead each mesh's range.
+            let count = if hull {
+                state.mesh_outlined[slot]
+            } else {
+                state.mesh_counts[slot]
+            };
             let entry = self.mesh_vat[slot];
             if count == 0 || entry == u8::MAX {
                 continue;
@@ -1472,11 +1770,21 @@ impl ScenePass {
         pipeline: &GraphicsPipeline,
         textured: bool,
     ) {
-        self.draw_skinned(device, command_buffer, state, pipeline, textured, true);
+        self.draw_skinned(
+            device,
+            command_buffer,
+            state,
+            pipeline,
+            textured,
+            true,
+            false,
+        );
     }
 
     /// One draw per skinned instance whose mesh's material is (`textured`) or is not
-    /// textured, with `pipeline`, binding each material set when `bind_materials`.
+    /// textured, with `pipeline`, binding each material set when `bind_materials`; with
+    /// `outlined_only` (the hull) only the outlined instances.
+    #[allow(clippy::too_many_arguments)] // The draw loop's switches.
     fn draw_skinned(
         &self,
         device: &DeviceContext,
@@ -1485,6 +1793,7 @@ impl ScenePass {
         pipeline: &GraphicsPipeline,
         textured: bool,
         bind_materials: bool,
+        outlined_only: bool,
     ) {
         {
             let mut bound_pipeline = false;
@@ -1493,6 +1802,12 @@ impl ScenePass {
                 let mesh = &self.meshes[draw.slot as usize];
                 let set = self.mesh_material_sets[draw.slot as usize];
                 if (set != vk::DescriptorSet::null()) != textured {
+                    continue;
+                }
+                let slot = draw.slot as usize;
+                if outlined_only
+                    && draw.instance >= state.mesh_starts[slot] + state.mesh_outlined[slot]
+                {
                     continue;
                 }
                 if !bound_pipeline {
@@ -1626,6 +1941,8 @@ impl SceneView {
             mesh_counts: [0; MAX_MESHES],
             mesh_starts: [0; MAX_MESHES],
             mesh_cursors: [0; MAX_MESHES],
+            mesh_outlined: [0; MAX_MESHES],
+            mesh_plain_cursors: [0; MAX_MESHES],
             skinned_draws: Vec::with_capacity(max_instances.min(max_bones)),
             unit_count: 0,
             max_instances,
@@ -1824,19 +2141,30 @@ fn bucket_by_mesh(
     units: &[crate::UnitInstance],
     mesh_count: usize,
     counts: &mut [u32; MAX_MESHES],
+    outlined: &mut [u32; MAX_MESHES],
     starts: &mut [u32; MAX_MESHES],
     cursors: &mut [u32; MAX_MESHES],
+    plain_cursors: &mut [u32; MAX_MESHES],
 ) {
     counts.fill(0);
+    outlined.fill(0);
     for unit in units {
-        counts[mesh_slot(unit.mesh, mesh_count)] += 1;
+        let slot = mesh_slot(unit.mesh, mesh_count);
+        counts[slot] += 1;
+        outlined[slot] += u32::from(is_outlined(unit));
     }
     let mut next = 0u32;
     for slot in 0..MAX_MESHES {
         starts[slot] = next;
+        plain_cursors[slot] = next + outlined[slot];
         next += counts[slot];
     }
     *cursors = *starts;
+}
+
+/// Whether `unit` has a drawable outline slot (`1..OUTLINE_SLOTS`, ADR-0016).
+fn is_outlined(unit: &crate::UnitInstance) -> bool {
+    (1..crate::scene::OUTLINE_SLOTS).contains(&usize::from(unit.outline))
 }
 
 #[cfg(test)]
@@ -1899,7 +2227,16 @@ mod tests {
         let mut counts = [0; MAX_MESHES];
         let mut starts = [0; MAX_MESHES];
         let mut cursors = [0; MAX_MESHES];
-        bucket_by_mesh(&units, 3, &mut counts, &mut starts, &mut cursors);
+        let (mut outlined, mut plain) = ([0; MAX_MESHES], [0; MAX_MESHES]);
+        bucket_by_mesh(
+            &units,
+            3,
+            &mut counts,
+            &mut outlined,
+            &mut starts,
+            &mut cursors,
+            &mut plain,
+        );
         // Mesh 9 is not registered (3 meshes), so it joins the cube bucket.
         assert_eq!(&counts[..4], &[3, 1, 2, 0]);
         assert_eq!(&starts[..4], &[0, 3, 4, 6]);
@@ -1913,9 +2250,48 @@ mod tests {
         let mut counts = [7; MAX_MESHES];
         let mut starts = [7; MAX_MESHES];
         let mut cursors = [7; MAX_MESHES];
-        bucket_by_mesh(&units, 1, &mut counts, &mut starts, &mut cursors);
+        let (mut outlined, mut plain) = ([0; MAX_MESHES], [0; MAX_MESHES]);
+        bucket_by_mesh(
+            &units,
+            1,
+            &mut counts,
+            &mut outlined,
+            &mut starts,
+            &mut cursors,
+            &mut plain,
+        );
         assert_eq!(counts[0], 5);
         assert_eq!(starts[0], 0);
         assert!(counts[1..].iter().all(|&count| count == 0));
+    }
+
+    #[test]
+    fn outlined_instances_lead_their_mesh_bucket() {
+        // Mesh 1: plain, outlined, plain, outlined (slot 9 is out of range: not outlined).
+        let units = [
+            unit(1),
+            unit(1).with_outline(2),
+            unit(0).with_outline(9),
+            unit(1),
+            unit(1).with_outline(7),
+        ];
+        let mut counts = [0; MAX_MESHES];
+        let mut starts = [0; MAX_MESHES];
+        let mut cursors = [0; MAX_MESHES];
+        let (mut outlined, mut plain) = ([0; MAX_MESHES], [0; MAX_MESHES]);
+        bucket_by_mesh(
+            &units,
+            2,
+            &mut counts,
+            &mut outlined,
+            &mut starts,
+            &mut cursors,
+            &mut plain,
+        );
+        assert_eq!(&counts[..2], &[1, 4]);
+        assert_eq!(&outlined[..2], &[0, 2]);
+        // Mesh 1's outlined instances go to [1, 3), its plain ones to [3, 5).
+        assert_eq!((cursors[1], plain[1]), (1, 3));
+        assert_eq!((cursors[0], plain[0]), (0, 0));
     }
 }

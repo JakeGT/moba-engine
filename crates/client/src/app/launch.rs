@@ -99,7 +99,10 @@ pub(crate) fn compressed_textures() -> bool {
 }
 
 /// The lighting features for `tier` with the `MOBA_SHADOWS` (`off|hard|pcf|pcss`),
-/// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides.
+/// `MOBA_SHADOW_SIZE`, `MOBA_IBL` and `MOBA_SPECULAR_IBL` (`0` turns either off) overrides,
+/// and the R2b switches (ADR-0016): `MOBA_LIGHTS=off|<global cap>`,
+/// `MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and
+/// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
 pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
     lighting_config_from(tier, |name| std::env::var(name).ok())
 }
@@ -127,6 +130,32 @@ fn lighting_config_from(
     }
     if off("MOBA_SPECULAR_IBL") {
         config = config.with_specular_ibl(false);
+    }
+    let switched_off = |value: &str| matches!(value.trim(), "off" | "OFF" | "0");
+    if let Some(value) = var("MOBA_LIGHTS") {
+        match value.trim().parse::<u32>() {
+            _ if switched_off(&value) => config = config.with_max_lights(0),
+            Ok(cap) => config = config.with_max_lights(cap),
+            Err(_) => eprintln!("MOBA_LIGHTS={value:?} is not off or a count; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_OUTLINES") {
+        match moba_render::OutlineMode::from_name(&value) {
+            Some(mode) => config = config.with_outlines(mode),
+            None => eprintln!("MOBA_OUTLINES={value:?} is not off/hull/screen; using the tier's"),
+        }
+    }
+    if var("MOBA_BAKED_AO").is_some_and(|value| switched_off(&value)) {
+        config = config.with_baked_ao(false);
+    }
+    if let Some(value) = var("MOBA_CONTACT_SHADOWS") {
+        match value.trim().parse::<u32>() {
+            _ if switched_off(&value) => config = config.with_contact_shadow_steps(0),
+            Ok(steps) => config = config.with_contact_shadow_steps(steps),
+            Err(_) => eprintln!(
+                "MOBA_CONTACT_SHADOWS={value:?} is not off or a step count; using the tier's"
+            ),
+        }
     }
     config
 }
@@ -788,7 +817,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 /// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
-pub(crate) const GPU_LANES: [&str; 21] = [
+pub(crate) const GPU_LANES: [&str; 24] = [
     "shadow",
     "scene",
     "composite",
@@ -801,6 +830,8 @@ pub(crate) const GPU_LANES: [&str; 21] = [
     "exposure",
     "fxaa",
     "upscale",
+    "contact_shadows",
+    "outline",
     "portraits",
     "minimap",
     "vfx_simulate",
@@ -808,26 +839,29 @@ pub(crate) const GPU_LANES: [&str; 21] = [
     "vfx_resolve",
     "vfx_alive",
     "vfx_overdraw",
+    "lights",
     "fow_raster",
     "fow_resolve",
 ];
-/// First lane of a pass that only some configurations have (R6 post, ADR-0015).
+/// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
+/// shadows and outlines, ADR-0016).
 const OPTIONAL_LANES: usize = 6;
 /// First lane of a pass that runs only in some frames (R7b offscreen).
-const OFFSCREEN_LANES: usize = 12;
+const OFFSCREEN_LANES: usize = 14;
 /// First lane after the offscreen passes (the VFX passes, ADR-0013).
-const VFX_LANES: usize = 14;
-/// First lane that is a particle statistic rather than a pass time.
-const STAT_LANES: usize = 17;
+const VFX_LANES: usize = 16;
+/// First lane that is a statistic rather than a pass time (particles, then R2b's lights).
+const STAT_LANES: usize = 19;
 /// First fog-of-war pass lane (R3a; runs only with the fog-of-war texture).
-const FOG_LANES: usize = 19;
+const FOG_LANES: usize = 22;
 
-/// One frame-log sample from `timings` and the same frame's particle `stats`, in
-/// [`GPU_LANES`] order (`0` for a pass that did not run). `ao` sums GTAO and its blur,
-/// `bloom` every bloom down- and up-sample.
+/// One frame-log sample from `timings`, the same frame's particle `stats` and its binned
+/// dynamic `lights` (ADR-0016), in [`GPU_LANES`] order (`0` for a pass that did not run).
+/// `ao` sums GTAO and its blur, `bloom` every bloom down- and up-sample.
 pub(crate) fn gpu_sample(
     timings: &moba_render::GpuTimings,
     stats: Option<moba_render::VfxStats>,
+    lights: f32,
 ) -> [f32; GPU_LANES.len()] {
     let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
     [
@@ -843,6 +877,8 @@ pub(crate) fn gpu_sample(
         pass("exposure"),
         pass("fxaa"),
         pass("upscale"),
+        pass("contact_shadows"),
+        pass("outline"),
         pass("portraits"),
         pass("minimap"),
         pass("vfx_simulate"),
@@ -850,6 +886,7 @@ pub(crate) fn gpu_sample(
         pass("vfx_resolve"),
         stats.map_or(0.0, |stats| stats.alive as f32),
         stats.map_or(0.0, |stats| stats.overdraw),
+        lights,
         pass("fow-raster"),
         pass("fow-resolve"),
     ]
@@ -857,11 +894,12 @@ pub(crate) fn gpu_sample(
 
 /// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from [`gpu_sample`] samples
 /// (`shadow` is 0 when shadows are off) plus the particle stats `vfx_alive` (live particles)
-/// and `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013), which get
+/// and `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013) and `lights`
+/// (dynamic lights binned, ADR-0016), which get
 /// `_p50`/`_p95`/`_max` columns without the unit. `total` sums the passes; `span` runs from
 /// the first pass's start to the last pass's end, so `span - total` is the time spent in
-/// barriers between passes. The R6 post lanes (`prepass` … `upscale`) are printed only when
-/// the configuration has the pass. The offscreen passes (R7b) run only in some frames and the
+/// barriers between passes. The R6 post lanes (`prepass` … `upscale`) and R2b's
+/// `contact_shadows` and `outline` are printed only when the configuration has the pass. The offscreen passes (R7b) run only in some frames and the
 /// fog-of-war passes (R3a, `fow_raster`, `fow_resolve`) only with the texture, so their
 /// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
 /// columns are left out.
@@ -983,6 +1021,35 @@ mod tests {
             env(&[("MOBA_SHADOWS", "vsm"), ("MOBA_SHADOW_SIZE", "big")]),
         );
         assert_eq!(bad, LightingConfig::for_tier(QualityTier::Low));
+        let r2b = lighting_config_from(
+            QualityTier::High,
+            env(&[
+                ("MOBA_LIGHTS", "off"),
+                ("MOBA_OUTLINES", "hull"),
+                ("MOBA_BAKED_AO", "off"),
+                ("MOBA_CONTACT_SHADOWS", "0"),
+            ]),
+        );
+        assert_eq!(r2b.max_lights, 0);
+        assert_eq!(r2b.outlines, moba_render::OutlineMode::Hull);
+        assert!(!r2b.baked_ao);
+        assert_eq!(r2b.contact_shadow_steps, 0);
+        let capped = lighting_config_from(
+            QualityTier::Low,
+            env(&[("MOBA_LIGHTS", "8"), ("MOBA_CONTACT_SHADOWS", "12")]),
+        );
+        assert_eq!(capped.max_lights, 8);
+        assert_eq!(capped.contact_shadow_steps, 12);
+        let ignored = lighting_config_from(
+            QualityTier::Ultra,
+            env(&[
+                ("MOBA_LIGHTS", "lots"),
+                ("MOBA_OUTLINES", "glow"),
+                ("MOBA_BAKED_AO", "1"),
+                ("MOBA_CONTACT_SHADOWS", "many"),
+            ]),
+        );
+        assert_eq!(ignored, LightingConfig::for_tier(QualityTier::Ultra));
     }
 
     #[test]
@@ -1129,6 +1196,9 @@ mod tests {
                     0.0,
                     0.03,
                     0.0,
+                    // R2b: contact shadows off, outlines on.
+                    0.0,
+                    0.5,
                     portraits,
                     0.0,
                     ms,
@@ -1136,6 +1206,7 @@ mod tests {
                     0.0,
                     index as f32,
                     ms,
+                    2.0,
                     0.0,
                     0.0,
                 ]
@@ -1151,6 +1222,8 @@ mod tests {
         assert!(report.contains("gpu_bloom_p50_ms=0.100 "));
         assert!(report.contains("gpu_fxaa_p95_ms=0.030 "));
         assert!(!report.contains("gpu_ao") && !report.contains("gpu_upscale"));
+        assert!(!report.contains("gpu_contact_shadows"));
+        assert!(report.contains("gpu_outline_p50_ms=0.500 gpu_outline_p95_ms=0.500 "));
         // Offscreen passes: percentiles over the frames they ran in, plus a run count.
         assert!(report.contains(
             "gpu_portraits_runs=11 gpu_portraits_p50_ms=0.020 gpu_portraits_p95_ms=0.020 "
@@ -1160,7 +1233,8 @@ mod tests {
         assert!(report.contains("gpu_vfx_draw_p95_ms=0.950 "));
         assert!(report.ends_with(
             "vfx_alive_p50=50.000 vfx_alive_p95=95.000 vfx_alive_max=100.000 \
-             vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 "
+             vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 \
+             lights_p50=2.000 lights_p95=2.000 lights_max=2.000 "
         ));
     }
 

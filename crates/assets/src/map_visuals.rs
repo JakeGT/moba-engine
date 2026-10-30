@@ -36,6 +36,8 @@
 //! specular_tint = [1.0, 0.9, 0.8]  # painted-specular tint, 0..=1
 //! unit_roughness = 0.55          # roughness of vertex-colour units, 0..=1
 //! terrain_roughness = 0.9        # 0..=1
+//! baked_ao = "map-grass-ao"      # <root>/maps/ao/map-grass-ao.{toml,ktx2} (ADR-0016)
+//! ao_strength = 1.0              # baked AO strength, 0..=1 (default 1)
 //!
 //! [atmosphere]                   # optional height fog and sky, every key optional
 //! fog_color = [0.5, 0.6, 0.7]    # linear RGB 0..=4
@@ -553,6 +555,11 @@ pub struct MapLighting {
     pub unit_roughness: Option<f32>,
     /// Terrain roughness, `0..=1`.
     pub terrain_roughness: Option<f32>,
+    /// Baked AO name: `<root>/maps/ao/<name>.{toml,ktx2}` ([`crate::baked_ao_paths`],
+    /// ADR-0016).
+    pub baked_ao: Option<String>,
+    /// Baked AO strength, `0..=1`.
+    pub ao_strength: Option<f32>,
 }
 
 /// One decorative prop.
@@ -726,6 +733,10 @@ struct RawLighting {
     unit_roughness: Option<f32>,
     #[serde(default)]
     terrain_roughness: Option<f32>,
+    #[serde(default)]
+    baked_ao: Option<String>,
+    #[serde(default)]
+    ao_strength: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -891,6 +902,8 @@ fn check_lighting(raw: Option<RawLighting>) -> Result<MapLighting, MapVisualsErr
             1.0,
             "terrain_roughness must be 0..=1",
         )?,
+        baked_ao: name(raw.baked_ao, "baked_ao names must be 1-32 of [A-Za-z0-9_-]")?,
+        ao_strength: check_scalar(raw.ao_strength, 1.0, "ao_strength must be 0..=1")?,
     };
     check_readability(&lighting)?;
     Ok(lighting)
@@ -1368,7 +1381,8 @@ color = [0.2, 0.2, 0.2]
         let base = "terrain = [0.1, 0.1, 0.1]\nwall = [0.2, 0.2, 0.2]\n[lighting]\n";
         let visuals = MapVisuals::parse(&format!(
             "{base}environment = \"ember\"\nsun_direction = [0, 2, 0]\nsun_color = [1, 0.5, 0.25]\n\
-             shadow_strength = 0.7\nwrap = 0.3\nramp = \"ember-ramp\"\nramp_strength = 0.5\n"
+             shadow_strength = 0.7\nwrap = 0.3\nramp = \"ember-ramp\"\nramp_strength = 0.5\n\
+             baked_ao = \"ember-ao\"\nao_strength = 0.8\n"
         ))
         .expect("lighting");
         let lighting = &visuals.lighting;
@@ -1378,6 +1392,8 @@ color = [0.2, 0.2, 0.2]
         assert_eq!(lighting.shadow_strength, Some(0.7));
         assert_eq!(lighting.ramp.as_deref(), Some("ember-ramp"));
         assert_eq!(lighting.sun_intensity, None);
+        assert_eq!(lighting.baked_ao.as_deref(), Some("ember-ao"));
+        assert_eq!(lighting.ao_strength, Some(0.8));
         // Dark ambient is fine with an environment to light the shadowed side.
         assert!(
             MapVisuals::parse(&format!("{base}environment = \"e\"\nambient = [0, 0, 0]\n")).is_ok()
@@ -1401,6 +1417,8 @@ color = [0.2, 0.2, 0.2]
             "wrap = -0.1",
             "rim_color = [1, 1]",
             "ramp = \"a/b\"",
+            "baked_ao = \"../ao\"",
+            "ao_strength = 1.5",
             "specular_tint = [1, 1, 2]",
             "unit_roughness = inf",
             "exposure = 1",

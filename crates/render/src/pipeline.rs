@@ -111,6 +111,9 @@ pub(crate) struct PipelineSpec {
     pub(crate) cull_mode: vk::CullModeFlags,
     /// Rasterisation samples (`TYPE_4` for the MSAA scene, ADR-0015).
     pub(crate) samples: vk::SampleCountFlags,
+    /// Write depth (scene surfaces); `false` for the inverted-hull outlines, which are
+    /// tested against the scene but never occlude it (R2b, ADR-0016).
+    pub(crate) depth_write: bool,
 }
 
 pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResult<vk::Pipeline> {
@@ -156,7 +159,7 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(true)
+        .depth_write_enable(spec.depth_write)
         .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
@@ -200,7 +203,8 @@ pub(crate) struct DepthOnly {
     pub(crate) bias: bool,
     /// Depth clamping (shadow casters on devices with `depthClamp`).
     pub(crate) clamp: bool,
-    /// Rasterisation samples (the MSAA prepass).
+    /// Rasterisation samples (single-sample for the shadow casters; the depth prepass is
+    /// [`create_prepass`], with the outline ID output, R2b).
     pub(crate) samples: vk::SampleCountFlags,
 }
 
@@ -213,19 +217,9 @@ impl DepthOnly {
             samples: vk::SampleCountFlags::TYPE_1,
         }
     }
-
-    /// The scene's depth prepass (R6, ADR-0015): no bias or clamp, so the depth matches the
-    /// scene pass exactly.
-    pub(crate) const fn prepass(samples: vk::SampleCountFlags) -> Self {
-        Self {
-            bias: false,
-            clamp: false,
-            samples,
-        }
-    }
 }
 
-/// Creates a depth-only pipeline (shadow casters and the depth prepass): no fragment shader
+/// Creates a depth-only pipeline (the shadow casters): no fragment shader
 /// and no colour attachment, depth test/write `LESS_OR_EQUAL`, no culling (sample meshes are
 /// not all closed). Shadow casters add a dynamic slope-scaled depth bias and, with depth
 /// clamping (the device feature), a caster nearer the light than the map's near plane is
@@ -295,6 +289,101 @@ pub(crate) fn create_depth_only(
         .layout(layout)
         .push_next(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shader.
+    device.create_graphics_pipeline(&create_info)
+}
+
+/// Creates a depth pre-pass pipeline (R2b, ADR-0016): depth test/write `LESS_OR_EQUAL`, no
+/// depth bias. The scene vertex shaders' positions are `invariant`, so the scene pass, which
+/// loads this depth and tests `LESS_OR_EQUAL`, reproduces it exactly where the pre-pass drew. With
+/// `id_format` the pass also has the outline ID colour attachment: `fragment` writes it, and
+/// without a fragment shader (the terrain) its write mask is empty. No culling, like the
+/// scene pipelines. `samples` is the main view's (4 under MSAA, ADR-0015).
+#[allow(clippy::too_many_arguments)] // One pipeline description.
+pub(crate) fn create_prepass(
+    device: &DeviceContext,
+    layout: vk::PipelineLayout,
+    vertex_layout: VertexLayout,
+    vertex: vk::ShaderModule,
+    fragment: Option<vk::ShaderModule>,
+    id_format: Option<vk::Format>,
+    depth_format: vk::Format,
+    samples: vk::SampleCountFlags,
+) -> RenderResult<vk::Pipeline> {
+    let vertex_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vertex)
+        .name(c"main");
+    let mut stages = [vertex_stage, vertex_stage];
+    let stage_count = match fragment {
+        Some(fragment) => {
+            stages[1] = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment)
+                .name(c"main");
+            2
+        }
+        None => 1,
+    };
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(vertex_layout.stride())
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(vertex_layout.attributes());
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .primitive_restart_enable(false);
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(false)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .depth_bias_enable(false)
+        .line_width(1.0);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(true)
+        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_bounds_test_enable(false)
+        .stencil_test_enable(false);
+    let write_mask = if fragment.is_some() {
+        vk::ColorComponentFlags::R
+    } else {
+        vk::ColorComponentFlags::empty()
+    };
+    let attachments = [vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(false)
+        .color_write_mask(write_mask)];
+    let attachment_count = usize::from(id_format.is_some());
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(&attachments[..attachment_count]);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let color_formats = [id_format.unwrap_or(vk::Format::UNDEFINED)];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats[..attachment_count])
+        .depth_attachment_format(depth_format);
+    let create_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages[..stage_count])
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&color_blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+    // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
 
@@ -425,6 +514,9 @@ pub(crate) enum FullscreenBlend {
     Additive,
     /// `src * k + dst * (1 - k)` with dynamic blend constants `k` (exposure adaptation).
     Constant,
+    /// `src * a + dst * (1 - a)` on colour, destination alpha kept (R2b's outlines over the
+    /// display-encoded image, whose alpha is FXAA's luma).
+    Alpha,
 }
 
 /// Creates a fullscreen-triangle pipeline: no vertex input, no depth, and `blend`.
@@ -473,14 +565,22 @@ pub(crate) fn create_fullscreen(
             vk::BlendFactor::CONSTANT_COLOR,
             vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR,
         ),
+        FullscreenBlend::Alpha => (
+            vk::BlendFactor::SRC_ALPHA,
+            vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        ),
+    };
+    let (src_alpha, dst_alpha) = match blend {
+        FullscreenBlend::Alpha => (vk::BlendFactor::ZERO, vk::BlendFactor::ONE),
+        _ => (src, dst),
     };
     let attachment = vk::PipelineColorBlendAttachmentState::default()
         .blend_enable(blend != FullscreenBlend::None)
         .src_color_blend_factor(src)
         .dst_color_blend_factor(dst)
         .color_blend_op(vk::BlendOp::ADD)
-        .src_alpha_blend_factor(src)
-        .dst_alpha_blend_factor(dst)
+        .src_alpha_blend_factor(src_alpha)
+        .dst_alpha_blend_factor(dst_alpha)
         .alpha_blend_op(vk::BlendOp::ADD)
         .color_write_mask(vk::ColorComponentFlags::RGBA);
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()

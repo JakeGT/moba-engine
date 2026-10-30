@@ -166,9 +166,11 @@ mod tests {
         };
         assert!(check("scene", &sets, minimum).is_ok());
         let fragment = stage_totals(&sets, vk::ShaderStageFlags::FRAGMENT);
-        // Material 4 + set 3: lighting 5, fog of war 1, terrain 3, R6's AO 1 (binding 10).
-        assert_eq!(fragment.samplers, 14);
-        assert_eq!(fragment.sampled_images, 14);
+        // Material 4 + set 3: lighting 5, fog of war 1, terrain 3, R6's AO 1 (binding 10),
+        // R2b's baked AO and contact shadows 2 (bindings 13, 14; the light list and grid are
+        // storage buffers): exactly the Vulkan minimum of 16.
+        assert_eq!(fragment.samplers, 16);
+        assert_eq!(fragment.sampled_images, 16);
         // The VAT layout (R4b) swaps set 2 for one vertex-stage VAT texture.
         let vat = crate::vat::set_layout_bindings();
         let vat_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 4] =
@@ -176,7 +178,7 @@ mod tests {
         assert!(check("VAT", &vat_sets, minimum).is_ok());
         assert_eq!(
             stage_totals(&vat_sets, vk::ShaderStageFlags::FRAGMENT).samplers,
-            10
+            12
         );
         assert_eq!(
             stage_totals(&vat_sets, vk::ShaderStageFlags::VERTEX).samplers,

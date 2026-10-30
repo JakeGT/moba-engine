@@ -48,6 +48,9 @@
 //!   `MOBA_SCREEN_EFFECTS_PREVIEW=death|damage|lowhealth` holds one effect for captures. The
 //!   map's `[post]` table sets exposure, eye adaptation, bloom strength and the grading LUT.
 //!   Captures pin auto exposure and dynamic resolution off unless they are set explicitly.
+//! - R2b overrides (ADR-0016): `MOBA_LIGHTS=off|<global cap>` (effect point lights),
+//!   `MOBA_OUTLINES=off|hull|screen` (team outlines), `MOBA_BAKED_AO=off` and
+//!   `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
 //! - Terrain, fog of war and atmosphere (R3a, ADR-0014) overrides of the tier's defaults:
 //!   `MOBA_TERRAIN=flat|splat` (flat: the R2a plane), `MOBA_FOW=texture|legacy|off` (the
 //!   visibility texture, the pre-R3a 16-circle loop, or none), `MOBA_FOW_SIZE=<64..1024>`,
@@ -80,6 +83,9 @@
 //!   multiplies every burst and rate, for budget stress tests.
 //! - `MOBA_VFX_PREVIEW=<effect>` (authoring): an empty arena that replays `vfx/<effect>.toml`
 //!   in a loop and reloads it when a file in `vfx/` changes; no match runs.
+//!   `MOBA_OUTLINE_PROBE=hidden|open|hit` (render tests) adds an outlined enemy unit behind a
+//!   wall, in the open or under the effect; hidden, the capture must equal one with
+//!   `MOBA_OUTLINES=off`.
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
@@ -446,6 +452,8 @@ impl ClientApp {
                         demo_bought: false,
                         demo_cast: parse_demo_cast(),
                         shop_page: 0,
+                        hover: None,
+                        attack_target: None,
                         spectator_pan: Vec3::ZERO,
                         spectator_yaw: -0.7,
                         spectator_zoom: camera_zoom,
@@ -510,7 +518,9 @@ impl ClientApp {
                     simulation.clear_events();
                 }
                 simulation.clear_events();
-                app.preview = app.vfx.library().preview_effect().map(vfx::Preview::new);
+                app.preview = app.vfx.library().preview_effect().map(|effect| {
+                    vfx::Preview::new(effect).with_probe(vfx::OutlineProbe::from_env())
+                });
                 app.simulation = Some(simulation);
             }
         }
@@ -1078,6 +1088,14 @@ impl App for ClientApp {
                             &self.bindings,
                             self.camera_sensitivity,
                         );
+                        // Used by the next frame's outlines (the units are already built).
+                        network.hover = crate::input::hovered_unit(
+                            network,
+                            frame.input(),
+                            &camera,
+                            width,
+                            height,
+                        );
                         if frame.input().was_key_pressed(self.bindings.scoreboard) {
                             *scoreboard_visible = !*scoreboard_visible;
                         }
@@ -1145,6 +1163,8 @@ impl App for ClientApp {
                             .with_atmosphere(map_visuals.scene_atmosphere())
                             .with_bones(bones.bones())
                             .with_vfx(vfx.frame())
+                            .with_lights(vfx.lights())
+                            .with_outlines(outlines::palette(hud_fx.palette))
                             .with_effects(screen_fx.update(frame_ms / 1_000.0));
                         if let Some(fog) = fog {
                             scene = scene.with_fog_of_war(fog);
@@ -1345,7 +1365,13 @@ impl App for ClientApp {
                     );
                 }
                 if let Some(preview) = preview.as_mut() {
-                    preview.frame(vfx, anchors, units, frame_ms);
+                    // Captures replay on the fixed capture tick, so they are reproducible.
+                    let preview_ms = if capture_path.is_some() {
+                        1_000.0 / 30.0
+                    } else {
+                        frame_ms
+                    };
+                    preview.frame(vfx, anchors, units, preview_ms);
                 }
                 if width > 0 && height > 0 {
                     let hud_mode = if preview.is_some() {
@@ -1388,6 +1414,8 @@ impl App for ClientApp {
                         .with_atmosphere(map_visuals.scene_atmosphere())
                         .with_bones(bones.bones())
                         .with_vfx(vfx.frame())
+                        .with_lights(vfx.lights())
+                        .with_outlines(outlines::palette(self.hud_fx.palette))
                         .with_effects(screen_fx.update(frame_ms / 1_000.0));
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
@@ -1434,7 +1462,11 @@ impl App for ClientApp {
                     .as_ref()
                     .and_then(moba_render::Renderer::vfx_stats)
                     .filter(|stats| stats.frame == timings.frame);
-                gpu.push(launch::gpu_sample(&timings, stats));
+                let lights = self
+                    .renderer
+                    .as_ref()
+                    .map_or(0.0, |renderer| renderer.light_stats().binned as f32);
+                gpu.push(launch::gpu_sample(&timings, stats, lights));
             }
         }
         if let Some(message) = failure {
@@ -1463,6 +1495,7 @@ mod materials;
 mod minions;
 mod models;
 mod offscreen;
+mod outlines;
 mod scene_build;
 mod screen_fx;
 mod skinning;

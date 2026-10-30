@@ -9,12 +9,16 @@
 //! vfx_simulate  compute: spawn, age, integrate and compact particles; indirect args (R5)
 //! shadow        (R2a; when shadows are on) the main view's units + skinned, depth only →
 //!               shadow map (fixed size)
-//! prepass       (R6, AO on) main view depth only → depth (msaa-depth + resolve with MSAA)
+//! prepass       (R6 AO, R2b contact shadows or screen outlines) main view depth → depth
+//!               (msaa-depth + resolve with MSAA), plus R2b's R8_UINT outline IDs
+//!               (msaa-outline-ids resolved likewise) with screen outlines
+//! contact_shadows (R2b) depth (sampled) → R8 contact visibility (render resolution)
 //! ao            depth → ao-raw (half render resolution): GTAO
 //! ao_blur       ao-raw → ao: 4×4 depth-aware blur
-//! scene         terrain + units + skinned + sky → hdr (colour, cleared; msaa-hdr resolved
-//!               into it with MSAA) + depth (sampled-capable; loaded after the prepass),
-//!               sampling the shadow map, this frame's fog-of-war image and ao
+//! scene         terrain + units + skinned + sky (+ R2b's hull outlines) → hdr (colour,
+//!               cleared; msaa-hdr resolved into it with MSAA) + depth (sampled-capable;
+//!               loaded after the prepass), sampling the shadow map, this frame's fog-of-war
+//!               image, ao and the contact visibility
 //! vfx_draw      particles → hdr (+ OIT accum/reveal), single-sampled after any MSAA
 //!               resolve; depth read-only + sampled (soft particles)
 //! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
@@ -22,6 +26,8 @@
 //! exposure      bloom4 → exposure (1×1, persistent; auto exposure)
 //! bloom_u*      bloom[i+1] tent-filtered and added into bloom[i] (bloom)
 //! composite     hdr + bloom0 + exposure → AgX + grading + screen effects → ldr | swapchain
+//! outline       (R2b; screen outlines) outline IDs (sampled) → silhouettes blended over the
+//!               composite's output, before FXAA and the upscale
 //! fxaa          ldr → ldr2 | swapchain (FXAA)
 //! upscale       ldr | ldr2 → swapchain (render scale < 1 or dynamic resolution)
 //! ui            HUD batch blended over the swapchain (not tonemapped); samples both
@@ -77,6 +83,10 @@ pub(crate) const LDR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 pub(crate) const AO_RAW_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 /// The blurred occlusion the scene samples.
 pub(crate) const AO_FORMAT: vk::Format = vk::Format::R8_UNORM;
+/// R2b's outline ID target: a mandatory colour-attachment and sampled format (ADR-0016).
+pub(crate) const OUTLINE_ID_FORMAT: vk::Format = vk::Format::R8_UINT;
+/// R2b's contact-shadow target.
+pub(crate) const CONTACT_FORMAT: vk::Format = vk::Format::R8_UNORM;
 
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +96,8 @@ pub(crate) enum PassKind {
     Shadow,
     VfxSimulate,
     Prepass,
+    /// Screen-space contact shadows from the prepass depth (R2b).
+    ContactShadows,
     Ao,
     AoBlur,
     Scene,
@@ -98,6 +110,8 @@ pub(crate) enum PassKind {
     /// Adds bloom mip `i + 1` into mip `i`.
     BloomUp(u8),
     Composite,
+    /// Screen-space outlines over the tonemapped image (R2b).
+    Outline,
     Fxaa,
     Upscale,
     Ui,
@@ -144,6 +158,16 @@ pub(crate) struct MsaaResources {
     pub(crate) depth: ResourceId,
 }
 
+/// R2b's outline ID images (ADR-0016).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutlineIdResources {
+    /// The single-sample IDs the outline pass samples (the prepass's MSAA IDs resolve into
+    /// it, sample 0).
+    pub(crate) ids: ResourceId,
+    /// The multisampled attachment; `None` without MSAA.
+    pub(crate) msaa: Option<ResourceId>,
+}
+
 /// The half-resolution AO images.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AoResources {
@@ -188,6 +212,10 @@ pub(crate) struct FrameResources {
     pub(crate) ldr2: Option<ResourceId>,
     /// The fog-of-war resources; `None` unless the fog of war uses the texture.
     pub(crate) fog: Option<FogResources>,
+    /// R2b's outline IDs; `None` without screen-space outlines.
+    pub(crate) outline_ids: Option<OutlineIdResources>,
+    /// R2b's contact-shadow visibility; `None` without contact shadows.
+    pub(crate) contact: Option<ResourceId>,
 }
 
 /// The shadow map a frame renders, when shadows are on.
@@ -214,9 +242,15 @@ pub(crate) struct FrameSpec {
     pub(crate) vfx: VfxMode,
     /// MSAA 4× scene attachments.
     pub(crate) msaa: bool,
-    /// The main view's depth prepass on its own (R2b's contact shadows and outlines may ask
-    /// for it); [`Self::ambient_occlusion`] implies it, see [`Self::has_prepass`].
+    /// The main view's depth prepass on its own; [`Self::ambient_occlusion`],
+    /// [`Self::outline_ids`] and [`Self::contact_shadows`] imply it, see
+    /// [`Self::has_prepass`].
     pub(crate) prepass: bool,
+    /// R2b's screen-space outlines: the prepass writes the ID target, the outline pass reads
+    /// it after the composite (ADR-0016).
+    pub(crate) outline_ids: bool,
+    /// R2b's contact shadows: a pass between the prepass and the scene.
+    pub(crate) contact_shadows: bool,
     /// The AO passes (and with them the depth prepass).
     pub(crate) ambient_occlusion: bool,
     /// The bloom up-chain (and the composite's bloom input).
@@ -250,6 +284,8 @@ impl FrameSpec {
             vfx: VfxMode::Off,
             msaa: false,
             prepass: false,
+            outline_ids: false,
+            contact_shadows: false,
             ambient_occlusion: false,
             bloom: false,
             auto_exposure: false,
@@ -260,9 +296,10 @@ impl FrameSpec {
         }
     }
 
-    /// Whether the depth prepass runs: asked for, or needed by AO.
+    /// Whether the depth prepass runs: asked for, or needed by AO, contact shadows or the
+    /// outline IDs.
     pub(crate) const fn has_prepass(&self) -> bool {
-        self.prepass || self.ambient_occlusion
+        self.prepass || self.ambient_occlusion || self.outline_ids || self.contact_shadows
     }
 
     /// Whether the bloom down-chain runs (bloom, or metering for auto exposure).
@@ -349,6 +386,23 @@ pub(crate) fn build(
             },
         ),
     });
+    // R2b (ADR-0016): render-resolution targets of their own formats, so they never alias
+    // the HDR or LDR images.
+    let outline_ids = spec.outline_ids.then(|| OutlineIdResources {
+        ids: graph.transient_image("outline-ids", image(OUTLINE_ID_FORMAT, render)),
+        msaa: spec.msaa.then(|| {
+            graph.transient_image(
+                "msaa-outline-ids",
+                ImageDesc {
+                    samples: vk::SampleCountFlags::TYPE_4,
+                    ..image(OUTLINE_ID_FORMAT, render)
+                },
+            )
+        }),
+    });
+    let contact = spec
+        .contact_shadows
+        .then(|| graph.transient_image("contact-shadows", image(CONTACT_FORMAT, render)));
     let ao = spec.ambient_occlusion.then(|| AoResources {
         raw: graph.transient_image("ao-raw", image(AO_RAW_FORMAT, half)),
         blurred: graph.transient_image("ao", image(AO_FORMAT, half)),
@@ -535,12 +589,29 @@ pub(crate) fn build(
         let pass = graph
             .pass("prepass", PassKind::Prepass)
             .access(bones, Access::VertexStorageRead);
-        let _ = match msaa {
+        let pass = match msaa {
             Some(msaa) => pass
                 .access(msaa.depth, Access::DepthWriteResolveSource)
                 .access(depth, Access::DepthResolveWrite),
             None => pass.access(depth, Access::DepthWrite),
         };
+        // R2b's outline IDs: written with the depth (and resolved, sample 0, with MSAA).
+        let _ = match outline_ids {
+            Some(OutlineIdResources {
+                ids,
+                msaa: Some(msaa_ids),
+            }) => pass
+                .access(msaa_ids, Access::ColorWrite)
+                .access(ids, Access::ColorWrite),
+            Some(OutlineIdResources { ids, msaa: None }) => pass.access(ids, Access::ColorWrite),
+            None => pass,
+        };
+    }
+    if let Some(contact) = contact {
+        let _ = graph
+            .pass("contact_shadows", PassKind::ContactShadows)
+            .access(depth, Access::SampledFragment)
+            .access(contact, Access::ColorWrite);
     }
     if let Some(ao) = ao {
         let _ = graph
@@ -584,6 +655,9 @@ pub(crate) fn build(
     }
     if let Some(ao) = ao {
         scene = scene.access(ao.blurred, Access::SampledFragment);
+    }
+    if let Some(contact) = contact {
+        scene = scene.access(contact, Access::SampledFragment);
     }
     let _ = scene;
     // Particles draw single-sampled into the resolved HDR target and test against the
@@ -650,6 +724,14 @@ pub(crate) fn build(
         composite = composite.access(exposure, Access::SampledFragment);
     }
     let _ = composite;
+    // R2b: outlines on the tonemapped image at render resolution, so FXAA and the upscale
+    // treat them like any other edge.
+    if let Some(outline_ids) = outline_ids {
+        let _ = graph
+            .pass("outline", PassKind::Outline)
+            .access(outline_ids.ids, Access::SampledFragment)
+            .access(ldr.unwrap_or(swapchain), Access::ColorReadWrite);
+    }
     if let (true, Some(ldr)) = (spec.fxaa, ldr) {
         let _ = graph
             .pass("fxaa", PassKind::Fxaa)
@@ -703,6 +785,8 @@ pub(crate) fn build(
             ldr,
             ldr2,
             fog: fog_resources,
+            outline_ids,
+            contact,
         },
     })
 }
@@ -842,18 +926,21 @@ mod tests {
         build(&shadowed_spec(), capture, offscreen).expect("the shadowed frame graph compiles")
     }
 
-    /// Every post topology the renderer can build (2^8 switch combinations, the standalone
-    /// prepass included) with each particle mode: off, unsorted (Low) and OIT. The shadowed
-    /// half also runs R3a's fog-of-war passes, as every tier with shadows does.
+    /// Every post topology the renderer can build (2^9 switch combinations, the standalone
+    /// prepass and R2b's outline IDs with contact shadows included) with each particle mode:
+    /// off, unsorted (Low) and OIT. The shadowed half also runs R3a's fog-of-war passes, as
+    /// every tier with shadows does.
     fn post_specs() -> Vec<FrameSpec> {
-        (0..768u32)
+        (0..1536u32)
             .map(|bits| FrameSpec {
-                vfx: match bits >> 8 {
+                vfx: match bits >> 9 {
                     0 => VfxMode::Off,
                     1 => VfxMode::Unsorted,
                     _ => VfxMode::Oit,
                 },
                 prepass: bits & 128 != 0,
+                outline_ids: bits & 256 != 0,
+                contact_shadows: bits & 256 != 0,
                 msaa: bits & 1 != 0,
                 ambient_occlusion: bits & 2 != 0,
                 bloom: bits & 4 != 0,
@@ -1085,6 +1172,8 @@ mod tests {
             assert_eq!(has(PassKind::Upscale), spec.upscale);
             assert_eq!(has(PassKind::FogRaster), spec.fog.is_some());
             assert_eq!(has(PassKind::FogResolve), spec.fog.is_some());
+            assert_eq!(has(PassKind::ContactShadows), spec.contact_shadows);
+            assert_eq!(has(PassKind::Outline), spec.outline_ids);
             // Order: [fow-raster fow-resolve] [shadow] [prepass ao ao_blur] scene [bloom_d* exposure bloom_u*]
             // composite [fxaa] [upscale] ui.
             let at = |kind| passes.iter().position(|&pass| pass == kind);
@@ -1118,6 +1207,12 @@ mod tests {
             }
             assert!(at(PassKind::Exposure).is_none_or(|exposure| exposure < composite));
             assert!(at(PassKind::Fxaa).is_none_or(|fxaa| fxaa > composite));
+            // R2b: contact shadows between the prepass and the scene; outlines right after
+            // the composite, before FXAA and the upscale.
+            assert!(at(PassKind::ContactShadows).is_none_or(|contact| {
+                at(PassKind::Prepass).is_some_and(|prepass| prepass < contact) && contact < scene
+            }));
+            assert!(at(PassKind::Outline).is_none_or(|outline| outline == composite + 1));
             assert!(
                 at(PassKind::Upscale)
                     .is_none_or(|upscale| upscale > composite && upscale + 1 == ui)
@@ -1133,8 +1228,14 @@ mod tests {
                 .map(|(index, _)| index)
                 .collect();
             assert_eq!(writers[0], base.acquire_split);
-            assert_eq!(writers.len(), 2, "{spec:?}: one post writer + the ui");
-            assert_eq!(writers[1], ui);
+            // R2b's outline pass also draws on the swapchain when the composite writes it.
+            let outline_on_swapchain = spec.outline_ids && !(spec.fxaa || spec.upscale);
+            assert_eq!(
+                writers.len(),
+                2 + usize::from(outline_on_swapchain),
+                "{spec:?}: one post writer (+ the outlines) + the ui"
+            );
+            assert_eq!(writers[writers.len() - 1], ui);
             // Imports with final accesses: the swapchain, the VFX stats readback and, with
             // auto exposure, the persistent exposure image, which is back in
             // SHADER_READ_ONLY_OPTIMAL after the composite's read (no final barrier needed).
@@ -1142,7 +1243,7 @@ mod tests {
             assert_eq!(base.graph.final_barriers().len(), finals, "{spec:?}");
             assert!(base.graph.passes().len() <= crate::graph::MAX_PASSES);
             // Slots: hdr + depth, [shadow], [fog-of-war raw], [msaa x2], [ao x2], [bloom x5],
-            // [ldr], [ldr2], [OIT accum + reveal].
+            // [ldr], [ldr2], [OIT accum + reveal], [outline IDs (+ msaa)], [contact].
             let expected = 2
                 + 2 * usize::from(spec.vfx == VfxMode::Oit)
                 + usize::from(spec.shadow.is_some())
@@ -1151,7 +1252,9 @@ mod tests {
                 + 2 * usize::from(spec.ambient_occlusion)
                 + BLOOM_LEVELS * usize::from(spec.bloom_chain())
                 + usize::from(spec.fxaa || spec.upscale)
-                + usize::from(spec.fxaa && spec.upscale);
+                + usize::from(spec.fxaa && spec.upscale)
+                + usize::from(spec.outline_ids) * (1 + usize::from(spec.msaa))
+                + usize::from(spec.contact_shadows);
             assert_eq!(base.graph.slots().len(), expected, "{spec:?}");
         }
     }
@@ -1230,6 +1333,90 @@ mod tests {
             let slot = frame.graph.slots()[frame.graph.slot_of(ao.blurred).expect("ao slot")];
             assert_eq!(slot.desc.size, ImageSize::Render { shift: 1 });
         }
+    }
+
+    #[test]
+    fn r2b_prepass_feeds_contact_shadows_the_scene_and_the_outlines() {
+        for (msaa, fxaa) in [(false, false), (true, false), (false, true), (true, true)] {
+            let spec = FrameSpec {
+                outline_ids: true,
+                contact_shadows: true,
+                msaa,
+                fxaa,
+                ..shadowed_spec()
+            };
+            let frame = build(&spec, false, 0).expect("compiles");
+            let order = kinds(&frame);
+            let at = |kind| order.iter().position(|&pass| pass == kind).expect("pass");
+            assert_eq!(at(PassKind::ContactShadows), at(PassKind::Prepass) + 1);
+            assert_eq!(at(PassKind::Scene), at(PassKind::ContactShadows) + 1);
+            assert_eq!(at(PassKind::Outline), at(PassKind::Composite) + 1);
+            let passes = frame.graph.passes();
+            let resources = frame.resources;
+            let barrier = |kind, resource| {
+                *passes[at(kind)]
+                    .barriers
+                    .iter()
+                    .find(|barrier| barrier.resource == resource)
+                    .expect("barrier")
+            };
+            // The prepass's (resolved) depth is sampled by the contact pass.
+            let sampled = barrier(PassKind::ContactShadows, resources.depth);
+            assert_eq!(sampled.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+            // The contact target: written, then sampled by the scene's fragment shaders.
+            let contact = resources.contact.expect("contact target");
+            let read = barrier(PassKind::Scene, contact);
+            assert_eq!(read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+            assert_eq!(read.src_access, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
+            // The IDs: written (and, with MSAA, resolved) by the prepass, read after the
+            // composite; the outlines draw on the composite's output.
+            let ids = resources.outline_ids.expect("ID target");
+            assert_eq!(ids.msaa.is_some(), msaa);
+            let prepass = &passes[at(PassKind::Prepass)];
+            assert!(prepass.uses(ids.ids) && ids.msaa.is_none_or(|ids| prepass.uses(ids)));
+            let ids_read = barrier(PassKind::Outline, ids.ids);
+            assert_eq!(ids_read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+            let target = resources.ldr.unwrap_or(resources.swapchain);
+            assert_eq!(resources.ldr.is_some(), fxaa);
+            assert!(passes[at(PassKind::Outline)].uses(target));
+            // Their own slots (R8_UINT, R8_UNORM) at render resolution.
+            for resource in [ids.ids, contact] {
+                let slot = frame.graph.slots()[frame.graph.slot_of(resource).expect("slot")];
+                assert_eq!(slot.desc.size, ImageSize::Render { shift: 0 });
+                assert!(slot.usage.contains(
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_prepass_for_one_r2b_feature_leaves_out_the_other() {
+        let contact_only = build(
+            &FrameSpec {
+                contact_shadows: true,
+                ..plain()
+            },
+            false,
+            0,
+        )
+        .expect("compiles");
+        assert!(contact_only.resources.outline_ids.is_none());
+        assert!(kinds(&contact_only).contains(&PassKind::Prepass));
+        assert!(!kinds(&contact_only).contains(&PassKind::Outline));
+        let outlines_only = build(
+            &FrameSpec {
+                outline_ids: true,
+                ..plain()
+            },
+            false,
+            0,
+        )
+        .expect("compiles");
+        assert!(outlines_only.resources.contact.is_none());
+        assert!(kinds(&outlines_only).contains(&PassKind::Prepass));
+        assert!(!kinds(&outlines_only).contains(&PassKind::ContactShadows));
+        assert!(!kinds(&outlines_only).contains(&PassKind::Ao));
     }
 
     #[test]

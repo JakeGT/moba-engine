@@ -1,0 +1,8 @@
+# Baked AO for map visuals "frost", by moba-tools ao-bake 0.4.0 (R2b, ADR-0016).
+# Client-local and cosmetic: never hashed or sent. Regenerate with
+# scripts/bake-map-ao.sh; see docs/content-authoring.md#baked-ao.
+# 4 walls, 5 props, 0.500 m texels, 16 directions, 12 m radius
+extent = 256.0
+texels = 512
+height = 3.0
+fingerprint = "0x01a84e44294da8b8"

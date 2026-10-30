@@ -40,6 +40,7 @@ jobs:
               - 'content/**'
               - 'tests/golden/**'
               - '.github/workflows/render-golden.yml'
+              - 'scripts/outline-probe.sh'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
@@ -105,6 +106,41 @@ jobs:
           status=$?
           cat network-fingerprint.log
           exit $status
+      # Ember golden (R2b): the networked match on the walled ember map at 24 m, so wall
+      # occlusion, baked AO, the outlines beside walls and effect lights are checked
+      # pixel-wise (the default map has no walls or props).
+      - name: Ember capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          timeout 300 xvfb-run -a ./target/release/moba-client \
+            > ember-capture.log 2>&1 || { cat ember-capture.log; exit 1; }
+          grep -F "baked AO" ember-capture.log || true
+          test -s render-ember-actual.ppm
+        env:
+          MOBA_SERVER: local
+          MOBA_HERO_MODELS: sentinel-skinned
+          MOBA_CONTENT: content/ember-map.toml
+          MOBA_CAMERA_DISTANCE: "24"
+          MOBA_CAPTURE_TICK: "120"
+          MOBA_SMOKE_FRAMES: "100000"
+          MOBA_CAPTURE: render-ember-actual.ppm
+      - name: Compare ember fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          ./target/release/image-check render-ember-actual.ppm \
+            --expected tests/golden/render-ember-fingerprint.rgb \
+            --diff render-ember-diff.ppm > ember-fingerprint.log 2>&1
+          status=$?
+          cat ember-fingerprint.log
+          exit $status
+      # Outlines never show a unit through a wall (R2b): hidden == outlines off, byte for byte,
+      # on the hull and screen paths; the open control must differ.
+      - name: Outline occlusion probe
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/outline-probe.sh ./target/release/moba-client outline-probe
+        env:
+          RUN: xvfb-run -a
       # VAT golden (R4b): 64 stress minions in the local preview at 40 m, pinned (one tick per
       # frame), so the vertex-animation-texture path is checked pixel-wise.
       - name: VAT capture with validation + sync validation
@@ -224,6 +260,11 @@ jobs:
             render-vat-diff.ppm
             vat-capture.log
             vat-fingerprint.log
+            render-ember-actual.ppm
+            render-ember-diff.ppm
+            ember-capture.log
+            ember-fingerprint.log
+            outline-probe/
             render-ultra-actual.ppm
             render-ultra-diff.ppm
             ultra-capture.log

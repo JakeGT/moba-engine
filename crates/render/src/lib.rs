@@ -12,6 +12,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+#[doc(hidden)]
+pub mod bench_support;
 mod descriptor_budget;
 mod device;
 mod dynres;
@@ -23,6 +25,7 @@ mod frame_graph;
 mod graph;
 mod instance;
 mod lighting;
+mod lights;
 mod material;
 mod mesh;
 mod passes;
@@ -47,8 +50,10 @@ mod world;
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
 pub use lighting::{
-    LightingConfig, MAX_SHADOW_RESOLUTION, MIN_SHADOW_RESOLUTION, SceneLighting, ShadowFilter,
+    BakedAo, LightingConfig, MAX_CONTACT_SHADOW_STEPS, MAX_SHADOW_RESOLUTION,
+    MIN_SHADOW_RESOLUTION, OutlineMode, SceneLighting, ShadowFilter,
 };
+pub use lights::{LightStats, MAX_LIGHTS, MAX_LIGHTS_PER_CELL, PointLight};
 pub use material::{
     MAX_MATERIALS, MAX_TEXTURES, MaterialData, MaterialId, MaterialStats, TextureId,
 };
@@ -67,8 +72,9 @@ pub use renderer::{
     RenderConfig, Renderer,
 };
 pub use scene::{
-    BoneRange, Camera, ClearRect, MeshId, OFFSCREEN_MAX_BONES, OFFSCREEN_MAX_INSTANCES,
-    OffscreenRender, Scene, UnitInstance, VISION_CIRCLES, VISION_WALLS, VisionCircles,
+    BoneRange, Camera, ClearRect, MAX_OUTLINE_WIDTH, MeshId, OFFSCREEN_MAX_BONES,
+    OFFSCREEN_MAX_INSTANCES, OUTLINE_SLOTS, OffscreenRender, OutlinePalette, Scene, UnitInstance,
+    VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
 
 /// Environment descriptor (SH-L2 diffuse, intensity) accepted by [`Renderer::set_environment`].

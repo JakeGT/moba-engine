@@ -25,3 +25,11 @@ direction = "random"
 gravity = -10
 size = [0.4, 0.7]
 color = [0.6, 2.4, 0.5, 1.0]
+
+# Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
+[light]
+color = [0.3, 1.0, 0.2]
+intensity = 4.0
+radius = 4.0
+duration = 0.05
+fade_out = 0.3

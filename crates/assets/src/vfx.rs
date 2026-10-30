@@ -85,6 +85,16 @@ const FPS_RANGE: (f32, f32) = (0.0, 120.0);
 const SPREAD_RANGE: (f32, f32) = (0.0, 180.0);
 const DELAY_RANGE: (f32, f32) = (0.0, MAX_EFFECT_SECONDS);
 const TINT_RANGE: (f32, f32) = (0.0, 4.0);
+/// Brightest effect light, a multiplier on its linear colour (ADR-0016).
+pub const MAX_VFX_LIGHT_INTENSITY: f32 = 64.0;
+/// Largest effect-light radius, metres. The renderer's light grid has 32 × 32 columns of
+/// about 4.6 m at the default 46 m camera, so a 24 m light is binned into about 11 × 11
+/// columns (a typical 4–6 m effect light into 2–3 × 2–3); keep radii as small as the look
+/// allows.
+pub const MAX_VFX_LIGHT_RADIUS: f32 = 24.0;
+const LIGHT_RADIUS_RANGE: (f32, f32) = (0.25, MAX_VFX_LIGHT_RADIUS);
+const LIGHT_COLOR_RANGE: (f32, f32) = (0.0, 4.0);
+const LIGHT_FADE_RANGE: (f32, f32) = (0.0, 10.0);
 
 /// One named region of the particle atlas: a single cell or a flipbook strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,6 +310,80 @@ pub struct VfxEffect {
     pub event_duration: bool,
     /// Emitters, in file order.
     pub emitters: Vec<VfxEmitter>,
+    /// The optional dynamic point light the effect casts (ADR-0016).
+    pub light: Option<VfxLight>,
+}
+
+/// A validated `[light]` block: the dynamic point light an effect casts while it runs
+/// (ADR-0016). Client-local presentation like the rest of the descriptor: it is attached to
+/// an effect instance the client already shows, so it can never light (or reveal) a unit
+/// the client does not have.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct VfxLight {
+    /// Linear RGB, `0..=4` per channel.
+    pub color: [f32; 3],
+    /// Multiplier on `color`, `0..=64`.
+    pub intensity: f32,
+    /// Distance at which the light reaches zero, metres (`0.25..=24`).
+    pub radius: f32,
+    /// Where it sits: the event's target position or its source unit (`line` is not
+    /// allowed).
+    pub anchor: VfxAnchor,
+    /// Offset from the anchor, metres (`y` is up; default one metre up).
+    pub offset: [f32; 3],
+    /// Seconds after the effect starts before the light switches on.
+    pub delay: f32,
+    /// Seconds the light lasts after `delay` (`None`: until the effect stops emitting).
+    pub duration: Option<f32>,
+    /// Seconds to ramp up from zero after `delay`.
+    pub fade_in: f32,
+    /// Seconds to ramp down to zero after the light ends (default 0.2).
+    pub fade_out: f32,
+    /// Random intensity flicker, `0..=1` (fraction of `intensity`).
+    pub flicker: f32,
+    /// How much the colour is pulled towards the team colour, `0..=1`.
+    pub team_tint: f32,
+    /// Scale `radius` by the event's radius (zones, areas).
+    pub scale_with_radius: bool,
+}
+
+impl VfxLight {
+    fn on_seconds(&self, emit_seconds: f32) -> f32 {
+        self.duration
+            .unwrap_or_else(|| (emit_seconds - self.delay).max(0.0))
+    }
+
+    /// The seconds after the effect starts at which the light has fully faded out, for an
+    /// effect emitting `emit_seconds`.
+    #[must_use]
+    pub fn end(&self, emit_seconds: f32) -> f32 {
+        self.delay + self.on_seconds(emit_seconds) + self.fade_out
+    }
+
+    /// The fade envelope at `age` seconds into an effect emitting `emit_seconds`, `0..=1`
+    /// (flicker excluded).
+    #[must_use]
+    pub fn envelope(&self, age: f32, emit_seconds: f32) -> f32 {
+        if !age.is_finite() || age < self.delay {
+            return 0.0;
+        }
+        let local = age - self.delay;
+        let on = self.on_seconds(emit_seconds);
+        let rise = if self.fade_in > 0.0 {
+            (local / self.fade_in).min(1.0)
+        } else {
+            1.0
+        };
+        let fall = if local <= on {
+            1.0
+        } else if self.fade_out > 0.0 {
+            1.0 - ((local - on) / self.fade_out).min(1.0)
+        } else {
+            0.0
+        };
+        (rise * fall).clamp(0.0, 1.0)
+    }
 }
 
 /// Why a VFX descriptor or bindings file could not be used.
@@ -359,6 +443,95 @@ struct RawEffect {
     event_duration: bool,
     #[serde(default)]
     emitters: Vec<RawEmitter>,
+    #[serde(default)]
+    light: Option<RawLight>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLight {
+    color: [f32; 3],
+    #[serde(default)]
+    intensity: Option<f32>,
+    radius: f32,
+    #[serde(default)]
+    anchor: Option<String>,
+    #[serde(default)]
+    offset: Option<[f32; 3]>,
+    #[serde(default)]
+    delay: Option<f32>,
+    #[serde(default)]
+    duration: Option<f32>,
+    #[serde(default)]
+    fade_in: Option<f32>,
+    #[serde(default)]
+    fade_out: Option<f32>,
+    #[serde(default)]
+    flicker: Option<f32>,
+    #[serde(default)]
+    team_tint: Option<f32>,
+    #[serde(default)]
+    scale_with_radius: bool,
+}
+
+fn light(raw: &RawLight) -> Result<VfxLight, VfxError> {
+    for channel in raw.color {
+        check(channel, LIGHT_COLOR_RANGE, "light color must be RGB 0..=4")?;
+    }
+    let anchor = keyword(
+        raw.anchor.as_deref(),
+        &[("target", VfxAnchor::Target), ("source", VfxAnchor::Source)],
+        "light anchor must be target or source",
+    )?;
+    let offset = raw.offset.unwrap_or([0.0, 1.0, 0.0]);
+    for value in offset {
+        check(value, OFFSET_RANGE, "light offset must be -50..=50")?;
+    }
+    Ok(VfxLight {
+        color: raw.color,
+        intensity: check(
+            raw.intensity.unwrap_or(1.0),
+            (0.0, MAX_VFX_LIGHT_INTENSITY),
+            "light intensity must be 0..=64",
+        )?,
+        radius: check(
+            raw.radius,
+            LIGHT_RADIUS_RANGE,
+            "light radius must be 0.25..=24 metres",
+        )?,
+        anchor,
+        offset,
+        delay: check(
+            raw.delay.unwrap_or(0.0),
+            DELAY_RANGE,
+            "light delay must be 0..=30",
+        )?,
+        duration: raw
+            .duration
+            .map(|duration| check(duration, DELAY_RANGE, "light duration must be 0..=30"))
+            .transpose()?,
+        fade_in: check(
+            raw.fade_in.unwrap_or(0.0),
+            LIGHT_FADE_RANGE,
+            "light fade_in must be 0..=10",
+        )?,
+        fade_out: check(
+            raw.fade_out.unwrap_or(0.2),
+            LIGHT_FADE_RANGE,
+            "light fade_out must be 0..=10",
+        )?,
+        flicker: check(
+            raw.flicker.unwrap_or(0.0),
+            (0.0, 1.0),
+            "light flicker must be 0..=1",
+        )?,
+        team_tint: check(
+            raw.team_tint.unwrap_or(0.0),
+            (0.0, 1.0),
+            "light team_tint must be 0..=1",
+        )?,
+        scale_with_radius: raw.scale_with_radius,
+    })
 }
 
 #[derive(Deserialize)]
@@ -687,6 +860,7 @@ impl VfxEffect {
             "duration must be 0..=30 seconds",
         )?;
         let importance = importance(raw.importance.as_deref())?;
+        let light = raw.light.as_ref().map(light).transpose()?;
         let mut emitters = Vec::with_capacity(raw.emitters.len());
         for raw in raw.emitters {
             emitters.push(emitter(raw)?);
@@ -696,6 +870,7 @@ impl VfxEffect {
             importance,
             event_duration: raw.event_duration,
             emitters,
+            light,
         })
     }
 
@@ -728,6 +903,7 @@ impl VfxEffect {
                 };
                 emitting.max(emitter.delay) + emitter.lifetime[1]
             })
+            .chain(self.light.map(|light| light.end(duration)))
             .fold(duration, f32::max)
     }
 
@@ -1274,6 +1450,49 @@ color = [1, 0.2, 0.2, 0.6]
 telegraph = true
 scale_with_radius = true
 "#;
+
+    #[test]
+    fn parses_an_effect_light_and_its_envelope() {
+        let text = "duration = 1\n[light]\ncolor = [1, 0.5, 0.2]\nintensity = 6\nradius = 5\n\
+                    fade_in = 0.1\nfade_out = 0.5\nflicker = 0.3\n\
+                    [[emitters]]\nburst = 1\nlifetime = [0.2, 0.2]\nsize = [1, 1]\n\
+                    color = [1, 1, 1, 1]";
+        let effect = VfxEffect::parse(text).expect("effect");
+        let light = effect.light.expect("light");
+        assert_eq!(light.anchor, VfxAnchor::Target);
+        assert_eq!(light.offset, [0.0, 1.0, 0.0]);
+        assert!((light.intensity - 6.0).abs() < 1e-6);
+        assert!((light.envelope(0.05, 1.0) - 0.5).abs() < 1e-5);
+        assert!((light.envelope(0.5, 1.0) - 1.0).abs() < 1e-6);
+        assert!((light.envelope(1.25, 1.0) - 0.5).abs() < 1e-5);
+        assert_eq!(light.envelope(2.0, 1.0), 0.0);
+        assert_eq!(light.envelope(f32::NAN, 1.0), 0.0);
+        // The light outlives the particles, so the instance must too.
+        assert!((effect.lifespan(0.0) - 1.5).abs() < 1e-6);
+        assert!(VfxEffect::parse(BOLT).expect("bolt").light.is_none());
+    }
+
+    #[test]
+    fn rejects_out_of_range_effect_lights() {
+        let base = "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [0.2, 0.2]\n\
+                    size = [1, 1]\ncolor = [1, 1, 1, 1]\n[light]\n";
+        for bad in [
+            "color = [1, 1, 1]\nradius = 0",
+            "color = [1, 1, 1]\nradius = 100",
+            "color = [9, 1, 1]\nradius = 4",
+            "color = [1, 1, 1]\nradius = 4\nintensity = 1000",
+            "color = [1, 1, 1]\nradius = 4\nanchor = \"line\"",
+            "color = [1, 1, 1]\nradius = 4\nflicker = 2",
+            "color = [1, 1, 1]\nradius = 4\nfade_out = -1",
+            "color = [1, 1, 1]\nradius = nan",
+            "color = [1, 1, 1]\nradius = 4\nbrightness = 2",
+        ] {
+            assert!(
+                VfxEffect::parse(&format!("{base}{bad}")).is_err(),
+                "accepted {bad}"
+            );
+        }
+    }
 
     #[test]
     fn parses_every_primitive_with_defaults() {

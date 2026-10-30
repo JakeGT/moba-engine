@@ -60,6 +60,12 @@ pub(crate) struct NetworkView {
     /// `MOBA_DEMO_CAST`: ability slot and the tick to cast it at, cleared once sent.
     pub(crate) demo_cast: Option<(u8, u32)>,
     pub(crate) shop_page: usize,
+    /// The unit under the cursor (R2b hover outline): picked from the previous frame's
+    /// camera, so it lags one frame. Only units in the latest snapshot can be picked.
+    pub(crate) hover: Option<u16>,
+    /// The unit the player last ordered an attack on (R2b target outline); a move or stop
+    /// order clears it.
+    pub(crate) attack_target: Option<u16>,
     pub(crate) spectator_pan: Vec3,
     pub(crate) spectator_yaw: f32,
     pub(crate) spectator_zoom: f32,
@@ -101,6 +107,8 @@ impl NetworkView {
             demo_bought: false,
             demo_cast: None,
             shop_page: 0,
+            hover: None,
+            attack_target: None,
             spectator_pan: Vec3::ZERO,
             spectator_yaw: -0.7,
             spectator_zoom: 1.0,

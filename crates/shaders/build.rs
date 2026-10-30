@@ -61,6 +61,27 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "skinned_shadow.vert",
         defines: &["SHADOW_PASS"],
     },
+    // Depth pre-pass (High and up) and inverted-hull outlines (Low/Medium), R2b/ADR-0016.
+    Permutation {
+        source: "unit.vert",
+        output: "unit_prepass.vert",
+        defines: &["DEPTH_PREPASS"],
+    },
+    Permutation {
+        source: "skinned.vert",
+        output: "skinned_prepass.vert",
+        defines: &["DEPTH_PREPASS"],
+    },
+    Permutation {
+        source: "unit.vert",
+        output: "unit_outline.vert",
+        defines: &["OUTLINE_HULL"],
+    },
+    Permutation {
+        source: "skinned.vert",
+        output: "skinned_outline.vert",
+        defines: &["OUTLINE_HULL"],
+    },
     // Particles with weighted blended OIT outputs (Medium and up, ADR-0013).
     Permutation {
         source: "vfx.frag",
@@ -72,6 +93,17 @@ const PERMUTATIONS: &[Permutation] = &[
         source: "vat.vert",
         output: "vat_shadow.vert",
         defines: &["SHADOW_PASS"],
+    },
+    // VAT depth pre-pass and inverted-hull outline (R2b, ADR-0016).
+    Permutation {
+        source: "vat.vert",
+        output: "vat_prepass.vert",
+        defines: &["DEPTH_PREPASS"],
+    },
+    Permutation {
+        source: "vat.vert",
+        output: "vat_outline.vert",
+        defines: &["OUTLINE_HULL"],
     },
 ];
 

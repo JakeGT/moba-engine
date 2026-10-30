@@ -319,6 +319,29 @@ pub(crate) fn supports_msaa4(device: &DeviceContext, hdr: vk::Format, depth: vk:
     samples(hdr, MSAA_COLOR_USAGE) && samples(depth, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
 }
 
+/// Whether the screen-space outlines' ID target (`R8_UINT`, ADR-0016) can be a 4x
+/// attachment: the device's `framebufferIntegerColorSampleCounts` limit, as reported for the
+/// format.
+pub(crate) fn supports_msaa4_ids(device: &DeviceContext) -> bool {
+    // SAFETY: the physical device belongs to the instance the device context was made from;
+    // the call only reads properties.
+    unsafe {
+        device.instance.get_physical_device_image_format_properties(
+            device.physical,
+            crate::frame_graph::OUTLINE_ID_FORMAT,
+            vk::ImageType::TYPE_2D,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            vk::ImageCreateFlags::empty(),
+        )
+    }
+    .is_ok_and(|properties| {
+        properties
+            .sample_counts
+            .contains(vk::SampleCountFlags::TYPE_4)
+    })
+}
+
 /// The tier's HDR colour format if it can be rendered to, blended and sampled; otherwise
 /// `R16G16B16A16_SFLOAT`, whose support for all three is mandatory.
 pub(crate) fn choose_hdr_format(device: &DeviceContext, tier: QualityTier) -> vk::Format {

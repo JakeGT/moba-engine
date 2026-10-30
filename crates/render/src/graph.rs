@@ -26,6 +26,7 @@ pub(crate) const MAX_PASSES: usize = 32;
 pub(crate) const MAX_RESOURCES: usize = 48;
 /// Most barriers emitted before one pass or at the end of the graph.
 pub(crate) const MAX_BARRIERS: usize = 16;
+const _: () = assert!(MAX_RESOURCES <= u64::BITS as usize);
 
 /// A resource declared on a [`GraphBuilder`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

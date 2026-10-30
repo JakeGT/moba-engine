@@ -10,7 +10,12 @@
 // that remaps N.L, a painted-specular tint and scale, and a coloured rim term that keeps
 // silhouettes readable against the terrain.
 //
-// Set 3 is the scene lighting set, written at load/resize only (crates/render/src/lighting.rs).
+// R2b (ADR-0016) adds clustered dynamic point lights after the sun, an ambient-occlusion term
+// on the ambient line (R6's min(relief, GTAO) x baked map AO) and screen-space contact
+// shadows multiplying the shadow-map term.
+//
+// Set 3 is the scene lighting set, one per frame in flight (crates/render/src/lighting.rs):
+// its descriptors are written at load/resize only; the light buffers' contents change per frame.
 #ifndef MOBA_LIGHTING_GLSL
 #define MOBA_LIGHTING_GLSL
 
@@ -29,6 +34,18 @@ layout(set = 3, binding = 4) uniform sampler2D lighting_ramp;
 // Half-resolution ambient occlusion (R6 GTAO, ADR-0015); white 1x1 without AO. Bindings 5-9
 // are R3a's world bindings (atmosphere.glsl, terrain.frag; ADR-0014 §6).
 layout(set = 3, binding = 10) uniform sampler2D ambient_occlusion;
+// Dynamic point lights (R2b): two vec4 per light, xyz position + w radius, rgb colour.
+layout(std430, set = 3, binding = 11) readonly buffer LightList {
+    vec4 lights[];
+} light_list;
+// Light grid: per column `camera.light_info.z` words, a count then light indices.
+layout(std430, set = 3, binding = 12) readonly buffer LightGrid {
+    uint cells[];
+} light_grid;
+// Baked top-down ambient occlusion of the static map (R8, 1 = open).
+layout(set = 3, binding = 13) uniform sampler2D baked_ao_map;
+// Screen-space contact-shadow visibility of the main view (R8, 1 = lit).
+layout(set = 3, binding = 14) uniform sampler2D contact_map;
 
 const float MOBA_PI = 3.14159265;
 const float MOBA_MIN_ROUGHNESS = 0.045;
@@ -51,7 +68,8 @@ struct Surface {
     vec4 specular;
     vec3 emissive;
     // Baked ambient occlusion (1 = open) that joins the screen-space AO as min(baked, GTAO):
-    // R3a's terrain relief while GTAO runs (ADR-0015 §5), 1 everywhere else.
+    // R3a's terrain relief while GTAO runs (ADR-0015 §5), 1 everywhere else. The map's baked
+    // AO (R2b) multiplies the result (ADR-0016).
     float occlusion;
 };
 
@@ -199,7 +217,92 @@ float shadow_visibility(vec3 world_pos, vec3 geometric_normal) {
     return sum / float(max(taps, 1));
 }
 
-// Shades `surface`: key light (shadowed), ambient, rim and emissive. Returns linear HDR.
+// Baked map AO at `p`: the top-down map at p.xz, faded out over the height falloff.
+float baked_occlusion(vec3 p) {
+    float strength = camera.occlusion.x;
+    if (strength <= 0.0) {
+        return 1.0;
+    }
+    vec2 uv = (p.xz - camera.baked_ao.xy) * camera.baked_ao.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return 1.0;
+    }
+    float ao = textureLod(baked_ao_map, uv, 0.0).r;
+    float fade = clamp(p.y / max(camera.baked_ao.w, 1e-3), 0.0, 1.0);
+    return mix(1.0, mix(ao, 1.0, fade), strength);
+}
+
+// Screen-space contact-shadow visibility of this fragment (1 = lit); 1 when not bound.
+float contact_visibility() {
+    if (camera.occlusion.y < 0.5) {
+        return 1.0;
+    }
+    return texelFetch(contact_map, ivec2(gl_FragCoord.xy), 0).r;
+}
+
+// Readability limits of the dynamic lights (ADR-0016, ADR-0011 rule 1). The inverse-square
+// falloff is floored at 1 m, so a light inside a unit does not reach 4-40x its colour; and the
+// lights' summed irradiance at a fragment is clamped to `MOBA_DYNAMIC_LIGHT_CAP` times the
+// sun's (at least 1), so a pile of hit flashes brightens a unit without bleaching its team
+// colour to white.
+const float MOBA_LIGHT_NEAR_FIELD = 1.0;
+const float MOBA_DYNAMIC_LIGHT_CAP = 1.5;
+
+float moba_luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Clustered dynamic point lights (ADR-0016): the lights binned into this fragment's grid
+// column, each with a windowed inverse-square falloff, wrap-lit diffuse and GGX specular,
+// unshadowed. Lights only add light, so team colour in albedo survives (ADR-0011 rule 1).
+vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, float alpha, vec3 sun) {
+    uint total = camera.light_info.w;
+    uint stride = camera.light_info.z;
+    if (total == 0u || stride < 2u) {
+        return vec3(0.0);
+    }
+    uvec2 dims = max(camera.light_info.xy, uvec2(1u));
+    vec2 cell_f = (surface.world_pos.xz - camera.light_grid.xy) * camera.light_grid.zw;
+    ivec2 cell = clamp(ivec2(floor(cell_f)), ivec2(0), ivec2(dims) - 1);
+    uint base = (uint(cell.y) * dims.x + uint(cell.x)) * stride;
+    uint count = min(light_grid.cells[base], stride - 1u);
+    vec3 sum = vec3(0.0);
+    float irradiance = 0.0;
+    for (uint i = 0u; i < count; i++) {
+        uint index = min(light_grid.cells[base + 1u + i], total - 1u);
+        vec4 position_radius = light_list.lights[index * 2u];
+        vec3 color = light_list.lights[index * 2u + 1u].rgb;
+        vec3 to_light = position_radius.xyz - surface.world_pos;
+        float d2 = dot(to_light, to_light);
+        float radius2 = position_radius.w * position_radius.w;
+        if (d2 >= radius2) {
+            continue;
+        }
+        float ratio = d2 / radius2;
+        float window = clamp(1.0 - ratio * ratio, 0.0, 1.0);
+        float attenuation = window * window / max(d2, MOBA_LIGHT_NEAR_FIELD);
+        vec3 l = to_light * inversesqrt(max(d2, 1e-8));
+        float n_dot_l_raw = dot(n, l);
+        float n_dot_l = max(n_dot_l_raw, 0.0);
+        float wrapped = clamp((n_dot_l_raw + surface.wrap) / (1.0 + surface.wrap), 0.0, 1.0);
+        vec3 half_sum = v + l;
+        float half_length2 = dot(half_sum, half_sum);
+        vec3 h = half_length2 > 1e-12 ? half_sum * inversesqrt(half_length2) : n;
+        vec3 fresnel = fresnel_schlick(f0, max(dot(v, h), 0.0));
+        vec3 kd = (vec3(1.0) - fresnel) * (1.0 - surface.metallic);
+        float d = distribution_ggx(max(dot(n, h), 0.0), alpha);
+        float vis = visibility_smith_ggx(n_dot_v, n_dot_l, alpha);
+        vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l
+            * surface.specular.rgb * surface.specular.w;
+        sum += (kd * surface.albedo * wrapped + specular) * color * attenuation;
+        irradiance += moba_luminance(color) * attenuation * wrapped;
+    }
+    float cap = MOBA_DYNAMIC_LIGHT_CAP * max(moba_luminance(sun), 1.0);
+    return irradiance > cap ? sum * (cap / irradiance) : sum;
+}
+
+// Shades `surface`: key light (shadowed), dynamic lights, ambient, rim and emissive.
+// Returns linear HDR.
 vec3 shade(Surface surface) {
     vec3 n = surface.normal;
     vec3 v = normalize(camera.camera_pos.xyz - surface.world_pos);
@@ -220,7 +323,10 @@ vec3 shade(Surface surface) {
     vec3 sun = camera.sun_color.rgb * camera.light_direction.w;
 
     // Shadowing: strength < 1 keeps a floor of direct light (units in shadow stay readable).
-    float shadow = shadow_visibility(surface.world_pos, surface.geometric_normal);
+    // Contact shadows (High+) tighten the map's shadow at contact points; the strength
+    // floor below still applies to their product.
+    float shadow = shadow_visibility(surface.world_pos, surface.geometric_normal)
+        * contact_visibility();
     float lit = mix(1.0, shadow, camera.sun_color.w);
 
     // Diffuse: wrap lighting, then the optional ramp remap of N.L.
@@ -240,7 +346,8 @@ vec3 shade(Surface surface) {
     float vis = visibility_smith_ggx(n_dot_v, n_dot_l, alpha);
     vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l * surface.specular.rgb * surface.specular.w;
 
-    vec3 direct = (diffuse + specular) * sun * lit;
+    vec3 direct = (diffuse + specular) * sun * lit
+        + dynamic_lights(surface, n, v, n_dot_v, f0, alpha, sun);
 
     // Ambient: SH or hemispheric diffuse, prefiltered specular through the split-sum LUT.
     vec3 f_ambient = fresnel_schlick_roughness(f0, n_dot_v, roughness);
@@ -251,8 +358,9 @@ vec3 shade(Surface surface) {
     vec3 ambient_spec = ambient_specular(r, roughness) * (f0 * brdf.x + brdf.y)
         * surface.specular.rgb * surface.specular.w;
     // R6: AO occludes the ambient (indirect) terms only; direct light, rim and emissive
-    // keep their readability (ADR-0015).
-    float ao = min(surface.occlusion, ambient_occlusion_here());
+    // keep their readability (ADR-0015). R2b's baked map AO multiplies it: the map's static
+    // occluders, which GTAO sees only on screen and at half resolution (ADR-0016).
+    float ao = min(surface.occlusion, ambient_occlusion_here()) * baked_occlusion(surface.world_pos);
     ambient_diffuse *= ao;
     ambient_spec *= specular_occlusion(n_dot_v, ao, roughness);
 

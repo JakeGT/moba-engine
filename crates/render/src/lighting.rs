@@ -13,6 +13,11 @@
 //! persistent default image, so those passes, which run before the shadow pass, never touch
 //! the shadow transient, and their camera uniform turns shadows off
 //! ([`FrameLighting::offscreen`]).
+//!
+//! R2b (ADR-0016) adds the dynamic-light buffers (bindings 5 and 6, host-written per frame
+//! in flight, so both sets exist once per frame), the baked AO map (7) and the main view's
+//! contact-shadow target (8; the offscreen set names a white default), plus the tier
+//! switches for lights, outlines, baked AO and contact shadows.
 
 use ash::vk;
 use moba_core::math::{Mat4, Vec3, Vec4, look_at_rh};
@@ -80,6 +85,59 @@ impl core::fmt::Display for ShadowFilter {
     }
 }
 
+/// How team and selection outlines are drawn (ADR-0016).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OutlineMode {
+    /// No outlines.
+    Off,
+    /// Inverted hulls in the scene pass (`Low`, `Medium`).
+    #[default]
+    Hull,
+    /// A screen-space pass over an ID target from the depth pre-pass (`High`, `Ultra`).
+    Screen,
+}
+
+impl OutlineMode {
+    /// Every mode.
+    pub const ALL: &'static [Self] = &[Self::Off, Self::Hull, Self::Screen];
+
+    /// Lower-case name, as accepted by [`Self::from_name`].
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Hull => "hull",
+            Self::Screen => "screen",
+        }
+    }
+
+    /// Parses a mode name, ignoring ASCII case and surrounding whitespace.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|mode| mode.name().eq_ignore_ascii_case(name))
+    }
+}
+
+impl core::fmt::Display for OutlineMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Most contact-shadow ray steps.
+pub const MAX_CONTACT_SHADOW_STEPS: u32 = 32;
+/// Contact-shadow ray length towards the sun, metres.
+const CONTACT_RAY_LENGTH: f32 = 0.8;
+/// Thickness assumed behind each depth-buffer surface, metres.
+const CONTACT_THICKNESS: f32 = 0.6;
+/// Distance from the eye at which contact shadows have faded out, metres.
+const CONTACT_FADE_END: f32 = 120.0;
+
 /// Smallest and largest accepted shadow-map edge.
 pub const MIN_SHADOW_RESOLUTION: u32 = 256;
 /// Largest accepted shadow-map edge.
@@ -109,17 +167,31 @@ pub struct LightingConfig {
     /// PCSS-lite PCF taps (the blocker search is always 16), clamped to 4..=64: 16 on `High`,
     /// 32 on `Ultra`. Ignored by the other filters.
     pub pcss_taps: u32,
+    /// Dynamic point lights uploaded per frame (ADR-0016), at most
+    /// [`MAX_LIGHTS`](crate::MAX_LIGHTS); `0` turns dynamic lights off.
+    pub max_lights: u32,
+    /// Lights per grid column, at most [`MAX_LIGHTS_PER_CELL`](crate::MAX_LIGHTS_PER_CELL).
+    pub lights_per_cell: u32,
+    /// How outlines are drawn.
+    pub outlines: OutlineMode,
+    /// Apply a map's baked ambient occlusion ([`Renderer::set_baked_ao`](crate::Renderer)).
+    pub baked_ao: bool,
+    /// Screen-space contact-shadow ray steps (`0` = off, at most
+    /// [`MAX_CONTACT_SHADOW_STEPS`]). On, they add the depth pre-pass.
+    pub contact_shadow_steps: u32,
 }
 
 impl LightingConfig {
-    /// The defaults of `tier` (ADR-0011):
+    /// The defaults of `tier` (ADR-0011, ADR-0016):
     ///
-    /// | Tier | Shadows | Map | Specular IBL |
-    /// |---|---|---|---|
-    /// | `Low` | hard (1 tap) | 1024² | off (SH only) |
-    /// | `Medium` | 3×3 PCF | 2048² | on |
-    /// | `High` | PCSS-lite, 16 + 16 taps | 2048² | on |
-    /// | `Ultra` | PCSS-lite, 16 + 32 taps | 4096² | on |
+    /// | Tier | Shadows | Map | Specular IBL | Lights (global / column) | Outlines | Contact |
+    /// |---|---|---|---|---|---|---|
+    /// | `Low` | hard (1 tap) | 1024² | off (SH only) | 16 / 8 | hull | off |
+    /// | `Medium` | 3×3 PCF | 2048² | on | 64 / 12 | hull | off |
+    /// | `High` | PCSS-lite, 16 + 16 taps | 2048² | on | 128 / 16 | screen | 8 steps |
+    /// | `Ultra` | PCSS-lite, 16 + 32 taps | 4096² | on | 256 / 16 | screen | 16 steps |
+    ///
+    /// Baked AO is on for every tier.
     #[must_use]
     pub const fn for_tier(tier: QualityTier) -> Self {
         let (shadows, shadow_resolution, specular_ibl, pcss_taps) = match tier {
@@ -128,13 +200,76 @@ impl LightingConfig {
             QualityTier::High => (ShadowFilter::Pcss, 2048, true, 16),
             QualityTier::Ultra => (ShadowFilter::Pcss, 4096, true, 32),
         };
+        let (max_lights, lights_per_cell, outlines, contact_shadow_steps) = match tier {
+            // Per-column caps: a column is about 4.6 m at the default camera, so a teamfight's
+            // overlapping effects put several lights in one (perf/0020).
+            QualityTier::Low => (16, 8, OutlineMode::Hull, 0),
+            QualityTier::Medium => (64, 12, OutlineMode::Hull, 0),
+            QualityTier::High => (128, 16, OutlineMode::Screen, 8),
+            QualityTier::Ultra => (256, 16, OutlineMode::Screen, 16),
+        };
         Self {
             shadows,
             shadow_resolution,
             specular_ibl,
             ibl: true,
             pcss_taps,
+            max_lights,
+            lights_per_cell,
+            outlines,
+            baked_ao: true,
+            contact_shadow_steps,
         }
+    }
+
+    /// Returns this config with [`LightingConfig::max_lights`] set (`0` = no dynamic lights).
+    #[must_use]
+    pub const fn with_max_lights(mut self, max_lights: u32) -> Self {
+        self.max_lights = max_lights;
+        self
+    }
+
+    /// Returns this config with [`LightingConfig::lights_per_cell`] set.
+    #[must_use]
+    pub const fn with_lights_per_cell(mut self, lights: u32) -> Self {
+        self.lights_per_cell = lights;
+        self
+    }
+
+    /// Returns this config with [`LightingConfig::outlines`] set.
+    #[must_use]
+    pub const fn with_outlines(mut self, outlines: OutlineMode) -> Self {
+        self.outlines = outlines;
+        self
+    }
+
+    /// Returns this config with [`LightingConfig::baked_ao`] set.
+    #[must_use]
+    pub const fn with_baked_ao(mut self, baked_ao: bool) -> Self {
+        self.baked_ao = baked_ao;
+        self
+    }
+
+    /// Returns this config with [`LightingConfig::contact_shadow_steps`] set (`0` = off).
+    #[must_use]
+    pub const fn with_contact_shadow_steps(mut self, steps: u32) -> Self {
+        self.contact_shadow_steps = steps;
+        self
+    }
+
+    /// The global light cap actually used.
+    pub(crate) fn light_cap(self) -> usize {
+        (self.max_lights as usize).min(crate::lights::MAX_LIGHTS)
+    }
+
+    /// The per-column light cap actually used.
+    pub(crate) fn cell_cap(self) -> usize {
+        (self.lights_per_cell as usize).min(crate::lights::MAX_LIGHTS_PER_CELL)
+    }
+
+    /// Contact-shadow steps actually used.
+    pub(crate) fn contact_steps(self) -> u32 {
+        self.contact_shadow_steps.min(MAX_CONTACT_SHADOW_STEPS)
     }
 
     /// Returns this config with [`LightingConfig::pcss_taps`] set.
@@ -564,6 +699,72 @@ impl EnvironmentState {
     };
 }
 
+/// A map's baked ambient occlusion placement ([`Renderer::set_baked_ao`], ADR-0016).
+///
+/// The AO texture (`R8`, 1 = open) covers the square `origin .. origin + size` of the
+/// world's xz plane (`u` along +x, `v` along +z). Surfaces sample it at their xz and fade
+/// it out over `height` metres above the ground; `strength` scales it (`0` = off).
+///
+/// [`Renderer::set_baked_ao`]: crate::Renderer::set_baked_ao
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct BakedAo {
+    /// World xz of the texture's `(0, 0)` corner.
+    pub origin: [f32; 2],
+    /// World size of the square the texture covers, metres.
+    pub size: f32,
+    /// Height above the ground over which the occlusion fades out, metres.
+    pub height: f32,
+    /// Strength, `0..=1`.
+    pub strength: f32,
+}
+
+impl BakedAo {
+    /// AO over `origin .. origin + size`, a 3 m falloff, full strength.
+    #[must_use]
+    pub const fn new(origin: [f32; 2], size: f32) -> Self {
+        Self {
+            origin,
+            size,
+            height: 3.0,
+            strength: 1.0,
+        }
+    }
+
+    /// Returns this placement with [`BakedAo::height`] set.
+    #[must_use]
+    pub const fn with_height(mut self, height: f32) -> Self {
+        self.height = height;
+        self
+    }
+
+    /// Returns this placement with [`BakedAo::strength`] set.
+    #[must_use]
+    pub const fn with_strength(mut self, strength: f32) -> Self {
+        self.strength = strength;
+        self
+    }
+
+    /// The camera-uniform values: `([origin x, origin z, 1 / size, height], strength)`;
+    /// `None` when unusable.
+    pub(crate) fn uniform(self) -> Option<([f32; 4], f32)> {
+        let finite = self.origin.iter().all(|value| value.is_finite())
+            && self.size.is_finite()
+            && self.size > 0.0;
+        finite.then(|| {
+            (
+                [
+                    self.origin[0],
+                    self.origin[1],
+                    1.0 / self.size,
+                    sanitize(self.height, 0.1, 64.0),
+                ],
+                sanitize(self.strength, 0.0, 1.0),
+            )
+        })
+    }
+}
+
 /// The lighting values of one frame, packed into the camera uniform.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FrameLighting {
@@ -582,9 +783,49 @@ pub(crate) struct FrameLighting {
     pub(crate) post_params: [f32; 4],
     /// Largest AO uv inside the rendered sub-rectangle (`camera.post_clamp`).
     pub(crate) post_clamp: [f32; 4],
+    // R2b (ADR-0016).
+    pub(crate) light_grid: [f32; 4],
+    pub(crate) light_info: [u32; 4],
+    pub(crate) occlusion: [f32; 4],
+    pub(crate) baked_ao: [f32; 4],
+    pub(crate) contact: [f32; 4],
 }
 
 impl FrameLighting {
+    /// Adds this frame's binned dynamic lights.
+    pub(crate) fn with_lights(mut self, grid: crate::lights::GridParams) -> Self {
+        self.light_grid = grid.grid;
+        self.light_info = grid.info;
+        self
+    }
+
+    /// Adds the map's baked AO (`None`, or `config.baked_ao` off: none).
+    pub(crate) fn with_baked_ao(mut self, ao: Option<BakedAo>, config: LightingConfig) -> Self {
+        match ao.filter(|_| config.baked_ao).and_then(BakedAo::uniform) {
+            Some((placement, strength)) => {
+                self.baked_ao = placement;
+                self.occlusion[0] = strength;
+            }
+            None => self.occlusion[0] = 0.0,
+        }
+        self
+    }
+
+    /// Turns on sampling the main view's contact-shadow target (`config`'s steps > 0).
+    pub(crate) fn with_contact_shadows(mut self, config: LightingConfig) -> Self {
+        let steps = config.contact_steps();
+        if steps > 0 {
+            self.occlusion[1] = 1.0;
+            self.contact = [
+                steps as f32,
+                CONTACT_RAY_LENGTH,
+                CONTACT_THICKNESS,
+                CONTACT_FADE_END,
+            ];
+        }
+        self
+    }
+
     /// The lighting of an offscreen view (R7b portraits, the minimap): shadows **off** (the
     /// map is fitted to, and rendered after, the main view; a baked minimap must not keep
     /// view-dependent shadows), the scene's art direction and the environment kept.
@@ -683,11 +924,16 @@ impl FrameLighting {
             sh,
             post_params: [0.0; 4],
             post_clamp: [0.0; 4],
+            light_grid: crate::lights::GridParams::NONE.grid,
+            light_info: crate::lights::GridParams::NONE.info,
+            occlusion: [0.0; 4],
+            baked_ao: [0.0, 0.0, 1.0, 1.0],
+            contact: [0.0; 4],
         }
     }
 }
 
-/// Combined-image-sampler bindings of the scene set (set 3): 0-4 lighting (`lighting.glsl`),
+/// Combined-image-sampler bindings 0-8 of the scene set (set 3): 0-4 lighting (`lighting.glsl`),
 /// 5 fog-of-war visibility (`atmosphere.glsl`), 6-8 terrain splat and layers (`terrain.frag`).
 const IMAGE_BINDINGS: u32 = 9;
 /// Binding of the terrain parameter block (a uniform buffer, `terrain.frag`).
@@ -695,30 +941,44 @@ const TERRAIN_BLOCK_BINDING: u32 = IMAGE_BINDINGS;
 /// Binding of the R6 ambient-occlusion image (`lighting.glsl`, ADR-0015 §5): the blurred GTAO
 /// transient on the main view, white elsewhere.
 const AO_BINDING: u32 = TERRAIN_BLOCK_BINDING + 1;
-/// Every binding of set 3.
-const SET_BINDINGS: usize = AO_BINDING as usize + 1;
-/// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image.
+/// The R2b bindings (ADR-0016 §6), after R6's AO: the dynamic lights and their grid (storage
+/// buffers), the baked AO map and the contact-shadow visibility (combined image samplers).
+const LIGHT_LIST_BINDING: u32 = AO_BINDING + 1;
+const LIGHT_GRID_BINDING: u32 = AO_BINDING + 2;
+const BAKED_AO_BINDING: u32 = AO_BINDING + 3;
+const CONTACT_BINDING: u32 = AO_BINDING + 4;
+/// Every binding of set 3 (`0..=CONTACT_BINDING`).
+const SET_BINDINGS: usize = CONTACT_BINDING as usize + 1;
+/// Combined image samplers in set 3: R3a's nine, R6's AO, the baked AO and the contact term.
+const SET_IMAGES: u32 = IMAGE_BINDINGS + 3;
+/// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image
+/// and light buffers.
 pub(crate) const MAIN_SETS: usize = 2;
+const LIGHT_LIST_BYTES: u64 = (crate::lights::MAX_LIGHTS
+    * crate::lights::LIGHT_VEC4S
+    * core::mem::size_of::<[f32; 4]>()) as u64;
+const LIGHT_GRID_WORDS: usize =
+    crate::lights::GRID * crate::lights::GRID * crate::lights::CELL_WORDS;
 
 /// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
-/// ADR-0015 §5): combined image samplers `0..IMAGE_BINDINGS`, the terrain block and the AO
-/// image, all fragment-only. Also counted by the scene layout's descriptor budget
+/// ADR-0015 §5, 11–14 in ADR-0016 §6): combined image samplers `0..IMAGE_BINDINGS`, the
+/// terrain block, the AO image, the two light buffers and the baked AO and contact images,
+/// all fragment-only. Also counted by the scene layout's descriptor budget
 /// (`descriptor_budget`).
 pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
-    let mut bindings: [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] =
-        core::array::from_fn(|index| {
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(index as u32)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-        });
-    bindings[TERRAIN_BLOCK_BINDING as usize] = vk::DescriptorSetLayoutBinding::default()
-        .binding(TERRAIN_BLOCK_BINDING)
-        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-        .descriptor_count(1)
-        .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-    bindings
+    core::array::from_fn(|index| {
+        let binding = index as u32;
+        let kind = match binding {
+            TERRAIN_BLOCK_BINDING => vk::DescriptorType::UNIFORM_BUFFER,
+            LIGHT_LIST_BINDING | LIGHT_GRID_BINDING => vk::DescriptorType::STORAGE_BUFFER,
+            _ => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        };
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(binding)
+            .descriptor_type(kind)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+    })
 }
 
 /// The terrain parameter block (`TerrainBlock` in `terrain.frag`, std140, `vec4`s only).
@@ -746,15 +1006,26 @@ pub(crate) struct WorldViews {
     pub(crate) terrain: Option<[Option<vk::ImageView>; 3]>,
 }
 
-/// The scene descriptor set (set 3) and the images it names besides the transients: the R2a
-/// lighting (shadow map, environment, BRDF LUT, ramp) and the R3a world (fog-of-war
-/// visibility, terrain splat and layers, the terrain block).
+/// One frame in flight's dynamic-light buffers (named by that frame's main-view set).
+struct LightFrame {
+    lights: GpuBuffer,
+    grid: GpuBuffer,
+}
+
+/// The scene descriptor set (set 3) and the images and buffers it names besides the
+/// transients: the R2a lighting (shadow map, environment, BRDF LUT, ramp), the R3a world
+/// (fog-of-war visibility, terrain splat and layers, the terrain block) and the R2b dynamic
+/// lights, baked AO and contact term.
 pub(crate) struct LightingResources {
-    /// Main-view sets, one per frame in flight (each names that frame's fog-of-war image).
+    /// Main-view sets, one per frame in flight (each names that frame's fog-of-war image and
+    /// light buffers).
     sets: [vk::DescriptorSet; MAIN_SETS],
-    /// The offscreen views' set: the same bindings, the default shadow and a white
-    /// visibility image.
+    /// The offscreen views' set: the same bindings, the default shadow, a white visibility,
+    /// AO and contact image, and frame 0's light buffers (offscreen views have no dynamic
+    /// lights, so they are never read).
     offscreen_set: vk::DescriptorSet,
+    /// Per frame in flight (`MAIN_SETS`).
+    frames: Vec<LightFrame>,
     _pool: DescriptorPool,
     set_layout: DescriptorSetLayout,
     shadow_compare: Sampler,
@@ -774,9 +1045,14 @@ pub(crate) struct LightingResources {
     ramp: Option<vk::ImageView>,
     /// The bound shadow-map view: the graph transient, or the default.
     shadow_view: vk::ImageView,
+    /// The main view's contact-shadow transient, when the frame has the pass.
+    contact_view: Option<vk::ImageView>,
+    /// The map's baked AO texture and placement.
+    baked_ao: Option<(GpuImage, BakedAo)>,
     /// The bound AO view (R6): the graph transient, or `default_ramp` (white).
     ao_view: vk::ImageView,
-    /// 1×1 `R8` white: fully visible (offscreen views, fog of war off).
+    /// 1×1 `R8` white: fully visible (offscreen views, fog of war off), and the baked AO and
+    /// contact image of views without one.
     default_visibility: GpuImage,
     /// 1×1 defaults for the terrain arrays (flat terrain): splat, albedo, normal.
     default_terrain: [GpuImage; 3],
@@ -784,14 +1060,17 @@ pub(crate) struct LightingResources {
     terrain_block: GpuBuffer,
     world: WorldViews,
     state: EnvironmentState,
+    light_stats: crate::lights::LightStats,
+    /// CPU scratch of the light binning's per-column counts (the mapped grid is write-only).
+    cell_counts: crate::lights::CellCounts,
 }
 
 impl LightingResources {
-    /// The set layout, samplers, default images, the BRDF LUT and the sets.
-    /// `shadow_format` is the shadow map's format (or the depth format when shadows are off),
-    /// `shadow_filter_linear` whether it can be sampled with linear filtering and
+    /// The set layout, samplers, default images, the BRDF LUT, the light buffers and the
+    /// sets. `shadow_format` is the shadow map's format (or the depth format when shadows are
+    /// off), `shadow_filter_linear` whether it can be sampled with linear filtering and
     /// `anisotropy` the terrain layers' maximum anisotropy.
-    #[allow(clippy::too_many_lines)] // Layout, samplers and default images, in order.
+    #[allow(clippy::too_many_lines)] // Layout, samplers, default images and buffers, in order.
     pub(crate) fn new(
         device: &DeviceContext,
         shadow_format: vk::Format,
@@ -804,10 +1083,13 @@ impl LightingResources {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(set_count * (IMAGE_BINDINGS + 1)),
+                .descriptor_count(set_count * SET_IMAGES),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(set_count),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(set_count * 2),
         ];
         let pool = DescriptorPool::new(device.device.clone(), &pool_sizes, set_count)?;
         let allocated = pool.allocate(&device.device, &[set_layout.handle(); MAIN_SETS + 1])?;
@@ -958,11 +1240,32 @@ impl LightingResources {
             gpu_allocator::MemoryLocation::CpuToGpu,
         )?;
         terrain_block.write_bytes(0, bytemuck::bytes_of(&TerrainBlock::default()));
+        let mut light_frames = Vec::with_capacity(MAIN_SETS);
+        for _ in 0..MAIN_SETS {
+            let buffer = |name, size| {
+                GpuBuffer::new(
+                    device.device.clone(),
+                    device.allocator(),
+                    name,
+                    size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER,
+                    gpu_allocator::MemoryLocation::CpuToGpu,
+                )
+            };
+            let lights = buffer("dynamic-lights", LIGHT_LIST_BYTES)?;
+            let mut grid = buffer("light-grid", (LIGHT_GRID_WORDS * 4) as u64)?;
+            // Every column starts empty; frames only rewrite the counts and used entries.
+            if let Some(words) = grid.mapped_slice_mut::<u32>(LIGHT_GRID_WORDS) {
+                words.fill(0);
+            }
+            light_frames.push(LightFrame { lights, grid });
+        }
         let shadow_view = default_shadow.view();
         let ao_view = default_ramp.view();
         let resources = Self {
             sets,
             offscreen_set,
+            frames: light_frames,
             _pool: pool,
             set_layout,
             shadow_compare,
@@ -976,12 +1279,16 @@ impl LightingResources {
             default_ramp,
             ramp: None,
             shadow_view,
+            contact_view: None,
+            baked_ao: None,
             ao_view,
             default_visibility,
             default_terrain,
             terrain_block,
             world: WorldViews::default(),
             state: EnvironmentState::NONE,
+            light_stats: crate::lights::LightStats::default(),
+            cell_counts: [0; crate::lights::GRID * crate::lights::GRID],
         };
         resources.write(device);
         Ok(resources)
@@ -991,13 +1298,14 @@ impl LightingResources {
         self.set_layout.handle()
     }
 
-    /// The main view's scene set for frame-in-flight `frame` (names the shadow map and that
-    /// frame's fog-of-war image).
+    /// The main view's scene set for frame-in-flight `frame` (names the shadow map, the
+    /// contact target and that frame's fog-of-war image and light buffers).
     pub(crate) fn set(&self, frame: usize) -> vk::DescriptorSet {
         self.sets[frame % MAIN_SETS]
     }
 
-    /// The offscreen views' lighting set (names the default shadow image).
+    /// The offscreen views' scene set (the default shadow, white visibility, AO and contact
+    /// images; their uniform has no lights).
     pub(crate) fn offscreen_set(&self) -> vk::DescriptorSet {
         self.offscreen_set
     }
@@ -1006,10 +1314,65 @@ impl LightingResources {
         &self.state
     }
 
-    /// Points the set at `view` (the shadow transient) or the default. The device must be
-    /// idle or the set unused by pending work (creation, resize).
-    pub(crate) fn bind_shadow(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
-        self.shadow_view = view.unwrap_or(self.default_shadow.view());
+    /// The bound baked AO placement, if any.
+    pub(crate) fn baked_ao(&self) -> Option<BakedAo> {
+        self.baked_ao.as_ref().map(|(_, ao)| *ao)
+    }
+
+    /// What happened to the most recent frame's lights.
+    pub(crate) fn light_stats(&self) -> crate::lights::LightStats {
+        self.light_stats
+    }
+
+    /// Bins `lights` for a camera `view_proj` into frame `frame`'s buffers under `config`'s
+    /// caps and returns the grid placement for the uniform. The frame's fence must have been
+    /// waited on. Never allocates.
+    pub(crate) fn upload_lights(
+        &mut self,
+        frame: usize,
+        lights: &[crate::lights::PointLight],
+        view_proj: Mat4,
+        config: LightingConfig,
+    ) -> crate::lights::GridParams {
+        let footprint = if config.light_cap() > 0 && !lights.is_empty() {
+            crate::lights::ground_footprint(view_proj)
+        } else {
+            None
+        };
+        let LightFrame {
+            lights: list, grid, ..
+        } = &mut self.frames[frame % MAIN_SETS];
+        let words = crate::lights::MAX_LIGHTS * crate::lights::LIGHT_VEC4S;
+        let (Some(list), Some(cells)) = (
+            list.mapped_slice_mut::<[f32; 4]>(words),
+            grid.mapped_slice_mut::<u32>(LIGHT_GRID_WORDS),
+        ) else {
+            return crate::lights::GridParams::NONE;
+        };
+        let (params, stats) = crate::lights::bin(
+            lights,
+            footprint,
+            config.light_cap(),
+            config.cell_cap(),
+            list,
+            cells,
+            &mut self.cell_counts,
+        );
+        self.light_stats = stats;
+        params
+    }
+
+    /// Points the main view's sets at `shadow` (the shadow transient) and `contact` (the
+    /// contact-shadow transient), or the defaults. The device must be idle or the sets unused
+    /// by pending work (creation, resize).
+    pub(crate) fn bind_transients(
+        &mut self,
+        device: &DeviceContext,
+        shadow: Option<vk::ImageView>,
+        contact: Option<vk::ImageView>,
+    ) {
+        self.shadow_view = shadow.unwrap_or(self.default_shadow.view());
+        self.contact_view = contact;
         self.write(device);
     }
 
@@ -1046,6 +1409,12 @@ impl LightingResources {
         self.write(device);
     }
 
+    /// Replaces the baked AO texture and placement. The device must be idle.
+    pub(crate) fn set_baked_ao(&mut self, device: &DeviceContext, ao: Option<(GpuImage, BakedAo)>) {
+        self.baked_ao = ao;
+        self.write(device);
+    }
+
     /// Replaces the ramp view (owned elsewhere for the renderer's lifetime). The device must
     /// be idle.
     pub(crate) fn set_ramp(&mut self, device: &DeviceContext, ramp: Option<vk::ImageView>) {
@@ -1054,20 +1423,27 @@ impl LightingResources {
     }
 
     fn write(&self, device: &DeviceContext) {
+        let white = self.default_visibility.view();
         for (frame, &set) in self.sets.iter().enumerate() {
-            let fog = self
-                .world
-                .fog
-                .map_or(self.default_visibility.view(), |views| views[frame]);
-            self.write_set(device, set, self.shadow_view, fog, self.ao_view);
+            let fog = self.world.fog.map_or(white, |views| views[frame]);
+            self.write_set(
+                device,
+                set,
+                &self.frames[frame],
+                [
+                    self.shadow_view,
+                    fog,
+                    self.contact_view.unwrap_or(white),
+                    self.ao_view,
+                ],
+            );
         }
         // Offscreen views: the default shadow image, full visibility and white AO.
         self.write_set(
             device,
             self.offscreen_set,
-            self.default_shadow.view(),
-            self.default_visibility.view(),
-            self.default_ramp.view(),
+            &self.frames[0],
+            [self.default_shadow.view(), white, white, white],
         );
     }
 
@@ -1075,76 +1451,86 @@ impl LightingResources {
         &self,
         device: &DeviceContext,
         set: vk::DescriptorSet,
-        shadow: vk::ImageView,
-        fog: vk::ImageView,
-        ao: vk::ImageView,
+        frame: &LightFrame,
+        [shadow, fog, contact, ao]: [vk::ImageView; 4],
     ) {
         let environment = self
             .environment
             .as_ref()
             .map_or(self.default_environment.view(), GpuImage::view);
+        let baked = self
+            .baked_ao
+            .as_ref()
+            .map_or(self.default_visibility.view(), |(image, _)| image.view());
         let defaults = self.default_terrain.each_ref().map(GpuImage::view);
         let [splat, albedo, normal] = match self.world.terrain {
             Some(views) => [0, 1, 2].map(|index| views[index].unwrap_or(defaults[index])),
             None => defaults,
         };
         let entries = [
-            (self.shadow_compare.handle(), shadow),
-            (self.shadow_plain.handle(), shadow),
-            (self.linear_clamp.handle(), environment),
-            (self.linear_clamp.handle(), self.brdf_lut.view()),
+            (0, self.shadow_compare.handle(), shadow),
+            (1, self.shadow_plain.handle(), shadow),
+            (2, self.linear_clamp.handle(), environment),
+            (3, self.linear_clamp.handle(), self.brdf_lut.view()),
             (
+                4,
                 self.linear_clamp.handle(),
                 self.ramp.unwrap_or(self.default_ramp.view()),
             ),
-            (self.linear_clamp.handle(), fog),
-            (self.linear_clamp.handle(), splat),
-            (self.layer_sampler.handle(), albedo),
-            (self.layer_sampler.handle(), normal),
+            (5, self.linear_clamp.handle(), fog),
+            (6, self.linear_clamp.handle(), splat),
+            (7, self.layer_sampler.handle(), albedo),
+            (8, self.layer_sampler.handle(), normal),
+            (AO_BINDING, self.linear_clamp.handle(), ao),
+            (BAKED_AO_BINDING, self.linear_clamp.handle(), baked),
+            (CONTACT_BINDING, self.shadow_plain.handle(), contact),
         ];
-        let infos: [[vk::DescriptorImageInfo; 1]; IMAGE_BINDINGS as usize] =
+        let infos: [[vk::DescriptorImageInfo; 1]; SET_IMAGES as usize] =
             core::array::from_fn(|index| {
                 [vk::DescriptorImageInfo::default()
-                    .sampler(entries[index].0)
-                    .image_view(entries[index].1)
+                    .sampler(entries[index].1)
+                    .image_view(entries[index].2)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
             });
-        let ao_info = [vk::DescriptorImageInfo::default()
-            .sampler(self.linear_clamp.handle())
-            .image_view(ao)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         let block = [vk::DescriptorBufferInfo::default()
             .buffer(self.terrain_block.handle())
             .offset(0)
             .range(core::mem::size_of::<TerrainBlock>() as u64)];
-        let images: [vk::WriteDescriptorSet<'_>; IMAGE_BINDINGS as usize] =
-            core::array::from_fn(|index| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(index as u32)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&infos[index])
-            });
-        let buffer = vk::WriteDescriptorSet::default()
+        let lights = [vk::DescriptorBufferInfo::default()
+            .buffer(frame.lights.handle())
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let grid = [vk::DescriptorBufferInfo::default()
+            .buffer(frame.grid.handle())
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let mut writes = [vk::WriteDescriptorSet::default(); SET_BINDINGS];
+        for (write, (info, entry)) in writes.iter_mut().zip(infos.iter().zip(entries)) {
+            *write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(entry.0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(info);
+        }
+        let images = SET_IMAGES as usize;
+        writes[images] = vk::WriteDescriptorSet::default()
             .dst_set(set)
             .dst_binding(TERRAIN_BLOCK_BINDING)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&block);
-        let ao_write = vk::WriteDescriptorSet::default()
+        writes[images + 1] = vk::WriteDescriptorSet::default()
             .dst_set(set)
-            .dst_binding(AO_BINDING)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&ao_info);
-        // SAFETY: the set, samplers, views and the terrain block are live, and the callers
-        // guarantee no pending command buffer uses the set (creation, or after a device-idle
-        // wait).
-        unsafe { device.device.update_descriptor_sets(&images, &[]) };
-        // SAFETY: as above.
-        unsafe {
-            device
-                .device
-                .update_descriptor_sets(&[buffer, ao_write], &[]);
-        }
+            .dst_binding(LIGHT_LIST_BINDING)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&lights);
+        writes[images + 2] = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(LIGHT_GRID_BINDING)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&grid);
+        // SAFETY: the set, samplers, views and buffers are live, and the callers guarantee no
+        // pending command buffer uses the set (creation, or after a device-idle wait).
+        unsafe { device.device.update_descriptor_sets(&writes, &[]) };
     }
 }
 
