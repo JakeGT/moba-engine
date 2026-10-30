@@ -13,17 +13,16 @@
 # CULL_PROBE_REUSE=<dir>: the four local scenes reuse the golden workflow's culled captures
 # of the same scenes (`<dir>/render[-x]-actual.ppm` with its frame log `<dir>/render[-x].frames`)
 # instead of capturing them again, so only their culling-off captures run. The networked scene
-# always captures both itself: its HUD (a hero's health-bar ticks) can differ by a few pixels
-# between two separate runs on a slow runner, unrelated to culling, so its pair runs together
-# under the same conditions.
-# CULL_PROBE_JOBS=<n> (default 1): captures run n at a time (the network pair first).
-# Any validation message in a capture fails it.
+# always captures both itself, back to back and at 640x360 (half the cost; it still culls 11
+# of 43 units and 56 of 64 chunks): its HUD (a hero's health-bar ticks) can differ by a few
+# pixels between two separate runs on a slow runner, unrelated to culling.
+# Captures run one at a time (lavapipe uses every core; parallel captures thrash). Any
+# validation message in a capture fails it.
 set -euo pipefail
 client=${1:-./target/release/moba-client}
 out=${2:-cull-probe}
 mkdir -p "$out"
 reuse=${CULL_PROBE_REUSE:-}
-jobs=${CULL_PROBE_JOBS:-1}
 capture() {
   local name=$1
   shift
@@ -49,7 +48,7 @@ field() {
 # environment (space-separated KEY=VALUE pairs, no spaces inside values; the golden step's
 # environment exactly)
 scenes=(
-  "network|-|MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_SMOKE_FRAMES=100000"
+  "network|-|MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_SMOKE_FRAMES=100000 MOBA_WINDOW_SIZE=640x360"
   "preview|render|MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90"
   "horizon|render-horizon|MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_PREVIEW_CAMERA=-0.7,0.12,170"
   "ultra-vat|render-ultra|MOBA_QUALITY=ultra MOBA_STRESS_MINIONS=64 MOBA_LOCAL_CAMERA_DISTANCE=40 MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90"
@@ -78,22 +77,11 @@ for scene in "${scenes[@]}"; do
   tasks+=("$name-off|$env_vars MOBA_GPU_CULL=off")
 done
 
-status=0
-running=0
 for task in "${tasks[@]}"; do
-  if [ "$running" -ge "$jobs" ]; then
-    wait -n || status=1
-    running=$((running - 1))
-  fi
   read -r -a vars <<< "${task#*|}"
-  capture "${task%%|*}" "${vars[@]}" &
-  running=$((running + 1))
+  capture "${task%%|*}" "${vars[@]}" || exit 1
 done
-while [ "$running" -gt 0 ]; do
-  wait -n || status=1
-  running=$((running - 1))
-done
-[ "$status" = 0 ] || exit 1
+status=0
 
 for name in "${names[@]}"; do
   candidates=$(field "$out/$name-culled.frames" cull_candidates)

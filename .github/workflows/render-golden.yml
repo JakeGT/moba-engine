@@ -254,16 +254,15 @@ jobs:
       # must be byte-identical with culling on and MOBA_GPU_CULL=off, and something must have
       # been culled. For the four local scenes the culled images are the golden captures
       # above (same environment, culling on by default, with frame logs), so the probe adds
-      # only their culling-off captures; the networked scene captures its own pair (its HUD
-      # can differ by a few pixels between separate runs). Three captures run at a time;
-      # any validation message fails.
+      # only their culling-off captures; the networked scene captures its own pair at
+      # 640x360 (its HUD can differ by a few pixels between separate runs). Any validation
+      # message fails.
       - name: Culling exactness probe
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: scripts/cull-probe.sh ./target/release/moba-client cull-probe
         env:
           RUN: xvfb-run -a
           CULL_PROBE_REUSE: .
-          CULL_PROBE_JOBS: "3"
       # R3b environment coverage (ADR-0017): the showcase river close up from a low camera on
       # the default tier (full water with refraction, foliage, reeds, the carved bed), on Low
       # (simple water, thinned foliage) and on Ultra through the reeds on the bank (4x MSAA
