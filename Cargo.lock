@@ -1404,6 +1404,7 @@ dependencies = [
  "ash",
  "ash-window",
  "bytemuck",
+ "criterion",
  "gpu-allocator",
  "moba-assets",
  "moba-core",

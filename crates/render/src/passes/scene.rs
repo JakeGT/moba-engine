@@ -1543,7 +1543,15 @@ impl ScenePass {
         pipeline: &GraphicsPipeline,
         textured: bool,
     ) {
-        self.draw_skinned(device, command_buffer, state, pipeline, textured, true, false);
+        self.draw_skinned(
+            device,
+            command_buffer,
+            state,
+            pipeline,
+            textured,
+            true,
+            false,
+        );
     }
 
     /// One draw per skinned instance whose mesh's material is (`textured`) or is not
@@ -2029,7 +2037,10 @@ mod tests {
         assert_eq!(starts[0], 0);
         assert!(counts[1..].iter().all(|&count| count == 0));
         assert_eq!(outlined[0], 0);
-        assert_eq!(plain[0], 0, "no outlined instance: the plain run starts the bucket");
+        assert_eq!(
+            plain[0], 0,
+            "no outlined instance: the plain run starts the bucket"
+        );
     }
 
     #[test]

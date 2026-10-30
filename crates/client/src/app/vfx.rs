@@ -32,8 +32,9 @@
 //!   hide an enemy behind them;
 //! - **effect lights** (an effect's optional `[light]` block, ADR-0016) become
 //!   [`PointLight`]s for [`moba_render::Scene::with_lights`]: enemy and neutral lights first,
-//!   then the viewer's and allies' (scaled by the allied-VFX opacity), so the renderer's
-//!   per-tier cap drops allied lights before enemy ones. A light belongs to an effect
+//!   then the viewer's own and allies' (allies scaled by the allied-VFX opacity, own effects
+//!   never, as for particles), so the renderer's per-tier cap drops allied lights before
+//!   enemy ones. A light belongs to an effect
 //!   instance the client already plays, so it never shows anything the client was not sent.
 //!
 //! Every buffer is preallocated: steady-state frames do not allocate.
@@ -41,7 +42,7 @@
 mod events;
 mod library;
 
-use moba_core::math::{Mat4, TAU, Vec3, Vec4};
+use moba_core::math::{Mat4, Quat, TAU, Vec3, Vec4};
 use moba_core::rng::Rng;
 use moba_render::{
     ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, PointLight, UnitInstance, VfxBudget,
@@ -971,7 +972,10 @@ impl VfxSystem {
         {
             let (list, scale) = match instance.relation {
                 Relation::Enemy | Relation::Neutral => (&mut self.lights, 1.0),
-                Relation::Own | Relation::Ally => (&mut self.ally_lights, self.ally_opacity),
+                // Own effects are never dimmed (as for particles, `VfxFrame::ally_opacity`
+                // scales allies only); they still list after enemies and neutrals.
+                Relation::Own => (&mut self.ally_lights, 1.0),
+                Relation::Ally => (&mut self.ally_lights, self.ally_opacity),
             };
             if list.len() < list.capacity() && scale > 0.0 {
                 list.push(PointLight::new(
@@ -1268,7 +1272,54 @@ pub(crate) struct Preview {
     effect: EffectId,
     clock: f32,
     next: f32,
+    probe: OutlineProbe,
 }
+
+/// `MOBA_OUTLINE_PROBE` (render tests, ADR-0016): an extra enemy-hero-outlined unit on the
+/// far side of the arena, behind a wall (`hidden`) or in the open (`open`), or standing
+/// beside the effect's target point under its light (`hit`, readability captures). With the wall,
+/// a capture must be byte-identical to one with `MOBA_OUTLINES=off`: no outline pixel of a
+/// unit fully behind a wall reaches the screen on either outline path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutlineProbe {
+    /// No probe (the default).
+    Off,
+    /// The probe unit, fully behind a wall.
+    Hidden,
+    /// The probe unit in the open (the control: its outline must show).
+    Open,
+    /// The probe unit standing just behind the effect's target point, so the effect's light
+    /// falls on its visible faces (readability: a hit unit keeps its team colour).
+    Hit,
+}
+
+impl OutlineProbe {
+    /// The environment variable.
+    pub(crate) const ENV: &'static str = "MOBA_OUTLINE_PROBE";
+
+    /// Parses `hidden`/`open`; anything else is off.
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some("hidden") => Self::Hidden,
+            Some("open") => Self::Open,
+            Some("hit") => Self::Hit,
+            _ => Self::Off,
+        }
+    }
+
+    /// From [`Self::ENV`].
+    pub(crate) fn from_env() -> Self {
+        Self::parse(std::env::var(Self::ENV).ok().as_deref())
+    }
+}
+
+/// The probe unit: on the far side of the arena from the preview camera (`Camera::orbit` at
+/// yaw −0.7 puts the eye at +x, −z), and the wall 2.5 m in front of it, 12 m wide and 8 m
+/// tall, square to the camera's heading: the view ray to the unit's top crosses the wall
+/// below 5 m.
+const PROBE_UNIT: Vec3 = Vec3::new(-6.0, 0.0, 6.0);
+const PROBE_UNIT_HEIGHT: f32 = 3.6;
+const PROBE_WALL_SIZE: Vec3 = Vec3::new(12.0, 8.0, 1.0);
 
 /// The preview's stand-in caster, the effect's target point and a stand-in target unit
 /// beside it (so the unit does not hide what plays at the point).
@@ -1282,6 +1333,45 @@ impl Preview {
             effect,
             clock: 0.0,
             next: 0.0,
+            probe: OutlineProbe::Off,
+        }
+    }
+
+    /// With the [`OutlineProbe`] staged.
+    pub(crate) const fn with_probe(mut self, probe: OutlineProbe) -> Self {
+        self.probe = probe;
+        self
+    }
+
+    /// The probe's instances (none when off): the outlined unit and, when hidden, its wall.
+    fn push_probe(&self, units: &mut Vec<UnitInstance>) {
+        if self.probe == OutlineProbe::Off {
+            return;
+        }
+        let position = if self.probe == OutlineProbe::Hit {
+            // Just behind the effect's point as the camera sees it, so its lights (about
+            // 1 m up) sit a metre in front of the faces the camera sees: the near field.
+            PREVIEW_TARGET + Vec3::new(-1.2, 0.0, 1.0)
+        } else {
+            PROBE_UNIT
+        };
+        units.push(
+            UnitInstance::at(position, PROBE_UNIT_HEIGHT, Vec4::new(1.0, 0.34, 0.28, 1.0))
+                .with_outline(super::outlines::ENEMY_HERO),
+        );
+        if self.probe == OutlineProbe::Hidden {
+            // Square to the eye's heading (towards +x, -z from the unit).
+            let toward = Vec3::new(16.8, 0.0, -14.1).normalize();
+            let center = PROBE_UNIT + toward * 2.5 + Vec3::Y * (PROBE_WALL_SIZE.y * 0.5);
+            let yaw = toward.x.atan2(toward.z);
+            units.push(UnitInstance::new(
+                Mat4::from_scale_rotation_translation(
+                    PROBE_WALL_SIZE,
+                    Quat::from_rotation_y(yaw),
+                    center,
+                ),
+                Vec4::new(0.45, 0.42, 0.4, 1.0),
+            ));
         }
     }
 
@@ -1302,6 +1392,7 @@ impl Preview {
         frame_ms: f32,
     ) {
         self.clock += (frame_ms / 1_000.0).clamp(0.0, 0.1);
+        self.push_probe(units);
         for (id, position, color) in [
             (1, PREVIEW_SOURCE, Vec4::new(0.28, 0.55, 1.0, 1.0)),
             (2, PREVIEW_TARGET_UNIT, Vec4::new(1.0, 0.34, 0.28, 1.0)),

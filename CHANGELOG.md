@@ -167,27 +167,36 @@ the semver check):
     most `MAX_LIGHTS` (256) lights, `MAX_LIGHTS_PER_CELL` (16) per column, into two
     host-visible storage buffers per frame in flight (set 3 bindings 5 and 6, so the lighting
     set is now one per frame in flight), and `shade()` loops over the fragment's column after
-    the sun (wrap diffuse + GGX, no shadows). Per-tier caps (Low 16/4, Medium 64/8, High
+    the sun (wrap diffuse + GGX, no shadows; falloff floored at 1 m and the summed irradiance
+    clamped to 1.5× the sun's, so stacked flashes never bleach a team colour). The footprint
+    covers a shallow camera's ground out to the horizon; per-column counts stay on the CPU
+    (the write-combined grid is never read back); a criterion bench (`light_binning`) times
+    256 lights. Per-tier caps (Low 16/8, Medium 64/12, High
     128/16, Ultra 256/16) drop lights in list order and are counted (`Renderer::light_stats`,
     the frame log's `lights_*` columns). Offscreen views get none.
   - **Effect lights:** an effect descriptor may have one `[light]` table (`moba_assets::VfxLight`:
     colour, intensity, radius, target/source anchor, offset, delay, duration, fades, flicker,
     team tint, `scale_with_radius`; bounded and range-checked like the rest, covered by the
     `vfx` fuzz target); `VfxEffect::lifespan` includes it. The client emits one light per live
-    instance, enemy and neutral first, allies scaled by `ally_vfx_opacity`; 25 shipped effects
+    instance, enemy and neutral first, allies scaled by `ally_vfx_opacity` (the viewer's own
+    not, as for particles); 25 shipped effects
     got lights. Lights come only from effects the client already plays, so they reveal nothing.
   - **Team outlines:** `UnitInstance::outline` (a palette slot) and `Scene::with_outlines`
     (`OutlinePalette`: colour and pixel width per slot). The client outlines allied, enemy and
-    its own heroes, the hovered unit and the unit it last ordered attacked, in the HUD's team
+    its own heroes, the hovered enemy (what a click would attack) and the unit it last
+    ordered attacked, in the HUD's team
     palette (the colour-blind palette applies). High/Ultra draw them in screen space: the new
     depth pre-pass writes an `R8_UINT` slot ID and an `outline` pass after the composite
     dilates it (8 directions, up to 4 px, higher slot wins, exterior only). Low/Medium draw an
-    inverted hull in the scene pass (static and skinned permutations, pushed back 0.3 m and
-    extruded in screen space). Both are depth-tested and only ever see units the client
-    draws: never through walls, fog or brush.
+    inverted hull in the scene pass (static, skinned and VAT permutations, pushed back 0.3 m
+    and extruded in screen space, drawn only for each mesh's outlined instances, which lead
+    its bucket). Both are depth-tested and only ever see units the client draws: never
+    through walls, fog or brush; `scripts/outline-probe.sh` (CI) checks that a unit fully
+    behind a wall changes no pixel on either path.
   - **Baked AO:** `moba-tools ao-bake` rasterises a map's walls and props into a 0.5 m height
     field and bakes horizon AO (16 directions, 12 m) into an `r8` KTX2 plus a sidecar
-    (`moba_assets::BakedAoDesc`, ≤ 2 KiB) with an input fingerprint (`ao_fingerprint`);
+    (`moba_assets::BakedAoDesc`, ≤ 2 KiB) with an input fingerprint (`ao_fingerprint`, which covers each prop mesh's bounds and
+    vertex and index counts, `PropMeshShape`);
     `[lighting] baked_ao`/`ao_strength` (`MapLighting`) name it, `maps/ao/<name>.{toml,ktx2}`.
     The client ignores a stale bake (fingerprint mismatch) with one log line;
     `Renderer::set_baked_ao`/`clear_baked_ao`/`has_baked_ao` bind it. `shade()` multiplies
@@ -195,8 +204,8 @@ the semver check):
     GTAO), faded out 3 m above the ground; every tier. Ships `content/maps/ao/ember-ao` and
     `frost-ao` (`scripts/bake-map-ao.sh`).
   - **Depth pre-pass and contact shadows:** on High/Ultra (or when screen outlines or contact
-    shadows are forced on) a `depth_prepass` draws terrain and units depth-only (biased back,
-    `invariant` positions) and the scene pass loads that depth (`Access::DepthReadWrite`,
+    shadows are forced on) a `depth_prepass` draws terrain and static, skinned and VAT units
+    depth-only (no depth bias, `invariant` positions) and the scene pass loads that depth (`Access::DepthReadWrite`,
     `LESS_OR_EQUAL`) instead of clearing it. `contact_shadows` ray-marches the pre-pass depth
     towards the sun (High 8 steps, Ultra 16, 0.8 m) into an `R8_UNORM` visibility that
     multiplies the shadow-map term. The pre-pass depth is sampled-capable between the
@@ -204,13 +213,13 @@ the semver check):
   - **Frame and API:** the frame is `(portraits, minimap) → vfx_simulate → (shadow) →
     (depth_prepass) → (contact_shadows) → scene → vfx_draw → (vfx_resolve) → composite →
     (outline) → ui`; the graph's limits are 32 passes and 48 resources (a `u64` mask, as in
-    R6). The instance record is 96 bytes (was 80),
+    R6). The instance record is 128 bytes (R4b's 112 plus the outline slot),
     the camera uniform 1,552 (was 1,264). New (additive) API: `PointLight`, `LightStats`,
     `MAX_LIGHTS`, `MAX_LIGHTS_PER_CELL`, `OutlineMode`, `OutlinePalette`, `OUTLINE_SLOTS`,
     `MAX_OUTLINE_WIDTH`, `BakedAo`, `MAX_CONTACT_SHADOW_STEPS`, `LightingConfig::{max_lights,
     lights_per_cell, outlines, baked_ao, contact_shadow_steps}` and their builders,
     `Scene::{lights, outlines}`; in `moba-assets` `VfxLight`, `BakedAoDesc`, `BakedAoError`,
-    `ao_fingerprint`, `baked_ao_paths`, `MapLighting::{baked_ao, ao_strength}`.
+    `ao_fingerprint`, `PropMeshShape`, `baked_ao_paths`, `MapLighting::{baked_ao, ao_strength}`.
   - **Switches:** `MOBA_LIGHTS=off|<cap>`, `MOBA_OUTLINES=off|hull|screen`,
     `MOBA_BAKED_AO=off`, `MOBA_CONTACT_SHADOWS=off|<steps>`; the frame log gains
     `gpu_depth_prepass_*`, `gpu_contact_shadows_*` and `gpu_outline_*`.
@@ -218,9 +227,12 @@ the semver check):
     synchronisation validation report 0 messages on lavapipe and the RTX 5070 Ti on every
     tier and every switch, with animated portraits, the minimap bake, `MOBA_VFX_SCALE=8` and
     the teamfight replay; per-pass GPU timings before/after at 1080p (median of 3 interleaved
-    rounds: High +0.10 ms GPU, contact shadows 0.05 ms the largest pass; Low +0.01 ms). Both
+    rounds: High +0.10 ms GPU, contact shadows 0.05 ms the largest pass; Low +0.01 ms). The
     golden fingerprints were rebaselined deliberately (hero outlines and contact shadows on
-    High), two lavapipe runs byte-identical.
+    High), two lavapipe runs byte-identical, and a new ember golden covers walls, baked AO
+    and outlines beside walls. A device whose per-stage sampler or sampled-image limit is
+    below the scene's fragment samplers is rejected at selection (a unit test keeps that
+    count within Vulkan's minimum of 16).
   - No wire, replay, simulation-logic or content-hash change (protocol v41, replay v5, logic
     v8): effects, map visuals and bakes are client-local.
 - **Animation runtime R4b: VAT minions, bone LOD, attachments (AAA roadmap R4, ADR-0012

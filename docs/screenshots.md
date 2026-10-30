@@ -355,6 +355,16 @@ effect's `[light]` block lights the ground and the nearby units in its colour, i
 windowed radius, so a zone reads as a source of light rather than a decal. The particles
 differ between columns only because the preview loop's phase differs.
 
+![A hit unit under Judgement Hit and Cinder Zone lights: off, old falloff, new falloff; zone off, on](images/r2b-hit-readability.png)
+
+**Readability under effect lights** (`MOBA_VFX_PREVIEW=judgement-hit` frame 3 and
+`cinder-zone` frame 20, `MOBA_OUTLINE_PROBE=hit` stands an outlined enemy a metre behind the
+light, High, crops): lights off; the review-round-1 falloff (`max(d², 0.25)`, no clamp), with
+a near-white hot spot at the unit's base; the shipped falloff (`max(d², 1)`, the summed
+irradiance clamped to 1.5× the sun), where the unit brightens but keeps its team colour
+(saturation 0.36 off, 0.39 on); the zone with lights off and on, where the telegraph ring
+keeps its contrast. [perf/0020](perf/0020-lights-outlines-ao.md) has the numbers.
+
 ![Frost walls: baked AO off, on, and the difference ×6](images/r2b-frost-ao-off-on.png)
 
 **Baked AO** (`MOBA_CONTENT=content/frost-map.toml MOBA_CAMERA=overview`, crop; left

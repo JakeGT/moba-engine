@@ -351,35 +351,42 @@ fn effect_lights_put_enemies_first_and_dim_allies() {
     let (mut vfx, root) = system("lights");
     let view = view(Some(0));
     let anchors = anchors();
-    let mut ally = event(Trigger::Cast, 0, Some(1));
+    // Unit 1 is the viewer's own hero, unit 3 an ally, unit 2 an enemy.
+    let mut own = event(Trigger::Cast, 0, Some(1));
+    own.ability = Some(0);
+    let mut ally = event(Trigger::Cast, 0, Some(3));
     ally.ability = Some(0);
     let mut enemy = event(Trigger::Cast, 1, Some(2));
     enemy.ability = Some(0);
     vfx.set_ally_opacity(0.5);
+    vfx.trigger(&own, &view, &anchors);
     vfx.trigger(&ally, &view, &anchors);
     vfx.trigger(&enemy, &view, &anchors);
     vfx.update(1.0 / 30.0, 0.0, &view, &anchors, NO_SOCKET);
     let lights = vfx.lights();
-    assert_eq!(lights.len(), 2);
-    // Enemy first (at its source, unit 2, one metre above the anchor), then the ally at half
-    // strength.
+    assert_eq!(lights.len(), 3);
+    // Enemy first (at its source, unit 2, one metre above the anchor), then the viewer's own
+    // at full strength (own effects are never dimmed, as for particles) and the ally at half.
     assert!((lights[0].position.x - 4.0).abs() < 1e-4);
     assert!((lights[0].position.y - 2.0).abs() < 1e-4);
     assert!((lights[0].color.x - 4.0).abs() < 1e-4);
     assert!((lights[1].position.x + 4.0).abs() < 1e-4);
-    assert!((lights[1].color.x - 2.0).abs() < 1e-4);
+    assert!((lights[1].color.x - 4.0).abs() < 1e-4);
+    assert!(lights[2].position.x.abs() < 1e-4);
+    assert!((lights[2].color.x - 2.0).abs() < 1e-4);
     assert!((lights[0].radius - 6.0).abs() < 1e-6);
     // The light fades out with the effect (0.2 s + 0.1 s fade), then is gone.
     for tick in 1..12 {
         vfx.update(1.0 / 30.0, tick as f32, &view, &anchors, NO_SOCKET);
     }
     assert_eq!(vfx.lights(), []);
-    // Allied lights at zero opacity are dropped, enemies stay.
+    // Allied lights at zero opacity are dropped; enemy and own lights stay.
     vfx.set_ally_opacity(0.0);
+    vfx.trigger(&own, &view, &anchors);
     vfx.trigger(&ally, &view, &anchors);
     vfx.trigger(&enemy, &view, &anchors);
     vfx.update(1.0 / 30.0, 20.0, &view, &anchors, NO_SOCKET);
-    assert_eq!(vfx.lights().len(), 1);
+    assert_eq!(vfx.lights().len(), 2);
     let _ = std::fs::remove_dir_all(root);
 }
 

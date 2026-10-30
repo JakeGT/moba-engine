@@ -138,6 +138,22 @@ impl DeviceContext {
                 let _ = writeln!(reasons, "{name}: no present queue; ");
                 continue;
             };
+            // The scene's fragment shaders bind this many combined image samplers at once
+            // (material + lighting sets); the spec's minimum is 16, so only a
+            // non-conformant driver fails this.
+            let samplers = crate::lighting::SCENE_FRAGMENT_SAMPLERS;
+            let limits = &properties.limits;
+            if limits.max_per_stage_descriptor_samplers < samplers
+                || limits.max_per_stage_descriptor_sampled_images < samplers
+            {
+                let _ = writeln!(
+                    reasons,
+                    "{name}: {} samplers / {} sampled images per stage < {samplers}; ",
+                    limits.max_per_stage_descriptor_samplers,
+                    limits.max_per_stage_descriptor_sampled_images,
+                );
+                continue;
+            }
 
             // SAFETY: `physical` came from this instance.
             let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;

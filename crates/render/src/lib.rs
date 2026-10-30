@@ -10,6 +10,8 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+#[doc(hidden)]
+pub mod bench_support;
 mod device;
 mod error;
 mod font;

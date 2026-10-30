@@ -68,6 +68,9 @@
 //!   multiplies every burst and rate, for budget stress tests.
 //! - `MOBA_VFX_PREVIEW=<effect>` (authoring): an empty arena that replays `vfx/<effect>.toml`
 //!   in a loop and reloads it when a file in `vfx/` changes; no match runs.
+//!   `MOBA_OUTLINE_PROBE=hidden|open|hit` (render tests) adds an outlined enemy unit behind a
+//!   wall, in the open or under the effect; hidden, the capture must equal one with
+//!   `MOBA_OUTLINES=off`.
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
@@ -471,7 +474,9 @@ impl ClientApp {
                     simulation.clear_events();
                 }
                 simulation.clear_events();
-                app.preview = app.vfx.library().preview_effect().map(vfx::Preview::new);
+                app.preview = app.vfx.library().preview_effect().map(|effect| {
+                    vfx::Preview::new(effect).with_probe(vfx::OutlineProbe::from_env())
+                });
                 app.simulation = Some(simulation);
             }
         }
@@ -1283,7 +1288,13 @@ impl App for ClientApp {
                     );
                 }
                 if let Some(preview) = preview.as_mut() {
-                    preview.frame(vfx, anchors, units, frame_ms);
+                    // Captures replay on the fixed capture tick, so they are reproducible.
+                    let preview_ms = if capture_path.is_some() {
+                        1_000.0 / 30.0
+                    } else {
+                        frame_ms
+                    };
+                    preview.frame(vfx, anchors, units, preview_ms);
                 }
                 if width > 0 && height > 0 {
                     let hud_mode = if preview.is_some() {

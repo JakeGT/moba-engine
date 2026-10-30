@@ -12,6 +12,10 @@
 //! | 5 | hovered enemy (any kind) | enemy, lightened | 2.5 px |
 //! | 6 | the current attack target | enemy, near white | 3 px |
 //!
+//! The hover is what a click would attack (`input::hovered_unit`: the nearest enemy within
+//! 4 m of the cursor, the attack order's own pick), so today only slot 5 is set by the
+//! network view; slot 4 stays in the palette for a future ally-targeted command.
+//!
 //! Colours come from the HUD's [`TeamPalette`], so the colour-blind palette applies to
 //! outlines too. Outlines are only ever set on instances the client is drawing, built from
 //! the units it was sent: a unit in fog or brush that the server did not send has no

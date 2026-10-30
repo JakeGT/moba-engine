@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use moba_assets::{
-    BakedAoDesc, MAX_BAKED_AO_TEXELS, MapProp, MapVisuals, MeshData, TextureData, TextureFormat,
-    ao_fingerprint,
+    BakedAoDesc, MAX_BAKED_AO_TEXELS, MapProp, MapVisuals, MeshData, PropMeshShape, TextureData,
+    TextureFormat, ao_fingerprint,
 };
 
 const USAGE: &str = "usage:
@@ -142,7 +142,7 @@ fn rasterise(occluders: &Occluders, texel: f32, root: &Path) -> bake::HeightFiel
     for prop in &occluders.props {
         let (sin, cos) = prop.yaw.to_radians().sin_cos();
         let mesh = prop.mesh.as_deref().and_then(|name| load_mesh(root, name));
-        if let Some(mesh) = mesh {
+        if let Some(mesh) = mesh.filter(|mesh| PropMeshShape::of(mesh).is_some()) {
             add_mesh(&mut field, &mesh, prop, [sin, cos]);
         } else {
             let half = prop.height * BLOCK_WIDTH * 0.5;
@@ -247,11 +247,23 @@ fn bake_command(args: &[String]) -> Result<(), String> {
     let texels = u32::try_from(field.texels).map_err(|_| "too many texels")?;
     let texture = TextureData::new(TextureFormat::R8Unorm, texels, texels, &[bake::to_r8(&ao)])
         .map_err(|error| format!("texture: {error}"))?;
+    // The same per-prop mesh shapes the client fingerprints (`None`: the block).
+    let shapes: Vec<Option<PropMeshShape>> = occluders
+        .props
+        .iter()
+        .map(|prop| {
+            prop.mesh
+                .as_deref()
+                .and_then(|name| load_mesh(&args.root, name))
+                .and_then(|mesh| PropMeshShape::of(&mesh))
+        })
+        .collect();
     let fingerprint = ao_fingerprint(
         occluders.extent,
         &occluders.walls,
         occluders.wall_height,
         &occluders.props,
+        &shapes,
     );
     let desc = BakedAoDesc::new(occluders.extent, texels, fingerprint).with_height(args.height);
     let header = [

@@ -144,8 +144,8 @@ byte-identical files (the jitter is a hash of the texel, not a random stream).
 
 | Map | fingerprint | bake time (release) |
 |---|---|---|
-| ember (`content/ember-map.toml`, `maps/ember.toml`) | `0x0a46010df1dceeee` | 0.47 s |
-| frost (`content/frost-map.toml`, `maps/frost.toml`) | `0xa44c8466f81c7435` | 0.45 s |
+| ember (`content/ember-map.toml`, `maps/ember.toml`) | `0x89b6c7442c81ad1b` | 0.47 s |
+| frost (`content/frost-map.toml`, `maps/frost.toml`) | `0x01a84e44294da8b8` | 0.45 s |
 
 The frost overview with AO off and on differs on 1.4 % of the pixels, by at most 22 of 255
 ([screenshot](../screenshots.md#r2b-lights-outlines-baked-ao-and-contact-shadows)): the

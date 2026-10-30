@@ -184,8 +184,8 @@ impl LightingConfig {
     ///
     /// | Tier | Shadows | Map | Specular IBL | Lights (global / column) | Outlines | Contact |
     /// |---|---|---|---|---|---|---|
-    /// | `Low` | hard (1 tap) | 1024² | off (SH only) | 16 / 4 | hull | off |
-    /// | `Medium` | 3×3 PCF | 2048² | on | 64 / 8 | hull | off |
+    /// | `Low` | hard (1 tap) | 1024² | off (SH only) | 16 / 8 | hull | off |
+    /// | `Medium` | 3×3 PCF | 2048² | on | 64 / 12 | hull | off |
     /// | `High` | PCSS-lite, 16 + 16 taps | 2048² | on | 128 / 16 | screen | 8 steps |
     /// | `Ultra` | PCSS-lite, 16 + 32 taps | 4096² | on | 256 / 16 | screen | 16 steps |
     ///
@@ -199,8 +199,10 @@ impl LightingConfig {
             QualityTier::Ultra => (ShadowFilter::Pcss, 4096, true, 32),
         };
         let (max_lights, lights_per_cell, outlines, contact_shadow_steps) = match tier {
-            QualityTier::Low => (16, 4, OutlineMode::Hull, 0),
-            QualityTier::Medium => (64, 8, OutlineMode::Hull, 0),
+            // Per-column caps: a column is about 4.6 m at the default camera, so a teamfight's
+            // overlapping effects put several lights in one (perf/0020).
+            QualityTier::Low => (16, 8, OutlineMode::Hull, 0),
+            QualityTier::Medium => (64, 12, OutlineMode::Hull, 0),
             QualityTier::High => (128, 16, OutlineMode::Screen, 8),
             QualityTier::Ultra => (256, 16, OutlineMode::Screen, 16),
         };
@@ -924,6 +926,19 @@ impl FrameLighting {
 
 /// Bindings of the lighting set (set 3), as in `lighting.glsl`.
 const BINDINGS: u32 = 9;
+/// Combined image samplers in the lighting set: every binding but the two light buffers.
+pub(crate) const LIGHTING_SAMPLERS: u32 = BINDINGS - 2;
+/// Fragment-stage combined image samplers a scene pipeline binds: the material set's
+/// textures (set 2) and the lighting set's (set 3). Sets 0/1 hold buffers only and the VAT
+/// set's one sampler is vertex-stage. Each counts once against both
+/// `maxPerStageDescriptorSamplers` and `maxPerStageDescriptorSampledImages`.
+pub(crate) const SCENE_FRAGMENT_SAMPLERS: u32 =
+    moba_assets::TextureSlot::COUNT as u32 + LIGHTING_SAMPLERS;
+/// Vulkan's required minimum of both per-stage limits (also `MoltenVK`'s value): the
+/// budget [`SCENE_FRAGMENT_SAMPLERS`] must stay within so every conformant device runs the
+/// scene. Device selection still checks the real limits.
+pub(crate) const MIN_PER_STAGE_SAMPLERS: u32 = 16;
+const _: () = assert!(SCENE_FRAGMENT_SAMPLERS <= MIN_PER_STAGE_SAMPLERS);
 /// The storage-buffer bindings (dynamic lights and their grid); the rest are images.
 const LIGHT_LIST_BINDING: u32 = 5;
 const LIGHT_GRID_BINDING: u32 = 6;
@@ -972,6 +987,8 @@ pub(crate) struct LightingResources {
     baked_ao: Option<(GpuImage, BakedAo)>,
     state: EnvironmentState,
     light_stats: crate::lights::LightStats,
+    /// CPU scratch of the light binning's per-column counts (the mapped grid is write-only).
+    cell_counts: crate::lights::CellCounts,
 }
 
 impl LightingResources {
@@ -1147,6 +1164,7 @@ impl LightingResources {
             baked_ao: None,
             state: EnvironmentState::NONE,
             light_stats: crate::lights::LightStats::default(),
+            cell_counts: [0; crate::lights::GRID * crate::lights::GRID],
         };
         resources.write(device);
         Ok(resources)
@@ -1214,6 +1232,7 @@ impl LightingResources {
             config.cell_cap(),
             list,
             cells,
+            &mut self.cell_counts,
         );
         self.light_stats = stats;
         params
@@ -1365,6 +1384,44 @@ pub(crate) fn check_environment_cube(data: &moba_assets::TextureData) -> RenderR
 
 #[cfg(test)]
 mod tests {
+    /// Sampler declarations (`uniform [u|i]sampler…`) in `set = <set>` of a GLSL source.
+    fn samplers_in_set(source: &str, set: u32) -> u32 {
+        let needle = format!("set = {set},");
+        let count = source
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//") && line.contains(&needle))
+            .filter(|line| {
+                ["uniform sampler", "uniform usampler", "uniform isampler"]
+                    .iter()
+                    .any(|kind| line.contains(kind))
+            })
+            .count();
+        u32::try_from(count).expect("small")
+    }
+
+    #[test]
+    fn the_scene_fragment_samplers_fit_the_vulkan_per_stage_minimum() {
+        let lighting = include_str!("../../shaders/shaders/include/lighting.glsl");
+        let material = include_str!("../../shaders/shaders/include/material.glsl");
+        // The constants match what the shaders declare...
+        assert_eq!(samplers_in_set(lighting, 3), super::LIGHTING_SAMPLERS);
+        assert_eq!(
+            samplers_in_set(material, 2),
+            moba_assets::TextureSlot::COUNT as u32
+        );
+        // ...no scene vertex shader samples in sets 0/1, and the total is within 16.
+        for source in [lighting, material] {
+            assert_eq!(samplers_in_set(source, 0) + samplers_in_set(source, 1), 0);
+        }
+        let total = samplers_in_set(lighting, 3) + samplers_in_set(material, 2);
+        assert_eq!(total, super::SCENE_FRAGMENT_SAMPLERS);
+        assert!(
+            total <= super::MIN_PER_STAGE_SAMPLERS,
+            "{total} fragment samplers"
+        );
+    }
+
     use super::*;
     use moba_core::math::{look_at_rh, perspective_rh};
 

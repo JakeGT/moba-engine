@@ -87,8 +87,10 @@ const DELAY_RANGE: (f32, f32) = (0.0, MAX_EFFECT_SECONDS);
 const TINT_RANGE: (f32, f32) = (0.0, 4.0);
 /// Brightest effect light, a multiplier on its linear colour (ADR-0016).
 pub const MAX_VFX_LIGHT_INTENSITY: f32 = 64.0;
-/// Largest effect-light radius, metres: one light lights at most a ~3×3 block of the
-/// renderer's light grid.
+/// Largest effect-light radius, metres. The renderer's light grid has 32 × 32 columns of
+/// about 4.6 m at the default 46 m camera, so a 24 m light is binned into about 11 × 11
+/// columns (a typical 4–6 m effect light into 2–3 × 2–3); keep radii as small as the look
+/// allows.
 pub const MAX_VFX_LIGHT_RADIUS: f32 = 24.0;
 const LIGHT_RADIUS_RANGE: (f32, f32) = (0.25, MAX_VFX_LIGHT_RADIUS);
 const LIGHT_COLOR_RANGE: (f32, f32) = (0.0, 4.0);

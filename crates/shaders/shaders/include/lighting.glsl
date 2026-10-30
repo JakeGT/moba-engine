@@ -227,10 +227,22 @@ float contact_visibility() {
     return texelFetch(contact_map, ivec2(gl_FragCoord.xy), 0).r;
 }
 
+// Readability limits of the dynamic lights (ADR-0016, ADR-0011 rule 1). The inverse-square
+// falloff is floored at 1 m, so a light inside a unit does not reach 4-40x its colour; and the
+// lights' summed irradiance at a fragment is clamped to `MOBA_DYNAMIC_LIGHT_CAP` times the
+// sun's (at least 1), so a pile of hit flashes brightens a unit without bleaching its team
+// colour to white.
+const float MOBA_LIGHT_NEAR_FIELD = 1.0;
+const float MOBA_DYNAMIC_LIGHT_CAP = 1.5;
+
+float moba_luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
 // Clustered dynamic point lights (ADR-0016): the lights binned into this fragment's grid
 // column, each with a windowed inverse-square falloff, wrap-lit diffuse and GGX specular,
 // unshadowed. Lights only add light, so team colour in albedo survives (ADR-0011 rule 1).
-vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, float alpha) {
+vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, float alpha, vec3 sun) {
     uint total = camera.light_info.w;
     uint stride = camera.light_info.z;
     if (total == 0u || stride < 2u) {
@@ -242,6 +254,7 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
     uint base = (uint(cell.y) * dims.x + uint(cell.x)) * stride;
     uint count = min(light_grid.cells[base], stride - 1u);
     vec3 sum = vec3(0.0);
+    float irradiance = 0.0;
     for (uint i = 0u; i < count; i++) {
         uint index = min(light_grid.cells[base + 1u + i], total - 1u);
         vec4 position_radius = light_list.lights[index * 2u];
@@ -254,7 +267,7 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
         }
         float ratio = d2 / radius2;
         float window = clamp(1.0 - ratio * ratio, 0.0, 1.0);
-        float attenuation = window * window / max(d2, 0.25);
+        float attenuation = window * window / max(d2, MOBA_LIGHT_NEAR_FIELD);
         vec3 l = to_light * inversesqrt(max(d2, 1e-8));
         float n_dot_l_raw = dot(n, l);
         float n_dot_l = max(n_dot_l_raw, 0.0);
@@ -269,8 +282,10 @@ vec3 dynamic_lights(Surface surface, vec3 n, vec3 v, float n_dot_v, vec3 f0, flo
         vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l
             * surface.specular.rgb * surface.specular.w;
         sum += (kd * surface.albedo * wrapped + specular) * color * attenuation;
+        irradiance += moba_luminance(color) * attenuation * wrapped;
     }
-    return sum;
+    float cap = MOBA_DYNAMIC_LIGHT_CAP * max(moba_luminance(sun), 1.0);
+    return irradiance > cap ? sum * (cap / irradiance) : sum;
 }
 
 // Shades `surface`: key light (shadowed), dynamic lights, ambient, rim and emissive.
@@ -319,7 +334,7 @@ vec3 shade(Surface surface) {
     vec3 specular = MOBA_PI * d * vis * fresnel * n_dot_l * surface.specular.rgb * surface.specular.w;
 
     vec3 direct = (diffuse + specular) * sun * lit
-        + dynamic_lights(surface, n, v, n_dot_v, f0, alpha);
+        + dynamic_lights(surface, n, v, n_dot_v, f0, alpha, sun);
 
     // Ambient: SH or hemispheric diffuse, prefiltered specular through the split-sum LUT.
     vec3 f_ambient = fresnel_schlick_roughness(f0, n_dot_v, roughness);

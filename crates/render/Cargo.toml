@@ -30,3 +30,8 @@ moba-shaders.workspace = true
 [dev-dependencies]
 # The VAT validation tests load the shipped sample model.
 moba-assets = { workspace = true, features = ["bc-decode", "glb"] }
+criterion.workspace = true
+
+[[bench]]
+name = "light_binning"
+harness = false

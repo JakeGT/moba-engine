@@ -59,7 +59,7 @@ pub use animation::{
 };
 pub use baked_ao::{
     BAKED_AO_DIR, BakedAoDesc, BakedAoError, DEFAULT_BAKED_AO_HEIGHT, MAX_BAKED_AO_BYTES,
-    MAX_BAKED_AO_TEXELS, ao_fingerprint, baked_ao_paths,
+    MAX_BAKED_AO_TEXELS, PropMeshShape, ao_fingerprint, baked_ao_paths,
 };
 pub use environment::{
     ENVIRONMENTS_DIR, EnvironmentDesc, EnvironmentError, MAX_ENVIRONMENT_BYTES, MAX_SPECULAR_MIPS,

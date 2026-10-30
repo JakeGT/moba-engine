@@ -240,9 +240,10 @@ pub(crate) fn handle_network_input(
     }
 }
 
-/// The living unit nearest the cursor's ground point, within 4 world units, from the latest
-/// snapshot (so only units the client was sent), for the hover outline. `None` without a
-/// cursor or a ground hit.
+/// The unit a click at the cursor would attack, for the hover outline: the living enemy
+/// nearest the cursor's ground point within 4 world units ([`nearest_enemy`], the same pick
+/// as the attack order), from the latest snapshot (so only units the client was sent).
+/// `None` for a spectator (who cannot attack), without a cursor or without a ground hit.
 pub(crate) fn hovered_unit(
     network: &NetworkView,
     input: &InputState,
@@ -250,21 +251,11 @@ pub(crate) fn hovered_unit(
     width: u32,
     height: u32,
 ) -> Option<u16> {
-    let ground = cursor_ground(camera, input.cursor()?, width, height, map_center(network))?;
-    let snapshot = network.client.snapshot()?;
-    let mut best: Option<(Fix, u16)> = None;
-    for entity in &snapshot.entities {
-        if entity.is_dead() {
-            continue;
-        }
-        let distance = dequantize_position(entity.x, entity.y).distance_sq(ground);
-        if distance <= Fix::from_i32(4) * Fix::from_i32(4)
-            && best.is_none_or(|(best_distance, _)| distance < best_distance)
-        {
-            best = Some((distance, entity.net_id));
-        }
+    if network.spectator {
+        return None;
     }
-    best.map(|(_, id)| id)
+    let ground = cursor_ground(camera, input.cursor()?, width, height, map_center(network))?;
+    nearest_enemy(network, ground)
 }
 
 fn nearest_enemy(network: &NetworkView, ground: FixVec2) -> Option<u16> {

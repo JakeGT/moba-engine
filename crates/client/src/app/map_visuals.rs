@@ -15,7 +15,7 @@
 //!   hemispheric ambient; a missing ramp: no ramp;
 //! - a missing, invalid or stale baked AO (`[lighting] baked_ao`, R2b/ADR-0016): no baked
 //!   AO. A bake is stale when its fingerprint ([`moba_assets::ao_fingerprint`] of the extent,
-//!   walls, wall height and props) differs from the map actually bound, so a visuals name
+//!   walls, wall height, props and each prop mesh's bounds and counts) differs from the map actually bound, so a visuals name
 //!   reused by a pack with other walls never shows wrong occlusion.
 //!
 //! The descriptor's `[lighting]` table sets the sun, ambient and stylisation
@@ -135,23 +135,25 @@ pub(crate) fn spec_walls(map: &MapSpec) -> impl Iterator<Item = (Vec2, Vec2)> + 
     })
 }
 
-/// A registered mesh and its model-space bounds.
+/// A registered mesh, its model-space bounds and its shape for the AO fingerprint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FittedMesh {
     mesh: MeshId,
     min: Vec3,
     max: Vec3,
+    shape: moba_assets::PropMeshShape,
 }
 
 impl FittedMesh {
+    /// `None` for a mesh with an unusable extent, by the same rule as the AO baker's
+    /// ([`moba_assets::PropMeshShape::of`]), so both fall back to the block together.
     fn new(mesh: MeshId, data: &MeshData) -> Option<Self> {
-        let (min, max) = data.bounds();
-        let (min, max) = (Vec3::from_array(min), Vec3::from_array(max));
-        let size = max - min;
-        (size.is_finite() && size.y > 1e-4 && size.max_element() > 1e-4).then_some(Self {
+        let shape = moba_assets::PropMeshShape::of(data)?;
+        Some(Self {
             mesh,
-            min,
-            max,
+            min: Vec3::from_array(shape.min),
+            max: Vec3::from_array(shape.max),
+            shape,
         })
     }
 
@@ -203,6 +205,8 @@ pub(crate) struct MapLibrary {
     extent: f32,
     /// [`moba_assets::ao_fingerprint`] of the bound map and descriptor.
     ao_fingerprint: u64,
+    /// Each bound prop's mesh shape (`None`: the block), for the fingerprint; reused.
+    prop_shapes: Vec<Option<moba_assets::PropMeshShape>>,
     /// The baked AO last applied (name, fingerprint, strength bits; `None`: none); `None`
     /// until the first [`MapLibrary::apply_lighting`] after a (re)created renderer.
     #[allow(clippy::option_option)] // Outer: applied yet; inner: which bake (or none).
@@ -226,6 +230,7 @@ impl MapLibrary {
             walls: Vec::with_capacity(MAX_WALLS),
             extent: 0.0,
             ao_fingerprint: 0,
+            prop_shapes: Vec::new(),
             applied_ao: None,
         }
     }
@@ -457,12 +462,7 @@ impl MapLibrary {
             self.ao_fingerprint = 0;
             return;
         };
-        self.ao_fingerprint = moba_assets::ao_fingerprint(
-            self.extent,
-            &self.walls,
-            visuals.wall_height,
-            &visuals.props,
-        );
+        self.prop_shapes.clear();
         for prop in &visuals.props {
             let ground = Vec3::new(prop.position[0] - center, 0.0, prop.position[1] - center);
             let rotation = Quat::from_rotation_y(-prop.yaw.to_radians());
@@ -471,6 +471,7 @@ impl MapLibrary {
                 .mesh
                 .as_deref()
                 .and_then(|name| self.mesh(name, &mut register));
+            self.prop_shapes.push(fitted.map(|fitted| fitted.shape));
             self.instances.push(match fitted {
                 Some(fitted) => UnitInstance::new(
                     Mat4::from_rotation_translation(rotation, ground)
@@ -488,6 +489,13 @@ impl MapLibrary {
                 ),
             });
         }
+        self.ao_fingerprint = moba_assets::ao_fingerprint(
+            self.extent,
+            &self.walls,
+            visuals.wall_height,
+            &visuals.props,
+            &self.prop_shapes,
+        );
     }
 
     /// The cached descriptor for `name`, loading (and logging) it the first time.

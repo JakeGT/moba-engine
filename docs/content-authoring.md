@@ -828,8 +828,8 @@ override them:
 
 | Tier | Shadows | Shadow map | Specular IBL | Lights (all / per column) | Outlines | Contact shadows |
 |---|---|---|---|---|---|---|
-| low | hard (1 tap) | 1024² | off (SH ambient only; the cube is not uploaded) | 16 / 4 | hull | off |
-| medium | 3×3 PCF | 2048² | on | 64 / 8 | hull | off |
+| low | hard (1 tap) | 1024² | off (SH ambient only; the cube is not uploaded) | 16 / 8 | hull | off |
+| medium | 3×3 PCF | 2048² | on | 64 / 12 | hull | off |
 | high | PCSS-lite (16 + 16 taps) | 2048² | on | 128 / 16 | screen | 8 steps |
 | ultra | PCSS-lite (16 + 32 taps) | 4096² | on | 256 / 16 | screen | 16 steps |
 
@@ -869,8 +869,9 @@ ambient), faded out over `height` above the ground, so it never darkens direct s
 a team colour.
 
 **Re-bake after changing the occluders.** The client recomputes the fingerprint (the map
-extent, every wall segment, the wall height and each prop's position, height, yaw and mesh;
-not colours) for the map it actually binds, and ignores a bake that does not match with
+extent, every wall segment, the wall height and each prop's position, height, yaw, mesh name and
+mesh shape, its bounds and vertex and index counts, so editing a prop's model invalidates the
+bake too; not colours) for the map it actually binds, and ignores a bake that does not match with
 `[assets] baked AO '<name>': stale: ...; no baked AO`. A visuals name shared by two packs with
 different walls therefore never shows wrong occlusion; a test fails when the shipped bakes go
 stale. A missing or invalid bake logs once and draws without it; `MOBA_BAKED_AO=off` turns it
@@ -998,10 +999,13 @@ scale_with_radius = false # multiply radius by the event's radius (zones)
   (`MOBA_VFX_ALLY_OPACITY`, default `1`), and their `alpha` particles are capped at 75 %
   opacity so an ally's smoke never fully hides an enemy behind it.
 - **Lights.** An effect's `[light]` lights the ground and units around it (diffuse and
-  specular, no shadows; lights add light and never replace a team colour). Each tier caps the
-  lights in a frame (Low 16 … Ultra 256) and per 32×32 grid column (4 … 16); enemy and
-  neutral effects' lights are listed first, so a cap drops allied lights (scaled by
-  `ally_vfx_opacity`) before an enemy's. A light belongs to an effect the client already
+  specular, no shadows; lights add light and never replace a team colour). The falloff is
+  floored at 1 m and the lights' sum at a point is clamped to 1.5× the sun, so a unit inside
+  a flash brightens without washing out to white. Each tier caps the lights in a frame (Low
+  16 … Ultra 256) and per 32×32 grid column (8 … 16; a column is about 4.6 m at the default
+  camera, so a 6 m light covers about 3 × 3 of them); enemy and neutral effects' lights are
+  listed first, so a cap drops allied lights (scaled by `ally_vfx_opacity`; your own are not)
+  before an enemy's. A light belongs to an effect the client already
   plays, so it never reveals anything the client was not sent. `MOBA_LIGHTS=off` turns
   them off.
 - **Budgets.** Each quality tier caps live particles (Low 4,096 … Ultra 49,152) and an overdraw

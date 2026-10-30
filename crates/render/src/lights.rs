@@ -117,10 +117,37 @@ impl GridParams {
 /// The xz bounds `[min x, min z, max x, max z]` of what `view_proj` shows of the receiver
 /// slab within [`MAX_LIGHT_DISTANCE`], padded by [`GRID_PAD`]; `None` for a degenerate
 /// camera or one that sees no ground.
+///
+/// Rays through points along the four frustum edges (and the centre) are cut by the slab.
+/// A ray at or above the horizon (a shallow camera's upper corners) is tilted just below it
+/// first, so the ground the screen's sides show out to the horizon is still covered: the
+/// frustum's side planes meet the ground there, not where the corner rays would.
 pub(crate) fn ground_footprint(view_proj: Mat4) -> Option<[f32; 4]> {
     let inverse = view_proj.inverse();
     if !inverse.is_finite() {
         return None;
+    }
+    // Five points along each edge (corners shared), plus the centre.
+    let mut samples = [(0.0f32, 0.0f32); 17];
+    for (index, step) in [-1.0f32, -0.5, 0.0, 0.5].into_iter().enumerate() {
+        samples[index] = (step, -1.0);
+        samples[4 + index] = (1.0, step);
+        samples[8 + index] = (-step, 1.0);
+        samples[12 + index] = (-1.0, -step);
+    }
+    let mut rays = [(Vec3::ZERO, Vec3::ZERO, 0.0f32); 17];
+    let mut sees_down = false;
+    for (ray, &(x, y)) in rays.iter_mut().zip(&samples) {
+        let near = inverse.project_point3(Vec3::new(x, y, 0.0));
+        let far = inverse.project_point3(Vec3::new(x, y, 1.0));
+        let span = far - near;
+        let length = span.length();
+        if !near.is_finite() || !length.is_finite() || length < 1e-6 {
+            return None;
+        }
+        let direction = span / length;
+        sees_down |= direction.y < -1e-6;
+        *ray = (near, direction, length.min(MAX_LIGHT_DISTANCE));
     }
     let mut bounds = [
         f32::INFINITY,
@@ -129,42 +156,37 @@ pub(crate) fn ground_footprint(view_proj: Mat4) -> Option<[f32; 4]> {
         f32::NEG_INFINITY,
     ];
     let mut any = false;
-    for (x, y) in [
-        (-1.0, -1.0),
-        (1.0, -1.0),
-        (-1.0, 1.0),
-        (1.0, 1.0),
-        (0.0, 0.0),
-    ] {
-        let near = inverse.project_point3(Vec3::new(x, y, 0.0));
-        let far = inverse.project_point3(Vec3::new(x, y, 1.0));
-        let ray = far - near;
-        let length = ray.length();
-        if !near.is_finite() || !length.is_finite() || length < 1e-6 {
-            return None;
-        }
-        let t_max = (MAX_LIGHT_DISTANCE / length).min(1.0);
-        let (mut enter, mut exit) = (0.0f32, t_max);
-        if ray.y.abs() > 1e-6 {
-            let to_ground = -near.y / ray.y;
-            let to_ceiling = (RECEIVER_HEIGHT - near.y) / ray.y;
+    for (near, direction, reach) in rays {
+        let (direction, reach) = if sees_down && direction.y > -HORIZON_TILT {
+            // Just below the horizon, in the ray's own heading.
+            let flat = Vec3::new(direction.x, 0.0, direction.z);
+            let heading = if flat.length() > 1e-6 {
+                flat.normalize()
+            } else {
+                continue;
+            };
+            let horizontal = (1.0 - HORIZON_TILT * HORIZON_TILT).sqrt();
+            (
+                heading * horizontal - Vec3::Y * HORIZON_TILT,
+                MAX_LIGHT_DISTANCE,
+            )
+        } else {
+            (direction, reach)
+        };
+        let (mut enter, mut exit) = (0.0f32, reach);
+        if direction.y.abs() > 1e-6 {
+            let to_ground = -near.y / direction.y;
+            let to_ceiling = (RECEIVER_HEIGHT - near.y) / direction.y;
             enter = enter.max(to_ground.min(to_ceiling));
             exit = exit.min(to_ground.max(to_ceiling));
         } else if !(0.0..=RECEIVER_HEIGHT).contains(&near.y) {
             continue;
         }
         if !enter.is_finite() || !exit.is_finite() || enter > exit {
-            // The ray misses the slab within reach: its farthest point still bounds what
-            // is visible along it (a camera looking at the horizon).
-            let point = near + ray * t_max;
-            if (0.0..=RECEIVER_HEIGHT).contains(&point.y) {
-                bounds = include(bounds, point);
-                any = true;
-            }
             continue;
         }
         for t in [enter, exit] {
-            bounds = include(bounds, near + ray * t);
+            bounds = include(bounds, near + direction * t);
             any = true;
         }
     }
@@ -178,6 +200,10 @@ pub(crate) fn ground_footprint(view_proj: Mat4) -> Option<[f32; 4]> {
     })
 }
 
+/// How far below the horizon a ray at or above it is tilted ([`ground_footprint`]): the
+/// sine of about 1.1°.
+const HORIZON_TILT: f32 = 0.02;
+
 fn include(bounds: [f32; 4], point: Vec3) -> [f32; 4] {
     [
         bounds[0].min(point.x),
@@ -187,11 +213,19 @@ fn include(bounds: [f32; 4], point: Vec3) -> [f32; 4] {
     ]
 }
 
+/// Per-column light counts of one binning, kept in CPU memory (see [`bin`]).
+pub(crate) type CellCounts = [u8; GRID * GRID];
+
 /// Bins `lights` over `footprint` into `light_words` (two `vec4` per light) and
 /// `cell_words` ([`GRID`]² columns of [`CELL_WORDS`]), keeping at most `max_lights` lights
 /// and `per_cell` per column, in list order. `light_words` and `cell_words` are the frame's
 /// mapped buffers; only the column counts and the entries below them are written, which is
 /// all the shader reads.
+///
+/// The mapped buffers are **only written**, never read: host-visible device memory is often
+/// write-combined (or BAR memory over the PCI Express bus), where every read is an uncached round trip.
+/// The running per-column counts live in `counts` (CPU scratch, reset here) and are written
+/// to the count words once at the end.
 pub(crate) fn bin(
     lights: &[PointLight],
     footprint: Option<[f32; 4]>,
@@ -199,6 +233,7 @@ pub(crate) fn bin(
     per_cell: usize,
     light_words: &mut [[f32; 4]],
     cell_words: &mut [u32],
+    counts: &mut CellCounts,
 ) -> (GridParams, LightStats) {
     let mut stats = LightStats {
         submitted: u32::try_from(lights.len()).unwrap_or(u32::MAX),
@@ -218,9 +253,7 @@ pub(crate) fn bin(
     let cell_x = ((max_x - min_x) / GRID as f32).max(0.25);
     let cell_z = ((max_z - min_z) / GRID as f32).max(0.25);
     let (inverse_x, inverse_z) = (1.0 / cell_x, 1.0 / cell_z);
-    for column in 0..GRID * GRID {
-        cell_words[column * CELL_WORDS] = 0;
-    }
+    counts.fill(0);
     let column_of = |value: f32, min: f32, inverse: f32| -> usize {
         // Saturating float-to-int casts clamp below; `min` clamps above.
         (((value - min) * inverse).floor().max(0.0) as usize).min(GRID - 1)
@@ -255,16 +288,20 @@ pub(crate) fn bin(
         );
         for z in z0..=z1 {
             for x in x0..=x1 {
-                let base = (z * GRID + x) * CELL_WORDS;
-                let used = cell_words[base] as usize;
+                let column = z * GRID + x;
+                let used = usize::from(counts[column]);
                 if used >= per_cell {
                     stats.cell_overflows += 1;
                     continue;
                 }
-                cell_words[base + 1 + used] = index;
-                cell_words[base] = u32::try_from(used + 1).unwrap_or(u32::MAX);
+                cell_words[column * CELL_WORDS + 1 + used] = index;
+                // `used < per_cell <= MAX_LIGHTS_PER_CELL` (16), so this fits a byte.
+                counts[column] = (used + 1) as u8;
             }
         }
+    }
+    for (column, &used) in counts.iter().enumerate() {
+        cell_words[column * CELL_WORDS] = u32::from(used);
     }
     stats.binned = u32::try_from(count).unwrap_or(u32::MAX);
     let params = GridParams {
@@ -315,6 +352,35 @@ mod tests {
     }
 
     #[test]
+    fn the_default_camera_grid_cells_are_a_few_metres() {
+        // The 46 m, 0.92 rad player camera (`Camera::orbit`, 60 degree fov) at 16:9.
+        let camera = crate::Camera::orbit(Vec3::ZERO, 46.0, -0.7, 0.92, 16.0 / 9.0);
+        let [min_x, min_z, max_x, max_z] =
+            ground_footprint(camera.view_proj).expect("sees the ground");
+        let (cell_x, cell_z) = ((max_x - min_x) / GRID as f32, (max_z - min_z) / GRID as f32);
+        eprintln!("default camera cells {cell_x:.2} x {cell_z:.2} m");
+        assert!((1.0..6.0).contains(&cell_x) && (1.0..6.0).contains(&cell_z));
+    }
+
+    #[test]
+    fn a_shallow_camera_covers_the_ground_out_to_its_horizon() {
+        // Eye 15 m up, pitched about 3 degrees down: the upper corners look at the sky, but
+        // the screen's sides show ground out to about +-100 m at the horizon.
+        let eye = Vec3::new(0.0, 15.0, 60.0);
+        let target = eye + Vec3::new(0.0, -(3.0f32.to_radians()).tan(), -1.0);
+        let camera =
+            perspective_rh(1.05, 16.0 / 9.0, 0.1, 1000.0) * look_at_rh(eye, target, Vec3::Y);
+        let [min_x, min_z, max_x, max_z] = ground_footprint(camera).expect("sees the ground");
+        assert!(min_x < -90.0 && max_x > 90.0, "{min_x} {max_x}");
+        // Still bounded by the light distance from the eye (padded).
+        assert!(max_x - min_x <= 2.0 * (MAX_LIGHT_DISTANCE + GRID_PAD));
+        assert!(
+            min_z >= eye.z - MAX_LIGHT_DISTANCE - GRID_PAD - 1.0 && max_z <= eye.z + GRID_PAD + 1.0,
+            "{min_z} {max_z}"
+        );
+    }
+
+    #[test]
     fn lights_land_in_every_column_they_touch_and_nowhere_else() {
         let (mut lights_buf, mut cells) = buffers();
         let footprint = ground_footprint(player_camera());
@@ -322,7 +388,15 @@ mod tests {
             PointLight::new(Vec3::new(0.0, 1.0, 0.0), 3.0, Vec3::new(4.0, 2.0, 1.0)),
             PointLight::new(Vec3::new(12.0, 1.0, -6.0), 1.0, Vec3::ONE),
         ];
-        let (params, stats) = bin(&lights, footprint, 64, 8, &mut lights_buf, &mut cells);
+        let (params, stats) = bin(
+            &lights,
+            footprint,
+            64,
+            8,
+            &mut lights_buf,
+            &mut cells,
+            &mut [0; GRID * GRID],
+        );
         assert_eq!((stats.binned, stats.dropped, stats.culled), (2, 0, 0));
         assert_eq!(params.info[3], 2);
         assert_eq!(lights_buf[0], [0.0, 1.0, 0.0, 3.0]);
@@ -346,7 +420,15 @@ mod tests {
         lights.push(PointLight::new(Vec3::splat(f32::NAN), 2.0, Vec3::ONE));
         lights.push(PointLight::new(Vec3::new(5000.0, 0.0, 0.0), 2.0, Vec3::ONE));
         lights.push(PointLight::new(Vec3::ZERO, 2.0, Vec3::ZERO));
-        let (params, stats) = bin(&lights, footprint, 4, 3, &mut lights_buf, &mut cells);
+        let (params, stats) = bin(
+            &lights,
+            footprint,
+            4,
+            3,
+            &mut lights_buf,
+            &mut cells,
+            &mut [0; GRID * GRID],
+        );
         assert_eq!(stats.submitted, 9);
         assert_eq!(stats.binned, 4, "the global cap keeps the first four");
         assert_eq!(stats.dropped, 2);
@@ -364,14 +446,38 @@ mod tests {
     fn no_footprint_or_a_zero_cap_uploads_nothing() {
         let (mut lights_buf, mut cells) = buffers();
         let lights = [PointLight::new(Vec3::ZERO, 2.0, Vec3::ONE)];
-        let (params, stats) = bin(&lights, None, 64, 8, &mut lights_buf, &mut cells);
+        let (params, stats) = bin(
+            &lights,
+            None,
+            64,
+            8,
+            &mut lights_buf,
+            &mut cells,
+            &mut [0; GRID * GRID],
+        );
         assert_eq!((params.info[3], stats.binned, stats.culled), (0, 0, 1));
         let footprint = ground_footprint(player_camera());
-        let (params, _) = bin(&lights, footprint, 0, 8, &mut lights_buf, &mut cells);
+        let (params, _) = bin(
+            &lights,
+            footprint,
+            0,
+            8,
+            &mut lights_buf,
+            &mut cells,
+            &mut [0; GRID * GRID],
+        );
         assert_eq!(params, GridParams::NONE);
         // Huge radii are clamped.
         let big = [PointLight::new(Vec3::ZERO, 1.0e9, Vec3::splat(1.0e9))];
-        let (_, stats) = bin(&big, footprint, 64, 8, &mut lights_buf, &mut cells);
+        let (_, stats) = bin(
+            &big,
+            footprint,
+            64,
+            8,
+            &mut lights_buf,
+            &mut cells,
+            &mut [0; GRID * GRID],
+        );
         assert_eq!(stats.binned, 1);
         assert_eq!(lights_buf[0][3], MAX_LIGHT_RADIUS);
         assert_eq!(lights_buf[1][0], MAX_LIGHT_COLOR);

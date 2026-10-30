@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::map_visuals::{MapProp, valid_mesh_name};
+use crate::mesh::MeshData;
 
 /// Directory under the asset root that holds baked AO (`maps/ao`).
 pub const BAKED_AO_DIR: &str = "maps/ao";
@@ -52,11 +53,54 @@ pub fn baked_ao_paths(root: &Path, name: &str) -> Option<(PathBuf, PathBuf)> {
     })
 }
 
+/// The shape of a prop's mesh as far as a bake is concerned ([`ao_fingerprint`]): the mesh's
+/// model-space bounds and its vertex and index counts, or `None` when the prop draws the
+/// built-in block (no mesh, or one that failed to load or is degenerate).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PropMeshShape {
+    /// Model-space minimum corner.
+    pub min: [f32; 3],
+    /// Model-space maximum corner.
+    pub max: [f32; 3],
+    /// Vertex count.
+    pub vertices: u32,
+    /// Index count.
+    pub indices: u32,
+}
+
+impl PropMeshShape {
+    /// The shape of `mesh`, or `None` if its extent is unusable (not finite, flat or empty);
+    /// the client and the baker then both use the built-in block.
+    #[must_use]
+    pub fn of(mesh: &MeshData) -> Option<Self> {
+        let (min, max) = mesh.bounds();
+        let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+        let usable = size.iter().all(|value| value.is_finite())
+            && size[1] > 1e-4
+            && size.iter().copied().fold(0.0f32, f32::max) > 1e-4;
+        usable.then(|| Self {
+            min,
+            max,
+            vertices: u32::try_from(mesh.positions().len()).unwrap_or(u32::MAX),
+            indices: u32::try_from(mesh.indices().len()).unwrap_or(u32::MAX),
+        })
+    }
+}
+
 /// FNV-1a (64-bit) over the inputs a bake depends on: the map extent, every wall segment
 /// (`[ax, ay, bx, by]` world units, in order), the wall height and each prop's position,
-/// height, yaw and mesh name. Colours are not included (they do not occlude).
+/// height, yaw, mesh name and mesh shape (`meshes[i]` for `props[i]`: bounds and vertex and
+/// index counts, so editing the model behind a name invalidates the bake; a missing entry is
+/// the block). Colours are not included (they do not occlude).
 #[must_use]
-pub fn ao_fingerprint(extent: f32, walls: &[[f32; 4]], wall_height: f32, props: &[MapProp]) -> u64 {
+pub fn ao_fingerprint(
+    extent: f32,
+    walls: &[[f32; 4]],
+    wall_height: f32,
+    props: &[MapProp],
+    meshes: &[Option<PropMeshShape>],
+) -> u64 {
     let mut hash = Fnv(0xcbf2_9ce4_8422_2325);
     hash.float(extent);
     hash.bytes(&(walls.len() as u64).to_le_bytes());
@@ -67,7 +111,7 @@ pub fn ao_fingerprint(extent: f32, walls: &[[f32; 4]], wall_height: f32, props: 
     }
     hash.float(wall_height);
     hash.bytes(&(props.len() as u64).to_le_bytes());
-    for prop in props {
+    for (index, prop) in props.iter().enumerate() {
         hash.float(prop.position[0]);
         hash.float(prop.position[1]);
         hash.float(prop.height);
@@ -75,6 +119,17 @@ pub fn ao_fingerprint(extent: f32, walls: &[[f32; 4]], wall_height: f32, props: 
         let mesh = prop.mesh.as_deref().unwrap_or("");
         hash.bytes(&(mesh.len() as u64).to_le_bytes());
         hash.bytes(mesh.as_bytes());
+        match meshes.get(index).copied().flatten() {
+            Some(shape) => {
+                hash.bytes(&[1]);
+                for value in shape.min.into_iter().chain(shape.max) {
+                    hash.float(value);
+                }
+                hash.bytes(&shape.vertices.to_le_bytes());
+                hash.bytes(&shape.indices.to_le_bytes());
+            }
+            None => hash.bytes(&[0]),
+        }
     }
     hash.0
 }
@@ -300,21 +355,47 @@ mod tests {
     fn fingerprint_tracks_occluders_not_colours() {
         let walls = [[0.0, 0.0, 10.0, 0.0], [5.0, 5.0, 5.0, 20.0]];
         let props = props();
-        let base = ao_fingerprint(64.0, &walls, 4.0, &props);
-        assert_eq!(base, ao_fingerprint(64.0, &walls, 4.0, &props));
-        assert_ne!(base, ao_fingerprint(65.0, &walls, 4.0, &props));
-        assert_ne!(base, ao_fingerprint(64.0, &walls[..1], 4.0, &props));
-        assert_ne!(base, ao_fingerprint(64.0, &walls, 6.0, &props));
-        assert_ne!(base, ao_fingerprint(64.0, &walls, 4.0, &[]));
+        let base = ao_fingerprint(64.0, &walls, 4.0, &props, &[]);
+        assert_eq!(base, ao_fingerprint(64.0, &walls, 4.0, &props, &[]));
+        assert_ne!(base, ao_fingerprint(65.0, &walls, 4.0, &props, &[]));
+        assert_ne!(base, ao_fingerprint(64.0, &walls[..1], 4.0, &props, &[]));
+        assert_ne!(base, ao_fingerprint(64.0, &walls, 6.0, &props, &[]));
+        assert_ne!(base, ao_fingerprint(64.0, &walls, 4.0, &[], &[]));
         let mut moved = props.clone();
         moved[0].position[0] += 1.0;
-        assert_ne!(base, ao_fingerprint(64.0, &walls, 4.0, &moved));
+        assert_ne!(base, ao_fingerprint(64.0, &walls, 4.0, &moved, &[]));
         let mut recoloured = props.clone();
         recoloured[0].color = [0.0, 1.0, 0.0];
-        assert_eq!(base, ao_fingerprint(64.0, &walls, 4.0, &recoloured));
+        assert_eq!(base, ao_fingerprint(64.0, &walls, 4.0, &recoloured, &[]));
         let mut swapped = walls;
         swapped.swap(0, 1);
-        assert_ne!(base, ao_fingerprint(64.0, &swapped, 4.0, &props));
+        assert_ne!(base, ao_fingerprint(64.0, &swapped, 4.0, &props, &[]));
+        // The mesh behind a prop's name is part of it: other bounds or counts, other bake.
+        let shape = PropMeshShape {
+            min: [-0.5, 0.0, -0.5],
+            max: [0.5, 2.0, 0.5],
+            vertices: 24,
+            indices: 36,
+        };
+        let meshed = ao_fingerprint(64.0, &walls, 4.0, &props, &[Some(shape)]);
+        assert_ne!(base, meshed);
+        let taller = PropMeshShape {
+            max: [0.5, 3.0, 0.5],
+            ..shape
+        };
+        assert_ne!(
+            meshed,
+            ao_fingerprint(64.0, &walls, 4.0, &props, &[Some(taller)])
+        );
+        let denser = PropMeshShape {
+            vertices: 25,
+            ..shape
+        };
+        assert_ne!(
+            meshed,
+            ao_fingerprint(64.0, &walls, 4.0, &props, &[Some(denser)])
+        );
+        assert_eq!(base, ao_fingerprint(64.0, &walls, 4.0, &props, &[None]));
     }
 
     #[test]

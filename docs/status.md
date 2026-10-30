@@ -49,7 +49,7 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
 
 ## Verification evidence
 
-- `cargo test --workspace --locked`: **634 passed**, 0 failed, 3 ignored.
+- `cargo test --workspace --locked`: **661 passed**, 0 failed, 3 ignored.
 - `cargo test --workspace --release --locked`: passes (same suite; CI job `release tests + doctests`).
 - `cargo fmt --all --check`; clippy `--workspace --all-targets -- -D warnings`; rustdoc with
   `RUSTDOCFLAGS="-D warnings"` are clean.
