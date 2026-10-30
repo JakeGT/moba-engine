@@ -1,0 +1,46 @@
+# Ground decals (ADR-0017): a telegraph ring with a progress fill, a cone, a line and a
+# stamped scorch splat. Client-local and cosmetic: never hashed, signed or sent.
+duration = 1.2
+event_duration = true
+importance = "high"
+
+[[emitters]]
+sprite = "dot"
+rate = 20
+lifetime = [0.4, 0.8]
+size = [0.1, 0.2]
+color = [2.0, 0.6, 0.2, 1.0]
+
+[[decals]]
+shape = "ring"
+radius = 1.0
+width = 0.25
+scale_with_radius = true
+color = [2.0, 0.4, 0.1, 0.8]
+telegraph = true
+progress = true
+
+[[decals]]
+shape = "cone"
+anchor = "source"
+radius = 6.0
+angle = 50.0
+lifetime = 0.8
+fade_in = 0.05
+fade_out = 0.2
+color = [1.0, 0.8, 0.2, 0.5]
+team_tint = 0.5
+
+[[decals]]
+shape = "line"
+anchor = "line"
+width = 1.2
+color = [0.4, 0.8, 2.0, 0.6]
+
+[[decals]]
+shape = "splat"
+delay = 1.0
+lifetime = 12.0
+radius = 2.5
+color = [0.04, 0.02, 0.01, 0.85]
+stamp = true

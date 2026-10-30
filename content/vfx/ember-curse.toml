@@ -34,3 +34,20 @@ intensity = 4.0
 radius = 5.0
 fade_out = 0.4
 flicker = 0.25
+
+[[decals]]                       # R3b: the area telegraph on the ground (ADR-0017 §1)
+shape = "ring"
+radius = 6.0
+width = 0.35
+color = [2.0, 0.7, 0.2, 0.55]
+telegraph = true
+progress = true
+lifetime = 1.2
+
+[[decals]]                       # a scorch mark
+shape = "splat"
+radius = 4.0
+color = [0.05, 0.03, 0.02, 0.7]
+lifetime = 8.0
+fade_out = 2.5
+stamp = true

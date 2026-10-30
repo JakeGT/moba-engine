@@ -35,3 +35,12 @@ color = [0.6, 0.3, 0.9]
 intensity = 3.0
 radius = 5.0
 fade_out = 0.3
+
+[[decals]]                       # R3b: the area telegraph on the ground (ADR-0017 §1)
+shape = "ring"
+radius = 7.0
+width = 0.35
+color = [1.2, 0.6, 1.8, 0.55]
+telegraph = true
+progress = true
+lifetime = 1.0

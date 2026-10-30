@@ -79,3 +79,76 @@ exposure = 0.0                   # EV stops
 bloom = 0.04
 grading = "meadow"               # grading/meadow.cube: grade-bake bake --preset meadow --size 17
 grading_strength = 0.8
+
+# R3b showcase (ADR-0017): a meadow river in two reaches, each crossing an outer lane at a
+# shallow ford and ending in a pool short of the mid towers, with reeds on the banks, grass
+# and flowers everywhere else, and brush in the four jungle quadrants. Decorative only: the
+# simulation has no water or brush; units wade (the bed is at most 0.35 m below their feet).
+[[water]]                        # north reach: from the top edge, across the top lane
+points = [[122, 8], [126, 30], [134, 56], [131, 80], [128, 98]]
+width = 11.0
+level = 0.1
+depth = 0.45
+flow = 1.4
+color = [0.015, 0.09, 0.12]
+shallow_color = [0.09, 0.27, 0.26]
+clarity = 0.28
+foam = 0.65
+
+[[water]]                        # south reach (the north one mirrored through the centre)
+points = [[134, 248], [130, 226], [122, 200], [125, 176], [128, 158]]
+width = 11.0
+level = 0.1
+depth = 0.45
+flow = 1.4
+color = [0.015, 0.09, 0.12]
+shallow_color = [0.09, 0.27, 0.26]
+clarity = 0.28
+foam = 0.65
+
+[foliage]
+density = 5.0
+height = [0.35, 0.75]
+base_color = [0.04, 0.13, 0.035]
+tip_color = [0.32, 0.52, 0.16]
+flower_color = [0.95, 0.78, 0.32]
+wind = [0.9, 0.35]
+wind_speed = 1.1
+reeds = true
+seed = 7
+
+[[foliage.patches]]              # jungle brush, point-symmetric pairs
+center = [92, 84]
+radius = 9.0
+kind = "brush"
+density = 5.0
+
+[[foliage.patches]]
+center = [164, 172]
+radius = 9.0
+kind = "brush"
+density = 5.0
+
+[[foliage.patches]]
+center = [164, 84]
+radius = 8.0
+kind = "brush"
+density = 4.0
+
+[[foliage.patches]]
+center = [92, 172]
+radius = 8.0
+kind = "brush"
+density = 4.0
+
+[[foliage.patches]]              # flower meadows by the pools
+center = [108, 104]
+radius = 7.0
+kind = "flowers"
+density = 3.0
+
+[[foliage.patches]]
+center = [148, 152]
+radius = 7.0
+kind = "flowers"
+density = 3.0

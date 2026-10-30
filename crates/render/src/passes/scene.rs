@@ -20,6 +20,11 @@
 //! meshes into their own targets. Each view owns its per-frame camera, instance and bone
 //! buffers and its bucketing scratch, all sized at creation, so preparing and recording
 //! several views in one frame allocates nothing.
+//!
+//! **Foliage and water** (R3b, ADR-0017): drawn last in the scene pass with their own layouts
+//! (`super::environment`): the main view's visible foliage chunks, then the simple water
+//! (alpha-blended over the carved bed) in every terrain view. The full water is a pass of
+//! its own after the scene ([`ScenePass::record_water_pass`]).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,10 +34,11 @@ use gpu_allocator::MemoryLocation;
 use moba_assets::JointMatrix;
 
 use crate::device::DeviceContext;
+use crate::environment::EnvironmentConfig;
 use crate::error::{RenderError, RenderResult};
 use crate::lighting::FrameLighting;
 use crate::mesh::{self, GpuMesh};
-use crate::pipeline::{self, DepthOnly, PipelineSpec, VertexLayout, VertexlessDepth};
+use crate::pipeline::{self, DepthOnly, PipelineSpec, SceneBlend, VertexLayout, VertexlessDepth};
 use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
@@ -40,6 +46,8 @@ use crate::scene::{BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Sce
 use crate::shaders::ShaderSource;
 use crate::vat::{VatMeshes, VatPush};
 use crate::world::WorldFrame;
+
+use super::environment::EnvironmentResources;
 
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
 pub(crate) const MAX_MESHES: usize = 64;
@@ -224,6 +232,14 @@ pub(crate) struct ScenePipelines {
     hull_unit: Option<GraphicsPipeline>,
     hull_skinned: Option<GraphicsPipeline>,
     hull_vat: Option<GraphicsPipeline>,
+    /// Procedural foliage (R3b): no vertex input, the foliage layout, the set's samples.
+    foliage: GraphicsPipeline,
+    /// Simple water: premultiplied alpha, depth tested only, the water layout, the set's
+    /// samples (R3b).
+    water: GraphicsPipeline,
+    /// Full water with refraction (R3b), single-sampled after any resolve; `None` unless the
+    /// full water passes run (built in the single-sample set only).
+    water_full: Option<GraphicsPipeline>,
 }
 
 /// Pipelines of the depth prepass: depth plus, with screen-space outlines, the units' outline
@@ -237,6 +253,25 @@ pub(crate) struct PrepassPipelines {
     skinned: Option<GraphicsPipeline>,
     /// `None` with [`ScenePipelines::vat`] (uses the VAT layout).
     vat: Option<GraphicsPipeline>,
+}
+
+/// Layouts and mode the R3b pipelines are built for.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EnvironmentLayouts {
+    pub(crate) foliage: vk::PipelineLayout,
+    pub(crate) water: vk::PipelineLayout,
+    pub(crate) full_water: bool,
+    /// Decals are on (`EnvironmentConfig::decals`); off, the terrain uses
+    /// `terrain_nodecals.frag`, its decal code compiled out.
+    pub(crate) decals: bool,
+}
+
+/// Attachments of the full water pass (R3b).
+pub(crate) struct WaterTargets {
+    pub(crate) hdr: vk::ImageView,
+    pub(crate) depth: vk::ImageView,
+    pub(crate) extent: vk::Extent2D,
+    pub(crate) lighting: vk::DescriptorSet,
 }
 
 /// What one [`ScenePipelines`] set is built for.
@@ -265,6 +300,7 @@ impl ScenePipelines {
         depth_format: vk::Format,
         set: SceneSetSpec,
         skinning: bool,
+        environment: EnvironmentLayouts,
     ) -> RenderResult<Self> {
         let SceneSetSpec {
             samples,
@@ -279,7 +315,11 @@ impl ScenePipelines {
         let textured_vertex = module("unit_textured.vert")?;
         let textured_fragment = module("unit_textured.frag")?;
         let terrain_vertex = module("terrain.vert")?;
-        let terrain_fragment = module("terrain.frag")?;
+        let terrain_fragment = module(if environment.decals {
+            "terrain.frag"
+        } else {
+            "terrain_nodecals.frag"
+        })?;
         let build = |vertex_layout, vertex: vk::ShaderModule, fragment: vk::ShaderModule| {
             pipeline::create(
                 device,
@@ -312,6 +352,15 @@ impl ScenePipelines {
             terrain_vertex.handle(),
             terrain_fragment.handle(),
         )?;
+        // `RenderConfig::pipeline_stats`: the terrain shader carries the decal code and sits
+        // near a register step on some GPUs (ADR-0017 §1), so its compiled statistics are
+        // logged for `scripts/terrain-decal-check.sh`.
+        for line in device.pipeline_statistics(terrain.handle()) {
+            eprintln!(
+                "[render] pipeline-stats terrain samples={} {line}",
+                samples.as_raw()
+            );
+        }
         let sky_vertex = module("sky.vert")?;
         let sky_fragment = module("sky.frag")?;
         let sky = pipeline::create_vertexless(
@@ -418,6 +467,53 @@ impl ScenePipelines {
                 })
                 .ok(),
             _ => None,
+        };
+        // R3b foliage and water.
+        let foliage_vertex = module("foliage.vert")?;
+        let foliage_fragment = module("foliage.frag")?;
+        let foliage = pipeline::create_vertexless(
+            device,
+            environment.foliage,
+            foliage_vertex.handle(),
+            foliage_fragment.handle(),
+            color_format,
+            false,
+            VertexlessDepth::ReadWrite(depth_format, samples),
+        )
+        .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
+        let water_vertex = module("water.vert")?;
+        let water_spec = |fragment: vk::ShaderModule, samples| PipelineSpec {
+            layout: environment.water,
+            vertex_layout: VertexLayout::Water,
+            vertex: water_vertex.handle(),
+            fragment,
+            color_format,
+            depth_format,
+            cull_mode: vk::CullModeFlags::NONE,
+            samples,
+            // Water never writes depth (the particles and decals see the bed through it).
+            depth_write: false,
+        };
+        let water_fragment = module("water.frag")?;
+        let water = pipeline::create_blended(
+            device,
+            &water_spec(water_fragment.handle(), samples),
+            SceneBlend::Premultiplied,
+        )
+        .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
+        // The full water draws after any MSAA resolve: single-sampled, in the base set only.
+        let water_full = if environment.full_water && samples == vk::SampleCountFlags::TYPE_1 {
+            let fragment = module("water_refraction.frag")?;
+            Some(
+                pipeline::create_blended(
+                    device,
+                    &water_spec(fragment.handle(), vk::SampleCountFlags::TYPE_1),
+                    SceneBlend::OpaqueTestOnly,
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?,
+            )
+        } else {
+            None
         };
         let (unit_shadow, skinned_shadow) = match shadow {
             Some(spec) => {
@@ -579,6 +675,9 @@ impl ScenePipelines {
             hull_unit,
             hull_skinned,
             hull_vat,
+            foliage,
+            water,
+            water_full,
         })
     }
 }
@@ -630,6 +729,8 @@ pub(crate) struct ScenePass {
     vat_pipeline_layout: PipelineLayout,
     /// Per mesh slot: its index in `vat`, or `u8::MAX` for a mesh without a VAT.
     mesh_vat: [u8; MAX_MESHES],
+    /// Foliage and water (R3b).
+    environment: EnvironmentResources,
 }
 
 /// How the main view is drawn (ADR-0015).
@@ -704,6 +805,7 @@ impl ScenePass {
         views: &[ViewBudget],
         main: MainViewSpec,
         skinning: bool,
+        environment: EnvironmentConfig,
     ) -> RenderResult<Self> {
         let (camera_binding, instance_binding) = buffer_set_layout_bindings();
         // Every scene pipeline shares one layout, so its per-stage descriptor totals must fit
@@ -712,6 +814,7 @@ impl ScenePass {
         let limits = crate::descriptor_budget::StageTotals {
             samplers: device.max_per_stage_samplers,
             sampled_images: device.max_per_stage_sampled_images,
+            storage_buffers: device.max_per_stage_storage_buffers,
         };
         let lighting_bindings = crate::lighting::set_layout_bindings();
         crate::descriptor_budget::check(
@@ -730,6 +833,27 @@ impl ScenePass {
                 &camera_binding,
                 &instance_binding,
                 &crate::vat::set_layout_bindings(),
+                &lighting_bindings,
+            ],
+            limits,
+        )?;
+        // R3b: the foliage and water layouts swap set 2 likewise.
+        crate::descriptor_budget::check(
+            "foliage",
+            &[
+                &camera_binding,
+                &instance_binding,
+                &super::environment::foliage_set_bindings(),
+                &lighting_bindings,
+            ],
+            limits,
+        )?;
+        crate::descriptor_budget::check(
+            "water",
+            &[
+                &camera_binding,
+                &instance_binding,
+                &super::environment::water_set_bindings(),
                 &lighting_bindings,
             ],
             limits,
@@ -775,7 +899,17 @@ impl ScenePass {
         ];
         let vat_pipeline_layout =
             PipelineLayout::with_push_constants(device.device.clone(), &vat_layouts, &skin_push)?;
+        let environment = EnvironmentResources::new(
+            device,
+            frames,
+            camera_layout.handle(),
+            instance_layout.handle(),
+            lighting_layout,
+            &skin_push,
+            environment,
+        )?;
         let (base_set, main_set) = main.sets(shadow);
+        let layouts = environment.layouts();
         let pipelines = ScenePipelines::build(
             device,
             shaders,
@@ -785,6 +919,7 @@ impl ScenePass {
             depth_format,
             base_set,
             skinning,
+            layouts,
         )?;
         let msaa_pipelines = main_set
             .map(|set| {
@@ -797,6 +932,7 @@ impl ScenePass {
                     depth_format,
                     set,
                     skinning,
+                    layouts,
                 )
             })
             .transpose()?;
@@ -840,6 +976,7 @@ impl ScenePass {
             vat,
             vat_pipeline_layout,
             mesh_vat: [u8::MAX; MAX_MESHES],
+            environment,
         })
     }
 
@@ -873,6 +1010,7 @@ impl ScenePass {
                 self.depth_format,
                 set,
                 self.skinning,
+                self.environment.layouts(),
             )
         };
         let pipelines = build(base_set)?;
@@ -905,6 +1043,16 @@ impl ScenePass {
             return Err(RenderError::Shader("a VAT pipeline failed to rebuild"));
         }
         Ok((pipelines, msaa))
+    }
+
+    /// The foliage and water resources (R3b).
+    pub(crate) fn environment(&self) -> &EnvironmentResources {
+        &self.environment
+    }
+
+    /// The foliage and water resources (R3b), mutably (uploads; the device must be idle).
+    pub(crate) fn environment_mut(&mut self) -> &mut EnvironmentResources {
+        &mut self.environment
     }
 
     /// Installs pipelines from [`Self::build_pipelines`]. The device must be idle.
@@ -1357,7 +1505,81 @@ impl ScenePass {
                 self.draw_vat(device, command_buffer, state, pipeline, None, true);
             }
         }
+        // R3b, after every scene-layout draw (they re-bind sets 2/3 with their own layouts):
+        // the main view's foliage, then the simple water over the carved bed.
+        if view == 0 {
+            self.environment.record_foliage(
+                device,
+                command_buffer,
+                frame,
+                pipelines.foliage.handle(),
+                targets.lighting,
+            );
+        }
+        if targets.terrain && (view != 0 || self.pipelines.water_full.is_none()) {
+            self.environment.record_water(
+                device,
+                command_buffer,
+                frame,
+                pipelines.water.handle(),
+                targets.lighting,
+                false,
+            );
+        }
 
+        device.cmd_end_rendering(command_buffer);
+    }
+
+    /// Records the full water pass (R3b): the main view's water over the HDR target, depth
+    /// tested read-only and sampled, refracting the copy the `water_copy` pass made.
+    pub(crate) fn record_water_pass(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        frame: usize,
+        targets: &WaterTargets,
+    ) {
+        let Some(pipeline) = &self.pipelines.water_full else {
+            return;
+        };
+        if !self.environment.has_water() {
+            return;
+        }
+        let color = vk::RenderingAttachmentInfo::default()
+            .image_view(targets.hdr)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE);
+        // Read-only depth: tested, never written, and sampled in the same pass.
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(targets.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::NONE);
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: targets.extent,
+            })
+            .layer_count(1)
+            .color_attachments(core::slice::from_ref(&color))
+            .depth_attachment(&depth);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(
+            device,
+            command_buffer,
+            super::flipped_viewport(targets.extent),
+            targets.extent,
+        );
+        self.bind_view_sets(device, command_buffer, &self.views[0], frame);
+        self.environment.record_water(
+            device,
+            command_buffer,
+            frame,
+            pipeline.handle(),
+            targets.lighting,
+            true,
+        );
         device.cmd_end_rendering(command_buffer);
     }
 

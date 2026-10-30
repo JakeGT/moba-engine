@@ -130,6 +130,37 @@ fn content_check_reports_map_consistency() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR-0017 §4: `content-check` reports water that leaves the board (an error) and brush on
+/// a lane (a warning: cover the simulation does not have).
+#[test]
+fn content_check_reports_water_and_foliage_rules() {
+    let dir = std::env::temp_dir().join(format!("moba-map-water-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("maps")).expect("dir");
+    let pack = std::fs::read_to_string(content_dir().join("ember-map.toml")).expect("pack");
+    std::fs::write(dir.join("pack.toml"), pack).expect("write");
+    let descriptor = "wall = [0.5, 0.2, 0.1]\nwall_height = 6.0\n\
+                      [terrain]\ntint = [0.2, 0.1, 0.05]\n[[terrain.layers]]\nalbedo = \"a\"\n\
+                      [[foliage.patches]]\ncenter = [128, 128]\nradius = 4\nkind = \"brush\"\n\
+                      [[water]]\npoints = [[2, 128]]\nwidth = 12\n";
+    std::fs::write(dir.join("maps/ember.toml"), descriptor).expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_content-check"))
+        .arg(dir.join("pack.toml"))
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("error: map visuals 'ember': water 0: at [2, 128] its width (12 m) leaves"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("warning: map visuals 'ember': brush patch 0 at [128, 128] (radius 4 m)"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Review fix: the client loads `maps/<visuals>.toml` by name whether or not the pack lists
 /// it under `[[assets.maps]]`, so `content-check` checks that file too (and reports one that
 /// does not load).

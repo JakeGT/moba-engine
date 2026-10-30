@@ -89,6 +89,46 @@ MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=345 MOBA_QUALITY=<
 MOBA_CAPTURE=/tmp/r6.ppm MOBA_CAPTURE_FRAME=10 MOBA_SMOKE_FRAMES=12 cargo run --release -p moba-client
 MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_SMOKE_FRAMES=100000 \
 MOBA_SCREEN_EFFECTS_PREVIEW=death MOBA_CAPTURE=/tmp/r6-death.ppm cargo run --release -p moba-client
+```
+
+### Decals, foliage and water (R3b)
+![The showcase river on every tier](images/r3b-river-tiers.png)
+
+The showcase map's river close up (`MOBA_PREVIEW_CAMERA=0.9,0.3,14,4,-62`, the river
+golden's camera) on Low, Medium, High and Ultra, RTX 5070 Ti at 1280×720 (shown at half size)
+([ADR-0017](adr/0017-decals-foliage-water.md), [perf/0021](perf/0021-decals-foliage-water.md)).
+Low and Medium blend the simple water in the scene pass (Low with one normal octave and
+thinner foliage); High and Ultra add the refraction pass, which bends the bed's cracks and
+pebbles. Shoreline foam follows the carved bank; grass is denser on the higher tiers.
+
+![Ground decals in the teamfight](images/r3b-decals.png)
+
+The 5v5 teamfight replay at tick 360 (the decal golden's frame), High, on lavapipe
+(recaptured after the review's ring rework, when the RTX was unavailable): with decals (left) and
+`MOBA_DECALS=off` (right). The enemy telegraph rings keep their two-tone rim (the bright
+band with a dark halo just inside it) on grass, dirt and water, and their cast timer fills
+their inside from the centre; scorch and splats stay where impacts and deaths happened. R5's particles and R2b's outlines and effect lights are the same on both
+sides.
+
+![Before and after R3b](images/r3b-before-after.png)
+
+`main` with R2b (left) against R3b (right) on High: the networked golden frame (tick 120), the
+whole-map overview (both river reaches, also in the baked minimap) and the local preview from
+60 m.
+
+![Jungle brush and the river](images/r3b-brush.png)
+
+A jungle brush patch on Ultra (`MOBA_PREVIEW_CAMERA=2.2,0.35,18,-36,-44`) and a wide view of
+the river with its carved banks and reeds (`0.5,0.45,32,-4,-70`). The brush is decorative: the
+simulation has no brush, and only units the client draws push it aside.
+
+```bash
+MOBA_PREVIEW_CAMERA=0.9,0.3,14,4,-62 MOBA_QUALITY=<tier> MOBA_CAPTURE=/tmp/river.ppm \
+  MOBA_CAPTURE_FRAME=90 MOBA_SMOKE_FRAMES=120 cargo run --release -p moba-client
+MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 MOBA_CAMERA_DISTANCE=30 \
+  MOBA_CAPTURE=/tmp/decals.ppm MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40 [MOBA_DECALS=off] \
+  cargo run --release -p moba-client
+```
 
 ### Terrain, fog of war v2 and atmosphere (R3a)
 ![Networked view before and after R3a](images/r3a-network-before-after.png)

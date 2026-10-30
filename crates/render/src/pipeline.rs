@@ -32,6 +32,9 @@ pub(crate) enum VertexLayout {
     /// [`SkinnedVertex`], position, joints and weights: the skinned shadow caster
     /// (`skinned_shadow.vert`).
     SkinnedShadow,
+    /// [`WaterVertexData`](crate::WaterVertexData) (stride 32): position, bed depth, flow and
+    /// body (`water.vert`, R3b).
+    Water,
 }
 
 impl VertexLayout {
@@ -43,6 +46,7 @@ impl VertexLayout {
             Self::Skinned | Self::SkinnedTextured | Self::SkinnedShadow => {
                 core::mem::size_of::<SkinnedVertex>()
             }
+            Self::Water => core::mem::size_of::<crate::WaterVertexData>(),
         };
         u32::try_from(size).expect("vertex stride fits u32")
     }
@@ -88,6 +92,12 @@ impl VertexLayout {
             attribute(2, vk::Format::R8G8B8A8_UINT, 24),
             attribute(3, vk::Format::R8G8B8A8_UNORM, 28),
         ];
+        const WATER: [vk::VertexInputAttributeDescription; 4] = [
+            attribute(0, vk::Format::R32G32B32_SFLOAT, 0),
+            attribute(1, vk::Format::R32_SFLOAT, 12),
+            attribute(2, vk::Format::R32G32_SFLOAT, 16),
+            attribute(3, vk::Format::R32_UINT, 24),
+        ];
         match self {
             Self::Static => &STATIC[..2],
             Self::StaticTextured => &STATIC,
@@ -96,6 +106,7 @@ impl VertexLayout {
             Self::Skinned => &SKINNED[..4],
             Self::SkinnedTextured => &SKINNED,
             Self::SkinnedShadow => &SKINNED_SHADOW,
+            Self::Water => &WATER,
         }
     }
 }
@@ -117,6 +128,27 @@ pub(crate) struct PipelineSpec {
 }
 
 pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResult<vk::Pipeline> {
+    create_blended(device, spec, SceneBlend::Opaque)
+}
+
+/// How a [`create_blended`] pipeline writes colour and depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SceneBlend {
+    /// No blending; depth tested and written (every opaque scene pipeline).
+    Opaque,
+    /// No blending; depth tested `LESS_OR_EQUAL`, not written (the full water, R3b).
+    OpaqueTestOnly,
+    /// Premultiplied alpha (`ONE`, `ONE_MINUS_SRC_ALPHA`); depth tested, not written (the
+    /// simple water, R3b).
+    Premultiplied,
+}
+
+/// [`create`] with the colour blend and depth write chosen by `blend`.
+pub(crate) fn create_blended(
+    device: &DeviceContext,
+    spec: &PipelineSpec,
+    blend: SceneBlend,
+) -> RenderResult<vk::Pipeline> {
     let entry_point = c"main";
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
@@ -159,13 +191,19 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
-        .depth_write_enable(spec.depth_write)
+        .depth_write_enable(spec.depth_write && blend == SceneBlend::Opaque)
         .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
         .depth_bounds_test_enable(false)
         .stencil_test_enable(false);
 
     let color_attachments = [vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(false)
+        .blend_enable(blend == SceneBlend::Premultiplied)
+        .src_color_blend_factor(vk::BlendFactor::ONE)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+        .alpha_blend_op(vk::BlendOp::ADD)
         .color_write_mask(vk::ColorComponentFlags::RGBA)];
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
@@ -191,6 +229,12 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
         .dynamic_state(&dynamic)
         .layout(spec.layout)
         .push_next(&mut rendering);
+    // Statistics for the perf check of the terrain shader's registers (ADR-0017 §1).
+    let create_info = if device.pipeline_stats {
+        create_info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
+    } else {
+        create_info
+    };
 
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
@@ -626,6 +670,9 @@ pub(crate) enum VertexlessDepth {
     /// Test `LESS_OR_EQUAL` against `format` without writing (the R3a sky on the far plane),
     /// rasterising with the given samples (the main view's MSAA set has its own sky, R6).
     TestOnly(vk::Format, vk::SampleCountFlags),
+    /// Test `LESS_OR_EQUAL` against `format` and write, with the given samples (the R3b
+    /// foliage).
+    ReadWrite(vk::Format, vk::SampleCountFlags),
 }
 
 /// Creates a pipeline with no vertex input (the vertex shader builds its own geometry from
@@ -666,7 +713,7 @@ pub(crate) fn create_vertexless(
         .line_width(1.0);
     let samples = match depth {
         VertexlessDepth::None => vk::SampleCountFlags::TYPE_1,
-        VertexlessDepth::TestOnly(_, samples) => samples,
+        VertexlessDepth::TestOnly(_, samples) | VertexlessDepth::ReadWrite(_, samples) => samples,
     };
     let multisample =
         vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
@@ -678,11 +725,11 @@ pub(crate) fn create_vertexless(
                 .depth_write_enable(false)
                 .depth_compare_op(vk::CompareOp::ALWAYS),
         ),
-        VertexlessDepth::TestOnly(format, _) => (
+        VertexlessDepth::TestOnly(format, _) | VertexlessDepth::ReadWrite(format, _) => (
             format,
             vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
-                .depth_write_enable(false)
+                .depth_write_enable(matches!(depth, VertexlessDepth::ReadWrite(_, _)))
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .depth_bounds_test_enable(false)
                 .stencil_test_enable(false),
@@ -758,6 +805,15 @@ mod tests {
             core::mem::offset_of!(SkinnedVertex, uv)
         );
         assert_eq!(VertexLayout::Static.attributes().len(), 2);
+        assert_eq!(VertexLayout::Water.stride(), 32);
+        assert_eq!(
+            VertexLayout::Water.attributes()[2].offset as usize,
+            core::mem::offset_of!(crate::WaterVertexData, flow)
+        );
+        assert_eq!(
+            VertexLayout::Water.attributes()[3].offset as usize,
+            core::mem::offset_of!(crate::WaterVertexData, body)
+        );
         assert_eq!(
             VertexLayout::StaticTextured.attributes()[2].offset as usize,
             core::mem::offset_of!(crate::mesh::Vertex, uv)

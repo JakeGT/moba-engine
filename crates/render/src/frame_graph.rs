@@ -18,7 +18,11 @@
 //! scene         terrain + units + skinned + sky (+ R2b's hull outlines) → hdr (colour,
 //!               cleared; msaa-hdr resolved into it with MSAA) + depth (sampled-capable;
 //!               loaded after the prepass), sampling the shadow map, this frame's fog-of-war
-//!               image, ao and the contact visibility
+//!               image, ao and the contact visibility (+ foliage and, below High, the simple
+//!               water: R3b)
+//! water_copy    (R3b; full water) hdr → refraction copy (transfer)
+//! water         (R3b; full water) water mesh → hdr, single-sampled after any MSAA resolve;
+//!               depth read-only + sampled, sampling the refraction copy
 //! vfx_draw      particles → hdr (+ OIT accum/reveal), single-sampled after any MSAA
 //!               resolve; depth read-only + sampled (soft particles)
 //! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
@@ -116,6 +120,10 @@ pub(crate) enum PassKind {
     Upscale,
     Ui,
     Capture,
+    /// Copies the HDR target for the water's refraction (R3b).
+    WaterCopy,
+    /// Draws the water with refraction (R3b).
+    Water,
     /// Renders the offscreen image of this [`UiImage`](crate::UiImage) slot.
     Offscreen(u8),
 }
@@ -216,6 +224,9 @@ pub(crate) struct FrameResources {
     pub(crate) outline_ids: Option<OutlineIdResources>,
     /// R2b's contact-shadow visibility; `None` without contact shadows.
     pub(crate) contact: Option<ResourceId>,
+    /// The water's refraction copy of the HDR target; `None` unless water is
+    /// [`WaterMode::Full`](crate::WaterMode::Full) (R3b).
+    pub(crate) refraction: Option<ResourceId>,
 }
 
 /// The shadow map a frame renders, when shadows are on.
@@ -265,6 +276,8 @@ pub(crate) struct FrameSpec {
     pub(crate) fxaa: bool,
     /// The upscale pass (render scale below 1 or dynamic resolution).
     pub(crate) upscale: bool,
+    /// The full water's copy and draw passes (R3b, ADR-0017 §3).
+    pub(crate) water: bool,
 }
 
 impl FrameSpec {
@@ -293,6 +306,7 @@ impl FrameSpec {
             exposure_format: vk::Format::R32_SFLOAT,
             fxaa: false,
             upscale: false,
+            water: false,
         }
     }
 
@@ -335,6 +349,7 @@ const fn image(format: vk::Format, size: ImageSize) -> ImageDesc {
 /// # Errors
 /// Only if the declaration below is inconsistent (covered by unit tests).
 #[allow(clippy::too_many_lines)] // One declaration of the whole frame.
+#[allow(clippy::too_many_arguments)] // The frame's feature switches, flattened.
 pub(crate) fn build(
     spec: &FrameSpec,
     capture: bool,
@@ -501,6 +516,11 @@ pub(crate) fn build(
             reveal: oit.then(|| graph.transient_image("vfx-reveal", image(reveal_format, render))),
         }
     });
+    // R3b full water: the HDR target as it was after the opaque scene, sampled with an offset
+    // through the water surface.
+    let refraction = spec
+        .water
+        .then(|| graph.transient_image("water-refraction", image(spec.hdr_format, render)));
     let ldr = (spec.fxaa || spec.upscale)
         .then(|| graph.transient_image("ldr", image(LDR_FORMAT, render)));
     let ldr2 = (spec.fxaa && spec.upscale)
@@ -632,12 +652,20 @@ pub(crate) fn build(
     } else {
         Access::DepthWrite
     };
+    // The full water and the particles test and sample the single-sample depth after the
+    // scene, so with MSAA it must hold what the scene drew: the prepass's resolve has only
+    // the units and terrain, not the foliage (R3b).
+    let depth_read_later = refraction.is_some() || vfx.is_some();
     scene = match msaa {
-        // Colour resolves into `hdr`; without the prepass the depth resolves too (with it,
-        // `depth` already holds the prepass's resolved depth, which the scene reproduces).
+        // Colour resolves into `hdr`; the depth resolves too, except after the prepass when
+        // nothing reads it later (`depth` then keeps the prepass's resolved depth).
         Some(msaa) => {
             let scene = scene.access(msaa.color, Access::ColorWrite);
-            if prepass {
+            if prepass && depth_read_later {
+                scene
+                    .access(msaa.depth, Access::DepthReadWriteResolveSource)
+                    .access(depth, Access::DepthResolveWrite)
+            } else if prepass {
                 scene.access(msaa.depth, scene_depth)
             } else {
                 scene
@@ -660,8 +688,30 @@ pub(crate) fn build(
         scene = scene.access(contact, Access::SampledFragment);
     }
     let _ = scene;
-    // Particles draw single-sampled into the resolved HDR target and test against the
-    // single-sampled depth (resolved, or the prepass's), before every post pass.
+    // The full water (R3b) and then the particles draw single-sampled into the resolved HDR
+    // target and test against the single-sampled depth (resolved, or the prepass's), before
+    // every post pass.
+    if let Some(refraction) = refraction {
+        let _ = graph
+            .pass("water_copy", PassKind::WaterCopy)
+            .access(hdr, Access::TransferRead)
+            .access(refraction, Access::TransferWrite);
+        let mut water = graph
+            .pass("water", PassKind::Water)
+            .access(hdr, Access::ColorReadWrite)
+            .access(depth, Access::DepthReadSampled)
+            .access(refraction, Access::SampledFragment);
+        if let Some(shadow_map) = shadow_map {
+            water = water.access(shadow_map, Access::SampledFragment);
+        }
+        if let Some(fog) = fog_resources {
+            water = water.access(fog.current, Access::SampledFragment);
+        }
+        if let Some(ao) = ao {
+            water = water.access(ao.blurred, Access::SampledFragment);
+        }
+        let _ = water;
+    }
     if let Some(vfx) = vfx {
         let mut pass = graph
             .pass("vfx_draw", PassKind::VfxDraw)
@@ -787,6 +837,7 @@ pub(crate) fn build(
             fog: fog_resources,
             outline_ids,
             contact,
+            refraction,
         },
     })
 }
@@ -1586,6 +1637,58 @@ mod tests {
         }
     }
 
+    /// R3b review: with MSAA and the prepass, the prepass resolves only what it drew (no
+    /// foliage, which is not in the prepass), so when the full water or the particles test
+    /// the single-sampled depth the scene resolves its multisampled depth into it again,
+    /// and they test the scene's depth (foliage included). Without a later reader the scene
+    /// leaves the prepass's resolve alone.
+    #[test]
+    fn the_scene_re_resolves_depth_after_the_prepass_for_water_and_particles() {
+        for (water, vfx) in [
+            (false, VfxMode::Off),
+            (true, VfxMode::Off),
+            (false, VfxMode::Oit),
+            (true, VfxMode::Oit),
+        ] {
+            let spec = FrameSpec {
+                vfx,
+                water,
+                msaa: true,
+                ambient_occlusion: true,
+                ..shadowed_spec()
+            };
+            let frame = build(&spec, false, 0).expect("compiles");
+            let passes = frame.graph.passes();
+            let scene = passes
+                .iter()
+                .find(|pass| pass.tag == PassKind::Scene)
+                .expect("scene");
+            let msaa = frame.resources.msaa.expect("msaa");
+            assert!(scene.uses(msaa.depth));
+            let later = water || vfx != VfxMode::Off;
+            assert_eq!(scene.uses(frame.resources.depth), later, "{water} {vfx:?}");
+            if later {
+                assert_eq!(
+                    barrier(scene, frame.resources.depth).new_layout,
+                    L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    "the resolve target"
+                );
+                let reader = passes
+                    .iter()
+                    .find(|pass| matches!(pass.tag, PassKind::Water | PassKind::VfxDraw))
+                    .expect("a depth reader");
+                let read = barrier(reader, frame.resources.depth);
+                assert_eq!(
+                    (read.old_layout, read.new_layout),
+                    (
+                        L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        L::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                    )
+                );
+            }
+        }
+    }
+
     fn world(capture: bool, offscreen: usize) -> super::FramePlan {
         let spec = FrameSpec {
             fog: Some(256),
@@ -1683,5 +1786,45 @@ mod tests {
         // Shadow map, raw fog raster, hdr and depth: four slots, the fixed-size ones apart.
         assert_eq!(plain.graph.slots().len(), 4);
         assert!(plain.graph.passes().len() <= crate::graph::MAX_PASSES);
+    }
+
+    /// R3b: full water copies the opaque scene, then draws over it with the depth read-only
+    /// and sampled, before the particles; the largest frame fits the graph's limits.
+    #[test]
+    fn full_water_copies_then_draws_between_the_scene_and_the_particles() {
+        for spec in post_specs() {
+            let spec = FrameSpec {
+                water: true,
+                ..spec
+            };
+            let plain = build(&spec, false, 0).expect("the frame graph compiles");
+            for (capture, offscreen) in [(false, 0), (true, OFFSCREEN_VARIANTS - 1)] {
+                let frame = build(&spec, capture, offscreen).expect("the frame graph compiles");
+                assert!(frame.graph.shares_transients_with(&plain.graph));
+                assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                assert!(frame.graph.passes().len() <= crate::graph::MAX_PASSES);
+                let kinds = kinds(&frame);
+                let scene = kinds.iter().position(|kind| *kind == PassKind::Scene);
+                let scene = scene.expect("scene");
+                assert_eq!(
+                    &kinds[scene..scene + 3],
+                    [PassKind::Scene, PassKind::WaterCopy, PassKind::Water]
+                );
+                if spec.vfx != VfxMode::Off {
+                    assert_eq!(kinds[scene + 3], PassKind::VfxDraw);
+                }
+                let refraction = frame.resources.refraction.expect("refraction copy");
+                let passes = frame.graph.passes();
+                let copy = barrier(&passes[scene + 1], frame.resources.hdr);
+                assert_eq!(copy.new_layout, L::TRANSFER_SRC_OPTIMAL);
+                let draw = barrier(&passes[scene + 2], refraction);
+                assert_eq!(
+                    (draw.old_layout, draw.new_layout),
+                    (L::TRANSFER_DST_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL)
+                );
+                let depth = barrier(&passes[scene + 2], frame.resources.depth);
+                assert_eq!(depth.new_layout, L::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+            }
+        }
     }
 }

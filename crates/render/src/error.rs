@@ -80,6 +80,9 @@ pub enum RenderError {
     /// unusable (heightfield size or values, layer or splat counts, formats or sizes); the
     /// text says which (ADR-0014).
     InvalidTerrain(&'static str),
+    /// A water mesh passed to [`Renderer::set_water`](crate::Renderer::set_water) is
+    /// unusable (empty, too large, out-of-range indices or bodies, non-finite values; R3b).
+    InvalidWater,
     /// A pipeline layout needs more samplers or sampled images in one shader stage than the
     /// device allows (`maxPerStageDescriptorSamplers`/`SampledImages`); `layout` names it.
     DescriptorLimit {
@@ -87,7 +90,7 @@ pub enum RenderError {
         layout: &'static str,
         /// The shader stage (`"fragment"`, ...).
         stage: &'static str,
-        /// `"samplers"` or `"sampled images"`.
+        /// `"samplers"`, `"sampled images"` or `"storage buffers"`.
         kind: &'static str,
         /// How many the layout needs.
         needed: u32,
@@ -127,6 +130,7 @@ impl fmt::Display for RenderError {
                 write!(f, "invalid vertex-animation texture: {reason}")
             }
             Self::InvalidTerrain(reason) => write!(f, "invalid terrain: {reason}"),
+            Self::InvalidWater => f.write_str("invalid water mesh"),
             Self::DescriptorLimit {
                 layout,
                 stage,

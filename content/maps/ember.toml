@@ -119,3 +119,15 @@ exposure_max = 1.0
 bloom = 0.06
 grading = "ember"                # grading/ember.cube: grade-bake bake --preset ember --size 17
 grading_strength = 0.9
+# Foliage (R3b, ADR-0017): sparse, scorched brush tufts in the ash; no flowers or reeds.
+# Decorative only: the simulation has no brush.
+[foliage]
+density = 1.2
+height = [0.2, 0.45]
+base_color = [0.06, 0.035, 0.02]
+tip_color = [0.42, 0.24, 0.09]
+flower_color = [0.9, 0.35, 0.08]
+wind = [0.6, -0.4]
+wind_speed = 0.7
+reeds = false
+seed = 11

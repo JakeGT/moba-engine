@@ -243,6 +243,48 @@ jobs:
             cat $view-fingerprint.log
           done
           exit $status
+      # R3b environment coverage (ADR-0017): the showcase river close up from a low camera on
+      # the default tier (full water with refraction, foliage, reeds, the carved bed), on Low
+      # (simple water, thinned foliage) and on Ultra through the reeds on the bank (4x MSAA
+      # with the prepass: the scene re-resolves its depth, so the water stays behind the
+      # reeds in front of it), and the 5v5 teamfight replay at tick 360 (ground decals:
+      # telegraph rings, scorch and splats, with water and foliage). Local captures advance
+      # one tick and one VFX step per frame, so the replay frame is repeatable.
+      - name: Environment captures with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          for quality in default low ultra; do
+            name=river
+            extra=""
+            camera=0.9,0.3,14,4,-62
+            if [ "$quality" = low ]; then name=river-low; extra="MOBA_QUALITY=low"; fi
+            if [ "$quality" = ultra ]; then
+              name=river-ultra; extra="MOBA_QUALITY=ultra"; camera=4.04,0.2,9,4,-62
+            fi
+            env $extra MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 \
+              MOBA_PREVIEW_CAMERA=$camera MOBA_CAPTURE=render-$name-actual.ppm \
+              timeout 180 xvfb-run -a ./target/release/moba-client \
+              > $name-capture.log 2>&1 || { cat $name-capture.log; exit 1; }
+            test -s render-$name-actual.ppm
+          done
+          MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 \
+            MOBA_CAMERA_DISTANCE=30 MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40 \
+            MOBA_CAPTURE=render-decals-actual.ppm \
+            timeout 300 xvfb-run -a ./target/release/moba-client \
+            > decals-capture.log 2>&1 || { cat decals-capture.log; exit 1; }
+          test -s render-decals-actual.ppm
+      - name: Compare environment fingerprints
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          status=0
+          for view in river river-low river-ultra decals; do
+            ./target/release/image-check render-$view-actual.ppm \
+              --expected tests/golden/render-$view-fingerprint.rgb \
+              --diff render-$view-diff.ppm > $view-fingerprint.log 2>&1 || status=1
+            cat $view-fingerprint.log
+          done
+          exit $status
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -281,4 +323,20 @@ jobs:
             render-horizon-diff.ppm
             horizon-capture.log
             horizon-fingerprint.log
+            render-river-actual.ppm
+            render-river-diff.ppm
+            river-capture.log
+            river-fingerprint.log
+            render-river-low-actual.ppm
+            render-river-low-diff.ppm
+            river-low-capture.log
+            river-low-fingerprint.log
+            render-river-ultra-actual.ppm
+            render-river-ultra-diff.ppm
+            river-ultra-capture.log
+            river-ultra-fingerprint.log
+            render-decals-actual.ppm
+            render-decals-diff.ppm
+            decals-capture.log
+            decals-fingerprint.log
           if-no-files-found: ignore

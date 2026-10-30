@@ -130,6 +130,21 @@ pub const VFX_OIT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx_oi
 pub const VFX_RESOLVE_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_resolve.frag.spv"));
 
+/// Foliage vertex shader (R3b): procedural, wind-animated blades from the instance buffer.
+pub const FOLIAGE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/foliage.vert.spv"));
+/// Foliage fragment shader (R3b).
+pub const FOLIAGE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/foliage.frag.spv"));
+/// Water vertex shader (R3b).
+pub const WATER_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/water.vert.spv"));
+/// Water fragment shader (R3b): flow-mapped normals, depth fade, foam; premultiplied alpha.
+pub const WATER_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/water.frag.spv"));
+/// The terrain without the decal code (`terrain.frag` + `MOBA_NO_DECALS`; decals off).
+pub const TERRAIN_NODECALS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_nodecals.frag.spv"));
+/// Water with screen-space refraction and contact foam (`water.frag` + `WATER_REFRACTION`).
+pub const WATER_REFRACTION_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/water_refraction.frag.spv"));
+
 /// A named SPIR-V module, for tooling and validation.
 #[derive(Clone, Copy, Debug)]
 pub struct ShaderModule {
@@ -141,6 +156,30 @@ pub struct ShaderModule {
 
 /// Every shader module in the crate.
 pub const MODULES: &[ShaderModule] = &[
+    ShaderModule {
+        name: "foliage.vert",
+        spirv: FOLIAGE_VERT,
+    },
+    ShaderModule {
+        name: "foliage.frag",
+        spirv: FOLIAGE_FRAG,
+    },
+    ShaderModule {
+        name: "water.vert",
+        spirv: WATER_VERT,
+    },
+    ShaderModule {
+        name: "water.frag",
+        spirv: WATER_FRAG,
+    },
+    ShaderModule {
+        name: "water_refraction.frag",
+        spirv: WATER_REFRACTION_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_nodecals.frag",
+        spirv: TERRAIN_NODECALS_FRAG,
+    },
     ShaderModule {
         name: "sky.vert",
         spirv: SKY_VERT,

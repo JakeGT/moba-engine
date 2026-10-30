@@ -16,6 +16,7 @@ use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
 
 const SWAPCHAIN: &CStr = c"VK_KHR_swapchain";
 const PORTABILITY_SUBSET: &CStr = c"VK_KHR_portability_subset";
+const PIPELINE_EXECUTABLE_PROPERTIES: &CStr = c"VK_KHR_pipeline_executable_properties";
 
 #[allow(clippy::struct_excessive_bools)] // Independent device capabilities.
 pub(crate) struct DeviceContext {
@@ -39,6 +40,8 @@ pub(crate) struct DeviceContext {
     /// `maxPerStageDescriptorSampledImages` (likewise; combined image samplers count for
     /// both).
     pub(crate) max_per_stage_sampled_images: u32,
+    /// `maxPerStageDescriptorStorageBuffers` (4 on the minimum device).
+    pub(crate) max_per_stage_storage_buffers: u32,
     /// `VkPhysicalDeviceLimits::timestampPeriod`: nanoseconds per timestamp tick.
     pub(crate) timestamp_period: f32,
     /// `timestampValidBits` of the graphics queue family; `0` means no timestamps.
@@ -64,6 +67,11 @@ pub(crate) struct DeviceContext {
     /// Comparison samplers (hardware PCF) are usable: always on conformant drivers; on a
     /// `VK_KHR_portability_subset` device only with `mutableComparisonSamplers`.
     pub(crate) comparison_samplers: bool,
+    /// `VK_KHR_pipeline_executable_properties` is enabled (asked for with
+    /// [`RenderConfig::pipeline_stats`](crate::RenderConfig::pipeline_stats) and supported):
+    /// scene pipelines capture their compiled statistics and the renderer logs the terrain
+    /// shader's (register count and the like, ADR-0017 §1).
+    pub(crate) pipeline_stats: bool,
     /// Identity a saved pipeline cache must match.
     pub(crate) cache_identity: CacheIdentity,
     /// The pipeline cache every pipeline is built through (null until
@@ -84,7 +92,11 @@ struct Candidate {
 
 impl DeviceContext {
     #[allow(clippy::too_many_lines)] // Device selection is one auditable decision table.
-    pub(crate) fn new(context: &InstanceContext, surface: vk::SurfaceKHR) -> RenderResult<Self> {
+    pub(crate) fn new(
+        context: &InstanceContext,
+        surface: vk::SurfaceKHR,
+        pipeline_stats: bool,
+    ) -> RenderResult<Self> {
         let instance = &context.instance;
         let surface_loader = ash::khr::surface::Instance::new(&context.entry, instance);
         // SAFETY: the instance is live; enumeration returns owned handles.
@@ -167,6 +179,9 @@ impl DeviceContext {
             if extension_supported(&available, PORTABILITY_SUBSET) {
                 extensions.push(PORTABILITY_SUBSET);
             }
+            if pipeline_stats && extension_supported(&available, PIPELINE_EXECUTABLE_PROPERTIES) {
+                extensions.push(PIPELINE_EXECUTABLE_PROPERTIES);
+            }
 
             let mut score = match properties.device_type {
                 vk::PhysicalDeviceType::DISCRETE_GPU => 1000,
@@ -237,11 +252,28 @@ impl DeviceContext {
         }
         let comparison_samplers =
             !portability || portability_features.mutable_comparison_samplers == vk::TRUE;
+        // Pipeline statistics (a development and perf-check aid, never required).
+        let mut executable_features =
+            vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default();
+        if candidate
+            .extensions
+            .contains(&PIPELINE_EXECUTABLE_PROPERTIES)
+        {
+            let mut query =
+                vk::PhysicalDeviceFeatures2::default().push_next(&mut executable_features);
+            // SAFETY: the physical device belongs to this instance, it exposes the extension,
+            // and the chain is valid for the call.
+            unsafe { instance.get_physical_device_features2(physical, &mut query) };
+        }
+        let pipeline_stats = executable_features.pipeline_executable_info == vk::TRUE;
         let mut features_2 = vk::PhysicalDeviceFeatures2::default()
             .features(base_features)
             .push_next(&mut features_13);
         if portability {
             features_2 = features_2.push_next(&mut portability_features);
+        }
+        if pipeline_stats {
+            features_2 = features_2.push_next(&mut executable_features);
         }
 
         let priorities = [1.0f32];
@@ -261,6 +293,7 @@ impl DeviceContext {
         let extension_names: Vec<*const c_char> = candidate
             .extensions
             .iter()
+            .filter(|name| pipeline_stats || **name != PIPELINE_EXECUTABLE_PROPERTIES)
             .map(|name| name.as_ptr())
             .collect();
         let create_info = vk::DeviceCreateInfo::default()
@@ -319,6 +352,10 @@ impl DeviceContext {
                 .properties
                 .limits
                 .max_per_stage_descriptor_sampled_images,
+            max_per_stage_storage_buffers: candidate
+                .properties
+                .limits
+                .max_per_stage_descriptor_storage_buffers,
             timestamp_period: candidate.properties.limits.timestamp_period,
             timestamp_valid_bits,
             compute_supported,
@@ -344,6 +381,7 @@ impl DeviceContext {
                     .contains(vk::SampleCountFlags::TYPE_4),
             depth_clamp,
             comparison_samplers,
+            pipeline_stats,
             cache_identity: CacheIdentity::of(&candidate.properties),
             pipeline_cache: vk::PipelineCache::null(),
             pipeline_builds: Cell::new((0, Duration::ZERO)),
@@ -436,6 +474,71 @@ impl DeviceContext {
                 .ok_or(RenderError::Shader("no pipeline returned")),
             Err((_, error)) => Err(error.into()),
         }
+    }
+
+    /// The driver's compiled statistics of `pipeline` (built with
+    /// `CAPTURE_STATISTICS_KHR`), one line per executable: its name and every statistic as
+    /// `name=value`. Empty without [`Self::pipeline_stats`] or when the driver reports none.
+    pub(crate) fn pipeline_statistics(&self, pipeline: vk::Pipeline) -> Vec<String> {
+        if !self.pipeline_stats {
+            return Vec::new();
+        }
+        let loader =
+            ash::khr::pipeline_executable_properties::Device::new(&self.instance, &self.device);
+        let info = vk::PipelineInfoKHR::default().pipeline(pipeline);
+        // SAFETY: the extension and its feature are enabled, and the pipeline is live and
+        // belongs to this device.
+        let Ok(executables) = (unsafe { loader.get_pipeline_executable_properties(&info) }) else {
+            return Vec::new();
+        };
+        let mut lines = Vec::with_capacity(executables.len());
+        for (index, executable) in executables.iter().enumerate() {
+            let info = vk::PipelineExecutableInfoKHR::default()
+                .pipeline(pipeline)
+                .executable_index(index as u32);
+            // SAFETY: as above; `index` is within the executables just enumerated.
+            let Ok(statistics) = (unsafe { loader.get_pipeline_executable_statistics(&info) })
+            else {
+                continue;
+            };
+            let name = executable.name_as_c_str().map_or_else(
+                |_| String::from("?"),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let mut line = format!("{name} ({:?}):", executable.stages);
+            for statistic in &statistics {
+                let label = statistic
+                    .name_as_c_str()
+                    .map_or_else(
+                        |_| String::from("?"),
+                        |name| name.to_string_lossy().into_owned(),
+                    )
+                    .replace(' ', "_");
+                let value = match statistic.format {
+                    vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                        // SAFETY: `format` says the driver wrote this union member.
+                        unsafe { statistic.value.b32 }.to_string()
+                    }
+                    vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                        // SAFETY: as above.
+                        unsafe { statistic.value.i64 }.to_string()
+                    }
+                    vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                        // SAFETY: as above.
+                        unsafe { statistic.value.u64 }.to_string()
+                    }
+                    vk::PipelineExecutableStatisticFormatKHR::FLOAT64 => {
+                        // SAFETY: as above.
+                        let value = unsafe { statistic.value.f64 };
+                        format!("{value:.3}")
+                    }
+                    _ => String::from("?"),
+                };
+                let _ = write!(line, " {label}={value}");
+            }
+            lines.push(line);
+        }
+        lines
     }
 
     /// Builds one compute pipeline through the pipeline cache, timing the driver call (it

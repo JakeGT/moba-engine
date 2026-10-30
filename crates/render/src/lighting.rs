@@ -947,12 +947,15 @@ const LIGHT_LIST_BINDING: u32 = AO_BINDING + 1;
 const LIGHT_GRID_BINDING: u32 = AO_BINDING + 2;
 const BAKED_AO_BINDING: u32 = AO_BINDING + 3;
 const CONTACT_BINDING: u32 = AO_BINDING + 4;
-/// Every binding of set 3 (`0..=CONTACT_BINDING`).
-const SET_BINDINGS: usize = CONTACT_BINDING as usize + 1;
+/// Binding of the decal storage buffer (R3b, `decals.glsl`): past the bindings R6 (10) and
+/// R2b (11–14) take (ADR-0017 §6).
+const DECAL_BINDING: u32 = 20;
+/// Every binding of set 3 (`0..=CONTACT_BINDING`, then the decals).
+const SET_BINDINGS: usize = CONTACT_BINDING as usize + 2;
 /// Combined image samplers in set 3: R3a's nine, R6's AO, the baked AO and the contact term.
 const SET_IMAGES: u32 = IMAGE_BINDINGS + 3;
-/// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image
-/// and light buffers.
+/// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image,
+/// light buffers and decals.
 pub(crate) const MAIN_SETS: usize = 2;
 const LIGHT_LIST_BYTES: u64 = (crate::lights::MAX_LIGHTS
     * crate::lights::LIGHT_VEC4S
@@ -961,16 +964,23 @@ const LIGHT_GRID_WORDS: usize =
     crate::lights::GRID * crate::lights::GRID * crate::lights::CELL_WORDS;
 
 /// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
-/// ADR-0015 §5, 11–14 in ADR-0016 §6): combined image samplers `0..IMAGE_BINDINGS`, the
-/// terrain block, the AO image, the two light buffers and the baked AO and contact images,
-/// all fragment-only. Also counted by the scene layout's descriptor budget
-/// (`descriptor_budget`).
+/// ADR-0015 §5, 11–14 in ADR-0016 §6, 20 in ADR-0017 §6): combined image samplers
+/// `0..IMAGE_BINDINGS`, the terrain block, the AO image, the two light buffers, the baked AO
+/// and contact images and the decal storage buffer, all fragment-only. Also counted by the
+/// scene layout's descriptor budget (`descriptor_budget`).
 pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
     core::array::from_fn(|index| {
-        let binding = index as u32;
+        // The last entry is the decal buffer; the others are numbered by their index.
+        let binding = if index == SET_BINDINGS - 1 {
+            DECAL_BINDING
+        } else {
+            index as u32
+        };
         let kind = match binding {
             TERRAIN_BLOCK_BINDING => vk::DescriptorType::UNIFORM_BUFFER,
-            LIGHT_LIST_BINDING | LIGHT_GRID_BINDING => vk::DescriptorType::STORAGE_BUFFER,
+            LIGHT_LIST_BINDING | LIGHT_GRID_BINDING | DECAL_BINDING => {
+                vk::DescriptorType::STORAGE_BUFFER
+            }
             _ => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         };
         vk::DescriptorSetLayoutBinding::default()
@@ -1058,6 +1068,10 @@ pub(crate) struct LightingResources {
     default_terrain: [GpuImage; 3],
     /// The terrain block, written when the terrain changes (device idle).
     terrain_block: GpuBuffer,
+    /// Per main-view set: this frame's decals (R3b), written each frame after the fence wait.
+    decals: [GpuBuffer; MAIN_SETS],
+    /// The offscreen views' decal buffer: always empty.
+    offscreen_decals: GpuBuffer,
     world: WorldViews,
     state: EnvironmentState,
     light_stats: crate::lights::LightStats,
@@ -1089,7 +1103,7 @@ impl LightingResources {
                 .descriptor_count(set_count),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(set_count * 2),
+                .descriptor_count(set_count * 3),
         ];
         let pool = DescriptorPool::new(device.device.clone(), &pool_sizes, set_count)?;
         let allocated = pool.allocate(&device.device, &[set_layout.handle(); MAIN_SETS + 1])?;
@@ -1260,6 +1274,21 @@ impl LightingResources {
             }
             light_frames.push(LightFrame { lights, grid });
         }
+        let empty = crate::environment::DecalUpload::boxed();
+        let decal_buffer = |name| -> RenderResult<GpuBuffer> {
+            let mut buffer = GpuBuffer::new(
+                device.device.clone(),
+                device.allocator(),
+                name,
+                crate::environment::DECAL_BUFFER_SIZE,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                gpu_allocator::MemoryLocation::CpuToGpu,
+            )?;
+            buffer.write_bytes(0, empty.bytes());
+            Ok(buffer)
+        };
+        let decals = [decal_buffer("decals-0")?, decal_buffer("decals-1")?];
+        let offscreen_decals = decal_buffer("decals-offscreen")?;
         let shadow_view = default_shadow.view();
         let ao_view = default_ramp.view();
         let resources = Self {
@@ -1285,6 +1314,8 @@ impl LightingResources {
             default_visibility,
             default_terrain,
             terrain_block,
+            decals,
+            offscreen_decals,
             world: WorldViews::default(),
             state: EnvironmentState::NONE,
             light_stats: crate::lights::LightStats::default(),
@@ -1362,6 +1393,12 @@ impl LightingResources {
         params
     }
 
+    /// Writes this frame's decals into main-view set `frame`'s buffer. The frame's fence
+    /// must have been waited on.
+    pub(crate) fn write_decals(&mut self, frame: usize, upload: &crate::environment::DecalUpload) {
+        self.decals[frame % MAIN_SETS].write_bytes(0, upload.bytes());
+    }
+
     /// Points the main view's sets at `shadow` (the shadow transient) and `contact` (the
     /// contact-shadow transient), or the defaults. The device must be idle or the sets unused
     /// by pending work (creation, resize).
@@ -1430,6 +1467,7 @@ impl LightingResources {
                 device,
                 set,
                 &self.frames[frame],
+                &self.decals[frame],
                 [
                     self.shadow_view,
                     fog,
@@ -1443,6 +1481,7 @@ impl LightingResources {
             device,
             self.offscreen_set,
             &self.frames[0],
+            &self.offscreen_decals,
             [self.default_shadow.view(), white, white, white],
         );
     }
@@ -1452,6 +1491,7 @@ impl LightingResources {
         device: &DeviceContext,
         set: vk::DescriptorSet,
         frame: &LightFrame,
+        decals: &GpuBuffer,
         [shadow, fog, contact, ao]: [vk::ImageView; 4],
     ) {
         let environment = self
@@ -1504,6 +1544,10 @@ impl LightingResources {
             .buffer(frame.grid.handle())
             .offset(0)
             .range(vk::WHOLE_SIZE)];
+        let decal_info = [vk::DescriptorBufferInfo::default()
+            .buffer(decals.handle())
+            .offset(0)
+            .range(crate::environment::DECAL_BUFFER_SIZE)];
         let mut writes = [vk::WriteDescriptorSet::default(); SET_BINDINGS];
         for (write, (info, entry)) in writes.iter_mut().zip(infos.iter().zip(entries)) {
             *write = vk::WriteDescriptorSet::default()
@@ -1528,6 +1572,11 @@ impl LightingResources {
             .dst_binding(LIGHT_GRID_BINDING)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .buffer_info(&grid);
+        writes[images + 3] = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(DECAL_BINDING)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&decal_info);
         // SAFETY: the set, samplers, views and buffers are live, and the callers guarantee no
         // pending command buffer uses the set (creation, or after a device-idle wait).
         unsafe { device.device.update_descriptor_sets(&writes, &[]) };
