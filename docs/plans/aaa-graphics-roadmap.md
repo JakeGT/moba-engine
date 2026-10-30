@@ -23,7 +23,7 @@ feature, recall, which is protocol v42 and sim logic v9 (replay format still v5)
 | Phase | Engine work | Merged in | Exit items left to the maintainer or the art team |
 |---|---|---|---|
 | R0 Asset foundation | done | #317, #309, #319, #316, #318 | — |
-| R1 Renderer architecture | done | #323 (R1a), #327 (R1b) | the ≤ 5 % criterion's reading (below) |
+| R1 Renderer architecture | done; exit met under the maintainer's reading of the 5 % criterion (below) | #323 (R1a), #327 (R1b) | — |
 | R2 Lighting and materials | done | #330 (R2a), #335 (R2b) | deferred to pre-1.0 by the maintainer: timings on the three §7 reference GPUs; art-direction readability sign-off |
 | R3 Terrain and environment | done | #333 (R3a), #336 (R3b) | deferred to pre-1.0 by the maintainer: sign-off of "one fully art-directed map" (the sample maps are engine-authored) |
 | R4 Animation runtime | done; exit met with recall ([perf/0024](../perf/0024-recall.md)) | #324 (R4a), #325 (R4b-1), #332 (R4b), #340 | — |
@@ -34,10 +34,11 @@ feature, recall, which is protocol v42 and sim logic v9 (replay format still v5)
 
 **R1's "≤ 5 % GPU-time overhead".** As [perf/0011](../perf/0011-render-graph.md) shows, the
 literal relative figure cannot hold for any design that adds the HDR target R1 itself asks for:
-the old frame did 13–30 µs of GPU work and one fullscreen copy is ~14 µs. This roadmap reads
-the criterion as **graph overhead for the same work** — barriers below 1 µs, CPU recording
-within noise — which is met; the HDR composite's cost is a feature cost and counts against
-each tier's §7 GPU budget, where every later phase was measured.
+the old frame did 13–30 µs of GPU work and one fullscreen copy is ~14 µs. **Maintainer
+decision (2026-10-30):** the criterion means **graph overhead for the same work** — barriers
+below 1 µs, CPU recording within noise — which is met; the HDR composite's cost is a feature
+cost and counts against each tier's §7 GPU budget, which every tier meets on the RTX 5070 Ti
+([perf/0022](../perf/0022-r8-scaling-pacing.md)).
 
 **Left for the maintainer, all planned for just before 1.0:**
 - **Art production (§8)**: an art director, the style guide sign-off and the heroes and maps
@@ -169,10 +170,11 @@ two deliberate scope choices: materials are **client-local and not hashed** (lik
 and animation sets, so no wire or replay change), not "defined in content and hashed"; and
 the GPU timings are in `MOBA_FRAME_LOG` but not yet in the HUD's stats line (the HUD is
 R7's area). The baker's BC7 encoder is single-mode (ADR-0010 follow-up). The exit's ≤ 5 %
-criterion is discussed in perf/0011.
+criterion is discussed in perf/0011; the maintainer resolved it on 2026-10-30 as graph
+overhead for the same work, which is met (see [Completion status](#completion-status-2026-10-30)).
 
 **Exit:**
-- The existing scene renders through the graph at ≤ 5 % GPU-time overhead versus today.
+- The existing scene renders through the graph at ≤ 5 % GPU-time overhead versus today (the graph's own overhead for the same work: maintainer decision, 2026-10-30).
 - Validation and sync validation are clean.
 - The golden fingerprint is rebaselined once, deliberately, from CI.
 
