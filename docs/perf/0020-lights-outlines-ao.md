@@ -188,7 +188,7 @@ whether allied heroes should be outlined at all, the per-map `ao_strength` (0.85
 
 Captured 2026-10-30, same machine and method, after the review fixes and the merges of R4b
 (#332) and R3a (#333): "before" is `main` at `760bd01`, "after" this branch merged with it.
-R6 (#334) has not landed; its merge is measured separately.
+R6 (#334) had not landed; its merge is measured [below](#r6-integration-on-main-with-r4b-r3a-and-r6).
 
 ### GPU and CPU time (RTX 5070 Ti, 1080p, teamfight replay, median of 3 interleaved rounds)
 
@@ -307,12 +307,110 @@ the last bit, and the axis-aligned walls' faces lie exactly on texel centres, so
 texels along a face can flip in or out of the wall. Both are within the bake's 0.5 m texel; the client draws the
 walls with the same `wall_box`.
 
+## R6 integration, on `main` with R4b, R3a and R6
+
+Captured 2026-10-30, same machine and method, after merging R6 (post-processing, #334):
+"before" is `main` at `df2dea6`, "after" this branch merged with it. The integration
+follows ADR-0016 §6: R2b's pre-pass is R6's `prepass` (now also run for contact shadows and
+screen outlines), the outline-ID target is 4× on Ultra and resolved from sample zero, the
+outlines draw on R6's LDR image before FXAA and the upscale, and the frame log's
+`gpu_depth_prepass_*` lane is R6's `gpu_prepass_*`.
+
+### GPU and CPU time (RTX 5070 Ti, 1080p, teamfight replay, median of 3 interleaved rounds)
+
+p50 in ms. R6's `bloom` (0.041), `exposure`, `fxaa` (0.017–0.022), `upscale` (Low's dynamic
+resolution, 0.010) and `composite` (0.018–0.022) are equal on both sides and left out.
+
+| Run | GPU total | shadow | prepass | contact_shadows | ao | scene | vfx_draw | outline | cpu | render |
+|---|---|---|---|---|---|---|---|---|---|---|
+| before-low | 0.157 | 0.004 | — | — | — | 0.085 | 0.004 | — | 0.007 | 0.073 |
+| after-low | 0.174 | 0.004 | — | — | — | 0.101 | 0.004 | — | 0.007 | 0.087 |
+| before-medium | 0.252 | 0.006 | — | — | — | 0.122 | 0.010 | — | 0.007 | 0.094 |
+| after-medium | 0.258 | 0.006 | — | — | — | 0.130 | 0.009 | — | 0.006 | 0.090 |
+| before-high | 0.315 | 0.006 | 0.015 | — | 0.047 | 0.122 | 0.010 | — | 0.007 | 0.101 |
+| after-high | 0.412 | 0.006 | 0.021 | 0.052 | 0.047 | 0.130 | 0.009 | 0.032 | 0.007 | 0.104 |
+| before-ultra | 0.418 | 0.011 | 0.047 | — | 0.059 | 0.189 | 0.013 | — | 0.006 | 0.100 |
+| after-ultra | 0.570 | 0.011 | 0.067 | 0.091 | 0.058 | 0.200 | 0.012 | 0.033 | 0.007 | 0.112 |
+| after-ultra-off | 0.420 | 0.011 | 0.047 | — | 0.059 | 0.192 | 0.012 | — | 0.007 | 0.107 |
+| before-high-x8 | 0.317 | 0.006 | 0.015 | — | 0.047 | 0.122 | 0.014 | — | 0.007 | 0.101 |
+| after-high-x8 | 0.415 | 0.006 | 0.021 | 0.052 | 0.047 | 0.130 | 0.013 | 0.032 | 0.007 | 0.103 |
+
+The three rounds of a run agree to within 0.016 ms, except one round in a slower GPU clock
+state in `after-low` (0.363), `after-ultra` (0.628), `after-ultra-off` (0.468),
+`before-ultra` (0.462) and `before-high-x8` (0.873); the median discards it. The p95 columns are dominated by those clock changes (after-high
+0.417, after-ultra 0.574 ms) and are in the scratch logs, not repeated here.
+
+- **Every tier is still far inside its budget**: at most 0.57 ms of GPU work at p50 (Ultra),
+  against 6–14 ms.
+- **Low +0.017 ms, Medium +0.006 ms**: the light loop, baked-AO fetch and hull outlines in
+  `scene`.
+- **High +0.097 ms** (+0.161 ms in the review round before R6): `contact_shadows` 0.052,
+  `outline` 0.032, the pre-pass +0.006 (the outline-ID output; R6 already ran the pre-pass for
+  GTAO, so its depth is now shared, not doubled) and `scene` +0.008.
+- **Ultra +0.152 ms** (0.420 ms with every R2b feature off, within 0.002 ms of `main`):
+  `contact_shadows` 0.091 (16 steps), `outline` 0.033, the pre-pass +0.020 (the 4× ID target
+  and its sample-zero resolve) and `scene` +0.011. The Ultra rows ran in the fast clock state
+  this time (`shadow` 0.011 ms), so they compare with High directly.
+- **CPU.** The work before the render call is unchanged (0.006–0.007 ms); the render call is
+  +0.003–0.014 ms at p50 (the light grid copy).
+- **Lights**: at most 10–11 live in the teamfight at 1080p, under every tier's global cap.
+
+### Which switch costs `scene` on High (4,800 frames per run, three runs each)
+
+| Run | scene | prepass | GPU total |
+|---|---|---|---|
+| `main` (`df2dea6`) | 0.121 / 0.122 / 0.122 | 0.015 / 0.014 / 0.015 | 0.312 / 0.312 / 0.316 |
+| all on | 0.130 / ¹ / 0.130 | 0.021 / ¹ / 0.021 | 0.412 / ¹ / 0.410 |
+| `MOBA_LIGHTS=off` | 0.125 / ¹ / 0.124 | 0.021 / ¹ / 0.021 | 0.407 / ¹ / 0.405 |
+| `MOBA_BAKED_AO=off` | ¹ / ¹ / 0.131 | ¹ / ¹ / 0.021 | ¹ / ¹ / 0.411 |
+| `MOBA_CONTACT_SHADOWS=off` | ¹ / ¹ / ¹ | ¹ / ¹ / ¹ | ¹ / ¹ / ¹ |
+| contact off, hull outlines | 0.132 / 0.132 / 0.132 | 0.014 / 0.014 / 0.014 | 0.323 / 0.323 / 0.326 |
+| all four off | 0.126 / 0.126 / 0.125 | 0.014 / 0.014 / 0.014 | 0.317 / 0.316 / 0.316 |
+
+¹ The GPU ran that run in a slower clock state (every pass 2–4× slower, the pre-pass
+0.034–0.095 ms), so it is not comparable; `MOBA_CONTACT_SHADOWS=off` did so in all three runs.
+
+- R2b now adds **+0.008 ms to `scene`** on High, against +0.051 ms in the review round on
+  `760bd01`. Lights account for about 0.006 ms of it; turning baked AO off changes nothing
+  measurable, and all four features off still leave +0.004 ms (not isolated; the 128-byte
+  instance record, 16 bytes more than `main`'s, is one candidate). The review round's large `scene` increase (the contact-shadow read on top
+  of R3a's splat shader) is gone after the merge; it was not isolated which R6 change removed
+  it (its pre-pass and scene depth set-up replaced R2b's own).
+- So R2b's High cost is now mostly its two fullscreen passes, `contact_shadows` 0.052 ms and
+  `outline` 0.032 ms. Moving the contact march into R6's half-resolution GTAO pass (the
+  ADR-0016 §6 follow-up) remains the way to remove the larger one, and it would free the
+  sampler binding the budget no longer has.
+
+### Validation, goldens and the outline probe after the R6 merge
+
+- **Validation and synchronisation validation: 0 messages** in 59 runs on the RTX 5070 Ti and 21 on lavapipe (plus the 16 golden captures and the probe's 12 on lavapipe): every tier
+  locally and networked on ember, VAT minions, R3a's views, and R6's combinations with R2b's
+  features (render scale 0.5 and 0.75 with the bilinear and bicubic upscale, dynamic
+  resolution, `MOBA_AO=off` with contact shadows or screen outlines alone, Ultra's MSAA at
+  scale 0.75, Ultra with FXAA, Ultra with hull outlines, Medium and Low with MSAA, Low with
+  screen outlines and contact shadows forced on, the death screen effect).
+- **Goldens.** All eight fingerprints (default, networked, VAT, ember, overview, horizon, R6's
+  Ultra MSAA and Low at render scale 0.75) were regenerated from this merge: two lavapipe runs
+  per capture are byte-identical, with no validation message. Against `main`'s fingerprints
+  the changes are small (mean 0.006–0.10 per channel; the largest single difference 26–27 of
+  255, in the horizon view and Low's scaled capture, just over the CI tolerance of 24, which
+  is why those two had to be rebaselined too); the overview moves least (max 8).
+- **Outline probe.** `scripts/outline-probe.sh` gains an Ultra case (screen outlines through
+  the 4× ID target and its sample-zero resolve); all six cases pass on lavapipe (a hidden unit
+  draws no outline pixel on Low's hull, High's FXAA path or Ultra's MSAA path; an open unit
+  does on each).
+- **Render scale.** At render scale below 1 the outline pass works in the rendered
+  sub-rectangle of the LDR image: its taps are clamped to that rectangle (the ID texels
+  outside it belong to an earlier, larger scale) and its widths are multiplied by the scale,
+  so the upscale brings them back to the palette's width in output pixels. The scale-1
+  captures (every golden) are byte-identical with and without that change.
+
 ## Not measured
 
 - The first table is this branch on `main` at `74f3087`; [the review round](#review-round-1-on-main-with-r4b-and-r3a)
-  re-measures it on `main` at `760bd01` (R4b and R3a). R6 has not landed: the integration
-  with its pre-pass, MSAA and GTAO (ADR-0016 §6) changes where the pre-pass cost is counted
-  and adds an MSAA ID target on Ultra, and is re-measured on that merge.
+  re-measures it on `main` at `760bd01` (R4b and R3a) and
+  [the R6 integration](#r6-integration-on-main-with-r4b-r3a-and-r6) on `df2dea6` (R6 too).
+  The earlier tables are kept as measured; the R6 one is the current cost.
 
 - The other §7 reference GPUs (UHD 620, GTX 1060, RTX 3060 classes, Apple M1) are still
   unowned (#9/#127); every number above is the RTX 5070 Ti at 1080p.

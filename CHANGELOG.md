@@ -299,7 +299,8 @@ the semver check):
     synchronisation validation report 0 messages on lavapipe and the RTX 5070 Ti on every
     tier and every switch, with animated portraits, the minimap bake, `MOBA_VFX_SCALE=8` and
     the teamfight replay; per-pass GPU timings before/after at 1080p (median of 3 interleaved
-    rounds: High +0.10 ms GPU, contact shadows 0.05 ms the largest pass; Low +0.01 ms). The
+    rounds on `main` with R6: Low +0.02, Medium +0.01, High +0.10, Ultra +0.15 ms GPU;
+    contact shadows 0.05–0.09 ms the largest pass, the outlines 0.03 ms). The
     golden fingerprints (all seven with R3a's and R6's) were rebaselined deliberately (hero
     outlines and contact shadows on High and Ultra), two lavapipe runs byte-identical, and a
     new ember golden covers walls, baked AO
