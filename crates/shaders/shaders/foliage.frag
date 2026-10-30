@@ -45,6 +45,7 @@ void main() {
     } else {
         lit = apply_height_fog(lit, in_world_pos);
     }
-    lit = apply_glow_decals(lit, in_world_pos, aa);
-    out_color = vec4(lit, 1.0);
+    float mark = 0.0; // ADR-0019: telegraph bands in the alpha, for the heat haze
+    lit = apply_glow_decals(lit, in_world_pos, aa, mark);
+    out_color = vec4(lit, 1.0 - mark);
 }

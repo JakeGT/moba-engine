@@ -16,6 +16,11 @@
 //! yaw = 30.0                     # optional, degrees (-360..=360, default 0)
 //! mesh = "crystal"               # optional: <root>/models/crystal.glb, else a block
 //!
+//! [[effects]]                    # optional looping ambient effects (ADR-0019), at most 16
+//! effect = "heat-vent"           # <root>/vfx/heat-vent.toml, restarted whenever it ends
+//! position = [92, 76]            # world units, like props
+//! radius = 1.0                   # the effect's event radius (0.1..=20, default 1)
+//!
 //! [lighting]                     # optional, every key optional (ADR-0011)
 //! environment = "ember"          # <root>/environments/ember.{toml,ktx2} (IBL), else the
 //!                                # hemispheric ambient below
@@ -149,6 +154,9 @@ use crate::terrain::{MAX_EDGE_HEIGHT, MAX_PLAY_RELIEF, MAX_TERRAIN_LAYERS};
 pub const MAX_MAP_VISUALS_BYTES: u64 = 32 * 1024;
 /// Most props one descriptor may place.
 pub const MAX_MAP_PROPS: usize = 32;
+/// Most looping ambient effects (`[[effects]]`, ADR-0019) one descriptor may place.
+pub const MAX_MAP_EFFECTS: usize = 16;
+const EFFECT_RADIUS_RANGE: (f32, f32) = (0.1, 20.0);
 /// Most distinct mesh names (wall and props together) one descriptor may reference.
 pub const MAX_MAP_MESHES: usize = 4;
 /// Longest accepted mesh name (`[A-Za-z0-9_-]`), matching hero model names.
@@ -227,6 +235,9 @@ pub struct MapVisuals {
     pub wall_mesh: Option<String>,
     /// Decorative props, in file order.
     pub props: Vec<MapProp>,
+    /// Looping ambient effects (`[[effects]]`, ADR-0019), in file order: client-local
+    /// presentation such as heat vents, played like any other effect instance.
+    pub effects: Vec<MapAmbientEffect>,
     /// Lighting and art-style overrides (`[lighting]`); unset keys keep the engine defaults.
     pub lighting: MapLighting,
     /// Heightfield terrain (the `[terrain]` table, ADR-0014); `None` (the top-level
@@ -958,6 +969,18 @@ pub struct MapProp {
     pub mesh: Option<String>,
 }
 
+/// One looping ambient effect of the map (`[[effects]]`, ADR-0019).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct MapAmbientEffect {
+    /// Effect name: `<asset root>/vfx/<effect>.toml` ([`crate::valid_vfx_name`]).
+    pub effect: String,
+    /// World position `[x, y]` (the pack's map coordinates), on the ground.
+    pub position: [f32; 2],
+    /// The effect's event radius (what `scale_with_radius` emitters scale by), metres.
+    pub radius: f32,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMapVisuals {
@@ -970,6 +993,8 @@ struct RawMapVisuals {
     wall_mesh: Option<String>,
     #[serde(default)]
     props: Vec<RawProp>,
+    #[serde(default)]
+    effects: Vec<RawAmbientEffect>,
     #[serde(default)]
     lighting: Option<RawLighting>,
     #[serde(default)]
@@ -1190,6 +1215,51 @@ struct RawProp {
     yaw: Option<f32>,
     #[serde(default)]
     mesh: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAmbientEffect {
+    effect: String,
+    position: [f32; 2],
+    #[serde(default)]
+    radius: Option<f32>,
+}
+
+fn check_effects(raw: Vec<RawAmbientEffect>) -> Result<Vec<MapAmbientEffect>, MapVisualsError> {
+    if raw.len() > MAX_MAP_EFFECTS {
+        return Err(MapVisualsError::Invalid("at most 16 ambient effects"));
+    }
+    let mut effects = Vec::with_capacity(raw.len());
+    for effect in raw {
+        if !crate::valid_vfx_name(&effect.effect) {
+            return Err(MapVisualsError::Invalid(
+                "ambient effect names must be 1-48 of [A-Za-z0-9_-]",
+            ));
+        }
+        let position = [
+            check_range(
+                effect.position[0],
+                POSITION_RANGE,
+                "ambient effect position out of range",
+            )?,
+            check_range(
+                effect.position[1],
+                POSITION_RANGE,
+                "ambient effect position out of range",
+            )?,
+        ];
+        effects.push(MapAmbientEffect {
+            effect: effect.effect,
+            position,
+            radius: check_range(
+                effect.radius.unwrap_or(1.0),
+                EFFECT_RADIUS_RANGE,
+                "ambient effect radius must be 0.1..=20",
+            )?,
+        });
+    }
+    Ok(effects)
 }
 
 /// Why a descriptor could not be used.
@@ -1820,6 +1890,7 @@ impl MapVisuals {
         }
         let foliage = raw.foliage.map(check_foliage).transpose()?;
         let water = check_water(raw.water)?;
+        let effects = check_effects(raw.effects)?;
         let visuals = Self {
             terrain,
             wall: check_color(raw.wall, "wall must be RGB in 0..=1")?,
@@ -1830,6 +1901,7 @@ impl MapVisuals {
             )?,
             wall_mesh: check_mesh(raw.wall_mesh)?,
             props,
+            effects,
             lighting: check_lighting(raw.lighting)?,
             ground,
             atmosphere: check_atmosphere(raw.atmosphere)?,
@@ -2114,6 +2186,40 @@ color = [0.2, 0.2, 0.2]
             "sun_intensity = 1",
         ] {
             assert!(MapVisuals::parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+    }
+
+    /// ADR-0019: looping ambient effects (heat vents) by name and position, bounded.
+    #[test]
+    fn ambient_effects_parse_and_are_validated() {
+        let base = "terrain = [0.1, 0.1, 0.1]\nwall = [0.2, 0.2, 0.2]\n";
+        let effect = |body: &str| format!("{base}[[effects]]\neffect = \"heat-vent\"\n{body}");
+        let visuals = MapVisuals::parse(&effect("position = [92, 76]")).expect("descriptor");
+        assert_eq!(
+            visuals.effects,
+            [MapAmbientEffect {
+                effect: String::from("heat-vent"),
+                position: [92.0, 76.0],
+                radius: 1.0,
+            }]
+        );
+        let wide = MapVisuals::parse(&effect("position = [1, 2]\nradius = 3")).expect("radius");
+        assert_eq!(wide.effects[0].radius, 3.0);
+        assert_eq!(MapVisuals::parse(base).expect("none").effects, []);
+        for bad in [
+            effect(""),
+            effect("position = [1e30, 0]"),
+            effect("position = [1, 1]\nradius = 0"),
+            effect("position = [1, 1]\nradius = 50"),
+            effect("position = [1, 1]\nloop = true"),
+            format!("{base}[[effects]]\neffect = \"../x\"\nposition = [1, 1]"),
+            format!("{base}[[effects]]\neffect = \"\"\nposition = [1, 1]"),
+            format!(
+                "{base}{}",
+                "[[effects]]\neffect = \"v\"\nposition = [1, 1]\n".repeat(MAX_MAP_EFFECTS + 1)
+            ),
+        ] {
+            assert!(MapVisuals::parse(&bad).is_err(), "{bad}");
         }
     }
 

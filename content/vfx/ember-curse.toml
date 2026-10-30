@@ -27,6 +27,24 @@ size_end = 0.2
 color = [3.0, 1.2, 0.3, 1.0]
 color_end = [1.5, 0.3, 0.1, 0.0]
 
+[[emitters]]                     # heat haze over the curse (ADR-0019; High and up, else skipped)
+blend = "distortion"
+burst = 3
+rate = 6
+lifetime = [1.0, 1.4]
+speed = [0.4, 0.8]
+direction = "up"
+spread = 10
+shape = "disc"
+radius = 3.5
+size = [3.5, 4.5]
+size_end = 1.2
+offset = [0, 1.4, 0]
+distortion = 0.6
+distortion_end = 0.0
+distortion_scale = 2.0
+distortion_speed = 1.0
+
 # Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
 [light]
 color = [1.0, 0.35, 0.1]

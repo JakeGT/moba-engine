@@ -173,7 +173,9 @@ void main() {
     }
 
     // Telegraphs and zones over everything, fog included (ADR-0017 §1).
-    lit = apply_glow_decals(lit, in_world_pos, decal_aa);
+    // ADR-0019: telegraph bands are marked in the alpha (1 elsewhere) for the heat haze.
+    float mark = 0.0;
+    lit = apply_glow_decals(lit, in_world_pos, decal_aa, mark);
 
-    out_color = vec4(lit, 1.0);
+    out_color = vec4(lit, 1.0 - mark);
 }

@@ -39,6 +39,14 @@ pub enum ParticleBlend {
     /// Alpha blended: weighted blended order-independent transparency where the tier
     /// enables it ([`VfxBudget::oit`]), unsorted premultiplied blending otherwise.
     Alpha,
+    /// Heat haze (ADR-0019): the particle refracts the scene behind it by a screen-space
+    /// offset instead of adding colour. Its colours carry `(strength, noise scale, rise
+    /// speed, unused)`: strength `0..=1` is a fraction of the tier's pixel cap
+    /// ([`VfxBudget::distortion_pixels`]), interpolated from `color` to `color_end` over the
+    /// life; the noise scale is cells across the sprite and the speed sprite heights per
+    /// second. Always an upright billboard, whatever the shape. Where distortion is off
+    /// ([`VfxBudget::distortion`]) such spawns are skipped: no slot, no upload.
+    Distortion,
 }
 
 /// Which readability rule (AAA roadmap §2) applies to a particle.
@@ -261,6 +269,7 @@ impl Default for VfxFrame<'_> {
 /// Per-tier VFX budgets ([`crate::QualityTier::vfx_budget`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // Independent per-tier feature switches.
 pub struct VfxBudget {
     /// GPU particle capacity: the hard cap, allocated once at renderer creation.
     pub max_particles: u32,
@@ -280,6 +289,13 @@ pub struct VfxBudget {
     pub max_distance: f32,
     /// Minimum opacity of enemy telegraphs.
     pub telegraph_floor: f32,
+    /// Heat haze (ADR-0019): [`ParticleBlend::Distortion`] particles refract the scene
+    /// (High and Ultra). In [`crate::Renderer::vfx_budget`] it is the effective value: off
+    /// when switched off, on portability-subset devices or without the unit ID target.
+    pub distortion: bool,
+    /// The distortion offset cap at a 1080-pixel render height, pixels
+    /// ([`crate::distortion::max_offset_pixels`] scales it with the render height).
+    pub distortion_pixels: f32,
 }
 
 /// Measured VFX statistics of the latest completed frame ([`crate::Renderer::vfx_stats`]).
@@ -294,6 +310,8 @@ pub struct VfxStats {
     pub sprites: u32,
     /// Of which mesh particles.
     pub meshes: u32,
+    /// Of which heat-haze (distortion) particles (ADR-0019).
+    pub distortion: u32,
     /// Particles spawned that frame.
     pub spawned: u32,
     /// Spawns dropped that frame (over the per-frame cap or no free slot).

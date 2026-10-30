@@ -210,7 +210,9 @@ in the local view with every effect.
 - **Distortion / heat haze** (High only): **moved to R6** with the rest of the full-screen
   post-processing. It needs a copy of the HDR target before the particle pass and a refraction
   permutation (another screen-sized target and pass), which belongs with R6's bloom chain and
-  its own tier switch rather than inside R5's budget.
+  its own tier switch rather than inside R5's budget. *Done in R6:
+  [ADR-0019](0019-distortion.md) (a `distortion` blend drawn by its own refraction pass
+  before the particles, High and up).*
 - Lights from effects (fireball glow on the ground) belong to R2's clustered lights. *Done in
   R2b: an effect's optional `[light]` table ([ADR-0016](0016-lights-outlines-ao.md)).*
 - Projected decals for telegraphs (R3) would replace ground quads on uneven terrain.

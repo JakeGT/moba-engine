@@ -132,6 +132,13 @@ passes run in this order:
      `water_copy` copies the HDR render region into a refraction image and `water` draws the
      water surface over the single-sampled HDR target, testing the scene depth read-only and
      sampling it and the copy for depth fade and refraction;
+   - with distortion (High and up, [ADR-0019](adr/0019-distortion.md)) `distortion_copy`
+     copies the haze's projected region (after the water) into a transient that shares the
+     water's refraction copy or the OIT accumulation target, and `distortion` draws the
+     heat-haze particles over the HDR target, refracting the copy by a capped noise offset,
+     testing the scene depth read-only and masking every unit (the prepass ID target) and
+     every telegraph band (the scene's alpha); a frame without haze in view runs the graph
+     variant that only reserves both passes (no commands, no barriers);
 7. `vfx_draw` draws the particles into the single-sampled HDR target, testing the scene depth
    read-only and sampling it for soft particles; alpha particles accumulate weighted blended
    OIT targets on Medium and up, which

@@ -83,7 +83,8 @@ void main() {
     float aa = decal_pixel(in_world_pos);
     if (in_depth <= 0.0) {
 #ifdef WATER_REFRACTION
-        out_color = vec4(texelFetch(refraction, ivec2(gl_FragCoord.xy), 0).rgb, 1.0);
+        // The copy as it is, alpha included (ADR-0019: the bed's telegraph marks).
+        out_color = texelFetch(refraction, ivec2(gl_FragCoord.xy), 0);
 #else
         out_color = vec4(0.0);
 #endif
@@ -151,6 +152,7 @@ void main() {
     // rim and halo (the simple water), so the bed's refracted copy of the ring never doubles
     // or weakens it (ADR-0017 §1).
     float rim_cover = 0.0;
+    float mark = 0.0; // ADR-0019: telegraph bands in the alpha (the full water), for the haze
 #ifdef WATER_REFRACTION
     float cover = 1.0 - (1.0 - opacity) * (1.0 - foam);
     vec3 top = (lit * (opacity * (1.0 - foam)) + foam_lit * foam) / max(cover, 1e-4);
@@ -158,17 +160,18 @@ void main() {
     float cover = clamp(mix(0.18, 0.95, opacity) + foam, 0.0, 1.0);
     vec3 top = mix(lit, foam_lit, foam / max(cover, 1e-3));
 #endif
-    top = apply_glow_decals_role(top, in_world_pos, aa, false, rim_cover);
+    top = apply_glow_decals_role(top, in_world_pos, aa, false, rim_cover, mark);
 #ifdef WATER_REFRACTION
     // The bed seen through the water, tinted by the shallow colour as it deepens.
     vec3 transmitted = behind * mix(vec3(1.0), shallow.rgb * 2.0, opacity * 0.6);
     vec3 shown = apply_glow_decals_role(mix(transmitted, top, cover), in_world_pos, aa, true,
-        rim_cover);
-    out_color = vec4(shown, 1.0);
+        rim_cover, mark);
+    out_color = vec4(shown, 1.0 - mark);
 #else
-    top = apply_glow_decals_role(top, in_world_pos, aa, true, rim_cover);
+    top = apply_glow_decals_role(top, in_world_pos, aa, true, rim_cover, mark);
     cover = max(cover, rim_cover);
-    // Premultiplied: ONE, ONE_MINUS_SRC_ALPHA.
+    // Premultiplied: ONE, ONE_MINUS_SRC_ALPHA; the alpha channel keeps the bed's (and its
+    // telegraph marks, ADR-0019).
     out_color = vec4(top * cover, cover);
 #endif
 }

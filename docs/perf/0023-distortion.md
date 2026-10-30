@@ -1,0 +1,180 @@
+# Distortion / heat haze: cost, validation and image evidence (R6 item 7)
+
+Captured 2026-10-30 on the development workstation, not a CI runner, for
+[ADR-0019](../adr/0019-distortion.md).
+
+- Software: lavapipe (`llvmpipe (LLVM 23.1.3, 256 bits)`) from
+  `/home/jaket/Projects/MOBA/.tools` with the bundled Khronos validation layer
+- GPU: NVIDIA GeForce RTX 5070 Ti (16 GB), driver 615.78.08 — **not measured, see below**
+- CPU: AMD Ryzen 7 9800X3D; OS: Linux 7.3.0-2-cachyos, Wayland
+- Build: release, this branch (`feat/r6-distortion`, based on `main` at `db29264`).
+  "No-draw" is the same build with `MOBA_DISTORTION=nodraw`, which spawns and simulates every
+  haze particle exactly as "on" does but never draws it, so the two differ by the
+  refraction alone. (An earlier draft compared against `MOBA_DISTORTION=off`, which skips
+  the haze spawns: that shifts the allocator and the effects' random streams, so its image
+  diff mixed different particles with the real refraction. Every number below is against
+  no-draw.)
+
+## RTX 5070 Ti timings: pending
+
+The brief asks for RTX timings (median of three interleaved on/off rounds of the teamfight
+replay at High and Ultra). They could not be taken: another process held 15.6 of the GPU's
+16.3 GB (`nvidia-smi --query-gpu=memory.used,memory.total`: `15623 MiB, 16303 MiB`), and the
+client fails at start-up with `renderer initialisation failed: GPU allocation error: Out of
+memory`; re-checked before this revision's runs: still `15625 MiB, 16303 MiB`. That
+process was left alone. **Follow-up:** rerun the commands below on the RTX
+when its memory is free and add the table here.
+
+```bash
+MOBA_QUALITY=<high|ultra> MOBA_WINDOW_SIZE=1920x1080 MOBA_REPLAY=tests/replays/teamfight-5v5.mbr \
+MOBA_WARMUP_TICKS=330 MOBA_SMOKE_FRAMES=3000 MOBA_VSYNC=0 MOBA_PIPELINE_CACHE=off \
+MOBA_FRAME_LOG=/tmp/r19.log [MOBA_DISTORTION=nodraw] cargo run --release -p moba-client
+```
+
+**What to expect, from the pass structure.** The teamfight at tick 330 has no haze in view
+(see below), so it runs the frame-graph variant in which both passes are only reserved:
+no commands, no timestamps and no barriers. With haze in view the copy is one
+`R16G16B16A16_SFLOAT` region copy of the haze's projected bounding box plus the cap (at
+most the full 1080p frame, 16.6 MB; R3b's full-frame `water_copy` measured 0.01–0.02 ms on
+this RTX in [perf/0021](0021-decals-foliage-water.md)), and the draw, scissored to the same
+box, shades only the haze sprites' pixels with seven texture reads each (a bilinear copy
+tap, a depth, an ID and an alpha fetch, and 2×2 gathers of the IDs, alpha and depth under
+the tap), well under the
+particles' own `vfx_draw` cost at the same coverage. On lavapipe, where every pass is
+CPU-rasterised, both together are 0.4–0.6 % of the frame.
+
+## Lavapipe timings (1280×720)
+
+Four scenes, three rounds interleaved on/no-draw (on, no-draw, on, no-draw, …), validation
+off, no pipeline cache, 90 frames each (the frame log covers the last 28). GPU ms at p50 from
+the renderer's timestamp queries, **median of the three rounds**; `range` is the three
+rounds' p50 totals. Live particles and `vfx_distortion_max` are identical between on and
+no-draw in every scene (the same spawns).
+
+| scene | distortion | total p50 / p95 | range | scene | vfx_draw | distortion_copy | distortion |
+|---|---|---|---|---|---|---|---|
+| teamfight, High | on | 123.64 / 136.42 | 123.6–124.0 | 107.53 | 0.59 | — (idle variant) | — (idle variant) |
+| teamfight, High | no-draw | 123.59 / 131.50 | 123.4–123.7 | 107.41 | 0.56 | — | — |
+| teamfight, Ultra | on | 164.54 / 180.64 | 163.7–169.4 | 141.33 | 0.81 | — (idle variant) | — (idle variant) |
+| teamfight, Ultra | no-draw | 164.63 / 175.63 | 164.2–164.7 | 141.16 | 0.72 | — | — |
+| `cinder-zone` preview, High | on | 157.14 / 168.00 | 157.1–157.4 | 139.57 | 0.57 | **0.094** | **0.896** |
+| `cinder-zone` preview, High | no-draw | 156.25 / 168.36 | 156.2–156.3 | 139.55 | 0.54 | — | — |
+| `cinder-zone` preview, Ultra | on | 221.19 / 238.07 | 221.1–232.4 | 197.59 | 0.58 | **0.121** | **0.883** |
+| `cinder-zone` preview, Ultra | no-draw | 220.06 / 233.17 | 219.6–220.1 | 197.62 | 0.59 | — | — |
+
+- **Teamfight:** the fight at tick 330 plays no hazy effect, so every frame runs the idle
+  variant: the frame log has no `distortion_copy` or `distortion` lane at all (no
+  timestamps, no commands, no barriers; the frame-graph unit test pins two fewer passes and
+  at least three fewer barriers than the haze variant, with the same transient slots).
+  On/no-draw totals are within the rounds' noise.
+- **`cinder-zone` with the haze live** (78 live particles, a 3 m zone at the preview
+  camera): the bounding-box copy costs 0.09–0.12 ms (the full-frame copy of the first
+  draft cost 0.16–0.18 ms) and the draw 0.88–0.90 ms, together **1.0 ms of a 157–221 ms
+  frame (0.5–0.6 %)**. The on/no-draw total delta (+0.9 / +1.1 ms) is the two passes; the
+  scene pass is unchanged (139.57 / 139.55, 197.59 / 197.62).
+
+## Memory (R8 accounting)
+
+| tier | `vram_mb` on / no-draw | `targets_mb` on / no-draw | `buffers_mb` on / no-draw |
+|---|---|---|---|
+| High | 85.5 / 85.5 | 49.1 / 49.1 | 15.8 / 15.8 |
+| Ultra | 184.7 / 184.7 | 139.8 / 139.8 | 24.2 / 24.2 |
+
+The copy is a graph transient that shares the water's refraction copy or the OIT
+accumulation target, so **no target is added** on High or Ultra (the frame-graph unit test
+pins that no topology with water or OIT gains a slot). The `alive` buffer is allocated with
+the distortion region on every tier (2 / 6 / 12 / 24 KB more, Low … Ultra), which the
+accounting rounds away. `uploads` stays at the load-time count and `locked_uploads=0`,
+`locked_pipelines=0` in every run: the distortion pipeline is built with the other VFX
+pipelines at renderer creation.
+
+## Validation and sync validation (lavapipe, `MOBA_VULKAN_VALIDATION=required`)
+
+Zero `VUID`/`SYNC-` messages in every run below (validation and synchronisation validation
+on, as in `render-golden.yml`):
+
+- all twelve existing render-golden captures (default High, network, ember, VAT, Ultra
+  with MSAA 4×, Low at 0.75 render scale, overview, horizon, river on High, Low and Ultra,
+  teamfight decals) — distortion idle on High/Ultra, off on Low;
+- the distortion golden (`cinder-zone`, Ultra, MSAA, haze live) and the same frame with
+  `MOBA_DISTORTION=nodraw`;
+- `cinder-zone` on High (live) and its no-draw twin, High at `MOBA_RENDER_SCALE=0.75`
+  (960×540 sub-rectangle, live), **Ultra (MSAA 4×) at 0.75** (live), Medium (off) and
+  `ember-curse` on Low at 0.75 (off); every live capture logs `vfx_distortion_max=8.000`
+  and 27 frames with the distortion passes, every no-draw capture the same
+  `vfx_distortion_max` and none;
+- the Ember map on High and Ultra (networked, the vents in the map's `[[effects]]`, none in
+  view; also with no-draw) and a local camera on an Ember crystal, on and no-draw (vents
+  live, `vfx_distortion_max=14.000`);
+- `scripts/outline-probe.sh` (all six cases ok: hidden units give zero outline pixels on the
+  hull, High screen and Ultra MSAA screen paths; the new ID value 8 for unoutlined units
+  does not change the outlines) and `scripts/cull-probe.sh` (all five scenes byte-identical
+  with culling on and off).
+
+## Goldens
+
+| golden | result |
+|---|---|
+| the twelve existing fingerprints | **unchanged**: every capture matches with `mean_abs_diff=0.000 max_diff=0` |
+| `render-distortion-fingerprint.rgb` | **new**: the `cinder-zone` preview on Ultra at frame 90 (MSAA resolved, prepass IDs, the stand-in units beside the haze); two lavapipe runs gave byte-identical captures |
+
+The fingerprint (64×36, tolerance mean 2.0 / max 24) is too coarse to see a few-pixel
+shimmer: the no-draw capture of the same frame still passes it (`mean 0.008, max 3`). So
+`render-golden.yml` captures the frame twice more with `MOBA_BLOOM=off`, drawn
+(`render-distortion-flat.ppm`) and with `MOBA_DISTORTION=nodraw`, and requires all of:
+
+- the golden and the drawn bloom-off logs show `vfx_distortion_max` > 0 and at least one
+  frame with the distortion passes, and no `distortion off` line;
+- the no-draw log shows `vfx_distortion_max` > 0 (the haze was there) and no distortion
+  pass;
+- the pair is not byte-identical (`cmp -s`), and `image-check --against
+  render-distortion-nodraw.ppm --min-changed 5000` passes;
+- the stand-in units' boxes are byte-identical in both (`--same-box 640,448,684,505` for the
+  red caster at the haze's edge, `--same-box 700,245,732,300` for the blue target).
+
+**Why bloom is off in the pair.** The first CI run of the pair (with bloom on, run
+41052647919, the runner's lavapipe on LLVM 21.1.8) found **one** changed pixel in the red
+stand-in's box: (648, 477), a flat face pixel (`221,149,133` vs `220,149,133`), 27 px right
+of the nearest refracted pixel and well inside the silhouette, so neither a mask leak at the
+silhouette edge nor an outline. It is bloom: bloom blurs the HDR target, so the haze's
+change reaches tens of pixels past the haze at 1–2 LSB after tonemapping. On that run the
+1–2 LSB changes span x 424–664, y 276–529, while every change above 2 LSB stays inside
+x 437–621, y 330–492; with bloom off (locally) every change, of any size, stays inside
+x 424–621, y 316–498, and both boxes are untouched. Whether a 1-LSB bloom change rounds over
+on a given pixel depends on the driver's float rounding, which is why the local LLVM 23
+build happened to give 0. Every other pass after the haze is per-pixel at Ultra (MSAA, no
+FXAA), so with bloom off the boxes test the unit mask alone.
+
+**Refraction evidence (full resolution, 1280×720, on vs no-draw).** Ultra: **18,833 pixels**
+change (18,873 with bloom off), High: **18,001**, all inside x 384–637, y 295–520 (the zone,
+its haze and its bloom). Both unit boxes: **0 changed pixels** locally. In the diff image the zone's telegraph ring band is a dark gap
+inside the changed area: the telegraph mask keeps every rim and halo pixel of the enemy
+zone's decal in place (the ring particles draw after the haze anyway). Two lavapipe runs of
+each capture are byte-identical, so the CI check is stable on one driver. The golden guards
+against gross breakage (garbage taps, NaNs, a wrong copy region); the cap, the masks and the
+bounds are unit-tested on the CPU twin (`moba_render::distortion`, `telegraph_mark`).
+
+**Readability check (Ember crystal, High, on vs no-draw).** 3,049 pixels change, in the
+vents' haze around the crystal; the crystal (a prop, prepass ID 8) keeps its pixels: the
+unit mask keeps every unit's and prop's silhouette in place.
+
+## Reproduce
+
+```bash
+# golden + evidence captures (validation on)
+MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=ultra MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 \
+MOBA_CAPTURE=render-distortion-actual.ppm MOBA_FRAME_LOG=render-distortion.frames \
+MOBA_VULKAN_VALIDATION=required ./target/release/moba-client
+./target/release/image-check render-distortion-actual.ppm \
+  --expected tests/golden/render-distortion-fingerprint.rgb
+MOBA_BLOOM=off MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=ultra MOBA_SMOKE_FRAMES=120 \
+MOBA_CAPTURE_FRAME=90 MOBA_CAPTURE=render-distortion-flat.ppm ./target/release/moba-client
+MOBA_BLOOM=off MOBA_DISTORTION=nodraw MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=ultra \
+MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_CAPTURE=render-distortion-nodraw.ppm \
+./target/release/moba-client
+./target/release/image-check render-distortion-flat.ppm --against render-distortion-nodraw.ppm \
+  --min-changed 5000 --same-box 640,448,684,505 --same-box 700,245,732,300 --diff haze.ppm
+# timings (validation off), with and without MOBA_DISTORTION=nodraw
+MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=high MOBA_SMOKE_FRAMES=90 MOBA_VSYNC=0 \
+MOBA_PIPELINE_CACHE=off MOBA_FRAME_LOG=/tmp/r19.frames ./target/release/moba-client
+```

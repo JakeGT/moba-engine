@@ -228,6 +228,17 @@ impl FittedMesh {
     }
 }
 
+/// One `[[effects]]` entry of the bound map (ADR-0019): a looping client-local effect.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AmbientEffect {
+    /// The `vfx/<effect>.toml` name.
+    pub(crate) effect: String,
+    /// Ground position in render space (map centred on the origin).
+    pub(crate) position: Vec3,
+    /// The effect's radius (scales `scale_with_radius` emitters), metres.
+    pub(crate) radius: f32,
+}
+
 /// The active map's look plus caches of descriptors and meshes.
 #[derive(Debug)]
 pub(crate) struct MapLibrary {
@@ -279,6 +290,8 @@ pub(crate) struct MapLibrary {
     /// The active descriptor's `[atmosphere]` and `[fog_of_war]` tables.
     atmosphere: MapAtmosphere,
     fog_style: MapFogStyle,
+    /// The active descriptor's `[[effects]]` (ADR-0019), render space; rebuilt by `bind`.
+    ambient: Vec<AmbientEffect>,
 }
 
 impl MapLibrary {
@@ -290,6 +303,7 @@ impl MapLibrary {
             meshes: Vec::new(),
             terrain: theme_visuals(0).0,
             instances: Vec::with_capacity(MAX_WALLS + moba_assets::MAX_MAP_PROPS),
+            ambient: Vec::with_capacity(moba_assets::MAX_MAP_EFFECTS),
             active: None,
             generation: 0,
             lighting: MapLighting::default(),
@@ -561,6 +575,11 @@ impl MapLibrary {
         self.generation
     }
 
+    /// The bound map's looping ambient effects (`[[effects]]`, ADR-0019).
+    pub(crate) fn ambient_effects(&self) -> &[AmbientEffect] {
+        &self.ambient
+    }
+
     /// Terrain tint for the scene. Never allocates.
     pub(crate) fn terrain_tint(&self) -> [f32; 4] {
         self.terrain
@@ -648,6 +667,7 @@ impl MapLibrary {
         self.generation = self.generation.wrapping_add(1);
         self.instances.clear();
         self.walls.clear();
+        self.ambient.clear();
         let center = key.center;
         self.extent = center * 2.0;
         for (a, b) in walls.into_iter().take(MAX_WALLS) {
@@ -674,6 +694,17 @@ impl MapLibrary {
             return;
         };
         self.prop_shapes.clear();
+        for effect in visuals.effects.iter().take(moba_assets::MAX_MAP_EFFECTS) {
+            self.ambient.push(AmbientEffect {
+                effect: effect.effect.clone(),
+                position: Vec3::new(
+                    effect.position[0] - center,
+                    0.0,
+                    effect.position[1] - center,
+                ),
+                radius: effect.radius,
+            });
+        }
         // Cliffs as props: the descriptor's edge mesh around the board, outside it.
         if let Some(ground) = &visuals.ground
             && let Some(fitted) = ground

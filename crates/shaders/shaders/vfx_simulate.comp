@@ -3,7 +3,8 @@
 
 // GPU particle simulation (ADR-0013), three dispatches per frame separated by barriers:
 //   mode 0: copy this frame's spawn records into their slots, reset the counters;
-//   mode 1: age, integrate and kill every slot, append live ones to the draw lists and
+//   mode 1: age, integrate and kill every slot, append live ones to the draw lists (sprites,
+//           four mesh slots and the distortion sprites of ADR-0019) and
 //           accumulate the projected pixel area (the overdraw estimate);
 //   mode 2: write the indirect draw arguments (clamped to each list's capacity) and stats.
 
@@ -40,6 +41,7 @@ void main() {
             for (uint i = VFX_COUNT_SPRITE; i <= VFX_STAT_SPAWNED; ++i) {
                 args[i] = 0u;
             }
+            args[VFX_COUNT_DISTORT] = 0u;
         }
         if (id < frame.counts.y) {
             Particle s = spawns[id];
@@ -67,6 +69,10 @@ void main() {
             args[base + 3u] = 0u;
             args[base + 4u] = 0u;
         }
+        args[VFX_ARGS_DISTORT + 0u] = 6u;
+        args[VFX_ARGS_DISTORT + 1u] = min(args[VFX_COUNT_DISTORT], region);
+        args[VFX_ARGS_DISTORT + 2u] = 0u;
+        args[VFX_ARGS_DISTORT + 3u] = 0u;
         args[VFX_STAT_SPAWNED] = frame.counts.y;
         return;
     }
@@ -93,7 +99,14 @@ void main() {
 
     uint flags = p.misc.x;
     uint shape = flags & VFX_SHAPE_MASK;
-    if (shape == VFX_SHAPE_MESH) {
+    if ((flags & VFX_FLAG_DISTORT) != 0u) {
+        // Heat haze (ADR-0019): its own list, drawn by the distortion pass, never vfx_draw.
+        uint index = atomicAdd(args[VFX_COUNT_DISTORT], 1u);
+        if (index >= frame.counts.z) {
+            return;
+        }
+        alive[VFX_DISTORT_BASE(capacity, frame.counts.z) + index] = id;
+    } else if (shape == VFX_SHAPE_MESH) {
         uint slot = (flags >> VFX_MESH_SHIFT) & 3u;
         if (frame.mesh_indices[slot] == 0u) {
             return;

@@ -1,4 +1,7 @@
-//! Compare a rendered PPM against a checked-in downscaled fingerprint.
+//! Compare a rendered PPM against a checked-in downscaled fingerprint, or (`--against`)
+//! against another full-resolution capture of the same frame: at least `--min-changed`
+//! pixels must differ and every `--same-box` must be byte-identical (ADR-0019: the heat haze
+//! is drawn, and the units' pixels are never touched by it).
 #![allow(clippy::print_stdout)]
 
 use std::path::Path;
@@ -6,27 +9,130 @@ use std::process::ExitCode;
 
 const FINGERPRINT_WIDTH: usize = 64;
 const FINGERPRINT_HEIGHT: usize = 36;
+const USAGE: &str = "usage: image-check <actual.ppm> --expected <fingerprint.rgb> [--write] [--diff <out.ppm>]\n       image-check <actual.ppm> --against <other.ppm> [--min-changed <pixels>] [--same-box <x0,y0,x1,y1>]... [--diff <out.ppm>]";
 
+/// A pixel box `[x0, x1) x [y0, y1)`.
+type PixelBox = [usize; 4];
+
+fn parse_box(text: &str) -> Option<PixelBox> {
+    let mut parts = text
+        .split(',')
+        .map(|part| part.trim().parse::<usize>().ok());
+    let value = [
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+    ];
+    (parts.next().is_none() && value[0] < value[2] && value[1] < value[3]).then_some(value)
+}
+
+/// Pixels that differ between two equal-sized RGB images, and per box whether any of its
+/// pixels differs (a box past the image counts as differing).
+fn compare_full(
+    actual: &[u8],
+    other: &[u8],
+    width: usize,
+    height: usize,
+    boxes: &[PixelBox],
+) -> (usize, Vec<usize>) {
+    let differs =
+        |index: usize| actual[index * 3..index * 3 + 3] != other[index * 3..index * 3 + 3];
+    let changed = (0..width * height).filter(|&index| differs(index)).count();
+    let in_box = boxes
+        .iter()
+        .map(|&[x0, y0, x1, y1]| {
+            if x1 > width || y1 > height {
+                return usize::MAX;
+            }
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| y * width + x))
+                .filter(|&index| differs(index))
+                .count()
+        })
+        .collect();
+    (changed, in_box)
+}
+
+/// `--against`: see the module docs.
+fn against(
+    actual_path: &str,
+    other_path: &Path,
+    min_changed: usize,
+    boxes: &[PixelBox],
+    diff_path: Option<&Path>,
+) -> ExitCode {
+    let (Ok((width, height, actual)), Ok((other_width, other_height, other))) =
+        (read_ppm(Path::new(actual_path)), read_ppm(other_path))
+    else {
+        eprintln!("cannot read {actual_path} or {}", other_path.display());
+        return ExitCode::from(1);
+    };
+    if (width, height) != (other_width, other_height) {
+        eprintln!("size mismatch: {width}x{height} vs {other_width}x{other_height}");
+        return ExitCode::from(1);
+    }
+    let (changed, in_box) = compare_full(&actual, &other, width, height, boxes);
+    if let Some(path) = diff_path {
+        let diff: Vec<u8> = actual
+            .iter()
+            .zip(&other)
+            .map(|(a, b)| a.abs_diff(*b).saturating_mul(8))
+            .collect();
+        let _ = write_ppm(path, width, height, &diff);
+    }
+    println!(
+        "render diff: changed_pixels={changed} of {} (min {min_changed})",
+        width * height
+    );
+    let mut ok = changed >= min_changed;
+    for (&[x0, y0, x1, y1], &count) in boxes.iter().zip(&in_box) {
+        println!("same box {x0},{y0},{x1},{y1}: changed_pixels={count}");
+        ok &= count == 0;
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("render diff check failed: too few pixels changed, or a same box changed");
+        ExitCode::from(1)
+    }
+}
+
+#[allow(clippy::too_many_lines)] // The argument parser and the fingerprint mode, in order.
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(actual_path) = args.next() else {
-        eprintln!(
-            "usage: image-check <actual.ppm> --expected <fingerprint.rgb> [--write] [--diff <out.ppm>]"
-        );
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
     let mut expected_path = None;
     let mut write = false;
     let mut diff_path = None;
+    let mut against_path = None;
+    let mut min_changed = 1usize;
+    let mut boxes = Vec::new();
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--expected" => expected_path = args.next().map(std::path::PathBuf::from),
             "--write" => write = true,
             "--diff" => diff_path = args.next().map(std::path::PathBuf::from),
+            "--against" => against_path = args.next().map(std::path::PathBuf::from),
+            "--min-changed" => {
+                let Some(value) = args.next().and_then(|value| value.parse().ok()) else {
+                    eprintln!("--min-changed needs a pixel count");
+                    return ExitCode::from(2);
+                };
+                min_changed = value;
+            }
+            "--same-box" => {
+                let Some(value) = args.next().as_deref().and_then(parse_box) else {
+                    eprintln!("--same-box needs x0,y0,x1,y1 with x0 < x1 and y0 < y1");
+                    return ExitCode::from(2);
+                };
+                boxes.push(value);
+            }
             "--help" => {
-                eprintln!(
-                    "usage: image-check <actual.ppm> --expected <fingerprint.rgb> [--write] [--diff <out.ppm>]"
-                );
+                eprintln!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
             other => {
@@ -34,6 +140,15 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    }
+    if let Some(other) = against_path {
+        return against(
+            &actual_path,
+            &other,
+            min_changed,
+            &boxes,
+            diff_path.as_deref(),
+        );
     }
     let Ok((width, height, pixels)) = read_ppm(Path::new(&actual_path)) else {
         eprintln!("cannot read PPM {actual_path}");
@@ -191,6 +306,29 @@ mod tests {
             FINGERPRINT_WIDTH * FINGERPRINT_HEIGHT * 3
         );
         assert!(fingerprint.iter().all(|value| *value == 7));
+    }
+
+    #[test]
+    fn full_comparison_counts_changes_and_checks_boxes() {
+        let (width, height) = (8, 4);
+        let base = vec![10u8; width * height * 3];
+        let mut other = base.clone();
+        // Two pixels differ: (1, 1) and (6, 2).
+        other[(width + 1) * 3] = 11;
+        other[(2 * width + 6) * 3 + 2] = 0;
+        let boxes = [[0, 0, 4, 4], [4, 0, 6, 4], [5, 0, 9, 4]];
+        let (changed, in_box) = compare_full(&base, &other, width, height, &boxes);
+        assert_eq!(changed, 2);
+        assert_eq!(
+            in_box,
+            [1, 0, usize::MAX],
+            "past the image counts as changed"
+        );
+        assert_eq!(compare_full(&base, &base, width, height, &[]).0, 0);
+        assert_eq!(parse_box("1,2,3,4"), Some([1, 2, 3, 4]));
+        assert_eq!(parse_box("3,2,1,4"), None);
+        assert_eq!(parse_box("1,2,3"), None);
+        assert_eq!(parse_box("1,2,3,4,5"), None);
     }
 
     #[test]

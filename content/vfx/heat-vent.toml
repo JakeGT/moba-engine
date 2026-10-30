@@ -1,0 +1,24 @@
+# Heat Vent: hot air rising from the Ember map's crystals (ADR-0019), looped by the map's
+# [[effects]]. Client-local and cosmetic: never hashed, signed or sent. High and up only:
+# without distortion the emitter is skipped (no fallback sprite), so lower tiers see nothing.
+# Format: docs/content-authoring.md#vfx
+duration = 2.5                   # at least half the lifespan: two live plays overlap seamlessly
+importance = "low"
+
+[[emitters]]
+blend = "distortion"
+rate = 3
+lifetime = [2.0, 2.4]
+speed = [0.4, 0.7]
+direction = "up"
+spread = 8
+shape = "disc"
+radius = 0.6
+scale_with_radius = true
+size = [1.8, 2.3]
+size_end = 1.4
+offset = [0, 1.6, 0]
+distortion = 0.5
+distortion_end = 0.0
+distortion_scale = 2.0
+distortion_speed = 0.6

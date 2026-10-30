@@ -30,7 +30,7 @@ pub struct PassTiming {
 }
 
 /// GPU timings of the most recent frame whose queries completed.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct GpuTimings {
     passes: [PassTiming; MAX_PASSES],
@@ -43,6 +43,18 @@ pub struct GpuTimings {
     /// submitted, then one more per submitted frame. Unchanged between two calls means the
     /// timings are the same sample (no newer frame completed in between).
     pub frame: u64,
+}
+
+impl Default for GpuTimings {
+    fn default() -> Self {
+        Self {
+            passes: [PassTiming::default(); MAX_PASSES],
+            count: 0,
+            total_ms: 0.0,
+            span_ms: 0.0,
+            frame: 0,
+        }
+    }
 }
 
 impl GpuTimings {

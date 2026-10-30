@@ -728,3 +728,221 @@ fn projectiles_survive_budgets_or_fall_back_to_cubes() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+const HAZE: &str = r#"
+duration = 1.0
+[[emitters]]
+burst = 4
+lifetime = [1, 1]
+size = [2, 2]
+blend = "distortion"
+distortion = 0.6
+distortion_end = 0.2
+distortion_scale = 3
+distortion_speed = 1.5
+fallback_color = [1, 0.4, 0.1, 0.2]
+[[emitters]]
+burst = 3
+lifetime = [1, 1]
+size = [2, 2]
+blend = "distortion"
+distortion = 0.5
+"#;
+
+/// ADR-0019: a heat-haze emitter gives distortion particles carrying (strength, noise scale,
+/// rise speed) where the tier has distortion, its faint additive fallback where not (or
+/// nothing without one); a map's `[[effects]]` loop at their positions and the preview
+/// plays none.
+#[test]
+fn heat_haze_spawns_distortion_or_its_fallback_and_map_effects_loop() {
+    let root = root("haze");
+    std::fs::write(root.join("vfx/haze.toml"), HAZE).expect("write");
+    let view = view(Some(0));
+    let anchors = anchors();
+    for (tier, distortion, fallback) in [
+        (QualityTier::High, 7, 0),
+        (QualityTier::Ultra, 7, 0),
+        (QualityTier::Medium, 0, 4),
+        (QualityTier::Low, 0, 4),
+    ] {
+        let library = VfxLibrary::preview(root.clone(), "haze");
+        let effect = library.preview_effect().expect("the haze loads");
+        let mut vfx = VfxSystem::new(library, tier.vfx_budget(), true);
+        let mut haze = event(Trigger::Zone, 1, None);
+        haze.effect = Some(effect);
+        vfx.trigger(&haze, &view, &anchors);
+        vfx.update(1.0 / 30.0, 1.0, &view, &anchors, NO_SOCKET);
+        let spawns = vfx.frame().spawns;
+        let hazes: Vec<_> = spawns
+            .iter()
+            .filter(|spawn| spawn.blend == ParticleBlend::Distortion)
+            .collect();
+        assert_eq!(hazes.len(), distortion, "{tier}");
+        assert_eq!(spawns.len(), distortion + fallback, "{tier}");
+        if let Some(first) = hazes.first() {
+            assert!((first.color.x - 0.6).abs() < 1e-5);
+            assert!((first.color.y - 3.0).abs() < 1e-5);
+            assert!((first.color.z - 1.5).abs() < 1e-5);
+            assert!((first.color_end.x - 0.2).abs() < 1e-5);
+            // Never a telegraph: an enemy's haze is a plain particle.
+            assert!(
+                hazes
+                    .iter()
+                    .all(|spawn| spawn.role != ParticleRole::EnemyTelegraph)
+            );
+        } else {
+            assert!(
+                spawns
+                    .iter()
+                    .all(|spawn| spawn.blend == ParticleBlend::Additive)
+            );
+            assert!((spawns[0].color.x - 1.0).abs() < 1e-5);
+            assert!((spawns[0].color.w - 0.2).abs() < 1e-5);
+            assert_eq!(spawns[0].color_end.w, 0.0, "the fallback fades out");
+        }
+    }
+
+    // Map effects: one live instance per entry, restarted as each play's emission ends.
+    let mut vfx = VfxSystem::new(
+        VfxLibrary::load(root.clone()),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let vents = [
+        crate::app::map_visuals::AmbientEffect {
+            effect: String::from("haze"),
+            position: Vec3::new(2.0, 0.0, 0.0),
+            radius: 1.0,
+        },
+        crate::app::map_visuals::AmbientEffect {
+            effect: String::from("missing"),
+            position: Vec3::ZERO,
+            radius: 1.0,
+        },
+    ];
+    vfx.sync_ambient(1, &vents);
+    vfx.update(1.0 / 30.0, 1.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(vfx.counters().instances, 1, "the unknown effect is skipped");
+    assert_eq!(vfx.frame().spawns.len(), 7);
+    assert!(
+        vfx.frame()
+            .spawns
+            .iter()
+            .all(|spawn| (spawn.position - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4)
+    );
+    // Same generation: nothing changes; after the 1 s emission window a second play starts.
+    vfx.sync_ambient(1, &[]);
+    let mut restarted = 0;
+    for frame in 0..45 {
+        vfx.update(1.0 / 30.0, 2.0 + frame as f32, &view, &anchors, NO_SOCKET);
+        restarted += vfx.frame().spawns.len();
+    }
+    assert_eq!(restarted, 7, "one more burst after the first play's window");
+    // A cleared system (content reload) resolves the map's effects again.
+    vfx.clear();
+    vfx.sync_ambient(1, &vents);
+    vfx.update(1.0 / 30.0, 50.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(vfx.frame().spawns.len(), 7);
+    // A map without effects stops them starting.
+    vfx.sync_ambient(2, &[]);
+    let mut later = 0;
+    for frame in 0..90 {
+        vfx.update(1.0 / 30.0, 60.0 + frame as f32, &view, &anchors, NO_SOCKET);
+        later += vfx.frame().spawns.len();
+    }
+    assert_eq!(later, 0);
+    // The authoring preview plays no map effects.
+    let mut preview = VfxSystem::new(
+        VfxLibrary::preview(root.clone(), "haze"),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    preview.sync_ambient(1, &vents);
+    preview.update(1.0 / 30.0, 1.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(preview.counters().instances, 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+const FLOOD: &str = r#"
+duration = 0.0
+importance = "low"
+[[emitters]]
+burst = 1
+lifetime = [10, 10]
+size = [1, 1]
+color = [1, 1, 1, 0.5]
+"#;
+
+/// ADR-0019 review: looping map effects can never starve gameplay events. Sixteen entries of
+/// a burst whose particles outlive its (zero) duration forty times over hold at most two
+/// live plays each, never one of the last free slots, and an enemy telegraph still spawns;
+/// an effect with a telegraph emitter or decal is never looped (it would draw as a fake,
+/// full-alpha telegraph).
+#[test]
+fn looping_map_effects_never_starve_events_or_fake_telegraphs() {
+    let root = root("flood");
+    std::fs::write(root.join("vfx/flood.toml"), FLOOD).expect("write");
+    let view = view(Some(0));
+    let anchors = anchors();
+    let mut vfx = VfxSystem::new(
+        VfxLibrary::load(root.clone()),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let entries: Vec<_> = (0..moba_assets::MAX_MAP_EFFECTS)
+        .map(|index| crate::app::map_visuals::AmbientEffect {
+            effect: String::from("flood"),
+            position: Vec3::new(index as f32, 0.0, 0.0),
+            radius: 1.0,
+        })
+        .collect();
+    vfx.sync_ambient(1, &entries);
+    for frame in 0..300 {
+        vfx.update(0.1, frame as f32, &view, &anchors, NO_SOCKET);
+        let live = vfx.counters().instances as usize;
+        assert!(
+            live <= moba_assets::MAX_MAP_EFFECTS * super::AMBIENT_PLAYS,
+            "frame {frame}: {live}"
+        );
+        assert!(live <= super::MAX_INSTANCES - super::EVENT_HEADROOM);
+    }
+    assert_eq!(
+        vfx.counters().instances as usize,
+        moba_assets::MAX_MAP_EFFECTS * super::AMBIENT_PLAYS,
+        "every entry keeps its two plays"
+    );
+    // An enemy hero death (a telegraph ring and decal) still gets its instance.
+    vfx.trigger(&event(Trigger::HeroDeath, 1, None), &view, &anchors);
+    vfx.update(0.1, 400.0, &view, &anchors, NO_SOCKET);
+    assert!(
+        vfx.frame()
+            .spawns
+            .iter()
+            .any(|spawn| spawn.role == ParticleRole::EnemyTelegraph)
+    );
+    assert!(
+        vfx.decals()
+            .iter()
+            .any(|decal| decal.role == moba_render::DecalRole::EnemyTelegraph)
+    );
+    assert_eq!(vfx.counters().dropped_events, 0);
+
+    // A telegraph effect is never looped by a map.
+    let mut fake = VfxSystem::new(
+        VfxLibrary::load(root.clone()),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let telegraph = [crate::app::map_visuals::AmbientEffect {
+        effect: String::from("telegraph"),
+        position: Vec3::ZERO,
+        radius: 1.0,
+    }];
+    fake.sync_ambient(1, &telegraph);
+    for frame in 0..10 {
+        fake.update(0.1, frame as f32, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(fake.counters().instances, 0);
+    assert!(fake.decals().is_empty() && fake.frame().spawns.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}

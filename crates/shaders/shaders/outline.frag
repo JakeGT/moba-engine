@@ -25,6 +25,10 @@ void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     ivec2 last = min(ivec2(push.palette[0].zw), textureSize(outline_ids, 0) - 1);
     uint own = texelFetch(outline_ids, pixel, 0).r;
+    // 8 marks a unit without an outline (ADR-0019's unit mask): outlined like no unit.
+    if (own >= 8u) {
+        own = 0u;
+    }
     int reach = min(int(ceil(push.palette[0].x)), 4);
     uint best = 0u;
     float coverage = 0.0;

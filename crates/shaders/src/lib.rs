@@ -129,6 +129,13 @@ pub const VFX_OIT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx_oi
 /// Weighted blended OIT resolve onto the HDR target.
 pub const VFX_RESOLVE_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_resolve.frag.spv"));
+/// Heat-haze vertex shader (ADR-0019): upright sprites from the distortion list.
+pub const VFX_DISTORT_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_distort.vert.spv"));
+/// Heat-haze fragment shader (ADR-0019): refracts the HDR copy by a capped, depth-tested,
+/// unit-masked offset.
+pub const VFX_DISTORT_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_distort.frag.spv"));
 
 /// Foliage vertex shader (R3b): procedural, wind-animated blades from the instance buffer.
 pub const FOLIAGE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/foliage.vert.spv"));
@@ -355,6 +362,14 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "vfx_resolve.frag",
         spirv: VFX_RESOLVE_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_distort.vert",
+        spirv: VFX_DISTORT_VERT,
+    },
+    ShaderModule {
+        name: "vfx_distort.frag",
+        spirv: VFX_DISTORT_FRAG,
     },
 ];
 

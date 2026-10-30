@@ -388,6 +388,9 @@ const FLAG_ENEMY: u32 = 2;
 /// Height band within which a receiver takes a decal (`MOBA_DECAL_REACH` in `decals.glsl`).
 const DECAL_REACH: f32 = 4.0;
 const FLAG_PROGRESS: u32 = 4;
+/// A telegraph (enemy or allied): its rim and halo bands are marked in the HDR alpha, so the
+/// heat haze never bends them (ADR-0019). Cosmetic decals are never marked.
+const FLAG_MARK: u32 = 8;
 
 /// One decal on the GPU (`DecalRecord` in `decals.glsl`, std430, 64 bytes).
 #[repr(C)]
@@ -551,6 +554,9 @@ fn gpu_decal(decal: &Decal, floor: f32) -> GpuDecal {
     }
     if decal.progress.is_some() {
         flags |= FLAG_PROGRESS;
+    }
+    if decal.style == DecalStyle::Glow && decal.role != DecalRole::Cosmetic {
+        flags |= FLAG_MARK;
     }
     let mut alpha = decal.color.w.clamp(0.0, 1.0);
     if enemy {
@@ -725,6 +731,28 @@ pub fn glow_reference(
         &record,
         decal_coverage(&record, point, pixel.max(1e-4)),
     )
+}
+
+/// The CPU twin of the telegraph mark the terrain, foliage and water shaders write for the
+/// heat haze (ADR-0019, `decal_mark` in `decals.glsl`): the strongest rim or halo coverage of
+/// `decal` at `point` (the HDR alpha there is `1 -` this), with a pixel `pixel` metres wide.
+/// Zero for paint, cosmetic and invisible decals.
+#[must_use]
+pub fn telegraph_mark(decal: &Decal, point: Vec3, pixel: f32) -> f32 {
+    if decal.style != DecalStyle::Glow || !decal.usable() {
+        return 0.0;
+    }
+    let record = gpu_decal(decal, 0.0);
+    decal_mark(&record, decal_coverage(&record, point, pixel.max(1e-4)))
+}
+
+/// One decal's step of `decals.glsl`'s mark: rim and halo of a visible telegraph.
+fn decal_mark(decal: &GpuDecal, coverage: Vec4) -> f32 {
+    let flags = decal.params[1] as u32;
+    if flags & FLAG_GLOW == 0 || flags & FLAG_MARK == 0 || decal.color[3] * decal.params[3] <= 0.0 {
+        return 0.0;
+    }
+    coverage.y.max(coverage.w).clamp(0.0, 1.0)
 }
 
 /// A map's foliage, uploaded once ([`Renderer::set_foliage`](crate::Renderer::set_foliage)).

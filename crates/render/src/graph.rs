@@ -4,6 +4,10 @@
 //! ([`Access`]). [`GraphBuilder::compile`] turns that list into a [`CompiledGraph`]:
 //!
 //! - passes whose outputs nothing consumes are culled;
+//! - a *reserved* pass ([`PassBuilder::reserved`]) shapes the transient slots (lifetimes,
+//!   usage and cross-frame start state) exactly as if it ran, but records nothing and gets
+//!   no barriers: a variant that leaves a pass out (the heat haze on frames without haze,
+//!   ADR-0019) then runs on the same physical transients as the variant that has it;
 //! - transient images get a physical slot, and transients with identical descriptions whose
 //!   lifetimes do not overlap share one slot (pooling/aliasing);
 //! - every hazard (read-after-write, write-after-read, write-after-write, layout change) gets
@@ -18,10 +22,11 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this). R6's
-/// post chain (ADR-0015), R3a's two fog-of-war passes and R3b's two full-water passes
-/// (ADR-0017) bring a frame with everything on (both offscreen passes and the capture
-/// included) to 29.
-pub(crate) const MAX_PASSES: usize = 32;
+/// post chain (ADR-0015), R2b's contact shadows and outlines (ADR-0016), R3a's two
+/// fog-of-war passes, R3b's two full-water passes (ADR-0017) and the heat haze's two passes
+/// (ADR-0019) bring a frame with everything on (both offscreen passes and the capture
+/// included) to 33.
+pub(crate) const MAX_PASSES: usize = 40;
 /// Most resources (imported + transient) one graph may declare (at most 64: a pass's
 /// resource set is a `u64` bit mask).
 pub(crate) const MAX_RESOURCES: usize = 48;
@@ -430,6 +435,7 @@ struct PassDecl<T> {
     tag: T,
     accesses: Vec<(ResourceId, Access)>,
     side_effect: bool,
+    reserved: bool,
 }
 
 /// Why a graph failed to compile.
@@ -504,6 +510,16 @@ impl<T> PassBuilder<'_, T> {
         self.pass.side_effect = true;
         self
     }
+
+    /// Reserves the pass's place in the transient plan without running it: its accesses
+    /// count towards slot lifetimes, usage and start state as if the pass were live, but it
+    /// is never culled, needs nothing from earlier passes, gets no barriers and is left out
+    /// of [`CompiledGraph::passes`]. The variant that runs the pass and the one that reserves
+    /// it then share transients ([`CompiledGraph::shares_transients_with`]).
+    pub(crate) fn reserved(self) -> Self {
+        self.pass.reserved = true;
+        self
+    }
 }
 
 impl<T: Copy> GraphBuilder<T> {
@@ -564,6 +580,7 @@ impl<T: Copy> GraphBuilder<T> {
             tag,
             accesses: Vec::with_capacity(4),
             side_effect: false,
+            reserved: false,
         });
         let pass = self.passes.last_mut().expect("pass was just pushed");
         PassBuilder { pass }
@@ -881,6 +898,11 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         .collect();
     let mut live = vec![false; passes.len()];
     for (index, pass) in passes.iter().enumerate().rev() {
+        if pass.reserved {
+            // Shapes the slots below; never needs anything itself.
+            live[index] = true;
+            continue;
+        }
         let produces_needed = pass
             .accesses
             .iter()
@@ -920,6 +942,13 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
         for &(resource, access) in &pass.accesses {
             let decl = &resources[resource.index()];
             let info = access.info();
+            if pass.reserved {
+                if matches!(decl.kind, Kind::Transient(_)) {
+                    first_use[resource.index()].get_or_insert(order);
+                    last_use[resource.index()] = order;
+                }
+                continue;
+            }
             if discards(decl) && info.reads_previous && !written[resource.index()] {
                 return Err(GraphError::ReadBeforeWrite {
                     pass: pass.name,
@@ -1023,6 +1052,9 @@ fn compile<T: Copy>(builder: GraphBuilder<T>) -> Result<CompiledGraph<T>, GraphE
     for (index, pass) in passes.into_iter().enumerate() {
         if !live[index] {
             culled.push(pass.name);
+            continue;
+        }
+        if pass.reserved {
             continue;
         }
         let mut barriers = Vec::with_capacity(pass.accesses.len());
