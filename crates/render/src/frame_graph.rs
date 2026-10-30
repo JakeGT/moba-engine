@@ -74,8 +74,6 @@ pub(crate) const LDR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 pub(crate) const AO_RAW_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 /// The blurred occlusion the scene samples.
 pub(crate) const AO_FORMAT: vk::Format = vk::Format::R8_UNORM;
-/// The adapted exposure (EV), 1×1: blendable on every device.
-pub(crate) const EXPOSURE_FORMAT: vk::Format = vk::Format::R16_SFLOAT;
 
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,7 +193,10 @@ pub(crate) struct FrameSpec {
     pub(crate) vfx: VfxMode,
     /// MSAA 4× scene attachments.
     pub(crate) msaa: bool,
-    /// The depth prepass and the AO passes.
+    /// The main view's depth prepass on its own (R2b's contact shadows and outlines may ask
+    /// for it); [`Self::ambient_occlusion`] implies it, see [`Self::has_prepass`].
+    pub(crate) prepass: bool,
+    /// The AO passes (and with them the depth prepass).
     pub(crate) ambient_occlusion: bool,
     /// The bloom up-chain (and the composite's bloom input).
     pub(crate) bloom: bool,
@@ -203,6 +204,8 @@ pub(crate) struct FrameSpec {
     pub(crate) auto_exposure: bool,
     /// Bloom mip format (`B10G11R11_UFLOAT_PACK32` where supported).
     pub(crate) bloom_format: vk::Format,
+    /// The 1×1 adapted-exposure format (`R32_SFLOAT` where blendable, else `R16_SFLOAT`).
+    pub(crate) exposure_format: vk::Format,
     /// The FXAA pass.
     pub(crate) fxaa: bool,
     /// The upscale pass (render scale below 1 or dynamic resolution).
@@ -224,13 +227,20 @@ impl FrameSpec {
             shadow: None,
             vfx: VfxMode::Off,
             msaa: false,
+            prepass: false,
             ambient_occlusion: false,
             bloom: false,
             auto_exposure: false,
             bloom_format: vk::Format::R16G16B16A16_SFLOAT,
+            exposure_format: vk::Format::R32_SFLOAT,
             fxaa: false,
             upscale: false,
         }
+    }
+
+    /// Whether the depth prepass runs: asked for, or needed by AO.
+    pub(crate) const fn has_prepass(&self) -> bool {
+        self.prepass || self.ambient_occlusion
     }
 
     /// Whether the bloom down-chain runs (bloom, or metering for auto exposure).
@@ -296,10 +306,12 @@ pub(crate) fn build(
         },
     );
     let msaa = spec.msaa.then(|| MsaaResources {
+        // Resolved at the end of the scene pass and never stored (DONT_CARE): transient.
         color: graph.transient_image(
             "msaa-hdr",
             ImageDesc {
                 samples: vk::SampleCountFlags::TYPE_4,
+                extra_usage: vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
                 ..image(spec.hdr_format, render)
             },
         ),
@@ -451,18 +463,23 @@ pub(crate) fn build(
             .access(shadow_map, Access::DepthWrite)
             .access(bones, Access::VertexStorageRead);
     }
-    if let Some(ao) = ao {
+    let prepass = spec.has_prepass();
+    if prepass {
         // The prepass writes the depth the AO reads and the scene tests against; with MSAA it
-        // renders the multisampled depth and resolves sample 0 into `depth`.
-        let prepass = graph
+        // renders the multisampled depth and resolves sample 0 into `depth`. (An extra
+        // colour output, such as R2b's outline IDs, is one more access on this pass and a
+        // colour attachment in `ScenePass::record_prepass`.)
+        let pass = graph
             .pass("prepass", PassKind::Prepass)
             .access(bones, Access::VertexStorageRead);
         let _ = match msaa {
-            Some(msaa) => prepass
-                .access(msaa.depth, Access::DepthWrite)
+            Some(msaa) => pass
+                .access(msaa.depth, Access::DepthWriteResolveSource)
                 .access(depth, Access::DepthResolveWrite),
-            None => prepass.access(depth, Access::DepthWrite),
+            None => pass.access(depth, Access::DepthWrite),
         };
+    }
+    if let Some(ao) = ao {
         let _ = graph
             .pass("ao", PassKind::Ao)
             .access(depth, Access::SampledFragment)
@@ -476,7 +493,7 @@ pub(crate) fn build(
         .pass("scene", PassKind::Scene)
         .access(hdr, Access::ColorWrite)
         .access(bones, Access::VertexStorageRead);
-    let scene_depth = if ao.is_some() {
+    let scene_depth = if prepass {
         Access::DepthReadWrite
     } else {
         Access::DepthWrite
@@ -485,13 +502,13 @@ pub(crate) fn build(
         // Colour resolves into `hdr`; without the prepass the depth resolves too (with it,
         // `depth` already holds the prepass's resolved depth, which the scene reproduces).
         Some(msaa) => {
-            let scene = scene
-                .access(msaa.color, Access::ColorWrite)
-                .access(msaa.depth, scene_depth);
-            if ao.is_some() {
-                scene
+            let scene = scene.access(msaa.color, Access::ColorWrite);
+            if prepass {
+                scene.access(msaa.depth, scene_depth)
             } else {
-                scene.access(depth, Access::DepthResolveWrite)
+                scene
+                    .access(msaa.depth, Access::DepthWriteResolveSource)
+                    .access(depth, Access::DepthResolveWrite)
             }
         }
         None => scene.access(depth, scene_depth),
@@ -755,16 +772,17 @@ mod tests {
         build(&shadowed_spec(), capture, offscreen).expect("the shadowed frame graph compiles")
     }
 
-    /// Every post topology the renderer can build (2^7 switch combinations), with and
-    /// without the OIT particle passes.
+    /// Every post topology the renderer can build (2^8 switch combinations, the standalone
+    /// prepass included) with each particle mode: off, unsorted (Low) and OIT.
     fn post_specs() -> Vec<FrameSpec> {
-        (0..256u32)
+        (0..768u32)
             .map(|bits| FrameSpec {
-                vfx: if bits & 128 != 0 {
-                    VfxMode::Oit
-                } else {
-                    VfxMode::Off
+                vfx: match bits >> 8 {
+                    0 => VfxMode::Off,
+                    1 => VfxMode::Unsorted,
+                    _ => VfxMode::Oit,
                 },
+                prepass: bits & 128 != 0,
                 msaa: bits & 1 != 0,
                 ambient_occlusion: bits & 2 != 0,
                 bloom: bits & 4 != 0,
@@ -983,7 +1001,7 @@ mod tests {
             }
             let passes = kinds(&base);
             let has = |kind| passes.contains(&kind);
-            assert_eq!(has(PassKind::Prepass), spec.ambient_occlusion, "{spec:?}");
+            assert_eq!(has(PassKind::Prepass), spec.has_prepass(), "{spec:?}");
             assert_eq!(has(PassKind::Ao), spec.ambient_occlusion);
             assert_eq!(has(PassKind::AoBlur), spec.ambient_occlusion);
             assert_eq!(has(PassKind::BloomDown(0)), spec.bloom_chain());
@@ -1001,14 +1019,21 @@ mod tests {
             assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > scene));
             // Particles land in the HDR target after the scene and before any post pass
             // reads it (bloom, exposure metering, composite).
-            if spec.vfx == VfxMode::Oit {
-                let resolve = at(PassKind::VfxResolve).expect("vfx resolve");
-                assert_eq!(at(PassKind::VfxDraw), Some(scene + 1), "{spec:?}");
-                assert_eq!(resolve, scene + 2);
-                assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > resolve));
-                assert!(resolve < composite);
-            } else {
-                assert!(at(PassKind::VfxDraw).is_none());
+            match spec.vfx {
+                VfxMode::Oit => {
+                    let resolve = at(PassKind::VfxResolve).expect("vfx resolve");
+                    assert_eq!(at(PassKind::VfxDraw), Some(scene + 1), "{spec:?}");
+                    assert_eq!(resolve, scene + 2);
+                    assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > resolve));
+                    assert!(resolve < composite);
+                }
+                VfxMode::Unsorted => {
+                    // Straight into the HDR target: no resolve pass, no OIT targets.
+                    assert_eq!(at(PassKind::VfxDraw), Some(scene + 1), "{spec:?}");
+                    assert!(at(PassKind::VfxResolve).is_none());
+                    assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > scene + 1));
+                }
+                VfxMode::Off => assert!(at(PassKind::VfxDraw).is_none()),
             }
             assert!(at(PassKind::Exposure).is_none_or(|exposure| exposure < composite));
             assert!(at(PassKind::Fxaa).is_none_or(|fxaa| fxaa > composite));

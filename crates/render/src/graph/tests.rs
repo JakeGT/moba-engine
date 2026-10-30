@@ -733,12 +733,17 @@ fn a_depth_resolve_is_made_visible_to_a_later_sampled_read() {
     let depth = graph.transient_image("depth", DEPTH);
     let _ = graph
         .pass("scene", 0)
-        .access(msaa_depth, Access::DepthWrite)
+        .access(msaa_depth, Access::DepthWriteResolveSource)
         .access(depth, Access::DepthResolveWrite)
         .access(target, Access::ColorWrite);
     let _ = graph
         .pass("post", 1)
         .access(depth, Access::SampledFragment)
+        .access(target, Access::ColorReadWrite);
+    // A later writer of the multisampled source waits for the resolve's read of it.
+    let _ = graph
+        .pass("again", 2)
+        .access(msaa_depth, Access::DepthReadWrite)
         .access(target, Access::ColorReadWrite);
     let compiled = graph.compile().expect("compiles");
     // Different sample counts never alias.
@@ -751,6 +756,15 @@ fn a_depth_resolve_is_made_visible_to_a_later_sampled_read() {
     assert!(read.src_stage.contains(S::COLOR_ATTACHMENT_OUTPUT));
     assert!(read.src_access.contains(A::COLOR_ATTACHMENT_WRITE));
     assert_eq!(read.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+    let rewrite = compiled.passes()[2]
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == msaa_depth)
+        .expect("source -> rewrite barrier");
+    assert!(
+        rewrite.src_stage.contains(S::COLOR_ATTACHMENT_OUTPUT),
+        "{rewrite:?}"
+    );
 }
 
 #[test]

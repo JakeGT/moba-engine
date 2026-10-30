@@ -973,7 +973,7 @@ auto_exposure = true           # opt in to eye adaptation (default off)
 exposure_min = -1.0            # auto-exposure clamp in EV stops, -8..=8 (default -2)
 exposure_max = 1.0             # -8..=8, at least exposure_min (default 2)
 adaptation = 1.5               # adaptation rate per second, 0.1..=10 (default 1.5)
-bloom = 0.06                   # bloom strength, 0..=0.25 (default 0.04)
+bloom = 0.06                   # bloom strength, 0..=0.1 (default 0.04)
 grading = "ember"              # <root>/grading/ember.cube: a colour-grading 3D LUT
 grading_strength = 0.9         # 0..=1: blend from the ungraded to the graded colour
 ```
@@ -985,8 +985,8 @@ grading_strength = 0.9         # 0..=1: blend from the ungraded to the graded co
   unset bound takes its default, so `exposure_min = 3` alone is an error (above the default
   `exposure_max` of 2). Captures and golden images pin auto exposure off so they stay
   deterministic.
-- **Bloom** is kept low by default so bright surfaces glow; the range stops at 0.25 so a map
-  cannot wash its units out.
+- **Bloom** is kept low by default so bright surfaces glow; the range stops at 0.1 so a map
+  cannot wash its units and team colours out.
 - **Grading names** follow the model-name rules (1..=32 of `[A-Za-z0-9_-]`) and resolve to
   `<root>/grading/<name>.cube`.
 - **Limits.** Unknown keys, wrong types and out-of-range or non-finite numbers are errors,
@@ -1009,9 +1009,14 @@ The loader accepts:
 8 MiB (a 64³ LUT with six decimals is about 7 MB). The shipped LUTs are 17³ (about 130 KB).
 
 **Readability.** Grades are art direction, not a filter: they must keep team colours
-distinguishable (ADR-0011 rule 1). Team red stays red and team blue stays blue, with their
-hues within about 15°; keep blue-channel loss small in warm grades. The `grade-bake` presets
-are tested for exactly this; check a hand-made LUT with `grade-bake apply` on a capture.
+distinguishable (ADR-0011 rule 1), and this is **checked**. For the standard red/blue unit
+colours and the colour-blind palette's orange/sky blue, at the map's `grading_strength` and
+at its exposure ± 1 EV, the grade must move no team hue by 20° or more, keep each team's
+chroma (brightest minus darkest channel) at 0.2 or more, and keep the two teams at least 90°
+apart in hue. `grade-bake bake` refuses a grade that fails and `grade-bake info` reports the
+result for any `.cube`; the client checks a map's grade when it loads it and, if it fails,
+logs the rule and draws the map ungraded. Keep blue-channel loss small in warm grades, and
+look at a hand-made LUT with `grade-bake apply` on a capture.
 
 **LUTs** come from `moba-tools grade-bake`, which evaluates a deterministic grade on every
 lattice point: per-channel lift/gamma/gain (`out = (gain·(x + lift·(1 − x)))^(1/gamma)`),

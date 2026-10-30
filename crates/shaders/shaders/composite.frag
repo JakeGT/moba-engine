@@ -63,7 +63,8 @@ void main() {
     if (push.vignette > 0.0) {
         vec2 centred = (gl_FragCoord.xy * push.dst_inv - 0.5) * vec2(push.aspect, 1.0);
         float radius = length(centred) / length(vec2(push.aspect, 1.0) * 0.5);
-        float edge = smoothstep(0.45, 1.0, radius) * push.vignette;
+        // Only the outer corners: the playfield and the HUD-adjacent edges stay readable.
+        float edge = smoothstep(0.6, 1.0, radius) * push.vignette;
         display = mix(display, push.vignette_color.rgb, edge);
     }
     display = clamp(display, 0.0, 1.0);

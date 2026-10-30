@@ -18,7 +18,7 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this). R6's
-/// post chain (ADR-0015) brings a full frame to about 27.
+/// post chain (ADR-0015) brings a frame with everything on to 25.
 pub(crate) const MAX_PASSES: usize = 32;
 /// Most resources (imported + transient) one graph may declare (at most 64: a pass's
 /// resource set is a `u64` bit mask).
@@ -49,6 +49,10 @@ pub(crate) enum Access {
     /// Depth attachment that loads the previous contents, tests and writes (the scene after
     /// a depth prepass, ADR-0015).
     DepthReadWrite,
+    /// [`Self::DepthWrite`] on a multisampled attachment that is also the **source** of a
+    /// depth resolve: the resolve reads it at `COLOR_ATTACHMENT_OUTPUT` with
+    /// `COLOR_ATTACHMENT_READ`, which a later writer must wait for.
+    DepthWriteResolveSource,
     /// Single-sample depth written by a multisample depth resolve at the end of a rendering
     /// scope. Resolves run at `COLOR_ATTACHMENT_OUTPUT` with `COLOR_ATTACHMENT_WRITE`; the
     /// fragment-test stages and depth write are included so the access is conservative.
@@ -139,6 +143,16 @@ impl Access {
                 A::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 true,
+                U::DEPTH_STENCIL_ATTACHMENT,
+            ),
+            Self::DepthWriteResolveSource => (
+                S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS | S::COLOR_ATTACHMENT_OUTPUT,
+                A::DEPTH_STENCIL_ATTACHMENT_READ
+                    | A::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | A::COLOR_ATTACHMENT_READ,
+                A::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                false,
                 U::DEPTH_STENCIL_ATTACHMENT,
             ),
             Self::DepthResolveWrite => (

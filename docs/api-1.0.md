@@ -257,8 +257,10 @@ public fields are `#[non_exhaustive]`; `VatAnimation`, `VatPlayer`, `SkinLod` an
 `BlendSpace2d` have private fields and constructors; and R6's post-processing assets
 (ADR-0015: `MapPost`/`MapVisuals::post` with the `DEFAULT_BLOOM_STRENGTH`, `DEFAULT_ADAPTATION`, `DEFAULT_EXPOSURE_MIN`/`MAX` defaults, and the
 `.cube` grading LUT `GradingLut` (`identity`, `from_texels`, `parse`, `load_file`, `sample`,
-`to_cube_string`), `GradingLutError`, `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
-`MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`; `GradingLut`, `GradingLutError` and `MapPost`
+`to_cube_string`, `check_team_readability`), `GradingLutError` (`Unreadable` for the
+readability check), `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
+`MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`, and the readability rule's
+`READABILITY_TEAMS`, `MAX_TEAM_HUE_SHIFT`, `MIN_TEAM_CHROMA`, `MIN_TEAM_HUE_SEPARATION`; `GradingLut`, `GradingLutError` and `MapPost`
 are `#[non_exhaustive]`).
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
   its types, so it carries the Engine-tier promise.

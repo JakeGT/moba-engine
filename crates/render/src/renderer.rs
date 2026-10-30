@@ -380,6 +380,8 @@ pub struct Renderer {
     last_frame_at: Option<Instant>,
     /// The next frame snaps the adapted exposure to the metered value.
     exposure_reset: bool,
+    /// Adaptation time not yet applied (steps below the half-float minimum are deferred).
+    exposure_pending: f32,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -477,7 +479,9 @@ impl Renderer {
             );
         }
         let mut post_config = config.effective_post();
-        if post_config.anti_aliasing == AntiAliasing::Msaa4 && !device.msaa4 {
+        if post_config.anti_aliasing == AntiAliasing::Msaa4
+            && !(device.msaa4 && targets::supports_msaa4(&device, hdr_format, depth_format))
+        {
             eprintln!("[render] 4x MSAA unsupported for the scene targets; using FXAA");
             post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
         }
@@ -527,10 +531,13 @@ impl Renderer {
             shadow,
             vfx: vfx_mode,
             msaa: post_config.anti_aliasing == AntiAliasing::Msaa4,
+            // Only AO asks for the prepass today; R2b's contact shadows will too.
+            prepass: false,
             ambient_occlusion: post_config.ambient_occlusion,
             bloom: post_config.bloom,
             auto_exposure: post_config.auto_exposure,
             bloom_format: targets::choose_bloom_format(&device),
+            exposure_format: targets::choose_exposure_format(&device),
             fxaa: post_config.anti_aliasing == AntiAliasing::Fxaa,
             upscale: post_config.scaled(),
         };
@@ -609,7 +616,7 @@ impl Renderer {
                 } else {
                     vk::SampleCountFlags::TYPE_1
                 },
-                prepass: frame_spec.ambient_occlusion,
+                prepass: frame_spec.has_prepass(),
             },
             config.skinning,
         )?;
@@ -712,6 +719,7 @@ impl Renderer {
             }),
             last_frame_at: None,
             exposure_reset: true,
+            exposure_pending: 0.0,
             device,
             surface,
             instance,
@@ -1462,11 +1470,18 @@ impl Renderer {
         let dt = self
             .last_frame_at
             .map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.25));
-        let adaptation = if self.exposure_reset {
-            1.0
+        let min_step = if self.frame_spec.exposure_format == vk::Format::R16_SFLOAT {
+            crate::post::MIN_HALF_ADAPTATION_STEP
         } else {
-            1.0 - (-dt * self.post.look().adaptation).exp()
+            0.0
         };
+        let adaptation = crate::post::adaptation_step(
+            &mut self.exposure_pending,
+            dt,
+            self.post.look().adaptation,
+            min_step,
+            self.exposure_reset,
+        );
         let post_frame = PostFrame {
             render: self.render_region(),
             swapchain: self.swapchain.extent,
@@ -1587,7 +1602,7 @@ impl Renderer {
         let ldr_view = view_of(resources.ldr);
         let ldr2_view = view_of(resources.ldr2);
         let render_extent = self.render_extent;
-        let prepass = resources.ao.is_some();
+        let prepass = self.frame_spec.has_prepass();
         let bindings = self.bindings(plan, frame_index, swapchain_image, capture_buffer);
         // Query resets run first in submission order, ahead of every timestamp write.
         self.profiler.begin_frame(command_buffers[0], frame_index);

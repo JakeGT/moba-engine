@@ -16,10 +16,14 @@ const FLASH_DECAY: f32 = 2.5;
 /// Death fade rates per second: towards grey while dead, back to colour on respawn.
 const DEATH_FADE_IN: f32 = 1.5;
 const DEATH_FADE_OUT: f32 = 4.0;
-/// Greyest the dead view gets (team colours stay faintly visible).
-const DEATH_DESATURATION: f32 = 0.85;
-/// The vignette's colour: a dark red, in display space.
-const VIGNETTE_COLOR: [f32; 3] = [0.55, 0.02, 0.02];
+/// Greyest the dead view gets: team colours stay clearly distinguishable while the player
+/// spectates their team (ADR-0015 §7: nothing may blur team colours).
+const DEATH_DESATURATION: f32 = 0.6;
+/// The vignette's colour: a neutral near-black in display space. Not red: red is the default
+/// enemy colour, and a hue would fight the colour-blind palettes.
+const VIGNETTE_COLOR: [f32; 3] = [0.04, 0.04, 0.05];
+/// Strongest vignette at the screen corners (damage flash and low-health pulse alike).
+const MAX_VIGNETTE: f32 = 0.45;
 
 /// Which effects the player allows (client settings).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +42,24 @@ impl ScreenFxSettings {
         damage_vignette: true,
         low_health_pulse: true,
     };
+
+    /// Every effect off.
+    pub(crate) const NONE: Self = Self {
+        death_desaturation: false,
+        damage_vignette: false,
+        low_health_pulse: false,
+    };
+
+    /// The settings a run uses: a capture (`MOBA_CAPTURE`, a map-switch capture) turns every
+    /// effect off, since they advance on wall-clock time and would make captures differ
+    /// between runs, unless `preview` holds one effect explicitly (it is time-independent).
+    pub(crate) const fn for_run(self, capture: bool, preview: Option<Preview>) -> Self {
+        if capture && preview.is_none() {
+            Self::NONE
+        } else {
+            self
+        }
+    }
 }
 
 /// A fixed effect for captures and screenshots (`MOBA_SCREEN_EFFECTS_PREVIEW`).
@@ -140,7 +162,7 @@ impl ScreenFx {
             0.0
         };
         let damage = if settings.damage_vignette {
-            0.6 * flash
+            MAX_VIGNETTE * flash
         } else {
             0.0
         };
@@ -148,7 +170,7 @@ impl ScreenFx {
             Some(fraction) if settings.low_health_pulse => {
                 // Stronger the lower the health, never fully off while low; a captured
                 // preview holds the peak so the frame is deterministic.
-                let depth = 0.2 + 0.3 * (LOW_HEALTH - fraction).max(0.0) / LOW_HEALTH;
+                let depth = 0.15 + 0.2 * (LOW_HEALTH - fraction).max(0.0) / LOW_HEALTH;
                 let wave = if self.preview.is_some() {
                     1.0
                 } else {
@@ -160,7 +182,7 @@ impl ScreenFx {
         };
         ScreenEffects::NONE
             .with_desaturation(desaturation)
-            .with_vignette(damage.max(pulse), VIGNETTE_COLOR)
+            .with_vignette(damage.max(pulse).min(MAX_VIGNETTE), VIGNETTE_COLOR)
     }
 }
 
@@ -179,7 +201,14 @@ mod tests {
         );
         fx.observe(800, 1_000, false);
         let hit = fx.update(0.0);
-        assert!(hit.vignette > 0.4, "{hit:?}");
+        assert!(
+            hit.vignette > 0.3 && hit.vignette <= MAX_VIGNETTE,
+            "{hit:?}"
+        );
+        assert_eq!(
+            hit.vignette_color, VIGNETTE_COLOR,
+            "a neutral dark, never a team hue"
+        );
         assert_eq!(hit.desaturation, 0.0);
         // Frame steps are capped at 0.25 s, so a hitch cannot skip the flash entirely.
         assert!(fx.update(1.0).vignette > 0.0);
@@ -247,5 +276,24 @@ mod tests {
             assert!(first.vignette > 0.0 || first.desaturation > 0.0);
         }
         assert_eq!(Preview::from_name("blood"), None);
+    }
+
+    #[test]
+    fn captures_pin_the_effects_off_unless_a_preview_is_set() {
+        let run = ScreenFxSettings::ALL.for_run(true, None);
+        assert_eq!(run, ScreenFxSettings::NONE);
+        let mut fx = ScreenFx::new(run, None);
+        fx.observe(100, 1_000, false);
+        fx.observe(50, 1_000, true);
+        assert_eq!(fx.update(0.1), ScreenEffects::NONE);
+        let preview = Some(Preview::Death);
+        assert_eq!(
+            ScreenFxSettings::ALL.for_run(true, preview),
+            ScreenFxSettings::ALL
+        );
+        assert_eq!(
+            ScreenFxSettings::ALL.for_run(false, None),
+            ScreenFxSettings::ALL
+        );
     }
 }

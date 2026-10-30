@@ -43,7 +43,7 @@
 //! exposure_min = -1.0            # auto-exposure EV clamp, -8..=8 (default -2)
 //! exposure_max = 1.0             # -8..=8, >= exposure_min (default 2)
 //! adaptation = 1.5               # adaptation rate per second, 0.1..=10 (default 1.5)
-//! bloom = 0.05                   # bloom strength, 0..=0.25 (default 0.04)
+//! bloom = 0.05                   # bloom strength, 0..=0.1 (default 0.04)
 //! grading = "ember"              # <root>/grading/ember.cube colour-grading LUT
 //! grading_strength = 0.9         # 0..=1 blend towards the graded colour
 //! ```
@@ -93,7 +93,7 @@ pub const DEFAULT_EXPOSURE_MAX: f32 = 2.0;
 const EXPOSURE_RANGE: (f32, f32) = (-4.0, 4.0);
 const EXPOSURE_CLAMP_RANGE: (f32, f32) = (-8.0, 8.0);
 const ADAPTATION_RANGE: (f32, f32) = (0.1, 10.0);
-const MAX_BLOOM_STRENGTH: f32 = 0.25;
+const MAX_BLOOM_STRENGTH: f32 = 0.1;
 
 const WALL_HEIGHT_RANGE: (f32, f32) = (0.5, 32.0);
 const PROP_HEIGHT_RANGE: (f32, f32) = (0.1, 32.0);
@@ -138,7 +138,8 @@ pub struct MapPost {
     pub exposure_max: Option<f32>,
     /// Eye-adaptation rate per second, `0.1..=10` (default [`DEFAULT_ADAPTATION`]).
     pub adaptation: Option<f32>,
-    /// Bloom strength, `0..=0.25` (default [`DEFAULT_BLOOM_STRENGTH`]).
+    /// Bloom strength, `0..=0.1` (default [`DEFAULT_BLOOM_STRENGTH`]): more washes team
+    /// colours and silhouettes out (ADR-0015 §3).
     pub bloom: Option<f32>,
     /// Colour-grading LUT name: `<root>/grading/<name>.cube`
     /// ([`grading_path`](crate::grading_path)).
@@ -480,7 +481,7 @@ fn check_post(raw: Option<RawPost>) -> Result<MapPost, MapVisualsError> {
             ADAPTATION_RANGE,
             "adaptation must be 0.1..=10 per second",
         )?,
-        bloom: check_scalar(raw.bloom, MAX_BLOOM_STRENGTH, "bloom must be 0..=0.25")?,
+        bloom: check_scalar(raw.bloom, MAX_BLOOM_STRENGTH, "bloom must be 0..=0.1")?,
         grading: match raw.grading {
             Some(name) if !valid_mesh_name(&name) => {
                 return Err(MapVisualsError::Invalid(
@@ -779,7 +780,7 @@ color = [0.2, 0.2, 0.2]
             "adaptation = 0.1",
             "adaptation = 10",
             "bloom = 0",
-            "bloom = 0.25",
+            "bloom = 0.1",
             "grading_strength = 0",
             "auto_exposure = false",
         ] {
@@ -798,7 +799,7 @@ color = [0.2, 0.2, 0.2]
             "adaptation = 0",
             "adaptation = 11",
             "bloom = -0.01",
-            "bloom = 0.3",
+            "bloom = 0.11",
             "bloom = inf",
             "grading = \"../ember\"",
             "grading = \"ember.cube\"",

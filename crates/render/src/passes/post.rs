@@ -17,9 +17,7 @@ use moba_core::math::{Mat4, Vec3, Vec4};
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
-use crate::frame_graph::{
-    AO_FORMAT, AO_RAW_FORMAT, BLOOM_LEVELS, EXPOSURE_FORMAT, FrameSpec, LDR_FORMAT,
-};
+use crate::frame_graph::{AO_FORMAT, AO_RAW_FORMAT, BLOOM_LEVELS, FrameSpec, LDR_FORMAT};
 use crate::pipeline::{self, FullscreenBlend};
 use crate::post::{PostConfig, PostLook, ScreenEffects, UpscaleFilter};
 use crate::resources::{
@@ -147,8 +145,8 @@ pub(crate) struct PostFrame {
     pub(crate) render: Region,
     /// The swapchain extent (upscale target).
     pub(crate) swapchain: vk::Extent2D,
-    /// Exposure adaptation factor this frame (`1` resets to the metered value).
-    pub(crate) adaptation: f32,
+    /// Exposure adaptation this frame (a reset clears the image and takes the metered value).
+    pub(crate) adaptation: crate::post::AdaptationStep,
     pub(crate) effects: ScreenEffects,
     /// The main camera (GTAO reconstructs positions with it).
     pub(crate) view_proj: Mat4,
@@ -363,7 +361,7 @@ impl PostPass {
                     width: 1,
                     height: 1,
                 },
-                EXPOSURE_FORMAT,
+                spec.exposure_format,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_DST,
@@ -747,8 +745,9 @@ impl PostPass {
     }
 
     /// Meters the last bloom mip and blends the clamped target EV into the exposure image
-    /// with factor `frame.adaptation`. A map without auto exposure keeps the pass but
-    /// writes 0 EV at once, so turning it on later starts from neutral.
+    /// with `frame.adaptation`'s factor; a reset clears the image first, so a non-finite
+    /// value can never stay latched. A map without auto exposure keeps the pass but writes
+    /// 0 EV at once, so turning it on later starts from neutral.
     pub(crate) fn record_exposure(
         &self,
         device: &DeviceContext,
@@ -764,10 +763,15 @@ impl PostPass {
             (
                 self.look.exposure_min,
                 self.look.exposure_max,
-                frame.adaptation.clamp(0.0, 1.0),
+                frame.adaptation.factor.clamp(0.0, 1.0),
             )
         } else {
             (0.0, 0.0, 1.0)
+        };
+        let load = if frame.adaptation.reset {
+            vk::AttachmentLoadOp::CLEAR
+        } else {
+            vk::AttachmentLoadOp::LOAD
         };
         let push = ExposurePush {
             scale: source.scale(),
@@ -786,7 +790,7 @@ impl PostPass {
             command_buffer,
             target,
             extent,
-            vk::AttachmentLoadOp::LOAD,
+            load,
             super::full_viewport(extent),
         );
         // SAFETY: the exposure pipeline declares BLEND_CONSTANTS dynamic.
@@ -1085,7 +1089,7 @@ fn build_pipelines(
         exposure: optional(
             spec.auto_exposure,
             "exposure.frag",
-            EXPOSURE_FORMAT,
+            spec.exposure_format,
             FullscreenBlend::Constant,
         )?,
         fxaa: optional(spec.fxaa, "fxaa.frag", fxaa_format, FullscreenBlend::None)?,
@@ -1196,7 +1200,10 @@ mod tests {
                 alloc: extent(1920, 1080),
             },
             swapchain: extent(1920, 1080),
-            adaptation: 1.0,
+            adaptation: crate::post::AdaptationStep {
+                factor: 1.0,
+                reset: true,
+            },
             effects: ScreenEffects::NONE,
             view_proj,
             eye,

@@ -114,6 +114,49 @@ pub enum GradingLutError {
         /// The line.
         line: usize,
     },
+    /// The LUT fails the team-colour readability check
+    /// ([`GradingLut::check_team_readability`]); the text names the rule.
+    Unreadable(&'static str),
+}
+
+/// Display-space team colour pairs [`GradingLut::check_team_readability`] holds a grade to:
+/// the standard red and blue unit tints, and the colour-blind palette's Okabe-Ito orange and
+/// sky blue.
+pub const READABILITY_TEAMS: [[[f32; 3]; 2]; 2] = [
+    [[0.85, 0.2, 0.2], [0.2, 0.4, 0.9]],
+    [[0.9, 0.6, 0.0], [0.34, 0.7, 0.9]],
+];
+/// Largest hue shift (degrees) a grade may apply to a team colour.
+pub const MAX_TEAM_HUE_SHIFT: f32 = 20.0;
+/// Smallest chroma (max − min channel) a graded team colour keeps.
+pub const MIN_TEAM_CHROMA: f32 = 0.2;
+/// Smallest hue separation (degrees) between the two graded team colours.
+pub const MIN_TEAM_HUE_SEPARATION: f32 = 90.0;
+
+/// HSV hue in degrees (0 for a grey).
+fn hue([r, g, b]: [f32; 3]) -> f32 {
+    let max = r.max(g).max(b);
+    let delta = max - r.min(g).min(b);
+    if delta <= 1e-6 {
+        return 0.0;
+    }
+    let sector = if r >= g && r >= b {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if g >= b {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    sector * 60.0
+}
+
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
+fn chroma(rgb: [f32; 3]) -> f32 {
+    rgb[0].max(rgb[1]).max(rgb[2]) - rgb[0].min(rgb[1]).min(rgb[2])
 }
 
 impl core::fmt::Display for GradingLutError {
@@ -147,6 +190,7 @@ impl core::fmt::Display for GradingLutError {
             Self::KeywordAfterData { line } => {
                 write!(f, "line {line}: keywords must precede the data")
             }
+            Self::Unreadable(rule) => write!(f, "team colours unreadable: {rule}"),
         }
     }
 }
@@ -377,6 +421,70 @@ impl GradingLut {
         };
         // Rounding in the lerps can step a hair outside 0..=1.
         lerp(plane(b0), plane(b0 + 1), fb).map(|value| value.clamp(0.0, 1.0))
+    }
+
+    /// ADR-0011 readability rule 1 for a grade: the display-space team colours
+    /// ([`READABILITY_TEAMS`]: the standard red/blue unit tints and the colour-blind palette's
+    /// orange/sky blue) stay distinguishable after this LUT at `strength` (`0..=1`, the map's
+    /// `grading_strength`) and at every exposure in `exposure_ev` (the map's fixed EV, and its
+    /// eye-adaptation range; modelled in display space as a `2^(EV / 2.2)` scale, clamped).
+    ///
+    /// For every team colour and exposure the LUT may shift the hue by less than
+    /// [`MAX_TEAM_HUE_SHIFT`]°, and the graded colour keeps a chroma (max − min channel) of at
+    /// least [`MIN_TEAM_CHROMA`]; the two teams' graded hues stay at least
+    /// [`MIN_TEAM_HUE_SEPARATION`]° apart.
+    ///
+    /// # Errors
+    /// [`GradingLutError::Unreadable`] naming the first rule broken.
+    pub fn check_team_readability(
+        &self,
+        strength: f32,
+        exposure_ev: &[f32],
+    ) -> Result<(), GradingLutError> {
+        let strength = if strength.is_finite() {
+            strength.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let nominal = [0.0];
+        let exposures = if exposure_ev.is_empty() {
+            &nominal[..]
+        } else {
+            exposure_ev
+        };
+        for &ev in exposures {
+            let scale = if ev.is_finite() {
+                (ev / 2.2).exp2()
+            } else {
+                return Err(GradingLutError::Unreadable("exposure must be finite"));
+            };
+            for pair in READABILITY_TEAMS {
+                let mut hues = [0.0; 2];
+                for (slot, team) in pair.into_iter().enumerate() {
+                    let exposed = team.map(|c| (c * scale).clamp(0.0, 1.0));
+                    let lut = self.sample(exposed);
+                    let graded: [f32; 3] =
+                        core::array::from_fn(|c| exposed[c] + (lut[c] - exposed[c]) * strength);
+                    if hue_distance(hue(graded), hue(exposed)) >= MAX_TEAM_HUE_SHIFT {
+                        return Err(GradingLutError::Unreadable(
+                            "the grade shifts a team colour's hue too far",
+                        ));
+                    }
+                    if chroma(graded) < MIN_TEAM_CHROMA {
+                        return Err(GradingLutError::Unreadable(
+                            "the grade washes a team colour out towards grey",
+                        ));
+                    }
+                    hues[slot] = hue(graded);
+                }
+                if hue_distance(hues[0], hues[1]) < MIN_TEAM_HUE_SEPARATION {
+                    return Err(GradingLutError::Unreadable(
+                        "the grade moves the two teams' hues too close together",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Writes the LUT as `.cube` text: `TITLE` (quotes and control characters in `title`
@@ -664,5 +772,51 @@ mod tests {
             Err(GradingLutError::Io(_))
         ));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn team_readability_accepts_identity_and_gentle_grades_and_rejects_hostile_ones() {
+        let identity = GradingLut::identity(17);
+        identity
+            .check_team_readability(1.0, &[-2.0, 0.0, 2.0])
+            .expect("identity is readable");
+        // A LUT that pulls everything to one hue (a heavy sepia) fails, at full strength only.
+        let sepia: Vec<[f32; 3]> = identity
+            .texels()
+            .iter()
+            .map(|&[r, g, b]| {
+                let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                [y, y * 0.8, y * 0.55]
+            })
+            .collect();
+        let sepia = GradingLut::from_texels(17, sepia).expect("valid");
+        assert!(matches!(
+            sepia.check_team_readability(1.0, &[0.0]),
+            Err(GradingLutError::Unreadable(_))
+        ));
+        sepia
+            .check_team_readability(0.1, &[0.0])
+            .expect("a light touch stays readable");
+        // Greyscale washes the teams out.
+        let grey: Vec<[f32; 3]> = identity
+            .texels()
+            .iter()
+            .map(|&[r, g, b]| [(r + g + b) / 3.0; 3])
+            .collect();
+        let grey = GradingLut::from_texels(17, grey).expect("valid");
+        let error = grey.check_team_readability(1.0, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("team colours unreadable"),
+            "{error}"
+        );
+        // A red/blue swap keeps the hues apart but shifts each one: rejected.
+        let swap: Vec<[f32; 3]> = identity
+            .texels()
+            .iter()
+            .map(|&[r, g, b]| [b, g, r])
+            .collect();
+        let swap = GradingLut::from_texels(17, swap).expect("valid");
+        assert!(swap.check_team_readability(1.0, &[0.0]).is_err());
+        assert!(identity.check_team_readability(1.0, &[f32::NAN]).is_err());
     }
 }

@@ -68,7 +68,9 @@ lighting, team colours and HUD are unchanged.
 ![Gameplay screen effects](images/r6-screen-effects.png)
 
 The three gameplay effects held for a capture with `MOBA_SCREEN_EFFECTS_PREVIEW`: none, death
-desaturation, the damage vignette at its peak and the low-health pulse at its peak. Each has
+desaturation (capped at 0.6, so the teams stay distinguishable), the damage vignette at its
+peak and the low-health pulse at its peak (a neutral dark in the outer corners only, never a
+team hue). Captured after the #334 review fixes. Each has
 its own setting (`death_desaturation`, `damage_vignette`, `low_health_pulse`) and
 `MOBA_SCREEN_EFFECTS=off` turns all three off; the HUD is never affected.
 

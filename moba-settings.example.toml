@@ -15,9 +15,9 @@ ally_vfx_opacity = 1.0
 # overrides it; dynamic resolution (Low by default, MOBA_DYNRES) lowers it under load.
 render_scale = 1.0
 # Accessibility: gameplay screen effects (R6). MOBA_SCREEN_EFFECTS=off turns all three off.
-death_desaturation = true   # fade to grey while your hero is dead
-damage_vignette = true      # red edge flash when your hero takes damage
-low_health_pulse = true     # red edge pulse below 30 % health
+death_desaturation = true   # fade partly to grey while your hero is dead
+damage_vignette = true      # dark corner flash when your hero takes damage
+low_health_pulse = true     # dark corner pulse below 30 % health
 
 [controls]
 move_up = "W"

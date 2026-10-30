@@ -162,9 +162,9 @@ pub(crate) struct Settings {
     pub(crate) render_scale: f32,
     /// Accessibility (R6): fade the screen towards grey while the local hero is dead.
     pub(crate) death_desaturation: bool,
-    /// Accessibility (R6): flash a red vignette when the local hero takes damage.
+    /// Accessibility (R6): darken the screen corners briefly when the local hero takes damage.
     pub(crate) damage_vignette: bool,
-    /// Accessibility (R6): pulse a red vignette while the local hero is below 30 % health.
+    /// Accessibility (R6): pulse a dark vignette while the local hero is below 30 % health.
     pub(crate) low_health_pulse: bool,
     pub(crate) controls: Controls,
 }

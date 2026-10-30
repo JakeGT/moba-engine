@@ -15,8 +15,12 @@
 //! `--gamma r,g,b` (0.2..=5) and `--gain r,g,b` (0..=2) override the preset; `--size` is
 //! 2..=64 (default 33). The output is deterministic for a given platform.
 //!
-//! `info` prints the size, the per-channel output range and the mean absolute deviation from
-//! the identity. `apply` grades an 8-bit PNG (its values taken as display-encoded, like the
+//! `bake` refuses a grade that fails `GradingLut::check_team_readability` (ADR-0011 rule 1:
+//! team colours stay distinguishable at full strength, nominal exposure ± 1 EV), the check
+//! the client repeats when it loads a map's grade.
+//!
+//! `info` prints the size, the per-channel output range, the mean absolute deviation from
+//! the identity and the readability result. `apply` grades an 8-bit PNG (its values taken as display-encoded, like the
 //! tonemapper's output) for side-by-side previews; alpha is kept.
 #![allow(clippy::print_stdout)]
 
@@ -34,6 +38,10 @@ const USAGE: &str = "usage:
                   [--gamma r,g,b] [--gain r,g,b] <out.cube>
   grade-bake info <file.cube>
   grade-bake apply <file.cube> <in.png> <out.png>";
+
+/// Exposures (EV) the readability check covers at bake time: nominal ± 1 stop, the margin the
+/// client checks around a map's fixed EV.
+const READABILITY_EXPOSURES: [f32; 3] = [-1.0, 0.0, 1.0];
 
 /// Recorded in the `.cube` header.
 const WRITER: &str = concat!("moba-tools grade-bake ", env!("CARGO_PKG_VERSION"));
@@ -176,8 +184,13 @@ fn bake(args: &BakeArgs) -> Result<String, String> {
         text.push('\n');
     }
     text.push_str(&lut.to_cube_string(&args.preset));
-    // The written file must load back (and fit the loader's size cap).
-    GradingLut::parse(&text).map_err(|error| format!("baked LUT does not parse: {error}"))?;
+    // The written file must load back (and fit the loader's size cap), and pass the
+    // readability check the client applies when it loads a map's grade.
+    let parsed =
+        GradingLut::parse(&text).map_err(|error| format!("baked LUT does not parse: {error}"))?;
+    parsed
+        .check_team_readability(1.0, &READABILITY_EXPOSURES)
+        .map_err(|error| format!("refusing to write {}: {error}", args.output.display()))?;
     Ok(text)
 }
 
@@ -251,6 +264,10 @@ fn info(args: &[String]) -> Result<(), String> {
         "  mean |out - in| = {:.5} (max {:.5})",
         stats.mean_deviation, stats.max_deviation
     );
+    match lut.check_team_readability(1.0, &READABILITY_EXPOSURES) {
+        Ok(()) => println!("  team colours: readable at full strength, EV -1..=1"),
+        Err(error) => println!("  {error} (at full strength, EV -1..=1)"),
+    }
     Ok(())
 }
 
@@ -391,6 +408,20 @@ mod tests {
             &["a", "b"],
         ] {
             assert!(parse_bake(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn bake_refuses_a_grade_that_breaks_team_readability() {
+        // Fully desaturated: the teams turn grey.
+        let grey = parse_bake(&args(&["--saturation", "0", "--size", "9", "grey.cube"]))
+            .expect("valid flags");
+        let error = bake(&grey).unwrap_err();
+        assert!(error.contains("team colours unreadable"), "{error}");
+        for preset in ["identity", "ember", "frost", "meadow"] {
+            let parsed =
+                parse_bake(&args(&["--preset", preset, "--size", "17", "x.cube"])).expect("valid");
+            bake(&parsed).unwrap_or_else(|error| panic!("{preset}: {error}"));
         }
     }
 

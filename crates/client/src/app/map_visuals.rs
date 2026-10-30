@@ -292,8 +292,18 @@ impl MapLibrary {
             eprintln!("[assets] lighting ramp: {error}; no ramp");
             let _ = renderer.set_lighting_ramp(None);
         }
+        let look = self.post_look();
         let lut = grading.as_deref().and_then(|name| {
             load_grading(&self.root, name)
+                .and_then(|lut| {
+                    // ADR-0011 rule 1: a grade must keep team colours readable. Eye
+                    // adaptation keeps the metered scene near mid-grey, so the map's fixed
+                    // EV ± 1 stop covers lit and shadowed units.
+                    let ev = look.exposure_ev;
+                    lut.check_team_readability(look.grading_strength, &[ev - 1.0, ev, ev + 1.0])
+                        .map(|()| lut)
+                        .map_err(|error| error.to_string())
+                })
                 .inspect_err(|reason| {
                     eprintln!("[assets] grading '{name}': {reason}; no grading");
                 })
@@ -782,11 +792,25 @@ mod tests {
         );
         assert_eq!(ExposureOverride::parse("nan"), None);
         assert_eq!(ExposureOverride::parse("bright"), None);
-        // Every shipped map's LUT loads.
+        // Every shipped map's LUT loads and keeps team colours readable with that map's
+        // exposure and grading strength (the check `apply_lighting` makes).
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
-        for name in ["ember", "frost", "meadow"] {
+        for (map, text) in [
+            ("ember", include_str!("../../../../content/maps/ember.toml")),
+            ("frost", include_str!("../../../../content/maps/frost.toml")),
+            (
+                "map-grass",
+                include_str!("../../../../content/maps/map-grass.toml"),
+            ),
+        ] {
+            let visuals = MapVisuals::parse(text).expect("shipped map visuals");
+            let name = visuals.post.grading.as_deref().expect("every map grades");
             let lut = load_grading(&root, name).expect("shipped LUT");
             assert_eq!(lut.size(), 17);
+            let look = post_look(&visuals.post, ExposureOverride::default());
+            let ev = look.exposure_ev;
+            lut.check_team_readability(look.grading_strength, &[ev - 1.0, ev, ev + 1.0])
+                .unwrap_or_else(|error| panic!("{map}: {error}"));
         }
         assert!(load_grading(&root, "../maps").is_err());
         assert!(load_grading(&root, "missing").is_err());

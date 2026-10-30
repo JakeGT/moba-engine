@@ -286,6 +286,39 @@ pub(crate) fn optimal_features(
     properties.optimal_tiling_features
 }
 
+/// Usage of the multisampled scene colour (R6 MSAA 4×): only ever an attachment, resolved
+/// at the end of the scene pass and never stored, so tilers may keep it on chip.
+pub(crate) const MSAA_COLOR_USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
+    vk::ImageUsageFlags::COLOR_ATTACHMENT.as_raw()
+        | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT.as_raw(),
+);
+
+/// Whether 4× multisampled images of the actual scene formats can be created: `hdr` with
+/// [`MSAA_COLOR_USAGE`] and `depth` as a depth attachment (the device-wide
+/// `framebuffer*SampleCounts` limits do not cover every format).
+pub(crate) fn supports_msaa4(device: &DeviceContext, hdr: vk::Format, depth: vk::Format) -> bool {
+    let samples = |format, usage| {
+        // SAFETY: the physical device belongs to the instance the device context was made
+        // from; the call only reads properties.
+        unsafe {
+            device.instance.get_physical_device_image_format_properties(
+                device.physical,
+                format,
+                vk::ImageType::TYPE_2D,
+                vk::ImageTiling::OPTIMAL,
+                usage,
+                vk::ImageCreateFlags::empty(),
+            )
+        }
+        .is_ok_and(|properties| {
+            properties
+                .sample_counts
+                .contains(vk::SampleCountFlags::TYPE_4)
+        })
+    };
+    samples(hdr, MSAA_COLOR_USAGE) && samples(depth, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+}
+
 /// The tier's HDR colour format if it can be rendered to, blended and sampled; otherwise
 /// `R16G16B16A16_SFLOAT`, whose support for all three is mandatory.
 pub(crate) fn choose_hdr_format(device: &DeviceContext, tier: QualityTier) -> vk::Format {
@@ -313,6 +346,23 @@ pub(crate) fn choose_bloom_format(device: &DeviceContext) -> vk::Format {
         packed
     } else {
         vk::Format::R16G16B16A16_SFLOAT
+    }
+}
+
+/// The adapted-exposure format (R6): `R32_SFLOAT` where it can be rendered to, blended into
+/// and sampled, so a slow adaptation at a high frame rate never stalls on half-float
+/// precision; otherwise `R16_SFLOAT` (blendable everywhere), which
+/// [`crate::post::adaptation_step`] then feeds in steps no smaller than
+/// [`crate::post::MIN_HALF_ADAPTATION_STEP`].
+pub(crate) fn choose_exposure_format(device: &DeviceContext) -> vk::Format {
+    let required = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE;
+    let full = vk::Format::R32_SFLOAT;
+    if optimal_features(device, full).contains(required) {
+        full
+    } else {
+        vk::Format::R16_SFLOAT
     }
 }
 

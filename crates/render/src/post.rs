@@ -342,7 +342,7 @@ pub struct PostLook {
     pub exposure_max: f32,
     /// Adaptation rate per second (`0.1..=10`).
     pub adaptation: f32,
-    /// Bloom mix (`0..=0.25`).
+    /// Bloom mix (`0..=0.1`, as a map's `[post] bloom`).
     pub bloom: f32,
     /// How much of the grading LUT applies (`0..=1`).
     pub grading_strength: f32,
@@ -416,7 +416,7 @@ impl PostLook {
             exposure_max: clamp(self.exposure_max, -8.0, 8.0, defaults.exposure_max)
                 .max(exposure_min),
             adaptation: clamp(self.adaptation, 0.1, 10.0, defaults.adaptation),
-            bloom: clamp(self.bloom, 0.0, 0.25, defaults.bloom),
+            bloom: clamp(self.bloom, 0.0, 0.1, defaults.bloom),
             grading_strength: clamp(self.grading_strength, 0.0, 1.0, 1.0),
         }
     }
@@ -448,7 +448,7 @@ impl ScreenEffects {
     pub const NONE: Self = Self {
         desaturation: 0.0,
         vignette: 0.0,
-        vignette_color: [0.75, 0.04, 0.02],
+        vignette_color: [0.04, 0.04, 0.05],
     };
 
     /// Returns these effects with [`Self::desaturation`] set.
@@ -490,9 +490,122 @@ impl Default for ScreenEffects {
     }
 }
 
+/// The smallest blend factor an adaptation step uses on an `R16_SFLOAT` exposure image: with
+/// a smaller factor, `factor × (target − adapted)` would round away below half-float
+/// precision and adaptation would stall short of the target (about 0.6 EV at 240 fps and a
+/// slow adaptation). With it the residual is at most half an ulp / step: ≤ 0.03 EV below
+/// 4 EV, ≤ 0.06 EV up to 8.
+pub(crate) const MIN_HALF_ADAPTATION_STEP: f32 = 1.0 / 32.0;
+
+/// Accumulated time after which a step is taken whatever its factor (a guard for tiny rates).
+const MAX_ADAPTATION_WAIT: f32 = 1.0;
+
+/// One frame's exposure adaptation: blend `factor` of the metered EV into the adapted EV,
+/// or `reset` (clear, then take the metered value).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AdaptationStep {
+    pub(crate) factor: f32,
+    pub(crate) reset: bool,
+}
+
+/// The adaptation step for a frame `dt` seconds after the previous one, at `rate` (1/s):
+/// `1 − exp(−t × rate)` over the time `pending` has accumulated. A step smaller than
+/// `min_step` is deferred (factor 0, the time kept in `pending`), so a low-precision image
+/// still converges; `min_step` 0 steps every frame.
+pub(crate) fn adaptation_step(
+    pending: &mut f32,
+    dt: f32,
+    rate: f32,
+    min_step: f32,
+    reset: bool,
+) -> AdaptationStep {
+    if reset {
+        *pending = 0.0;
+        return AdaptationStep {
+            factor: 1.0,
+            reset: true,
+        };
+    }
+    let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    let rate = if rate.is_finite() { rate.max(0.0) } else { 0.0 };
+    *pending += dt;
+    let factor = 1.0 - (-*pending * rate).exp();
+    if factor >= min_step || *pending >= MAX_ADAPTATION_WAIT {
+        *pending = 0.0;
+        AdaptationStep {
+            factor: factor.clamp(0.0, 1.0),
+            reset: false,
+        }
+    } else {
+        AdaptationStep {
+            factor: 0.0,
+            reset: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Simulates `seconds` of adaptation at `fps` from 0 EV towards `target`, rounding the
+    /// stored value to half precision after every blend when `half`.
+    fn adapt(target: f32, fps: f32, rate: f32, seconds: f32, half: bool) -> f32 {
+        let min_step = if half { MIN_HALF_ADAPTATION_STEP } else { 0.0 };
+        let mut pending = 0.0;
+        let mut adapted = 0.0_f32;
+        let frames = (seconds * fps) as usize;
+        for _ in 0..frames {
+            let step = adaptation_step(&mut pending, 1.0 / fps, rate, min_step, false);
+            adapted += step.factor * (target - adapted);
+            if half {
+                adapted = moba_assets::f32_from_f16(moba_assets::f16_from_f32(adapted));
+            }
+        }
+        adapted
+    }
+
+    #[test]
+    fn adaptation_converges_at_high_frame_rates_even_in_half_precision() {
+        // 240 fps, the slowest adaptation (0.1 / s) for 60 s: e^-6 of the way left.
+        for target in [-3.0_f32, 1.5, 3.9, 6.0] {
+            let full = adapt(target, 240.0, 0.1, 60.0, false);
+            assert!((full - target).abs() < 0.02, "full {target}: {full}");
+            let half = adapt(target, 240.0, 0.1, 60.0, true);
+            assert!((half - target).abs() < 0.07, "half {target}: {half}");
+        }
+    }
+
+    #[test]
+    fn adaptation_steps_reset_defer_and_sanitise() {
+        let mut pending = 0.3;
+        let reset = adaptation_step(&mut pending, 0.01, 1.0, 0.0, true);
+        assert_eq!(
+            reset,
+            AdaptationStep {
+                factor: 1.0,
+                reset: true
+            }
+        );
+        assert_eq!(pending, 0.0);
+        // Deferred below the minimum step, then taken with the accumulated time.
+        let small = adaptation_step(&mut pending, 0.01, 1.0, 0.05, false);
+        assert_eq!(small.factor, 0.0);
+        let mut taken = small;
+        for _ in 0..10 {
+            taken = adaptation_step(&mut pending, 0.01, 1.0, 0.05, false);
+            if taken.factor > 0.0 {
+                break;
+            }
+        }
+        assert!(taken.factor >= 0.05 && taken.factor < 0.07, "{taken:?}");
+        assert_eq!(pending, 0.0);
+        // Non-finite inputs never produce a non-finite factor.
+        for (dt, rate) in [(f32::NAN, 1.0), (0.01, f32::NAN), (f32::INFINITY, 1.0)] {
+            let step = adaptation_step(&mut pending, dt, rate, 0.0, false);
+            assert!(step.factor.is_finite() && (0.0..=1.0).contains(&step.factor));
+        }
+    }
 
     #[test]
     fn tiers_scale_post_features_up_and_low_keeps_the_cheap_path() {

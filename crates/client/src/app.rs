@@ -236,6 +236,20 @@ impl ClientApp {
             .and_then(|value| value.parse::<f32>().ok())
             .unwrap_or(settings.ally_vfx_opacity);
         let camera_sensitivity = settings.camera_sensitivity;
+        let map_capture = map_visuals::SwitchCapture::from_env();
+        let screen_fx_preview = std::env::var("MOBA_SCREEN_EFFECTS_PREVIEW")
+            .ok()
+            .and_then(|name| screen_fx::Preview::from_name(&name));
+        // Captures pin the effects off (they run on wall-clock time) unless a preview is set.
+        let screen_fx_settings = screen_fx::ScreenFxSettings {
+            death_desaturation: settings.death_desaturation,
+            damage_vignette: settings.damage_vignette,
+            low_health_pulse: settings.low_health_pulse,
+        }
+        .for_run(
+            capture_path.is_some() || map_capture.is_some(),
+            screen_fx_preview,
+        );
         let audio_volume = settings.audio_volume;
         let audio_mute = settings.audio_mute;
         for warning in warnings {
@@ -299,7 +313,7 @@ impl ClientApp {
             },
             map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env())
                 .with_exposure_override(launch::exposure_override()),
-            map_capture: map_visuals::SwitchCapture::from_env(),
+            map_capture,
             capture_series: evidence::CaptureSeries::from_env(),
             bones: skinning::BonePool::new(moba_render::DEFAULT_MAX_BONES),
             animation: animation::AnimationDriver::new(animation::AnimLod::from_env(), 30)
@@ -341,16 +355,7 @@ impl ClientApp {
             hud_fx: HudFx::new(team_palette),
             portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(quality)),
             minimap: offscreen::MinimapBaker::new(offscreen::MinimapMode::from_env()),
-            screen_fx: screen_fx::ScreenFx::new(
-                screen_fx::ScreenFxSettings {
-                    death_desaturation: settings.death_desaturation,
-                    damage_vignette: settings.damage_vignette,
-                    low_health_pulse: settings.low_health_pulse,
-                },
-                std::env::var("MOBA_SCREEN_EFFECTS_PREVIEW")
-                    .ok()
-                    .and_then(|name| screen_fx::Preview::from_name(&name)),
-            ),
+            screen_fx: screen_fx::ScreenFx::new(screen_fx_settings, screen_fx_preview),
             render_scale: settings.render_scale,
             frames: 0,
             quit_after_frames,

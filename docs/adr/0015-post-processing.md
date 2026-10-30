@@ -72,16 +72,21 @@ ADR-0008 requires. Changing a post setting recreates the renderer, like the tier
 - **Exposure** is `RenderConfig::exposure` × `2^EV`, where EV is the map's compensation
   (`[post] exposure`, client-local map visuals) plus, when on, **auto exposure**.
 - **Auto exposure (eye adaptation)** meters the last bloom mip (1/32 resolution): one
-  fragment writes the 1×1 exposure image from a 4×4 grid of bilinear taps (each averaging
-  2×2 texels) — the log-average luminance of a 1/128-resolution image, centre-weighted. The
-  target exposure `log2(0.18 / L)` is **clamped** to the map's `[exposure_min, exposure_max]`
-  EV, then **blended** into the stored value with the fixed-function blend
-  (`CONSTANT_COLOR`): `k = 1 − exp(−dt · adaptation)`, `k = 1` on the first frame and after a
-  map change. No compute and no read-back: the composite samples the 1×1 image. It is opt-in
-  per map and needs the bloom down-chain (Medium and up; the chain runs for metering even
-  when bloom itself is off). The image is an imported persistent resource (like R7b's
-  offscreen images), `R16_SFLOAT` (blendable everywhere; its 0.002-EV steps near ±4 EV are
-  invisible).
+  fragment writes the 1×1 exposure image from an 8×8 grid of bilinear taps over that mip —
+  the log-average luminance, centre-weighted, with non-finite texels counted as black (and
+  the bloom down-samples treat them the same way). The target exposure `log2(0.18 / L)` is
+  **clamped** to the map's `[exposure_min, exposure_max]` EV, then **blended** into the
+  stored value with the fixed-function blend (`CONSTANT_COLOR`):
+  `k = 1 − exp(−dt · adaptation)`. The first frame and every map change **clear** the image
+  and use `k = 1`, so nothing (a NaN included) survives a reset. No compute and no
+  read-back: the composite reads the 1×1 image. It is opt-in per map and needs the bloom
+  down-chain (Medium and up; the chain runs for metering even when bloom itself is off). The
+  image is an imported persistent resource (like R7b's offscreen images), **`R32_SFLOAT`**
+  where that format can be blended into (desktop GPUs, lavapipe), else `R16_SFLOAT`. In half
+  precision a small `k` (slow adaptation at a high frame rate: 0.004 at 240 fps) rounds the
+  blend's step away and adaptation stalls up to ~0.6 EV short, so on `R16_SFLOAT` steps are
+  deferred until `k ≥ 1/32` (the frame time accumulates), which bounds the residual to
+  ≤ 0.03 EV below 4 EV (unit-tested at 240 fps for 60 s).
 - **Grading** is a per-map **3D LUT** (`[post] grading = "<name>"` →
   `<asset root>/grading/<name>.cube`, the Adobe/Resolve text format, parsed and bounded by
   `moba_assets::GradingLut`), applied in the composite after the tonemap: it maps the
@@ -90,6 +95,13 @@ ADR-0008 requires. Changing a post setting recreates the renderer, like the tier
   with the half-texel offset so trilinear filtering is exact on the lattice); without one a
   2³ identity is bound. `moba-tools grade-bake` generates the sample LUTs from documented
   lift/gamma/gain, contrast, saturation and white-balance parameters.
+- **Team colours survive the grade** (ADR-0011 rule 1, now checked):
+  `GradingLut::check_team_readability` holds a LUT, at the map's `grading_strength` and at
+  its fixed EV ± 1 stop, to the standard red/blue unit tints and the colour-blind palette's
+  orange/sky blue: the grade shifts no team hue by 20° or more, keeps each team's chroma
+  ≥ 0.2 and keeps the two teams ≥ 90° apart in hue. `grade-bake bake` refuses a LUT that
+  fails (`info` reports it) and the client, loading a map's grade, logs the rule and draws
+  ungraded instead. The shipped grades pass with their maps' settings (unit-tested).
 - **Why after the tonemap:** artists grade display images, `.cube` files from any grading
   tool assume display-referred input, and a [0, 1] domain needs no shaper LUT.
 
@@ -99,8 +111,9 @@ Duty: Advanced Warfare", SIGGRAPH 2014): five down-samples with the 13-tap filte
 with the Karis average, which removes single-pixel fireflies from GGX peaks), then up-samples
 with a 3×3 tent, each added into the next larger mip by blending. The composite mixes the
 result with the scene in linear HDR before exposure (`mix(hdr, bloom, strength)`, strength
-0.04 by default, per map `[post] bloom`, 0..0.25), so bloom is energy conserving: there is
-no threshold, and dim pixels contribute almost nothing visible. Five levels reach 1/32 of
+0.04 by default, per map `[post] bloom`, **capped at 0.1** by the descriptor parser and the
+renderer, since more washes team colours and silhouettes out), so bloom is energy
+conserving: there is no threshold, and dim pixels contribute almost nothing visible. Five levels reach 1/32 of
 the render resolution (60×34 at 1080p), which is wide enough at MOBA zoom; a sixth level
 would add a pass for an invisible radius. **Low: off** (`MOBA_BLOOM=off` everywhere).
 
@@ -130,8 +143,17 @@ Options measured in [perf/0019](../perf/0019-post.md); defaults:
   High-only in the roadmap) is not implemented: it needs motion vectors for skinned and VFX
   geometry and a history buffer, and its ghosting on fast units is exactly the readability
   hazard the roadmap warns about. Revisit with art direction.
-- `MOBA_AA=off|fxaa|msaa4`; a device without 4× MSAA for the HDR or depth format falls back
-  to FXAA with one log line.
+- The multisampled colour is never stored (resolved, then `DONT_CARE`), so it is created
+  `TRANSIENT_ATTACHMENT` (tilers can keep it on chip; gpu-allocator does not expose lazily
+  allocated memory, so it is still backed). A depth access that is a resolve **source**
+  (`DepthWriteResolveSource`: the prepass, or the scene without one) includes the resolve's
+  `COLOR_ATTACHMENT_OUTPUT` read, so a later writer of the multisampled depth waits for it.
+- `MOBA_AA=off|fxaa|msaa4`; a device whose **actual** HDR or depth format has no 4×
+  sample count (`vkGetPhysicalDeviceImageFormatProperties`, not just the device-wide
+  framebuffer limits) falls back to FXAA with one log line.
+- R4b's VAT minions draw through the same per-sample-count pipeline sets as every other
+  scene mesh, with a depth-only prepass twin (`vat.vert` declares `invariant gl_Position`,
+  like `terrain.vert`, `unit.vert` and `skinned.vert`; a shader test checks all four).
 
 ### 5. Ambient occlusion
 - **GTAO** (Jimenez et al., "Practical real-time strategies for accurate indirect
@@ -143,9 +165,11 @@ Options measured in [perf/0019](../perf/0019-post.md); defaults:
   four frustum-corner rays at unit view depth) times the linear view depth recovered from the
   depth buffer. Unprojecting through the inverse view-projection instead loses most of fp32's
   precision near depth 1 and made the reconstructed normals of grazing ground noisy. Each
-  slice's visibility is the cosine-weighted integral over its two horizons, and the slices
-  are averaged with equal weight (weighting by the normal's projected length biased tilted
-  faces dark).
+  slice's visibility is the cosine-weighted integral over its two horizons, weighted by the
+  length of the normal projected into the slice plane and averaged over the slices (divided
+  by the slice count, not by the summed lengths): over all slice directions an open
+  hemisphere then integrates to exactly 1 for any normal, where normalising by the summed
+  lengths biased tilted faces dark.
 - **Normals are reconstructed from depth** (per pixel, the smaller of the left/right and
   up/down depth differences, so silhouettes do not smear). A forward renderer has no normal
   buffer; adding one would mean a second colour output on every scene pipeline (8 bytes per
@@ -167,11 +191,19 @@ Options measured in [perf/0019](../perf/0019-post.md); defaults:
   would remove that sampler but darken direct light (see Alternatives).
 - **Composition with R3a and R2b.** R6 merges after R3a and before R2b. On `main` today AO
   is set 3 binding 5, the first free one; R3a takes set-3 bindings 5–9, so when R6 catches
-  up with it AO moves to the **next free set-3 binding after R3a's** (one line in
-  `lighting.glsl` and the set-3 layout) and keeps R3a's per-stage sampler-budget check
-  passing. R2b then appends its bindings after AO. **The frame has one depth prepass, R6's**
-  (main view, High and up; multisample depth with a `SAMPLE_ZERO` resolve under MSAA): R2b's
-  contact shadows reuse it rather than adding their own.
+  up with it AO moves to **binding 10** (`lighting.glsl` and the set-3 layout's binding
+  list) and keeps R3a's per-stage sampler-budget check passing; both PRs append `vec4`s
+  after `sh[9]` in `CameraBlock`, merged in the same std140 order as `FrameLighting`, and
+  R3a's sky gets an MSAA twin through `view_pipelines` like every scene pipeline. R2b then
+  appends its bindings after AO. **The frame has one depth prepass, R6's** (main view,
+  High and up; multisample depth with a `SAMPLE_ZERO` resolve under MSAA): R2b's contact
+  shadows reuse it rather than adding their own. `FrameSpec::prepass` requests it without
+  AO (AO implies it), and an extra prepass output such as R2b's `R8_UINT` outline IDs is
+  one more graph access and one colour attachment in `ScenePass::record_prepass`.
+- **R3a's baked relief AO and GTAO** are not stacked on the terrain: on High and Ultra the
+  terrain's ambient takes `min(baked, gtao)`, since both see the same crevices and their
+  product would darken them twice; units take GTAO only. Low and Medium keep the baked
+  term alone. (Implemented when R6 catches up with R3a.)
 - **Low/Medium:** off; Low will rely on baked AO (R2b). `MOBA_AO=off`.
 
 ### 6. Resolution scaling
@@ -193,9 +225,13 @@ Options measured in [perf/0019](../perf/0019-post.md); defaults:
 ### 7. Gameplay effects
 `Scene::effects` (`ScreenEffects`) carries three values the client sets each frame from data
 it already has: **death desaturation** (0..1, while the local hero is dead), a **damage
-vignette** (a red edge flash scaled by the health lost in the latest snapshots) and a
+vignette** (an edge flash scaled by the health lost in the latest snapshots) and a
 **low-health pulse** (a vignette pulsing at ~1 Hz below 30 % health). The composite applies
-them after grading, so they never touch the HUD. Each has its own client setting
+them after grading, so they never touch the HUD. Nothing may blur team colours: death
+desaturation stops at **0.6** (teams stay distinguishable while spectating), and the
+vignette is a **neutral near-black** (not red, the default enemy colour, and not a hue that
+fights the colour-blind palettes), only in the outer corners (from 0.6 of the half
+diagonal) and at most **0.45** strong. Each has its own client setting
 (`death_desaturation`, `damage_vignette`, `low_health_pulse`, all on by default) and
 `MOBA_SCREEN_EFFECTS=off` turns them all off. They are cosmetic and client-local.
 
@@ -217,9 +253,13 @@ Switches (`RenderConfig::post`, `PostConfig::with_*`; the client reads the envir
 `MOBA_DYNRES=off|on|<target ms>`, `MOBA_GRADING=off`, `MOBA_EXPOSURE=auto|fixed|<EV>`,
 `MOBA_UPSCALE=bilinear|bicubic`, `MOBA_SCREEN_EFFECTS=off`.
 
-**Captures and goldens:** with `MOBA_CAPTURE` set the client pins auto exposure and dynamic
-resolution off (fixed exposure, the configured render scale), unless `MOBA_EXPOSURE=auto`
-or `MOBA_DYNRES` is given explicitly, so two capture runs stay byte-identical.
+**Captures and goldens:** with `MOBA_CAPTURE` (or a map-switch capture) set the client pins
+auto exposure, dynamic resolution and the **screen effects** off (fixed exposure, the
+configured render scale, no wall-clock-driven effect), unless `MOBA_EXPOSURE=auto`,
+`MOBA_DYNRES` or `MOBA_SCREEN_EFFECTS_PREVIEW` is given explicitly, so two capture runs stay
+byte-identical. Five goldens cover the post topologies: the default (High), the networked
+frame, R4b's VAT minions, **Ultra** (MSAA 4× + GTAO, with VAT minions) and **Low at render
+scale 0.75** (FXAA fast + the bilinear upscale).
 
 ## Alternatives considered
 - **ACES-fitted tonemap:** rejected in ADR-0008 (mid-grey lift, hue skew of team colours).

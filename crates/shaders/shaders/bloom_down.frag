@@ -24,7 +24,11 @@ layout(location = 0) out vec4 out_color;
 
 vec3 tap(vec2 uv, vec2 offset) {
     vec3 color = textureLod(source, post_clamp(uv + offset * push.texel, push.scale, push.texel), 0.0).rgb;
-    // Finite, non-negative input even if a later pass ever writes something out of range.
+    // Finite, non-negative input even if a pass ever writes something out of range: clamp
+    // does not remove a NaN, so non-finite texels count as black.
+    if (any(isnan(color)) || any(isinf(color))) {
+        return vec3(0.0);
+    }
     return clamp(color, vec3(0.0), vec3(32768.0));
 }
 
