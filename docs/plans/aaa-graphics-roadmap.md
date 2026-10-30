@@ -12,6 +12,8 @@ accounts and live operations are separate tracks (see [§9](#9-other-tracks-a-sh
 
 ## Completion status (2026-10-30)
 
+The follow-on plan is the [next-gen graphics roadmap](next-gen-graphics-roadmap.md).
+
 The engine is now AAA-*capable* in the sense of [§2](#2-what-aaa-means-for-a-moba): every
 engineering item below is merged, tiered (Low/Medium/High/Ultra) with an off switch, clean
 under validation and sync validation on lavapipe, and covered by goldens. Rendering stays
