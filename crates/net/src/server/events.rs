@@ -272,14 +272,20 @@ impl RawEvent {
         if spectator || self.kind == EVENT_MATCH_ENDED {
             return true;
         }
+        // The end of a recall (a cancel or a completion) reports where the hero channelled,
+        // which is not where it may be now: it teleported to its spawn, or a dash cancelled
+        // the channel and moved it in the same tick. So it goes only to a viewer that saw the
+        // hero in its previous snapshot, standing still on that spot, whether or not it sees
+        // it now; being visible now is not enough (a viewer watching the spawn would learn the
+        // hidden channel spot).
+        if self.kind == EVENT_RECALL && self.value != RECALL_STARTED {
+            return self.source.is_some_and(known);
+        }
         // A basic attack or a death may name a unit the viewer saw in its previous snapshot
         // but no longer sees: the victim of a killing blow is despawned (or, an enemy hero,
-        // hidden) in the same tick. So may a completed recall: the hero teleported to its
-        // spawn, out of an enemy's vision, in the tick the event reports, and it completed
-        // where the viewer last saw it channel. Anything else (a recall start or cancel
-        // included) needs an endpoint observed now.
-        let recent = matches!(self.kind, EVENT_ATTACK | EVENT_UNIT_DIED)
-            || (self.kind == EVENT_RECALL && self.value == RECALL_COMPLETED);
+        // hidden) in the same tick. Anything else (a recall start included) needs an endpoint
+        // observed now.
+        let recent = matches!(self.kind, EVENT_ATTACK | EVENT_UNIT_DIED);
         let visible = |entity: moba_ecs::Entity| {
             units.iter().any(|unit| unit.entity == entity) || (recent && known(entity))
         };
