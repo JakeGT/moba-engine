@@ -24,7 +24,7 @@ Captured 2026-10-30 on the development workstation, not a CI runner, for
 | VRAM | 58 MB (Low) to 263 MB (Ultra) at 1080p, every tier far inside its budget; texture bytes 6.8–7.5 MB |
 | Mid-match uploads / pipeline builds | 0 / 0 in every run (`locked_uploads`, `locked_pipelines`) |
 | 10-minute pacing (p99 ≤ 1.5 × p50) | p99 ÷ p50 = 1.006 (Low), 1.044 (Medium), 1.289 (High), 1.248 (Ultra); GPU p99 0.44–1.08 ms, every tier inside its §7 budget ([below](#frame-pacing-10-minute-replay)) |
-| Goldens | culling: unchanged; LODs: deliberate rebaseline of all eight fingerprints (silhouette pixels only) |
+| Goldens | culling: unchanged; LODs: deliberate rebaseline of every fingerprint (silhouette pixels only; twelve after R3b) |
 
 ## GPU-driven culling: the measurement that decided it
 
@@ -250,6 +250,12 @@ all eight were rebaselined again on lavapipe, two complete runs byte-identical w
 validation messages, and `scripts/cull-probe.sh` still reports all five scenes byte-identical
 with culling on and off with the measured skinned spheres (Ultra VAT units 131/164, networked
 32/43).
+
+**After R3b.** Merged with R3b's decals, foliage and water (ADR-0017, twelve goldens), the
+twelve captures against R3b's fingerprints differ by at most 2/255 (default, low, overview,
+horizon, networked; the other seven match exactly at fingerprint resolution); all twelve were
+written from one of two lavapipe runs that were byte-identical (24 files), with 0 validation
+messages; `scripts/cull-probe.sh` and `scripts/outline-probe.sh` pass on the merged build.
 
 ## Hardware matrix (#9/#127)
 

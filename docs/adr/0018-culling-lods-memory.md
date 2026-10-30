@@ -69,7 +69,14 @@ so whichever side culls, the CPU uploads every candidate's 128-byte instance eve
   run) and drawn with one `vkCmdDrawIndexed` each; the prepass and the scene draw the same runs.
   With culling off the whole reordered buffer is one draw, so off and on draw the same
   triangles in the same order. The terrain casts no shadow (ADR-0014), so there is no shadow
-  terrain list.
+  terrain list. Decals (R3b, ADR-0017) are shaded inside the terrain and units, so the terrain
+  runs above cover them.
+- **R3b environment.** Foliage keeps its own CPU culling (ADR-0017: per-chunk boxes against
+  the main camera's six planes plus a distance cap, merged into instance runs), which R8 leaves
+  as it is: the chunks are foliage instances, not units, and the same exactness argument
+  holds (culled runs draw a subset in the same order). Water is one small mesh drawn whole and
+  decals have no geometry of their own, so neither is unit-culled. `CullMode::Off` does not
+  switch foliage culling off; `scripts/cull-probe.sh` compares units and terrain.
 - **Switch.** `RenderConfig::culling` (`CullMode::{Off, Cpu}`), from
   `MOBA_GPU_CULL=off|cpu` in the client (`on` is accepted as `cpu`); the default is `cpu` on
   every tier. `off` draws everything, the reference for the exactness check
