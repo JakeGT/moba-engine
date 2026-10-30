@@ -95,6 +95,43 @@
 //! The `[terrain]` generator and the visual-versus-simulation consistency rules live in
 //! [`crate::generate_terrain`] and [`crate::check_map_consistency`].
 //!
+//! With a `[terrain]` table, a descriptor may add foliage and shallow water (ADR-0017):
+//!
+//! ```toml
+//! [foliage]                      # optional; every key optional
+//! density = 1.5                  # grass clumps per 10 m² of board, 0..=8
+//! height = [0.3, 0.6]            # clump height range, metres, 0.1..=1.5
+//! base_color = [0.05, 0.16, 0.04]  # linear RGB 0..=1 at the root
+//! tip_color = [0.35, 0.55, 0.18]   # at the tip
+//! flower_color = [0.9, 0.75, 0.3]
+//! wind = [0.8, 0.3]              # direction times strength, length 0..=4
+//! wind_speed = 1.2               # gust speed, 0..=8
+//! reeds = true                   # reeds line the water's banks
+//! seed = 1                       # u32 placement seed
+//!
+//! [[foliage.patches]]            # optional, at most 32
+//! center = [96, 140]             # world units
+//! radius = 8.0                   # metres, 1..=60
+//! kind = "brush"                 # grass | brush | reeds | flowers
+//! density = 4.0                  # clumps per 10 m², 0..=20
+//!
+//! [[water]]                      # optional, at most 8 bodies
+//! points = [[40, 90], [128, 120], [210, 150]]  # 1..=32; one point is a round pool
+//! width = 12.0                   # metres, 2..=60
+//! level = 0.1                    # surface height, metres, -0.5..=0.3
+//! depth = 0.45                   # bed depth below the surface, 0.05..=0.8
+//!                                # (level - depth >= -0.5: the bed stays in the relief limit)
+//! flow = 1.0                     # flow speed along the points, metres per second, 0..=8
+//! color = [0.02, 0.12, 0.16]     # deep colour, linear RGB 0..=1
+//! shallow_color = [0.10, 0.30, 0.30]
+//! clarity = 0.35                 # metres of depth per e-fold of the deep colour, 0.05..=4
+//! foam = 0.6                     # shoreline foam, 0..=1
+//! ```
+//!
+//! [`crate::generate_foliage`], [`crate::generate_water`] and
+//! [`crate::generate_terrain_with_water`] turn these into instances, the water mesh and the
+//! carved bed.
+//!
 //! Descriptors are untrusted, client-local and cosmetic: they never reach the simulation, the
 //! wire or the content hash. [`MapVisuals::load_file`] reads at most
 //! [`MAX_MAP_VISUALS_BYTES`], rejects unknown keys, and range-checks every number, so a
@@ -108,7 +145,7 @@ use serde::Deserialize;
 use crate::terrain::{MAX_EDGE_HEIGHT, MAX_PLAY_RELIEF, MAX_TERRAIN_LAYERS};
 
 /// Largest descriptor file accepted, in bytes.
-pub const MAX_MAP_VISUALS_BYTES: u64 = 16 * 1024;
+pub const MAX_MAP_VISUALS_BYTES: u64 = 32 * 1024;
 /// Most props one descriptor may place.
 pub const MAX_MAP_PROPS: usize = 32;
 /// Most distinct mesh names (wall and props together) one descriptor may reference.
@@ -200,6 +237,344 @@ pub struct MapVisuals {
     pub fog_of_war: MapFogStyle,
     /// Post-processing overrides (`[post]`); unset keys keep the engine defaults.
     pub post: MapPost,
+    /// Grass, brush, reeds and flowers (`[foliage]`, ADR-0017); needs `ground`.
+    pub foliage: Option<MapFoliage>,
+    /// Shallow rivers and pools (`[[water]]`, ADR-0017), in file order; needs `ground`.
+    pub water: Vec<MapWater>,
+}
+
+/// Most `[[water]]` bodies one descriptor may have.
+pub const MAX_MAP_WATER: usize = 8;
+/// Most centre-line points one water body may have.
+pub const MAX_WATER_POINTS: usize = 32;
+/// Highest water surface above the ground units stand on (height 0), metres.
+pub const MAX_WATER_LEVEL: f32 = 0.3;
+/// Deepest water allowed above the carved bed, metres: a 2 m hero visibly wades, never swims.
+pub const MAX_WADE_DEPTH: f32 = 0.8;
+/// Most `[[foliage.patches]]` one descriptor may have.
+pub const MAX_FOLIAGE_PATCHES: usize = 32;
+
+pub(crate) const WATER_WIDTH_RANGE: (f32, f32) = (2.0, 60.0);
+pub(crate) const WATER_DEPTH_RANGE: (f32, f32) = (0.05, MAX_WADE_DEPTH);
+const WATER_FLOW_RANGE: (f32, f32) = (0.0, 8.0);
+const WATER_CLARITY_RANGE: (f32, f32) = (0.05, 4.0);
+const FOLIAGE_DENSITY_RANGE: (f32, f32) = (0.0, 8.0);
+const FOLIAGE_HEIGHT_RANGE: (f32, f32) = (0.1, 1.5);
+const PATCH_RADIUS_RANGE: (f32, f32) = (1.0, 60.0);
+const PATCH_DENSITY_RANGE: (f32, f32) = (0.0, 20.0);
+const MAX_WIND: f32 = 4.0;
+
+/// One shallow water body (`[[water]]`, ADR-0017 §3): a river along a centre polyline, or a
+/// round pool around a single point. Values built in code are not range-checked; the
+/// generators clamp them to the limits the parser enforces.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct MapWater {
+    /// Centre polyline, world units (simulation coordinates); one point is a round pool.
+    pub points: Vec<[f32; 2]>,
+    /// Width across the river (the pool's diameter), metres, `2..=60`.
+    pub width: f32,
+    /// Surface height, metres, `-0.5..=`[`MAX_WATER_LEVEL`].
+    pub level: f32,
+    /// Bed depth below the surface at the centre line, metres, `0.05..=`[`MAX_WADE_DEPTH`].
+    pub depth: f32,
+    /// Flow speed along the polyline, metres per second, `0..=8` (pools do not flow).
+    pub flow: f32,
+    /// Deep colour, linear RGB `0..=1`.
+    pub color: [f32; 3],
+    /// Shallow colour, linear RGB `0..=1`.
+    pub shallow_color: [f32; 3],
+    /// Metres of depth per e-fold towards the deep colour, `0.05..=4`.
+    pub clarity: f32,
+    /// Shoreline foam strength, `0..=1`.
+    pub foam: f32,
+}
+
+impl MapWater {
+    /// Width when a body sets none, metres.
+    pub const DEFAULT_WIDTH: f32 = 12.0;
+    /// Surface level when a body sets none, metres.
+    pub const DEFAULT_LEVEL: f32 = 0.1;
+    /// Bed depth when a body sets none, metres.
+    pub const DEFAULT_DEPTH: f32 = 0.45;
+    /// Flow speed when a body sets none, metres per second.
+    pub const DEFAULT_FLOW: f32 = 1.0;
+    /// Deep colour when a body sets none.
+    pub const DEFAULT_COLOR: [f32; 3] = [0.02, 0.12, 0.16];
+    /// Shallow colour when a body sets none.
+    pub const DEFAULT_SHALLOW_COLOR: [f32; 3] = [0.10, 0.30, 0.30];
+    /// Clarity when a body sets none, metres.
+    pub const DEFAULT_CLARITY: f32 = 0.35;
+    /// Foam when a body sets none.
+    pub const DEFAULT_FOAM: f32 = 0.6;
+
+    /// A body along `points` with every other value at its default.
+    #[must_use]
+    pub fn new(points: Vec<[f32; 2]>) -> Self {
+        Self {
+            points,
+            width: Self::DEFAULT_WIDTH,
+            level: Self::DEFAULT_LEVEL,
+            depth: Self::DEFAULT_DEPTH,
+            flow: Self::DEFAULT_FLOW,
+            color: Self::DEFAULT_COLOR,
+            shallow_color: Self::DEFAULT_SHALLOW_COLOR,
+            clarity: Self::DEFAULT_CLARITY,
+            foam: Self::DEFAULT_FOAM,
+        }
+    }
+
+    /// Returns this body with a width.
+    #[must_use]
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// Returns this body with a surface level and bed depth.
+    #[must_use]
+    pub fn with_level(mut self, level: f32, depth: f32) -> Self {
+        self.level = level;
+        self.depth = depth;
+        self
+    }
+
+    /// Returns this body with a flow speed.
+    #[must_use]
+    pub fn with_flow(mut self, flow: f32) -> Self {
+        self.flow = flow;
+        self
+    }
+
+    /// Returns this body with its deep and shallow colours.
+    #[must_use]
+    pub fn with_colors(mut self, color: [f32; 3], shallow_color: [f32; 3]) -> Self {
+        self.color = color;
+        self.shallow_color = shallow_color;
+        self
+    }
+
+    /// Returns this body with a clarity and foam strength.
+    #[must_use]
+    pub fn with_style(mut self, clarity: f32, foam: f32) -> Self {
+        self.clarity = clarity;
+        self.foam = foam;
+        self
+    }
+
+    /// Half the width, clamped to the parser's range (the generators' value).
+    pub(crate) fn half_width(&self) -> f32 {
+        0.5 * crate::terrain::finite_clamp(
+            self.width,
+            WATER_WIDTH_RANGE.0,
+            WATER_WIDTH_RANGE.1,
+            Self::DEFAULT_WIDTH,
+        )
+    }
+
+    /// Surface level, clamped to the parser's range (the generators' value).
+    pub(crate) fn surface(&self) -> f32 {
+        crate::terrain::finite_clamp(
+            self.level,
+            -MAX_PLAY_RELIEF,
+            MAX_WATER_LEVEL,
+            Self::DEFAULT_LEVEL,
+        )
+    }
+
+    /// Bed depth, clamped to the parser's range (the generators' value).
+    pub(crate) fn bed_depth(&self) -> f32 {
+        crate::terrain::finite_clamp(
+            self.depth,
+            WATER_DEPTH_RANGE.0,
+            WATER_DEPTH_RANGE.1,
+            Self::DEFAULT_DEPTH,
+        )
+    }
+
+    /// The centre points with finite coordinates, at most [`MAX_WATER_POINTS`].
+    pub(crate) fn finite_points(&self) -> impl Iterator<Item = [f32; 2]> + '_ {
+        self.points
+            .iter()
+            .copied()
+            .filter(|p| p[0].is_finite() && p[1].is_finite())
+            .take(MAX_WATER_POINTS)
+    }
+}
+
+/// What a foliage clump is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FoliageKind {
+    /// Short grass tufts (the generated scatter).
+    #[default]
+    Grass,
+    /// Waist-high brush (decorative only: the simulation has no brush areas).
+    Brush,
+    /// Tall reeds (along water banks).
+    Reeds,
+    /// Grass with flower heads.
+    Flowers,
+}
+
+impl FoliageKind {
+    /// Every kind, in [`Self::index`] order.
+    pub const ALL: [Self; 4] = [Self::Grass, Self::Brush, Self::Reeds, Self::Flowers];
+
+    /// The GPU kind index: grass 0, brush 1, reeds 2, flowers 3.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        match self {
+            Self::Grass => 0,
+            Self::Brush => 1,
+            Self::Reeds => 2,
+            Self::Flowers => 3,
+        }
+    }
+
+    /// The descriptor spelling (`"grass"`, `"brush"`, `"reeds"`, `"flowers"`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Grass => "grass",
+            Self::Brush => "brush",
+            Self::Reeds => "reeds",
+            Self::Flowers => "flowers",
+        }
+    }
+
+    /// Parses the descriptor spelling.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+}
+
+/// One `[[foliage.patches]]` entry: extra clumps of one kind in a disc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct FoliagePatch {
+    /// Disc centre, world units.
+    pub center: [f32; 2],
+    /// Disc radius, metres, `1..=60`.
+    pub radius: f32,
+    /// Kind of every clump in the patch.
+    pub kind: FoliageKind,
+    /// Clumps per 10 m², `0..=20`.
+    pub density: f32,
+}
+
+impl FoliagePatch {
+    /// Patch density when a patch sets none, clumps per 10 m².
+    pub const DEFAULT_DENSITY: f32 = 4.0;
+
+    /// A patch of `kind` at the default density.
+    #[must_use]
+    pub fn new(center: [f32; 2], radius: f32, kind: FoliageKind) -> Self {
+        Self {
+            center,
+            radius,
+            kind,
+            density: Self::DEFAULT_DENSITY,
+        }
+    }
+
+    /// Returns this patch with a density.
+    #[must_use]
+    pub fn with_density(mut self, density: f32) -> Self {
+        self.density = density;
+        self
+    }
+}
+
+/// The `[foliage]` table (ADR-0017 §2): the generated grass scatter, reeds along water and
+/// authored patches. Values built in code are not range-checked; [`crate::generate_foliage`]
+/// clamps them to the limits the parser enforces.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct MapFoliage {
+    /// Grass clumps per 10 m² of board, `0..=8`.
+    pub density: f32,
+    /// Clump height range, metres, `0.1..=1.5`, low first.
+    pub height: [f32; 2],
+    /// Colour at the root, linear RGB `0..=1`.
+    pub base_color: [f32; 3],
+    /// Colour at the tip, linear RGB `0..=1`.
+    pub tip_color: [f32; 3],
+    /// Flower head colour, linear RGB `0..=1`.
+    pub flower_color: [f32; 3],
+    /// Wind direction times strength (simulation `x`, `y`), length `0..=4`.
+    pub wind: [f32; 2],
+    /// Gust speed, `0..=8`.
+    pub wind_speed: f32,
+    /// Reeds line the water's banks.
+    pub reeds: bool,
+    /// Placement seed (combined with the terrain seed).
+    pub seed: u32,
+    /// Authored patches, in file order (at most [`MAX_FOLIAGE_PATCHES`]).
+    pub patches: Vec<FoliagePatch>,
+}
+
+impl Default for MapFoliage {
+    fn default() -> Self {
+        Self {
+            density: Self::DEFAULT_DENSITY,
+            height: Self::DEFAULT_HEIGHT,
+            base_color: Self::DEFAULT_BASE_COLOR,
+            tip_color: Self::DEFAULT_TIP_COLOR,
+            flower_color: Self::DEFAULT_FLOWER_COLOR,
+            wind: Self::DEFAULT_WIND,
+            wind_speed: Self::DEFAULT_WIND_SPEED,
+            reeds: true,
+            seed: 1,
+            patches: Vec::new(),
+        }
+    }
+}
+
+impl MapFoliage {
+    /// Scatter density when `[foliage]` sets none, clumps per 10 m².
+    pub const DEFAULT_DENSITY: f32 = 1.5;
+    /// Clump height range when `[foliage]` sets none, metres.
+    pub const DEFAULT_HEIGHT: [f32; 2] = [0.3, 0.6];
+    /// Root colour when `[foliage]` sets none.
+    pub const DEFAULT_BASE_COLOR: [f32; 3] = [0.05, 0.16, 0.04];
+    /// Tip colour when `[foliage]` sets none.
+    pub const DEFAULT_TIP_COLOR: [f32; 3] = [0.35, 0.55, 0.18];
+    /// Flower colour when `[foliage]` sets none.
+    pub const DEFAULT_FLOWER_COLOR: [f32; 3] = [0.9, 0.75, 0.3];
+    /// Wind when `[foliage]` sets none.
+    pub const DEFAULT_WIND: [f32; 2] = [0.8, 0.3];
+    /// Gust speed when `[foliage]` sets none.
+    pub const DEFAULT_WIND_SPEED: f32 = 1.2;
+
+    /// Returns this table with a scatter density.
+    #[must_use]
+    pub fn with_density(mut self, density: f32) -> Self {
+        self.density = density;
+        self
+    }
+
+    /// Returns this table with reeds along water on or off.
+    #[must_use]
+    pub fn with_reeds(mut self, reeds: bool) -> Self {
+        self.reeds = reeds;
+        self
+    }
+
+    /// Returns this table with a placement seed.
+    #[must_use]
+    pub fn with_seed(mut self, seed: u32) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Returns this table with one more patch.
+    #[must_use]
+    pub fn with_patch(mut self, patch: FoliagePatch) -> Self {
+        self.patches.push(patch);
+        self
+    }
 }
 
 /// How the ground outside the board rises (`[terrain] edge`).
@@ -598,6 +973,66 @@ struct RawMapVisuals {
     fog_of_war: Option<RawFogStyle>,
     #[serde(default)]
     post: Option<RawPost>,
+    foliage: Option<RawFoliage>,
+    #[serde(default)]
+    water: Vec<RawWater>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFoliage {
+    #[serde(default)]
+    density: Option<f32>,
+    #[serde(default)]
+    height: Option<[f32; 2]>,
+    #[serde(default)]
+    base_color: Option<[f32; 3]>,
+    #[serde(default)]
+    tip_color: Option<[f32; 3]>,
+    #[serde(default)]
+    flower_color: Option<[f32; 3]>,
+    #[serde(default)]
+    wind: Option<[f32; 2]>,
+    #[serde(default)]
+    wind_speed: Option<f32>,
+    #[serde(default)]
+    reeds: Option<bool>,
+    #[serde(default)]
+    seed: Option<u32>,
+    #[serde(default)]
+    patches: Vec<RawPatch>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPatch {
+    center: [f32; 2],
+    radius: f32,
+    kind: String,
+    #[serde(default)]
+    density: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWater {
+    points: Vec<[f32; 2]>,
+    #[serde(default)]
+    width: Option<f32>,
+    #[serde(default)]
+    level: Option<f32>,
+    #[serde(default)]
+    depth: Option<f32>,
+    #[serde(default)]
+    flow: Option<f32>,
+    #[serde(default)]
+    color: Option<[f32; 3]>,
+    #[serde(default)]
+    shallow_color: Option<[f32; 3]>,
+    #[serde(default)]
+    clarity: Option<f32>,
+    #[serde(default)]
+    foam: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -1158,6 +1593,167 @@ fn check_fog_style(raw: Option<RawFogStyle>) -> Result<MapFogStyle, MapVisualsEr
     })
 }
 
+fn check_position(p: [f32; 2], what: &'static str) -> Result<[f32; 2], MapVisualsError> {
+    Ok([
+        check_range(p[0], POSITION_RANGE, what)?,
+        check_range(p[1], POSITION_RANGE, what)?,
+    ])
+}
+
+fn check_foliage(raw: RawFoliage) -> Result<MapFoliage, MapVisualsError> {
+    if raw.patches.len() > MAX_FOLIAGE_PATCHES {
+        return Err(MapVisualsError::Invalid("at most 32 foliage patches"));
+    }
+    let mut patches = Vec::with_capacity(raw.patches.len());
+    for patch in raw.patches {
+        patches.push(FoliagePatch {
+            center: check_position(patch.center, "foliage patch center out of range")?,
+            radius: check_range(
+                patch.radius,
+                PATCH_RADIUS_RANGE,
+                "foliage patch radius must be 1..=60 metres",
+            )?,
+            kind: FoliageKind::from_name(&patch.kind).ok_or(MapVisualsError::Invalid(
+                "foliage patch kind must be \"grass\", \"brush\", \"reeds\" or \"flowers\"",
+            ))?,
+            density: check_range(
+                patch.density.unwrap_or(FoliagePatch::DEFAULT_DENSITY),
+                PATCH_DENSITY_RANGE,
+                "foliage patch density must be 0..=20 clumps per 10 m²",
+            )?,
+        });
+    }
+    let height = raw.height.unwrap_or(MapFoliage::DEFAULT_HEIGHT);
+    let height = [
+        check_range(
+            height[0],
+            FOLIAGE_HEIGHT_RANGE,
+            "foliage height must be 0.1..=1.5",
+        )?,
+        check_range(
+            height[1],
+            FOLIAGE_HEIGHT_RANGE,
+            "foliage height must be 0.1..=1.5",
+        )?,
+    ];
+    if height[0] > height[1] {
+        return Err(MapVisualsError::Invalid(
+            "foliage height must be [low, high] with low <= high",
+        ));
+    }
+    let wind = raw.wind.unwrap_or(MapFoliage::DEFAULT_WIND);
+    let strength = (wind[0] * wind[0] + wind[1] * wind[1]).sqrt();
+    if !strength.is_finite() || strength > MAX_WIND {
+        return Err(MapVisualsError::Invalid(
+            "foliage wind must be a vector of length 0..=4",
+        ));
+    }
+    let color =
+        |value: Option<[f32; 3]>, fallback, what| check_color(value.unwrap_or(fallback), what);
+    Ok(MapFoliage {
+        density: check_range(
+            raw.density.unwrap_or(MapFoliage::DEFAULT_DENSITY),
+            FOLIAGE_DENSITY_RANGE,
+            "foliage density must be 0..=8 clumps per 10 m²",
+        )?,
+        height,
+        base_color: color(
+            raw.base_color,
+            MapFoliage::DEFAULT_BASE_COLOR,
+            "foliage base_color must be RGB in 0..=1",
+        )?,
+        tip_color: color(
+            raw.tip_color,
+            MapFoliage::DEFAULT_TIP_COLOR,
+            "foliage tip_color must be RGB in 0..=1",
+        )?,
+        flower_color: color(
+            raw.flower_color,
+            MapFoliage::DEFAULT_FLOWER_COLOR,
+            "foliage flower_color must be RGB in 0..=1",
+        )?,
+        wind,
+        wind_speed: check_range(
+            raw.wind_speed.unwrap_or(MapFoliage::DEFAULT_WIND_SPEED),
+            (0.0, 8.0),
+            "foliage wind_speed must be 0..=8",
+        )?,
+        reeds: raw.reeds.unwrap_or(true),
+        seed: raw.seed.unwrap_or(1),
+        patches,
+    })
+}
+
+fn check_water(raw: Vec<RawWater>) -> Result<Vec<MapWater>, MapVisualsError> {
+    if raw.len() > MAX_MAP_WATER {
+        return Err(MapVisualsError::Invalid("at most 8 water bodies"));
+    }
+    let mut bodies = Vec::with_capacity(raw.len());
+    for body in raw {
+        if body.points.is_empty() || body.points.len() > MAX_WATER_POINTS {
+            return Err(MapVisualsError::Invalid("a water body needs 1..=32 points"));
+        }
+        let mut points = Vec::with_capacity(body.points.len());
+        for point in body.points {
+            points.push(check_position(point, "water point out of range")?);
+        }
+        let level = check_range(
+            body.level.unwrap_or(MapWater::DEFAULT_LEVEL),
+            (-MAX_PLAY_RELIEF, MAX_WATER_LEVEL),
+            "water level must be -0.5..=0.3 metres (units stand at height 0 and wade)",
+        )?;
+        let depth = check_range(
+            body.depth.unwrap_or(MapWater::DEFAULT_DEPTH),
+            WATER_DEPTH_RANGE,
+            "water depth must be 0.05..=0.8 metres (a hero wades, never swims)",
+        )?;
+        if level - depth < -MAX_PLAY_RELIEF - 1e-4 {
+            return Err(MapVisualsError::Invalid(
+                "water level - depth must be at least -0.5: the bed stays within the board's \
+                 relief limit (ADR-0014)",
+            ));
+        }
+        let color =
+            |value: Option<[f32; 3]>, fallback, what| check_color(value.unwrap_or(fallback), what);
+        bodies.push(MapWater {
+            points,
+            width: check_range(
+                body.width.unwrap_or(MapWater::DEFAULT_WIDTH),
+                WATER_WIDTH_RANGE,
+                "water width must be 2..=60 metres",
+            )?,
+            level,
+            depth,
+            flow: check_range(
+                body.flow.unwrap_or(MapWater::DEFAULT_FLOW),
+                WATER_FLOW_RANGE,
+                "water flow must be 0..=8 metres per second",
+            )?,
+            color: color(
+                body.color,
+                MapWater::DEFAULT_COLOR,
+                "water color must be RGB in 0..=1",
+            )?,
+            shallow_color: color(
+                body.shallow_color,
+                MapWater::DEFAULT_SHALLOW_COLOR,
+                "water shallow_color must be RGB in 0..=1",
+            )?,
+            clarity: check_range(
+                body.clarity.unwrap_or(MapWater::DEFAULT_CLARITY),
+                WATER_CLARITY_RANGE,
+                "water clarity must be 0.05..=4 metres",
+            )?,
+            foam: check_range(
+                body.foam.unwrap_or(MapWater::DEFAULT_FOAM),
+                (0.0, 1.0),
+                "water foam must be 0..=1",
+            )?,
+        });
+    }
+    Ok(bodies)
+}
+
 fn check_mesh(name: Option<String>) -> Result<Option<String>, MapVisualsError> {
     match name {
         Some(name) if !valid_mesh_name(&name) => Err(MapVisualsError::Invalid(
@@ -1211,6 +1807,13 @@ impl MapVisuals {
             });
         }
         let (terrain, ground) = split_terrain(raw.terrain)?;
+        if ground.is_none() && (raw.foliage.is_some() || !raw.water.is_empty()) {
+            return Err(MapVisualsError::Invalid(
+                "[foliage] and [[water]] need the [terrain] table (they stand on the heightfield)",
+            ));
+        }
+        let foliage = raw.foliage.map(check_foliage).transpose()?;
+        let water = check_water(raw.water)?;
         let visuals = Self {
             terrain,
             wall: check_color(raw.wall, "wall must be RGB in 0..=1")?,
@@ -1226,6 +1829,8 @@ impl MapVisuals {
             atmosphere: check_atmosphere(raw.atmosphere)?,
             fog_of_war: check_fog_style(raw.fog_of_war)?,
             post: check_post(raw.post)?,
+            foliage,
+            water,
         };
         if visuals.mesh_names().count() > MAX_MAP_MESHES {
             return Err(MapVisualsError::Invalid(
@@ -1313,6 +1918,20 @@ impl MapVisuals {
     #[must_use]
     pub fn with_fog_of_war(mut self, fog_of_war: MapFogStyle) -> Self {
         self.fog_of_war = fog_of_war;
+        self
+    }
+
+    /// Returns this descriptor with a `[foliage]` table (or none).
+    #[must_use]
+    pub fn with_foliage(mut self, foliage: Option<MapFoliage>) -> Self {
+        self.foliage = foliage;
+        self
+    }
+
+    /// Returns this descriptor with these `[[water]]` bodies.
+    #[must_use]
+    pub fn with_water(mut self, water: Vec<MapWater>) -> Self {
+        self.water = water;
         self
     }
 }
@@ -1529,7 +2148,7 @@ color = [0.2, 0.2, 0.2]
                     })
                     .concat()
             ),
-            format!("{base}#{}", "x".repeat(17 * 1024)),
+            format!("{base}#{}", "x".repeat(33 * 1024)),
         ] {
             assert!(MapVisuals::parse(&bad).is_err(), "{bad:?}");
         }
@@ -1774,7 +2393,7 @@ mist = 0.4
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("dir.toml")).expect("temp dir");
         std::fs::write(root.join("ok.toml"), EMBER).expect("write");
-        std::fs::write(root.join("big.toml"), vec![b'#'; 20 * 1024]).expect("write");
+        std::fs::write(root.join("big.toml"), vec![b'#'; 40 * 1024]).expect("write");
         std::fs::write(root.join("binary.toml"), [0xff, 0xfe, 0x00]).expect("write");
         assert!(MapVisuals::load_file(&root.join("ok.toml")).is_ok());
         assert_eq!(
@@ -1788,5 +2407,149 @@ mist = 0.4
         assert!(MapVisuals::load_file(&root.join("binary.toml")).is_err());
         assert!(MapVisuals::load_file(&root.join("dir.toml")).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    const HEIGHTFIELD: &str = "wall = [0.5, 0.2, 0.1]\n[terrain]\ntint = [0.3, 0.1, 0.1]\n\
+                           [[terrain.layers]]\nalbedo = \"grass\"\n";
+
+    #[test]
+    fn foliage_and_water_parse_with_defaults() {
+        let visuals = MapVisuals::parse(&format!(
+            "{HEIGHTFIELD}[foliage]\ndensity = 2.5\nheight = [0.2, 0.9]\nwind = [1.0, -2.0]\n\
+             reeds = false\nseed = 9\n\
+             [[foliage.patches]]\ncenter = [96, 140]\nradius = 8\nkind = \"brush\"\n\
+             [[foliage.patches]]\ncenter = [20, 20]\nradius = 3\nkind = \"flowers\"\ndensity = 12\n\
+             [[water]]\npoints = [[40, 90], [128, 120], [210, 150]]\nwidth = 14\nlevel = 0.2\n\
+             depth = 0.6\nflow = 2\ncolor = [0.0, 0.1, 0.2]\nclarity = 0.5\nfoam = 0.2\n\
+             [[water]]\npoints = [[200, 40]]\n"
+        ))
+        .expect("foliage and water");
+        let foliage = visuals.foliage.as_ref().expect("foliage");
+        assert!((foliage.density - 2.5).abs() < 1e-6);
+        assert_eq!(foliage.height, [0.2, 0.9]);
+        assert_eq!(foliage.wind, [1.0, -2.0]);
+        assert!(!foliage.reeds);
+        assert_eq!(foliage.seed, 9);
+        assert_eq!(foliage.tip_color, MapFoliage::DEFAULT_TIP_COLOR);
+        assert_eq!(foliage.patches.len(), 2);
+        assert_eq!(foliage.patches[0].kind, FoliageKind::Brush);
+        assert!((foliage.patches[0].density - FoliagePatch::DEFAULT_DENSITY).abs() < 1e-6);
+        assert_eq!(foliage.patches[1].kind.index(), 3);
+        assert_eq!(visuals.water.len(), 2);
+        let river = &visuals.water[0];
+        assert_eq!(river.points.len(), 3);
+        assert!((river.width - 14.0).abs() < 1e-6 && (river.level - 0.2).abs() < 1e-6);
+        assert!((river.depth - 0.6).abs() < 1e-6 && (river.flow - 2.0).abs() < 1e-6);
+        assert_eq!(river.shallow_color, MapWater::DEFAULT_SHALLOW_COLOR);
+        assert_eq!(visuals.water[1], MapWater::new(vec![[200.0, 40.0]]));
+        // Defaults when the table is empty.
+        let plain = MapVisuals::parse(&format!("{HEIGHTFIELD}[foliage]\n")).expect("empty foliage");
+        assert_eq!(plain.foliage, Some(MapFoliage::default()));
+        assert_eq!(plain.water.len(), 0);
+        let none = MapVisuals::parse(HEIGHTFIELD).expect("no foliage");
+        assert_eq!((none.foliage, none.water.len()), (None, 0));
+        for kind in FoliageKind::ALL {
+            assert_eq!(FoliageKind::from_name(kind.name()), Some(kind));
+        }
+        assert_eq!(FoliageKind::from_name("tree"), None);
+    }
+
+    #[test]
+    fn rejects_hostile_or_out_of_range_foliage_and_water() {
+        let water = |body: &str| format!("{HEIGHTFIELD}[[water]]\npoints = [[10, 10]]\n{body}");
+        let foliage = |body: &str| format!("{HEIGHTFIELD}[foliage]\n{body}");
+        let patch = |body: &str| {
+            format!(
+                "{HEIGHTFIELD}[[foliage.patches]]\ncenter = [1, 1]\nradius = 2\nkind = \"grass\"\n{body}"
+            )
+        };
+        assert!(MapVisuals::parse(&water("")).is_ok());
+        assert!(MapVisuals::parse(&patch("")).is_ok());
+        for bad in [
+            // Both need the heightfield.
+            String::from("terrain = [0.1, 0.1, 0.1]\nwall = [0.1, 0.1, 0.1]\n[foliage]\n"),
+            String::from(
+                "terrain = [0.1, 0.1, 0.1]\nwall = [0.1, 0.1, 0.1]\n[[water]]\npoints = [[1, 1]]\n",
+            ),
+            water("extra = 1"),
+            water("width = 1"),
+            water("width = 61"),
+            water("level = 0.31"),
+            water("level = -0.6"),
+            water("depth = 0.01"),
+            water("depth = 0.9"),
+            // The bed would sink below the relief limit.
+            water("level = -0.2\ndepth = 0.4"),
+            water("flow = -1"),
+            water("flow = 9"),
+            water("color = [2, 0, 0]"),
+            water("clarity = 0"),
+            water("foam = 1.5"),
+            water("level = nan"),
+            format!("{HEIGHTFIELD}[[water]]\npoints = []\n"),
+            format!("{HEIGHTFIELD}[[water]]\nwidth = 4\n"),
+            format!("{HEIGHTFIELD}[[water]]\npoints = [[1e9, 1]]\n"),
+            format!(
+                "{HEIGHTFIELD}[[water]]\npoints = [{}]\n",
+                vec!["[1, 1]"; MAX_WATER_POINTS + 1].join(", ")
+            ),
+            format!(
+                "{HEIGHTFIELD}{}",
+                "[[water]]\npoints = [[1, 1]]\n".repeat(MAX_MAP_WATER + 1)
+            ),
+            foliage("extra = 1"),
+            foliage("density = 9"),
+            foliage("density = -1"),
+            foliage("height = [0.05, 0.5]"),
+            foliage("height = [0.9, 0.3]"),
+            foliage("height = [0.3, 2]"),
+            foliage("wind = [3, 3]"),
+            foliage("wind = [inf, 0]"),
+            foliage("wind_speed = 9"),
+            foliage("tip_color = [1, 1, 2]"),
+            foliage("seed = -1"),
+            patch("extra = 1"),
+            patch("density = 21"),
+            format!(
+                "{HEIGHTFIELD}[[foliage.patches]]\ncenter = [1, 1]\nradius = 0.5\nkind = \"grass\"\n"
+            ),
+            format!(
+                "{HEIGHTFIELD}[[foliage.patches]]\ncenter = [1, 1]\nradius = 61\nkind = \"grass\"\n"
+            ),
+            format!(
+                "{HEIGHTFIELD}[[foliage.patches]]\ncenter = [1, 1]\nradius = 2\nkind = \"tree\"\n"
+            ),
+            format!("{HEIGHTFIELD}[[foliage.patches]]\ncenter = [1, 1]\nradius = 2\n"),
+            format!(
+                "{HEIGHTFIELD}{}",
+                "[[foliage.patches]]\ncenter = [1, 1]\nradius = 2\nkind = \"grass\"\n"
+                    .repeat(MAX_FOLIAGE_PATCHES + 1)
+            ),
+        ] {
+            assert!(MapVisuals::parse(&bad).is_err(), "{bad:?}");
+        }
+        // The bed may reach the relief limit exactly.
+        assert!(MapVisuals::parse(&water("level = 0.3\ndepth = 0.8")).is_ok());
+        // Eight full bodies and 32 patches fit in a descriptor.
+        let points = vec!["[100.25, 100.25]"; MAX_WATER_POINTS].join(", ");
+        let full = format!(
+            "{HEIGHTFIELD}{}{}",
+            format!(
+                "[[water]]\npoints = [{points}]\nwidth = 12.5\nlevel = 0.1\ndepth = 0.45\nflow = 1.0\n\
+                 color = [0.02, 0.12, 0.16]\nshallow_color = [0.10, 0.30, 0.30]\nclarity = 0.35\n\
+                 foam = 0.6\n"
+            )
+            .repeat(MAX_MAP_WATER),
+            "[[foliage.patches]]\ncenter = [100.5, 100.5]\nradius = 10.0\nkind = \"flowers\"\n\
+             density = 4.0\n"
+                .repeat(MAX_FOLIAGE_PATCHES)
+        );
+        assert!(
+            (full.len() as u64) < MAX_MAP_VISUALS_BYTES / 2,
+            "{}",
+            full.len()
+        );
+        let full = MapVisuals::parse(&full).expect("full descriptor");
+        assert_eq!(full.water.len(), MAX_MAP_WATER);
     }
 }

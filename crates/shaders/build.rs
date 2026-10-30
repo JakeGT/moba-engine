@@ -105,6 +105,12 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "vat_outline.vert",
         defines: &["OUTLINE_HULL"],
     },
+    // Water with screen-space refraction (High and up, ADR-0017).
+    Permutation {
+        source: "water.frag",
+        output: "water_refraction.frag",
+        defines: &["WATER_REFRACTION"],
+    },
 ];
 
 fn main() {

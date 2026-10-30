@@ -56,8 +56,13 @@
 //!   visibility texture, the pre-R3a 16-circle loop, or none), `MOBA_FOW_SIZE=<64..1024>`,
 //!   `MOBA_FOG=off` (height fog) and `MOBA_SKY=off`. The map's `[terrain]`, `[atmosphere]`
 //!   and `[fog_of_war]` tables set the art direction.
-//! - `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>` (local preview): a fixed orbit camera
-//!   (radians, metres) instead of the slow turn; the R3a goldens use it for the horizon view.
+//! - Decals, foliage and water (R3b, ADR-0017) overrides of the tier's defaults:
+//!   `MOBA_DECALS=off` (no projected telegraphs, scorch marks or splats; the effects' particles
+//!   stay), `MOBA_FOLIAGE=off` and `MOBA_WATER=off|simple|full`. The map's `[foliage]` and
+//!   `[[water]]` tables and the effects' `[[decals]]` set the art direction.
+//! - `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>[,<x>,<z>]` (local preview): a fixed orbit
+//!   camera (radians, metres) instead of the slow turn, around an optional focus (metres from
+//!   the map centre); the R3a goldens use it for the horizon view, R3b for the river.
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
 //!   `MOBA_SERVER=local` server is lock-stepped to the client and stops at `n`, so the frame
@@ -163,6 +168,8 @@ struct ClientApp {
     vfx: vfx::VfxSystem,
     /// This frame's units effects can attach to.
     anchors: vfx::Anchors,
+    /// This frame's foliage displacers, from the drawn units only (R3b).
+    displacers: foliage::Displacers,
     /// `MOBA_REPLAY`: the recorded inputs the local view plays, and the next frame.
     replay: Option<(moba_sim::Replay, usize)>,
     /// `MOBA_VFX_PREVIEW`: the authoring loop.
@@ -206,8 +213,8 @@ struct ClientApp {
     quality: moba_render::QualityTier,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
-    /// `MOBA_PREVIEW_CAMERA`: a fixed local-preview orbit `[yaw, pitch, distance]` (R3a).
-    preview_camera: Option<[f32; 3]>,
+    /// `MOBA_PREVIEW_CAMERA`: a fixed local-preview orbit `[yaw, pitch, distance, x, z]`.
+    preview_camera: Option<[f32; 5]>,
     /// `MOBA_SHADER_DIR` (dev): SPIR-V overrides, hot-reloaded when a `.spv` changes.
     shader_dir: Option<PathBuf>,
     /// Override file count and newest modification time at the last poll (`None` before
@@ -363,6 +370,7 @@ impl ClientApp {
                 system
             },
             anchors: vfx::Anchors::new(),
+            displacers: foliage::Displacers::new(),
             replay: None,
             preview: None,
             ui: UiDrawList::new(),
@@ -617,7 +625,8 @@ impl App for ClientApp {
                 self.render_scale,
                 self.capture_path.is_some() || self.map_capture.is_some(),
             )))
-            .with_world(Some(launch::world_config(self.quality)));
+            .with_world(Some(launch::world_config(self.quality)))
+            .with_environment(Some(launch::environment_config(self.quality)));
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -786,6 +795,7 @@ impl App for ClientApp {
                 animation,
                 vfx,
                 anchors,
+                displacers,
                 replay,
                 preview,
                 minions,
@@ -1157,6 +1167,13 @@ impl App for ClientApp {
                             frame_ms / 1_000.0
                         };
                         let fog = fog_input.build(network, fog_dt);
+                        // R3b: only the drawn units bend the foliage; wind and water follow
+                        // the render tick, so a pinned capture is repeatable.
+                        displacers.build(anchors, view.focus);
+                        let environment = moba_render::EnvironmentFrame::new(
+                            render_tick / 30.0,
+                            displacers.as_slice(),
+                        );
                         let mut scene = Scene::with_vision(camera, units, vision)
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
@@ -1165,6 +1182,8 @@ impl App for ClientApp {
                             .with_vfx(vfx.frame())
                             .with_lights(vfx.lights())
                             .with_outlines(outlines::palette(hud_fx.palette))
+                            .with_decals(vfx.decals())
+                            .with_environment(environment)
                             .with_effects(screen_fx.update(frame_ms / 1_000.0));
                         if let Some(fog) = fog {
                             scene = scene.with_fog_of_war(fog);
@@ -1316,8 +1335,8 @@ impl App for ClientApp {
                 } else {
                     frame.elapsed_secs() as f32 * 0.035
                 };
-                let local_camera = if let Some([yaw, pitch, distance]) = self.preview_camera {
-                    Camera::orbit(Vec3::ZERO, distance, yaw, pitch, aspect)
+                let local_camera = if let Some([yaw, pitch, distance, x, z]) = self.preview_camera {
+                    Camera::orbit(Vec3::new(x, 0.0, z), distance, yaw, pitch, aspect)
                 } else if preview.is_some() {
                     Camera::orbit(Vec3::ZERO, 30.0, -0.7, 0.75, aspect)
                 } else if replay.is_some() {
@@ -1408,6 +1427,11 @@ impl App for ClientApp {
                     vfx.update(vfx_dt, render_tick, &view, anchors, &socket);
                     vfx::push_placeholders(vfx, units);
                     // The local preview has no player hero: only a preview effect applies.
+                    displacers.build(anchors, view.focus);
+                    let environment = moba_render::EnvironmentFrame::new(
+                        render_tick / 30.0,
+                        displacers.as_slice(),
+                    );
                     let scene = Scene::new(camera, units)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
@@ -1416,6 +1440,8 @@ impl App for ClientApp {
                         .with_vfx(vfx.frame())
                         .with_lights(vfx.lights())
                         .with_outlines(outlines::palette(self.hud_fx.palette))
+                        .with_decals(vfx.decals())
+                        .with_environment(environment)
                         .with_effects(screen_fx.update(frame_ms / 1_000.0));
                     if let Some(renderer) = renderer.as_mut() {
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
@@ -1488,6 +1514,7 @@ impl App for ClientApp {
 mod animation;
 mod bone_lod;
 mod evidence;
+mod foliage;
 mod launch;
 mod local_feed;
 mod map_visuals;

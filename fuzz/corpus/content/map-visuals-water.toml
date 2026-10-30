@@ -1,0 +1,49 @@
+# Map visuals with foliage and water (ADR-0017). Client-local and cosmetic.
+wall = [0.40, 0.42, 0.38]
+
+[terrain]
+tint = [0.12, 0.20, 0.08]
+relief = 0.3
+lane_width = 12.0
+seed = 5
+
+[[terrain.layers]]
+albedo = "terrain-grass"
+
+[[terrain.layers]]
+albedo = "terrain-pebbles"
+
+[[terrain.layers]]
+albedo = "terrain-rock"
+
+[foliage]
+density = 2.0
+height = [0.25, 0.6]
+wind = [0.8, 0.3]
+wind_speed = 1.2
+reeds = true
+seed = 2
+
+[[foliage.patches]]
+center = [200, 60]
+radius = 8.0
+kind = "brush"
+
+[[foliage.patches]]
+center = [60, 196]
+radius = 6.0
+kind = "flowers"
+density = 8.0
+
+[[water]]
+points = [[40, 210], [128, 200], [216, 214]]
+width = 12.0
+level = 0.1
+depth = 0.45
+flow = 1.2
+
+[[water]]
+points = [[180, 40]]
+width = 16.0
+level = 0.2
+depth = 0.6

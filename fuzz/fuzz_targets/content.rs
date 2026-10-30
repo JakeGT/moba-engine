@@ -38,6 +38,28 @@ fuzz_target!(|data: &[u8]| {
                     .with_wall([112.0, 60.0], [112.0, 100.0]);
                 let terrain = moba_assets::generate_terrain(ground, &site, 16, 16);
                 assert_eq!(terrain.heightfield.heights.len(), 17 * 17);
+                // Water beds (ADR-0017) carve within the same relief rules, and the water
+                // mesh and foliage stay bounded and finite.
+                assert!(visuals.water.len() <= moba_assets::MAX_MAP_WATER);
+                let wet =
+                    moba_assets::generate_terrain_with_water(ground, &site, &visuals.water, 16, 16);
+                let mesh = moba_assets::generate_water(&visuals.water, &wet.heightfield);
+                assert!(mesh.indices.iter().all(|&i| (i as usize) < mesh.vertices.len()));
+                assert!(mesh.vertices.iter().all(|v| v.depth.is_finite()));
+                if let Some(foliage) = &visuals.foliage {
+                    assert!(foliage.patches.len() <= moba_assets::MAX_FOLIAGE_PATCHES);
+                    let clumps = moba_assets::generate_foliage(
+                        foliage,
+                        ground,
+                        &site,
+                        &wet.heightfield,
+                        &visuals.water,
+                        1.0,
+                        1024,
+                    );
+                    assert!(clumps.len() <= 1024);
+                    assert!(clumps.iter().all(|c| c.position.iter().all(|v| v.is_finite())));
+                }
                 let report = moba_assets::check_map_consistency(&visuals, &site);
                 assert!(
                     report.errors.iter().all(|error| !error.starts_with("terrain ")),

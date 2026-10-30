@@ -9,11 +9,13 @@
 // darkens crevices; top-down projection on flat ground and triplanar on slopes (High and
 // up); the layers' normal maps (Medium and up) with a UDN blend. Texture fetches inside the
 // per-layer branches use explicit gradients, so skipping zero-weight layers stays valid.
-// Flat mode: the R2a plane's procedural grid and the map tint.
+// Flat mode: the R2a plane's procedural grid and the map tint. Both take the R3b decals
+// (ADR-0017): paint into the albedo, glow over the final colour.
 
 #include "camera.glsl"
 #include "lighting.glsl"
 #include "atmosphere.glsl"
+#include "decals.glsl"
 
 layout(set = 3, binding = 6) uniform sampler2DArray terrain_splat;
 layout(set = 3, binding = 7) uniform sampler2DArray terrain_albedo;
@@ -32,6 +34,9 @@ layout(location = 2) in float in_occlusion;
 
 layout(location = 0) out vec4 out_color;
 
+// World-space pixel size for the decal edges (set in main, in uniform control flow).
+float decal_aa;
+
 float grid_line(vec2 position, float spacing, float thickness) {
     vec2 coord = position / spacing;
     vec2 derivative = fwidth(coord);
@@ -49,7 +54,8 @@ vec3 flat_terrain(vec3 normal) {
         * camera.terrain.w;
     vec3 grass = camera.terrain.rgb;
     vec3 line = camera.terrain.rgb * 2.0;
-    Surface surface = default_surface(mix(grass, line, grid), normal, in_world_pos, camera.rim_color.w);
+    vec3 albedo = apply_paint_decals(mix(grass, line, grid), in_world_pos, decal_aa);
+    Surface surface = default_surface(albedo, normal, in_world_pos, camera.rim_color.w);
     surface.rim = 0.0;
     return shade(surface);
 }
@@ -138,11 +144,13 @@ vec3 splat_terrain(vec3 geometric) {
     // (the painterly convention; ADR-0011's R2b hook will move it to the ambient term). With
     // R6's GTAO on (High, Ultra) the relief term instead joins the ambient occlusion as
     // min(baked, GTAO): both see the same crevices, and stacking them would darken them twice
-    // (ADR-0015 §5). Low and Medium keep the baked term alone.
+    // (ADR-0015 §5). Low and Medium keep the baked term alone. Paint decals (R3b) go into the
+    // albedo after it, so they are lit and shadowed like the ground.
     float relief = clamp(in_occlusion, 0.0, 1.0);
     bool gtao = camera.post_params.x > 0.0;
     float occlusion = mix(1.0, cavity * (gtao ? 1.0 : relief), 0.75);
-    Surface surface = default_surface(albedo * occlusion, normal, in_world_pos, camera.rim_color.w);
+    albedo = apply_paint_decals(albedo * occlusion, in_world_pos, decal_aa);
+    Surface surface = default_surface(albedo, normal, in_world_pos, camera.rim_color.w);
     surface.occlusion = gtao ? mix(1.0, relief, 0.75) : 1.0;
     surface.geometric_normal = geometric;
     surface.rim = 0.0;
@@ -150,6 +158,7 @@ vec3 splat_terrain(vec3 geometric) {
 }
 
 void main() {
+    decal_aa = decal_pixel(in_world_pos);
     vec3 geometric = normalize(in_normal);
     vec3 lit = terrain_block.params.x < 0.5 ? flat_terrain(geometric) : splat_terrain(geometric);
 
@@ -162,6 +171,9 @@ void main() {
     } else {
         lit = apply_height_fog(lit, in_world_pos);
     }
+
+    // Telegraphs and zones over everything, fog included (ADR-0017 §1).
+    lit = apply_glow_decals(lit, in_world_pos, decal_aa);
 
     out_color = vec4(lit, 1.0);
 }

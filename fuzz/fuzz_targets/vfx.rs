@@ -10,8 +10,20 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     if let Ok(effect) = moba_assets::VfxEffect::parse(text) {
-        assert!(!effect.emitters.is_empty());
+        assert!(!effect.emitters.is_empty() || !effect.decals.is_empty());
         assert!(effect.emitters.len() <= moba_assets::MAX_VFX_EMITTERS);
+        assert!(effect.decals.len() <= moba_assets::MAX_VFX_DECALS);
+        for decal in &effect.decals {
+            assert!(decal.radius.is_finite() && decal.radius > 0.0);
+            assert!(decal.color.iter().all(|c| c.is_finite()));
+            assert!(!(decal.stamp && decal.telegraph));
+            assert!(!decal.stamp || decal.lifetime.is_some());
+            assert!(
+                decal
+                    .lifetime
+                    .is_none_or(|seconds| seconds <= moba_assets::MAX_DECAL_SECONDS)
+            );
+        }
         assert!((0.0..=moba_assets::MAX_EFFECT_SECONDS).contains(&effect.duration));
         for emitter in &effect.emitters {
             assert!(emitter.burst <= moba_assets::MAX_VFX_BURST);

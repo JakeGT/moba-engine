@@ -39,6 +39,8 @@ pub(crate) struct DeviceContext {
     /// `maxPerStageDescriptorSampledImages` (likewise; combined image samplers count for
     /// both).
     pub(crate) max_per_stage_sampled_images: u32,
+    /// `maxPerStageDescriptorStorageBuffers` (4 on the minimum device).
+    pub(crate) max_per_stage_storage_buffers: u32,
     /// `VkPhysicalDeviceLimits::timestampPeriod`: nanoseconds per timestamp tick.
     pub(crate) timestamp_period: f32,
     /// `timestampValidBits` of the graphics queue family; `0` means no timestamps.
@@ -319,6 +321,10 @@ impl DeviceContext {
                 .properties
                 .limits
                 .max_per_stage_descriptor_sampled_images,
+            max_per_stage_storage_buffers: candidate
+                .properties
+                .limits
+                .max_per_stage_descriptor_storage_buffers,
             timestamp_period: candidate.properties.limits.timestamp_period,
             timestamp_valid_bits,
             compute_supported,

@@ -35,18 +35,25 @@
 //! prefiltered specular cube map (`environments/<name>.ktx2`).
 //!
 //! VFX (ADR-0013): [`VfxEffect`] is the bounded client-local effect descriptor
-//! (`vfx/<name>.toml`, up to eight particle emitters), [`VfxBindings`] maps ability names and
-//! unit events to effects (`vfx/bindings.toml`), and [`procedural_atlas`] generates the
-//! built-in particle atlas.
+//! (`vfx/<name>.toml`, up to eight particle emitters and four ground [`VfxDecal`]s,
+//! ADR-0017), [`VfxBindings`] maps ability names and unit events to effects
+//! (`vfx/bindings.toml`), and [`procedural_atlas`] generates the built-in particle atlas.
 //! Post-processing (R6): [`MapPost`] is the descriptor's `[post]` table (exposure, eye
 //! adaptation, bloom, grading) and [`GradingLut`] is a bounded 3D colour-grading LUT parsed
 //! from the `.cube` text format (`grading/<name>.cube`).
+//!
+//! Foliage and water (ADR-0017) are descriptor tables too ([`MapFoliage`], [`MapWater`]).
+//! [`generate_terrain_with_water`] carves the water beds into the heightfield,
+//! [`generate_water`] builds the water surface mesh on the terrain's own grid, and
+//! [`generate_foliage`] scatters the foliage instances; all three are deterministic and shared
+//! by the client and `content-check`.
 
 #![forbid(unsafe_code)]
 
 mod animation;
 mod baked_ao;
 mod environment;
+mod foliage;
 #[cfg(feature = "glb")]
 mod glb;
 mod grading;
@@ -60,6 +67,7 @@ mod terrain;
 mod texture;
 mod vat;
 mod vfx;
+mod water;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -80,6 +88,7 @@ pub use environment::{
     ENVIRONMENTS_DIR, EnvironmentDesc, EnvironmentError, MAX_ENVIRONMENT_BYTES, MAX_SPECULAR_MIPS,
     SH_COEFFICIENTS, environment_paths, sh_basis,
 };
+pub use foliage::{FoliageInstance, MAX_FOLIAGE_INSTANCES, generate_foliage};
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
 pub use grading::{
@@ -92,9 +101,11 @@ pub use map_visuals::{
     DEFAULT_EDGE_SPACING, DEFAULT_EXPOSURE_MAX, DEFAULT_EXPOSURE_MIN, DEFAULT_LANE_WIDTH,
     DEFAULT_LAYER_TILING, DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_RELIEF, DEFAULT_TERRAIN_ROUGHNESS,
     DEFAULT_TERRAIN_SEED, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT, EdgeStyle, FOW_DARKEN_RANGE,
-    MAX_FOG_OPACITY, MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MESH_NAME,
-    MAX_SHADOW_STRENGTH, MIN_SUN_ELEVATION, MapAtmosphere, MapFogStyle, MapLighting, MapPost,
-    MapProp, MapTerrain, MapVisuals, MapVisualsError, TerrainLayer, valid_mesh_name,
+    FoliageKind, FoliagePatch, MAX_FOG_OPACITY, MAX_FOLIAGE_PATCHES, MAX_MAP_MESHES, MAX_MAP_PROPS,
+    MAX_MAP_VISUALS_BYTES, MAX_MAP_WATER, MAX_MESH_NAME, MAX_SHADOW_STRENGTH, MAX_WADE_DEPTH,
+    MAX_WATER_LEVEL, MAX_WATER_POINTS, MIN_SUN_ELEVATION, MapAtmosphere, MapFogStyle, MapFoliage,
+    MapLighting, MapPost, MapProp, MapTerrain, MapVisuals, MapVisualsError, MapWater, TerrainLayer,
+    valid_mesh_name,
 };
 pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
@@ -117,7 +128,8 @@ pub use terrain::{
     MAX_PLAY_RELIEF, MAX_TERRAIN_LAYERS, MIN_WALL_HEIGHT, MapConsistency, TERRAIN_GRID_SIZES,
     TerrainSite, WALL_THICKNESS, WallBox, board_edge_relief, check_map_consistency,
     check_map_consistency_with_edge_footprint, edge_footprint_radius, edge_placements,
-    generate_heightfield, generate_splat, generate_terrain, terrain_margin, wall_box,
+    generate_heightfield, generate_splat, generate_terrain, generate_terrain_with_water,
+    terrain_margin, wall_box,
 };
 pub use texture::{
     MAX_CUBE_DIMENSION, MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData,
@@ -131,13 +143,16 @@ pub use vat::{
     vat_paths,
 };
 pub use vfx::{
-    MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS, MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES,
-    MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY, MAX_VFX_LIGHT_RADIUS,
-    MAX_VFX_NAME, MAX_VFX_RATE, VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES,
-    VfxAbilityBinding, VfxAnchor, VfxBindings, VfxBlend, VfxDirection, VfxEffect, VfxEmitter,
-    VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape, VfxSprite, VfxUnitEffects,
-    procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
+    DEFAULT_DECAL_ANGLE, DEFAULT_DECAL_FADE_IN, DEFAULT_DECAL_FADE_OUT, DEFAULT_DECAL_RADIUS,
+    DEFAULT_DECAL_WIDTH, MAX_DECAL_SECONDS, MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS,
+    MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES, MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_DECALS,
+    MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY, MAX_VFX_LIGHT_RADIUS, MAX_VFX_NAME, MAX_VFX_RATE,
+    VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES, VfxAbilityBinding, VfxAnchor,
+    VfxBindings, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle, VfxDirection, VfxEffect,
+    VfxEmitter, VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape, VfxSprite,
+    VfxUnitEffects, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
 };
+pub use water::{WaterMesh, WaterVertex, generate_water};
 
 /// One asset entry.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

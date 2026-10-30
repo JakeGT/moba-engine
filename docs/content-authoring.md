@@ -457,7 +457,8 @@ mesh = "crystal"               # optional: <root>/models/crystal.glb, else a bui
   distinct meshes (wall, props and the `[terrain]` edge mesh together). A client uploads at most 16 distinct map meshes
   per session (renderer mesh slots are shared with hero models and never freed); later ones
   draw the built-in block.
-- **Limits.** A descriptor is at most 16 KiB. Unknown keys, wrong types and out-of-range or
+- **Limits.** A descriptor is at most 32 KiB (raised from 16 KiB in R3b for `[[water]]` and
+  `[foliage]`). Unknown keys, wrong types and out-of-range or
   non-finite numbers are errors. The client reads it with a bounded read and never panics on
   it.
 
@@ -922,7 +923,7 @@ owner's most recent cast. A cast socket needs an animated hero (an animation set
 `[[sockets]]` name); otherwise `source` emitters attach to the caster's mid-height.
 
 **Effects.** `<root>/vfx/<name>.toml` (names are 1..=48 of `[A-Za-z0-9_-]`) holds up to eight
-emitters:
+emitters and up to four ground decals (below), at least one of either:
 
 ```toml
 duration = 0.6            # seconds the effect emits (0..=30)
@@ -992,6 +993,44 @@ scale_with_radius = false # multiply radius by the event's radius (zones)
 - **Anchors.** `target` is the event's position: the cast point, the impact, the zone centre,
   the dead unit; for a projectile effect, the flying projectile. `source` follows the caster
   (or its socket). `line` spawns along the segment between them.
+
+**Decals** ([ADR-0017](adr/0017-decals-foliage-water.md)) project straight down onto the
+terrain, the water and the foliage (never onto units, walls or props, so a telegraph never
+paints the enemy standing in it). An effect may have up to four:
+
+```toml
+[[decals]]
+shape = "ring"            # disc | ring | cone | line | splat (default disc)
+style = "glow"            # glow | paint (default glow; paint for splats)
+anchor = "target"         # target | source | line (from the source to the target)
+radius = 1.0              # metres, 0.1..=50 (default 2; a line's length unless anchored on a line)
+width = 0.3               # ring and line band width, metres, 0.05..=20 (default 0.5)
+angle = 90.0              # cone angle, degrees, 1..=360 (default 90)
+delay = 0.0               # seconds after the effect starts, 0..=30
+lifetime = 1.0            # seconds once shown, 0.05..=30 (default: the effect's emit window)
+fade_in = 0.1             # seconds, 0..=10
+fade_out = 0.25           # seconds, 0..=10
+color = [2.0, 0.4, 0.1, 0.8]   # required, linear RGBA; RGB may exceed 1 (HDR, 0..=32)
+team_tint = 0.0           # pull towards the team colour, 0..=1
+scale_with_radius = true  # radius and width times the event's radius (zones)
+telegraph = true          # an area telegraph (readability rules below)
+progress = true           # an inner fill grows to the edge over the decal's life (cast timers)
+stamp = false             # persist after the effect (scorch marks), for `lifetime`
+```
+
+- **Styles.** `glow` is composited after lighting, fog of war and height fog, so nothing dims
+  it: telegraphs and zones. `paint` blends into the ground's colour before lighting, so it is
+  shadowed and fogged like the ground: scorch, blood, goo.
+- **Lifetime.** Without `lifetime` a decal lasts the effect's emit window (a zone's decal with
+  `event_duration` lasts the zone). A **stamp** is copied at its `delay` into a ring of 96
+  persistent decals and stays for its `lifetime` (required) after the effect ends; when the
+  ring is full the oldest stamp goes. A stamp can be neither a telegraph nor a progress fill.
+- **Telegraphs** must use `glow`. An enemy's telegraph decal is never culled, keeps at least
+  35 % opacity until the last 15 % of its life, and gets a two-tone contrast rim (a bright
+  band and a dark halo) so it reads on any ground; an ally's keeps the rim. Decals exist only
+  for effects the client plays, so they reveal nothing the server did not send.
+- **Tiers.** At most 48 (Low), 96 (Medium) or 128 (High, Ultra) decals a frame, enemy
+  telegraphs first and exempt. `MOBA_DECALS=off` draws none (particles still play).
 
 **Readability rules** (AAA roadmap §2) are applied for every viewer:
 
@@ -1168,6 +1207,69 @@ team's vision; the server still decides what each client is sent. It is a smooth
 presentation, so static ground up to about one fog texel past the server's vision can show,
 and lost vision drops to half visible at once before it fades.
 
+### Foliage
+
+With a `[terrain]` table, the `[foliage]` table scatters grass, brush, reeds and flowers
+([ADR-0017](adr/0017-decals-foliage-water.md) §2). Every key is optional; an empty
+`[foliage]` table gives the default meadow.
+
+```toml
+[foliage]
+density = 1.5                    # grass clumps per 10 m² of board, 0..=8
+height = [0.3, 0.6]              # clump height range, metres, 0.1..=1.5, low <= high
+base_color = [0.05, 0.16, 0.04]  # linear RGB 0..=1 at the root
+tip_color = [0.35, 0.55, 0.18]   # at the tip
+flower_color = [0.9, 0.75, 0.3]
+wind = [0.8, 0.3]                # direction times strength (map x, y), length 0..=4
+wind_speed = 1.2                 # gust speed, 0..=8
+reeds = true                     # reeds along the water's banks
+seed = 1                         # u32, combined with the terrain seed
+
+[[foliage.patches]]              # optional, at most 32
+center = [200, 60]               # map coordinates
+radius = 8.0                     # metres, 1..=60
+kind = "brush"                   # required: grass | brush | reeds | flowers
+density = 4.0                    # clumps per 10 m², 0..=20
+```
+
+Placement is procedural and deterministic (`moba_assets::generate_foliage`): a jittered grid
+over the board kept where a low-frequency mask allows (meadows with bare patches), with a few
+flower clumps; reeds `width / 2 + 0.2` to `+ 2` m from each water body's centre line; and
+the patches. Nothing is ever placed within `lane_width / 2 + 1` m of a lane, 6 m of a
+structure, 10 m of a spawn, 2 m of a wall, in water or off the board. Grass and flowers take
+the `height` range; brush is 0.9-1.4 m and reeds 0.9-1.5 m. Foliage is **decorative**: the
+simulation has no brush areas and no one hides in a bush, and only units the client draws
+bend it. Quality tiers thin it (Low 30 %, Medium 60 %) and cap it (8k / 24k / 48k / 64k
+clumps); `MOBA_FOLIAGE=off` draws none.
+
+### Water
+
+With a `[terrain]` table, up to eight `[[water]]` bodies add shallow rivers and pools
+([ADR-0017](adr/0017-decals-foliage-water.md) §3):
+
+```toml
+[[water]]
+points = [[40, 210], [128, 200], [216, 214]]  # required, 1..=32; one point is a round pool
+width = 12.0                     # metres across (a pool's diameter), 2..=60
+level = 0.1                      # surface height, metres, -0.5..=0.3
+depth = 0.45                     # bed depth below the surface, 0.05..=0.8
+flow = 1.0                       # flow speed along the points, m/s, 0..=8 (pools do not flow)
+color = [0.02, 0.12, 0.16]       # deep colour, linear RGB 0..=1
+shallow_color = [0.10, 0.30, 0.30]
+clarity = 0.35                   # metres of depth per e-fold towards the deep colour, 0.05..=4
+foam = 0.6                       # shoreline foam, 0..=1
+```
+
+The bed is carved into the generated terrain (`moba_assets::generate_terrain_with_water`):
+it falls smoothly to `level - depth` at the centre line, meets the surface exactly at
+`width / 2`, and the banks rise a few centimetres above the surface before blending back
+into the relief by `width / 2 + 3` m. The splat's path layer (layer 2) covers the bed. All of
+it stays within the board's ±0.5 m relief rule, so `level - depth` must be at least -0.5:
+units stand at height 0 and visibly wade (at most 0.3 m above their feet, 0.8 m above the
+bed), never swim. The surface mesh shares the terrain grid, so the shoreline lands exactly
+where the water meets the drawn ground. `MOBA_WATER=simple` drops the screen-space
+refraction; `MOBA_WATER=off` draws no water (the carved bed still shows).
+
 ### Map consistency checks
 
 `content-check` runs `moba_assets::check_map_consistency` on every `[[assets.maps]]`
@@ -1189,6 +1291,11 @@ warning: map visuals 'ember': prop 2 at [128, 128] (16 m tall, footprint radius 
 | An edge prop whose footprint (from `models/<edge_mesh>.glb`'s bounds, as the client places it) reaches the board | error | edge props mark the end of the walkable space |
 | A missing or mis-formatted terrain texture, or layers that disagree on size or mip count | error (file check) | the client would fall back to the flat plane |
 | A prop at least 2 m tall whose footprint (radius `height × 0.225`) overlaps a lane corridor (`lane_width / 2`, 12 m wide without `[terrain]`) or comes within 4 m of a structure | warning | it looks like an obstacle units walk through (props elsewhere are decoration by design) |
+| A water body whose `level` is outside -0.5..=0.3 m, or that (its points widened by `width / 2`) leaves the board | error | units stand at height 0 and must visibly wade; outside the board the ground only rises |
+| A board sample under a water body more than 0.8 m below its surface (every tier's grid, bed carved), or the relief rule above failing with the beds carved | error | the simulation lets every unit walk everywhere, so no water may look too deep to cross |
+| `[foliage]` or `[[water]]` without `[terrain]` (code-built descriptors; the parser rejects it) | error | both stand on the heightfield |
+| Water within 4 m of a structure or covering a spawn; water crossing a wall; two bodies that overlap | warning | structures and spawns read as dry ground; a wall in water or merged beds look broken |
+| A `brush` patch over a lane corridor (`lane_width / 2` plus its radius) or within 6 m of a structure | warning | it would read as cover the simulation does not have |
 
 The JSON output adds `map_errors` and `map_warnings` counts; the errors are also in `errors`.
 

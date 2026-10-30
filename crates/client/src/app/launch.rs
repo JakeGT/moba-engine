@@ -307,6 +307,33 @@ fn world_config_from(
     config
 }
 
+/// The decal, foliage and water features for `tier` (ADR-0017) with the `MOBA_DECALS=off`,
+/// `MOBA_FOLIAGE=off` and `MOBA_WATER=off|simple|full` overrides.
+pub(crate) fn environment_config(tier: moba_render::QualityTier) -> moba_render::EnvironmentConfig {
+    environment_config_from(tier, |name| std::env::var(name).ok())
+}
+
+fn environment_config_from(
+    tier: moba_render::QualityTier,
+    var: impl Fn(&str) -> Option<String>,
+) -> moba_render::EnvironmentConfig {
+    let mut config = moba_render::EnvironmentConfig::for_tier(tier);
+    let off = |name| var(name).is_some_and(|value| value.trim().eq_ignore_ascii_case("off"));
+    if off("MOBA_DECALS") {
+        config = config.with_decals(false);
+    }
+    if off("MOBA_FOLIAGE") {
+        config = config.with_foliage(false);
+    }
+    if let Some(value) = var("MOBA_WATER") {
+        match moba_render::WaterMode::from_name(&value) {
+            Some(mode) => config = config.with_water(mode),
+            None => eprintln!("MOBA_WATER={value:?} is not off/simple/full; using the tier's"),
+        }
+    }
+    config
+}
+
 /// Number of `.spv` files in a shader override directory and their newest modification time.
 pub(crate) type ShaderStamp = (usize, Option<std::time::SystemTime>);
 
@@ -446,16 +473,32 @@ pub(crate) fn parse_capture_tick() -> Option<u32> {
 }
 
 /// `MOBA_WINDOW_SIZE=<w>x<h>` (logical pixels, 320-7680 × 240-4320), else 1280×720.
-/// `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>` (radians, radians, metres): a fixed orbit
-/// for the local preview (R3a goldens). Pitch is clamped by the orbit camera; the distance
-/// to 8–600 m.
-pub(crate) fn parse_preview_camera(value: Option<&str>) -> Option<[f32; 3]> {
-    let mut parts = value?
+/// `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>[,<x>,<z>]` (radians, radians, metres, and
+/// an optional focus in metres from the map centre): a fixed orbit for the local preview (R3a
+/// and R3b goldens). Pitch is clamped by the orbit camera, the distance to 8–600 m and the
+/// focus to ±200 m. Returns `[yaw, pitch, distance, x, z]`.
+pub(crate) fn parse_preview_camera(value: Option<&str>) -> Option<[f32; 5]> {
+    let parts: Vec<f32> = value?
         .split(',')
-        .map(|part| part.trim().parse::<f32>().ok());
-    let (yaw, pitch, distance) = (parts.next()??, parts.next()??, parts.next()??);
-    (parts.next().is_none() && [yaw, pitch, distance].iter().all(|value| value.is_finite()))
-        .then(|| [yaw, pitch, distance.clamp(8.0, 600.0)])
+        .map(|part| part.trim().parse::<f32>().ok())
+        .collect::<Option<_>>()?;
+    let [yaw, pitch, distance, x, z] = match parts[..] {
+        [yaw, pitch, distance] => [yaw, pitch, distance, 0.0, 0.0],
+        [yaw, pitch, distance, x, z] => [yaw, pitch, distance, x, z],
+        _ => return None,
+    };
+    [yaw, pitch, distance, x, z]
+        .iter()
+        .all(|value| value.is_finite())
+        .then(|| {
+            [
+                yaw,
+                pitch,
+                distance.clamp(8.0, 600.0),
+                x.clamp(-200.0, 200.0),
+                z.clamp(-200.0, 200.0),
+            ]
+        })
 }
 
 pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
@@ -772,13 +815,14 @@ fn quality_summary(renderer: &moba_render::Renderer) -> String {
     let lighting = renderer.lighting_config();
     let post = renderer.post_config();
     let world = renderer.world_config();
+    let environment = renderer.environment_config();
     let [render_width, render_height] = renderer.render_extent();
     format!(
         "{} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
              auto_exposure={} grading={} render={render_width}x{render_height} \
              dynres={} ibl={} specular_ibl={} vat_meshes={} terrain={} fow={} fow_size={} \
-             fog={} sky={} pipelines={} pipeline_build_ms={:.3} pipeline_cache={} \
-             startup_ms={:.1}",
+             fog={} sky={} decals={} foliage={} water={} pipelines={} pipeline_build_ms={:.3} \
+             pipeline_cache={} startup_ms={:.1}",
         renderer.quality_tier(),
         renderer.hdr_format_name(),
         lighting.shadows,
@@ -805,6 +849,13 @@ fn quality_summary(renderer: &moba_render::Renderer) -> String {
         world.fog_of_war_resolution,
         on_off(world.height_fog),
         on_off(world.sky),
+        on_off(environment.decals),
+        renderer.foliage_instances(),
+        if renderer.has_water() {
+            environment.water.name()
+        } else {
+            "none"
+        },
         pipelines.pipelines,
         pipelines.build_ms,
         pipelines.cache,
@@ -817,7 +868,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 /// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
-pub(crate) const GPU_LANES: [&str; 24] = [
+pub(crate) const GPU_LANES: [&str; 26] = [
     "shadow",
     "scene",
     "composite",
@@ -842,6 +893,8 @@ pub(crate) const GPU_LANES: [&str; 24] = [
     "lights",
     "fow_raster",
     "fow_resolve",
+    "water_copy",
+    "water",
 ];
 /// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
 /// shadows and outlines, ADR-0016).
@@ -852,7 +905,8 @@ const OFFSCREEN_LANES: usize = 14;
 const VFX_LANES: usize = 16;
 /// First lane that is a statistic rather than a pass time (particles, then R2b's lights).
 const STAT_LANES: usize = 19;
-/// First fog-of-war pass lane (R3a; runs only with the fog-of-war texture).
+/// First fog-of-war pass lane (R3a; runs only with the fog-of-war texture). The two full-water
+/// lanes after them (R3b, ADR-0017) run only with `MOBA_WATER=full` and a map with water.
 const FOG_LANES: usize = 22;
 
 /// One frame-log sample from `timings`, the same frame's particle `stats` and its binned
@@ -889,6 +943,8 @@ pub(crate) fn gpu_sample(
         lights,
         pass("fow-raster"),
         pass("fow-resolve"),
+        pass("water_copy"),
+        pass("water"),
     ]
 }
 
@@ -952,8 +1008,9 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        gpu_report, lighting_config_from, parse_hex32, parse_preview_camera, parse_window_size,
-        pipeline_cache_path_from, post_config_from, world_config_from,
+        environment_config_from, gpu_report, lighting_config_from, parse_hex32,
+        parse_preview_camera, parse_window_size, pipeline_cache_path_from, post_config_from,
+        world_config_from,
     };
 
     #[test]
@@ -1176,6 +1233,37 @@ mod tests {
     }
 
     #[test]
+    fn environment_overrides_turn_decals_foliage_and_water_off() {
+        use moba_render::{EnvironmentConfig, QualityTier, WaterMode};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        assert_eq!(
+            environment_config_from(QualityTier::Low, env(&[])),
+            EnvironmentConfig::for_tier(QualityTier::Low)
+        );
+        let off = environment_config_from(
+            QualityTier::High,
+            env(&[
+                ("MOBA_DECALS", "off"),
+                ("MOBA_FOLIAGE", "OFF"),
+                ("MOBA_WATER", "simple"),
+            ]),
+        );
+        assert!(!off.decals && !off.foliage);
+        assert_eq!(off.water, WaterMode::Simple);
+        let none = environment_config_from(QualityTier::Ultra, env(&[("MOBA_WATER", "off")]));
+        assert_eq!(none.water, WaterMode::Off);
+        let bad = environment_config_from(QualityTier::Medium, env(&[("MOBA_WATER", "lava")]));
+        assert_eq!(bad, EnvironmentConfig::for_tier(QualityTier::Medium));
+    }
+
+    #[test]
     fn gpu_report_lists_each_pass_percentile() {
         let samples: Vec<[f32; super::GPU_LANES.len()]> = (0..=100)
             .map(|index| {
@@ -1209,6 +1297,8 @@ mod tests {
                     2.0,
                     0.0,
                     0.0,
+                    0.0,
+                    0.0,
                 ]
             })
             .collect();
@@ -1230,6 +1320,7 @@ mod tests {
         ));
         assert!(!report.contains("gpu_minimap"));
         assert!(!report.contains("gpu_fow"));
+        assert!(!report.contains("gpu_water"));
         assert!(report.contains("gpu_vfx_draw_p95_ms=0.950 "));
         assert!(report.ends_with(
             "vfx_alive_p50=50.000 vfx_alive_p95=95.000 vfx_alive_max=100.000 \
@@ -1242,13 +1333,30 @@ mod tests {
     fn preview_camera_parses_three_numbers() {
         assert_eq!(
             parse_preview_camera(Some("-0.7, 0.2, 260")),
-            Some([-0.7, 0.2, 260.0])
+            Some([-0.7, 0.2, 260.0, 0.0, 0.0])
         );
         assert_eq!(
             parse_preview_camera(Some("1,2,9000")),
-            Some([1.0, 2.0, 600.0])
+            Some([1.0, 2.0, 600.0, 0.0, 0.0])
         );
-        for bad in ["", "1,2", "1,2,3,4", "a,b,c", "nan,1,1"] {
+        // R3b: an optional focus.
+        assert_eq!(
+            parse_preview_camera(Some("0.5,0.6,40,-3,-30")),
+            Some([0.5, 0.6, 40.0, -3.0, -30.0])
+        );
+        assert_eq!(
+            parse_preview_camera(Some("0,0.6,40,900,0")),
+            Some([0.0, 0.6, 40.0, 200.0, 0.0])
+        );
+        for bad in [
+            "",
+            "1,2",
+            "1,2,3,4",
+            "1,2,3,4,5,6",
+            "a,b,c",
+            "nan,1,1",
+            "1,1,1,1,inf",
+        ] {
             assert_eq!(parse_preview_camera(Some(bad)), None, "{bad:?}");
         }
         assert_eq!(parse_preview_camera(None), None);

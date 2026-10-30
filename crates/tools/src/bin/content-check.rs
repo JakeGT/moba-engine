@@ -85,7 +85,9 @@ fn main() {
         .collect();
     // The map's own visuals descriptor must agree with the simulation's map (ADR-0014 §2):
     // relief, wall coverage, walls and edge props on the right side of the board edge, and
-    // tall props off the lanes (a warning).
+    // tall props off the lanes (a warning); with water and foliage (ADR-0017 §4), water on
+    // the board and wadeable, and warnings for water at structures, spawns or walls,
+    // overlapping bodies and brush that would read as cover.
     let (map_errors, map_warnings) = map_consistency(&content, pack_dir);
     let map_error_count = map_errors.len();
     errors.extend(map_errors);

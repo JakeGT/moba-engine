@@ -66,6 +66,13 @@ burst = 6
 lifetime = [0.3, 0.3]
 size = [0.3, 0.3]
 color = [1, 1, 1, 1]
+[[decals]]
+shape = "splat"
+radius = 0.8
+lifetime = 5.0
+fade_out = 1.0
+color = [0.05, 0.03, 0.02, 0.8]
+stamp = true
 "#;
 
 const TELEGRAPH: &str = r#"
@@ -78,6 +85,14 @@ size = [2, 2]
 color = [1, 0.2, 0.2, 0.1]
 telegraph = true
 scale_with_radius = true
+[[decals]]
+shape = "ring"
+radius = 1.0
+width = 0.2
+scale_with_radius = true
+color = [2, 0.4, 0.2, 0.3]
+telegraph = true
+progress = true
 "#;
 
 fn root(tag: &str) -> PathBuf {
@@ -154,6 +169,83 @@ fn system(tag: &str) -> (VfxSystem, PathBuf) {
 }
 
 const NO_SOCKET: &dyn Fn(u32, &str) -> Option<Vec3> = &|_, _| None;
+
+/// R3b (ADR-0017 §1): effect decals follow the telegraph rules. Enemy telegraph decals are
+/// listed first, never culled (even far away) and keep full strength; an ally's are dimmed;
+/// stamped scorch marks outlive their effect in a bounded ring and then expire.
+#[test]
+fn effect_decals_list_enemy_telegraphs_first_and_stamps_outlive_their_effect() {
+    use moba_render::{DecalRole, DecalShape, DecalStyle};
+    let (mut vfx, root) = system("decals");
+    vfx.set_ally_opacity(0.5);
+    let view = view(Some(0));
+    let anchors = anchors();
+    // Cosmetic attacks first (their stamps), then an ally and a far enemy telegraph.
+    vfx.trigger(&event(Trigger::Attack, 1, Some(3)), &view, &anchors);
+    vfx.trigger(&event(Trigger::HeroDeath, 0, None), &view, &anchors);
+    let mut far = event(Trigger::HeroDeath, 1, None);
+    far.position = Vec3::new(0.0, 0.0, 900.0);
+    vfx.trigger(&far, &view, &anchors);
+    vfx.update(1.0 / 30.0, 0.0, &view, &anchors, NO_SOCKET);
+    let decals = vfx.decals();
+    assert_eq!(
+        decals[0].role,
+        DecalRole::EnemyTelegraph,
+        "enemy telegraphs first"
+    );
+    assert_eq!(decals[0].shape, DecalShape::Ring);
+    assert_eq!(decals[0].style, DecalStyle::Glow);
+    assert!(
+        (decals[0].position.z - 900.0).abs() < 1e-3,
+        "never distance-culled"
+    );
+    assert!(
+        (decals[0].radius - (3.0 - 0.3)).abs() < 1e-4,
+        "scaled, band centred"
+    );
+    assert!(
+        (decals[0].fade - 1.0).abs() < 1e-6,
+        "full strength until its last 15 %"
+    );
+    assert!(decals[0].progress.is_some_and(|progress| progress < 0.05));
+    let ally = decals
+        .iter()
+        .find(|decal| decal.role == DecalRole::Ally)
+        .expect("the ally telegraph");
+    assert!(
+        (ally.color.w - 0.15).abs() < 1e-5,
+        "dimmed by the ally opacity"
+    );
+    let scorch = decals
+        .iter()
+        .find(|decal| decal.shape == DecalShape::Splat)
+        .expect("the stamped scorch");
+    assert_eq!(scorch.style, DecalStyle::Paint);
+    assert_eq!(scorch.role, DecalRole::Cosmetic);
+    // The attack's instance ends after 0.3 s; its stamp stays until 5 s, then expires.
+    let splats = |vfx: &VfxSystem| {
+        vfx.decals()
+            .iter()
+            .filter(|decal| decal.shape == DecalShape::Splat)
+            .count()
+    };
+    for frame in 1..=60 {
+        vfx.update(1.0 / 30.0, frame as f32, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(vfx.counters().instances, 0, "every effect ended");
+    assert_eq!(splats(&vfx), 1, "the stamp outlives its effect");
+    for frame in 61..=180 {
+        vfx.update(1.0 / 30.0, frame as f32, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(splats(&vfx), 0, "and expires");
+    // The ring is bounded: 200 stamps keep the newest MAX_STAMPS.
+    for _ in 0..200 {
+        vfx.trigger(&event(Trigger::Attack, 1, Some(3)), &view, &anchors);
+        vfx.update(1.0 / 30.0, 200.0, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(splats(&vfx), super::MAX_STAMPS);
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[test]
 fn casts_projectiles_and_hits_spawn_their_bound_effects() {
@@ -399,7 +491,11 @@ fn preview_plays_every_shipped_effect() {
     for name in bindings.effect_names() {
         let library = VfxLibrary::preview(content.clone(), name);
         let effect = library.preview_effect().expect("the effect loads");
+        let projects_decals = library
+            .effect(effect)
+            .is_some_and(|loaded| !loaded.effect.decals.is_empty());
         let mut vfx = VfxSystem::new(library, QualityTier::High.vfx_budget(), true);
+        let mut decals = 0;
         let mut preview = super::Preview::new(effect);
         let mut anchors = Anchors::new();
         let mut units = Vec::new();
@@ -411,8 +507,11 @@ fn preview_plays_every_shipped_effect() {
             preview.frame(&mut vfx, &mut anchors, &mut units, 1_000.0 / 30.0);
             vfx.update(1.0 / 30.0, 0.0, &view, &anchors, NO_SOCKET);
             total += vfx.frame().spawns.len();
+            decals += vfx.decals().len();
         }
         assert!(total > 0, "{name}: no particles ({:?})", vfx.counters());
+        // R3b: an effect with `[[decals]]` projects them (telegraph rings, scorch, splats).
+        assert_eq!(decals > 0, projects_decals, "{name}: decals");
         assert_eq!(units.len(), 2, "the stand-in caster and target");
     }
 }

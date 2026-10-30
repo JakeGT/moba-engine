@@ -106,6 +106,63 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Decals, foliage and water (AAA roadmap R3b, ADR-0017; completes R3):**
+  - **Decals:** effect descriptors gain up to four `[[decals]]` (`moba_assets::VfxDecal`:
+    ring, disc or splat; `paint` tints the ground's albedo before lighting, `glow` adds light
+    after it; telegraph decals sweep with the effect's progress; `stamp` leaves a scorch or
+    splat behind for its fade-out). The renderer projects up to 128 decals a frame in the
+    terrain shader (and on the water surface) from one host-visible storage buffer per frame
+    (set-3 binding 20, 24,608 bytes): the decals plus a 32×32 world grid of 128-bit masks over
+    their bounding box. No extra pass and no sampler. **Enemy telegraphs** (`DecalRole`) are
+    listed first and never dropped, their alpha keeps R5's 35 % floor (only the last 15 % of
+    the telegraph fades), and they get a two-tone rim (a band brightened to at least 1.8× the
+    ground's luminance plus a dark halo) whose contrast `glow_reference` and a unit test hold
+    from black to 16× white ground. Ally decals follow the allied-VFX opacity. Decals come
+    only from the client's own effects, which follow what it is shown. The shipped
+    telegraphs, impacts and deaths gain rings, scorch and splats; R5's particle rings stay.
+    Tiers cap the other decals at 48 / 96 / 128 / 128.
+  - **Foliage:** a per-map `[foliage]` table (`MapFoliage`: density, height range, seed, kind
+    and up to 32 `grass`/`brush`/`reeds`/`flowers` patches; reeds along the banks) scattered
+    deterministically by `moba_assets::generate_foliage` (never on lanes, near walls,
+    structures or spawns, or in water). The renderer draws it GPU-instanced (16-byte instances, procedural blades in the vertex
+    shader, no vertex buffer), culled by 16 m chunk and draw distance, wind-animated, and
+    pushed aside by up to 32 displacers that the client builds from the units it draws:
+    hidden units never bend anything (unit-tested). The simulation has no brush, so foliage
+    is decorative. Tiers: density 0.3 / 0.6 / 1 / 1, blades per clump 3–6, 60–180 m.
+  - **Water:** up to eight `[[water]]` bodies per map (`MapWater`: a centre polyline or a
+    pool, width, level, depth, flow, colours, clarity, foam). `generate_terrain_with_water`
+    carves the beds into the heightfield and `generate_water` builds the surface on the
+    terrain grid with the bed depth per vertex. The shader has flow-map normals (one octave
+    on Low), depth fade, shoreline and contact foam and glow decals on the surface; Low and
+    Medium
+    blend it at the end of the scene pass (`Simple`), High and Ultra add **screen-space
+    refraction** (`Full`: a `water_copy` pass copies the HDR region and a `water` pass reads
+    it and the scene depth). `content-check` rejects water deeper than a unit can visibly
+    wade through (0.8 m), levels outside -0.5..0.3 m and water off the board, and warns about
+    water near structures or spawns, overlapping bodies and brush over lanes or structures.
+  - **Showcase:** `map-grass` gains a river with fords down the middle, reeds, brush and
+    flower patches and a meadow; ember and frost get sparse, tinted grass in their own wind
+    (no water).
+  - **Tiers and switches:** `EnvironmentConfig::for_tier` (`RenderConfig::environment`),
+    `MOBA_DECALS=off`, `MOBA_FOLIAGE=off`, `MOBA_WATER=off|simple|full`; the frame log gains
+    `water_copy` and `water` lanes and `decals=`, `foliage=`, `water=` fields.
+    `MOBA_PREVIEW_CAMERA` takes an optional focus (`yaw,pitch,distance,x,z`).
+  - **Composition:** R3b adds no sampler to the scene pipelines (16 of 16 with R6's AO and
+    R2b's baked AO and contact shadows; the decals are a third fragment storage buffer beside
+    R2b's light list and grid, and the `descriptor_budget` test now also counts storage
+    buffers per stage). Foliage and the simple water get MSAA twins; the full water runs
+    after the resolve; neither is in the depth prepass nor writes outline IDs, so a unit in
+    brush keeps its screen-space outline; refraction reads by texel, so render scale works.
+    R2b's effect lights, baked AO and contact shadows light foliage and water.
+  - **Evidence** ([perf/0021](docs/perf/0021-decals-foliage-water.md)): validation and
+    synchronisation validation report 0 messages on lavapipe and the RTX 5070 Ti for every
+    tier and switch, MSAA, render scale, the 5v5 teamfight at `MOBA_VFX_SCALE=8` and 64 stress
+    minions. The decal shader reads each record in place: copying the record into a local
+    pushed the terrain shader past a register step on NVIDIA and doubled its cost on Ultra. Every golden was rebaselined deliberately (the showcase map changes every
+    view) and three are new: the river on the default tier and on Low, and the teamfight's
+    decals. Art sign-off of the showcase is a maintainer item.
+  - No wire, replay, simulation-logic or content-hash change: decals, foliage and water are
+    client-local presentation.
 - **Terrain, fog of war v2 and atmosphere (AAA roadmap R3a, ADR-0014):**
   - **Terrain:** a map visuals `[terrain]` table (`moba_assets::MapTerrain`, in
     `MapVisuals::ground`; the old `terrain = [r, g, b]` tint still parses and moves into the

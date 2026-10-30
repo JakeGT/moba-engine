@@ -37,10 +37,21 @@
 //! a wall segment); 3 variation patches on the base; 4..=7 sparse extra patches. Rock covers
 //! path, path covers the ground layers. A role without a layer folds its weight into the base,
 //! so only `layers.len()` layers ever get weight, and each texel's eight bytes sum to 255.
+//!
+//! # Water beds ([`generate_terrain_with_water`], ADR-0017 §3)
+//! Before occlusion and the splat, each `[[water]]` body carves its bed into the board
+//! samples (never outside the board, where the ground only rises). With `d` the distance to
+//! the body's centre polyline and `half` half its width: inside (`d <= half`) the ground is
+//! `level − depth × (1 − smoothstep(0.35, 1, d / half))`, meeting the surface exactly at the
+//! bank; on the banks (`half < d < half + 3`) it rises to at least `level + 6 cm` and blends
+//! back to the original relief by `half + 3`. Inside wins over any other body's bank, and
+//! everything is clamped to ±[`MAX_PLAY_RELIEF`]. The splat's path layer (pebbles, sand)
+//! covers the bed to `half + 1`. Without water the output is exactly [`generate_terrain`]'s.
 
 use crate::map_visuals::{
     DEFAULT_EDGE_MESH_HEIGHT, DEFAULT_EDGE_SPACING, DEFAULT_LANE_WIDTH, EDGE_MESH_HEIGHT_RANGE,
-    EDGE_SPACING_RANGE, EdgeStyle, LANE_WIDTH_RANGE, MapTerrain, MapVisuals,
+    EDGE_SPACING_RANGE, EdgeStyle, FoliageKind, LANE_WIDTH_RANGE, MAX_WADE_DEPTH, MAX_WATER_LEVEL,
+    MapTerrain, MapVisuals, MapWater,
 };
 use crate::texture::{TextureData, TextureFormat, full_mip_chain};
 
@@ -234,11 +245,25 @@ pub fn generate_terrain(
     cells: u32,
     splat_size: u32,
 ) -> GeneratedTerrain {
-    let heightfield = generate_heightfield(terrain, site, cells);
+    generate_terrain_with_water(terrain, site, &[], cells, splat_size)
+}
+
+/// [`generate_terrain`] with the `[[water]]` beds carved into the heightfield before its
+/// occlusion, and the bed painted with the splat's path layer (see the module docs). With no
+/// water it is exactly [`generate_terrain`].
+#[must_use]
+pub fn generate_terrain_with_water(
+    terrain: &MapTerrain,
+    site: &TerrainSite,
+    water: &[MapWater],
+    cells: u32,
+    splat_size: u32,
+) -> GeneratedTerrain {
+    let heightfield = heightfield(terrain, site, water, cells);
     let splat = terrain
         .splat
         .is_none()
-        .then(|| generate_splat(terrain, site, &heightfield, splat_size));
+        .then(|| splat(terrain, site, water, &heightfield, splat_size));
     GeneratedTerrain { heightfield, splat }
 }
 
@@ -324,6 +349,16 @@ impl Params {
 /// rules). `cells` (per side) is clamped to 16..=1024.
 #[must_use]
 pub fn generate_heightfield(terrain: &MapTerrain, site: &TerrainSite, cells: u32) -> Heightfield {
+    heightfield(terrain, site, &[], cells)
+}
+
+/// The heightfield with the water beds carved before the occlusion.
+fn heightfield(
+    terrain: &MapTerrain,
+    site: &TerrainSite,
+    water: &[MapWater],
+    cells: u32,
+) -> Heightfield {
     let params = Params::new(terrain, site);
     let cells = cells.clamp(16, 1024);
     let resolution = cells + 1;
@@ -344,8 +379,103 @@ pub fn generate_heightfield(terrain: &MapTerrain, site: &TerrainSite, cells: u32
         heights,
         occlusion: Vec::new(),
     };
+    carve_water(&mut heightfield, water, params.extent);
     heightfield.occlusion = occlusion(&heightfield);
     heightfield
+}
+
+/// Width of the raised bank beyond a water body's half width, metres.
+const WATER_BANK: f32 = 3.0;
+/// Height the banks keep above the water surface, metres.
+const WATER_BANK_LIFT: f32 = 0.06;
+
+/// Inclusive sample index range of `field` covering `[low, high]` along one axis.
+fn sample_range(field: &Heightfield, low: f32, high: f32, axis: usize) -> Option<(u32, u32)> {
+    let last = field.resolution.saturating_sub(1);
+    let spacing = field.spacing.max(1e-6);
+    let first = ((low - field.origin[axis]) / spacing).ceil().max(0.0);
+    let end = ((high - field.origin[axis]) / spacing).floor();
+    if !(first.is_finite() && end.is_finite()) || end < first || end < 0.0 {
+        return None;
+    }
+    Some((first as u32, (end as u32).min(last)))
+}
+
+/// Carves every water body's bed into the board samples (module docs, "Water beds").
+fn carve_water(field: &mut Heightfield, water: &[MapWater], extent: f32) {
+    if water.is_empty() || field.heights.is_empty() {
+        return;
+    }
+    let width = field.resolution as usize;
+    // Per sample: the lowest carved bed of the bodies containing it, and the highest bank.
+    let mut bed = vec![f32::INFINITY; field.heights.len()];
+    let mut bank = field.heights.clone();
+    for body in water {
+        let points: Vec<[f32; 2]> = body.finite_points().collect();
+        let Some((low, high)) = bounds(&points) else {
+            continue;
+        };
+        let half = body.half_width();
+        let (level, depth) = (body.surface(), body.bed_depth());
+        let reach = half + WATER_BANK;
+        let x_range = sample_range(
+            field,
+            (low[0] - reach).max(0.0),
+            (high[0] + reach).min(extent),
+            0,
+        );
+        let y_range = sample_range(
+            field,
+            (low[1] - reach).max(0.0),
+            (high[1] + reach).min(extent),
+            1,
+        );
+        let (Some((x0, x1)), Some((y0, y1))) = (x_range, y_range) else {
+            continue;
+        };
+        for iy in y0..=y1 {
+            let y = field.origin[1] + iy as f32 * field.spacing;
+            for ix in x0..=x1 {
+                let x = field.origin[0] + ix as f32 * field.spacing;
+                let index = iy as usize * width + ix as usize;
+                let d = polyline_distance([x, y], &points);
+                let original = field.heights[index];
+                if d <= half {
+                    let carved = level - depth * (1.0 - smoothstep(0.35, 1.0, d / half));
+                    bed[index] = bed[index].min(carved);
+                } else if d < reach {
+                    let lift = level + WATER_BANK_LIFT * smoothstep(half, half + 1.0, d);
+                    let target = lerp(
+                        original.max(lift),
+                        original,
+                        smoothstep(half + 1.0, reach, d),
+                    );
+                    bank[index] = bank[index].max(target);
+                }
+            }
+        }
+    }
+    for (index, height) in field.heights.iter_mut().enumerate() {
+        let value = if bed[index].is_finite() {
+            bed[index]
+        } else {
+            bank[index]
+        };
+        if value.to_bits() != height.to_bits() {
+            *height = value.clamp(-MAX_PLAY_RELIEF, MAX_PLAY_RELIEF);
+        }
+    }
+}
+
+/// Bounding box of `points`, or `None` without any.
+pub(crate) fn bounds(points: &[[f32; 2]]) -> Option<([f32; 2], [f32; 2])> {
+    let first = *points.first()?;
+    Some(points.iter().fold((first, first), |(low, high), p| {
+        (
+            [low[0].min(p[0]), low[1].min(p[1])],
+            [high[0].max(p[0]), high[1].max(p[1])],
+        )
+    }))
 }
 
 /// Horizon ambient occlusion: per direction, the steepest rise among neighbours 2, 4 and 8
@@ -423,6 +553,17 @@ pub fn generate_splat(
     heightfield: &Heightfield,
     size: u32,
 ) -> [TextureData; 2] {
+    splat(terrain, site, &[], heightfield, size)
+}
+
+/// [`generate_splat`] with the path layer over the water beds.
+fn splat(
+    terrain: &MapTerrain,
+    site: &TerrainSite,
+    water: &[MapWater],
+    heightfield: &Heightfield,
+    size: u32,
+) -> [TextureData; 2] {
     let size = size.clamp(16, 2048).next_power_of_two();
     let n = size as usize;
     let layers = terrain.layers.len().clamp(1, MAX_TERRAIN_LAYERS);
@@ -443,6 +584,11 @@ pub fn generate_splat(
         discs,
         wall_rock,
     } = Masks::rasterise(site, &grid, layers, half_width);
+    let water_path = if layers > 1 {
+        water_path(water, &grid)
+    } else {
+        Vec::new()
+    };
 
     // The patch noises are smooth at the texel scale: evaluate them at half resolution and
     // interpolate, which keeps a 512² splat well inside its time budget.
@@ -475,6 +621,9 @@ pub fn generate_splat(
             }
             if let Some(path_edge) = &path_edge {
                 let mut path = discs[index];
+                if let Some(bed) = water_path.get(index) {
+                    path = path.max(*bed);
+                }
                 let d = lane_distance[index];
                 if d < half_width + 3.0 {
                     let edge = half_width + (2.0 * path_edge.at(ix, iy)).clamp(-2.0, 2.0);
@@ -500,6 +649,36 @@ pub fn generate_splat(
         }
     }
     [splat_texture(size, first), splat_texture(size, second)]
+}
+
+/// Path weight over the water beds, per texel (empty without water): full on the bed,
+/// fading out by `half + 1`.
+fn water_path(water: &[MapWater], grid: &Grid) -> Vec<f32> {
+    if water.is_empty() {
+        return Vec::new();
+    }
+    let mut weights = vec![0.0f32; grid.n * grid.n];
+    for body in water {
+        let points: Vec<[f32; 2]> = body.finite_points().collect();
+        let half = body.half_width();
+        for (a, b) in segments(&points) {
+            grid.for_each_near(a, b, half + 1.0, |index, point| {
+                let d = segment_distance(point, a, b);
+                let weight = 1.0 - smoothstep(half + 0.25, half + 1.0, d);
+                weights[index] = weights[index].max(weight);
+            });
+        }
+    }
+    weights
+}
+
+/// A polyline's segments; one point is a zero-length segment.
+pub(crate) fn segments(points: &[[f32; 2]]) -> Vec<([f32; 2], [f32; 2])> {
+    match points {
+        [] => Vec::new(),
+        [single] => vec![(*single, *single)],
+        many => many.windows(2).map(|pair| (pair[0], pair[1])).collect(),
+    }
 }
 
 /// Per-texel distances and weights rasterised from the site's geometry.
@@ -892,6 +1071,15 @@ impl MapConsistency {
 /// **Warnings:** (6) a prop at least 2 m tall whose footprint (radius `height × 0.225`)
 /// overlaps a lane corridor (`lane_width / 2` from the lane) or comes within 4 m of a
 /// structure. Texture files (rule 5) are checked by [`crate::AssetManifest::check_files`].
+///
+/// **Water and foliage (ADR-0017 §4)**, on every grid size with the beds carved
+/// ([`generate_terrain_with_water`]). Errors: a body's level outside
+/// `[-MAX_PLAY_RELIEF, MAX_WATER_LEVEL]`; a body whose polyline widened by half its width
+/// leaves the board; a board sample under a body deeper than [`MAX_WADE_DEPTH`] below its
+/// surface; `[foliage]` or `[[water]]` without `[terrain]`; and the relief rule above with the
+/// beds carved. Warnings: water within 4 m of a structure or covering a spawn; water crossing
+/// a wall; overlapping bodies; a `brush` patch over a lane corridor or within 6 m of a
+/// structure (it would read as cover the simulation does not have).
 #[must_use]
 pub fn check_map_consistency(visuals: &MapVisuals, site: &TerrainSite) -> MapConsistency {
     check_map_consistency_with_edge_footprint(visuals, site, None)
@@ -915,8 +1103,9 @@ pub fn check_map_consistency_with_edge_footprint(
         return report;
     }
     if let Some(terrain) = &visuals.ground {
-        check_relief(terrain, site, &mut report);
+        check_relief(terrain, site, &visuals.water, &mut report);
     }
+    check_water_and_foliage(visuals, site, &mut report);
     let inside = |p: [f32; 2]| {
         (-0.5..=extent + 0.5).contains(&p[0]) && (-0.5..=extent + 0.5).contains(&p[1])
     };
@@ -1003,16 +1192,257 @@ pub fn check_map_consistency_with_edge_footprint(
 /// Rule 1 on the generated heightfield, at every render grid size: the samples, plus the
 /// interpolated surface of the cells that straddle the board edge (their outside corners may
 /// rise, and the drawn surface must still stay within the limit on the board).
-fn check_relief(terrain: &MapTerrain, site: &TerrainSite, report: &mut MapConsistency) {
+/// With water, every grid has the beds carved, and no board sample under a body may lie
+/// deeper than [`MAX_WADE_DEPTH`] below its surface.
+fn check_relief(
+    terrain: &MapTerrain,
+    site: &TerrainSite,
+    water: &[MapWater],
+    report: &mut MapConsistency,
+) {
+    let mut relief_reported = false;
+    let mut wade_reported = vec![false; water.len()];
     for cells in TERRAIN_GRID_SIZES {
-        let field = generate_heightfield(terrain, site, cells);
-        let before = report.errors.len();
-        check_relief_grid(&field, site.extent, cells, report);
-        if report.errors.len() > before {
+        let field = heightfield(terrain, site, water, cells);
+        if !relief_reported {
+            let before = report.errors.len();
+            check_relief_grid(&field, site.extent, cells, report);
             // One grid's report is enough; the finer grids only repeat it.
+            relief_reported = report.errors.len() > before;
+        }
+        for (index, body) in water.iter().enumerate() {
+            if !wade_reported[index] {
+                wade_reported[index] = check_wade_depth(&field, body, index, site.extent, report);
+            }
+        }
+        if relief_reported && wade_reported.iter().all(|&done| done) {
             return;
         }
     }
+}
+
+/// The deepest board sample under `body` on `field`; reports it when it is deeper than
+/// [`MAX_WADE_DEPTH`] and returns whether it did.
+fn check_wade_depth(
+    field: &Heightfield,
+    body: &MapWater,
+    index: usize,
+    extent: f32,
+    report: &mut MapConsistency,
+) -> bool {
+    let points: Vec<[f32; 2]> = body.finite_points().collect();
+    let Some((low, high)) = bounds(&points) else {
+        return false;
+    };
+    let half = body.half_width();
+    let surface = body.surface();
+    let x_range = sample_range(
+        field,
+        (low[0] - half).max(0.0),
+        (high[0] + half).min(extent),
+        0,
+    );
+    let y_range = sample_range(
+        field,
+        (low[1] - half).max(0.0),
+        (high[1] + half).min(extent),
+        1,
+    );
+    let (Some((x0, x1)), Some((y0, y1))) = (x_range, y_range) else {
+        return false;
+    };
+    let mut worst: Option<(f32, [f32; 2])> = None;
+    for iy in y0..=y1 {
+        let y = field.origin[1] + iy as f32 * field.spacing;
+        for ix in x0..=x1 {
+            let x = field.origin[0] + ix as f32 * field.spacing;
+            if polyline_distance([x, y], &points) > half {
+                continue;
+            }
+            let depth = surface - field.height(ix, iy);
+            if worst.is_none_or(|(deepest, _)| depth > deepest || depth.is_nan()) {
+                worst = Some((depth, [x, y]));
+            }
+        }
+    }
+    match worst {
+        Some((depth, at)) if depth.is_nan() || depth > MAX_WADE_DEPTH + 1e-3 => {
+            report.errors.push(format!(
+                "water {index}: {depth:.3} m deep at {} ({}-cell grid), deeper than the \
+                 {MAX_WADE_DEPTH} m a hero visibly wades through (every unit walks everywhere)",
+                point(at),
+                field.resolution - 1
+            ));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// ADR-0017 §4: the water and foliage rules that do not need a heightfield.
+#[allow(clippy::too_many_lines)] // One rule after another, in ADR order.
+fn check_water_and_foliage(visuals: &MapVisuals, site: &TerrainSite, report: &mut MapConsistency) {
+    let extent = site.extent;
+    if visuals.ground.is_none() {
+        if !visuals.water.is_empty() {
+            report.errors.push(String::from(
+                "[[water]] needs the [terrain] table: its bed is carved into the heightfield",
+            ));
+        }
+        if visuals.foliage.is_some() {
+            report.errors.push(String::from(
+                "[foliage] needs the [terrain] table: its instances stand on the heightfield",
+            ));
+        }
+        return;
+    }
+    let lane_half = 0.5
+        * visuals
+            .ground
+            .as_ref()
+            .map_or(DEFAULT_LANE_WIDTH, |terrain| terrain.lane_width);
+    let bodies: Vec<(Vec<[f32; 2]>, f32)> = visuals
+        .water
+        .iter()
+        .map(|body| (body.finite_points().collect(), body.half_width()))
+        .collect();
+    for (index, body) in visuals.water.iter().enumerate() {
+        let name = format!("water {index}");
+        if !(body.level.is_finite() && (-MAX_PLAY_RELIEF..=MAX_WATER_LEVEL).contains(&body.level)) {
+            report.errors.push(format!(
+                "{name}: level {} m is outside [-{MAX_PLAY_RELIEF}, {MAX_WATER_LEVEL}]: the \
+                 surface must stay within wading height of the ground units stand on",
+                body.level
+            ));
+        }
+        let (points, half) = &bodies[index];
+        let half = *half;
+        if points.is_empty() || points.len() != body.points.len() {
+            report
+                .errors
+                .push(format!("{name}: needs 1..=32 finite points"));
+            continue;
+        }
+        if let Some(outside) = points.iter().find(|p| {
+            p[0] - half < -1e-3
+                || p[1] - half < -1e-3
+                || p[0] + half > extent + 1e-3
+                || p[1] + half > extent + 1e-3
+        }) {
+            report.errors.push(format!(
+                "{name}: at {} its width ({} m) leaves the board [0, {extent}], where the \
+                 ground only rises",
+                point(*outside),
+                2.0 * half
+            ));
+        }
+        for (structure_index, &structure) in site.structures.iter().enumerate() {
+            let d = polyline_distance(structure, points) - half;
+            if d < 4.0 {
+                report.warnings.push(format!(
+                    "{name} comes within {:.1} m of structure {structure_index} at {}: \
+                     structures should stand on dry ground",
+                    d.max(0.0),
+                    point(structure)
+                ));
+            }
+        }
+        for (spawn_index, &spawn) in site.spawns.iter().enumerate() {
+            if polyline_distance(spawn, points) < half {
+                report.warnings.push(format!(
+                    "{name} covers spawn {spawn_index} at {}",
+                    point(spawn)
+                ));
+            }
+        }
+        for (wall_index, &(a, b)) in site.walls.iter().enumerate() {
+            let d = segments(points)
+                .into_iter()
+                .map(|(p, q)| segment_segment_distance(p, q, a, b))
+                .fold(f32::INFINITY, f32::min);
+            if d < half + 0.5 * WALL_THICKNESS {
+                report.warnings.push(format!(
+                    "{name} crosses wall {wall_index} ({} to {}): a wall standing in water",
+                    point(a),
+                    point(b)
+                ));
+            }
+        }
+        for (other_index, (other, other_half)) in bodies.iter().enumerate().skip(index + 1) {
+            let d = polyline_polyline_distance(points, other);
+            if d < half + other_half {
+                report.warnings.push(format!(
+                    "{name} overlaps water {other_index}: the beds merge and the surfaces may \
+                     not meet"
+                ));
+            }
+        }
+    }
+    let Some(foliage) = &visuals.foliage else {
+        return;
+    };
+    for (index, patch) in foliage.patches.iter().enumerate() {
+        if patch.kind != FoliageKind::Brush {
+            continue;
+        }
+        let name = format!(
+            "brush patch {index} at {} (radius {} m)",
+            point(patch.center),
+            patch.radius
+        );
+        for (lane_index, lane) in site.lanes.iter().enumerate() {
+            let d = polyline_distance(patch.center, lane);
+            if d < lane_half + patch.radius {
+                report.warnings.push(format!(
+                    "{name} overlaps lane {lane_index}'s corridor: it would read as cover the \
+                     simulation does not have"
+                ));
+                break;
+            }
+        }
+        for (structure_index, &structure) in site.structures.iter().enumerate() {
+            let d = distance(patch.center, structure) - patch.radius;
+            if d < 6.0 {
+                report.warnings.push(format!(
+                    "{name} comes within {:.1} m of structure {structure_index} at {}: it \
+                     would read as cover the simulation does not have",
+                    d.max(0.0),
+                    point(structure)
+                ));
+            }
+        }
+    }
+}
+
+/// Distance between segments `a`-`b` and `c`-`d` (0 when they cross).
+fn segment_segment_distance(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> f32 {
+    let cross = |o: [f32; 2], p: [f32; 2], q: [f32; 2]| {
+        (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+    };
+    let (d1, d2) = (cross(c, d, a), cross(c, d, b));
+    let (d3, d4) = (cross(a, b, c), cross(a, b, d));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return 0.0;
+    }
+    segment_distance(a, c, d)
+        .min(segment_distance(b, c, d))
+        .min(segment_distance(c, a, b))
+        .min(segment_distance(d, a, b))
+}
+
+/// Distance between two polylines (one point each is a point).
+fn polyline_polyline_distance(a: &[[f32; 2]], b: &[[f32; 2]]) -> f32 {
+    let others = segments(b);
+    segments(a)
+        .into_iter()
+        .flat_map(|(p, q)| {
+            others
+                .iter()
+                .map(move |&(r, s)| segment_segment_distance(p, q, r, s))
+        })
+        .fold(f32::INFINITY, f32::min)
 }
 
 /// The worst interpolated height on the board within the cells that straddle its edge:
@@ -1097,15 +1527,15 @@ fn check_relief_grid(field: &Heightfield, extent: f32, cells: u32, report: &mut 
     }
 }
 
-fn point(p: [f32; 2]) -> String {
+pub(crate) fn point(p: [f32; 2]) -> String {
     format!("[{}, {}]", p[0], p[1])
 }
 
-fn finite(p: [f32; 2]) -> bool {
+pub(crate) fn finite(p: [f32; 2]) -> bool {
     p[0].is_finite() && p[1].is_finite()
 }
 
-fn finite_clamp(value: f32, low: f32, high: f32, fallback: f32) -> f32 {
+pub(crate) fn finite_clamp(value: f32, low: f32, high: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value.clamp(low, high)
     } else {
@@ -1113,22 +1543,22 @@ fn finite_clamp(value: f32, low: f32, high: f32, fallback: f32) -> f32 {
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
+pub(crate) fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-fn distance(a: [f32; 2], b: [f32; 2]) -> f32 {
+pub(crate) fn distance(a: [f32; 2], b: [f32; 2]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
     (dx * dx + dy * dy).sqrt()
 }
 
-fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+pub(crate) fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let ab = [b[0] - a[0], b[1] - a[1]];
     let length2 = ab[0] * ab[0] + ab[1] * ab[1];
     let t = if length2 > 0.0 {
@@ -1139,7 +1569,7 @@ fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     distance(p, [a[0] + t * ab[0], a[1] + t * ab[1]])
 }
 
-fn polyline_distance(p: [f32; 2], line: &[[f32; 2]]) -> f32 {
+pub(crate) fn polyline_distance(p: [f32; 2], line: &[[f32; 2]]) -> f32 {
     match line {
         [] => f32::INFINITY,
         [single] => distance(p, *single),
@@ -1151,14 +1581,14 @@ fn polyline_distance(p: [f32; 2], line: &[[f32; 2]]) -> f32 {
 }
 
 /// Euclidean distance from `p` to the board square `[0, extent]²` (0 inside).
-fn board_distance(p: [f32; 2], extent: f32) -> f32 {
+pub(crate) fn board_distance(p: [f32; 2], extent: f32) -> f32 {
     let dx = (-p[0]).max(p[0] - extent).max(0.0);
     let dy = (-p[1]).max(p[1] - extent).max(0.0);
     (dx * dx + dy * dy).sqrt()
 }
 
 /// Integer lattice hash (no floats involved, so it is the same on every platform).
-fn hash(x: i32, y: i32, seed: u32) -> u32 {
+pub(crate) fn hash(x: i32, y: i32, seed: u32) -> u32 {
     let mut h = x.cast_unsigned().wrapping_mul(0x8da6_b343)
         ^ y.cast_unsigned().wrapping_mul(0xd816_3841)
         ^ seed.wrapping_mul(0xcb1a_b31f).wrapping_add(0x9e37_79b9);
@@ -1186,7 +1616,7 @@ fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
 }
 
 /// Fractal value noise in `[-1, 1]`.
-fn fbm(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
+pub(crate) fn fbm(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
     let (mut sum, mut amplitude, mut frequency, mut norm) = (0.0, 1.0, 1.0, 0.0);
     for octave in 0..octaves {
         sum += amplitude
@@ -1203,14 +1633,14 @@ fn fbm(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
 }
 
 /// Fractal value noise in `[0, 1]`.
-fn fbm01(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
+pub(crate) fn fbm01(x: f32, y: f32, seed: u32, octaves: u32) -> f32 {
     0.5 + 0.5 * fbm(x, y, seed, octaves)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map_visuals::TerrainLayer;
+    use crate::map_visuals::{FoliagePatch, MapFoliage, TerrainLayer};
 
     fn layers(count: usize) -> Vec<TerrainLayer> {
         (0..count)
@@ -1555,6 +1985,156 @@ mod tests {
 
         // Rule 1 holds for the parser's ranges; a zero extent is an error.
         assert!(!check_map_consistency(&clean, &TerrainSite::new(0.0)).is_ok());
+    }
+
+    fn river() -> MapWater {
+        MapWater::new(vec![[30.0, 220.0], [128.0, 214.0], [226.0, 222.0]])
+    }
+
+    #[test]
+    fn water_beds_are_carved_inside_the_relief_rules() {
+        let site = site();
+        let terrain = MapTerrain::new(layers(3)).with_relief(0.5);
+        // No water: exactly the ADR-0014 terrain.
+        assert_eq!(
+            generate_terrain(&terrain, &site, 192, 64),
+            generate_terrain_with_water(&terrain, &site, &[], 192, 64)
+        );
+        let water = [
+            river(),
+            MapWater::new(vec![[200.0, 40.0]]).with_level(0.3, 0.8),
+        ];
+        let dry = generate_heightfield(&terrain, &site, 256);
+        let wet = generate_terrain_with_water(&terrain, &site, &water, 256, 256);
+        let field = &wet.heightfield;
+        assert_eq!(field.heights.len(), dry.heights.len());
+        let mut carved = 0;
+        for iy in 0..field.resolution {
+            for ix in 0..field.resolution {
+                let p = [
+                    field.origin[0] + ix as f32 * field.spacing,
+                    field.origin[1] + iy as f32 * field.spacing,
+                ];
+                let (h, h0) = (field.height(ix, iy), dry.height(ix, iy));
+                let on_board = (0.0..=256.0).contains(&p[0]) && (0.0..=256.0).contains(&p[1]);
+                if !on_board {
+                    assert_eq!(h, h0, "off-board ground is never carved at {p:?}");
+                    continue;
+                }
+                assert!(h.abs() <= MAX_PLAY_RELIEF, "{h} at {p:?}");
+                let mut near = false;
+                for body in &water {
+                    let d = polyline_distance(p, &body.points);
+                    let half = body.half_width();
+                    if d <= half {
+                        assert!(h <= body.level + 1e-6 && h >= body.level - body.depth - 1e-6);
+                        assert!(body.level - h <= MAX_WADE_DEPTH + 1e-6);
+                        carved += 1;
+                        near = true;
+                    } else if d < half + 1.0 {
+                        assert!(h >= body.level - 1e-6, "the bank stays dry at {p:?}");
+                        near = true;
+                    } else if d < half + WATER_BANK {
+                        near = true;
+                    }
+                }
+                if !near {
+                    assert_eq!(h, h0, "{p:?}");
+                }
+            }
+        }
+        assert!(carved > 100, "{carved}");
+        // The centre line is the full depth below the surface.
+        let centre = field.sample(128.0, 214.0);
+        assert!((centre - (0.1 - 0.45)).abs() < 1e-4, "{centre}");
+        assert!((field.sample(200.0, 40.0) - (0.3 - 0.8)).abs() < 1e-4);
+        // The bed takes the path layer.
+        let [first, _] = wet.splat.expect("generated splat");
+        let [dry_splat, _] = generate_splat(&terrain, &site, &dry, 256);
+        let (_, _, a) = first.level(0).expect("level 0");
+        let (_, _, b) = dry_splat.level(0).expect("level 0");
+        let texel = field.size() / 256.0;
+        let at = |x: f32, y: f32| {
+            let ix = ((x - field.origin[0]) / texel) as usize;
+            let iy = ((y - field.origin[1]) / texel) as usize;
+            (iy * 256 + ix) * 4 + 1
+        };
+        assert!(a[at(128.0, 214.0)] > 200, "{}", a[at(128.0, 214.0)]);
+        assert!(b[at(128.0, 214.0)] < 50, "{}", b[at(128.0, 214.0)]);
+        // Hostile code-built bodies stay bounded.
+        let hostile = [
+            MapWater::new(vec![[f32::NAN, 1.0], [1e9, -1e9]]),
+            MapWater::new(Vec::new()),
+            MapWater::new(vec![[128.0, 128.0]]).with_level(f32::INFINITY, f32::NAN),
+        ];
+        let field = generate_terrain_with_water(&terrain, &site, &hostile, 64, 16).heightfield;
+        assert!(field.heights.iter().all(|h| h.is_finite()));
+    }
+
+    #[test]
+    fn water_and_foliage_consistency_rules() {
+        let site = site();
+        let terrain = "[terrain]\ntint = [0.1, 0.1, 0.1]\n[[terrain.layers]]\nalbedo = \"a\"\n";
+        let clean = visuals(&format!(
+            "{terrain}[[water]]\npoints = [[140, 220], [200, 224]]\n\
+             [foliage]\n[[foliage.patches]]\ncenter = [200, 60]\nradius = 6\nkind = \"brush\"\n"
+        ));
+        let report = check_map_consistency(&clean, &site);
+        assert!(report.is_ok() && report.warnings.is_empty(), "{report:?}");
+
+        // Errors: leaving the board; deeper than wading; a level out of range; no terrain.
+        let water = MapWater::new(vec![[3.0, 40.0], [60.0, 40.0]]);
+        let report = check_map_consistency(&clean.clone().with_water(vec![water]), &site);
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].starts_with("water 0: at [3, 40] its width"));
+        let mut deep = MapWater::new(vec![[200.0, 220.0]]);
+        deep.level = 0.6;
+        let report = check_map_consistency(&clean.clone().with_water(vec![deep]), &site);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.starts_with("water 0: level 0.6 m")),
+            "{report:?}"
+        );
+        let mut lake = MapWater::new(vec![[200.0, 220.0]]);
+        lake.depth = 2.0;
+        lake.level = 0.3;
+        // The generator clamps the bed at the relief limit, so it stays wadeable.
+        let report = check_map_consistency(&clean.clone().with_water(vec![lake]), &site);
+        assert!(report.is_ok(), "{report:?}");
+        let flat = clean.clone().with_ground(None);
+        let report = check_map_consistency(&flat, &site);
+        assert_eq!(report.errors.len(), 2, "{report:?}");
+
+        // Warnings: near a structure, over a spawn, across a wall, overlapping, brush cover.
+        let busy = clean
+            .clone()
+            .with_water(vec![
+                MapWater::new(vec![[72.0, 105.0]]).with_width(10.0),
+                MapWater::new(vec![[224.0, 140.0]]).with_width(30.0),
+                MapWater::new(vec![[40.0, 178.0], [120.0, 178.0]]),
+                MapWater::new(vec![[100.0, 230.0], [140.0, 230.0]]),
+                MapWater::new(vec![[130.0, 236.0], [180.0, 236.0]]),
+            ])
+            .with_foliage(Some(
+                MapFoliage::default()
+                    .with_patch(FoliagePatch::new([128.0, 140.0], 4.0, FoliageKind::Brush))
+                    .with_patch(FoliagePatch::new([20.0, 136.0], 4.0, FoliageKind::Brush))
+                    .with_patch(FoliagePatch::new([128.0, 140.0], 4.0, FoliageKind::Flowers)),
+            ));
+        let report = check_map_consistency(&busy, &site);
+        assert!(report.is_ok(), "{report:?}");
+        let has = |needle: &str| report.warnings.iter().any(|w| w.contains(needle));
+        assert!(has("water 0 comes within"), "{:?}", report.warnings);
+        assert!(has("water 1 covers spawn 1"), "{:?}", report.warnings);
+        assert!(has("water 2 crosses wall 1"), "{:?}", report.warnings);
+        assert!(has("water 3 overlaps water 4"), "{:?}", report.warnings);
+        assert!(has(
+            "brush patch 0 at [128, 140] (radius 4 m) overlaps lane 0"
+        ));
+        assert!(has("brush patch 1 at [20, 136] (radius 4 m) comes within"));
+        assert!(!has("patch 2"), "flowers are not cover");
     }
 
     #[test]

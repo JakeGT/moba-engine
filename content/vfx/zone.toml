@@ -27,3 +27,13 @@ scale_with_radius = true
 team_tint = 0.6
 fade_in = 0.2
 fade_out = 0.3
+
+[[decals]]                       # R3b: the area telegraph on the ground (ADR-0017 §1)
+shape = "ring"
+radius = 1.0
+width = 0.1
+color = [1.5, 1.5, 1.5, 0.45]
+telegraph = true
+progress = true
+scale_with_radius = true
+team_tint = 0.7

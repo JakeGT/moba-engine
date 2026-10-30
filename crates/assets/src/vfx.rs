@@ -28,6 +28,30 @@
 //! drag = 1.0               # 1/s
 //! ```
 //!
+//! An effect may also project up to [`MAX_VFX_DECALS`] ground decals (ADR-0017): telegraph
+//! markers, zones, scorch marks. An effect needs at least one emitter or one decal.
+//!
+//! ```toml
+//! [[decals]]
+//! shape = "ring"           # disc | ring | cone | line | splat
+//! style = "glow"           # glow (after lighting, never dimmed) | paint (into the albedo);
+//!                          # default glow, paint for splats
+//! anchor = "target"        # target | source | line (from the source to the target)
+//! radius = 3.0             # metres, 0.1..=50 (a line's length when not anchored on a line)
+//! width = 0.4              # ring / line band width, metres, 0.05..=20
+//! angle = 60.0             # cone angle, degrees, 1..=360
+//! delay = 0.0              # seconds after the effect starts, 0..=30
+//! lifetime = 1.2           # seconds, 0.05..=30 (default: the effect's emit window)
+//! fade_in = 0.1            # seconds, 0..=10
+//! fade_out = 0.25          # seconds, 0..=10
+//! color = [1.0, 0.3, 0.2, 0.8]   # linear RGBA; RGB may exceed 1 (HDR, up to 32)
+//! team_tint = 0.0          # 0..=1
+//! scale_with_radius = true # radius and width times the event's radius (zones, areas)
+//! telegraph = true         # an area telegraph (glow only; never stamped)
+//! progress = true          # an inner fill grows to the edge over the decal's life
+//! stamp = false            # copied into the persistent ring at `delay` (needs `lifetime`)
+//! ```
+//!
 //! A **bindings** file, `<asset root>/vfx/bindings.toml`, maps catalogue ability names and
 //! unit events to effect names (see [`VfxBindings`]). Both files are untrusted, client-local
 //! and cosmetic: they never reach the simulation, the wire, replays or the content hash.
@@ -95,6 +119,25 @@ pub const MAX_VFX_LIGHT_RADIUS: f32 = 24.0;
 const LIGHT_RADIUS_RANGE: (f32, f32) = (0.25, MAX_VFX_LIGHT_RADIUS);
 const LIGHT_COLOR_RANGE: (f32, f32) = (0.0, 4.0);
 const LIGHT_FADE_RANGE: (f32, f32) = (0.0, 10.0);
+const DECAL_RADIUS_RANGE: (f32, f32) = (0.1, 50.0);
+const DECAL_WIDTH_RANGE: (f32, f32) = (0.05, 20.0);
+const DECAL_ANGLE_RANGE: (f32, f32) = (1.0, 360.0);
+const DECAL_LIFETIME_RANGE: (f32, f32) = (0.05, MAX_DECAL_SECONDS);
+const DECAL_FADE_RANGE: (f32, f32) = (0.0, 10.0);
+/// Most decals one effect may project.
+pub const MAX_VFX_DECALS: usize = 4;
+/// Longest decal lifetime, seconds (also the longest a stamped decal persists).
+pub const MAX_DECAL_SECONDS: f32 = 30.0;
+/// Decal radius when a `[[decals]]` entry gives none, metres.
+pub const DEFAULT_DECAL_RADIUS: f32 = 2.0;
+/// Ring / line band width when a `[[decals]]` entry gives none, metres.
+pub const DEFAULT_DECAL_WIDTH: f32 = 0.5;
+/// Cone angle when a `[[decals]]` entry gives none, degrees.
+pub const DEFAULT_DECAL_ANGLE: f32 = 90.0;
+/// Fade-in when a `[[decals]]` entry gives none, seconds.
+pub const DEFAULT_DECAL_FADE_IN: f32 = 0.1;
+/// Fade-out when a `[[decals]]` entry gives none, seconds.
+pub const DEFAULT_DECAL_FADE_OUT: f32 = 0.25;
 
 /// One named region of the particle atlas: a single cell or a flipbook strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,6 +341,85 @@ pub struct VfxEmitter {
     pub telegraph: bool,
 }
 
+/// The footprint of a ground decal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum VfxDecalShape {
+    /// A filled disc of `radius`.
+    #[default]
+    Disc,
+    /// A band of `width` just inside `radius`.
+    Ring,
+    /// A sector of `radius` and `angle`, opening along the source → target direction.
+    Cone,
+    /// A band of `width`: from the source to the target when anchored on a line, else
+    /// `radius` long along the source → target direction.
+    Line,
+    /// An irregular splat of about `radius` (its outline comes from a per-instance seed).
+    Splat,
+}
+
+/// How a ground decal is composited (ADR-0017 §1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VfxDecalStyle {
+    /// Composited after shading, fog of war and height fog: nothing dims it (telegraphs,
+    /// zones).
+    Glow,
+    /// Blended into the surface albedo before lighting: shadowed and fogged like the ground
+    /// (scorch, goo).
+    Paint,
+}
+
+/// One validated ground decal of an effect (`[[decals]]`).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // Independent descriptor flags, as in the TOML.
+pub struct VfxDecal {
+    /// Footprint.
+    pub shape: VfxDecalShape,
+    /// Compositing style.
+    pub style: VfxDecalStyle,
+    /// Where it is placed.
+    pub anchor: VfxAnchor,
+    /// Radius (a line's length unless anchored on a line), metres.
+    pub radius: f32,
+    /// Ring / line band width, metres.
+    pub width: f32,
+    /// Cone angle, degrees.
+    pub angle: f32,
+    /// Seconds after the effect starts before it appears.
+    pub delay: f32,
+    /// Seconds it lasts once it appears; `None`: the effect's emit window.
+    pub lifetime: Option<f32>,
+    /// Fade-in, seconds.
+    pub fade_in: f32,
+    /// Fade-out, seconds.
+    pub fade_out: f32,
+    /// Linear RGBA (RGB up to 32, alpha 0..=1).
+    pub color: [f32; 4],
+    /// How much the colour is pulled towards the team colour, `0..=1`.
+    pub team_tint: f32,
+    /// Scale `radius` and `width` by the event's radius (zones, areas).
+    pub scale_with_radius: bool,
+    /// An area telegraph: enemy instances keep a minimum opacity and the contrast rim and are
+    /// never culled by budgets. Always [`VfxDecalStyle::Glow`], never stamped.
+    pub telegraph: bool,
+    /// An inner fill grows from the centre to the edge over the decal's life (a cast timer).
+    pub progress: bool,
+    /// Copied into the persistent stamp ring at `delay`, outliving the effect for `lifetime`.
+    pub stamp: bool,
+}
+
+impl VfxDecal {
+    /// Seconds the decal lasts once it appears, for an effect emitting `emit_seconds`
+    /// ([`VfxEffect::emit_seconds`]).
+    #[must_use]
+    pub fn seconds(&self, emit_seconds: f32) -> f32 {
+        self.lifetime.unwrap_or(emit_seconds)
+    }
+}
+
 /// A validated effect descriptor.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -308,8 +430,10 @@ pub struct VfxEffect {
     pub importance: VfxImportance,
     /// Emit for the triggering event's lifetime (a zone's duration) instead of `duration`.
     pub event_duration: bool,
-    /// Emitters, in file order.
+    /// Emitters, in file order (at most [`MAX_VFX_EMITTERS`]).
     pub emitters: Vec<VfxEmitter>,
+    /// Ground decals, in file order (at most [`MAX_VFX_DECALS`]).
+    pub decals: Vec<VfxDecal>,
     /// The optional dynamic point light the effect casts (ADR-0016).
     pub light: Option<VfxLight>,
 }
@@ -445,6 +569,8 @@ struct RawEffect {
     emitters: Vec<RawEmitter>,
     #[serde(default)]
     light: Option<RawLight>,
+    #[serde(default)]
+    decals: Vec<RawDecal>,
 }
 
 #[derive(Deserialize)]
@@ -532,6 +658,43 @@ fn light(raw: &RawLight) -> Result<VfxLight, VfxError> {
         )?,
         scale_with_radius: raw.scale_with_radius,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Mirrors the TOML schema.
+struct RawDecal {
+    #[serde(default)]
+    shape: Option<String>,
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    anchor: Option<String>,
+    #[serde(default)]
+    radius: Option<f32>,
+    #[serde(default)]
+    width: Option<f32>,
+    #[serde(default)]
+    angle: Option<f32>,
+    #[serde(default)]
+    delay: Option<f32>,
+    #[serde(default)]
+    lifetime: Option<f32>,
+    #[serde(default)]
+    fade_in: Option<f32>,
+    #[serde(default)]
+    fade_out: Option<f32>,
+    color: [f32; 4],
+    #[serde(default)]
+    team_tint: Option<f32>,
+    #[serde(default)]
+    scale_with_radius: bool,
+    #[serde(default)]
+    telegraph: bool,
+    #[serde(default)]
+    progress: bool,
+    #[serde(default)]
+    stamp: bool,
 }
 
 #[derive(Deserialize)]
@@ -680,15 +843,7 @@ fn emitter(raw: RawEmitter) -> Result<VfxEmitter, VfxError> {
         (_, Some(_)) => return Err(VfxError::Invalid("only mesh emitters name a mesh")),
         (_, None) => None,
     };
-    let anchor = keyword(
-        raw.anchor.as_deref(),
-        &[
-            ("target", VfxAnchor::Target),
-            ("source", VfxAnchor::Source),
-            ("line", VfxAnchor::Line),
-        ],
-        "anchor must be target, source or line",
-    )?;
+    let anchor = anchor(raw.anchor.as_deref())?;
     let direction = keyword(
         raw.direction.as_deref(),
         &[
@@ -809,6 +964,113 @@ fn emitter(raw: RawEmitter) -> Result<VfxEmitter, VfxError> {
     })
 }
 
+fn anchor(value: Option<&str>) -> Result<VfxAnchor, VfxError> {
+    keyword(
+        value,
+        &[
+            ("target", VfxAnchor::Target),
+            ("source", VfxAnchor::Source),
+            ("line", VfxAnchor::Line),
+        ],
+        "anchor must be target, source or line",
+    )
+}
+
+fn decal(raw: &RawDecal) -> Result<VfxDecal, VfxError> {
+    let shape = keyword(
+        raw.shape.as_deref(),
+        &[
+            ("disc", VfxDecalShape::Disc),
+            ("ring", VfxDecalShape::Ring),
+            ("cone", VfxDecalShape::Cone),
+            ("line", VfxDecalShape::Line),
+            ("splat", VfxDecalShape::Splat),
+        ],
+        "decal shape must be disc, ring, cone, line or splat",
+    )?;
+    let style = match raw.style.as_deref() {
+        None if shape == VfxDecalShape::Splat => VfxDecalStyle::Paint,
+        None => VfxDecalStyle::Glow,
+        Some(text) if text.eq_ignore_ascii_case("glow") => VfxDecalStyle::Glow,
+        Some(text) if text.eq_ignore_ascii_case("paint") => VfxDecalStyle::Paint,
+        Some(_) => return Err(VfxError::Invalid("decal style must be glow or paint")),
+    };
+    if raw.stamp && raw.telegraph {
+        return Err(VfxError::Invalid(
+            "a telegraph decal cannot be stamped: it must end with its effect",
+        ));
+    }
+    if raw.stamp && raw.progress {
+        return Err(VfxError::Invalid("a stamped decal cannot show progress"));
+    }
+    if raw.stamp && raw.lifetime.is_none() {
+        return Err(VfxError::Invalid("a stamped decal needs a lifetime"));
+    }
+    if raw.telegraph && style == VfxDecalStyle::Paint {
+        return Err(VfxError::Invalid(
+            "a telegraph decal must use the glow style: paint is shadowed and fogged",
+        ));
+    }
+    Ok(VfxDecal {
+        shape,
+        style,
+        anchor: anchor(raw.anchor.as_deref())?,
+        radius: check(
+            raw.radius.unwrap_or(DEFAULT_DECAL_RADIUS),
+            DECAL_RADIUS_RANGE,
+            "decal radius must be 0.1..=50 metres",
+        )?,
+        width: check(
+            raw.width.unwrap_or(DEFAULT_DECAL_WIDTH),
+            DECAL_WIDTH_RANGE,
+            "decal width must be 0.05..=20 metres",
+        )?,
+        angle: check(
+            raw.angle.unwrap_or(DEFAULT_DECAL_ANGLE),
+            DECAL_ANGLE_RANGE,
+            "decal angle must be 1..=360 degrees",
+        )?,
+        delay: check(
+            raw.delay.unwrap_or(0.0),
+            DELAY_RANGE,
+            "decal delay must be 0..=30 seconds",
+        )?,
+        lifetime: raw
+            .lifetime
+            .map(|seconds| {
+                check(
+                    seconds,
+                    DECAL_LIFETIME_RANGE,
+                    "decal lifetime must be 0.05..=30 seconds",
+                )
+            })
+            .transpose()?,
+        fade_in: check(
+            raw.fade_in.unwrap_or(DEFAULT_DECAL_FADE_IN),
+            DECAL_FADE_RANGE,
+            "decal fade_in must be 0..=10 seconds",
+        )?,
+        fade_out: check(
+            raw.fade_out.unwrap_or(DEFAULT_DECAL_FADE_OUT),
+            DECAL_FADE_RANGE,
+            "decal fade_out must be 0..=10 seconds",
+        )?,
+        color: check_color(
+            raw.color,
+            "decal color must be RGB in 0..=32 with alpha in 0..=1",
+        )?,
+        team_tint: check(
+            raw.team_tint.unwrap_or(0.0),
+            (0.0, 1.0),
+            "decal team_tint must be 0..=1",
+        )?,
+        scale_with_radius: raw.scale_with_radius,
+        telegraph: raw.telegraph,
+        progress: raw.progress,
+        stamp: raw.stamp,
+    })
+}
+
 fn importance(value: Option<&str>) -> Result<VfxImportance, VfxError> {
     keyword(
         value,
@@ -851,8 +1113,16 @@ impl VfxEffect {
         }
         let raw: RawEffect =
             toml::from_str(text).map_err(|error| VfxError::Toml(error.to_string()))?;
-        if raw.emitters.is_empty() || raw.emitters.len() > MAX_VFX_EMITTERS {
-            return Err(VfxError::Invalid("an effect needs 1..=8 emitters"));
+        if raw.emitters.len() > MAX_VFX_EMITTERS {
+            return Err(VfxError::Invalid("an effect has at most 8 emitters"));
+        }
+        if raw.decals.len() > MAX_VFX_DECALS {
+            return Err(VfxError::Invalid("an effect has at most 4 decals"));
+        }
+        if raw.emitters.is_empty() && raw.decals.is_empty() {
+            return Err(VfxError::Invalid(
+                "an effect needs at least one emitter or decal",
+            ));
         }
         let duration = check(
             raw.duration,
@@ -865,12 +1135,17 @@ impl VfxEffect {
         for raw in raw.emitters {
             emitters.push(emitter(raw)?);
         }
+        let mut decals = Vec::with_capacity(raw.decals.len());
+        for raw in raw.decals {
+            decals.push(decal(&raw)?);
+        }
         Ok(Self {
             duration,
             importance,
             event_duration: raw.event_duration,
             emitters,
             light,
+            decals,
         })
     }
 
@@ -882,17 +1157,31 @@ impl VfxEffect {
         Self::parse(&read_bounded(path, MAX_VFX_BYTES)?)
     }
 
-    /// Whether any emitter is an area telegraph.
+    /// Whether any emitter or decal is an area telegraph.
     #[must_use]
     pub fn has_telegraph(&self) -> bool {
         self.emitters.iter().any(|emitter| emitter.telegraph)
+            || self.decals.iter().any(|decal| decal.telegraph)
     }
 
-    /// The longest time after the start at which a particle can still be alive, seconds
-    /// (`event_seconds` stands in for `duration` when [`Self::event_duration`] is set).
+    /// The longest time after the start at which a particle or an unstamped decal can still
+    /// be alive, seconds (`event_seconds` stands in for `duration` when
+    /// [`Self::event_duration`] is set). A stamped decal needs the effect only until its
+    /// delay; the stamp ring keeps it after that.
     #[must_use]
     pub fn lifespan(&self, event_seconds: f32) -> f32 {
         let duration = self.emit_seconds(event_seconds);
+        let decals = self
+            .decals
+            .iter()
+            .map(|decal| {
+                if decal.stamp {
+                    decal.delay
+                } else {
+                    decal.delay + decal.seconds(duration)
+                }
+            })
+            .fold(duration, f32::max);
         self.emitters
             .iter()
             .map(|emitter| {
@@ -904,7 +1193,7 @@ impl VfxEffect {
                 emitting.max(emitter.delay) + emitter.lifetime[1]
             })
             .chain(self.light.map(|light| light.end(duration)))
-            .fold(duration, f32::max)
+            .fold(decals, f32::max)
     }
 
     /// Seconds the effect emits for an event lasting `event_seconds`.
@@ -1656,5 +1945,120 @@ zone = "cinder"
         for bad in ["", "../x", "a.b", "a/b", "c:x", &"x".repeat(49)] {
             assert!(vfx_path(root, bad).is_none(), "{bad:?}");
         }
+    }
+
+    const ZONE: &str = r#"
+duration = 3
+event_duration = true
+
+[[decals]]
+shape = "ring"
+radius = 1.0
+width = 0.3
+color = [1.0, 0.25, 0.1, 0.8]
+scale_with_radius = true
+telegraph = true
+progress = true
+
+[[decals]]
+shape = "splat"
+delay = 0.5
+lifetime = 12
+color = [0.05, 0.03, 0.02, 0.9]
+stamp = true
+"#;
+
+    #[test]
+    fn decals_parse_with_defaults_and_count_towards_lifespan() {
+        let effect = VfxEffect::parse(ZONE).expect("decal-only effect");
+        assert_eq!(effect.emitters.len(), 0);
+        assert_eq!(effect.decals.len(), 2);
+        let ring = &effect.decals[0];
+        assert_eq!(ring.shape, VfxDecalShape::Ring);
+        assert_eq!(ring.style, VfxDecalStyle::Glow);
+        assert_eq!(ring.anchor, VfxAnchor::Target);
+        assert!(ring.telegraph && ring.progress && ring.scale_with_radius && !ring.stamp);
+        assert_eq!(ring.lifetime, None);
+        assert!((ring.angle - DEFAULT_DECAL_ANGLE).abs() < 1e-6);
+        assert!((ring.fade_in - DEFAULT_DECAL_FADE_IN).abs() < 1e-6);
+        assert!((ring.fade_out - DEFAULT_DECAL_FADE_OUT).abs() < 1e-6);
+        let splat = &effect.decals[1];
+        assert_eq!(splat.style, VfxDecalStyle::Paint, "splats default to paint");
+        assert!((splat.radius - DEFAULT_DECAL_RADIUS).abs() < 1e-6);
+        assert!((splat.width - DEFAULT_DECAL_WIDTH).abs() < 1e-6);
+        assert!(effect.has_telegraph());
+        // The ring lasts the zone (event_duration); the stamp only needs the effect until
+        // its delay.
+        assert!((ring.seconds(effect.emit_seconds(5.0)) - 5.0).abs() < 1e-6);
+        assert!((effect.lifespan(5.0) - 5.0).abs() < 1e-6);
+        assert!((effect.lifespan(0.0) - 3.0).abs() < 1e-6);
+        // A decal that outlasts the emitters extends the lifespan.
+        let late = VfxEffect::parse(
+            "duration = 0.5\n[[emitters]]\nburst = 1\nlifetime = [0.2, 0.2]\nsize = [1, 1]\n\
+             color = [1, 1, 1, 1]\n[[decals]]\nshape = \"cone\"\nangle = 45\ndelay = 0.25\n\
+             lifetime = 2\nanchor = \"source\"\ncolor = [1, 1, 1, 1]",
+        )
+        .expect("emitter and decal");
+        assert!((late.lifespan(0.0) - 2.25).abs() < 1e-6);
+        assert!(!late.has_telegraph());
+        assert_eq!(late.decals[0].anchor, VfxAnchor::Source);
+    }
+
+    #[test]
+    fn rejects_hostile_or_contradictory_decals() {
+        let decal = |body: &str| format!("duration = 1\n[[decals]]\ncolor = [1, 1, 1, 1]\n{body}");
+        assert!(VfxEffect::parse(&decal("")).is_ok());
+        for bad in [
+            decal("extra = 1"),
+            decal("shape = \"star\""),
+            decal("style = \"neon\""),
+            decal("anchor = \"sky\""),
+            decal("radius = 0"),
+            decal("radius = 51"),
+            decal("radius = nan"),
+            decal("width = 0.01"),
+            decal("width = 21"),
+            decal("angle = 0"),
+            decal("angle = 361"),
+            decal("delay = -1"),
+            decal("delay = 31"),
+            decal("lifetime = 0"),
+            decal("lifetime = 31"),
+            decal("fade_in = 11"),
+            decal("fade_out = -0.1"),
+            decal("team_tint = 2"),
+            decal("color = [33, 1, 1, 1]"),
+            decal("color = [1, 1, 1, 1.5]"),
+            String::from("duration = 1\n[[decals]]\nradius = 1"),
+            // A stamp needs a lifetime, and is never a telegraph or a progress fill.
+            decal("stamp = true"),
+            decal("stamp = true\nlifetime = 5\ntelegraph = true"),
+            decal("stamp = true\nlifetime = 5\nprogress = true"),
+            // A telegraph is never dimmed by lighting or fog.
+            decal("telegraph = true\nstyle = \"paint\""),
+            decal("telegraph = true\nshape = \"splat\""),
+            format!(
+                "duration = 1\n{}",
+                "[[decals]]\ncolor = [1, 1, 1, 1]\n".repeat(MAX_VFX_DECALS + 1)
+            ),
+        ] {
+            assert!(VfxEffect::parse(&bad).is_err(), "{bad:?}");
+        }
+        let four = format!(
+            "duration = 1\n{}",
+            "[[decals]]\ncolor = [1, 1, 1, 1]\n".repeat(MAX_VFX_DECALS)
+        );
+        assert_eq!(
+            VfxEffect::parse(&four).expect("four decals").decals.len(),
+            4
+        );
+        // Eight emitters plus four decals is the most an effect holds.
+        let full = format!(
+            "{four}{}",
+            "[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]\ncolor = [1, 1, 1, 1]\n"
+                .repeat(MAX_VFX_EMITTERS)
+        );
+        let full = VfxEffect::parse(&full).expect("full effect");
+        assert_eq!((full.emitters.len(), full.decals.len()), (8, 4));
     }
 }
