@@ -613,21 +613,40 @@ pub fn vfx_path(root: &Path, name: &str) -> Option<std::path::PathBuf> {
 pub struct VfxDirReport {
     /// Effect files that loaded.
     pub effects: usize,
-    /// Effect or bindings files that do not load, and effects referenced but missing.
+    /// Problems that break shipped content: a bindings file that does not load, an effect
+    /// the bindings or a map's `[[effects]]` name that is missing or does not load, and a map
+    /// effect that would draw as a fake telegraph.
     pub errors: Vec<String>,
+    /// Problems nothing reaches: an unreferenced effect file that does not load or is
+    /// misnamed (a third-party pack's spare file), and a map effect whose plays outlast twice
+    /// its restart period (it pulses, [`AMBIENT_PLAYS`]).
+    pub warnings: Vec<String>,
 }
 
-/// Validates a content root's client-local effects (`<root>/vfx`, `content-check`): every
-/// `vfx/<name>.toml` must load ([`VfxEffect::load_file`], so every field of every emitter,
-/// heat haze included, is checked), `vfx/bindings.toml` must load when present and every
-/// effect it names must exist, as must each of `referenced` (`(who, effect)` pairs, such as
-/// a map's `[[effects]]`). A missing `vfx` directory is fine (no effects) unless something
-/// references an effect.
+/// Live plays one looping map effect may hold at once (the client's cap, ADR-0019): its
+/// current play and the previous one's fading particles.
+pub const AMBIENT_PLAYS: usize = 2;
+/// Shortest restart period of a looping map effect, seconds (four starts a second at most).
+pub const AMBIENT_MIN_PERIOD: f32 = 0.25;
+
+/// Validates a content root's client-local effects (`<root>/vfx`, `content-check`).
+///
+/// - `vfx/bindings.toml` must load when present, and every effect it names must exist and
+///   load ([`VfxEffect::load_file`], so every field of every emitter, heat haze included,
+///   is checked);
+/// - so must each of `ambient`, a map's looping `[[effects]]` (`(who, effect)` pairs), which
+///   also must have no telegraph emitter or decal (a neutral loop would draw as a fake,
+///   full-alpha telegraph); one whose plays outlast [`AMBIENT_PLAYS`] restart periods is a
+///   warning (the client caps its live plays, so it pulses);
+/// - every other `vfx/*.toml` is loaded too, but a failure there is a warning: nothing
+///   references it.
+///
+/// A missing `vfx` directory is fine (no effects) unless something references an effect.
 #[must_use]
-pub fn check_vfx_dir(root: &Path, referenced: &[(&str, &str)]) -> VfxDirReport {
+pub fn check_vfx_dir(root: &Path, ambient: &[(&str, &str)]) -> VfxDirReport {
     let mut report = VfxDirReport::default();
     let dir = root.join("vfx");
-    let mut known: Vec<String> = Vec::new();
+    let mut files: Vec<(String, Result<VfxEffect, String>)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let mut paths: Vec<std::path::PathBuf> = entries
             .filter_map(Result::ok)
@@ -646,41 +665,79 @@ pub fn check_vfx_dir(root: &Path, referenced: &[(&str, &str)]) -> VfxDirReport {
                 continue;
             }
             if !valid_vfx_name(stem) {
-                report.errors.push(format!(
-                    "vfx/{stem}.toml: not a valid effect name (1-{MAX_VFX_NAME} of A-Z a-z 0-9 _ -)"
+                report.warnings.push(format!(
+                    "vfx/{stem}.toml is never loaded: not a valid effect name \
+                     (1-{MAX_VFX_NAME} of A-Z a-z 0-9 _ -)"
                 ));
                 continue;
             }
-            match VfxEffect::load_file(&path) {
-                Ok(_) => {
-                    report.effects += 1;
-                    known.push(String::from(stem));
-                }
-                Err(error) => report.errors.push(format!("vfx/{stem}.toml: {error}")),
+            let loaded = VfxEffect::load_file(&path).map_err(|error| error.to_string());
+            if loaded.is_ok() {
+                report.effects += 1;
             }
+            files.push((String::from(stem), loaded));
         }
     }
-    let exists = |name: &str| known.iter().any(|known| known == name);
+    let mut referenced: Vec<String> = Vec::new();
+    let mut require = |who: &str, name: &str, report: &mut VfxDirReport| {
+        if !referenced.iter().any(|known| known == name) {
+            referenced.push(String::from(name));
+        }
+        match files.iter().find(|(stem, _)| stem == name) {
+            None => {
+                report.errors.push(format!(
+                    "{who} names effect '{name}', but vfx/{name}.toml does not exist"
+                ));
+                None
+            }
+            Some((_, Err(error))) => {
+                report
+                    .errors
+                    .push(format!("vfx/{name}.toml: {error} (named by {who})"));
+                None
+            }
+            Some((_, Ok(effect))) => Some(effect),
+        }
+    };
     let bindings = dir.join("bindings.toml");
     if bindings.exists() {
         match VfxBindings::load_file(&bindings) {
             Ok(bindings) => {
                 for name in bindings.effect_names() {
-                    if !exists(name) {
-                        report.errors.push(format!(
-                            "vfx/bindings.toml names effect '{name}', but vfx/{name}.toml does \
-                             not exist or does not load"
-                        ));
-                    }
+                    let _ = require("vfx/bindings.toml", name, &mut report);
                 }
             }
             Err(error) => report.errors.push(format!("vfx/bindings.toml: {error}")),
         }
     }
-    for (who, name) in referenced {
-        if !exists(name) {
+    for &(who, name) in ambient {
+        let Some(effect) = require(who, name, &mut report) else {
+            continue;
+        };
+        if effect.has_telegraph() {
             report.errors.push(format!(
-                "{who} names effect '{name}', but vfx/{name}.toml does not exist or does not load"
+                "{who} loops effect '{name}', which has a telegraph emitter or decal: a map \
+                 effect is neutral and would draw as a fake telegraph"
+            ));
+            continue;
+        }
+        let period = effect.duration.max(AMBIENT_MIN_PERIOD);
+        let lifespan = effect.lifespan(effect.duration).max(effect.duration);
+        if lifespan > AMBIENT_PLAYS as f32 * period + 1e-4 {
+            report.warnings.push(format!(
+                "{who} loops effect '{name}', whose plays last {lifespan:.2} s but restart \
+                 every {period:.2} s: at most {AMBIENT_PLAYS} plays are live at once, so it \
+                 pulses (make its duration at least 1/{AMBIENT_PLAYS} of its lifespan)"
+            ));
+        }
+    }
+    for (stem, loaded) in &files {
+        if let Err(error) = loaded
+            && !referenced.iter().any(|name| name == stem)
+        {
+            report.warnings.push(format!(
+                "vfx/{stem}.toml: {error} (not referenced by the bindings or a map, so never \
+                 loaded)"
             ));
         }
     }
@@ -2334,23 +2391,81 @@ stamp = true
                     blend = \"distortion\"\ndistortion = 0.5\n";
         std::fs::write(root.join("vfx/heat-vent.toml"), haze).expect("write");
         // A distortion emitter with a colour is invalid content.
+        let bad = format!("{haze}color = [1, 1, 1, 1]\n");
+        std::fs::write(root.join("vfx/bad.toml"), &bad).expect("write");
+        std::fs::write(root.join("vfx/spare.toml"), &bad).expect("write");
+        std::fs::write(root.join("vfx/bad name.toml"), haze).expect("write");
+        // A looping map effect with a telegraph, and one whose plays outlast two periods.
         std::fs::write(
-            root.join("vfx/bad.toml"),
-            format!("{haze}color = [1, 1, 1, 1]\n"),
+            root.join("vfx/ring.toml"),
+            "duration = 1\n[[decals]]\nshape = \"ring\"\nradius = 1\nwidth = 0.2\n\
+             color = [1, 0.2, 0.2, 0.4]\ntelegraph = true\n",
+        )
+        .expect("write");
+        std::fs::write(
+            root.join("vfx/long.toml"),
+            "duration = 0\n[[emitters]]\nburst = 1\nlifetime = [3, 3]\nsize = [1, 1]\n\
+             color = [1, 1, 1, 1]\n",
         )
         .expect("write");
         std::fs::write(
             root.join("vfx/bindings.toml"),
-            "[defaults]\nhit = \"heat-vent\"\nzone = \"gone\"\n",
+            "[defaults]\nhit = \"heat-vent\"\nzone = \"gone\"\nattack = \"bad\"\n",
         )
         .expect("write");
-        let report =
-            super::check_vfx_dir(&root, &[("map 'ember'", "heat-vent"), ("map 'x'", "bad")]);
-        assert_eq!(report.effects, 1);
-        assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
-        assert!(report.errors[0].starts_with("vfx/bad.toml: "));
-        assert!(report.errors[1].contains("'gone'"));
-        assert!(report.errors[2].starts_with("map 'x' names effect 'bad'"));
+        let report = super::check_vfx_dir(
+            &root,
+            &[
+                ("map 'ember'", "heat-vent"),
+                ("map 'x'", "bad"),
+                ("map 'x'", "ring"),
+                ("map 'x'", "long"),
+            ],
+        );
+        assert_eq!(report.effects, 3, "heat-vent, ring and long");
+        // Referenced and broken: errors (the bindings' twice, the map's, the telegraph).
+        assert_eq!(report.errors.len(), 4, "{:?}", report.errors);
+        assert!(report.errors[0].contains("'gone'"));
+        assert!(
+            report.errors[1].starts_with("vfx/bad.toml: ")
+                && report.errors[1].ends_with("(named by vfx/bindings.toml)")
+        );
+        assert!(
+            report.errors[2].starts_with("vfx/bad.toml: ")
+                && report.errors[2].ends_with("(named by map 'x')")
+        );
+        assert!(
+            report.errors[3].contains("telegraph"),
+            "{}",
+            report.errors[3]
+        );
+        // Unreferenced or misnamed files, and a pulsing loop: warnings only.
+        assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("vfx/bad name.toml"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("'long'"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("vfx/spare.toml: "))
+        );
+        // The shipped vent does not pulse.
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("heat-vent"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

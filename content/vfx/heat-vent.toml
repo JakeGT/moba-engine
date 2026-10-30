@@ -2,13 +2,13 @@
 # [[effects]]. Client-local and cosmetic: never hashed, signed or sent. High and up only:
 # without distortion the emitter is skipped (no fallback sprite), so lower tiers see nothing.
 # Format: docs/content-authoring.md#vfx
-duration = 2.0
+duration = 2.5                   # at least half the lifespan: two live plays overlap seamlessly
 importance = "low"
 
 [[emitters]]
 blend = "distortion"
 rate = 3
-lifetime = [2.0, 2.6]
+lifetime = [2.0, 2.4]
 speed = [0.4, 0.7]
 direction = "up"
 spread = 8

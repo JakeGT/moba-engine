@@ -154,15 +154,15 @@ pub use vat::{
     VatQuality, VatSample, bake_vat, for_each_sampled_pose, mesh_hash, vat_extent, vat_paths,
 };
 pub use vfx::{
-    DEFAULT_DECAL_ANGLE, DEFAULT_DECAL_FADE_IN, DEFAULT_DECAL_FADE_OUT, DEFAULT_DECAL_RADIUS,
-    DEFAULT_DECAL_WIDTH, MAX_DECAL_SECONDS, MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS,
-    MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES, MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_DECALS,
-    MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY, MAX_VFX_LIGHT_RADIUS, MAX_VFX_NAME, MAX_VFX_RATE,
-    STAMP_LATCH_SECONDS, VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES,
-    VfxAbilityBinding, VfxAnchor, VfxBindings, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle,
-    VfxDirReport, VfxDirection, VfxDistortion, VfxEffect, VfxEmitter, VfxError, VfxImportance,
-    VfxLight, VfxPrimitive, VfxShape, VfxSprite, VfxUnitEffects, check_vfx_dir, procedural_atlas,
-    valid_vfx_name, vfx_path, vfx_sprite,
+    AMBIENT_MIN_PERIOD, AMBIENT_PLAYS, DEFAULT_DECAL_ANGLE, DEFAULT_DECAL_FADE_IN,
+    DEFAULT_DECAL_FADE_OUT, DEFAULT_DECAL_RADIUS, DEFAULT_DECAL_WIDTH, MAX_DECAL_SECONDS,
+    MAX_EFFECT_SECONDS, MAX_PARTICLE_SECONDS, MAX_VFX_ABILITY_BINDINGS, MAX_VFX_BINDINGS_BYTES,
+    MAX_VFX_BURST, MAX_VFX_BYTES, MAX_VFX_DECALS, MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY,
+    MAX_VFX_LIGHT_RADIUS, MAX_VFX_NAME, MAX_VFX_RATE, STAMP_LATCH_SECONDS, VFX_ATLAS_CELL,
+    VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES, VfxAbilityBinding, VfxAnchor, VfxBindings,
+    VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle, VfxDirReport, VfxDirection, VfxDistortion,
+    VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape, VfxSprite,
+    VfxUnitEffects, check_vfx_dir, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
 };
 pub use water::{MAX_WATER_MESH_VERTICES, WaterMesh, WaterVertex, generate_water};
 

@@ -113,25 +113,35 @@ the semver check):
     `fallback_color`; sprite emitters only, no colour, team tint or telegraph). Map visuals
     gain up to 16 looping `[[effects]]` (`MapAmbientEffect`). Heat haze ships on
     `cinder-zone`, `ember-curse` and a new `heat-vent` effect at the Ember map's five
-    crystals. `content-check` now loads every `vfx/*.toml` and the bindings
-    (`moba_assets::check_vfx_dir`) and fails on a missing or invalid effect a binding or a
-    map names.
+    crystals. `content-check` (`moba_assets::check_vfx_dir`) fails on a missing or invalid
+    effect a binding or a map names and on a map effect with a telegraph; an unreferenced
+    file that does not load, and a map effect that would pulse, are warnings. A map effect
+    holds at most two live plays (`AMBIENT_PLAYS`) and never one of the last 64 free effect
+    slots, so looping effects never starve gameplay events.
   - **Renderer:** `ParticleBlend::Distortion` particles go to a list of their own and are
     drawn by a `distortion` pass after the full water and before `vfx_draw`, refracting a
-    `distortion_copy` of the HDR render region (a transient sharing the water's refraction
-    copy or the OIT accumulation target, so no extra VRAM): rising procedural noise, soft
-    edge, birth, depth and view-distance fades, an offset capped at 6 px (High) / 8 px
-    (Ultra) per 1080 render pixels. Units are masked: the prepass now writes ID 8
-    (`distortion::UNIT_ID_PLAIN`) for units without an outline, the outline pass ignores it,
-    and taps landing on a unit or nearer geometry are rejected. Own pipeline layout (3
-    fragment samplers; the scene layout stays at 16 of 16). Neither pass records commands
-    while no haze can be live. `MAX_PASSES` 32 → 40 (the largest frame is now 33 passes).
+    `distortion_copy` of the haze's projected region plus the cap (CPU-tracked haze bounds;
+    a transient sharing the water's refraction copy or the OIT accumulation target, so no
+    extra VRAM): rising procedural noise, soft edge, birth, depth and view-distance fades, an
+    offset capped at 6 px (High) / 8 px (Ultra) per 1080 render pixels. Units are masked: the
+    prepass now writes ID 8 (`distortion::UNIT_ID_PLAIN`) for units without an outline, the
+    outline pass ignores it, and taps landing on a unit or nearer geometry are rejected.
+    Telegraph decals' rim and halo bands are masked too: the terrain, foliage and water write
+    `1 - mark` into the HDR alpha (`telegraph_mark` is the CPU twin). Own pipeline layout (3
+    fragment samplers; the scene layout stays at 16 of 16). Frames without haze in view run
+    a frame-graph variant in which both passes are only *reserved* (new
+    `PassBuilder::reserved`: same transients, no commands, no barriers). `MAX_PASSES`
+    32 → 40 (the largest frame is now 33 passes).
   - **Tiers and switches:** High and Ultra (`VfxBudget::{distortion, distortion_pixels}`);
     off on Low and Medium, with `MOBA_DISTORTION=off` (`RenderConfig::distortion`), on
     portability-subset devices and without screen-space outlines (one `[render] distortion
-    off: ...` line). `Renderer::distortion_available`; the frame log gains `distortion_copy`
-    and `distortion` lanes. New `render-distortion` golden (the `cinder-zone` preview on
-    Ultra); the `renderer-gate` job's timeout is 45 minutes.
+    off: ...` line); `MOBA_DISTORTION=nodraw` (`RenderConfig::distortion_draw`) simulates
+    the haze but never draws it. `Renderer::distortion_available`; the frame log gains
+    `distortion_copy` and `distortion` lanes and the `vfx_distortion` statistic. New
+    `render-distortion` golden (the `cinder-zone` preview on Ultra), plus a no-draw capture
+    of the same frame that must differ by at least 5000 pixels with the stand-in units'
+    pixels identical (`image-check --against --min-changed --same-box`); the
+    `renderer-gate` job's timeout is 45 minutes.
 - **Culling, mesh LODs, VRAM budgets and frame pacing (AAA roadmap R8, ADR-0018;
   [perf/0022](docs/perf/0022-r8-scaling-pacing.md)):**
   - **Frustum culling:** every view culls its units against its camera (bounding spheres per

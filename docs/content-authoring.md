@@ -513,8 +513,14 @@ radius = 2.0                   # optional: the effect's radius, 0.1..=20 (defaul
   wall mesh is authored along +X and stretched to the segment's length.
 - **Ambient effects** play their effect at `position` over and over (each play starts when
   the last one's emission window ends), as a neutral effect: culled by distance, view and the
-  tier's budgets like any other, never a telegraph. The Ember map's heat vents are haze only,
-  so they show on High and Ultra and nowhere else. The authoring preview plays none.
+  tier's budgets like any other. An entry holds at most two live plays (a start waits for the
+  older one to end) and never takes one of the last 64 free effect slots, so looping effects
+  can never crowd out gameplay events such as enemy telegraphs. Give an ambient effect a
+  `duration` of at least half its lifespan (its longest particle or decal) or it pulses;
+  `content-check` warns. An ambient effect may not contain a telegraph emitter or decal
+  (`content-check` fails it, the client skips it): a neutral loop would draw at full alpha as
+  a fake telegraph. The Ember map's heat vents are haze only, so they show on High and Ultra
+  and nowhere else. The authoring preview plays none.
 - **Props** are cosmetic only. They never block movement or vision; walls do the gameplay. A
   prop mesh is scaled uniformly to `height`, standing on the ground and centred on `position`.
   Meshes are static (a skin is ignored).
@@ -1071,12 +1077,15 @@ scale_with_radius = false # multiply radius by the event's radius (zones)
   The offset is rising procedural noise, faded at the sprite's edge, over its first 15 % of
   life, where it meets the scene and with view distance (70–110 m), and never longer than
   the tier's cap: 6 px (High) or 8 px (Ultra) at a 1080-pixel render height, scaled with the
-  render height. **Units are never bent**: their pixels are kept and nothing is pulled out of
-  or into a silhouette (the prepass ID target masks them); geometry in front of the haze is
-  never pulled into it; particles, telegraphs, outlines and the HUD draw after it. Allied
-  haze is scaled by `ally_vfx_opacity`; haze is never exempt from budgets. On Low, Medium,
-  with `MOBA_DISTORTION=off`, on `MoltenVK` or without screen-space outlines the emitter is
-  skipped (no particle, no budget) unless it has a `fallback_color`.
+  render height. **Units and telegraph edges are never bent**: their pixels are kept and
+  nothing is pulled out of or into a unit's silhouette (the prepass ID target masks them) or
+  a telegraph decal's rim and halo bands (marked in the scene's alpha); geometry in front of
+  the haze is never pulled into it; particles (telegraph rings included), outlines and the
+  HUD draw after it. Allied haze is scaled by `ally_vfx_opacity`; haze is never exempt from
+  budgets. On Low, Medium, with `MOBA_DISTORTION=off`, on `MoltenVK` or without screen-space
+  outlines the emitter is skipped (no particle, no budget) unless it has a `fallback_color`.
+  `MOBA_DISTORTION=nodraw` keeps every haze particle but skips drawing it, to compare a
+  capture with and without the refraction alone.
 - **Sprites** (the 8×8 atlas layout): `soft`, `dot`, `ring`, `spark`, `star`, `shard`, `rune`,
   `beam`, `noise`, `swirl`, `cross`, `halo`, `solid`, and the flipbooks `burst` (16 frames),
   `smoke` (16) and `lightning` (8). The built-in atlas is procedural; `<root>/vfx/atlas.ktx2`
@@ -1157,9 +1166,10 @@ stamp = false             # persist after the effect (scorch marks), for `lifeti
 
 **Limits and fallback.** A descriptor is at most 16 KiB and a bindings file 32 KiB; unknown
 keys, wrong types and out-of-range or non-finite numbers are errors (the `vfx` fuzz target
-covers both parsers). `content-check` loads every `vfx/*.toml` next to the pack and the
-bindings, and fails the pack when one does not load or when the bindings or a map's
-`[[effects]]` name an effect that does not exist. A missing or invalid file is logged once (`[vfx] effect ...: ...; no
+covers both parsers). `content-check` fails the pack when the bindings do not load, or when
+an effect the bindings or a map's `[[effects]]` name does not exist or does not load (or, for
+a map effect, has a telegraph emitter or decal); it also loads every other `vfx/*.toml` next
+to the pack, but one that does not load is a warning (nothing references it). A missing or invalid file is logged once (`[vfx] effect ...: ...; no
 effect`) and plays nothing; a match never fails because of an effect. A missing or invalid
 `bindings.toml` turns effects off (`[vfx] ...; effects off`), as do `MOBA_VFX=off` and the
 `vfx = false` setting; projectiles then draw as cubes.

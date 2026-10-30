@@ -56,7 +56,7 @@ pub use environment::{
     Decal, DecalRole, DecalShape, DecalStyle, EnvironmentConfig, EnvironmentFrame, FoliageData,
     FoliageDisplacer, FoliageInstanceData, MAX_DECALS, MAX_FOLIAGE_DISPLACERS,
     MAX_FOLIAGE_INSTANCES, MAX_WATER_BODIES, MAX_WATER_VERTICES, WaterData, WaterMode, WaterStyle,
-    WaterVertexData, glow_reference,
+    WaterVertexData, glow_reference, telegraph_mark,
 };
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};

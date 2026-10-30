@@ -267,8 +267,8 @@ done 2026-10-30 ([ADR-0019](../adr/0019-distortion.md), [perf/0023](../perf/0023
 distortion particles (`blend = "distortion"`) refract a copy of the HDR target taken after the
 water and before the particles, on High (6 px at 1080p) and Ultra (8 px), off on Low, Medium,
 `MOBA_DISTORTION=off` and portability-subset devices; units are masked through the prepass ID
-target, nearer geometry is never pulled in, and telegraphs, outlines and the UI draw after
-it. Heat haze ships on `cinder-zone`, `ember-curse` and the Ember map's crystals. Not done:
+target and telegraph decals' bands through the scene's alpha, nearer geometry is never pulled
+in, and the particles (telegraph rings), outlines and the UI draw after it. Heat haze ships on `cinder-zone`, `ember-curse` and the Ember map's crystals. Not done:
 TAA (optional; not started for the readability reason above), SMAA and FSR (ADR-0015 §4, §6),
 and baked AO for Low (R2b).
 

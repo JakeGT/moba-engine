@@ -862,3 +862,87 @@ fn heat_haze_spawns_distortion_or_its_fallback_and_map_effects_loop() {
     assert_eq!(preview.counters().instances, 0);
     let _ = std::fs::remove_dir_all(root);
 }
+
+const FLOOD: &str = r#"
+duration = 0.0
+importance = "low"
+[[emitters]]
+burst = 1
+lifetime = [10, 10]
+size = [1, 1]
+color = [1, 1, 1, 0.5]
+"#;
+
+/// ADR-0019 review: looping map effects can never starve gameplay events. Sixteen entries of
+/// a burst whose particles outlive its (zero) duration forty times over hold at most two
+/// live plays each, never one of the last free slots, and an enemy telegraph still spawns;
+/// an effect with a telegraph emitter or decal is never looped (it would draw as a fake,
+/// full-alpha telegraph).
+#[test]
+fn looping_map_effects_never_starve_events_or_fake_telegraphs() {
+    let root = root("flood");
+    std::fs::write(root.join("vfx/flood.toml"), FLOOD).expect("write");
+    let view = view(Some(0));
+    let anchors = anchors();
+    let mut vfx = VfxSystem::new(
+        VfxLibrary::load(root.clone()),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let entries: Vec<_> = (0..moba_assets::MAX_MAP_EFFECTS)
+        .map(|index| crate::app::map_visuals::AmbientEffect {
+            effect: String::from("flood"),
+            position: Vec3::new(index as f32, 0.0, 0.0),
+            radius: 1.0,
+        })
+        .collect();
+    vfx.sync_ambient(1, &entries);
+    for frame in 0..300 {
+        vfx.update(0.1, frame as f32, &view, &anchors, NO_SOCKET);
+        let live = vfx.counters().instances as usize;
+        assert!(
+            live <= moba_assets::MAX_MAP_EFFECTS * super::AMBIENT_PLAYS,
+            "frame {frame}: {live}"
+        );
+        assert!(live <= super::MAX_INSTANCES - super::EVENT_HEADROOM);
+    }
+    assert_eq!(
+        vfx.counters().instances as usize,
+        moba_assets::MAX_MAP_EFFECTS * super::AMBIENT_PLAYS,
+        "every entry keeps its two plays"
+    );
+    // An enemy hero death (a telegraph ring and decal) still gets its instance.
+    vfx.trigger(&event(Trigger::HeroDeath, 1, None), &view, &anchors);
+    vfx.update(0.1, 400.0, &view, &anchors, NO_SOCKET);
+    assert!(
+        vfx.frame()
+            .spawns
+            .iter()
+            .any(|spawn| spawn.role == ParticleRole::EnemyTelegraph)
+    );
+    assert!(
+        vfx.decals()
+            .iter()
+            .any(|decal| decal.role == moba_render::DecalRole::EnemyTelegraph)
+    );
+    assert_eq!(vfx.counters().dropped_events, 0);
+
+    // A telegraph effect is never looped by a map.
+    let mut fake = VfxSystem::new(
+        VfxLibrary::load(root.clone()),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let telegraph = [crate::app::map_visuals::AmbientEffect {
+        effect: String::from("telegraph"),
+        position: Vec3::ZERO,
+        radius: 1.0,
+    }];
+    fake.sync_ambient(1, &telegraph);
+    for frame in 0..10 {
+        fake.update(0.1, frame as f32, &view, &anchors, NO_SOCKET);
+    }
+    assert_eq!(fake.counters().instances, 0);
+    assert!(fake.decals().is_empty() && fake.frame().spawns.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}

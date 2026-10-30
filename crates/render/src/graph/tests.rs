@@ -381,6 +381,98 @@ fn variants_share_transients_only_with_the_same_start_state() {
     assert!(!normal.shares_transients_with(&other));
 }
 
+/// ADR-0019: a variant that reserves two passes instead of running them gets the same
+/// slots (aliasing, usage, start state) as the variant that runs them, records neither and
+/// orders the next pass straight after the last one that ran.
+#[test]
+fn reserved_passes_shape_the_slots_but_record_nothing() {
+    let build = |run: bool| {
+        let mut graph = GraphBuilder::new();
+        let target = swapchain(&mut graph);
+        let hdr = graph.transient_image("hdr", HDR);
+        let refraction = graph.transient_image("refraction", HDR);
+        let copy = graph.transient_image("copy", HDR);
+        let accum = graph.transient_image("accum", HDR);
+        let _ = graph.pass("scene", 0).access(hdr, Access::ColorWrite);
+        let _ = graph
+            .pass("water_copy", 1)
+            .access(hdr, Access::TransferRead)
+            .access(refraction, Access::TransferWrite);
+        let _ = graph
+            .pass("water", 2)
+            .access(hdr, Access::ColorReadWrite)
+            .access(refraction, Access::SampledFragment);
+        let haze_copy = graph
+            .pass("haze_copy", 3)
+            .access(hdr, Access::TransferRead)
+            .access(copy, Access::TransferWrite);
+        if !run {
+            let _ = haze_copy.reserved();
+        }
+        let haze = graph
+            .pass("haze", 4)
+            .access(hdr, Access::ColorReadWrite)
+            .access(copy, Access::SampledFragment);
+        if !run {
+            let _ = haze.reserved();
+        }
+        let _ = graph
+            .pass("particles", 5)
+            .access(hdr, Access::ColorReadWrite)
+            .access(accum, Access::ColorWrite);
+        let _ = graph
+            .pass("composite", 6)
+            .access(hdr, Access::SampledFragment)
+            .access(accum, Access::SampledFragment)
+            .access(target, Access::ColorWrite);
+        (graph.compile().expect("valid graph"), hdr, copy, accum)
+    };
+    let (ran, hdr, copy, accum) = build(true);
+    let (skipped, ..) = build(false);
+    assert!(ran.shares_transients_with(&skipped));
+    // The copy aliases the refraction copy and the accumulation target in both.
+    assert_eq!(ran.slots().len(), 2);
+    assert_eq!(ran.slot_of(copy), ran.slot_of(accum));
+    assert_eq!(skipped.slot_of(copy), ran.slot_of(copy));
+    let names = |plan: &super::CompiledGraph<i32>| {
+        plan.passes()
+            .iter()
+            .map(|pass| pass.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&ran).len(), 7);
+    assert_eq!(
+        names(&skipped),
+        ["scene", "water_copy", "water", "particles", "composite"]
+    );
+    assert!(skipped.culled().is_empty(), "reserved, not culled");
+    // Without the haze, the particles order against the water directly.
+    let particles = &skipped.passes()[3];
+    let hdr_barrier = particles
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == hdr);
+    assert!(
+        hdr_barrier.is_none_or(|barrier| barrier.src_stage == S::COLOR_ATTACHMENT_OUTPUT),
+        "{hdr_barrier:?}"
+    );
+    let accum_barrier = particles
+        .barriers
+        .iter()
+        .find(|barrier| barrier.resource == accum)
+        .expect("accum starts");
+    assert_eq!(accum_barrier.old_layout, L::UNDEFINED);
+    assert_eq!(accum_barrier.src_stage, S::FRAGMENT_SHADER);
+    // No barrier anywhere names the reserved copy.
+    assert!(
+        skipped
+            .passes()
+            .iter()
+            .flat_map(|pass| &pass.barriers)
+            .all(|barrier| barrier.resource != copy)
+    );
+}
+
 /// R7b: a persistent offscreen target (colour + depth imports) that a pass renders into and
 /// the UI samples, with and without the writer in the frame.
 #[test]

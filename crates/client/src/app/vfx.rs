@@ -69,6 +69,13 @@ use moba_assets::{
 pub(crate) const MAX_INSTANCES: usize = 256;
 /// The team of a map's ambient effects: neither side's (no team tint, never a telegraph).
 const AMBIENT_TEAM: u8 = 2;
+/// Live instances one looping map effect may hold at once (ADR-0019): the current play and
+/// the last one's fading particles, never more, whatever its duration and lifespan.
+pub(crate) const AMBIENT_PLAYS: usize = moba_assets::AMBIENT_PLAYS;
+/// Free instance slots a map effect never takes: room for gameplay events (enemy
+/// telegraphs above all) however many looping effects a map has.
+pub(crate) const EVENT_HEADROOM: usize = 64;
+const NO_SLOT: u16 = u16::MAX;
 /// Events waiting for the view to reach their tick.
 const MAX_PENDING: usize = 128;
 /// Casts remembered to bind a later projectile, hit or zone to its ability.
@@ -310,6 +317,8 @@ struct Instance {
     bursts: u8,
     /// Decals already copied into the stamp ring, one bit per `[[decals]]` entry.
     stamped: u8,
+    /// `1 +` the index of the looping map effect this instance plays, or 0 (ADR-0019).
+    ambient: u8,
 }
 
 impl Instance {
@@ -337,6 +346,7 @@ impl Instance {
         rate_accumulator: [0.0; moba_assets::MAX_VFX_EMITTERS],
         bursts: 0,
         stamped: 0,
+        ambient: 0,
     };
 }
 
@@ -392,7 +402,9 @@ impl LoadEstimate {
 }
 
 /// One looping map effect (`[[effects]]`, ADR-0019): restarted whenever its emission
-/// window ends, so the next play overlaps the last one's fading particles.
+/// window ends, so the next play overlaps the last one's fading particles, but holding at
+/// most [`AMBIENT_PLAYS`] live instances and never one of the last [`EVENT_HEADROOM`] free
+/// slots (a start waits until both allow it).
 #[derive(Clone, Copy, Debug)]
 struct Ambient {
     effect: EffectId,
@@ -400,6 +412,8 @@ struct Ambient {
     radius: f32,
     /// System time of the next start.
     next: f32,
+    /// The instance slots of its live plays ([`NO_SLOT`] when unused).
+    plays: [u16; AMBIENT_PLAYS],
 }
 
 /// The per-frame particle emitter state.
@@ -862,19 +876,35 @@ impl VfxSystem {
             return;
         }
         for effect in effects.iter().take(moba_assets::MAX_MAP_EFFECTS) {
-            match self.library.effect_id(&effect.effect) {
-                Some(id) => self.ambient.push(Ambient {
-                    effect: id,
-                    position: effect.position,
-                    radius: effect.radius,
-                    next: f32::NEG_INFINITY,
-                }),
-                None => eprintln!("[vfx] map effect {:?} did not load; skipped", effect.effect),
+            let Some(id) = self.library.effect_id(&effect.effect) else {
+                eprintln!("[vfx] map effect {:?} did not load; skipped", effect.effect);
+                continue;
+            };
+            // Never a telegraph: a neutral loop would draw at full alpha as a fake one.
+            if self
+                .library
+                .effect(id)
+                .is_some_and(|loaded| loaded.effect.has_telegraph())
+            {
+                eprintln!(
+                    "[vfx] map effect {:?} has a telegraph emitter or decal; skipped",
+                    effect.effect
+                );
+                continue;
             }
+            self.ambient.push(Ambient {
+                effect: id,
+                position: effect.position,
+                radius: effect.radius,
+                next: f32::NEG_INFINITY,
+                plays: [NO_SLOT; AMBIENT_PLAYS],
+            });
         }
     }
 
-    /// Starts each looping map effect whose emission window has ended.
+    /// Starts each looping map effect whose emission window has ended, while it holds
+    /// fewer than [`AMBIENT_PLAYS`] live plays and more than [`EVENT_HEADROOM`] slots are
+    /// free; otherwise the start waits.
     fn start_ambient(&mut self) {
         for index in 0..self.ambient.len() {
             let ambient = self.ambient[index];
@@ -887,12 +917,25 @@ impl VfxSystem {
             let emit = loaded.effect.duration;
             let lifespan = loaded.effect.lifespan(emit).max(emit);
             let importance = loaded.effect.importance;
-            // Never faster than four starts a second, whatever the effect's duration.
-            self.ambient[index].next = self.time + emit.max(0.25);
-            let Some(slot) = self.instances.iter().position(|instance| !instance.alive) else {
-                self.counters.dropped_events += 1;
+            let tag = u8::try_from(index + 1).unwrap_or(u8::MAX);
+            let instances = &self.instances;
+            let Some(play) = ambient.plays.iter().position(|&slot| {
+                instances
+                    .get(usize::from(slot))
+                    .is_none_or(|instance| !instance.alive || instance.ambient != tag)
+            }) else {
+                continue; // Both plays still live: wait for the older one to end.
+            };
+            let free = instances.iter().filter(|instance| !instance.alive).count();
+            if free <= EVENT_HEADROOM {
+                continue; // The rest is the events'.
+            }
+            let Some(slot) = instances.iter().position(|instance| !instance.alive) else {
                 continue;
             };
+            // Never faster than four starts a second, whatever the effect's duration.
+            self.ambient[index].next = self.time + emit.max(moba_assets::AMBIENT_MIN_PERIOD);
+            self.ambient[index].plays[play] = u16::try_from(slot).unwrap_or(NO_SLOT);
             self.instances[slot] = Instance {
                 alive: true,
                 effect: Some(ambient.effect),
@@ -905,6 +948,7 @@ impl VfxSystem {
                 target: ambient.position,
                 source_position: ambient.position,
                 radius: ambient.radius,
+                ambient: tag,
                 ..Instance::DEAD
             };
         }
@@ -1216,6 +1260,7 @@ impl VfxSystem {
             rate_accumulator: [0.0; moba_assets::MAX_VFX_EMITTERS],
             bursts: 0,
             stamped: 0,
+            ambient: 0,
         };
     }
 

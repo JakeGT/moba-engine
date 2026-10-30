@@ -91,15 +91,18 @@ fn main() {
     let (map_errors, map_warnings, ambient) = map_consistency(&content, pack_dir);
     let map_error_count = map_errors.len();
     errors.extend(map_errors);
-    // Client-local effects (ADR-0013, ADR-0019): every `vfx/*.toml` loads (heat haze fields
-    // included), and every effect the bindings or the map's `[[effects]]` name exists. They
-    // are cosmetic and not part of the content hash, but broken content is never shipped.
-    let referenced: Vec<(&str, &str)> = ambient
+    // Client-local effects (ADR-0013, ADR-0019): every effect the bindings or the map's
+    // `[[effects]]` name exists and loads (heat haze fields included), and no map effect is a
+    // telegraph; an unreferenced file that does not load, or a map effect that pulses, is a
+    // warning. They are cosmetic and not part of the content hash, but broken content is
+    // never shipped.
+    let ambient: Vec<(&str, &str)> = ambient
         .iter()
         .map(|(who, effect)| (who.as_str(), effect.as_str()))
         .collect();
-    let vfx = moba_assets::check_vfx_dir(pack_dir, &referenced);
+    let vfx = moba_assets::check_vfx_dir(pack_dir, &ambient);
     errors.extend(vfx.errors);
+    let vfx_warnings = vfx.warnings;
     // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
     // would load. One descriptor set per textured material; the pool is sized from this.
     let materials = content.assets.material_report(pack_dir);
@@ -203,6 +206,7 @@ fn main() {
     let map_warning_count = map_warnings.len();
     warnings.extend(map_warnings);
     warnings.extend(budget_warnings);
+    warnings.extend(vfx_warnings);
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }

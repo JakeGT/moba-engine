@@ -247,13 +247,24 @@ fn syntax_errors_are_json_too() {
     assert_rejected("toml", "name = \n\t[[", "invalid TOML");
 }
 
-/// ADR-0019: the pack's client-local effects are validated too: a heat-haze emitter with an
-/// out-of-range strength (or any field the parser rejects) fails the pack, in text and JSON.
+/// ADR-0019: the pack's client-local effects are validated too: a referenced heat-haze
+/// emitter with an out-of-range strength (or any field the parser rejects) fails the pack, in
+/// text and JSON; the same file unreferenced is only a warning (a third-party pack's spare).
 #[test]
 fn invalid_effects_are_rejected() {
     let text = pack(&unit("knight", "models/sentinel.glb"), "knight", "");
     let pack = Pack::new("vfx", &text);
     std::fs::create_dir_all(pack.dir.join("vfx")).expect("vfx dir");
+    std::fs::write(
+        pack.dir.join("vfx/spare.toml"),
+        "duration = 1\n[[emitters]]\nblend = \"sideways\"\n",
+    )
+    .expect("write");
+    std::fs::write(
+        pack.dir.join("vfx/bindings.toml"),
+        "[defaults]\nzone = \"heat-vent\"\n",
+    )
+    .expect("write");
     let haze = "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]\n\
                 blend = \"distortion\"\n";
     std::fs::write(
@@ -261,8 +272,13 @@ fn invalid_effects_are_rejected() {
         format!("{haze}distortion = 0.5\n"),
     )
     .expect("write");
-    let run = content_check(true, &pack.path());
+    let run = content_check(false, &pack.path());
     assert_eq!(run.code, Some(0), "a valid haze passes: {}", run.stderr);
+    assert!(
+        run.stderr.contains("warning: vfx/spare.toml: ") && run.stderr.contains("never loaded"),
+        "{}",
+        run.stderr
+    );
     std::fs::write(
         pack.dir.join("vfx/heat-vent.toml"),
         format!("{haze}distortion = 3.0\n"),

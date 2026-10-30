@@ -4,9 +4,9 @@
 #define MOBA_DISTORTION_GLSL
 
 layout(push_constant) uniform DistortionPush {
-    vec4 rect;   // x, y: last pixel of the render sub-rectangle; z: offset cap (pixels);
-                 // w: 1 = mask units with the prepass ID target
-    vec4 fade;   // x: soft distance (m); y, z: view-distance fade start, end (m); w: unused
+    vec4 rect;   // the region the copy holds this frame: first pixel (x, y), last pixel (z, w)
+    vec4 fade;   // x: soft distance (m); y, z: view-distance fade start, end (m);
+                 // w: offset cap (pixels)
     uvec4 list;  // x: first index of the distortion list in `alive`
 } push;
 

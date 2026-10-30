@@ -26,7 +26,9 @@
 //! distortion_copy (ADR-0019; High and up) hdr → distortion copy (transfer; aliases the
 //!               water's refraction copy and the OIT accumulation target)
 //! distortion    (ADR-0019) heat-haze sprites → hdr, single-sampled after any MSAA resolve;
-//!               depth read-only + sampled, sampling the copy and the outline IDs (unit mask)
+//!               depth read-only + sampled, sampling the copy and the outline IDs (unit mask).
+//!               On frames without haze on screen the renderer runs the variant that
+//!               *reserves* both passes: the same transients, no commands, no barriers
 //! vfx_draw      particles → hdr (+ OIT accum/reveal), single-sampled after any MSAA
 //!               resolve; depth read-only + sampled (soft particles)
 //! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
@@ -289,7 +291,7 @@ pub(crate) struct FrameSpec {
     /// The full water's copy and draw passes (R3b, ADR-0017 §3).
     pub(crate) water: bool,
     /// The heat haze's copy and draw passes (ADR-0019). Needs the particles and the outline
-    /// IDs (its unit mask); [`build`] ignores it without them.
+    /// IDs (its unit mask); [`build_variant`] ignores it without them.
     pub(crate) distortion: bool,
 }
 
@@ -355,19 +357,31 @@ const fn image(format: vk::Format, size: ImageSize) -> ImageDesc {
     }
 }
 
+/// [`build_variant`] of a frame with heat haze on screen (the tests' default).
+#[cfg(test)]
+pub(crate) fn build(
+    spec: &FrameSpec,
+    capture: bool,
+    offscreen: usize,
+) -> Result<FramePlan, GraphError> {
+    build_variant(spec, capture, offscreen, true)
+}
+
 /// Builds and compiles the frame graph for `spec`. Bit `s` of `offscreen` adds the pass that
-/// renders offscreen image `s` this frame; `capture` adds the readback. Every variant of one
-/// renderer passes the same `spec` (shadows, the fog of war's texture edge, the post chain),
-/// so they share transients.
+/// renders offscreen image `s` this frame; `capture` adds the readback; `haze` runs the heat
+/// haze's two passes (ADR-0019), which a frame without haze on screen only reserves. Every
+/// variant of one renderer passes the same `spec` (shadows, the fog of war's texture edge,
+/// the post chain), so they share transients.
 ///
 /// # Errors
 /// Only if the declaration below is inconsistent (covered by unit tests).
 #[allow(clippy::too_many_lines)] // One declaration of the whole frame.
 #[allow(clippy::too_many_arguments)] // The frame's feature switches, flattened.
-pub(crate) fn build(
+pub(crate) fn build_variant(
     spec: &FrameSpec,
     capture: bool,
     offscreen: usize,
+    haze: bool,
 ) -> Result<FramePlan, GraphError> {
     let render = ImageSize::Render { shift: 0 };
     let half = ImageSize::Render { shift: 1 };
@@ -732,12 +746,18 @@ pub(crate) fn build(
         let _ = water;
     }
     // ADR-0019: the heat haze refracts the scene and the water, under the particles.
+    // Without haze on screen both passes are only reserved: the copy's slot keeps the same
+    // lifetime, usage and start state, so the two variants alternate on one set of
+    // transients, and the frame records neither the passes nor their barriers.
     if let (Some(copy), Some(vfx), Some(ids)) = (distortion, vfx, outline_ids) {
-        let _ = graph
+        let pass = graph
             .pass("distortion_copy", PassKind::DistortionCopy)
             .access(hdr, Access::TransferRead)
             .access(copy, Access::TransferWrite);
-        let _ = graph
+        if !haze {
+            let _ = pass.reserved();
+        }
+        let pass = graph
             .pass("distortion", PassKind::Distortion)
             .access(hdr, Access::ColorReadWrite)
             .access(depth, Access::DepthReadSampled)
@@ -746,6 +766,9 @@ pub(crate) fn build(
             .access(vfx.particles, Access::VertexStorageRead)
             .access(vfx.alive, Access::VertexStorageRead)
             .access(vfx.args, Access::IndirectRead);
+        if !haze {
+            let _ = pass.reserved();
+        }
     }
     if let Some(vfx) = vfx {
         let mut pass = graph
@@ -982,6 +1005,7 @@ pub(crate) fn record_barriers(
 mod tests {
     use super::{
         BLOOM_LEVELS, FrameSpec, OFFSCREEN_VARIANTS, PassKind, ShadowSpec, VfxMode, build,
+        build_variant,
     };
     use crate::graph::{ImageSize, ResourceId};
     use ash::vk;
@@ -1904,9 +1928,29 @@ mod tests {
                     "{spec:?}"
                 );
                 for (capture, offscreen) in [(false, 0), (true, OFFSCREEN_VARIANTS - 1)] {
+                    // Without haze on screen: the same transients, neither pass, and the
+                    // particles straight after the water (or the scene).
+                    let idle = build_variant(&spec, capture, offscreen, false)
+                        .expect("the hazeless variant compiles");
+                    assert!(idle.graph.shares_transients_with(&plain.graph), "{spec:?}");
+                    assert_eq!(idle.graph.culled(), [] as [&str; 0]);
+                    let idle_kinds = kinds(&idle);
+                    assert!(!idle_kinds.contains(&PassKind::DistortionCopy));
+                    assert!(!idle_kinds.contains(&PassKind::Distortion));
                     let frame = build(&spec, capture, offscreen).expect("the frame compiles");
                     assert!(frame.graph.shares_transients_with(&plain.graph));
                     assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                    assert_eq!(idle_kinds.len() + 2, kinds(&frame).len());
+                    let barriers = |plan: &super::FramePlan| {
+                        plan.graph
+                            .passes()
+                            .iter()
+                            .map(|pass| pass.barriers.len())
+                            .sum::<usize>()
+                    };
+                    // The haze's barriers (the HDR target to transfer and back, the copy's
+                    // two transitions) are gone with it.
+                    assert!(barriers(&idle) + 3 <= barriers(&frame), "{spec:?}");
                     let count = frame.graph.passes().len();
                     assert!(count <= crate::graph::MAX_PASSES);
                     largest = largest.max(count);

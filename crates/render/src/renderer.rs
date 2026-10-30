@@ -140,6 +140,11 @@ pub struct RenderConfig {
     /// (`MoltenVK`) and without screen-space outlines (its unit mask is their ID target);
     /// [`Renderer::vfx_budget`] reports the effective value. Default `true`.
     pub distortion: bool,
+    /// Draw the heat haze (default `true`). `false` keeps everything else of distortion (the
+    /// budget, every haze spawn and its simulation) but records no haze pass: a diagnostic
+    /// (`MOBA_DISTORTION=nodraw`) whose capture differs from the normal one only by the
+    /// refraction itself (ADR-0019).
+    pub distortion_draw: bool,
     /// Size of each offscreen [`UiImage`] (R7b), indexed by [`UiImage::index`]; default
     /// [`DEFAULT_UI_IMAGE_SIZES`]. Each side is clamped to `1..=`[`MAX_UI_IMAGE_SIZE`]; a
     /// 1x1 image is the cheapest way to switch a slot off. The images are allocated once
@@ -193,6 +198,7 @@ impl Default for RenderConfig {
             compressed_textures: true,
             vfx: true,
             distortion: true,
+            distortion_draw: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
             lighting: None,
             post: None,
@@ -332,6 +338,13 @@ impl RenderConfig {
     #[must_use]
     pub const fn with_distortion(mut self, distortion: bool) -> Self {
         self.distortion = distortion;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::distortion_draw`] set.
+    #[must_use]
+    pub const fn with_distortion_draw(mut self, draw: bool) -> Self {
+        self.distortion_draw = draw;
         self
     }
 
@@ -495,7 +508,8 @@ pub struct Renderer {
     /// Offscreen images (R7b), indexed by [`UiImage::index`]; fixed size.
     offscreen: Vec<OffscreenTarget>,
     /// Every frame variant, compiled once at creation: index
-    /// `capture * OFFSCREEN_VARIANTS + offscreen mask` (see [`Self::plan_index`]).
+    /// `(2 * haze + capture) * OFFSCREEN_VARIANTS + offscreen mask` (see
+    /// [`Self::plan_index`]).
     plans: Vec<FramePlan>,
     capture_pending: bool,
     capture_ready: bool,
@@ -676,6 +690,8 @@ impl Renderer {
                 Some("portability subset")
             } else if lighting_config.outlines != OutlineMode::Screen {
                 Some("no unit ID target (outlines are not screen-space)")
+            } else if hdr_format == vk::Format::B10G11R11_UFLOAT_PACK32 {
+                Some("the HDR format has no alpha for the telegraph mask")
             } else {
                 None
             };
@@ -700,7 +716,13 @@ impl Renderer {
                 budget,
                 budget.oit,
             ) {
-                Ok(pass) => Some(pass),
+                Ok(mut pass) => {
+                    if !config.distortion_draw && budget.distortion {
+                        eprintln!("[render] distortion: simulated, not drawn (nodraw)");
+                    }
+                    pass.set_distortion_draw(config.distortion_draw);
+                    Some(pass)
+                }
                 Err(error) => {
                     eprintln!("[render] VFX unavailable ({error}); drawing without particles");
                     None
@@ -737,12 +759,17 @@ impl Renderer {
             water: full_water,
             distortion: vfx.as_ref().is_some_and(VfxPass::has_distortion),
         };
-        let mut plans = Vec::with_capacity(2 * OFFSCREEN_VARIANTS);
-        for capture in [false, true] {
-            for offscreen in 0..OFFSCREEN_VARIANTS {
-                plans.push(
-                    frame_graph::build(&frame_spec, capture, offscreen).map_err(graph_error)?,
-                );
+        // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
+        // that run them; see `plan_index`.
+        let mut plans = Vec::with_capacity(4 * OFFSCREEN_VARIANTS);
+        for haze in [false, true] {
+            for capture in [false, true] {
+                for offscreen in 0..OFFSCREEN_VARIANTS {
+                    plans.push(
+                        frame_graph::build_variant(&frame_spec, capture, offscreen, haze)
+                            .map_err(graph_error)?,
+                    );
+                }
             }
         }
         // The variants alternate on the same physical transients, so each slot must also
@@ -1810,9 +1837,11 @@ impl Renderer {
         self.last_submitted
     }
 
-    /// The plan variant for a capture flag and an offscreen mask.
-    const fn plan_index(capture: bool, offscreen: usize) -> usize {
-        (capture as usize) * OFFSCREEN_VARIANTS + offscreen
+    /// The plan variant for a capture flag, an offscreen mask and whether heat haze is in
+    /// view (ADR-0019: without it the haze's passes are only reserved, so the frame records
+    /// neither them nor their barriers).
+    const fn plan_index(capture: bool, offscreen: usize, haze: bool) -> usize {
+        (2 * (haze as usize) + capture as usize) * OFFSCREEN_VARIANTS + offscreen
     }
 
     /// Points passes that sample transients at the current pool images.
@@ -2259,7 +2288,8 @@ impl Renderer {
         } else {
             None
         };
-        let plan = &self.plans[Self::plan_index(capturing, offscreen_mask)];
+        let haze = self.vfx.as_ref().and_then(VfxPass::distortion_region);
+        let plan = &self.plans[Self::plan_index(capturing, offscreen_mask, haze.is_some())];
         let resources = plan.resources;
         let hdr_view = self.transient(resources.hdr).view();
         let depth_view = self.transient(resources.depth).view();
@@ -2432,24 +2462,32 @@ impl Renderer {
                     }
                 }
                 PassKind::DistortionCopy => {
-                    if let (Some(copy), Some(vfx)) = (resources.distortion, &self.vfx)
-                        && vfx.distortion_live()
-                    {
+                    if let (Some(copy), Some(haze)) = (resources.distortion, haze) {
                         let layers = vk::ImageSubresourceLayers::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
                             .layer_count(1);
-                        // The render region only, as for the water's copy.
+                        // The haze's region plus the cap only (ADR-0019), within the render
+                        // sub-rectangle.
+                        let rect = haze.copy;
+                        let offset = vk::Offset3D {
+                            x: i32::try_from(rect.x0).unwrap_or(0),
+                            y: i32::try_from(rect.y0).unwrap_or(0),
+                            z: 0,
+                        };
                         let region = vk::ImageCopy::default()
                             .src_subresource(layers)
                             .dst_subresource(layers)
+                            .src_offset(offset)
+                            .dst_offset(offset)
                             .extent(vk::Extent3D {
-                                width: render_extent.width,
-                                height: render_extent.height,
+                                width: rect.width(),
+                                height: rect.height(),
                                 depth: 1,
                             });
                         // SAFETY: both transients are render-sized images of the HDR format,
                         // transitioned by the graph to TRANSFER_SRC/DST_OPTIMAL, and the
-                        // region lies within them.
+                        // region lies within the render extent (`HazeBounds::region`), so
+                        // within them.
                         unsafe {
                             self.device.device.cmd_copy_image(
                                 command_buffer,
@@ -2463,9 +2501,7 @@ impl Renderer {
                     }
                 }
                 PassKind::Distortion => {
-                    if let Some(vfx) = &self.vfx
-                        && vfx.distortion_live()
-                    {
+                    if let (Some(vfx), Some(region)) = (&self.vfx, haze) {
                         let cap = crate::distortion::max_offset_pixels(
                             &vfx.budget(),
                             render_extent.height,
@@ -2478,6 +2514,7 @@ impl Renderer {
                                 hdr: hdr_view,
                                 depth: depth_view,
                                 extent: render_extent,
+                                region,
                             },
                             cap,
                         );

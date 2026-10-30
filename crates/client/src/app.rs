@@ -646,7 +646,8 @@ impl App for ClientApp {
             .with_compressed_textures(launch::compressed_textures())
             .with_lighting(Some(launch::lighting_config(self.quality)))
             .with_vfx(self.vfx.enabled())
-            .with_distortion(launch::distortion_enabled())
+            .with_distortion(launch::distortion_switch().0)
+            .with_distortion_draw(launch::distortion_switch().1)
             .with_post(Some(launch::post_config(
                 self.quality,
                 self.render_scale,

@@ -17,10 +17,12 @@
 //!
 //! **Distortion** (ADR-0019, High and up): `distortion` draws the distortion list with its
 //! own pipeline layout (the frame set plus the HDR copy, the scene depth and the unit ID
-//! target), refracting the copy the `distortion_copy` pass made. When no distortion particle
-//! can be live (the CPU knows every lifetime), the renderer records neither pass.
+//! target), refracting the copy the `distortion_copy` pass made. The CPU bounds every live
+//! haze sprite ([`HazeBounds`]: it knows each spawn's position, motion and lifetime), so the
+//! copy and the draw cover only the haze's projected region plus the cap; when no haze is in
+//! view the renderer runs the frame variant that only reserves both passes.
 //! - per frame in flight: the uniform block, the spawn upload (`max_spawns_per_frame`
-//!   records, host-visible) and a 128-byte host-readable copy of `args` for [`VfxStats`].
+//!   records, host-visible) and a 160-byte host-readable copy of `args` for [`VfxStats`].
 //!
 //! **Allocation.** The CPU hands each spawn a free slot: it keeps every slot's expiry time
 //! on its own clock (the sum of the frames' `dt`, as the GPU ages particles) and scans at
@@ -40,6 +42,7 @@ use gpu_allocator::MemoryLocation;
 use moba_core::math::{Mat4, Vec3, Vec4};
 
 use crate::device::DeviceContext;
+use crate::distortion::{HazeBounds, HazeRegion};
 use crate::error::{RenderError, RenderResult};
 use crate::mesh::Vertex;
 use crate::passes::scene::ScenePass;
@@ -123,9 +126,9 @@ const PUSH_SIZE: u32 = core::mem::size_of::<VfxPush>() as u32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct DistortionPush {
-    /// Last pixel of the render sub-rectangle (x, y), the offset cap (pixels), 1 = unit mask.
+    /// The copied region: first pixel (x, y), last pixel (x, y).
     rect: [f32; 4],
-    /// Soft distance (m), view-distance fade start and end (m), unused.
+    /// Soft distance (m), view-distance fade start and end (m), the offset cap (pixels).
     fade: [f32; 4],
     /// First index of the distortion list in `alive`.
     list: [u32; 4],
@@ -253,6 +256,19 @@ impl GpuParticle {
     pub(crate) fn lifetime(&self) -> f32 {
         self.vel_life[3]
     }
+
+    /// The world box the encoded sprite can cover over its life (ADR-0019's haze bounds).
+    pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
+        let [x, y, z, _] = self.pos_age;
+        let [vx, vy, vz, life] = self.vel_life;
+        crate::distortion::sprite_bounds(
+            Vec3::new(x, y, z),
+            Vec3::new(vx, vy, vz),
+            f32::from_bits(self.misc[2]),
+            life,
+            self.size_spin[0].max(self.size_spin[1]),
+        )
+    }
 }
 
 /// `(P22, P23)` of the perspective projection inside `view_proj`, so that linear view depth
@@ -375,6 +391,8 @@ pub(crate) struct DistortionTargets {
     pub(crate) depth: vk::ImageView,
     /// The render sub-rectangle (top-left corner of the render-sized targets).
     pub(crate) extent: vk::Extent2D,
+    /// This frame's draw and copy regions ([`VfxPass::distortion_region`]).
+    pub(crate) region: HazeRegion,
 }
 
 /// The distortion pipeline's own layout and set (ADR-0019).
@@ -427,8 +445,13 @@ pub(crate) struct VfxPass {
     texture_set: vk::DescriptorSet,
     resolve_set: Option<vk::DescriptorSet>,
     distortion: Option<DistortionResources>,
-    /// Allocator-clock time until which a distortion particle may be live (ADR-0019).
-    distortion_until: f64,
+    /// Where live heat haze can be (ADR-0019), on the allocator's clock and transaction.
+    haze: HazeBounds,
+    /// This frame's haze region; `None` records no haze passes.
+    haze_region: Option<HazeRegion>,
+    /// `false` simulates the haze but never draws it (`MOBA_DISTORTION=nodraw`, a diagnostic
+    /// that keeps every spawn, so a capture differs from the normal one only by the haze).
+    distortion_draw: bool,
     pipelines: VfxPipelines,
     pipeline_layout: PipelineLayout,
     resolve_pipeline_layout: PipelineLayout,
@@ -720,7 +743,9 @@ impl VfxPass {
             texture_set,
             resolve_set,
             distortion,
-            distortion_until: f64::NEG_INFINITY,
+            haze: HazeBounds::new(),
+            haze_region: None,
+            distortion_draw: true,
             pipelines,
             pipeline_layout,
             resolve_pipeline_layout,
@@ -910,10 +935,16 @@ impl VfxPass {
         self.distortion.is_some() && self.pipelines.distortion.is_some()
     }
 
-    /// Whether a distortion particle may be live this frame (after [`Self::prepare`]): the
-    /// renderer records the copy and the draw only then (ADR-0019).
-    pub(crate) fn distortion_live(&self) -> bool {
-        self.has_distortion() && self.allocator.clock < self.distortion_until
+    /// This frame's haze draw and copy regions (after [`Self::prepare`]), or `None` when no
+    /// haze is in view: the renderer then runs the frame variant that only reserves the
+    /// copy and the draw (ADR-0019).
+    pub(crate) fn distortion_region(&self) -> Option<HazeRegion> {
+        self.haze_region.filter(|_| self.has_distortion())
+    }
+
+    /// `false` keeps simulating the heat haze but never draws it (`MOBA_DISTORTION=nodraw`).
+    pub(crate) fn set_distortion_draw(&mut self, draw: bool) {
+        self.distortion_draw = draw;
     }
 
     /// The particle state, compacted lists and indirect arguments (render-graph imports).
@@ -966,6 +997,7 @@ impl VfxPass {
     /// Marks `frame` as submitted, so the next [`Self::collect`] reads its stats.
     pub(crate) fn submitted(&mut self, frame: usize) {
         self.allocator.commit();
+        self.haze.commit();
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         if let Some(buffers) = self.frames.get_mut(frame) {
@@ -984,7 +1016,9 @@ impl VfxPass {
             0.0
         };
         self.allocator.begin();
+        self.haze.begin();
         self.allocator.advance(dt);
+        self.haze.expire(self.allocator.clock);
         let mesh_ok: [bool; VFX_MESH_SLOTS] = core::array::from_fn(|slot| {
             self.budget.mesh_particles
                 && self.pipelines.mesh.is_some()
@@ -1010,9 +1044,10 @@ impl VfxPass {
                     continue;
                 };
                 if haze {
+                    let (low, high) = encoded.bounds();
                     let until =
                         self.allocator.clock + f64::from(encoded.lifetime()) + EXPIRY_MARGIN;
-                    self.distortion_until = self.distortion_until.max(until);
+                    self.haze.add(low, high, until);
                 }
                 upload[count] = encoded;
                 upload[count].misc[3] = slot;
@@ -1021,6 +1056,13 @@ impl VfxPass {
         } else {
             dropped = wanted;
         }
+        self.haze_region = (distortion && self.distortion_draw && self.haze.any())
+            .then(|| {
+                let cap = crate::distortion::max_offset_pixels(&self.budget, extent.height);
+                self.haze
+                    .region(scene.camera.view_proj, extent.width, extent.height, cap)
+            })
+            .flatten();
         buffers.spawn_count = u32::try_from(count).unwrap_or(u32::MAX);
         buffers.dropped = u32::try_from(dropped).unwrap_or(u32::MAX);
         buffers.pixels_on_screen = u64::from(extent.width) * u64::from(extent.height);
@@ -1323,9 +1365,9 @@ impl VfxPass {
 
 impl VfxPass {
     /// Records the heat-haze draw (ADR-0019) into the HDR target: the distortion list, depth
-    /// tested read-only against the scene, refracting the copy within the render
-    /// sub-rectangle by at most `cap` pixels. `mask` uses the unit ID target. The caller
-    /// checks [`Self::distortion_live`].
+    /// tested read-only against the scene and scissored to the haze's region, refracting the
+    /// copy (which holds `targets.region.copy`) by at most `cap` pixels. The renderer runs
+    /// the pass only when [`Self::distortion_region`].
     pub(crate) fn record_distortion(
         &self,
         device: &DeviceContext,
@@ -1365,6 +1407,22 @@ impl VfxPass {
             super::flipped_viewport(extent),
             extent,
         );
+        let (draw, copy) = (targets.region.draw, targets.region.copy);
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D {
+                x: i32::try_from(draw.x0).unwrap_or(0),
+                y: i32::try_from(draw.y0).unwrap_or(0),
+            },
+            extent: vk::Extent2D {
+                width: draw.width(),
+                height: draw.height(),
+            },
+        };
+        // SAFETY: recording inside the rendering scope; the region lies within the render
+        // area (`HazeBounds::region` clamps it to the render extent).
+        unsafe {
+            device.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+        }
         bind_graphics(device, command_buffer, pipeline);
         let sets = [self.frames[frame].set, resources.set];
         // SAFETY: both sets match the distortion layout (sets 0 and 1) and name live
@@ -1382,16 +1440,16 @@ impl VfxPass {
         }
         let push = DistortionPush {
             rect: [
-                extent.width.saturating_sub(1) as f32,
-                extent.height.saturating_sub(1) as f32,
-                cap,
-                1.0,
+                copy.x0 as f32,
+                copy.y0 as f32,
+                copy.x1.saturating_sub(1) as f32,
+                copy.y1.saturating_sub(1) as f32,
             ],
             fade: [
                 crate::distortion::SOFT_DISTANCE,
                 crate::distortion::FADE_START,
                 crate::distortion::FADE_END,
-                0.0,
+                cap,
             ],
             list: [
                 self.capacity + self.mesh_region * VFX_MESH_SLOTS as u32,

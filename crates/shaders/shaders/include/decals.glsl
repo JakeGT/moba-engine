@@ -11,7 +11,10 @@
 //   telegraphs keep a two-tone rim: a band brightened to at least 1.8x the ground's
 //   luminance and a dark halo inside it, so one of them contrasts with any ground
 //   (`glow_reference` is the CPU twin of `decal_coverage` and this composite, unit-tested
-//   per shape).
+//   per shape). Both glow functions also return `mark`, the strongest rim or halo band of a
+//   visible telegraph (`MOBA_DECAL_MARK`), which the receivers write as `1 - mark` into the
+//   HDR alpha so the heat haze never bends a telegraph's edge (ADR-0019; the CPU twin is
+//   `telegraph_mark`).
 //
 // `aa` is the world-space size of a pixel, computed by the caller in uniform control flow.
 #ifndef MOBA_DECALS_GLSL
@@ -20,6 +23,7 @@
 #define MOBA_DECAL_GLOW 1u
 #define MOBA_DECAL_ENEMY 2u
 #define MOBA_DECAL_PROGRESS 4u
+#define MOBA_DECAL_MARK 8u
 #define MOBA_DECAL_REACH 4.0
 
 struct DecalRecord {
@@ -170,7 +174,7 @@ vec3 apply_paint_decals(vec3 albedo, vec3 world, float aa) {
     return albedo;
 }
 
-vec3 apply_glow_decals(vec3 color, vec3 world, float aa) {
+vec3 apply_glow_decals(vec3 color, vec3 world, float aa, inout float mark) {
 #ifdef MOBA_NO_DECALS
     return color;
 #endif
@@ -194,6 +198,9 @@ vec3 apply_glow_decals(vec3 color, vec3 world, float aa) {
                 continue;
             }
             float alpha = clamp(MOBA_DECAL(index).color.a * MOBA_DECAL(index).params.w, 0.0, 1.0);
+            if ((flags & MOBA_DECAL_MARK) != 0u && alpha > 0.0) {
+                mark = max(mark, max(coverage.y, coverage.w));
+            }
             float band = min(2.0 * alpha, 1.0);
             vec3 tint = MOBA_DECAL(index).color.rgb;
             // Fill: a light wash, stronger where a cast timer has filled.
@@ -215,7 +222,8 @@ vec3 apply_glow_decals(vec3 color, vec3 world, float aa) {
 // transmitted bed included) and the rest on its surface. `rim_cover` returns the strongest
 // enemy rim band drawn, so the blended simple water can make its rims opaque. A separate
 // function, so the terrain's `apply_glow_decals` is untouched (register budget, §1).
-vec3 apply_glow_decals_role(vec3 color, vec3 world, float aa, bool enemy, inout float rim_cover) {
+vec3 apply_glow_decals_role(vec3 color, vec3 world, float aa, bool enemy, inout float rim_cover,
+                            inout float mark) {
     int cell = decal_cell(world);
     if (cell < 0) {
         return color;
@@ -236,6 +244,9 @@ vec3 apply_glow_decals_role(vec3 color, vec3 world, float aa, bool enemy, inout 
                 continue;
             }
             float alpha = clamp(MOBA_DECAL(index).color.a * MOBA_DECAL(index).params.w, 0.0, 1.0);
+            if ((flags & MOBA_DECAL_MARK) != 0u && alpha > 0.0) {
+                mark = max(mark, max(coverage.y, coverage.w));
+            }
             float band = min(2.0 * alpha, 1.0);
             vec3 tint = MOBA_DECAL(index).color.rgb;
             color = mix(color, tint, alpha * (0.3 * coverage.x + 0.35 * coverage.z));
