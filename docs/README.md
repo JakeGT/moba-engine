@@ -11,7 +11,7 @@
   maintainer decisions for the remaining milestones.
 - [AAA graphics roadmap](plans/aaa-graphics-roadmap.md) — phases R0–R8 from the preview
   renderer to AAA-quality, readable, scalable MOBA visuals; engine work complete.
-- [Next-gen graphics roadmap](plans/next-gen-graphics-roadmap.md) — proposal: photoreal,
+- [Next-gen graphics roadmap](plans/next-gen-graphics-roadmap.md) — accepted plan: photoreal,
   ray-traced five-tier renderer (Low–Overdrive), vendor stack, phases N0–N11 and the
   licence-clean asset and AI-generation pipeline.
 - [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — completed
