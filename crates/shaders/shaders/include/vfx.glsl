@@ -28,6 +28,7 @@ struct Particle {
 #define VFX_ROLE_TELEGRAPH 2u
 #define VFX_MESH_SHIFT 5u
 #define VFX_FLAG_HARD 128u
+#define VFX_FLAG_DISTORT 256u    // heat haze (ADR-0019): drawn by the distortion pass only
 
 // args[] layout (uints)
 #define VFX_ARGS_SPRITE 0u        // VkDrawIndirectCommand
@@ -37,7 +38,11 @@ struct Particle {
 #define VFX_STAT_PIXELS 29u
 #define VFX_STAT_ALIVE 30u
 #define VFX_STAT_SPAWNED 31u
+#define VFX_ARGS_DISTORT 32u      // VkDrawIndirectCommand of the distortion list (ADR-0019)
+#define VFX_COUNT_DISTORT 36u
 #define VFX_MESH_SLOTS 4u
+// The distortion list follows the four mesh-slot regions in `alive`, `counts.z` entries.
+#define VFX_DISTORT_BASE(capacity, region) ((capacity) + VFX_MESH_SLOTS * (region))
 
 layout(std140, set = 0, binding = 0) uniform VfxFrame {
     mat4 view_proj;

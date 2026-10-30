@@ -67,6 +67,8 @@ use moba_assets::{
 
 /// Most live effect instances.
 pub(crate) const MAX_INSTANCES: usize = 256;
+/// The team of a map's ambient effects: neither side's (no team tint, never a telegraph).
+const AMBIENT_TEAM: u8 = 2;
 /// Events waiting for the view to reach their tick.
 const MAX_PENDING: usize = 128;
 /// Casts remembered to bind a later projectile, hit or zone to its ability.
@@ -389,6 +391,17 @@ impl LoadEstimate {
     }
 }
 
+/// One looping map effect (`[[effects]]`, ADR-0019): restarted whenever its emission
+/// window ends, so the next play overlaps the last one's fading particles.
+#[derive(Clone, Copy, Debug)]
+struct Ambient {
+    effect: EffectId,
+    position: Vec3,
+    radius: f32,
+    /// System time of the next start.
+    next: f32,
+}
+
 /// The per-frame particle emitter state.
 #[derive(Debug)]
 pub(crate) struct VfxSystem {
@@ -421,6 +434,10 @@ pub(crate) struct VfxSystem {
     scale: u32,
     load: LoadEstimate,
     counters: VfxCounters,
+    /// The bound map's looping effects (capacity [`moba_assets::MAX_MAP_EFFECTS`]).
+    ambient: Vec<Ambient>,
+    /// The map generation `ambient` was resolved for; `None` to resolve again.
+    ambient_generation: Option<u32>,
 }
 
 /// This frame's decals and the persistent stamp ring (preallocated).
@@ -763,6 +780,8 @@ impl VfxSystem {
             scale: 1,
             load: LoadEstimate::new(),
             counters: VfxCounters::default(),
+            ambient: Vec::with_capacity(moba_assets::MAX_MAP_EFFECTS),
+            ambient_generation: None,
         }
     }
 
@@ -821,6 +840,74 @@ impl VfxSystem {
         self.pending.clear();
         self.unstamped.clear();
         self.casts = [(u32::MAX, 0, f32::NEG_INFINITY); MAX_CASTS];
+        // A content reload may renumber the effects: resolve the map's again.
+        self.ambient.clear();
+        self.ambient_generation = None;
+    }
+
+    /// Points the looping map effects at the bound map's `[[effects]]` (ADR-0019). Cheap
+    /// when `generation` is unchanged; otherwise it resolves (and on first use loads) each
+    /// effect by name, at map changes only. The authoring preview plays none.
+    pub(crate) fn sync_ambient(
+        &mut self,
+        generation: u32,
+        effects: &[crate::app::map_visuals::AmbientEffect],
+    ) {
+        if self.ambient_generation == Some(generation) {
+            return;
+        }
+        self.ambient_generation = Some(generation);
+        self.ambient.clear();
+        if self.library.is_preview() {
+            return;
+        }
+        for effect in effects.iter().take(moba_assets::MAX_MAP_EFFECTS) {
+            match self.library.effect_id(&effect.effect) {
+                Some(id) => self.ambient.push(Ambient {
+                    effect: id,
+                    position: effect.position,
+                    radius: effect.radius,
+                    next: f32::NEG_INFINITY,
+                }),
+                None => eprintln!("[vfx] map effect {:?} did not load; skipped", effect.effect),
+            }
+        }
+    }
+
+    /// Starts each looping map effect whose emission window has ended.
+    fn start_ambient(&mut self) {
+        for index in 0..self.ambient.len() {
+            let ambient = self.ambient[index];
+            if self.time < ambient.next {
+                continue;
+            }
+            let Some(loaded) = self.library.effect(ambient.effect) else {
+                continue;
+            };
+            let emit = loaded.effect.duration;
+            let lifespan = loaded.effect.lifespan(emit).max(emit);
+            let importance = loaded.effect.importance;
+            // Never faster than four starts a second, whatever the effect's duration.
+            self.ambient[index].next = self.time + emit.max(0.25);
+            let Some(slot) = self.instances.iter().position(|instance| !instance.alive) else {
+                self.counters.dropped_events += 1;
+                continue;
+            };
+            self.instances[slot] = Instance {
+                alive: true,
+                effect: Some(ambient.effect),
+                start: self.time,
+                emit,
+                end: self.time + lifespan,
+                team: AMBIENT_TEAM,
+                relation: Relation::Neutral,
+                importance,
+                target: ambient.position,
+                source_position: ambient.position,
+                radius: ambient.radius,
+                ..Instance::DEAD
+            };
+        }
     }
 
     /// Queues a network event until its snapshot's tick is known ([`Self::stamp`]).
@@ -914,6 +1001,7 @@ impl VfxSystem {
             }
         }
         self.pending.truncate(kept);
+        self.start_ambient();
         let up = {
             let (_, up) = camera_up(view.view_proj);
             up
@@ -1277,8 +1365,16 @@ impl VfxSystem {
             if count == 0 || culled {
                 continue;
             }
+            // Heat haze (ADR-0019) where distortion is off: its fallback sprite, or nothing.
+            if let Some(distortion) = &emitter.distortion
+                && !self.budget.distortion
+                && distortion.fallback_color.is_none()
+            {
+                continue;
+            }
             let telegraph = emitter.telegraph && instance.relation == Relation::Enemy;
-            let exempt = telegraph || exempt_projectile;
+            // Heat haze is never exempt from the budgets: it is decoration (ADR-0019).
+            let exempt = (telegraph || exempt_projectile) && emitter.distortion.is_none();
             if !exempt && !self.admit(instance.importance, view) {
                 self.counters.culled_budget += count;
                 continue;
@@ -1306,6 +1402,7 @@ impl VfxSystem {
                     &context,
                     instance.previous,
                     telegraph,
+                    self.budget.distortion,
                 );
                 let pixels = estimate_pixels(view, up, &spawn);
                 self.load.add(self.time + spawn.lifetime, pixels);
@@ -1411,7 +1508,8 @@ fn estimate_pixels(view: &VfxView, up: Vec3, spawn: &ParticleSpawn) -> f32 {
     }
 }
 
-/// One particle of `emitter`.
+/// One particle of `emitter`. A heat-haze emitter (ADR-0019) gives a distortion particle
+/// where `distortion` is on and its faint additive fallback sprite elsewhere.
 #[allow(clippy::too_many_lines)] // One table of emitter fields to particle fields.
 fn build_particle(
     rng: &mut Rng,
@@ -1419,6 +1517,7 @@ fn build_particle(
     context: &EmitContext,
     previous: Option<Vec3>,
     telegraph: bool,
+    distortion: bool,
 ) -> ParticleSpawn {
     let scale = if emitter.scale_with_radius {
         context.radius
@@ -1471,7 +1570,25 @@ fn build_particle(
     };
     let mut color = shade(emitter.color);
     let mut color_end = shade(emitter.color_end);
-    let alpha = emitter.blend == VfxBlend::Alpha;
+    let haze = emitter.distortion.as_ref();
+    let mut blend = match emitter.blend {
+        VfxBlend::Alpha => ParticleBlend::Alpha,
+        _ => ParticleBlend::Additive,
+    };
+    if let Some(haze) = haze {
+        if distortion {
+            // The colours carry (strength, noise scale, rise speed, 1) (ADR-0019).
+            color = Vec4::new(haze.strength, haze.scale, haze.speed, 1.0);
+            color_end = Vec4::new(haze.strength_end, haze.scale, haze.speed, 1.0);
+            blend = ParticleBlend::Distortion;
+        } else {
+            let fallback = haze.fallback_color.unwrap_or([0.0; 4]);
+            color = shade(fallback);
+            color_end = color.truncate().extend(0.0);
+            blend = ParticleBlend::Additive;
+        }
+    }
+    let alpha = blend == ParticleBlend::Alpha;
     let role = match context.relation {
         Relation::Ally => {
             if alpha {
@@ -1490,11 +1607,7 @@ fn build_particle(
         .with_color_end(color_end)
         .with_rotation(rng.next_f32() * TAU, spin)
         .with_forces(emitter.gravity, emitter.drag)
-        .with_blend(if alpha {
-            ParticleBlend::Alpha
-        } else {
-            ParticleBlend::Additive
-        })
+        .with_blend(blend)
         .with_role(role);
     let sprite = emitter.sprite;
     spawn = match emitter.primitive {

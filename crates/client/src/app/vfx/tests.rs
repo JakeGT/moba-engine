@@ -728,3 +728,137 @@ fn projectiles_survive_budgets_or_fall_back_to_cubes() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+const HAZE: &str = r#"
+duration = 1.0
+[[emitters]]
+burst = 4
+lifetime = [1, 1]
+size = [2, 2]
+blend = "distortion"
+distortion = 0.6
+distortion_end = 0.2
+distortion_scale = 3
+distortion_speed = 1.5
+fallback_color = [1, 0.4, 0.1, 0.2]
+[[emitters]]
+burst = 3
+lifetime = [1, 1]
+size = [2, 2]
+blend = "distortion"
+distortion = 0.5
+"#;
+
+/// ADR-0019: a heat-haze emitter gives distortion particles carrying (strength, noise scale,
+/// rise speed) where the tier has distortion, its faint additive fallback where not (or
+/// nothing without one); a map's `[[effects]]` loop at their positions and the preview
+/// plays none.
+#[test]
+fn heat_haze_spawns_distortion_or_its_fallback_and_map_effects_loop() {
+    let root = root("haze");
+    std::fs::write(root.join("vfx/haze.toml"), HAZE).expect("write");
+    let view = view(Some(0));
+    let anchors = anchors();
+    for (tier, distortion, fallback) in [
+        (QualityTier::High, 7, 0),
+        (QualityTier::Ultra, 7, 0),
+        (QualityTier::Medium, 0, 4),
+        (QualityTier::Low, 0, 4),
+    ] {
+        let library = VfxLibrary::preview(root.clone(), "haze");
+        let effect = library.preview_effect().expect("the haze loads");
+        let mut vfx = VfxSystem::new(library, tier.vfx_budget(), true);
+        let mut haze = event(Trigger::Zone, 1, None);
+        haze.effect = Some(effect);
+        vfx.trigger(&haze, &view, &anchors);
+        vfx.update(1.0 / 30.0, 1.0, &view, &anchors, NO_SOCKET);
+        let spawns = vfx.frame().spawns;
+        let hazes: Vec<_> = spawns
+            .iter()
+            .filter(|spawn| spawn.blend == ParticleBlend::Distortion)
+            .collect();
+        assert_eq!(hazes.len(), distortion, "{tier}");
+        assert_eq!(spawns.len(), distortion + fallback, "{tier}");
+        if let Some(first) = hazes.first() {
+            assert!((first.color.x - 0.6).abs() < 1e-5);
+            assert!((first.color.y - 3.0).abs() < 1e-5);
+            assert!((first.color.z - 1.5).abs() < 1e-5);
+            assert!((first.color_end.x - 0.2).abs() < 1e-5);
+            // Never a telegraph: an enemy's haze is a plain particle.
+            assert!(
+                hazes
+                    .iter()
+                    .all(|spawn| spawn.role != ParticleRole::EnemyTelegraph)
+            );
+        } else {
+            assert!(
+                spawns
+                    .iter()
+                    .all(|spawn| spawn.blend == ParticleBlend::Additive)
+            );
+            assert!((spawns[0].color.x - 1.0).abs() < 1e-5);
+            assert!((spawns[0].color.w - 0.2).abs() < 1e-5);
+            assert_eq!(spawns[0].color_end.w, 0.0, "the fallback fades out");
+        }
+    }
+
+    // Map effects: one live instance per entry, restarted as each play's emission ends.
+    let mut vfx = VfxSystem::new(
+        VfxLibrary::load(root.clone()),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    let vents = [
+        crate::app::map_visuals::AmbientEffect {
+            effect: String::from("haze"),
+            position: Vec3::new(2.0, 0.0, 0.0),
+            radius: 1.0,
+        },
+        crate::app::map_visuals::AmbientEffect {
+            effect: String::from("missing"),
+            position: Vec3::ZERO,
+            radius: 1.0,
+        },
+    ];
+    vfx.sync_ambient(1, &vents);
+    vfx.update(1.0 / 30.0, 1.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(vfx.counters().instances, 1, "the unknown effect is skipped");
+    assert_eq!(vfx.frame().spawns.len(), 7);
+    assert!(
+        vfx.frame()
+            .spawns
+            .iter()
+            .all(|spawn| (spawn.position - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4)
+    );
+    // Same generation: nothing changes; after the 1 s emission window a second play starts.
+    vfx.sync_ambient(1, &[]);
+    let mut restarted = 0;
+    for frame in 0..45 {
+        vfx.update(1.0 / 30.0, 2.0 + frame as f32, &view, &anchors, NO_SOCKET);
+        restarted += vfx.frame().spawns.len();
+    }
+    assert_eq!(restarted, 7, "one more burst after the first play's window");
+    // A cleared system (content reload) resolves the map's effects again.
+    vfx.clear();
+    vfx.sync_ambient(1, &vents);
+    vfx.update(1.0 / 30.0, 50.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(vfx.frame().spawns.len(), 7);
+    // A map without effects stops them starting.
+    vfx.sync_ambient(2, &[]);
+    let mut later = 0;
+    for frame in 0..90 {
+        vfx.update(1.0 / 30.0, 60.0 + frame as f32, &view, &anchors, NO_SOCKET);
+        later += vfx.frame().spawns.len();
+    }
+    assert_eq!(later, 0);
+    // The authoring preview plays no map effects.
+    let mut preview = VfxSystem::new(
+        VfxLibrary::preview(root.clone(), "haze"),
+        QualityTier::High.vfx_budget(),
+        true,
+    );
+    preview.sync_ambient(1, &vents);
+    preview.update(1.0 / 30.0, 1.0, &view, &anchors, NO_SOCKET);
+    assert_eq!(preview.counters().instances, 0);
+    let _ = std::fs::remove_dir_all(root);
+}

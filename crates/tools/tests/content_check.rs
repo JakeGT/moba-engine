@@ -246,3 +246,35 @@ fn missing_wrong_type_and_malformed_files_are_rejected() {
 fn syntax_errors_are_json_too() {
     assert_rejected("toml", "name = \n\t[[", "invalid TOML");
 }
+
+/// ADR-0019: the pack's client-local effects are validated too: a heat-haze emitter with an
+/// out-of-range strength (or any field the parser rejects) fails the pack, in text and JSON.
+#[test]
+fn invalid_effects_are_rejected() {
+    let text = pack(&unit("knight", "models/sentinel.glb"), "knight", "");
+    let pack = Pack::new("vfx", &text);
+    std::fs::create_dir_all(pack.dir.join("vfx")).expect("vfx dir");
+    let haze = "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]\n\
+                blend = \"distortion\"\n";
+    std::fs::write(
+        pack.dir.join("vfx/heat-vent.toml"),
+        format!("{haze}distortion = 0.5\n"),
+    )
+    .expect("write");
+    let run = content_check(true, &pack.path());
+    assert_eq!(run.code, Some(0), "a valid haze passes: {}", run.stderr);
+    std::fs::write(
+        pack.dir.join("vfx/heat-vent.toml"),
+        format!("{haze}distortion = 3.0\n"),
+    )
+    .expect("write");
+    for json in [false, true] {
+        let run = content_check(json, &pack.path());
+        assert_eq!(run.code, Some(1), "{}", run.stderr);
+        let output = if json { &run.stdout } else { &run.stderr };
+        assert!(
+            output.contains("vfx/heat-vent.toml: ") && output.contains("distortion must be"),
+            "{output}"
+        );
+    }
+}

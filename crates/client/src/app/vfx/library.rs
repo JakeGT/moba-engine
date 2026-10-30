@@ -168,8 +168,13 @@ impl VfxLibrary {
         );
     }
 
+    /// Whether this is the `MOBA_VFX_PREVIEW` library (one effect, no bindings).
+    pub(crate) fn is_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
     /// The id of effect `name`, loading it on first use (`None` if it does not load).
-    fn effect_id(&mut self, name: &str) -> Option<EffectId> {
+    pub(crate) fn effect_id(&mut self, name: &str) -> Option<EffectId> {
         if let Some(index) = self.effects.iter().position(|loaded| loaded.name == name) {
             return EffectId::try_from(index).ok();
         }

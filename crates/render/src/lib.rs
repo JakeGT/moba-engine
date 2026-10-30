@@ -17,6 +17,7 @@ pub mod bench_support;
 mod cull;
 mod descriptor_budget;
 mod device;
+pub mod distortion;
 mod dynres;
 mod environment;
 mod error;

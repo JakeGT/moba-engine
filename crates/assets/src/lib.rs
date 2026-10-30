@@ -107,11 +107,11 @@ pub use map_visuals::{
     DEFAULT_EDGE_SPACING, DEFAULT_EXPOSURE_MAX, DEFAULT_EXPOSURE_MIN, DEFAULT_LANE_WIDTH,
     DEFAULT_LAYER_TILING, DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_RELIEF, DEFAULT_TERRAIN_ROUGHNESS,
     DEFAULT_TERRAIN_SEED, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT, EdgeStyle, FOW_DARKEN_RANGE,
-    FoliageKind, FoliagePatch, MAX_FOG_OPACITY, MAX_FOLIAGE_PATCHES, MAX_MAP_MESHES, MAX_MAP_PROPS,
-    MAX_MAP_VISUALS_BYTES, MAX_MAP_WATER, MAX_MESH_NAME, MAX_SHADOW_STRENGTH, MAX_WADE_DEPTH,
-    MAX_WATER_LEVEL, MAX_WATER_POINTS, MIN_SUN_ELEVATION, MapAtmosphere, MapFogStyle, MapFoliage,
-    MapLighting, MapPost, MapProp, MapTerrain, MapVisuals, MapVisualsError, MapWater, TerrainLayer,
-    valid_mesh_name,
+    FoliageKind, FoliagePatch, MAX_FOG_OPACITY, MAX_FOLIAGE_PATCHES, MAX_MAP_EFFECTS,
+    MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MAP_WATER, MAX_MESH_NAME,
+    MAX_SHADOW_STRENGTH, MAX_WADE_DEPTH, MAX_WATER_LEVEL, MAX_WATER_POINTS, MIN_SUN_ELEVATION,
+    MapAmbientEffect, MapAtmosphere, MapFogStyle, MapFoliage, MapLighting, MapPost, MapProp,
+    MapTerrain, MapVisuals, MapVisualsError, MapWater, TerrainLayer, valid_mesh_name,
 };
 pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
@@ -160,8 +160,9 @@ pub use vfx::{
     MAX_VFX_EMITTERS, MAX_VFX_LIGHT_INTENSITY, MAX_VFX_LIGHT_RADIUS, MAX_VFX_NAME, MAX_VFX_RATE,
     STAMP_LATCH_SECONDS, VFX_ATLAS_CELL, VFX_ATLAS_GRID, VFX_SOLID_CELL, VFX_SPRITES,
     VfxAbilityBinding, VfxAnchor, VfxBindings, VfxBlend, VfxDecal, VfxDecalShape, VfxDecalStyle,
-    VfxDirection, VfxEffect, VfxEmitter, VfxError, VfxImportance, VfxLight, VfxPrimitive, VfxShape,
-    VfxSprite, VfxUnitEffects, procedural_atlas, valid_vfx_name, vfx_path, vfx_sprite,
+    VfxDirReport, VfxDirection, VfxDistortion, VfxEffect, VfxEmitter, VfxError, VfxImportance,
+    VfxLight, VfxPrimitive, VfxShape, VfxSprite, VfxUnitEffects, check_vfx_dir, procedural_atlas,
+    valid_vfx_name, vfx_path, vfx_sprite,
 };
 pub use water::{MAX_WATER_MESH_VERTICES, WaterMesh, WaterVertex, generate_water};
 

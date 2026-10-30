@@ -49,6 +49,25 @@ color = [0.08, 0.06, 0.05, 0.6]
 color_end = [0.06, 0.05, 0.05, 0.0]
 offset = [0, 0.8, 0]
 
+[[emitters]]                     # heat haze over the zone (ADR-0019; High and up, else skipped)
+blend = "distortion"
+burst = 2
+rate = 5
+lifetime = [1.3, 1.7]
+speed = [0.3, 0.6]
+direction = "up"
+spread = 10
+shape = "disc"
+radius = 0.5
+scale_with_radius = true
+size = [1.3, 1.7]
+size_end = 1.25
+offset = [0, 1.1, 0]
+distortion = 0.75
+distortion_end = 0.1
+distortion_scale = 2.5
+distortion_speed = 0.8
+
 # Dynamic point light (R2b, ADR-0016): lights the ground and units around the effect.
 [light]
 color = [1.0, 0.4, 0.1]

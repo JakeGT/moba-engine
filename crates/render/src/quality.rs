@@ -64,7 +64,8 @@ impl QualityTier {
     }
 
     /// GPU particle budgets (ADR-0013). `Low` has no soft particles, no OIT targets and no
-    /// mesh particles; every tier keeps enemy telegraphs at least 35 % opaque.
+    /// mesh particles; every tier keeps enemy telegraphs at least 35 % opaque. Heat haze
+    /// (ADR-0019) is High and up: 6 pixels at 1080p on High, 8 on Ultra.
     #[must_use]
     pub const fn vfx_budget(self) -> VfxBudget {
         let (max_particles, max_spawns_per_frame, max_overdraw, max_distance) = match self {
@@ -74,6 +75,12 @@ impl QualityTier {
             Self::Ultra => (49_152, 4_096, 8.0, 240.0),
         };
         let full = !matches!(self, Self::Low);
+        // Heat haze (ADR-0019): High and up; the cap at a 1080-pixel render height.
+        let distortion_pixels = match self {
+            Self::Low | Self::Medium => 0.0,
+            Self::High => 6.0,
+            Self::Ultra => 8.0,
+        };
         VfxBudget {
             max_particles,
             max_spawns_per_frame,
@@ -83,6 +90,8 @@ impl QualityTier {
             mesh_particles: full,
             max_distance,
             telegraph_floor: 0.35,
+            distortion: distortion_pixels > 0.0,
+            distortion_pixels,
         }
     }
 
@@ -159,5 +168,20 @@ mod tests {
             previous = budget.max_particles;
         }
         assert!(QualityTier::High.vfx_budget().oit);
+        // Heat haze (ADR-0019): off below High, a larger cap on Ultra, and only where the
+        // OIT accumulation target exists for the copy to alias.
+        for &tier in QualityTier::ALL {
+            let budget = tier.vfx_budget();
+            assert_eq!(
+                budget.distortion,
+                matches!(tier, QualityTier::High | QualityTier::Ultra)
+            );
+            assert_eq!(budget.distortion, budget.distortion_pixels > 0.0);
+            assert!(!budget.distortion || budget.oit);
+        }
+        assert!(
+            QualityTier::Ultra.vfx_budget().distortion_pixels
+                > QualityTier::High.vfx_budget().distortion_pixels
+        );
     }
 }

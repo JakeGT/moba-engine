@@ -29,7 +29,8 @@ Constraints:
   add a sampler to the scene layout.
 - **No per-frame allocation and no mid-match pipeline build** (R8's `locked_uploads` and
   `locked_pipelines` stay 0).
-- The graph's limits are 32 passes and 48 resources; the largest frame had 29 passes.
+- The graph's limits are 32 passes and 48 resources; the largest frame had 31 passes (the
+  29 ADR-0017 counted plus R2b's contact shadows and outlines).
 
 ## Decision
 
@@ -72,8 +73,8 @@ estimate on the CPU and the GPU — but it writes a **screen-space offset, not c
 ```text
 … → scene → (water_copy → water) → (distortion_copy → distortion) → vfx_draw → (vfx_resolve) → …
 ```
-- **`vfx_simulate`** appends distortion particles to a list of their own (a fourth region of
-  the `alive` buffer, `capacity / 8` entries, after the four mesh regions) with its own
+- **`vfx_simulate`** appends distortion particles to a list of their own (a region of the
+  `alive` buffer, `capacity / 8` entries, after the four mesh-slot regions) with its own
   `VkDrawIndirectCommand` and counter (the args block grows from 32 to 40 words); they are
   not in the sprite list, so `vfx_draw` never draws them.
 - **`distortion_copy`** copies the HDR target — resolved, single-sample (MSAA on Ultra is
@@ -81,10 +82,12 @@ estimate on the CPU and the GPU — but it writes a **screen-space offset, not c
   render-sized transient of the HDR format (`ImageSize::Render { shift: 0 }`).
 - **`distortion`** draws the distortion list (one `vkCmdDrawIndirect`) into the HDR target
   with the scene depth attached **read-only** and sampled in the same pass (as the particles
-  and the water do), sampling the copy and the outline ID target by texel at `gl_FragCoord`.
-  Its viewport and scissor are the render sub-rectangle, and every tap is clamped to it.
-  Each fragment writes the copy's texel at `gl_FragCoord + offset`, blended with source
-  alpha so overlapping sprites cross-fade, and keeps the destination alpha.
+  and the water do), reading the outline ID target and the depth by texel at
+  `gl_FragCoord` and the copy bilinearly at `gl_FragCoord + offset` (a 2×2 gather of the IDs
+  and the depth at the tap guards the rejection below). Its viewport and scissor are the
+  render sub-rectangle, and every tap is clamped to it. Each fragment writes the copy at the
+  tap, blended with source alpha so overlapping sprites cross-fade, and keeps the
+  destination alpha; a kept pixel writes alpha 0 (no `discard`).
 
 **Why the copy is after the water and before the particles.** The water's copy (taken
 before the water pass) would show the river bed without the river under a haze. A copy
@@ -96,7 +99,8 @@ separate graph resources; the graph aliases transients with equal descriptions w
 lifetimes do not overlap, so the distortion copy shares the water's refraction image when
 there is one (their lifetimes are `water_copy..water` and `distortion_copy..distortion`) or
 the OIT accumulation target on tiers without water (`vfx_draw..vfx_resolve`, the same
-`R16G16B16A16_SFLOAT` render-sized description). A unit test pins both aliasings.
+`R16G16B16A16_SFLOAT` render-sized description). A unit test pins that the copy never adds
+a slot on any topology with water or OIT.
 
 **Why a direct refraction draw (b) and not an offset target (a).** An offset target (an
 `RG16F` screen-sized image the particles add their offsets into, then a fullscreen apply
@@ -178,15 +182,19 @@ already shows, by a few pixels. Nothing hidden is drawn, so nothing hidden can b
 - **Graph.** Two passes (`distortion_copy`, `distortion`) and one transient. The largest
   frame (both offscreen passes, fog of war, shadow, the prepass with contact shadows and
   AO, the scene, the two water passes, the two distortion passes, the three VFX passes, the
-  bloom chain, exposure, composite, outlines, FXAA, upscale, UI and capture) has **31
-  passes**, inside `MAX_PASSES` 32; resources stay under `MAX_RESOURCES` 48. The limits do
-  not change. The frame-graph topology test compiles every topology with distortion.
+  bloom chain, exposure, composite, outlines, FXAA, upscale, UI and capture) has **33
+  passes**, one over the old `MAX_PASSES` 32, so **`MAX_PASSES` rises to 40** (the GPU
+  profiler's fixed query arrays grow from 64 to 80 queries, 16 more `PassTiming`s in
+  `GpuTimings`; nothing else is sized by it). `MAX_RESOURCES` 48 is unchanged. The
+  frame-graph topology test compiles every topology with distortion (with and without
+  water, capture and the offscreen passes) and pins the largest at 33.
 - **Memory.** The copy is a graph transient, so R8's VRAM accounting counts it as a target
   automatically (ADR-0018 §4). It aliases the water's refraction copy or the OIT
   accumulation target, so on High and Ultra it adds **no VRAM** in every shipped
   configuration; without either (no OIT is impossible on High+), it would be one
   `R16G16B16A16_SFLOAT` render-sized image (16.6 MB at 1080p). The `alive` buffer grows by
-  `capacity / 8` entries (12 KB on High, 24 KB on Ultra) and the args block by 32 bytes.
+  `capacity / 8` entries on every tier (2, 6, 12 and 24 KB on Low … Ultra; one buffer
+  layout for all tiers) and the args block by 32 bytes.
 - **Pipelines** are built at renderer creation through the pipeline cache, with the other
   VFX pipelines, only when distortion is on; nothing compiles mid-match.
 
@@ -195,11 +203,13 @@ already shows, by a few pixels. Nothing hidden is drawn, so nothing hidden can b
   heat-haze emitter.
 - Map visuals gain optional `[[effects]]` (up to 16 looping, client-local ambient effects
   at board positions: `effect`, `position`, `radius`), played by the client like any other
-  effect instance (culled by distance, budgeted, `low` importance by default). The Ember map
-  gets heat vents: a `heat-vent` effect (haze, a few embers, a dim light) at five spots
-  beside its crystals, off the lanes. `content-check` validates every effect file under
-  the pack's `vfx/` directory, the bindings, and that each map ambient effect names an
-  effect that exists.
+  effect instance (culled by distance and view, budgeted by the effect's own importance,
+  neutral: no team tint, never a telegraph) and restarted whenever an emission window ends.
+  The authoring preview plays none. The Ember map gets heat vents: a haze-only `heat-vent`
+  effect (`low` importance, no fallback, so Low and Medium are unchanged) at its five
+  crystals. `content-check` validates every effect file under the pack's `vfx/` directory
+  (`moba_assets::check_vfx_dir`), the bindings, and that every effect the bindings or a map
+  ambient effect names exists; any failure is an error.
 
 ## Alternatives considered
 - **(a) An offset target and an apply pass** (above): one more screen-sized target and a
@@ -224,11 +234,13 @@ already shows, by a few pixels. Nothing hidden is drawn, so nothing hidden can b
   `distortion` module (`max_offset_pixels`, `refract_tap`, `DistortionTap`,
   `UNIT_ID_PLAIN`); in `moba-assets` `VfxBlend::Distortion`, `VfxDistortion`,
   `VfxEmitter::distortion`, `MapAmbientEffect`, `MapVisuals::effects`,
-  `MAX_MAP_EFFECTS`.
+  `MAX_MAP_EFFECTS`, `check_vfx_dir`, `VfxDirReport`. `GpuTimings` keeps `Default` (now
+  written out, as arrays over 32 have no derived `Default`).
 - No wire, replay, simulation-logic, golden-state-hash or content-hash change: effects and
   map visuals are client-local, and the pack hash covers only the pack TOML (checked).
 - `MOBA_FRAME_LOG` gains `distortion_copy` and `distortion` lanes.
 - Goldens: a new distortion golden (the `cinder-zone` preview on Ultra: MSAA, the prepass
-  IDs, the stand-in units inside the haze). Existing goldens change only where a haze is in
-  view (perf/0023 lists them).
-- Costs and validation: [perf/0023](../perf/0023-distortion.md).
+  IDs, the stand-in units inside the haze). No existing golden changed (none has a live
+  haze in view; the passes run idle there).
+- Costs and validation: [perf/0023](../perf/0023-distortion.md) (lavapipe; the RTX 5070 Ti
+  timings are pending, its memory was held by another process).

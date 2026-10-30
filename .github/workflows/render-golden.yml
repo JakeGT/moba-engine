@@ -18,9 +18,10 @@ jobs:
   renderer-gate:
     name: renderer-gate
     runs-on: ubuntu-latest
-    # Twelve lavapipe captures, the outline probe and the R8 culling probe's five extra
-    # captures run in sequence; the limit is a safety margin above that.
-    timeout-minutes: 30
+    # Thirteen lavapipe captures (ADR-0019 added the distortion one), the outline probe and
+    # the R8 culling probe's five extra captures run in sequence; the limit is a safety
+    # margin above that.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -305,6 +306,35 @@ jobs:
             cat $view-fingerprint.log
           done
           exit $status
+      # ADR-0019: heat haze on Ultra (MSAA resolved, the prepass unit mask, the stand-in units
+      # inside the haze). The fingerprint's tolerance cannot see a few-pixel shimmer, so the
+      # log must also show the distortion passes ran and were not switched off.
+      - name: Distortion capture with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          timeout 180 xvfb-run -a ./target/release/moba-client \
+            > distortion-capture.log 2>&1 || { cat distortion-capture.log; exit 1; }
+          test -s render-distortion-actual.ppm
+          if grep -F "distortion off" distortion-capture.log; then exit 1; fi
+          grep -o "gpu_distortion_runs=[0-9]* gpu_distortion_p50_ms=[0-9.]*" \
+            distortion-capture.log | tail -1 | grep . || { cat distortion-capture.log; exit 1; }
+        env:
+          MOBA_VFX_PREVIEW: cinder-zone
+          MOBA_QUALITY: ultra
+          MOBA_SMOKE_FRAMES: "120"
+          MOBA_CAPTURE_FRAME: "90"
+          MOBA_CAPTURE: render-distortion-actual.ppm
+          MOBA_FRAME_LOG: render-distortion.frames
+      - name: Compare distortion fingerprint
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          ./target/release/image-check render-distortion-actual.ppm \
+            --expected tests/golden/render-distortion-fingerprint.rgb \
+            --diff render-distortion-diff.ppm > distortion-fingerprint.log 2>&1
+          status=$?
+          cat distortion-fingerprint.log
+          exit $status
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -361,4 +391,8 @@ jobs:
             render-decals-diff.ppm
             decals-capture.log
             decals-fingerprint.log
+            render-distortion-actual.ppm
+            render-distortion-diff.ppm
+            distortion-capture.log
+            distortion-fingerprint.log
           if-no-files-found: ignore

@@ -231,5 +231,18 @@ mod tests {
             stage_totals(&water_sets, vk::ShaderStageFlags::FRAGMENT).samplers,
             14
         );
+        // ADR-0019: the heat haze has its own layout (the VFX frame set and the copy, depth
+        // and unit-ID samplers), so the scene's 16 fragment samplers are unchanged.
+        let vfx_frame = crate::passes::vfx::frame_set_bindings();
+        let distortion = crate::passes::vfx::distortion_set_bindings();
+        let distortion_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 2] = [&vfx_frame, &distortion];
+        assert!(check("distortion", &distortion_sets, minimum).is_ok());
+        let distortion_fragment = stage_totals(&distortion_sets, vk::ShaderStageFlags::FRAGMENT);
+        assert_eq!(distortion_fragment.samplers, 3);
+        assert_eq!(distortion_fragment.storage_buffers, 0);
+        assert_eq!(
+            stage_totals(&distortion_sets, vk::ShaderStageFlags::VERTEX).storage_buffers,
+            2
+        );
     }
 }

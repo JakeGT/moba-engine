@@ -88,9 +88,18 @@ fn main() {
     // tall props off the lanes (a warning); with water and foliage (ADR-0017 §4), water on
     // the board and wadeable, and warnings for water at structures, spawns or walls,
     // overlapping bodies and brush that would read as cover.
-    let (map_errors, map_warnings) = map_consistency(&content, pack_dir);
+    let (map_errors, map_warnings, ambient) = map_consistency(&content, pack_dir);
     let map_error_count = map_errors.len();
     errors.extend(map_errors);
+    // Client-local effects (ADR-0013, ADR-0019): every `vfx/*.toml` loads (heat haze fields
+    // included), and every effect the bindings or the map's `[[effects]]` name exists. They
+    // are cosmetic and not part of the content hash, but broken content is never shipped.
+    let referenced: Vec<(&str, &str)> = ambient
+        .iter()
+        .map(|(who, effect)| (who.as_str(), effect.as_str()))
+        .collect();
+    let vfx = moba_assets::check_vfx_dir(pack_dir, &referenced);
+    errors.extend(vfx.errors);
     // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
     // would load. One descriptor set per textured material; the pool is sized from this.
     let materials = content.assets.material_report(pack_dir);
@@ -279,12 +288,15 @@ fn main() {
 /// `maps/<visuals>.toml` under the pack directory whenever it exists, listed or not, because
 /// the client loads that file by name. Listed descriptors that do not load (or resolve
 /// outside the pack) are skipped, since the file check above already reports them; an
-/// unlisted `maps/<visuals>.toml` that does not load is an error here.
+/// unlisted `maps/<visuals>.toml` that does not load is an error here. The third list holds
+/// the effects the descriptors' `[[effects]]` name (ADR-0019), as `(who, effect)`.
+#[allow(clippy::type_complexity)] // Three plain lists.
 fn map_consistency(
     content: &moba_game::GameContent,
     pack_dir: &std::path::Path,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+    let mut ambient = Vec::new();
     let name = content.map.visuals_name();
     let root = pack_dir.canonicalize().ok();
     let site = map_site::terrain_site(&content.map);
@@ -341,8 +353,14 @@ fn map_consistency(
         let label = |line: String| format!("map visuals '{name}': {line}");
         errors.extend(report.errors.into_iter().map(label));
         warnings.extend(report.warnings.into_iter().map(label));
+        for effect in &visuals.effects {
+            ambient.push((
+                format!("map visuals '{name}' [[effects]]"),
+                effect.effect.clone(),
+            ));
+        }
     }
-    (errors, warnings)
+    (errors, warnings, ambient)
 }
 
 /// `triangles=… joints=… texture_kib=…` of one model.

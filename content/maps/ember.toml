@@ -40,6 +40,32 @@ height = 8.0
 yaw = 270.0
 mesh = "crystal"
 
+# Heat haze over the crystals (ADR-0019): looping client-local effects, High and up only.
+[[effects]]
+effect = "heat-vent"
+position = [96, 72]
+radius = 2.0
+
+[[effects]]
+effect = "heat-vent"
+position = [160, 184]
+radius = 2.0
+
+[[effects]]
+effect = "heat-vent"
+position = [121, 138]
+radius = 2.5
+
+[[effects]]
+effect = "heat-vent"
+position = [52, 84]
+radius = 1.6
+
+[[effects]]
+effect = "heat-vent"
+position = [204, 172]
+radius = 1.6
+
 # Lighting and art direction (R2a, ADR-0011): a low, hot sun through smoke, ember-orange
 # rims so units read against the scorched ground, warm painted specular.
 [lighting]

@@ -11,6 +11,7 @@
 //! [[emitters]]
 //! primitive = "sprite"     # sprite | flipbook | trail | beam | ring | mesh
 //! blend = "additive"       # additive | alpha (weighted blended OIT; Low draws it unsorted)
+//!                          # | distortion (heat haze, below; High and up)
 //! sprite = "soft"          # an atlas cell, see VFX_SPRITES
 //! anchor = "target"        # target | source | line (from the source to the target)
 //! burst = 24               # particles at `delay`
@@ -26,6 +27,23 @@
 //! color_end = [0.8, 0.1, 0.0, 0.0]
 //! gravity = -2.0           # m/s² along +Y
 //! drag = 1.0               # 1/s
+//! ```
+//!
+//! A **distortion** emitter (heat haze, ADR-0019) writes a screen-space offset instead of
+//! colour: camera-facing sprites that bend the scene behind them on High and Ultra. It takes
+//! no `color`, `color_end`, `team_tint`, `width`, `fps` or `telegraph`, and only the
+//! `sprite` primitive:
+//!
+//! ```toml
+//! [[emitters]]
+//! blend = "distortion"
+//! distortion = 0.6         # strength at birth, a fraction of the tier's pixel cap, 0.05..=1
+//! distortion_end = 0.0     # strength at the end of life, 0..=1 (default 0)
+//! distortion_scale = 2.0   # noise cells across the sprite, 0.5..=8 (default 2)
+//! distortion_speed = 1.0   # rise speed, sprite heights per second, 0..=8 (default 1)
+//! fallback_color = [1.0, 0.4, 0.1, 0.1]  # optional faint additive sprite (`sprite`) where
+//!                          # distortion is off (Low, Medium): RGB 0..=4, alpha 0..=0.5;
+//!                          # without it the emitter is skipped there
 //! ```
 //!
 //! An effect may also project up to [`MAX_VFX_DECALS`] ground decals (ADR-0017): telegraph
@@ -222,6 +240,27 @@ pub enum VfxBlend {
     Additive,
     /// Alpha blended through weighted blended order-independent transparency.
     Alpha,
+    /// Heat haze (ADR-0019): refracts the scene behind the sprite by a capped screen-space
+    /// offset instead of adding colour. High and Ultra only; see [`VfxDistortion`].
+    Distortion,
+}
+
+/// The authored parameters of a [`VfxBlend::Distortion`] emitter (ADR-0019).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct VfxDistortion {
+    /// Strength at birth, a fraction of the tier's pixel cap, `0.05..=1`.
+    pub strength: f32,
+    /// Strength at the end of life, `0..=1`.
+    pub strength_end: f32,
+    /// Noise cells across the sprite, `0.5..=8`.
+    pub scale: f32,
+    /// Noise rise speed, sprite heights per second, `0..=8`.
+    pub speed: f32,
+    /// The faint additive sprite drawn instead where distortion is off (Low, Medium, or
+    /// switched off), linear RGBA (RGB `0..=4`, alpha `0..=0.5`); `None` skips the emitter
+    /// there.
+    pub fallback_color: Option<[f32; 4]>,
 }
 
 /// Where an emitter spawns.
@@ -347,6 +386,9 @@ pub struct VfxEmitter {
     /// An area telegraph: enemy instances keep a minimum opacity and are never culled by
     /// budgets (roadmap §2 readability rules).
     pub telegraph: bool,
+    /// The heat-haze parameters; `Some` exactly when `blend` is [`VfxBlend::Distortion`]
+    /// (whose `color` and `color_end` are then unused zeros).
+    pub distortion: Option<VfxDistortion>,
 }
 
 /// The footprint of a ground decal.
@@ -565,6 +607,86 @@ pub fn vfx_path(root: &Path, name: &str) -> Option<std::path::PathBuf> {
     valid_vfx_name(name).then(|| root.join("vfx").join(format!("{name}.toml")))
 }
 
+/// What [`check_vfx_dir`] found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VfxDirReport {
+    /// Effect files that loaded.
+    pub effects: usize,
+    /// Effect or bindings files that do not load, and effects referenced but missing.
+    pub errors: Vec<String>,
+}
+
+/// Validates a content root's client-local effects (`<root>/vfx`, `content-check`): every
+/// `vfx/<name>.toml` must load ([`VfxEffect::load_file`], so every field of every emitter,
+/// heat haze included, is checked), `vfx/bindings.toml` must load when present and every
+/// effect it names must exist, as must each of `referenced` (`(who, effect)` pairs, such as
+/// a map's `[[effects]]`). A missing `vfx` directory is fine (no effects) unless something
+/// references an effect.
+#[must_use]
+pub fn check_vfx_dir(root: &Path, referenced: &[(&str, &str)]) -> VfxDirReport {
+    let mut report = VfxDirReport::default();
+    let dir = root.join("vfx");
+    let mut known: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "toml")
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if stem == "bindings" {
+                continue;
+            }
+            if !valid_vfx_name(stem) {
+                report.errors.push(format!(
+                    "vfx/{stem}.toml: not a valid effect name (1-{MAX_VFX_NAME} of A-Z a-z 0-9 _ -)"
+                ));
+                continue;
+            }
+            match VfxEffect::load_file(&path) {
+                Ok(_) => {
+                    report.effects += 1;
+                    known.push(String::from(stem));
+                }
+                Err(error) => report.errors.push(format!("vfx/{stem}.toml: {error}")),
+            }
+        }
+    }
+    let exists = |name: &str| known.iter().any(|known| known == name);
+    let bindings = dir.join("bindings.toml");
+    if bindings.exists() {
+        match VfxBindings::load_file(&bindings) {
+            Ok(bindings) => {
+                for name in bindings.effect_names() {
+                    if !exists(name) {
+                        report.errors.push(format!(
+                            "vfx/bindings.toml names effect '{name}', but vfx/{name}.toml does \
+                             not exist or does not load"
+                        ));
+                    }
+                }
+            }
+            Err(error) => report.errors.push(format!("vfx/bindings.toml: {error}")),
+        }
+    }
+    for (who, name) in referenced {
+        if !exists(name) {
+            report.errors.push(format!(
+                "{who} names effect '{name}', but vfx/{name}.toml does not exist or does not load"
+            ));
+        }
+    }
+    report
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawEffect {
@@ -744,7 +866,8 @@ struct RawEmitter {
     size: [f32; 2],
     #[serde(default)]
     size_end: Option<f32>,
-    color: [f32; 4],
+    #[serde(default)]
+    color: Option<[f32; 4]>,
     #[serde(default)]
     color_end: Option<[f32; 4]>,
     #[serde(default)]
@@ -761,6 +884,91 @@ struct RawEmitter {
     fps: Option<f32>,
     #[serde(default)]
     telegraph: bool,
+    #[serde(default)]
+    distortion: Option<f32>,
+    #[serde(default)]
+    distortion_end: Option<f32>,
+    #[serde(default)]
+    distortion_scale: Option<f32>,
+    #[serde(default)]
+    distortion_speed: Option<f32>,
+    #[serde(default)]
+    fallback_color: Option<[f32; 4]>,
+}
+
+impl RawEmitter {
+    /// Whether any heat-haze key is present.
+    const fn has_distortion_keys(&self) -> bool {
+        self.distortion.is_some()
+            || self.distortion_end.is_some()
+            || self.distortion_scale.is_some()
+            || self.distortion_speed.is_some()
+            || self.fallback_color.is_some()
+    }
+}
+
+/// Validates a distortion emitter's heat-haze keys and the keys it may not have (ADR-0019).
+fn distortion(raw: &RawEmitter, primitive: VfxPrimitive) -> Result<VfxDistortion, VfxError> {
+    if primitive != VfxPrimitive::Sprite {
+        return Err(VfxError::Invalid(
+            "a distortion emitter must use the sprite primitive",
+        ));
+    }
+    if raw.color.is_some() || raw.color_end.is_some() || raw.team_tint.is_some() {
+        return Err(VfxError::Invalid(
+            "a distortion emitter has no color, color_end or team_tint (use fallback_color)",
+        ));
+    }
+    if raw.width.is_some() || raw.fps.is_some() {
+        return Err(VfxError::Invalid(
+            "a distortion emitter has no width or fps",
+        ));
+    }
+    if raw.telegraph {
+        return Err(VfxError::Invalid(
+            "a distortion emitter cannot be a telegraph: telegraphs must stay crisp",
+        ));
+    }
+    let strength = raw.distortion.ok_or(VfxError::Invalid(
+        "a distortion emitter needs a distortion strength",
+    ))?;
+    let fallback_color = match raw.fallback_color {
+        Some(color) => {
+            for channel in &color[..3] {
+                check(
+                    *channel,
+                    (0.0, 4.0),
+                    "fallback_color must be RGB 0..=4, alpha 0..=0.5",
+                )?;
+            }
+            check(
+                color[3],
+                (0.0, 0.5),
+                "fallback_color must be RGB 0..=4, alpha 0..=0.5",
+            )?;
+            Some(color)
+        }
+        None => None,
+    };
+    Ok(VfxDistortion {
+        strength: check(strength, (0.05, 1.0), "distortion must be 0.05..=1")?,
+        strength_end: check(
+            raw.distortion_end.unwrap_or(0.0),
+            (0.0, 1.0),
+            "distortion_end must be 0..=1",
+        )?,
+        scale: check(
+            raw.distortion_scale.unwrap_or(2.0),
+            (0.5, 8.0),
+            "distortion_scale must be 0.5..=8",
+        )?,
+        speed: check(
+            raw.distortion_speed.unwrap_or(1.0),
+            (0.0, 8.0),
+            "distortion_speed must be 0..=8",
+        )?,
+        fallback_color,
+    })
 }
 
 fn check(value: f32, (min, max): (f32, f32), what: &'static str) -> Result<f32, VfxError> {
@@ -819,9 +1027,22 @@ fn emitter(raw: RawEmitter) -> Result<VfxEmitter, VfxError> {
     )?;
     let blend = keyword(
         raw.blend.as_deref(),
-        &[("additive", VfxBlend::Additive), ("alpha", VfxBlend::Alpha)],
-        "blend must be additive or alpha",
+        &[
+            ("additive", VfxBlend::Additive),
+            ("alpha", VfxBlend::Alpha),
+            ("distortion", VfxBlend::Distortion),
+        ],
+        "blend must be additive, alpha or distortion",
     )?;
+    let distortion = if blend == VfxBlend::Distortion {
+        Some(distortion(&raw, primitive)?)
+    } else if raw.has_distortion_keys() {
+        return Err(VfxError::Invalid(
+            "distortion keys need blend = \"distortion\"",
+        ));
+    } else {
+        None
+    };
     let default_sprite = match primitive {
         VfxPrimitive::Mesh => "solid",
         VfxPrimitive::Trail | VfxPrimitive::Beam => "beam",
@@ -894,7 +1115,12 @@ fn emitter(raw: RawEmitter) -> Result<VfxEmitter, VfxError> {
         .stop
         .map(|stop| check(stop, DELAY_RANGE, "stop must be 0..=30"))
         .transpose()?;
-    let color = check_color(raw.color, "color must be RGB 0..=32, alpha 0..=1")?;
+    let color = match (raw.color, distortion) {
+        (Some(color), None) => check_color(color, "color must be RGB 0..=32, alpha 0..=1")?,
+        (None, None) => return Err(VfxError::Invalid("an emitter needs a color")),
+        // A distortion emitter writes an offset, not colour (rejected above if given).
+        (_, Some(_)) => [0.0; 4],
+    };
     Ok(VfxEmitter {
         primitive,
         blend,
@@ -969,6 +1195,7 @@ fn emitter(raw: RawEmitter) -> Result<VfxEmitter, VfxError> {
         )?,
         fps: check(raw.fps.unwrap_or(0.0), FPS_RANGE, "fps must be 0..=120")?,
         telegraph: raw.telegraph,
+        distortion,
     })
 }
 
@@ -2083,5 +2310,120 @@ stamp = true
         );
         let full = VfxEffect::parse(&full).expect("full effect");
         assert_eq!((full.emitters.len(), full.decals.len()), (8, 4));
+    }
+
+    /// ADR-0019: a heat-haze emitter carries strength, scale, speed and an optional
+    /// fallback sprite; colour keys, other primitives, telegraphs and stray haze keys fail.
+    #[test]
+    fn check_vfx_dir_loads_every_effect_and_resolves_references() {
+        let root = std::env::temp_dir().join(format!("moba-vfx-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // No directory: nothing to check, unless something names an effect.
+        assert_eq!(
+            super::check_vfx_dir(&root, &[]),
+            super::VfxDirReport::default()
+        );
+        assert_eq!(
+            super::check_vfx_dir(&root, &[("map 'ember'", "heat-vent")])
+                .errors
+                .len(),
+            1
+        );
+        std::fs::create_dir_all(root.join("vfx")).expect("vfx dir");
+        let haze = "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]\n\
+                    blend = \"distortion\"\ndistortion = 0.5\n";
+        std::fs::write(root.join("vfx/heat-vent.toml"), haze).expect("write");
+        // A distortion emitter with a colour is invalid content.
+        std::fs::write(
+            root.join("vfx/bad.toml"),
+            format!("{haze}color = [1, 1, 1, 1]\n"),
+        )
+        .expect("write");
+        std::fs::write(
+            root.join("vfx/bindings.toml"),
+            "[defaults]\nhit = \"heat-vent\"\nzone = \"gone\"\n",
+        )
+        .expect("write");
+        let report =
+            super::check_vfx_dir(&root, &[("map 'ember'", "heat-vent"), ("map 'x'", "bad")]);
+        assert_eq!(report.effects, 1);
+        assert_eq!(report.errors.len(), 3, "{:?}", report.errors);
+        assert!(report.errors[0].starts_with("vfx/bad.toml: "));
+        assert!(report.errors[1].contains("'gone'"));
+        assert!(report.errors[2].starts_with("map 'x' names effect 'bad'"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parses_distortion_emitters_and_rejects_invalid_ones() {
+        let haze = "duration = 1\n[[emitters]]\nblend = \"distortion\"\nrate = 8\n\
+                    lifetime = [1, 1.5]\nsize = [1.5, 2]\ndistortion = 0.6\n";
+        let effect = VfxEffect::parse(haze).expect("haze");
+        let emitter = &effect.emitters[0];
+        assert_eq!(emitter.blend, VfxBlend::Distortion);
+        assert_eq!(emitter.color, [0.0; 4]);
+        let distortion = emitter.distortion.expect("distortion parameters");
+        assert!((distortion.strength - 0.6).abs() < 1e-6);
+        assert_eq!(distortion.strength_end, 0.0);
+        assert_eq!((distortion.scale, distortion.speed), (2.0, 1.0));
+        assert_eq!(distortion.fallback_color, None);
+        assert_eq!(
+            emitter.sprite.name, "soft",
+            "the fallback sprite defaults to soft"
+        );
+        let full = VfxEffect::parse(&format!(
+            "{haze}distortion_end = 0.2\ndistortion_scale = 4\ndistortion_speed = 3\n\
+             fallback_color = [1, 0.4, 0.1, 0.1]\nsprite = \"dot\"\n"
+        ))
+        .expect("haze with every key");
+        let distortion = full.emitters[0].distortion.expect("parameters");
+        assert_eq!((distortion.scale, distortion.speed), (4.0, 3.0));
+        assert_eq!(distortion.fallback_color, Some([1.0, 0.4, 0.1, 0.1]));
+        assert_eq!(full.emitters[0].sprite.name, "dot");
+        // Other emitters carry no haze parameters.
+        let plain = VfxEffect::parse(BOLT).expect("bolt");
+        assert!(
+            plain
+                .emitters
+                .iter()
+                .all(|emitter| emitter.distortion.is_none())
+        );
+        for bad in [
+            // Strength is required and range-checked.
+            haze.replace("distortion = 0.6\n", ""),
+            haze.replace("distortion = 0.6", "distortion = 0.01"),
+            haze.replace("distortion = 0.6", "distortion = 1.5"),
+            haze.replace("distortion = 0.6", "distortion = nan"),
+            format!("{haze}distortion_end = 2"),
+            format!("{haze}distortion_scale = 0.1"),
+            format!("{haze}distortion_scale = 9"),
+            format!("{haze}distortion_speed = -1"),
+            format!("{haze}fallback_color = [1, 1, 1, 0.9]"),
+            format!("{haze}fallback_color = [9, 1, 1, 0.1]"),
+            // Offsets, not colour; billboards only; never a telegraph.
+            format!("{haze}color = [1, 1, 1, 1]"),
+            format!("{haze}color_end = [1, 1, 1, 0]"),
+            format!("{haze}team_tint = 0.5"),
+            format!("{haze}width = 0.5"),
+            format!("{haze}fps = 12"),
+            format!("{haze}telegraph = true"),
+            format!("{haze}primitive = \"ring\""),
+            format!("{haze}primitive = \"trail\""),
+            format!("{haze}primitive = \"mesh\""),
+            format!("{haze}primitive = \"flipbook\"\nsprite = \"smoke\""),
+            format!("{haze}distortion_amount = 1"),
+            // Haze keys need the distortion blend; colour is required elsewhere.
+            String::from(
+                "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]\n\
+                 color = [1, 1, 1, 1]\ndistortion = 0.5",
+            ),
+            String::from(
+                "duration = 1\n[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]\n\
+                 color = [1, 1, 1, 1]\nfallback_color = [1, 1, 1, 0.1]",
+            ),
+            String::from("duration = 1\n[[emitters]]\nburst = 1\nlifetime = [1, 1]\nsize = [1, 1]"),
+        ] {
+            assert!(VfxEffect::parse(&bad).is_err(), "{bad:?}");
+        }
     }
 }

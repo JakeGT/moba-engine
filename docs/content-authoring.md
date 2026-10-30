@@ -500,12 +500,21 @@ color = [1.0, 0.42, 0.10]      # required: linear RGB, each 0..=1
 height = 11.0                  # optional: metres, 0.1..=32 (default 3)
 yaw = 45.0                     # optional: degrees about the vertical axis, -360..=360
 mesh = "crystal"               # optional: <root>/models/crystal.glb, else a built-in block
+
+[[effects]]                    # optional looping ambient effects, at most 16 (ADR-0019)
+effect = "heat-vent"           # required: <root>/vfx/heat-vent.toml
+position = [96, 72]            # required: world units, the pack's map coordinates
+radius = 2.0                   # optional: the effect's radius, 0.1..=20 (default 1)
 ```
 
 - **Walls** are the map's `[[map.walls]]` segments, the same data the server sends, so the
   local preview and a networked client draw the same walls. Each is the built-in block
   (2.5 m thick, `wall_height` tall) or, with `wall_mesh`, that mesh fitted to the same box: a
   wall mesh is authored along +X and stretched to the segment's length.
+- **Ambient effects** play their effect at `position` over and over (each play starts when
+  the last one's emission window ends), as a neutral effect: culled by distance, view and the
+  tier's budgets like any other, never a telegraph. The Ember map's heat vents are haze only,
+  so they show on High and Ultra and nowhere else. The authoring preview plays none.
 - **Props** are cosmetic only. They never block movement or vision; walls do the gameplay. A
   prop mesh is scaled uniformly to `height`, standing on the ground and centred on `position`.
   Meshes are static (a skin is ignored).
@@ -988,7 +997,7 @@ event_duration = false    # zones: emit for the zone's lifetime instead of `dura
 
 [[emitters]]
 primitive = "sprite"      # sprite | flipbook | trail | beam | ring | mesh
-blend = "additive"        # additive | alpha
+blend = "additive"        # additive | alpha | distortion (heat haze, below)
 sprite = "soft"           # an atlas sprite (below)
 anchor = "target"         # target | source | line (source to target)
 burst = 24                # particles at `delay` (0..=512)
@@ -1039,7 +1048,35 @@ scale_with_radius = false # multiply radius by the event's radius (zones)
   missing model or the Low tier draw a shard billboard instead).
 - **Blending.** `additive` adds light and never darkens. `alpha` is weighted blended
   order-independent transparency on Medium and up (no sorting needed) and unsorted
-  premultiplied blending on Low.
+  premultiplied blending on Low. `distortion` is heat haze (below).
+- **Heat haze** ([ADR-0019](adr/0019-distortion.md)): a `blend = "distortion"` emitter
+  bends the scene behind its sprites instead of adding colour, on High and Ultra only. It
+  must be a `sprite` emitter (always an upright billboard) and takes no `color`,
+  `color_end`, `team_tint`, `width`, `fps` or `telegraph`; instead:
+
+  ```toml
+  [[emitters]]
+  blend = "distortion"
+  rate = 6
+  lifetime = [1.2, 1.6]
+  size = [1.4, 1.8]
+  distortion = 0.7          # required: strength at birth, 0.05..=1 of the tier's pixel cap
+  distortion_end = 0.0      # strength at the end of life, 0..=1 (default 0)
+  distortion_scale = 2.0    # noise cells across the sprite, 0.5..=8 (default 2)
+  distortion_speed = 1.0    # noise rise, sprite heights per second, 0..=8 (default 1)
+  fallback_color = [1.0, 0.4, 0.1, 0.15]  # optional: a faint additive sprite where there is
+                                          #   no distortion (RGB 0..=4, alpha 0..=0.5)
+  ```
+
+  The offset is rising procedural noise, faded at the sprite's edge, over its first 15 % of
+  life, where it meets the scene and with view distance (70–110 m), and never longer than
+  the tier's cap: 6 px (High) or 8 px (Ultra) at a 1080-pixel render height, scaled with the
+  render height. **Units are never bent**: their pixels are kept and nothing is pulled out of
+  or into a silhouette (the prepass ID target masks them); geometry in front of the haze is
+  never pulled into it; particles, telegraphs, outlines and the HUD draw after it. Allied
+  haze is scaled by `ally_vfx_opacity`; haze is never exempt from budgets. On Low, Medium,
+  with `MOBA_DISTORTION=off`, on `MoltenVK` or without screen-space outlines the emitter is
+  skipped (no particle, no budget) unless it has a `fallback_color`.
 - **Sprites** (the 8×8 atlas layout): `soft`, `dot`, `ring`, `spark`, `star`, `shard`, `rune`,
   `beam`, `noise`, `swirl`, `cross`, `halo`, `solid`, and the flipbooks `burst` (16 frames),
   `smoke` (16) and `lightning` (8). The built-in atlas is procedural; `<root>/vfx/atlas.ktx2`
@@ -1120,7 +1157,9 @@ stamp = false             # persist after the effect (scorch marks), for `lifeti
 
 **Limits and fallback.** A descriptor is at most 16 KiB and a bindings file 32 KiB; unknown
 keys, wrong types and out-of-range or non-finite numbers are errors (the `vfx` fuzz target
-covers both parsers). A missing or invalid file is logged once (`[vfx] effect ...: ...; no
+covers both parsers). `content-check` loads every `vfx/*.toml` next to the pack and the
+bindings, and fails the pack when one does not load or when the bindings or a map's
+`[[effects]]` name an effect that does not exist. A missing or invalid file is logged once (`[vfx] effect ...: ...; no
 effect`) and plays nothing; a match never fails because of an effect. A missing or invalid
 `bindings.toml` turns effects off (`[vfx] ...; effects off`), as do `MOBA_VFX=off` and the
 `vfx = false` setting; projectiles then draw as cubes.

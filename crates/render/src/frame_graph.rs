@@ -23,6 +23,10 @@
 //! water_copy    (R3b; full water) hdr → refraction copy (transfer)
 //! water         (R3b; full water) water mesh → hdr, single-sampled after any MSAA resolve;
 //!               depth read-only + sampled, sampling the refraction copy
+//! distortion_copy (ADR-0019; High and up) hdr → distortion copy (transfer; aliases the
+//!               water's refraction copy and the OIT accumulation target)
+//! distortion    (ADR-0019) heat-haze sprites → hdr, single-sampled after any MSAA resolve;
+//!               depth read-only + sampled, sampling the copy and the outline IDs (unit mask)
 //! vfx_draw      particles → hdr (+ OIT accum/reveal), single-sampled after any MSAA
 //!               resolve; depth read-only + sampled (soft particles)
 //! vfx_resolve   OIT accum/reveal (sampled) blended over hdr (Medium and up)
@@ -124,6 +128,10 @@ pub(crate) enum PassKind {
     WaterCopy,
     /// Draws the water with refraction (R3b).
     Water,
+    /// Copies the HDR target for the heat haze (ADR-0019).
+    DistortionCopy,
+    /// Draws the heat-haze sprites, refracting the copy (ADR-0019).
+    Distortion,
     /// Renders the offscreen image of this [`UiImage`](crate::UiImage) slot.
     Offscreen(u8),
 }
@@ -227,6 +235,8 @@ pub(crate) struct FrameResources {
     /// The water's refraction copy of the HDR target; `None` unless water is
     /// [`WaterMode::Full`](crate::WaterMode::Full) (R3b).
     pub(crate) refraction: Option<ResourceId>,
+    /// The heat haze's copy of the HDR target; `None` without distortion (ADR-0019).
+    pub(crate) distortion: Option<ResourceId>,
 }
 
 /// The shadow map a frame renders, when shadows are on.
@@ -278,6 +288,9 @@ pub(crate) struct FrameSpec {
     pub(crate) upscale: bool,
     /// The full water's copy and draw passes (R3b, ADR-0017 §3).
     pub(crate) water: bool,
+    /// The heat haze's copy and draw passes (ADR-0019). Needs the particles and the outline
+    /// IDs (its unit mask); [`build`] ignores it without them.
+    pub(crate) distortion: bool,
 }
 
 impl FrameSpec {
@@ -307,6 +320,7 @@ impl FrameSpec {
             fxaa: false,
             upscale: false,
             water: false,
+            distortion: false,
         }
     }
 
@@ -521,6 +535,11 @@ pub(crate) fn build(
     let refraction = spec
         .water
         .then(|| graph.transient_image("water-refraction", image(spec.hdr_format, render)));
+    // ADR-0019 heat haze: the HDR target after the water, refracted by the haze sprites. The
+    // same description as the refraction copy and the OIT accumulation target, whose
+    // lifetimes it never overlaps, so it shares their slot (no extra VRAM).
+    let distortion = (spec.distortion && vfx.is_some() && outline_ids.is_some())
+        .then(|| graph.transient_image("distortion-copy", image(spec.hdr_format, render)));
     let ldr = (spec.fxaa || spec.upscale)
         .then(|| graph.transient_image("ldr", image(LDR_FORMAT, render)));
     let ldr2 = (spec.fxaa && spec.upscale)
@@ -712,6 +731,22 @@ pub(crate) fn build(
         }
         let _ = water;
     }
+    // ADR-0019: the heat haze refracts the scene and the water, under the particles.
+    if let (Some(copy), Some(vfx), Some(ids)) = (distortion, vfx, outline_ids) {
+        let _ = graph
+            .pass("distortion_copy", PassKind::DistortionCopy)
+            .access(hdr, Access::TransferRead)
+            .access(copy, Access::TransferWrite);
+        let _ = graph
+            .pass("distortion", PassKind::Distortion)
+            .access(hdr, Access::ColorReadWrite)
+            .access(depth, Access::DepthReadSampled)
+            .access(copy, Access::SampledFragment)
+            .access(ids.ids, Access::SampledFragment)
+            .access(vfx.particles, Access::VertexStorageRead)
+            .access(vfx.alive, Access::VertexStorageRead)
+            .access(vfx.args, Access::IndirectRead);
+    }
     if let Some(vfx) = vfx {
         let mut pass = graph
             .pass("vfx_draw", PassKind::VfxDraw)
@@ -838,6 +873,7 @@ pub(crate) fn build(
             outline_ids,
             contact,
             refraction,
+            distortion,
         },
     })
 }
@@ -1826,5 +1862,90 @@ mod tests {
                 assert_eq!(depth.new_layout, L::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
             }
         }
+    }
+
+    /// ADR-0019: the heat haze copies the HDR target after the water, then draws with the
+    /// depth read-only and sampled and the outline IDs sampled, right before the particles;
+    /// its copy shares a slot with the water's refraction copy or the OIT accumulation
+    /// target (no extra VRAM), and the largest frame stays within the graph's limits.
+    #[test]
+    fn distortion_copies_then_draws_after_the_water_and_before_the_particles() {
+        let mut largest = 0;
+        for spec in post_specs() {
+            for water in [false, true] {
+                let spec = FrameSpec {
+                    water,
+                    distortion: true,
+                    ..spec
+                };
+                let plain = build(&spec, false, 0).expect("the frame graph compiles");
+                let without = build(
+                    &FrameSpec {
+                        distortion: false,
+                        ..spec
+                    },
+                    false,
+                    0,
+                )
+                .expect("the frame graph compiles");
+                let on = spec.vfx != VfxMode::Off && spec.outline_ids;
+                assert_eq!(plain.resources.distortion.is_some(), on, "{spec:?}");
+                if !on {
+                    assert_eq!(kinds(&plain), kinds(&without), "ignored without its inputs");
+                    continue;
+                }
+                // Never an extra slot: the copy aliases the refraction copy or (OIT) the
+                // accumulation target; only Low's unsorted particles have neither, and Low
+                // has no distortion.
+                let extra = usize::from(!water && spec.vfx != VfxMode::Oit);
+                assert_eq!(
+                    plain.graph.slots().len(),
+                    without.graph.slots().len() + extra,
+                    "{spec:?}"
+                );
+                for (capture, offscreen) in [(false, 0), (true, OFFSCREEN_VARIANTS - 1)] {
+                    let frame = build(&spec, capture, offscreen).expect("the frame compiles");
+                    assert!(frame.graph.shares_transients_with(&plain.graph));
+                    assert_eq!(frame.graph.culled(), [] as [&str; 0]);
+                    let count = frame.graph.passes().len();
+                    assert!(count <= crate::graph::MAX_PASSES);
+                    largest = largest.max(count);
+                    let kinds = kinds(&frame);
+                    let at = |kind| kinds.iter().position(|&pass| pass == kind);
+                    let copy = at(PassKind::DistortionCopy).expect("distortion copy");
+                    let draw = at(PassKind::Distortion).expect("distortion");
+                    let scene = at(PassKind::Scene).expect("scene");
+                    assert_eq!(draw, copy + 1);
+                    assert_eq!(at(PassKind::VfxDraw), Some(draw + 1));
+                    let after = if water {
+                        at(PassKind::Water).expect("water")
+                    } else {
+                        scene
+                    };
+                    assert_eq!(copy, after + 1, "{spec:?}");
+                    let passes = frame.graph.passes();
+                    let source = barrier(&passes[copy], frame.resources.hdr);
+                    assert_eq!(source.new_layout, L::TRANSFER_SRC_OPTIMAL);
+                    let copied = frame.resources.distortion.expect("copy");
+                    let sampled = barrier(&passes[draw], copied);
+                    assert_eq!(
+                        (sampled.old_layout, sampled.new_layout),
+                        (L::TRANSFER_DST_OPTIMAL, L::SHADER_READ_ONLY_OPTIMAL)
+                    );
+                    // Read-only depth from here on (the water already moved it there).
+                    if !water {
+                        let depth = barrier(&passes[draw], frame.resources.depth);
+                        assert_eq!(depth.new_layout, L::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+                    }
+                    assert!(passes[draw].uses(frame.resources.depth));
+                    let ids = frame.resources.outline_ids.expect("ids").ids;
+                    assert!(passes[draw].uses(ids));
+                    let hdr = barrier(&passes[draw], frame.resources.hdr);
+                    assert_eq!(hdr.new_layout, L::COLOR_ATTACHMENT_OPTIMAL);
+                }
+            }
+        }
+        // The largest frame: 33 of 40 passes (ADR-0019).
+        assert_eq!(largest, 33);
     }
 }

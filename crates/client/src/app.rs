@@ -646,6 +646,7 @@ impl App for ClientApp {
             .with_compressed_textures(launch::compressed_textures())
             .with_lighting(Some(launch::lighting_config(self.quality)))
             .with_vfx(self.vfx.enabled())
+            .with_distortion(launch::distortion_enabled())
             .with_post(Some(launch::post_config(
                 self.quality,
                 self.render_scale,
@@ -1195,6 +1196,7 @@ impl App for ClientApp {
                         let socket = |unit: u32, name: &str| {
                             network_socket(anchors, models, animation, unit, name)
                         };
+                        vfx.sync_ambient(map_visuals.generation(), map_visuals.ambient_effects());
                         vfx.update(vfx_dt, render_tick, &view, anchors, &socket);
                         vfx::push_placeholders(vfx, units);
                         let vision = build_vision(network);
@@ -1463,6 +1465,7 @@ impl App for ClientApp {
                     let socket = |unit: u32, name: &str| {
                         network_socket(anchors, models, animation, unit, name)
                     };
+                    vfx.sync_ambient(map_visuals.generation(), map_visuals.ambient_effects());
                     vfx.update(vfx_dt, render_tick, &view, anchors, &socket);
                     vfx::push_placeholders(vfx, units);
                     // The local preview has no player hero: only a preview effect applies.

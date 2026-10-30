@@ -394,6 +394,23 @@ fn world_config_from(
     config
 }
 
+/// `false` when `MOBA_DISTORTION` is `off` (or `0`): no heat haze on any tier (ADR-0019).
+pub(crate) fn distortion_enabled() -> bool {
+    distortion_enabled_from(std::env::var("MOBA_DISTORTION").ok().as_deref())
+}
+
+fn distortion_enabled_from(value: Option<&str>) -> bool {
+    match value.map(str::trim) {
+        None => true,
+        Some(value) if value.eq_ignore_ascii_case("off") || value == "0" => false,
+        Some(value) if value.eq_ignore_ascii_case("on") || value == "1" => true,
+        Some(value) => {
+            eprintln!("MOBA_DISTORTION={value:?} is not on/off; using the tier's");
+            true
+        }
+    }
+}
+
 /// The decal, foliage and water features for `tier` (ADR-0017) with the `MOBA_DECALS=off`,
 /// `MOBA_FOLIAGE=off` and `MOBA_WATER=off|simple|full` overrides.
 pub(crate) fn environment_config(tier: moba_render::QualityTier) -> moba_render::EnvironmentConfig {
@@ -978,7 +995,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 /// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
-pub(crate) const GPU_LANES: [&str; 26] = [
+pub(crate) const GPU_LANES: [&str; 28] = [
     "shadow",
     "scene",
     "composite",
@@ -1005,6 +1022,8 @@ pub(crate) const GPU_LANES: [&str; 26] = [
     "fow_resolve",
     "water_copy",
     "water",
+    "distortion_copy",
+    "distortion",
 ];
 /// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
 /// shadows and outlines, ADR-0016).
@@ -1016,7 +1035,8 @@ const VFX_LANES: usize = 16;
 /// First lane that is a statistic rather than a pass time (particles, then R2b's lights).
 const STAT_LANES: usize = 19;
 /// First fog-of-war pass lane (R3a; runs only with the fog-of-war texture). The two full-water
-/// lanes after them (R3b, ADR-0017) run only with `MOBA_WATER=full` and a map with water.
+/// lanes after them (R3b, ADR-0017) run only with `MOBA_WATER=full` and a map with water, the
+/// two heat-haze lanes (ADR-0019) only on High and up.
 const FOG_LANES: usize = 22;
 
 /// One frame-log sample from `timings`, the same frame's particle `stats` and its binned
@@ -1055,6 +1075,8 @@ pub(crate) fn gpu_sample(
         pass("fow-resolve"),
         pass("water_copy"),
         pass("water"),
+        pass("distortion_copy"),
+        pass("distortion"),
     ]
 }
 
@@ -1411,6 +1433,11 @@ mod tests {
         );
         assert!(!off.decals && !off.foliage);
         assert_eq!(off.water, WaterMode::Simple);
+        assert!(super::distortion_enabled_from(None));
+        assert!(!super::distortion_enabled_from(Some(" OFF ")));
+        assert!(!super::distortion_enabled_from(Some("0")));
+        assert!(super::distortion_enabled_from(Some("on")));
+        assert!(super::distortion_enabled_from(Some("shimmer")));
         let none = environment_config_from(QualityTier::Ultra, env(&[("MOBA_WATER", "off")]));
         assert_eq!(none.water, WaterMode::Off);
         let bad = environment_config_from(QualityTier::Medium, env(&[("MOBA_WATER", "lava")]));
@@ -1453,10 +1480,17 @@ mod tests {
                     0.0,
                     0.0,
                     0.0,
+                    // ADR-0019: the heat haze ran in every other frame.
+                    if index % 2 == 0 { 0.01 } else { 0.0 },
+                    if index % 2 == 0 { 0.04 } else { 0.0 },
                 ]
             })
             .collect();
         let report = gpu_report(&samples);
+        assert!(report.contains("gpu_distortion_copy_runs=51 gpu_distortion_copy_p50_ms=0.010 "));
+        assert!(report.ends_with(
+            "gpu_distortion_runs=51 gpu_distortion_p50_ms=0.040 gpu_distortion_p95_ms=0.040 "
+        ));
         assert!(report.starts_with("gpu_shadow_p50_ms=0.250 gpu_shadow_p95_ms=0.475 "));
         assert!(report.contains("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));
@@ -1476,7 +1510,7 @@ mod tests {
         assert!(!report.contains("gpu_fow"));
         assert!(!report.contains("gpu_water"));
         assert!(report.contains("gpu_vfx_draw_p95_ms=0.950 "));
-        assert!(report.ends_with(
+        assert!(report.contains(
             "vfx_alive_p50=50.000 vfx_alive_p95=95.000 vfx_alive_max=100.000 \
              vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 \
              lights_p50=2.000 lights_p95=2.000 lights_max=2.000 "

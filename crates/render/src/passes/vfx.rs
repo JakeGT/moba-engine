@@ -8,10 +8,17 @@
 //! - `particles`: `max_particles` × [`GpuParticle`] (96 bytes), device local, persistent
 //!   across frames. A slot with `lifetime <= 0` is free.
 //! - `alive`: the compacted draw lists, rebuilt every frame: sprites in `[0, capacity)`,
-//!   then four mesh-slot regions of `capacity / 8` each.
-//! - `args`: 32 words: one `VkDrawIndirectCommand` (sprites), four
-//!   `VkDrawIndexedIndirectCommand`s (mesh slots), five raw list counters and three stats
-//!   (projected pixels, live particles, spawns). The layout is `include/vfx.glsl`'s.
+//!   then four mesh-slot regions of `capacity / 8` each, then the heat-haze (distortion)
+//!   list of `capacity / 8` (ADR-0019).
+//! - `args`: 40 words: one `VkDrawIndirectCommand` (sprites), four
+//!   `VkDrawIndexedIndirectCommand`s (mesh slots), five raw list counters, three stats
+//!   (projected pixels, live particles, spawns), then the distortion list's
+//!   `VkDrawIndirectCommand` and counter. The layout is `include/vfx.glsl`'s.
+//!
+//! **Distortion** (ADR-0019, High and up): `distortion` draws the distortion list with its
+//! own pipeline layout (the frame set plus the HDR copy, the scene depth and the unit ID
+//! target), refracting the copy the `distortion_copy` pass made. When no distortion particle
+//! can be live (the CPU knows every lifetime), the renderer records neither pass.
 //! - per frame in flight: the uniform block, the spawn upload (`max_spawns_per_frame`
 //!   records, host-visible) and a 128-byte host-readable copy of `args` for [`VfxStats`].
 //!
@@ -51,7 +58,9 @@ const MODE_SIMULATE: u32 = 1;
 const MODE_FINALIZE: u32 = 2;
 const WORKGROUP: u32 = 64;
 /// Words in the args buffer (see the module docs and `include/vfx.glsl`).
-const ARGS_WORDS: usize = 32;
+const ARGS_WORDS: usize = 40;
+/// The distortion list's `VkDrawIndirectCommand` (ADR-0019).
+const ARGS_DISTORT: usize = 32;
 const ARGS_BYTES: u64 = (ARGS_WORDS * 4) as u64;
 const ARGS_MESH: usize = 4;
 const STAT_PIXELS: usize = 29;
@@ -68,6 +77,8 @@ const MAX_DT: f32 = 0.1;
 const SOFT_DISTANCE: f32 = 0.6;
 /// Atlas cell drawn for mesh particles where meshes are unavailable (the `shard` sprite).
 const MESH_FALLBACK_CELL: u8 = 5;
+/// The particle flag of a heat-haze particle (`VFX_FLAG_DISTORT`).
+const FLAG_DISTORT: u32 = 256;
 const ACCUM_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const REVEAL_FORMAT: vk::Format = vk::Format::R16_SFLOAT;
 
@@ -106,6 +117,23 @@ struct VfxPush {
     slot: u32,
 }
 const PUSH_SIZE: u32 = core::mem::size_of::<VfxPush>() as u32;
+
+/// Push constants of the distortion pipeline (48 bytes, vertex + fragment). Must match
+/// `include/distortion.glsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct DistortionPush {
+    /// Last pixel of the render sub-rectangle (x, y), the offset cap (pixels), 1 = unit mask.
+    rect: [f32; 4],
+    /// Soft distance (m), view-distance fade start and end (m), unused.
+    fade: [f32; 4],
+    /// First index of the distortion list in `alive`.
+    list: [u32; 4],
+}
+const DISTORTION_PUSH_SIZE: u32 = core::mem::size_of::<DistortionPush>() as u32;
+const DISTORTION_PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
+    vk::ShaderStageFlags::VERTEX.as_raw() | vk::ShaderStageFlags::FRAGMENT.as_raw(),
+);
 const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
     vk::ShaderStageFlags::COMPUTE.as_raw() | vk::ShaderStageFlags::VERTEX.as_raw(),
 );
@@ -153,7 +181,11 @@ impl GpuParticle {
         };
         let (mut shape, mut cell, mut frames) = (spawn.shape, spawn.cell.min(63), spawn.frames);
         let mesh_slot = u32::from(spawn.mesh_slot.min(VFX_MESH_SLOTS as u8 - 1));
-        if shape == ParticleShape::Mesh && !mesh_ok {
+        let distortion = spawn.blend == ParticleBlend::Distortion;
+        if distortion {
+            // Heat haze is always an upright billboard (ADR-0019).
+            shape = ParticleShape::Billboard;
+        } else if shape == ParticleShape::Mesh && !mesh_ok {
             shape = ParticleShape::Billboard;
             cell = MESH_FALLBACK_CELL;
             frames = 1;
@@ -167,6 +199,7 @@ impl GpuParticle {
         };
         let blend_bits = match spawn.blend {
             ParticleBlend::Alpha => 4,
+            ParticleBlend::Distortion => FLAG_DISTORT,
             _ => 0,
         };
         let role_bits = match spawn.role {
@@ -336,6 +369,23 @@ impl SlotAllocator {
     }
 }
 
+/// Views and region the distortion pass renders into this frame (ADR-0019).
+pub(crate) struct DistortionTargets {
+    pub(crate) hdr: vk::ImageView,
+    pub(crate) depth: vk::ImageView,
+    /// The render sub-rectangle (top-left corner of the render-sized targets).
+    pub(crate) extent: vk::Extent2D,
+}
+
+/// The distortion pipeline's own layout and set (ADR-0019).
+struct DistortionResources {
+    pipeline_layout: PipelineLayout,
+    set: vk::DescriptorSet,
+    _layout: DescriptorSetLayout,
+    /// Bilinear, clamped: the HDR copy is sampled at sub-pixel offsets.
+    linear_sampler: Sampler,
+}
+
 /// Views the VFX passes render into or sample this frame.
 pub(crate) struct VfxTargets {
     pub(crate) hdr: vk::ImageView,
@@ -363,6 +413,8 @@ pub(crate) struct VfxPipelines {
     sprite: GraphicsPipeline,
     mesh: Option<GraphicsPipeline>,
     resolve: Option<GraphicsPipeline>,
+    /// The heat-haze pipeline (ADR-0019); `None` without distortion.
+    distortion: Option<GraphicsPipeline>,
 }
 
 /// The VFX passes' buffers, descriptor sets and pipelines.
@@ -374,6 +426,9 @@ pub(crate) struct VfxPass {
     default_atlas: GpuImage,
     texture_set: vk::DescriptorSet,
     resolve_set: Option<vk::DescriptorSet>,
+    distortion: Option<DistortionResources>,
+    /// Allocator-clock time until which a distortion particle may be live (ADR-0019).
+    distortion_until: f64,
     pipelines: VfxPipelines,
     pipeline_layout: PipelineLayout,
     resolve_pipeline_layout: PipelineLayout,
@@ -411,7 +466,9 @@ fn layout_binding(
 
 impl VfxPass {
     /// Allocates every buffer for `budget`, uploads the built-in atlas and builds the
-    /// pipelines. `oit` selects the weighted blended OIT draw (and the resolve pass).
+    /// pipelines. `oit` selects the weighted blended OIT draw (and the resolve pass);
+    /// `budget.distortion` the heat-haze pipeline and its set (ADR-0019), whose layout is
+    /// checked against the device's per-stage descriptor limits.
     #[allow(clippy::too_many_lines)] // One linear set-up sequence.
     pub(crate) fn new(
         device: &DeviceContext,
@@ -425,22 +482,8 @@ impl VfxPass {
         let capacity = budget.max_particles.max(WORKGROUP);
         let mesh_region = (capacity / 8).max(1);
         let max_spawns = budget.max_spawns_per_frame.clamp(1, capacity);
-        let storage = vk::DescriptorType::STORAGE_BUFFER;
-        let compute_vertex = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX;
-        let frame_layout = DescriptorSetLayout::new(
-            device.device.clone(),
-            &[
-                layout_binding(
-                    0,
-                    vk::DescriptorType::UNIFORM_BUFFER,
-                    compute_vertex | vk::ShaderStageFlags::FRAGMENT,
-                ),
-                layout_binding(1, storage, compute_vertex),
-                layout_binding(2, storage, vk::ShaderStageFlags::COMPUTE),
-                layout_binding(3, storage, compute_vertex),
-                layout_binding(4, storage, vk::ShaderStageFlags::COMPUTE),
-            ],
-        )?;
+        let frame_bindings = frame_set_bindings();
+        let frame_layout = DescriptorSetLayout::new(device.device.clone(), &frame_bindings)?;
         let sampled = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
         let fragment = vk::ShaderStageFlags::FRAGMENT;
         let texture_layout = DescriptorSetLayout::new(
@@ -457,6 +500,22 @@ impl VfxPass {
                 layout_binding(1, sampled, fragment),
             ],
         )?;
+        let distortion_bindings = distortion_set_bindings();
+        if budget.distortion {
+            crate::descriptor_budget::check(
+                "distortion",
+                &[&frame_bindings, &distortion_bindings],
+                crate::descriptor_budget::StageTotals {
+                    samplers: device.max_per_stage_samplers,
+                    sampled_images: device.max_per_stage_sampled_images,
+                    storage_buffers: device.max_per_stage_storage_buffers,
+                },
+            )?;
+        }
+        let distortion_layout = budget
+            .distortion
+            .then(|| DescriptorSetLayout::new(device.device.clone(), &distortion_bindings))
+            .transpose()?;
         let frame_count = u32::try_from(frames).expect("frame count fits u32");
         let pool = DescriptorPool::new(
             device.device.clone(),
@@ -465,13 +524,13 @@ impl VfxPass {
                     .ty(vk::DescriptorType::UNIFORM_BUFFER)
                     .descriptor_count(frame_count),
                 vk::DescriptorPoolSize::default()
-                    .ty(storage)
+                    .ty(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(4 * frame_count),
                 vk::DescriptorPoolSize::default()
                     .ty(sampled)
-                    .descriptor_count(4),
+                    .descriptor_count(7),
             ],
-            frame_count + 2,
+            frame_count + 3,
         )?;
         let push = [vk::PushConstantRange::default()
             .stage_flags(PUSH_STAGES)
@@ -487,6 +546,20 @@ impl VfxPass {
             &[resolve_layout.handle()],
             &[],
         )?;
+        let distortion_push = [vk::PushConstantRange::default()
+            .stage_flags(DISTORTION_PUSH_STAGES)
+            .offset(0)
+            .size(DISTORTION_PUSH_SIZE)];
+        let distortion_pipeline_layout = distortion_layout
+            .as_ref()
+            .map(|layout| {
+                PipelineLayout::with_push_constants(
+                    device.device.clone(),
+                    &[frame_layout.handle(), layout.handle()],
+                    &distortion_push,
+                )
+            })
+            .transpose()?;
 
         let buffer = |name: &str, size: u64, usage, location| {
             GpuBuffer::new(
@@ -501,7 +574,9 @@ impl VfxPass {
         let particle_bytes = core::mem::size_of::<GpuParticle>() as u64;
         let range_limit = u64::from(device.max_storage_buffer_range);
         let particles_size = particle_bytes * u64::from(capacity);
-        let alive_size = 4 * (u64::from(capacity) + u64::from(mesh_region) * VFX_MESH_SLOTS as u64);
+        // Sprites, the four mesh-slot regions, then the distortion list (ADR-0019).
+        let alive_size =
+            4 * (u64::from(capacity) + u64::from(mesh_region) * (VFX_MESH_SLOTS as u64 + 1));
         if particles_size > range_limit || alive_size > range_limit {
             return Err(RenderError::Vfx(
                 "the particle budget exceeds the storage-buffer range",
@@ -534,6 +609,7 @@ impl VfxPass {
             .map(|_| frame_layout.handle())
             .chain([texture_layout.handle()])
             .chain(oit.then(|| resolve_layout.handle()))
+            .chain(distortion_layout.as_ref().map(DescriptorSetLayout::handle))
             .collect();
         let sets = pool.allocate(&device.device, &sets_layouts)?;
         let mut frame_buffers = Vec::with_capacity(frames);
@@ -570,6 +646,9 @@ impl VfxPass {
         }
         let texture_set = sets[frames];
         let resolve_set = oit.then(|| sets[frames + 1]);
+        let distortion_set = budget
+            .distortion
+            .then(|| sets[frames + 1 + usize::from(oit)]);
 
         let atlas_sampler = Sampler::new(
             device.device.clone(),
@@ -598,13 +677,39 @@ impl VfxPass {
         let pipelines = build_pipelines(
             device,
             shaders,
-            pipeline_layout.handle(),
-            resolve_pipeline_layout.handle(),
+            &PipelineLayouts {
+                particles: pipeline_layout.handle(),
+                resolve: resolve_pipeline_layout.handle(),
+                distortion: distortion_pipeline_layout
+                    .as_ref()
+                    .map(PipelineLayout::handle),
+            },
             hdr_format,
             depth_format,
             oit,
             budget.mesh_particles,
         )?;
+        let distortion = match (
+            distortion_layout,
+            distortion_pipeline_layout,
+            distortion_set,
+        ) {
+            (Some(layout), Some(pipeline_layout), Some(set)) => Some(DistortionResources {
+                pipeline_layout,
+                set,
+                _layout: layout,
+                linear_sampler: Sampler::new(
+                    device.device.clone(),
+                    &vk::SamplerCreateInfo::default()
+                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::LINEAR)
+                        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                )?,
+            }),
+            _ => None,
+        };
         let pass = Self {
             frames: frame_buffers,
             particles,
@@ -614,6 +719,8 @@ impl VfxPass {
             default_atlas,
             texture_set,
             resolve_set,
+            distortion,
+            distortion_until: f64::NEG_INFINITY,
             pipelines,
             pipeline_layout,
             resolve_pipeline_layout,
@@ -653,8 +760,14 @@ impl VfxPass {
         build_pipelines(
             device,
             shaders,
-            self.pipeline_layout.handle(),
-            self.resolve_pipeline_layout.handle(),
+            &PipelineLayouts {
+                particles: self.pipeline_layout.handle(),
+                resolve: self.resolve_pipeline_layout.handle(),
+                distortion: self
+                    .distortion
+                    .as_ref()
+                    .map(|distortion| distortion.pipeline_layout.handle()),
+            },
             self.hdr_format,
             self.depth_format,
             self.oit,
@@ -707,14 +820,16 @@ impl VfxPass {
         }
     }
 
-    /// Points the descriptor sets at this swapchain size's depth and OIT targets. Only call
-    /// while no submitted frame uses them (at creation and after the resize's idle wait).
+    /// Points the descriptor sets at this swapchain size's depth, OIT targets and (with
+    /// distortion) the HDR copy and the unit ID target. Only call while no submitted frame
+    /// uses them (at creation and after the resize's idle wait).
     pub(crate) fn bind_targets(
         &mut self,
         device: &DeviceContext,
         depth: vk::ImageView,
         accum: Option<vk::ImageView>,
         reveal: Option<vk::ImageView>,
+        distortion: Option<(vk::ImageView, vk::ImageView)>,
     ) {
         self.depth_view = depth;
         // Without soft particles (Low, portability-subset devices) the shader never samples
@@ -757,9 +872,48 @@ impl VfxPass {
                 );
             }
         }
+        // ADR-0019: the copy (bilinear), the depth (read-only attachment of the same pass,
+        // like the particles' soft depth) and the unit IDs (point).
+        let copy_info;
+        let distortion_depth_info;
+        let ids_info;
+        if let (Some(resources), Some((copy, ids))) = (&self.distortion, distortion) {
+            copy_info = [vk::DescriptorImageInfo::default()
+                .sampler(resources.linear_sampler.handle())
+                .image_view(copy)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            distortion_depth_info = [vk::DescriptorImageInfo::default()
+                .sampler(self.point_sampler.handle())
+                .image_view(depth)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)];
+            ids_info = [vk::DescriptorImageInfo::default()
+                .sampler(self.point_sampler.handle())
+                .image_view(ids)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            for (binding, info) in [(0, &copy_info), (1, &distortion_depth_info), (2, &ids_info)] {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(resources.set)
+                        .dst_binding(binding)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(info),
+                );
+            }
+        }
         // SAFETY: every set, sampler and view is live and no pending command buffer uses the
         // sets (see the method contract).
         unsafe { device.device.update_descriptor_sets(&writes, &[]) };
+    }
+
+    /// Whether the heat-haze pipeline exists (ADR-0019).
+    pub(crate) fn has_distortion(&self) -> bool {
+        self.distortion.is_some() && self.pipelines.distortion.is_some()
+    }
+
+    /// Whether a distortion particle may be live this frame (after [`Self::prepare`]): the
+    /// renderer records the copy and the draw only then (ADR-0019).
+    pub(crate) fn distortion_live(&self) -> bool {
+        self.has_distortion() && self.allocator.clock < self.distortion_until
     }
 
     /// The particle state, compacted lists and indirect arguments (render-graph imports).
@@ -789,12 +943,14 @@ impl VfxPass {
         let meshes = (0..VFX_MESH_SLOTS)
             .map(|slot| words[ARGS_MESH + slot * 5 + 1])
             .sum();
+        let distortion = words[ARGS_DISTORT + 1];
         let pixels = u64::from(words[STAT_PIXELS]);
         self.latest = Some(VfxStats {
             frame: buffers.sequence,
             alive: words[STAT_ALIVE],
             sprites: words[1],
             meshes,
+            distortion,
             spawned: words[STAT_SPAWNED],
             dropped: buffers.dropped,
             pixels,
@@ -839,14 +995,25 @@ impl VfxPass {
         let wanted = vfx.spawns.len();
         let mut dropped = wanted.saturating_sub(limit);
         let mut count = 0usize;
+        let distortion = self.distortion.is_some() && self.pipelines.distortion.is_some();
         if let Some(upload) = buffers.spawns.mapped_slice_mut::<GpuParticle>(limit) {
             for spawn in &vfx.spawns[..wanted.min(limit)] {
+                let haze = spawn.blend == ParticleBlend::Distortion;
+                if haze && !distortion {
+                    // Heat haze where distortion is off: skipped, not dropped (ADR-0019).
+                    continue;
+                }
                 let slot_ok = mesh_ok[usize::from(spawn.mesh_slot).min(VFX_MESH_SLOTS - 1)];
                 let encoded = GpuParticle::encode(spawn, 0, slot_ok);
                 let Some(slot) = self.allocator.allocate(encoded.lifetime()) else {
                     dropped += 1;
                     continue;
                 };
+                if haze {
+                    let until =
+                        self.allocator.clock + f64::from(encoded.lifetime()) + EXPIRY_MARGIN;
+                    self.distortion_until = self.distortion_until.max(until);
+                }
                 upload[count] = encoded;
                 upload[count].misc[3] = slot;
                 count += 1;
@@ -1154,6 +1321,138 @@ impl VfxPass {
     }
 }
 
+impl VfxPass {
+    /// Records the heat-haze draw (ADR-0019) into the HDR target: the distortion list, depth
+    /// tested read-only against the scene, refracting the copy within the render
+    /// sub-rectangle by at most `cap` pixels. `mask` uses the unit ID target. The caller
+    /// checks [`Self::distortion_live`].
+    pub(crate) fn record_distortion(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        frame: usize,
+        targets: &DistortionTargets,
+        cap: f32,
+    ) {
+        let (Some(resources), Some(pipeline)) = (&self.distortion, &self.pipelines.distortion)
+        else {
+            return;
+        };
+        let extent = targets.extent;
+        let colors = [vk::RenderingAttachmentInfo::default()
+            .image_view(targets.hdr)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE)];
+        // Read-only depth: tested, never written, and sampled in the same pass.
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(targets.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::NONE);
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            })
+            .layer_count(1)
+            .color_attachments(&colors)
+            .depth_attachment(&depth);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(
+            device,
+            command_buffer,
+            super::flipped_viewport(extent),
+            extent,
+        );
+        bind_graphics(device, command_buffer, pipeline);
+        let sets = [self.frames[frame].set, resources.set];
+        // SAFETY: both sets match the distortion layout (sets 0 and 1) and name live
+        // resources; the graph transitioned the copy and the IDs to SHADER_READ_ONLY_OPTIMAL
+        // and the depth to DEPTH_STENCIL_READ_ONLY_OPTIMAL.
+        unsafe {
+            device.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                resources.pipeline_layout.handle(),
+                0,
+                &sets,
+                &[],
+            );
+        }
+        let push = DistortionPush {
+            rect: [
+                extent.width.saturating_sub(1) as f32,
+                extent.height.saturating_sub(1) as f32,
+                cap,
+                1.0,
+            ],
+            fade: [
+                crate::distortion::SOFT_DISTANCE,
+                crate::distortion::FADE_START,
+                crate::distortion::FADE_END,
+                0.0,
+            ],
+            list: [
+                self.capacity + self.mesh_region * VFX_MESH_SLOTS as u32,
+                0,
+                0,
+                0,
+            ],
+        };
+        // SAFETY: the layout declares exactly this 48-byte vertex + fragment range at 0.
+        unsafe {
+            device.device.cmd_push_constants(
+                command_buffer,
+                resources.pipeline_layout.handle(),
+                DISTORTION_PUSH_STAGES,
+                0,
+                bytes_of(&push),
+            );
+        }
+        let offset = (ARGS_DISTORT * 4) as u64;
+        // SAFETY: the args buffer holds the distortion list's VkDrawIndirectCommand at
+        // `offset`, whose instance count the simulation clamped to the list's region (and
+        // the shader reads `alive` from the list's base within the buffer).
+        unsafe {
+            device
+                .device
+                .cmd_draw_indirect(command_buffer, self.args.handle(), offset, 1, 16);
+        }
+        device.cmd_end_rendering(command_buffer);
+    }
+}
+
+/// The VFX frame set (set 0 of the particle and distortion layouts): the uniform block, the
+/// particles, the spawn upload, the compacted lists and the arguments.
+pub(crate) fn frame_set_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; 5] {
+    let storage = vk::DescriptorType::STORAGE_BUFFER;
+    let compute_vertex = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::VERTEX;
+    [
+        layout_binding(
+            0,
+            vk::DescriptorType::UNIFORM_BUFFER,
+            compute_vertex | vk::ShaderStageFlags::FRAGMENT,
+        ),
+        layout_binding(1, storage, compute_vertex),
+        layout_binding(2, storage, vk::ShaderStageFlags::COMPUTE),
+        layout_binding(3, storage, compute_vertex),
+        layout_binding(4, storage, vk::ShaderStageFlags::COMPUTE),
+    ]
+}
+
+/// Set 1 of the distortion layout (ADR-0019): the HDR copy, the scene depth and the unit ID
+/// target, all fragment-stage combined image samplers. Not part of the scene layout.
+pub(crate) fn distortion_set_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; 3] {
+    let sampled = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
+    let fragment = vk::ShaderStageFlags::FRAGMENT;
+    [
+        layout_binding(0, sampled, fragment),
+        layout_binding(1, sampled, fragment),
+        layout_binding(2, sampled, fragment),
+    ]
+}
+
 /// The OIT target formats (accumulation, revealage).
 pub(crate) const fn oit_formats() -> (vk::Format, vk::Format) {
     (ACCUM_FORMAT, REVEAL_FORMAT)
@@ -1278,17 +1577,24 @@ fn clear_buffers(device: &DeviceContext, buffers: &[&GpuBuffer]) -> RenderResult
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // Every pipeline of the pass shares these inputs.
+/// The pipeline layouts of the VFX pipelines.
+struct PipelineLayouts {
+    particles: vk::PipelineLayout,
+    resolve: vk::PipelineLayout,
+    /// `None` without distortion (ADR-0019).
+    distortion: Option<vk::PipelineLayout>,
+}
+
 fn build_pipelines(
     device: &DeviceContext,
     shaders: &ShaderSource,
-    layout: vk::PipelineLayout,
-    resolve_layout: vk::PipelineLayout,
+    layouts: &PipelineLayouts,
     hdr_format: vk::Format,
     depth_format: vk::Format,
     oit: bool,
     meshes: bool,
 ) -> RenderResult<VfxPipelines> {
+    let (layout, resolve_layout) = (layouts.particles, layouts.resolve);
     let module = |name| shaders.module(device, name);
     let compute = module("vfx_simulate.comp")?;
     let stage = vk::PipelineShaderStageCreateInfo::default()
@@ -1358,11 +1664,31 @@ fn build_pipelines(
     } else {
         None
     };
+    let distortion = match layouts.distortion {
+        Some(layout) => {
+            let vertex = module("vfx_distort.vert")?;
+            let fragment = module("vfx_distort.frag")?;
+            Some(particle_pipeline(
+                device,
+                &ParticleSpec {
+                    layout,
+                    vertex: vertex.handle(),
+                    fragment: fragment.handle(),
+                    formats: &[hdr_format],
+                    depth_format,
+                    blend: Blend::Refract,
+                    mesh_input: false,
+                },
+            )?)
+        }
+        None => None,
+    };
     Ok(VfxPipelines {
         simulate,
         sprite,
         mesh,
         resolve,
+        distortion,
     })
 }
 
@@ -1374,6 +1700,9 @@ enum Blend {
     Premultiplied,
     /// `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`: the OIT resolve over the scene.
     Over,
+    /// `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` on colour, destination alpha kept: the heat haze
+    /// cross-fades overlapping sprites (ADR-0019).
+    Refract,
 }
 
 struct ParticleSpec<'a> {
@@ -1450,10 +1779,15 @@ fn particle_pipeline(
     let (src, dst) = match spec.blend {
         Blend::Add => (vk::BlendFactor::ONE, vk::BlendFactor::ONE),
         Blend::Premultiplied => (vk::BlendFactor::ONE, vk::BlendFactor::ONE_MINUS_SRC_ALPHA),
-        Blend::Over => (
+        Blend::Over | Blend::Refract => (
             vk::BlendFactor::SRC_ALPHA,
             vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
         ),
+    };
+    let (src_alpha, dst_alpha) = if spec.blend == Blend::Refract {
+        (vk::BlendFactor::ZERO, vk::BlendFactor::ONE)
+    } else {
+        (src, dst)
     };
     // Every attachment uses the same state, so `independentBlend` is not required.
     let attachment = vk::PipelineColorBlendAttachmentState::default()
@@ -1461,8 +1795,8 @@ fn particle_pipeline(
         .src_color_blend_factor(src)
         .dst_color_blend_factor(dst)
         .color_blend_op(vk::BlendOp::ADD)
-        .src_alpha_blend_factor(src)
-        .dst_alpha_blend_factor(dst)
+        .src_alpha_blend_factor(src_alpha)
+        .dst_alpha_blend_factor(dst_alpha)
         .alpha_blend_op(vk::BlendOp::ADD)
         .color_write_mask(vk::ColorComponentFlags::RGBA);
     let attachments = [attachment; 3];
@@ -1501,7 +1835,15 @@ mod tests {
         assert_eq!(core::mem::size_of::<GpuParticle>(), 96);
         assert_eq!(core::mem::size_of::<VfxUniform>(), 192);
         assert_eq!(core::mem::size_of::<VfxPush>(), 8);
-        assert_eq!(ARGS_WORDS, 32);
+        assert_eq!(core::mem::size_of::<DistortionPush>(), 48);
+        assert_eq!(ARGS_WORDS, 40);
+        // The distortion command follows the sprite, mesh, counter and stat words.
+        assert_eq!(ARGS_DISTORT, STAT_SPAWNED + 1);
+        assert_eq!(
+            ARGS_DISTORT % 4,
+            0,
+            "16-byte aligned like every indirect command"
+        );
     }
 
     #[test]
@@ -1536,6 +1878,14 @@ mod tests {
         let without = GpuParticle::encode(&mesh, 0, false);
         assert_eq!(without.misc[0] & 3, 0, "billboard fallback");
         assert_eq!(without.misc[1] & 255, u32::from(MESH_FALLBACK_CELL));
+        // Heat haze (ADR-0019): its own flag, always an upright billboard.
+        let haze = ParticleSpawn::new(Vec3::ZERO, 1.0, 2.0, Vec4::new(0.6, 2.0, 1.0, 1.0))
+            .with_blend(ParticleBlend::Distortion)
+            .with_shape(ParticleShape::Ground)
+            .with_role(ParticleRole::Ally);
+        let gpu = GpuParticle::encode(&haze, 3, true);
+        assert_eq!(gpu.misc[0], FLAG_DISTORT | (1 << 3));
+        assert_eq!(gpu.misc[0] & 3, 0, "billboard");
         // Hostile values never reach the GPU as NaN.
         let bad = ParticleSpawn::new(Vec3::splat(f32::NAN), f32::NAN, f32::INFINITY, Vec4::NAN);
         let bad = GpuParticle::encode(&bad, 0, false);

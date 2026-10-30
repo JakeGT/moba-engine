@@ -253,6 +253,8 @@ resource to R6's graph (`MAX_PASSES` 32, `MAX_RESOURCES` 48 with a `u64` mask): 
 largest frame (both offscreen passes, fog of war, shadow, the prepass and AO, the scene, the
 two water passes, the three VFX passes, the bloom chain, exposure, composite, FXAA, upscale,
 UI and capture) has 29 passes.
+*Later:* [ADR-0019](0019-distortion.md) inserts `distortion_copy → distortion` between the
+water and `vfx_draw` (High and up) and raises `MAX_PASSES` to 40.
 
 ### 6. Set 3 and the descriptor budget
 Set 3 gains **binding 20**, the decal storage buffer (fragment), numbered past the bindings

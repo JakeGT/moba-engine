@@ -18,10 +18,11 @@
 use ash::vk;
 
 /// Most passes one graph may hold (the GPU profiler sizes its query pools from this). R6's
-/// post chain (ADR-0015), R3a's two fog-of-war passes and R3b's two full-water passes
-/// (ADR-0017) bring a frame with everything on (both offscreen passes and the capture
-/// included) to 29.
-pub(crate) const MAX_PASSES: usize = 32;
+/// post chain (ADR-0015), R2b's contact shadows and outlines (ADR-0016), R3a's two
+/// fog-of-war passes, R3b's two full-water passes (ADR-0017) and the heat haze's two passes
+/// (ADR-0019) bring a frame with everything on (both offscreen passes and the capture
+/// included) to 33.
+pub(crate) const MAX_PASSES: usize = 40;
 /// Most resources (imported + transient) one graph may declare (at most 64: a pass's
 /// resource set is a `u64` bit mask).
 pub(crate) const MAX_RESOURCES: usize = 48;
