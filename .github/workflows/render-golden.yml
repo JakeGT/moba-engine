@@ -18,9 +18,9 @@ jobs:
   renderer-gate:
     name: renderer-gate
     runs-on: ubuntu-latest
-    # Twelve lavapipe captures, the outline probe and the R8 culling probe (ten captures,
-    # about 10 minutes) run in sequence: about 25 minutes on a hosted runner.
-    timeout-minutes: 40
+    # Twelve lavapipe captures, the outline probe and the R8 culling probe's five extra
+    # captures run in sequence; the limit is a safety margin above that.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -72,6 +72,7 @@ jobs:
         env:
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE: render-actual.ppm
+          MOBA_FRAME_LOG: render.frames
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -99,6 +100,7 @@ jobs:
           MOBA_CAPTURE_TICK: "120"
           MOBA_SMOKE_FRAMES: "100000"
           MOBA_CAPTURE: render-network-actual.ppm
+          MOBA_FRAME_LOG: render-network.frames
       - name: Compare network fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
@@ -144,15 +146,6 @@ jobs:
         run: scripts/outline-probe.sh ./target/release/moba-client outline-probe
         env:
           RUN: xvfb-run -a
-      # Culling never changes what a player sees (R8, ADR-0018 §1): five scenes (the preview,
-      # the horizon view, Ultra with VAT minions, Low with hull outlines, the networked match)
-      # must be byte-identical with culling on and MOBA_GPU_CULL=off, and something must have
-      # been culled.
-      - name: Culling exactness probe
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
-        run: scripts/cull-probe.sh ./target/release/moba-client cull-probe
-        env:
-          RUN: xvfb-run -a
       # VAT golden (R4b): 64 stress minions in the local preview at 40 m, pinned (one tick per
       # frame), so the vertex-animation-texture path is checked pixel-wise.
       - name: VAT capture with validation + sync validation
@@ -193,6 +186,7 @@ jobs:
           MOBA_LOCAL_CAMERA_DISTANCE: "40"
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE: render-ultra-actual.ppm
+          MOBA_FRAME_LOG: render-ultra.frames
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare Ultra fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -215,6 +209,7 @@ jobs:
           MOBA_RENDER_SCALE: "0.75"
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE: render-low-actual.ppm
+          MOBA_FRAME_LOG: render-low.frames
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare Low scaled fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -239,7 +234,7 @@ jobs:
             > overview-capture.log 2>&1 || { cat overview-capture.log; exit 1; }
           test -s render-overview-actual.ppm
           MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_PREVIEW_CAMERA=-0.7,0.12,170 \
-            MOBA_CAPTURE=render-horizon-actual.ppm \
+            MOBA_CAPTURE=render-horizon-actual.ppm MOBA_FRAME_LOG=render-horizon.frames \
             timeout 180 xvfb-run -a ./target/release/moba-client \
             > horizon-capture.log 2>&1 || { cat horizon-capture.log; exit 1; }
           test -s render-horizon-actual.ppm
@@ -255,6 +250,18 @@ jobs:
             cat $view-fingerprint.log
           done
           exit $status
+      # Culling never changes what a player sees (R8, ADR-0018 §1): five scenes (the preview,
+      # the horizon view, Ultra with VAT minions, Low with hull outlines, the networked match)
+      # must be byte-identical with culling on and MOBA_GPU_CULL=off, and something must have
+      # been culled. The culled images are the golden captures above (same scenes, culling on
+      # by default, sync validation, with frame logs): the probe only adds the five
+      # culling-off captures, with plain validation (any message fails).
+      - name: Culling exactness probe
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/cull-probe.sh ./target/release/moba-client cull-probe
+        env:
+          RUN: xvfb-run -a
+          CULL_PROBE_REUSE: .
       # R3b environment coverage (ADR-0017): the showcase river close up from a low camera on
       # the default tier (full water with refraction, foliage, reeds, the carved bed), on Low
       # (simple water, thinned foliage) and on Ultra through the reeds on the bank (4x MSAA
@@ -320,6 +327,7 @@ jobs:
             ember-fingerprint.log
             outline-probe/
             cull-probe/
+            render*.frames
             render-ultra-actual.ppm
             render-ultra-diff.ppm
             ultra-capture.log
