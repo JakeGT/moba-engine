@@ -24,8 +24,8 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Simulation logic | **v8** | `crates/sim/src/replay.rs::SIM_LOGIC_VERSION` |
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
-| Golden image | 64×36 fingerprints (default scene + networked skinned capture), lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **634 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon), lavapipe, validation required | `.github/workflows/render-golden.yml` |
+| Tests | **676 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -56,8 +56,10 @@ crates/netsim     lossy-link conditioner
 crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader (ADR-0007),
                   animation sampling/blending/state machine (ADR-0012), bounded KTX2
                   textures and material descriptors (ADR-0010), VFX descriptors and the
-                  procedural particle atlas (ADR-0013)
-crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, terrain/fog, MSDF UI text,
+                  procedural particle atlas (ADR-0013), terrain generator and
+                  visual-vs-simulation map checks (ADR-0014)
+crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, splat terrain, fog-of-war
+                  texture, height fog + sky, MSDF UI text,
                   animated rig, GPU skinning, materials, pipeline cache, per-pass GPU timestamps,
                   compute GPU particles (ADR-0013)
 crates/shaders    GLSL -> SPIR-V build (shared #include files, enumerated permutations)

@@ -20,6 +20,8 @@
 layout(set = 0, binding = 0) uniform sampler2D ui_atlas;
 layout(set = 0, binding = 1) uniform sampler2D font_atlas;
 layout(set = 0, binding = 2) uniform sampler2D ui_images[UI_IMAGE_SLOTS];
+// The fog-of-war visibility of this frame (R3a; white without the texture), for MODE_FOG.
+layout(set = 0, binding = 3) uniform sampler2D fog_visibility;
 
 layout(push_constant) uniform UiPush {
     vec2 viewport;
@@ -48,6 +50,7 @@ const uint MODE_TEXT = 2u;
 const uint MODE_TEXT_SOFT = 3u;
 const uint MODE_SWEEP = 4u;
 const uint MODE_IMAGE = 5u;
+const uint MODE_FOG = 6u;
 
 const float TAU = 6.28318530718;
 
@@ -88,6 +91,11 @@ void main() {
         vec3 display = agx_tonemap(hdr * 0.25 * push.exposure, push.saturation);
         vec3 color = push.srgb_target != 0u ? pow(display, vec3(2.2)) : display;
         out_color = vec4(color * in_color.rgb, in_color.a);
+        return;
+    }
+    if (in_mode == MODE_FOG) {
+        float visible = textureLod(fog_visibility, in_uv, 0.0).r;
+        out_color = vec4(in_color.rgb, in_color.a * (1.0 - visible));
         return;
     }
     if (in_mode == MODE_ATLAS) {

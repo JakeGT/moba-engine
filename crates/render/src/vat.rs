@@ -40,15 +40,21 @@ pub(crate) struct VatMeshes {
     sampler: Sampler,
 }
 
+/// Bindings of the VAT pipelines' set 2: the mesh's VAT texture, vertex stage. Also counted
+/// by the VAT layout's descriptor budget (`descriptor_budget`).
+pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; 1] {
+    [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)]
+}
+
 impl VatMeshes {
     /// The set layout (one vertex-stage combined image sampler), a nearest clamp sampler and a
     /// pool for [`MAX_VAT_MESHES`] sets.
     pub(crate) fn new(device: &DeviceContext) -> RenderResult<Self> {
-        let binding = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)];
+        let binding = set_layout_bindings();
         let layout = DescriptorSetLayout::new(device.device.clone(), &binding)?;
         let count = u32::try_from(MAX_VAT_MESHES).unwrap_or(u32::MAX);
         let pool = DescriptorPool::new(

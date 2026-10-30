@@ -90,6 +90,11 @@ impl UiVertex {
     /// box-filtered over the pixel footprint, exposed and `AgX`-tonemapped like the scene,
     /// then multiplied by `color` (R7b).
     pub const MODE_IMAGE: u32 = 5;
+    /// The fog-of-war visibility texture as a mask (R3a): `color` where the team has no
+    /// vision, transparent where it has (`uv` = texture coordinates over the board, `0..1`
+    /// from the board's lowest x, z corner). Draws nothing when the renderer has no
+    /// fog-of-war texture.
+    pub const MODE_FOG: u32 = 6;
 }
 
 /// Packs a linear RGBA colour into the vertex `outline` field (red in the low byte).
@@ -708,6 +713,28 @@ impl UiDrawList {
     pub fn panel(&mut self, x: f32, y: f32, width: f32, height: f32, fill: Vec4, border: Vec4) {
         self.rect(x, y, width, height, fill);
         self.outline(x, y, width, height, 1.0, border);
+    }
+
+    /// Adds a fog-of-war mask over `x, y, width, height` (R3a, ADR-0014): `color` (alpha
+    /// included) wherever the team has no vision, clear where it has. `uv` is the
+    /// `[u0, v0, u1, v1]` region of the visibility texture the quad shows (`0..1` over the
+    /// board, `u` along world x, `v` along world z). The texture respects line-of-sight
+    /// walls and fades like the scene's fog. Without a fog-of-war texture
+    /// ([`FogOfWarMode::Texture`](crate::FogOfWarMode) off) the quad is transparent.
+    #[allow(clippy::too_many_arguments)] // Geometry, region and colour.
+    pub fn fog_mask(&mut self, x: f32, y: f32, width: f32, height: f32, uv: [f32; 4], color: Vec4) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        self.quad(
+            [x, y, x + width, y + height],
+            [uv[0], uv[1]],
+            [uv[2], uv[3]],
+            UiVertex::MODE_FOG,
+            [color; 4],
+            0,
+            [0.0; 2],
+        );
     }
 
     /// Adds a quad showing the `[u0, v0, u1, v1]` region of an offscreen [`UiImage`]

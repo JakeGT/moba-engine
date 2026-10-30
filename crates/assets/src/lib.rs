@@ -9,6 +9,16 @@
 //! [`MeshSkin`]/[`Skeleton`] carry skinning data and named clips.
 //! [`MapVisuals`] is the bounded per-map visuals descriptor (`maps/<name>.toml`, #287).
 //!
+//! Terrain, atmosphere and fog-of-war styling (ADR-0014) are descriptor tables too
+//! ([`MapTerrain`] with its [`TerrainLayer`]s and [`EdgeStyle`], [`MapAtmosphere`],
+//! [`MapFogStyle`]). [`generate_terrain`] is the pure, deterministic generator the client and
+//! `content-check` share: from the descriptor and the simulation's map ([`TerrainSite`]) it
+//! builds a [`Heightfield`] (relief clamped to [`MAX_PLAY_RELIEF`] on the board, rising
+//! hills or cliffs outside) and, without a named splat map, the splat weights. [`wall_box`]
+//! and [`edge_placements`] are the shared placement math for walls and edge props, and
+//! [`check_map_consistency`] reports where visuals contradict the simulation
+//! ([`MapConsistency`]).
+//!
 //! The animation runtime (ADR-0012) is pure CPU code with no GPU dependency: [`Pose`],
 //! [`BoneMask`], [`BlendSpace1d`] and [`BlendSpace2d`] sample and blend clips; [`AnimationSet`] is the bounded
 //! client-local state-machine descriptor (`animations/<model>.toml`), [`AnimationGraph`]
@@ -41,6 +51,7 @@ mod mesh;
 mod pose;
 mod skin;
 mod skin_lod;
+mod terrain;
 mod texture;
 mod vat;
 mod vfx;
@@ -63,9 +74,12 @@ pub use environment::{
 #[cfg(feature = "glb")]
 pub use glb::{GlbError, MAX_GLB_BYTES, MAX_JSON_BYTES, load_glb, load_glb_file};
 pub use map_visuals::{
-    DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_ROUGHNESS, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT,
-    MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MESH_NAME, MAX_SHADOW_STRENGTH,
-    MIN_SUN_ELEVATION, MapLighting, MapProp, MapVisuals, MapVisualsError, valid_mesh_name,
+    DEFAULT_EDGE_HEIGHT, DEFAULT_EDGE_MESH_HEIGHT, DEFAULT_EDGE_SPACING, DEFAULT_LANE_WIDTH,
+    DEFAULT_LAYER_TILING, DEFAULT_PROP_HEIGHT, DEFAULT_TERRAIN_RELIEF, DEFAULT_TERRAIN_ROUGHNESS,
+    DEFAULT_TERRAIN_SEED, DEFAULT_UNIT_ROUGHNESS, DEFAULT_WALL_HEIGHT, EdgeStyle, FOW_DARKEN_RANGE,
+    MAX_FOG_OPACITY, MAX_MAP_MESHES, MAX_MAP_PROPS, MAX_MAP_VISUALS_BYTES, MAX_MESH_NAME,
+    MAX_SHADOW_STRENGTH, MIN_SUN_ELEVATION, MapAtmosphere, MapFogStyle, MapLighting, MapProp,
+    MapTerrain, MapVisuals, MapVisualsError, TerrainLayer, valid_mesh_name,
 };
 pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
@@ -83,6 +97,13 @@ pub use skin::{
     valid_animation_name,
 };
 pub use skin_lod::SkinLod;
+pub use terrain::{
+    DEFAULT_SPLAT_SIZE, EdgePlacement, GeneratedTerrain, Heightfield, MAX_EDGE_HEIGHT,
+    MAX_PLAY_RELIEF, MAX_TERRAIN_LAYERS, MIN_WALL_HEIGHT, MapConsistency, TERRAIN_GRID_SIZES,
+    TerrainSite, WALL_THICKNESS, WallBox, board_edge_relief, check_map_consistency,
+    check_map_consistency_with_edge_footprint, edge_footprint_radius, edge_placements,
+    generate_heightfield, generate_splat, generate_terrain, terrain_margin, wall_box,
+};
 pub use texture::{
     MAX_CUBE_DIMENSION, MAX_KTX2_BYTES, MAX_MIP_LEVELS, MAX_TEXTURE_DIMENSION, TextureData,
     TextureError, TextureFormat, f16_from_f32, f32_from_f16, full_mip_chain, load_ktx2,
@@ -224,6 +245,10 @@ pub enum AssetFileProblem {
     /// The model's material descriptor (`materials/<model>.toml`) or one of its textures
     /// (`textures/<name>.ktx2`) is unusable; the text says which and why.
     Material(String),
+    /// A texture the map visuals descriptor's `[terrain]` table names
+    /// (`textures/<name>.ktx2`) is missing, malformed, in the wrong format for its slot, or
+    /// disagrees in size or mip count with the other layers; the text says which and why.
+    Texture(String),
     /// A mesh the map visuals descriptor names (`models/<mesh>.glb`) is unusable.
     Mesh {
         /// Mesh name from the descriptor.
@@ -244,6 +269,7 @@ impl core::fmt::Display for AssetFileProblem {
             Self::Malformed(error) => write!(f, "malformed mesh ({error})"),
             Self::BadDescriptor(error) => write!(f, "invalid descriptor ({error})"),
             Self::Material(error) => write!(f, "material: {error}"),
+            Self::Texture(error) => write!(f, "texture: {error}"),
             Self::Mesh { name, problem } => {
                 write!(f, "mesh '{name}' (models/{name}.glb): {problem}")
             }
@@ -362,7 +388,12 @@ impl AssetManifest {
     /// resolved. Unit paths must end in `.glb`; with the `glb` feature they are also parsed
     /// with the bounded loader. Map paths must end in `.toml` and parse as a [`MapVisuals`]
     /// descriptor, and every mesh it names must pass the unit checks at
-    /// `root/models/<mesh>.glb` (where a client resolves it). Paths are assumed to have
+    /// `root/models/<mesh>.glb` (where a client resolves it), the `[terrain]` edge mesh
+    /// included. Every texture its `[terrain]` table names must load from
+    /// `root/textures/<name>.ktx2` in its slot's format (layer albedo sRGB colour, layer
+    /// normal BC5/RG8, splat linear RGBA8/BC7), with all albedo layers, all normal maps and
+    /// both splats agreeing in size and mip count ([`AssetFileProblem::Texture`]; ADR-0014
+    /// §2 rule 5). The simulation-consistency rules are [`check_map_consistency`]. Paths are assumed to have
     /// passed [`AssetManifest::validate`]. This is an authoring check (`content-check`): the
     /// engine never fails a match on a missing asset.
     #[must_use]
@@ -582,6 +613,10 @@ fn check_file(
                 }
             })?;
         }
+        if let Some(terrain) = &visuals.ground {
+            check_terrain_textures(root, canonical_root, terrain)
+                .map_err(AssetFileProblem::Texture)?;
+        }
         return Ok(());
     }
     #[cfg(feature = "glb")]
@@ -589,6 +624,98 @@ fn check_file(
     // A material next to the model (`materials/<model>.toml`) must load, with its textures.
     if let Some(model) = model_stem(path) {
         check_material(root, canonical_root, model)?;
+    }
+    Ok(())
+}
+
+/// `(width, height, mip levels)` of a texture.
+type TextureShape = (u32, u32, u32);
+
+/// Which `[terrain]` slot a texture fills, for format checks.
+#[derive(Clone, Copy)]
+enum TerrainSlot {
+    Albedo,
+    Normal,
+    Splat,
+}
+
+impl TerrainSlot {
+    fn accepts(self, format: TextureFormat) -> bool {
+        match self {
+            Self::Albedo => matches!(format, TextureFormat::Bc7Srgb | TextureFormat::Rgba8Srgb),
+            Self::Normal => matches!(format, TextureFormat::Bc5Unorm | TextureFormat::Rg8Unorm),
+            Self::Splat => matches!(format, TextureFormat::Rgba8Unorm | TextureFormat::Bc7Unorm),
+        }
+    }
+
+    fn expected(self) -> &'static str {
+        match self {
+            Self::Albedo => "sRGB colour (bc7-srgb or rgba8-srgb)",
+            Self::Normal => "a normal map (bc5 or rg8)",
+            Self::Splat => "linear RGBA weights (rgba8 or bc7)",
+        }
+    }
+}
+
+/// Rule 5 of ADR-0014 §2: every `[terrain]` texture exists inside `root`, loads, has its
+/// slot's format, and agrees in size and mip count with the others of its kind.
+fn check_terrain_textures(
+    root: &Path,
+    canonical_root: Option<&Path>,
+    terrain: &MapTerrain,
+) -> Result<(), String> {
+    let mut slots: Vec<(String, TerrainSlot, &str)> = Vec::new();
+    for (index, layer) in terrain.layers.iter().enumerate() {
+        slots.push((
+            format!("terrain layer {} albedo", index + 1),
+            TerrainSlot::Albedo,
+            &layer.albedo,
+        ));
+        if let Some(normal) = &layer.normal {
+            slots.push((
+                format!("terrain layer {} normal", index + 1),
+                TerrainSlot::Normal,
+                normal,
+            ));
+        }
+    }
+    for (what, name) in [("splat", &terrain.splat), ("splat2", &terrain.splat2)] {
+        if let Some(name) = name {
+            slots.push((format!("terrain {what}"), TerrainSlot::Splat, name));
+        }
+    }
+    // (width, height, levels) of the first texture per slot kind, and who set it.
+    let mut shapes: [Option<(TextureShape, String)>; 3] = [None, None, None];
+    for (what, slot, name) in slots {
+        let shown = format!("{what} textures/{name}.ktx2");
+        let path = texture_path(root, name).ok_or_else(|| format!("{shown}: invalid name"))?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("{shown}: missing or unreadable ({error})"))?;
+        if canonical_root.is_some_and(|root| !canonical.starts_with(root)) {
+            return Err(format!("{shown}: resolves outside the pack directory"));
+        }
+        let texture = load_ktx2_file(&canonical).map_err(|error| format!("{shown}: {error}"))?;
+        if texture.is_cube() || !slot.accepts(texture.format()) {
+            return Err(format!(
+                "{shown}: format {}{} is not allowed; the slot takes {}",
+                texture.format(),
+                if texture.is_cube() { " cube" } else { "" },
+                slot.expected()
+            ));
+        }
+        let shape = (texture.width(), texture.height(), texture.level_count());
+        match &shapes[slot as usize] {
+            None => shapes[slot as usize] = Some((shape, shown)),
+            Some((first, first_name)) if *first != shape => {
+                return Err(format!(
+                    "{shown}: {}x{} with {} mips does not match {first_name} ({}x{} with {} \
+                     mips); layers of one kind share a texture array",
+                    shape.0, shape.1, shape.2, first.0, first.1, first.2
+                ));
+            }
+            Some(_) => {}
+        }
     }
     Ok(())
 }
@@ -839,6 +966,103 @@ fallback = "a"
         assert!(issues[5].to_string().starts_with(
             "assets.maps 'nomesh' (maps/nomesh.toml): mesh 'gone' (models/gone.glb): missing"
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terrain_textures_are_checked_for_format_and_shape() {
+        let root = temp_root("terrain");
+        std::fs::create_dir_all(root.join("maps")).expect("maps dir");
+        std::fs::create_dir_all(root.join("textures")).expect("textures dir");
+        let texture = |format: TextureFormat, side: u32, levels: u32| {
+            let bytes = format.level_bytes(1, 1).expect("8-bit format");
+            let data: Vec<Vec<u8>> = (0..levels)
+                .map(|level| {
+                    let (w, h) = mip_size(side, side, level);
+                    vec![128; bytes * (w * h) as usize]
+                })
+                .collect();
+            write_ktx2(
+                &TextureData::new(format, side, side, &data).expect("texture"),
+                "test",
+            )
+        };
+        let write = |name: &str, bytes: Vec<u8>| {
+            std::fs::write(root.join(format!("textures/{name}.ktx2")), bytes).expect("write");
+        };
+        write("grass", texture(TextureFormat::Rgba8Srgb, 4, 3));
+        write("dirt", texture(TextureFormat::Rgba8Srgb, 4, 3));
+        write("small", texture(TextureFormat::Rgba8Srgb, 2, 2));
+        write("linear", texture(TextureFormat::Rgba8Unorm, 4, 3));
+        write("grass-normal", texture(TextureFormat::Rg8Unorm, 4, 3));
+        write("splat", texture(TextureFormat::Rgba8Unorm, 8, 4));
+        std::fs::write(root.join("textures/broken.ktx2"), b"KTX nope").expect("write");
+        let descriptor = |body: &str| {
+            format!(
+                "wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n{body}\n\
+                 [[terrain.layers]]\nalbedo = \"grass\"\nnormal = \"grass-normal\"\n"
+            )
+        };
+        let layer = |albedo: &str| format!("[[terrain.layers]]\nalbedo = \"{albedo}\"\n");
+        let cases = [
+            ("good", descriptor("splat = \"splat\"") + &layer("dirt")),
+            ("missing", descriptor("") + &layer("gone")),
+            ("linear", descriptor("") + &layer("linear")),
+            ("size", descriptor("") + &layer("small")),
+            ("broken", descriptor("") + &layer("broken")),
+            ("splat", descriptor("splat = \"grass\"")),
+            (
+                "normal",
+                descriptor("") + &layer("dirt") + "normal = \"grass\"\n",
+            ),
+        ];
+        for (name, text) in &cases {
+            std::fs::write(root.join(format!("maps/{name}.toml")), text).expect("write");
+        }
+        let manifest = AssetManifest {
+            units: Vec::new(),
+            maps: cases
+                .iter()
+                .map(|(name, _)| AssetEntry::new(*name, format!("maps/{name}.toml")))
+                .collect(),
+        };
+        let issues = manifest.check_files(&root);
+        let found: Vec<(&str, String)> = issues
+            .iter()
+            .map(|issue| match &issue.problem {
+                AssetFileProblem::Texture(text) => (issue.name.as_str(), text.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let names: Vec<&str> = found.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            ["missing", "linear", "size", "broken", "splat", "normal"]
+        );
+        let text = |index: usize| found[index].1.as_str();
+        assert!(
+            text(0).starts_with("terrain layer 2 albedo textures/gone.ktx2: missing"),
+            "{}",
+            text(0)
+        );
+        assert!(
+            text(1).contains("rgba8") && text(1).contains("sRGB colour"),
+            "{}",
+            text(1)
+        );
+        assert!(
+            text(2).contains("2x2 with 2 mips does not match terrain layer 1 albedo"),
+            "{}",
+            text(2)
+        );
+        assert!(text(3).starts_with("terrain layer 2 albedo textures/broken.ktx2: "));
+        assert!(text(4).starts_with("terrain splat textures/grass.ktx2: format"));
+        assert!(text(5).contains("layer 2 normal") && text(5).contains("bc5 or rg8"));
+        assert!(
+            issues[0]
+                .to_string()
+                .starts_with("assets.maps 'missing' (maps/missing.toml): texture: terrain layer 2")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -27,6 +27,24 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(visuals) = moba_assets::MapVisuals::parse(text) {
             assert!(visuals.props.len() <= moba_assets::MAX_MAP_PROPS);
             assert!(visuals.mesh_names().count() <= moba_assets::MAX_MAP_MESHES);
+            // A `[terrain]` table (ADR-0014) keeps 1..=8 layers and its relief bound.
+            if let Some(ground) = &visuals.ground {
+                assert!((1..=moba_assets::MAX_TERRAIN_LAYERS).contains(&ground.layers.len()));
+                assert!(ground.relief <= moba_assets::MAX_PLAY_RELIEF);
+                // The generator and the consistency check accept anything that parses, and
+                // the generator always satisfies its own relief rules.
+                let site = moba_assets::TerrainSite::new(256.0)
+                    .with_lane(vec![[32.0, 128.0], [128.0, 128.0], [224.0, 128.0]])
+                    .with_wall([112.0, 60.0], [112.0, 100.0]);
+                let terrain = moba_assets::generate_terrain(ground, &site, 16, 16);
+                assert_eq!(terrain.heightfield.heights.len(), 17 * 17);
+                let report = moba_assets::check_map_consistency(&visuals, &site);
+                assert!(
+                    report.errors.iter().all(|error| !error.starts_with("terrain ")),
+                    "{:?}",
+                    report.errors
+                );
+            }
         }
         // So are animation sets (ADR-0012): parsing stays within its caps.
         if let Ok(set) = moba_assets::AnimationSet::parse(text) {

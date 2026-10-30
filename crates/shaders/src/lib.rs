@@ -51,6 +51,17 @@ pub const TERRAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/terrai
 pub const FULLSCREEN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv"));
 /// Composite fragment shader: HDR scene colour, exposure and the `AgX` tonemap.
 pub const COMPOSITE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composite.frag.spv"));
+/// Sky backdrop vertex shader (R3a): a far-plane triangle with unprojected view rays.
+pub const SKY_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky.vert.spv"));
+/// Sky backdrop fragment shader (R3a): environment cube or gradient, horizon haze.
+pub const SKY_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky.frag.spv"));
+/// Fog-of-war raster vertex shader (R3a): one quad per vision source.
+pub const FOW_RASTER_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fow_raster.vert.spv"));
+/// Fog-of-war raster fragment shader (R3a): disc coverage with line-of-sight walls.
+pub const FOW_RASTER_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fow_raster.frag.spv"));
+/// Fog-of-war resolve fragment shader (R3a): blur and temporal fade.
+pub const FOW_RESOLVE_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/fow_resolve.frag.spv"));
 /// Screen-space UI vertex shader.
 pub const UI_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.vert.spv"));
 /// Screen-space UI fragment shader.
@@ -82,6 +93,26 @@ pub struct ShaderModule {
 
 /// Every shader module in the crate.
 pub const MODULES: &[ShaderModule] = &[
+    ShaderModule {
+        name: "sky.vert",
+        spirv: SKY_VERT,
+    },
+    ShaderModule {
+        name: "sky.frag",
+        spirv: SKY_FRAG,
+    },
+    ShaderModule {
+        name: "fow_raster.vert",
+        spirv: FOW_RASTER_VERT,
+    },
+    ShaderModule {
+        name: "fow_raster.frag",
+        spirv: FOW_RASTER_FRAG,
+    },
+    ShaderModule {
+        name: "fow_resolve.frag",
+        spirv: FOW_RESOLVE_FRAG,
+    },
     ShaderModule {
         name: "unit.vert",
         spirv: UNIT_VERT,
