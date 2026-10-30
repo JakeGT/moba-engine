@@ -352,7 +352,8 @@ state in `after-low` (0.363), `after-ultra` (0.628), `after-ultra-off` (0.468),
   and its sample-zero resolve) and `scene` +0.011. The Ultra rows ran in the fast clock state
   this time (`shadow` 0.011 ms), so they compare with High directly.
 - **CPU.** The work before the render call is unchanged (0.006–0.007 ms); the render call is
-  +0.003–0.014 ms at p50 (the light grid copy).
+  −0.004 to +0.014 ms at p50 (the light grid copy, within the run-to-run noise on
+  Medium and High).
 - **Lights**: at most 10–11 live in the teamfight at 1080p, under every tier's global cap.
 
 ### Which switch costs `scene` on High (4,800 frames per run, three runs each)
