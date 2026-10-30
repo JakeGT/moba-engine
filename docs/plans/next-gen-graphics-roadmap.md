@@ -1,7 +1,6 @@
 # Roadmap: next-gen photoreal graphics
 
-Written 2026-10-30. Status: **accepted plan**; maintainer decisions in §1, one open question
-in §13. Owner: maintainer.
+Written 2026-10-30. Status: **accepted plan**; maintainer decisions in §1. Owner: maintainer.
 
 **Follows:** [the AAA graphics roadmap](aaa-graphics-roadmap.md), whose engine work (R0–R8) is
 complete.
@@ -46,6 +45,7 @@ date and **must be re-checked when each phase starts**: this area moves monthly.
 | AI 3D generation | **Local open-weight models** on the RTX 5070 Ti, with permissive licences that hold in the UK (Hunyuan3D's licence excludes the UK). Every output passes the remesh and bake pipeline (§9). |
 | Compat renderer | **Keep today's renderer as Compat**, give it one refresh (C1, §8) so photoreal content still looks good on it, then **freeze** it. It serves macOS, NVK and GPUs without hardware RT. |
 | NVIDIA SDKs | **Use NVIDIA's SDKs** (RTXDI, SHaRC, NRD, and RTXPT as reference) rather than clean-room versions: matching their quality would take years. |
+| Art bible | **Owned by the maintainer and their team** (possibly a graphic designer and a marketing executive); agents draft and keep it testable (§9.6). |
 | Platforms and hardware | **Linux and Windows** are the targets for the tiered renderer. macOS is Compat only: its hardware can't reach the new Medium, or arguably Low. The reference-GPU matrix is **brought forward** from pre-1.0, with Windows tested in a GPU-passthrough VM (§10). |
 
 **Consequence: macOS and non-RT GPUs.**
@@ -496,7 +496,7 @@ Rendering never touches determinism. Every phase:
 | **N10 Characters and showcase** | Skin, eyes, cloth, hair cards; showcase mode (LOD class, streamed mip 0, strands, path-traced SSS, DOF, motion blur); champion select and victory screens | L–XL | N2; parts on N9 |
 | **N11 Content scale** | Mip streaming (≤ 512² resident in match), software feedback, NTC load mode; virtual texturing only if needed | M–L | N0 |
 | **C1 Compat refresh, then freeze** | Bring today's forward renderer up to photoreal content: GGX with multiscatter compensation and the N2 material parameters (dropping the stylised ramps); sample N3's baked lightmaps, probes and reflection probes (the biggest win, and it needs no RT); Hillaire sky and improved height fog from N6; loading the shared content packs at capped LODs and mips; the §4 readability tests. Targets: 1080p60 on GTX 1060 / RX 580; Apple M1-class at a reduced render scale. Then **freeze**: bug fixes and content-format compatibility only. | M | N2 (material spec), N3 (bakes), N6 (sky) |
-| **A-track** (parallel from N0) | Asset pipeline and content (§9): A0 licence gate, A1 ingest tools, A2 AI workstation, A3 vertical slice, A4 roster | XL, continuous | A3 needs N2 + N3 |
+| **A-track** (parallel from N0) | Asset pipeline and content (§9): A0 licence gate, A1 ingest tools, A2 AI workstation, A3 vertical slice, A4 roster | XL, continuous | A3 needs N2 + N3 and art bible v0; A4 needs bible v1 (§9.6) |
 
 **Critical path:** N0 → N1 → N2 → (N3 ∥ N4) → N5 → N8 → N9.
 
@@ -667,6 +667,40 @@ incoherent assets. That is the main failure mode of pure-AI content.
   - Human-modified assets may be CC0 or CC-BY.
   - Steam's AI disclosure is generated from the manifests.
 
+### 9.6 Art bible
+
+**Owner:** the maintainer, working with their team, which may include a graphic designer and
+a marketing executive. Agents draft, research and turn decisions into checks; people decide.
+
+| Part | Contents | Lead | What becomes a check |
+|---|---|---|---|
+| World and factions | Setting, faction identity, shape language, architecture | Maintainer | — |
+| Palette and value | Per-map palette; value and saturation budget in playable space; team colours | Maintainer + graphic designer | The §4 value and saturation clamps and contrast tests |
+| Lighting mood per map | Sun angle and colour, sky/HDRI, fog density, exposure range | Maintainer | `light-bake` inputs; the gameplay exposure lock |
+| Material vocabulary | The allowed materials and their look ("worn bronze", "wet basalt") | Agent draft from physicallybased.info and references; maintainer approves | `content-check` PBR ranges per material class |
+| Silhouettes and scale | Hero, minion and monster size classes; silhouette rules at 40 px tall; team rims | Maintainer | Silhouette and contrast checks in the review renders (§9.4) |
+| VFX language | Colour by team and ability type; telegraph styles | Maintainer + graphic designer | R5 readability rules; telegraph contrast tests |
+| UI, HUD and typography | HUD layout and style, icons, fonts, number formatting, outlines | Graphic designer | HUD contrast tests; font licences (SIL OFL, as today's HUD font) |
+| Brand and key art | Logo, key art, store capsules, trailer look, showcase and victory framing | Marketing executive + graphic designer | — |
+
+**How agents help:**
+- reference boards from CC0 photos, Poly Haven HDRIs and Apache-licensed concept models
+  (§9.3);
+- first drafts of each part, revised from the team's feedback;
+- turning each decision into a numeric rule in `content-check` or the readability tests, so
+  the bible is enforced on every asset rather than remembered;
+- review-render contact sheets for every new asset against the bible.
+
+**Where it lives:** `docs/art/`, holding the text, the rules and CC0 or team-owned reference
+images. Work made by team members goes in the repo only under CC0 or CC-BY (or a written
+assignment), so it can sit alongside the rest of the content. Brand marks (logo, name) are the
+exception: they stay all-rights-reserved and are listed as such.
+
+**Versions:**
+- **v0**, before the vertical slice (A3): enough to build one map section, one hero and the
+  minions.
+- **v1**, signed off by the maintainer after the slice's go/no-go: the gate for the roster (A4).
+
 ## 10. Evidence and performance gates
 
 - Every phase keeps the existing bar:
@@ -723,7 +757,8 @@ incoherent assets. That is the main failure mode of pure-AI content.
 
 ## 12. Next concrete steps
 
-1. Decide the art-bible owner (§13).
+1. Draft art bible v0 (§9.6) with the maintainer and team, starting with palette, lighting
+   mood and material vocabulary for the first map.
 2. **ADR-0020 (N0):** bindings, capability gate and Compat, bindless, Slang, tier presets and
    budgets, and the cargo-feature layout for the NVIDIA, AMD and Intel SDKs.
 3. **ADR-0021 (N1):** the temporal foundation, the upscaler interface and the overlay layer.
@@ -736,9 +771,6 @@ incoherent assets. That is the main failure mode of pure-AI content.
 
 ## 13. Open questions for the maintainer
 
-Resolved on 2026-10-30 (now in §1): the Compat path (keep, refresh, freeze), NVIDIA SDKs over
-clean-room versions, and the reference-GPU matrix brought forward for Linux and Windows.
-
-Still open:
-
-1. **Art bible:** who owns it? It's the one artefact the agentic pipeline can't produce.
+All resolved on 2026-10-30 and recorded in §1: the Compat path (keep, refresh, freeze),
+NVIDIA SDKs over clean-room versions, the reference-GPU matrix brought forward for Linux and
+Windows, and the art bible owned by the maintainer and team with agent drafting (§9.6).
