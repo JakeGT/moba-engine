@@ -86,6 +86,20 @@ impl QualityTier {
         }
     }
 
+    /// The tier's asset and memory budgets (R8, ADR-0018 §4; `moba_assets::TIER_BUDGETS`):
+    /// VRAM, texture bytes, per-model triangles/joints/texture bytes and the mesh LOD
+    /// tolerance.
+    #[must_use]
+    pub fn budget(self) -> &'static moba_assets::TierBudget {
+        let index = match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::Ultra => 3,
+        };
+        &moba_assets::TIER_BUDGETS[index]
+    }
+
     /// Preferred HDR scene colour format for this tier.
     pub(crate) const fn hdr_format(self) -> vk::Format {
         match self {
@@ -114,6 +128,13 @@ mod tests {
         assert_eq!(QualityTier::from_name(" ULTRA "), Some(QualityTier::Ultra));
         assert_eq!(QualityTier::from_name("epic"), None);
         assert_eq!(QualityTier::default(), QualityTier::High);
+        for &tier in QualityTier::ALL {
+            assert_eq!(
+                tier.budget().name,
+                tier.name(),
+                "budgets are indexed by tier"
+            );
+        }
         assert_eq!(
             QualityTier::Low.hdr_format(),
             vk::Format::B10G11R11_UFLOAT_PACK32

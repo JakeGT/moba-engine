@@ -46,6 +46,7 @@
 
 mod animation;
 mod baked_ao;
+mod budget;
 mod environment;
 #[cfg(feature = "glb")]
 mod glb;
@@ -53,6 +54,7 @@ mod grading;
 mod map_visuals;
 mod material;
 mod mesh;
+mod mesh_lod;
 mod pose;
 mod skin;
 mod skin_lod;
@@ -75,6 +77,10 @@ pub use animation::{
 pub use baked_ao::{
     BAKED_AO_DIR, BakedAoDesc, BakedAoError, DEFAULT_BAKED_AO_HEIGHT, MAX_BAKED_AO_BYTES,
     MAX_BAKED_AO_TEXELS, PropMeshShape, ao_fingerprint, baked_ao_paths,
+};
+pub use budget::{
+    ModelBudgetReport, TIER_BUDGETS, TierBudget, TierFit, finest_level_within, model_report,
+    tier_budget,
 };
 pub use environment::{
     ENVIRONMENTS_DIR, EnvironmentDesc, EnvironmentError, MAX_ENVIRONMENT_BYTES, MAX_SPECULAR_MIPS,
@@ -100,7 +106,12 @@ pub use material::{
     MAX_MATERIAL_BYTES, MaterialDesc, MaterialError, MaterialShader, TextureSlot, material_path,
     texture_path,
 };
-pub use mesh::{MeshData, MeshError};
+pub use mesh::{MeshData, MeshError, bounding_sphere};
+#[cfg(feature = "glb")]
+pub use mesh_lod::load_glb_file_with_lods;
+pub use mesh_lod::{
+    LodError, MAX_LOD_FILE_BYTES, MAX_MESH_LODS, MeshLod, MeshLods, load_lods_for, lod_path,
+};
 pub use pose::{
     BlendSpace1d, BlendSpace2d, BlendSpaceError, BoneMask, ClipWrap, MAX_BLEND_POINTS, Pose,
     joint_matrix,
@@ -463,6 +474,42 @@ impl AssetManifest {
             }
         }
         report
+    }
+
+    /// Every unit model's numbers against each quality tier's budgets (R8, ADR-0018 §4):
+    /// LOD0 and baked-level triangles (`models/<model>.lod`), skin joints and the texture
+    /// bytes of its material. A model that does not load is reported with its error; a stale
+    /// level file counts as no levels. For `content-check`.
+    #[cfg(feature = "glb")]
+    #[must_use]
+    pub fn budget_report(&self, root: &Path) -> Vec<(String, Result<ModelBudgetReport, String>)> {
+        let mut out: Vec<(String, Result<ModelBudgetReport, String>)> = Vec::new();
+        for entry in &self.units {
+            let Some(model) = model_stem(&entry.path) else {
+                continue;
+            };
+            if out.iter().any(|(known, _)| known == model) {
+                continue;
+            }
+            let report = load_glb_file_with_lods(&root.join(&entry.path))
+                .map_err(|error| error.to_string())
+                .map(|(mesh, _)| {
+                    let texture_bytes = check_material(root, None, model)
+                        .ok()
+                        .flatten()
+                        .map_or(0, |stats| {
+                            stats.textures.iter().map(|(_, bytes)| *bytes as u64).sum()
+                        });
+                    model_report(
+                        mesh.triangle_count(),
+                        mesh.lods(),
+                        mesh.skin().map_or(0, |skin| skin.skeleton().joint_count()),
+                        texture_bytes,
+                    )
+                });
+            out.push((model.to_owned(), report));
+        }
+        out
     }
 
     /// Resolves an asset through its fallback chain.

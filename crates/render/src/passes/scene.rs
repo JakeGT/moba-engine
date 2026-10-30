@@ -20,6 +20,14 @@
 //! meshes into their own targets. Each view owns its per-frame camera, instance and bone
 //! buffers and its bucketing scratch, all sized at creation, so preparing and recording
 //! several views in one frame allocates nothing.
+//!
+//! **Culling and LODs** (R8, ADR-0018): each view culls its units against its camera frustum
+//! (outlined units are kept: the hull outline reaches past the silhouette) and picks each
+//! unit's mesh level by projected error; the main view also builds a separate **caster list**
+//! for the shadow pass, culled against the fitted shadow box's sides. A list buckets its
+//! instances by mesh and level, in scene order inside a bucket, so a culled list draws a
+//! subset of the unculled one in the same order. The terrain is drawn as the runs of its
+//! visible chunks. `CullMode::Off` keeps every unit and chunk.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,21 +36,32 @@ use bytemuck::{Pod, Zeroable, bytes_of};
 use gpu_allocator::MemoryLocation;
 use moba_assets::JointMatrix;
 
+use moba_core::math::Mat4;
+
+use crate::cull::{CullMode, CullStats, Frustum, LodConfig, LodMetric, Planes};
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::lighting::FrameLighting;
-use crate::mesh::{self, GpuMesh};
+use crate::mesh::{self, GpuMesh, MAX_LODS};
 use crate::pipeline::{self, DepthOnly, PipelineSpec, VertexLayout, VertexlessDepth};
 use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
 use crate::scene::{BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Scene};
 use crate::shaders::ShaderSource;
+use crate::terrain::{MAX_TERRAIN_CHUNKS, TerrainChunk};
 use crate::vat::{VatMeshes, VatPush};
 use crate::world::WorldFrame;
 
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
 pub(crate) const MAX_MESHES: usize = 64;
+/// Draw buckets per list: one per mesh slot and level (R8).
+const BUCKETS: usize = MAX_MESHES * MAX_LODS;
+/// A unit's per-frame decision bits ([`SceneView::decisions`]): in the camera list, in the
+/// caster list, and its mesh level in bits 2..4.
+const IN_CAMERA: u8 = 1;
+const IN_CASTERS: u8 = 2;
+const LOD_SHIFT: u8 = 2;
 /// Most backdrop rectangles one view clears ([`SceneTargets::clear_rects`]); later ones are
 /// ignored.
 pub(crate) const MAX_CLEAR_RECTS: usize = 32;
@@ -83,6 +102,8 @@ struct SkinnedDraw {
     instance: u32,
     first_bone: u32,
     joint_count: u32,
+    /// The mesh level drawn (R8).
+    lod: u8,
 }
 
 /// Per-frame-in-flight scene buffers and their descriptor sets.
@@ -170,23 +191,119 @@ const SHADOW_BIAS_SLOPE: f32 = 1.75;
 pub(crate) struct ViewBudget {
     pub(crate) max_instances: usize,
     pub(crate) max_bones: usize,
+    /// The view also builds a shadow caster list (the main view with shadows, R8): its
+    /// instance buffer holds `2 × max_instances`.
+    pub(crate) casters: bool,
+}
+
+/// How a scene pass culls and selects levels (R8, ADR-0018), fixed at creation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CullSettings {
+    pub(crate) mode: CullMode,
+    pub(crate) lod: LodConfig,
+    /// The tier's per-model triangle budget: a mesh over it draws its first level within it
+    /// as its finest.
+    pub(crate) model_triangles: usize,
+}
+
+/// One list of instances, bucketed by mesh and level: the camera list (prepass, scene,
+/// hulls) or the main view's caster list (the shadow pass).
+struct DrawList {
+    /// The list's first instance slot in its view's instance buffer.
+    base: u32,
+    /// Per bucket (`slot * MAX_LODS + level`): instances, outlined instances (which lead the
+    /// bucket, so the hulls draw exactly them), first instance slot (absolute) and the write
+    /// cursors of the outlined and the plain instances.
+    counts: [u32; BUCKETS],
+    outlined: [u32; BUCKETS],
+    starts: [u32; BUCKETS],
+    cursors: [u32; BUCKETS],
+    plain_cursors: [u32; BUCKETS],
+    /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
+    skinned: Vec<SkinnedDraw>,
+    /// Instances in the list this frame.
+    len: u32,
+}
+
+impl DrawList {
+    fn new(base: u32, skinned_capacity: usize) -> Self {
+        Self {
+            base,
+            counts: [0; BUCKETS],
+            outlined: [0; BUCKETS],
+            starts: [0; BUCKETS],
+            cursors: [0; BUCKETS],
+            plain_cursors: [0; BUCKETS],
+            skinned: Vec::with_capacity(skinned_capacity),
+            len: 0,
+        }
+    }
+
+    /// Counting-sort bucketing of the `units` whose decision has `bit`, by mesh and level,
+    /// without allocating. On return `counts[b]` is bucket `b`'s instances, `starts[b]` its
+    /// first slot (from `base`), `cursors[b] == starts[b]` and `plain_cursors[b]` the first
+    /// slot after its outlined instances. Buckets are in (mesh slot, level) order and keep
+    /// scene order inside, so a scene that only uses the cube at LOD0 is laid out as before.
+    fn bucket(
+        &mut self,
+        units: &[crate::UnitInstance],
+        decisions: &[u8],
+        bit: u8,
+        mesh_count: usize,
+    ) {
+        self.counts.fill(0);
+        self.outlined.fill(0);
+        self.skinned.clear();
+        for (unit, &decision) in units.iter().zip(decisions) {
+            if decision & bit == 0 {
+                continue;
+            }
+            let bucket = bucket_of(mesh_slot(unit.mesh, mesh_count), decision);
+            self.counts[bucket] += 1;
+            self.outlined[bucket] += u32::from(is_outlined(unit));
+        }
+        let mut next = self.base;
+        for bucket in 0..BUCKETS {
+            self.starts[bucket] = next;
+            self.plain_cursors[bucket] = next + self.outlined[bucket];
+            next += self.counts[bucket];
+        }
+        self.cursors = self.starts;
+        self.len = next - self.base;
+    }
+
+    /// The slot of the next instance of `unit` in `bucket` (outlined first), advancing its
+    /// cursor. Only for units counted by [`Self::bucket`].
+    fn place(&mut self, unit: &crate::UnitInstance, bucket: usize) -> u32 {
+        let cursor = if is_outlined(unit) {
+            &mut self.cursors[bucket]
+        } else {
+            &mut self.plain_cursors[bucket]
+        };
+        let instance = *cursor;
+        *cursor += 1;
+        instance
+    }
+}
+
+/// The bucket of a unit of mesh `slot` with `decision`'s level.
+fn bucket_of(slot: usize, decision: u8) -> usize {
+    slot * MAX_LODS + usize::from(decision >> LOD_SHIFT) % MAX_LODS
 }
 
 /// One view's per-frame buffers and its bucketing scratch.
 struct SceneView {
     frames: Vec<SceneFrame>,
-    /// Per-frame bucketing scratch (instances per mesh, first instance, write cursor).
-    mesh_counts: [u32; MAX_MESHES],
-    mesh_starts: [u32; MAX_MESHES],
-    mesh_cursors: [u32; MAX_MESHES],
-    /// Outlined instances per mesh (R2b): they lead the mesh's range, so the hull pipelines
-    /// draw exactly `mesh_outlined[slot]` instances from `mesh_starts[slot]`.
-    mesh_outlined: [u32; MAX_MESHES],
-    /// Write cursor of the non-outlined instances (after the outlined ones).
-    mesh_plain_cursors: [u32; MAX_MESHES],
-    /// Per-frame skinned draws; capacity fixed at creation so pushing never reallocates.
-    skinned_draws: Vec<SkinnedDraw>,
-    /// Units uploaded for the frame being recorded.
+    /// The camera list (prepass, scene, hulls).
+    camera: DrawList,
+    /// The shadow caster list (the main view with shadows, R8), from slot `max_instances`.
+    casters: Option<DrawList>,
+    /// Per unit this frame: [`IN_CAMERA`], [`IN_CASTERS`] and the level; capacity
+    /// `max_instances`, never grown.
+    decisions: Vec<u8>,
+    /// The terrain's visible index runs this frame; capacity [`MAX_TERRAIN_CHUNKS`].
+    terrain_runs: Vec<(u32, u32)>,
+    /// Units handed in for the frame being recorded (after the cap).
     unit_count: usize,
     max_instances: usize,
     max_bones: usize,
@@ -630,6 +747,14 @@ pub(crate) struct ScenePass {
     vat_pipeline_layout: PipelineLayout,
     /// Per mesh slot: its index in `vat`, or `u8::MAX` for a mesh without a VAT.
     mesh_vat: [u8; MAX_MESHES],
+    /// Per mesh slot: the finest level this tier draws (its triangle budget, R8).
+    mesh_finest: [u8; MAX_MESHES],
+    /// The map terrain's culling chunks (R8); empty for the R2a plane.
+    terrain_chunks: Vec<TerrainChunk>,
+    /// Culling and level selection (R8).
+    culling: CullSettings,
+    /// What the main view culled in the latest frame.
+    stats: CullStats,
 }
 
 /// How the main view is drawn (ADR-0015).
@@ -704,6 +829,7 @@ impl ScenePass {
         views: &[ViewBudget],
         main: MainViewSpec,
         skinning: bool,
+        culling: CullSettings,
     ) -> RenderResult<Self> {
         let (camera_binding, instance_binding) = buffer_set_layout_bindings();
         // Every scene pipeline shares one layout, so its per-stage descriptor totals must fit
@@ -840,7 +966,31 @@ impl ScenePass {
             vat,
             vat_pipeline_layout,
             mesh_vat: [u8::MAX; MAX_MESHES],
+            mesh_finest: [0; MAX_MESHES],
+            terrain_chunks: Vec::with_capacity(MAX_TERRAIN_CHUNKS),
+            culling,
+            stats: CullStats {
+                mode: culling.mode,
+                ..CullStats::default()
+            },
         })
+    }
+
+    /// What the main view culled and selected in the latest frame.
+    pub(crate) fn cull_stats(&self) -> CullStats {
+        self.stats
+    }
+
+    /// Records the finest level the tier draws for the mesh just pushed (its triangle
+    /// budget): LOD0 when it fits, else the first level that does, else the coarsest.
+    fn push_mesh(&mut self, gpu: GpuMesh) {
+        let budget = self.culling.model_triangles;
+        let count = usize::from(gpu.lods.count.max(1));
+        let finest = (0..count)
+            .find(|&level| gpu.lods.levels[level].index_count as usize / 3 <= budget)
+            .unwrap_or(count - 1);
+        self.mesh_finest[self.meshes.len()] = u8::try_from(finest).unwrap_or(0);
+        self.meshes.push(gpu);
     }
 
     /// The camera uniform's set layout (set 0 of every scene pipeline).
@@ -948,9 +1098,16 @@ impl ScenePass {
         Ok(())
     }
 
-    /// Replaces the map's terrain mesh (`None`: the R2a plane). The device must be idle.
-    pub(crate) fn set_terrain_mesh(&mut self, mesh: Option<GpuMesh>) {
-        self.map_terrain = mesh;
+    /// Replaces the map's terrain mesh and its culling chunks (`None`: the R2a plane). The
+    /// device must be idle.
+    pub(crate) fn set_terrain_mesh(&mut self, terrain: Option<(GpuMesh, Vec<TerrainChunk>)>) {
+        self.terrain_chunks.clear();
+        self.map_terrain = terrain.map(|(mesh, chunks)| {
+            // At most MAX_TERRAIN_CHUNKS by construction; never grow the scratch.
+            let room = self.terrain_chunks.capacity();
+            self.terrain_chunks.extend(chunks.into_iter().take(room));
+            mesh
+        });
     }
 
     /// The main view's bone budget after clamping to the device's storage-buffer range.
@@ -989,7 +1146,8 @@ impl ScenePass {
     ) -> RenderResult<MeshId> {
         let id = self.next_mesh_id()?;
         let cpu = mesh::CpuMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
-        self.meshes.push(mesh::upload(device, &cpu)?);
+        let gpu = mesh::upload(device, &cpu)?;
+        self.push_mesh(gpu);
         Ok(id)
     }
 
@@ -1004,7 +1162,8 @@ impl ScenePass {
         }
         let id = self.next_mesh_id()?;
         let cpu = mesh::CpuSkinnedMesh::from_asset(data).ok_or(RenderError::InvalidMesh)?;
-        self.meshes.push(mesh::upload_skinned(device, &cpu)?);
+        let gpu = mesh::upload_skinned(device, &cpu)?;
+        self.push_mesh(gpu);
         Ok(id)
     }
 
@@ -1031,10 +1190,18 @@ impl ScenePass {
         // Every check first, then the mesh, then the VAT entry: a failure at any step leaves
         // no VAT slot or mesh slot taken (the uploaded mesh is dropped).
         crate::vat::validate(self.vat.len(), data, texture, descriptor)?;
-        let gpu = mesh::upload(device, &cpu)?;
+        // The culling sphere covers every baked frame (R8): the rest pose's would be too
+        // small for an attack swing or a death fall.
+        let bounds = descriptor
+            .position_bounds(texture)
+            .ok_or(RenderError::InvalidVat(
+                "the texture holds non-finite positions",
+            ))?;
+        let mut gpu = mesh::upload(device, &cpu)?;
+        gpu.bounds = bounds;
         let entry = self.vat.register(device, data, texture, descriptor)?;
         let entry = u8::try_from(entry).map_err(|_| RenderError::InvalidVat("too many VATs"))?;
-        self.meshes.push(gpu);
+        self.push_mesh(gpu);
         self.mesh_vat[id.index()] = entry;
         Ok(id)
     }
@@ -1066,8 +1233,11 @@ impl ScenePass {
     }
 
     /// Writes this frame's camera (with `lighting`), instances and bones of `view` and
-    /// buckets its draws. The frame's fence must have been waited on. The truncation counters
-    /// report the main view (0) only.
+    /// buckets its draws: culls each unit against the view's camera (and, for the main view
+    /// with shadows, against the shadow box for the caster list), picks its mesh level and
+    /// computes the terrain's visible runs (R8). The frame's fence must have been waited on.
+    /// The truncation counters and [`Self::cull_stats`] report the main view (0) only.
+    #[allow(clippy::too_many_lines)] // Cull, bucket and scatter belong together.
     pub(crate) fn prepare(
         &mut self,
         view: usize,
@@ -1078,7 +1248,17 @@ impl ScenePass {
         extent: vk::Extent2D,
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
-        let Self { views, meshes, .. } = self;
+        let culling = self.culling;
+        let Self {
+            views,
+            meshes,
+            mesh_finest,
+            map_terrain,
+            terrain_chunks,
+            terrain_mesh,
+            stats,
+            ..
+        } = self;
         let state = &mut views[view];
         let unit_count = scene.units.len().min(state.max_instances);
         let bone_count = scene.bones.len().min(state.max_bones);
@@ -1088,7 +1268,6 @@ impl ScenePass {
                 Ordering::Relaxed,
             );
         }
-        state.skinned_draws.clear();
         state.unit_count = unit_count;
         let mut skinned_dropped = 0u64;
         let target = &mut state.frames[frame];
@@ -1113,49 +1292,128 @@ impl ScenePass {
         }
         // `bone_count <= max_bones`, which the bone buffer was sized from.
         let uploaded_bones = u32::try_from(bone_count).unwrap_or(u32::MAX);
-        if unit_count > 0 {
-            let units = &scene.units[..unit_count];
-            bucket_by_mesh(
-                units,
-                mesh_count,
-                &mut state.mesh_counts,
-                &mut state.mesh_outlined,
-                &mut state.mesh_starts,
-                &mut state.mesh_cursors,
-                &mut state.mesh_plain_cursors,
+
+        // Culling volumes and the level metric (R8): `Off` keeps everything.
+        let culled = culling.mode != CullMode::Off;
+        let camera_frustum = if culled {
+            Frustum::new(scene.camera.view_proj, Planes::All)
+        } else {
+            Frustum::EVERYTHING
+        };
+        let caster_frustum = if culled {
+            Frustum::new(
+                Mat4::from_cols_array_2d(&lighting.light_view_proj),
+                Planes::Sides,
+            )
+        } else {
+            Frustum::EVERYTHING
+        };
+        let metric = LodMetric::new(scene.camera.view_proj, extent.height, culling.lod);
+        let casters = state.casters.is_some();
+
+        // The terrain's visible runs: every chunk of the map's heightfield, or the plane.
+        match map_terrain.as_ref() {
+            Some(_) if !terrain_chunks.is_empty() => {
+                let visible = crate::cull::terrain_runs(
+                    terrain_chunks,
+                    &camera_frustum,
+                    &mut state.terrain_runs,
+                );
+                if view == 0 {
+                    stats.terrain_chunks = u32::try_from(terrain_chunks.len()).unwrap_or(u32::MAX);
+                    stats.terrain_chunks_drawn = visible;
+                }
+            }
+            terrain => {
+                let mesh = terrain.unwrap_or(terrain_mesh);
+                state.terrain_runs.clear();
+                state.terrain_runs.push((0, mesh.index_count));
+                if view == 0 {
+                    stats.terrain_chunks = 1;
+                    stats.terrain_chunks_drawn = 1;
+                }
+            }
+        }
+
+        let units = &scene.units[..unit_count];
+        state.decisions.clear();
+        let mut lod_instances = [0u32; MAX_LODS];
+        for unit in units {
+            let slot = mesh_slot(unit.mesh, mesh_count);
+            let mesh = &meshes[slot];
+            let (center, radius) = crate::cull::world_sphere(&unit.transform, mesh.bounds);
+            let in_camera =
+                !culled || is_outlined(unit) || camera_frustum.sphere_visible(center, radius);
+            let in_casters = casters && (!culled || caster_frustum.sphere_visible(center, radius));
+            let scale = crate::cull::max_axis_scale(&unit.transform);
+            let lod = metric.select(&mesh.lods, mesh_finest[slot], center, scale);
+            if in_camera {
+                lod_instances[usize::from(lod)] += 1;
+            }
+            // `decisions` has `max_instances >= unit_count` capacity: never reallocates.
+            state.decisions.push(
+                (u8::from(in_camera) * IN_CAMERA)
+                    | (u8::from(in_casters) * IN_CASTERS)
+                    | (lod << LOD_SHIFT),
             );
+        }
+        state
+            .camera
+            .bucket(units, &state.decisions, IN_CAMERA, mesh_count);
+        if let Some(list) = state.casters.as_mut() {
+            list.bucket(units, &state.decisions, IN_CASTERS, mesh_count);
+        }
+        if view == 0 {
+            *stats = CullStats {
+                mode: culling.mode,
+                candidates: u32::try_from(unit_count).unwrap_or(u32::MAX),
+                drawn: state.camera.len,
+                casters: state.casters.as_ref().map_or(0, |list| list.len),
+                lod_instances,
+                ..*stats
+            };
+        }
+        let lists = state.casters.as_ref().map_or(1, |_| 2);
+        if unit_count > 0 {
             let mapped = target
                 .instance_buffer
-                .mapped_slice_mut::<GpuInstance>(unit_count)
+                .mapped_slice_mut::<GpuInstance>(state.max_instances * lists)
                 .ok_or_else(|| {
                     RenderError::NoSuitableDevice(String::from(
                         "instance buffer is not host visible",
                     ))
                 })?;
-            // Each mesh's instances land contiguously at its `mesh_starts` slot, so one draw
-            // per mesh reads them through `firstInstance` (gl_InstanceIndex); the outlined
-            // ones first, so the hulls draw only them.
-            for unit in units {
+            // Each bucket's instances land contiguously at its `starts` slot, so one draw per
+            // bucket reads them through `firstInstance` (gl_InstanceIndex); the outlined ones
+            // first, so the hulls draw only them.
+            for (unit, &decision) in units.iter().zip(&state.decisions) {
                 let slot = mesh_slot(unit.mesh, mesh_count);
-                let cursor = if is_outlined(unit) {
-                    &mut state.mesh_cursors[slot]
-                } else {
-                    &mut state.mesh_plain_cursors[slot]
-                };
-                let instance = *cursor;
-                mapped[instance as usize] = GpuInstance::from(*unit);
-                *cursor += 1;
+                let bucket = bucket_of(slot, decision);
                 let joints = meshes[slot].joint_count;
-                if joints == 0 {
-                    continue;
-                }
-                // A skinned mesh is only drawn with a bone range inside this frame's upload;
-                // the capacity check keeps `push` from reallocating.
-                match skinned_draw(unit.bones, joints, uploaded_bones, slot, instance) {
-                    Some(draw) if state.skinned_draws.len() < state.skinned_draws.capacity() => {
-                        state.skinned_draws.push(draw);
+                let lod = decision >> LOD_SHIFT;
+                let gpu = GpuInstance::from(*unit);
+                for (bit, list) in [
+                    (IN_CAMERA, Some(&mut state.camera)),
+                    (IN_CASTERS, state.casters.as_mut()),
+                ] {
+                    let Some(list) = list.filter(|_| decision & bit != 0) else {
+                        continue;
+                    };
+                    let instance = list.place(unit, bucket);
+                    mapped[instance as usize] = gpu;
+                    if joints == 0 {
+                        continue;
                     }
-                    _ => skinned_dropped += 1,
+                    // A skinned mesh is only drawn with a bone range inside this frame's
+                    // upload; the capacity check keeps `push` from reallocating.
+                    match skinned_draw(unit.bones, joints, uploaded_bones, slot, instance) {
+                        Some(draw) if list.skinned.len() < list.skinned.capacity() => {
+                            list.skinned.push(SkinnedDraw { lod, ..draw });
+                        }
+                        // The caster list does not count drops twice.
+                        _ if bit == IN_CASTERS => {}
+                        _ => skinned_dropped += 1,
+                    }
                 }
             }
         }
@@ -1260,41 +1518,32 @@ impl ScenePass {
         }
 
         if targets.terrain {
-            let terrain = self.map_terrain.as_ref().unwrap_or(&self.terrain_mesh);
-            bind_pipeline(device, command_buffer, &pipelines.terrain);
-            bind_mesh(device, command_buffer, terrain);
-            // SAFETY: the mesh is uploaded and drawable; its index buffer holds `index_count`
-            // in-range `u32` indices (the grid is built with exact indices in
-            // `terrain::grid_mesh`).
-            unsafe {
-                device
-                    .device
-                    .cmd_draw_indexed(command_buffer, terrain.index_count, 1, 0, 0, 0);
-            }
+            self.draw_terrain(device, command_buffer, state, &pipelines.terrain);
         }
 
-        if state.unit_count > 0 {
+        let list = &state.camera;
+        if list.len > 0 {
             for textured in [false, true] {
                 let pipeline = if textured {
                     &pipelines.unit_textured
                 } else {
                     &pipelines.unit
                 };
-                self.draw_static(device, command_buffer, state, pipeline, textured, true);
+                self.draw_static(device, command_buffer, list, pipeline, textured, true);
             }
         }
 
-        if !state.skinned_draws.is_empty()
+        if !list.skinned.is_empty()
             && let Some(skinned) = &pipelines.skinned
         {
             // Textured skinned meshes fall back to the vertex-colour pipeline if their
             // permutation is missing.
             let textured = pipelines.skinned_textured.as_ref();
-            self.record_skinned(device, command_buffer, state, skinned, false);
+            self.record_skinned(device, command_buffer, list, skinned, false);
             self.record_skinned(
                 device,
                 command_buffer,
-                state,
+                list,
                 textured.unwrap_or(skinned),
                 true,
             );
@@ -1310,13 +1559,13 @@ impl ScenePass {
         }
         // Then the VAT minions (R4b): their layout re-binds sets 2/3, which would invalidate
         // set 3 for any scene-layout draw after them. The hulls below use only sets 0/1.
-        if state.unit_count > 0
+        if list.len > 0
             && let Some(vat) = &pipelines.vat
         {
             self.draw_vat(
                 device,
                 command_buffer,
-                state,
+                list,
                 vat,
                 Some(targets.lighting),
                 false,
@@ -1326,13 +1575,13 @@ impl ScenePass {
         // Inverted-hull outlines last (R2b): depth-tested against everything above (minions
         // included), never written, so each hull shows only as its unit's silhouette ring
         // (ADR-0016). Only the outlined instances are drawn.
-        if targets.hull_outlines && state.unit_count > 0 {
+        if targets.hull_outlines && list.len > 0 {
             if let Some(pipeline) = &pipelines.hull_unit {
                 for textured in [false, true] {
                     self.draw_static_with(
                         device,
                         command_buffer,
-                        state,
+                        list,
                         pipeline,
                         textured,
                         false,
@@ -1345,7 +1594,7 @@ impl ScenePass {
                     self.draw_skinned(
                         device,
                         command_buffer,
-                        state,
+                        list,
                         pipeline,
                         textured,
                         false,
@@ -1354,7 +1603,7 @@ impl ScenePass {
                 }
             }
             if let Some(pipeline) = &pipelines.hull_vat {
-                self.draw_vat(device, command_buffer, state, pipeline, None, true);
+                self.draw_vat(device, command_buffer, list, pipeline, None, true);
             }
         }
 
@@ -1385,10 +1634,11 @@ impl ScenePass {
         }
     }
 
-    /// Records the shadow pass: the **main view's** units (static meshes instanced, skinned
-    /// meshes one draw each, from view 0's buckets and bones) depth-only through the light's
-    /// view-projection into `target`, cleared to 1. Offscreen views never cast into it. The
-    /// terrain receives but never casts.
+    /// Records the shadow pass: the **main view's caster list** (static meshes instanced,
+    /// skinned meshes one draw each, from view 0's caster buckets and bones; R8: culled
+    /// against the shadow box's sides) depth-only through the light's view-projection into
+    /// `target`, cleared to 1. Offscreen views never cast into it. The terrain receives but
+    /// never casts.
     pub(crate) fn record_shadow(
         &self,
         device: &DeviceContext,
@@ -1431,11 +1681,11 @@ impl ScenePass {
                 SHADOW_BIAS_SLOPE,
             );
         }
-        if state.unit_count > 0 {
+        if let Some(list) = state.casters.as_ref().filter(|list| list.len > 0) {
             self.bind_view_sets(device, command_buffer, state, frame);
             if let Some(pipeline) = &self.pipelines.unit_shadow {
                 for textured in [false, true] {
-                    self.draw_static(device, command_buffer, state, pipeline, textured, false);
+                    self.draw_static(device, command_buffer, list, pipeline, textured, false);
                 }
             }
             if let Some(pipeline) = &self.pipelines.skinned_shadow {
@@ -1443,7 +1693,7 @@ impl ScenePass {
                     self.draw_skinned(
                         device,
                         command_buffer,
-                        state,
+                        list,
                         pipeline,
                         textured,
                         false,
@@ -1452,7 +1702,7 @@ impl ScenePass {
                 }
             }
             if let Some(pipeline) = &self.pipelines.vat_shadow {
-                self.draw_vat(device, command_buffer, state, pipeline, None, false);
+                self.draw_vat(device, command_buffer, list, pipeline, None, false);
             }
         }
         device.cmd_end_rendering(command_buffer);
@@ -1528,38 +1778,24 @@ impl ScenePass {
             target.extent,
         );
         self.bind_view_sets(device, command_buffer, state, frame);
-        // The same terrain mesh as `record` (the map's heightfield, or the R2a plane).
-        let terrain = self.map_terrain.as_ref().unwrap_or(&self.terrain_mesh);
-        bind_pipeline(device, command_buffer, &prepass.terrain);
-        bind_mesh(device, command_buffer, terrain);
-        // SAFETY: as in `record`: the terrain mesh holds `index_count` in-range indices.
-        unsafe {
-            device
-                .device
-                .cmd_draw_indexed(command_buffer, terrain.index_count, 1, 0, 0, 0);
-        }
+        // The same terrain runs as `record` (the map's heightfield, or the R2a plane).
+        self.draw_terrain(device, command_buffer, state, &prepass.terrain);
         // The position-only prepass shaders read no material, so one pipeline draws both
-        // the vertex-colour and the textured meshes.
-        if state.unit_count > 0 {
+        // the vertex-colour and the textured meshes. The camera list, as the scene's.
+        let list = &state.camera;
+        if list.len > 0 {
             for textured in [false, true] {
-                self.draw_static(
-                    device,
-                    command_buffer,
-                    state,
-                    &prepass.unit,
-                    textured,
-                    false,
-                );
+                self.draw_static(device, command_buffer, list, &prepass.unit, textured, false);
             }
         }
-        if !state.skinned_draws.is_empty()
+        if !list.skinned.is_empty()
             && let Some(skinned) = &prepass.skinned
         {
             for textured in [false, true] {
                 self.draw_skinned(
                     device,
                     command_buffer,
-                    state,
+                    list,
                     skinned,
                     textured,
                     false,
@@ -1569,21 +1805,48 @@ impl ScenePass {
         }
         // VAT minions (R4b), so GTAO, contact shadows, outlines and the particles' depth test
         // see them; last, as in `record` (the VAT layout re-binds set 2).
-        if state.unit_count > 0
+        if list.len > 0
             && let Some(vat) = &prepass.vat
         {
-            self.draw_vat(device, command_buffer, state, vat, None, false);
+            self.draw_vat(device, command_buffer, list, vat, None, false);
         }
         device.cmd_end_rendering(command_buffer);
     }
 
-    /// One instanced draw with `pipeline` per static mesh whose material is (`textured`) or is
-    /// not textured, binding each material set when `bind_materials`.
-    fn draw_static(
+    /// The terrain's visible runs of `state` (computed in [`Self::prepare`]) with `pipeline`:
+    /// the map's heightfield, or the R2a plane.
+    fn draw_terrain(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
         state: &SceneView,
+        pipeline: &GraphicsPipeline,
+    ) {
+        let terrain = self.map_terrain.as_ref().unwrap_or(&self.terrain_mesh);
+        if state.terrain_runs.is_empty() {
+            return;
+        }
+        bind_pipeline(device, command_buffer, pipeline);
+        bind_mesh(device, command_buffer, terrain);
+        for &(first, count) in &state.terrain_runs {
+            // SAFETY: each run lies inside the terrain's index buffer (the chunks tile it,
+            // `terrain::grid_mesh`; the plane's run is its whole buffer), and every index is
+            // in range for its vertices by construction.
+            unsafe {
+                device
+                    .device
+                    .cmd_draw_indexed(command_buffer, count, 1, first, 0, 0);
+            }
+        }
+    }
+
+    /// One instanced draw with `pipeline` per static mesh and level whose material is
+    /// (`textured`) or is not textured, binding each material set when `bind_materials`.
+    fn draw_static(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        list: &DrawList,
         pipeline: &GraphicsPipeline,
         textured: bool,
         bind_materials: bool,
@@ -1591,7 +1854,7 @@ impl ScenePass {
         self.draw_static_with(
             device,
             command_buffer,
-            state,
+            list,
             pipeline,
             textured,
             bind_materials,
@@ -1606,87 +1869,94 @@ impl ScenePass {
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
-        state: &SceneView,
+        list: &DrawList,
         pipeline: &GraphicsPipeline,
         textured: bool,
         bind_materials: bool,
         hull: bool,
     ) {
         let mut bound = false;
-        {
-            for (slot, mesh) in self.meshes.iter().enumerate() {
-                // The hull draws only the outlined instances, which lead the mesh's range.
+        for (slot, mesh) in self.meshes.iter().enumerate() {
+            let set = self.mesh_material_sets[slot];
+            // Skinned meshes are drawn per instance below, and VAT meshes instanced, each
+            // with their own pipeline.
+            if mesh.joint_count > 0
+                || self.mesh_vat[slot] != u8::MAX
+                || (set != vk::DescriptorSet::null()) != textured
+            {
+                continue;
+            }
+            let mut mesh_bound = false;
+            for level in 0..usize::from(mesh.lods.count.max(1)) {
+                let bucket = slot * MAX_LODS + level;
+                // The hull draws only the outlined instances, which lead the bucket.
                 let count = if hull {
-                    state.mesh_outlined[slot]
+                    list.outlined[bucket]
                 } else {
-                    state.mesh_counts[slot]
+                    list.counts[bucket]
                 };
-                let set = self.mesh_material_sets[slot];
-                // Skinned meshes are drawn per instance below, and VAT meshes instanced, each
-                // with their own pipeline.
-                if count == 0
-                    || mesh.joint_count > 0
-                    || self.mesh_vat[slot] != u8::MAX
-                    || (set != vk::DescriptorSet::null()) != textured
-                {
+                if count == 0 {
                     continue;
                 }
                 if !bound {
                     bind_pipeline(device, command_buffer, pipeline);
                     bound = true;
                 }
-                if textured && bind_materials {
-                    bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
-                }
-                bind_mesh(device, command_buffer, mesh);
-                if hull {
-                    let push = SkinPush {
-                        first_bone: 0,
-                        joint_count: 0,
-                        reserved: [u32::from(slot == 0), 0],
-                    };
-                    // SAFETY: the shared pipeline layout declares exactly this 16-byte
-                    // vertex-stage range at offset 0.
-                    unsafe {
-                        device.device.cmd_push_constants(
-                            command_buffer,
-                            self.pipeline_layout.handle(),
-                            vk::ShaderStageFlags::VERTEX,
-                            0,
-                            bytes_of(&push),
-                        );
+                if !mesh_bound {
+                    if textured && bind_materials {
+                        bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
                     }
+                    bind_mesh(device, command_buffer, mesh);
+                    if hull {
+                        let push = SkinPush {
+                            first_bone: 0,
+                            joint_count: 0,
+                            reserved: [u32::from(slot == 0), 0],
+                        };
+                        // SAFETY: the shared pipeline layout declares exactly this 16-byte
+                        // vertex-stage range at offset 0.
+                        unsafe {
+                            device.device.cmd_push_constants(
+                                command_buffer,
+                                self.pipeline_layout.handle(),
+                                vk::ShaderStageFlags::VERTEX,
+                                0,
+                                bytes_of(&push),
+                            );
+                        }
+                    }
+                    mesh_bound = true;
                 }
-                // SAFETY: indices: `index_count == indices.len()`, so firstIndex 0 +
-                // indexCount fits the index buffer, and every index is below the vertex
-                // count (cube by construction; registered meshes re-checked in
+                let range = mesh.lods.level(level);
+                // SAFETY: indices: the level's range lies inside the index buffer (LOD0 then
+                // the levels, back to back, `mesh::with_levels`), and every index is below the
+                // vertex count (cube by construction; registered meshes re-checked in
                 // `CpuMesh::from_asset`), so no vertex fetch leaves the vertex buffer.
-                // Instances: `mesh_starts[slot] + count <= unit_count <= max_instances`, the
-                // view's instance buffer's element capacity, by construction in
-                // `bucket_by_mesh`.
+                // Instances: `starts[bucket] + count <= base + len <= the list's capacity`,
+                // inside the view's instance buffer, by construction in `DrawList::bucket`.
                 unsafe {
                     device.device.cmd_draw_indexed(
                         command_buffer,
-                        mesh.index_count,
+                        range.index_count,
                         count,
+                        range.first_index,
                         0,
-                        0,
-                        state.mesh_starts[slot],
+                        list.starts[bucket],
                     );
                 }
             }
         }
     }
 
-    /// One instanced draw per VAT mesh with `pipeline` (`vat` or `vat_shadow`), binding the
-    /// mesh's VAT set at 2 and, for the colour pass, `lighting` at 3. Both are bound with the
-    /// VAT layout, which differs from the scene layout in set 2 only, so sets 0/1 stay valid;
-    /// binding 2 and 3 in one call re-validates 3 after 2 changed layout.
+    /// One instanced draw per VAT mesh and level with `pipeline` (`vat` or `vat_shadow`),
+    /// binding the mesh's VAT set at 2 and, for the colour pass, `lighting` at 3. Both are
+    /// bound with the VAT layout, which differs from the scene layout in set 2 only, so sets
+    /// 0/1 stay valid; binding 2 and 3 in one call re-validates 3 after 2 changed layout.
     fn draw_vat(
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
-        state: &SceneView,
+        list: &DrawList,
         pipeline: &GraphicsPipeline,
         lighting: Option<vk::DescriptorSet>,
         hull: bool,
@@ -1694,68 +1964,81 @@ impl ScenePass {
         let layout = self.vat_pipeline_layout.handle();
         let mut bound = false;
         for (slot, mesh) in self.meshes.iter().enumerate() {
-            // The hull draws only the outlined instances, which lead each mesh's range.
-            let count = if hull {
-                state.mesh_outlined[slot]
-            } else {
-                state.mesh_counts[slot]
-            };
             let entry = self.mesh_vat[slot];
-            if count == 0 || entry == u8::MAX {
+            if entry == u8::MAX {
                 continue;
             }
             let Some((set, push)) = self.vat.entry(usize::from(entry)) else {
                 continue;
             };
-            if !bound {
-                bind_pipeline(device, command_buffer, pipeline);
-                bound = true;
-            }
-            let lighting_set = [set, lighting.unwrap_or(vk::DescriptorSet::null())];
-            let sets = if lighting.is_some() {
-                &lighting_set[..]
-            } else {
-                &lighting_set[..1]
-            };
-            // SAFETY: the VAT set was allocated with the VAT set layout, which the VAT pipeline
-            // layout declares at 2, and the lighting set with the lighting layout it declares
-            // at 3; both outlive the renderer's frames and are not updated after creation
-            // (the lighting set only while the device is idle).
-            unsafe {
-                device.device.cmd_bind_descriptor_sets(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    layout,
-                    2,
-                    sets,
-                    &[],
-                );
-            }
-            // SAFETY: the VAT layout declares exactly this 16-byte vertex-stage range at 0.
-            unsafe {
-                device.device.cmd_push_constants(
-                    command_buffer,
-                    layout,
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    bytes_of::<VatPush>(&push),
-                );
-            }
-            bind_mesh(device, command_buffer, mesh);
-            // SAFETY: indices are in range for the vertex buffer (`CpuMesh::from_asset`);
-            // `mesh_starts[slot] + count <= unit_count <= max_instances` (`bucket_by_mesh`).
-            // Texture reads: the mesh has exactly `push.vertex_count` vertices and the shader
-            // clamps every frame below `push.frame_count`, and `VatMeshes::register` checked
-            // that `2 * frames * vertices` texels fit the texture.
-            unsafe {
-                device.device.cmd_draw_indexed(
-                    command_buffer,
-                    mesh.index_count,
-                    count,
-                    0,
-                    0,
-                    state.mesh_starts[slot],
-                );
+            let mut mesh_bound = false;
+            for level in 0..usize::from(mesh.lods.count.max(1)) {
+                let bucket = slot * MAX_LODS + level;
+                // The hull draws only the outlined instances, which lead each bucket.
+                let count = if hull {
+                    list.outlined[bucket]
+                } else {
+                    list.counts[bucket]
+                };
+                if count == 0 {
+                    continue;
+                }
+                if !bound {
+                    bind_pipeline(device, command_buffer, pipeline);
+                    bound = true;
+                }
+                if !mesh_bound {
+                    let lighting_set = [set, lighting.unwrap_or(vk::DescriptorSet::null())];
+                    let sets = if lighting.is_some() {
+                        &lighting_set[..]
+                    } else {
+                        &lighting_set[..1]
+                    };
+                    // SAFETY: the VAT set was allocated with the VAT set layout, which the VAT
+                    // pipeline layout declares at 2, and the lighting set with the lighting
+                    // layout it declares at 3; both outlive the renderer's frames and are not
+                    // updated after creation (the lighting set only while the device is idle).
+                    unsafe {
+                        device.device.cmd_bind_descriptor_sets(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            layout,
+                            2,
+                            sets,
+                            &[],
+                        );
+                    }
+                    // SAFETY: the VAT layout declares exactly this 16-byte vertex-stage range
+                    // at 0.
+                    unsafe {
+                        device.device.cmd_push_constants(
+                            command_buffer,
+                            layout,
+                            vk::ShaderStageFlags::VERTEX,
+                            0,
+                            bytes_of::<VatPush>(&push),
+                        );
+                    }
+                    bind_mesh(device, command_buffer, mesh);
+                    mesh_bound = true;
+                }
+                let range = mesh.lods.level(level);
+                // SAFETY: the level's indices lie inside the index buffer and are in range for
+                // the vertex buffer (`CpuMesh::from_asset`); `starts[bucket] + count` stays
+                // inside the list (`DrawList::bucket`). Texture reads: the mesh has exactly
+                // `push.vertex_count` vertices (every level indexes the same vertices) and the
+                // shader clamps every frame below `push.frame_count`, and
+                // `VatMeshes::register` checked that `2 * frames * vertices` texels fit.
+                unsafe {
+                    device.device.cmd_draw_indexed(
+                        command_buffer,
+                        range.index_count,
+                        count,
+                        range.first_index,
+                        0,
+                        list.starts[bucket],
+                    );
+                }
             }
         }
     }
@@ -1766,14 +2049,14 @@ impl ScenePass {
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
-        state: &SceneView,
+        list: &DrawList,
         pipeline: &GraphicsPipeline,
         textured: bool,
     ) {
         self.draw_skinned(
             device,
             command_buffer,
-            state,
+            list,
             pipeline,
             textured,
             true,
@@ -1789,75 +2072,72 @@ impl ScenePass {
         &self,
         device: &DeviceContext,
         command_buffer: vk::CommandBuffer,
-        state: &SceneView,
+        list: &DrawList,
         pipeline: &GraphicsPipeline,
         textured: bool,
         bind_materials: bool,
         outlined_only: bool,
     ) {
-        {
-            let mut bound_pipeline = false;
-            let mut bound_slot = u32::MAX;
-            for draw in &state.skinned_draws {
-                let mesh = &self.meshes[draw.slot as usize];
-                let set = self.mesh_material_sets[draw.slot as usize];
-                if (set != vk::DescriptorSet::null()) != textured {
-                    continue;
+        let mut bound_pipeline = false;
+        let mut bound_slot = u32::MAX;
+        for draw in &list.skinned {
+            let mesh = &self.meshes[draw.slot as usize];
+            let set = self.mesh_material_sets[draw.slot as usize];
+            if (set != vk::DescriptorSet::null()) != textured {
+                continue;
+            }
+            let bucket = draw.slot as usize * MAX_LODS + usize::from(draw.lod) % MAX_LODS;
+            if outlined_only && draw.instance >= list.starts[bucket] + list.outlined[bucket] {
+                continue;
+            }
+            if !bound_pipeline {
+                // The pipeline was created with the shared layout the descriptor sets
+                // are bound with, so sets 0/1 stay valid for it.
+                bind_pipeline(device, command_buffer, pipeline);
+                bound_pipeline = true;
+            }
+            if draw.slot != bound_slot {
+                bound_slot = draw.slot;
+                if textured && bind_materials {
+                    bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
                 }
-                let slot = draw.slot as usize;
-                if outlined_only
-                    && draw.instance >= state.mesh_starts[slot] + state.mesh_outlined[slot]
-                {
-                    continue;
-                }
-                if !bound_pipeline {
-                    // The pipeline was created with the shared layout the descriptor sets
-                    // are bound with, so sets 0/1 stay valid for it.
-                    bind_pipeline(device, command_buffer, pipeline);
-                    bound_pipeline = true;
-                }
-                if draw.slot != bound_slot {
-                    bound_slot = draw.slot;
-                    if textured && bind_materials {
-                        bind_material(device, command_buffer, self.pipeline_layout.handle(), set);
-                    }
-                    // Skinned meshes (joint_count > 0) hold `SkinnedVertex` data, the layout
-                    // of the bound skinned pipeline.
-                    bind_mesh(device, command_buffer, mesh);
-                }
-                let push = SkinPush {
-                    first_bone: draw.first_bone,
-                    joint_count: draw.joint_count,
-                    reserved: [0; 2],
-                };
-                // SAFETY: the shared pipeline layout declares exactly this 16-byte
-                // vertex-stage range at offset 0.
-                unsafe {
-                    device.device.cmd_push_constants(
-                        command_buffer,
-                        self.pipeline_layout.handle(),
-                        vk::ShaderStageFlags::VERTEX,
-                        0,
-                        bytes_of(&push),
-                    );
-                }
-                // SAFETY: indices are in range for the vertex buffer (re-checked in
-                // `CpuSkinnedMesh::from_asset`). `draw.instance < unit_count <= max_instances`
-                // (it is a bucketed instance slot). Bones: `skinned_draw` guarantees
-                // `joint_count >= 1` and `first_bone + joint_count <= bone_count <=
-                // max_bones`, the bone buffer's capacity, and the shader clamps each joint
-                // index below `joint_count`, so every bone read stays inside this frame's
-                // upload.
-                unsafe {
-                    device.device.cmd_draw_indexed(
-                        command_buffer,
-                        mesh.index_count,
-                        1,
-                        0,
-                        0,
-                        draw.instance,
-                    );
-                }
+                // Skinned meshes (joint_count > 0) hold `SkinnedVertex` data, the layout
+                // of the bound skinned pipeline.
+                bind_mesh(device, command_buffer, mesh);
+            }
+            let push = SkinPush {
+                first_bone: draw.first_bone,
+                joint_count: draw.joint_count,
+                reserved: [0; 2],
+            };
+            // SAFETY: the shared pipeline layout declares exactly this 16-byte
+            // vertex-stage range at offset 0.
+            unsafe {
+                device.device.cmd_push_constants(
+                    command_buffer,
+                    self.pipeline_layout.handle(),
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    bytes_of(&push),
+                );
+            }
+            let range = mesh.lods.level(usize::from(draw.lod));
+            // SAFETY: the level's indices lie inside the index buffer and are in range for the
+            // vertex buffer (re-checked in `CpuSkinnedMesh::from_asset`). `draw.instance` is a
+            // bucketed instance slot of the list, inside the view's instance buffer. Bones:
+            // `skinned_draw` guarantees `joint_count >= 1` and `first_bone + joint_count <=
+            // bone_count <= max_bones`, the bone buffer's capacity, and the shader clamps each
+            // joint index below `joint_count`, so every bone read stays inside this frame's
+            // upload.
+            unsafe {
+                device.device.cmd_draw_indexed(
+                    command_buffer,
+                    range.index_count,
+                    1,
+                    range.first_index,
+                    0,
+                    draw.instance,
+                );
             }
         }
     }
@@ -1874,12 +2154,15 @@ impl SceneView {
         let ViewBudget {
             max_instances,
             max_bones,
+            casters,
         } = budget;
+        // The caster list (R8) follows the camera list in the same buffer.
+        let lists = if casters { 2 } else { 1 };
         // Both SSBOs are bound with `WHOLE_SIZE`, so each must fit one storage-buffer range.
         let range_limit = u64::from(device.max_storage_buffer_range);
         let instance_buffer_size = u64::try_from(core::mem::size_of::<GpuInstance>())
             .ok()
-            .zip(u64::try_from(max_instances.max(1)).ok())
+            .zip(u64::try_from(max_instances.max(1) * lists).ok())
             .and_then(|(size, count)| size.checked_mul(count))
             .filter(|&bytes| bytes <= range_limit)
             .ok_or_else(|| {
@@ -1936,14 +2219,16 @@ impl SceneView {
             write_descriptors(&device.device, &scene_frame);
             scene_frames.push(scene_frame);
         }
+        let skinned_capacity = max_instances.min(max_bones);
+        let caster_base = u32::try_from(max_instances).map_err(|_| {
+            RenderError::NoSuitableDevice(String::from("max_instances exceeds u32"))
+        })?;
         Ok(Self {
             frames: scene_frames,
-            mesh_counts: [0; MAX_MESHES],
-            mesh_starts: [0; MAX_MESHES],
-            mesh_cursors: [0; MAX_MESHES],
-            mesh_outlined: [0; MAX_MESHES],
-            mesh_plain_cursors: [0; MAX_MESHES],
-            skinned_draws: Vec::with_capacity(max_instances.min(max_bones)),
+            camera: DrawList::new(0, skinned_capacity),
+            casters: casters.then(|| DrawList::new(caster_base, skinned_capacity)),
+            decisions: Vec::with_capacity(max_instances),
+            terrain_runs: Vec::with_capacity(MAX_TERRAIN_CHUNKS),
             unit_count: 0,
             max_instances,
             max_bones,
@@ -2128,38 +2413,8 @@ fn skinned_draw(
         instance,
         first_bone: bones.first,
         joint_count: bones.count.min(mesh_joints),
+        lod: 0,
     })
-}
-
-/// Counting-sort bucketing of `units` by mesh, without allocating.
-///
-/// On return `counts[m]` is the number of instances of mesh `m`, `starts[m]` the first
-/// instance slot of that mesh's contiguous run, and `cursors[m] == starts[m]` (the write
-/// cursor the caller advances while scattering). Runs are in mesh-slot order and keep scene
-/// order within a mesh, so a scene that only uses the cube is laid out exactly as before.
-fn bucket_by_mesh(
-    units: &[crate::UnitInstance],
-    mesh_count: usize,
-    counts: &mut [u32; MAX_MESHES],
-    outlined: &mut [u32; MAX_MESHES],
-    starts: &mut [u32; MAX_MESHES],
-    cursors: &mut [u32; MAX_MESHES],
-    plain_cursors: &mut [u32; MAX_MESHES],
-) {
-    counts.fill(0);
-    outlined.fill(0);
-    for unit in units {
-        let slot = mesh_slot(unit.mesh, mesh_count);
-        counts[slot] += 1;
-        outlined[slot] += u32::from(is_outlined(unit));
-    }
-    let mut next = 0u32;
-    for slot in 0..MAX_MESHES {
-        starts[slot] = next;
-        plain_cursors[slot] = next + outlined[slot];
-        next += counts[slot];
-    }
-    *cursors = *starts;
 }
 
 /// Whether `unit` has a drawable outline slot (`1..OUTLINE_SLOTS`, ADR-0016).
@@ -2169,7 +2424,10 @@ fn is_outlined(unit: &crate::UnitInstance) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_MESHES, SkinPush, SkinnedDraw, bucket_by_mesh, clamp_rect, skinned_draw};
+    use super::{
+        BUCKETS, DrawList, IN_CAMERA, IN_CASTERS, LOD_SHIFT, MAX_LODS, SkinPush, SkinnedDraw,
+        clamp_rect, skinned_draw,
+    };
     use crate::{BoneRange, MeshId, UnitInstance};
     use moba_core::math::{Mat4, Vec4};
 
@@ -2204,6 +2462,7 @@ mod tests {
                 first_bone: 64,
                 // Never more than the mesh's joints.
                 joint_count: 7,
+                lod: 0,
             }
         );
         assert_eq!(skinned_draw(BoneRange::NONE, 7, 128, 3, 9), None);
@@ -2221,48 +2480,76 @@ mod tests {
         UnitInstance::new(Mat4::IDENTITY, Vec4::ONE).with_mesh(MeshId::from_index(mesh))
     }
 
+    /// Buckets the units with every decision in the camera list at LOD0.
+    fn camera_list(units: &[UnitInstance], mesh_count: usize) -> DrawList {
+        let mut list = DrawList::new(0, 4);
+        list.bucket(units, &vec![IN_CAMERA; units.len()], IN_CAMERA, mesh_count);
+        list
+    }
+
     #[test]
     fn buckets_are_contiguous_and_unknown_meshes_draw_as_cubes() {
         let units = [unit(2), unit(0), unit(1), unit(2), unit(9), unit(0)];
-        let mut counts = [0; MAX_MESHES];
-        let mut starts = [0; MAX_MESHES];
-        let mut cursors = [0; MAX_MESHES];
-        let (mut outlined, mut plain) = ([0; MAX_MESHES], [0; MAX_MESHES]);
-        bucket_by_mesh(
-            &units,
-            3,
-            &mut counts,
-            &mut outlined,
-            &mut starts,
-            &mut cursors,
-            &mut plain,
-        );
+        let list = camera_list(&units, 3);
         // Mesh 9 is not registered (3 meshes), so it joins the cube bucket.
-        assert_eq!(&counts[..4], &[3, 1, 2, 0]);
-        assert_eq!(&starts[..4], &[0, 3, 4, 6]);
-        assert_eq!(cursors, starts);
-        assert_eq!(starts[MAX_MESHES - 1], 6);
+        let lod0 = |slot: usize| slot * MAX_LODS;
+        assert_eq!(
+            [0, 1, 2, 3].map(|slot| list.counts[lod0(slot)]),
+            [3, 1, 2, 0]
+        );
+        assert_eq!(
+            [0, 1, 2, 3].map(|slot| list.starts[lod0(slot)]),
+            [0, 3, 4, 6]
+        );
+        assert_eq!(list.cursors, list.starts);
+        assert_eq!(list.starts[BUCKETS - 1], 6);
+        assert_eq!(list.len, 6);
     }
 
     #[test]
     fn cube_only_scenes_keep_one_run_in_scene_order() {
-        let units = [unit(0); 5];
-        let mut counts = [7; MAX_MESHES];
-        let mut starts = [7; MAX_MESHES];
-        let mut cursors = [7; MAX_MESHES];
-        let (mut outlined, mut plain) = ([0; MAX_MESHES], [0; MAX_MESHES]);
-        bucket_by_mesh(
-            &units,
-            1,
-            &mut counts,
-            &mut outlined,
-            &mut starts,
-            &mut cursors,
-            &mut plain,
+        let list = camera_list(&[unit(0); 5], 1);
+        assert_eq!(list.counts[0], 5);
+        assert_eq!(list.starts[0], 0);
+        assert!(list.counts[1..].iter().all(|&count| count == 0));
+    }
+
+    /// R8: culled units leave their bucket without reordering the rest; each list counts only
+    /// its own units, from its own base; a unit's level picks its bucket inside the mesh.
+    #[test]
+    fn lists_bucket_their_own_units_by_mesh_and_level() {
+        let units = [unit(1), unit(1), unit(0), unit(1), unit(1)];
+        let both = IN_CAMERA | IN_CASTERS;
+        let decisions = [
+            both,
+            IN_CASTERS,
+            IN_CAMERA,
+            both | (2 << LOD_SHIFT),
+            IN_CAMERA,
+        ];
+        let mut camera = DrawList::new(0, 4);
+        camera.bucket(&units, &decisions, IN_CAMERA, 2);
+        let mut casters = DrawList::new(100, 4);
+        casters.bucket(&units, &decisions, IN_CASTERS, 2);
+        assert_eq!(camera.len, 4);
+        assert_eq!(casters.len, 3);
+        let mesh1 = MAX_LODS;
+        assert_eq!(
+            (
+                camera.counts[0],
+                camera.counts[mesh1],
+                camera.counts[mesh1 + 2]
+            ),
+            (1, 2, 1)
         );
-        assert_eq!(counts[0], 5);
-        assert_eq!(starts[0], 0);
-        assert!(counts[1..].iter().all(|&count| count == 0));
+        assert_eq!((camera.starts[mesh1], camera.starts[mesh1 + 2]), (1, 3));
+        assert_eq!((casters.counts[mesh1], casters.counts[mesh1 + 2]), (2, 1));
+        assert_eq!(casters.starts[0], 100, "the caster list starts at its base");
+        assert_eq!(casters.starts[mesh1 + 2], 102);
+        // Placing keeps scene order inside a bucket.
+        assert_eq!(camera.place(&units[0], mesh1), 1);
+        assert_eq!(camera.place(&units[4], mesh1), 2);
+        assert_eq!(casters.place(&units[1], mesh1), 100);
     }
 
     #[test]
@@ -2275,23 +2562,12 @@ mod tests {
             unit(1),
             unit(1).with_outline(7),
         ];
-        let mut counts = [0; MAX_MESHES];
-        let mut starts = [0; MAX_MESHES];
-        let mut cursors = [0; MAX_MESHES];
-        let (mut outlined, mut plain) = ([0; MAX_MESHES], [0; MAX_MESHES]);
-        bucket_by_mesh(
-            &units,
-            2,
-            &mut counts,
-            &mut outlined,
-            &mut starts,
-            &mut cursors,
-            &mut plain,
-        );
-        assert_eq!(&counts[..2], &[1, 4]);
-        assert_eq!(&outlined[..2], &[0, 2]);
+        let list = camera_list(&units, 2);
+        let mesh1 = MAX_LODS;
+        assert_eq!((list.counts[0], list.counts[mesh1]), (1, 4));
+        assert_eq!((list.outlined[0], list.outlined[mesh1]), (0, 2));
         // Mesh 1's outlined instances go to [1, 3), its plain ones to [3, 5).
-        assert_eq!((cursors[1], plain[1]), (1, 3));
-        assert_eq!((cursors[0], plain[0]), (0, 0));
+        assert_eq!((list.cursors[mesh1], list.plain_cursors[mesh1]), (1, 3));
+        assert_eq!((list.cursors[0], list.plain_cursors[0]), (0, 0));
     }
 }

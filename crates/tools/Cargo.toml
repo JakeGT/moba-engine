@@ -26,3 +26,4 @@ moba-render.workspace = true
 moba-assets = { workspace = true, features = ["glb", "bc-decode"] }
 bcdec_rs.workspace = true
 png.workspace = true
+meshopt.workspace = true

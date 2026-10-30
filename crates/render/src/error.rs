@@ -80,6 +80,15 @@ pub enum RenderError {
     /// unusable (heightfield size or values, layer or splat counts, formats or sizes); the
     /// text says which (ADR-0014).
     InvalidTerrain(&'static str),
+    /// A texture does not fit the quality tier's texture budget even with every mip level
+    /// but its smallest dropped (R8, ADR-0018 §4). Smaller textures degrade instead; the
+    /// caller keeps the material untextured.
+    OverBudget {
+        /// The texture's bytes at its smallest level.
+        needed: u64,
+        /// The texture budget left.
+        free: u64,
+    },
     /// A pipeline layout needs more samplers or sampled images in one shader stage than the
     /// device allows (`maxPerStageDescriptorSamplers`/`SampledImages`); `layout` names it.
     DescriptorLimit {
@@ -127,6 +136,10 @@ impl fmt::Display for RenderError {
                 write!(f, "invalid vertex-animation texture: {reason}")
             }
             Self::InvalidTerrain(reason) => write!(f, "invalid terrain: {reason}"),
+            Self::OverBudget { needed, free } => write!(
+                f,
+                "texture over the tier's texture budget: {needed} bytes needed, {free} free"
+            ),
             Self::DescriptorLimit {
                 layout,
                 stage,

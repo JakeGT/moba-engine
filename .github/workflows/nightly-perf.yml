@@ -1,0 +1,73 @@
+name: nightly perf
+
+# R8 (ADR-0018 §6): the 10-minute teamfight replay on a self-hosted GPU runner, once per
+# quality tier, gated by `perf-gate` against the roadmap's §7 GPU budgets, the frame-pacing
+# rule (p99 <= 1.5x p50), the no-mid-match-upload contract and tests/perf/baseline.toml.
+#
+# The job only runs where a GPU runner exists: set the repository variable
+# HAS_GPU_RUNNER=true once a runner labelled [self-hosted, gpu] is registered (with a
+# desktop session or xvfb, Vulkan drivers and the validation layers). Without it the job is
+# skipped rather than queued forever. A new runner GPU needs its own baseline: run
+# scripts/perf-replay.sh with BASELINE= on it and commit the gpu_total_p95_ms values.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticks:
+        description: Replay length in ticks (30 Hz; 18000 = 10 minutes)
+        default: "18000"
+  schedule:
+    - cron: "41 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-perf
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf:
+    name: teamfight replay per tier
+    if: vars.HAS_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build client and tools
+        run: cargo build --release --locked -p moba-client -p moba-tools
+      # Short validation-required runs first: a perf number from a frame with validation
+      # errors is not evidence.
+      - name: Validation + sync validation, every tier, culling on and off
+        run: |
+          set -euo pipefail
+          for tier in low medium high ultra; do
+            for cull in cpu off; do
+              MOBA_VULKAN_VALIDATION=required MOBA_QUALITY=$tier MOBA_GPU_CULL=$cull \
+                MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 \
+                MOBA_SMOKE_FRAMES=300 MOBA_VSYNC=0 \
+                timeout 300 ./target/release/moba-client > "validation-$tier-$cull.log" 2>&1 \
+                || { tail -20 "validation-$tier-$cull.log"; exit 1; }
+              if grep -E '^\[vulkan' "validation-$tier-$cull.log"; then
+                echo "validation messages on $tier (culling $cull)"
+                exit 1
+              fi
+            done
+          done
+      - name: 10-minute replay per tier and perf gate
+        run: scripts/perf-replay.sh perf-replay
+        env:
+          TICKS: ${{ github.event.inputs.ticks || '18000' }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: nightly-perf
+          path: |
+            validation-*.log
+            perf-replay/frames-*.log
+            perf-replay/frames-*.log.stderr
+          if-no-files-found: ignore

@@ -89,7 +89,13 @@
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
-//!   ahead; a capture advances one tick per frame.
+//!   ahead; a capture advances one tick per frame. `MOBA_REPLAY_EXIT=1` exits when the
+//!   recording ends (the R8 10-minute pacing runs).
+//! - R8 (ADR-0018): `MOBA_GPU_CULL=off|cpu` (frustum culling; `off` draws everything),
+//!   `MOBA_MESH_LOD=off|<px>` (mesh level selection; the tier's tolerance by default) and
+//!   `MOBA_FRAME_LOG_FRAMES=<n>` (frame-log samples, default 10,000). The frame log and the
+//!   startup `[vram]` line report memory against the tier's budgets and any upload or
+//!   pipeline build after the match started (`locked_uploads`, `locked_pipelines`).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -165,6 +171,8 @@ struct ClientApp {
     anchors: vfx::Anchors,
     /// `MOBA_REPLAY`: the recorded inputs the local view plays, and the next frame.
     replay: Option<(moba_sim::Replay, usize)>,
+    /// `MOBA_REPLAY_EXIT=1`: exit once the replay's last frame has played (R8).
+    replay_exit: bool,
     /// `MOBA_VFX_PREVIEW`: the authoring loop.
     preview: Option<vfx::Preview>,
     /// VAT minion players and corpses (R4b).
@@ -282,9 +290,17 @@ impl ClientApp {
             .ok()
             .and_then(|value| value.parse::<f32>().ok());
         let frame_log_path = std::env::var("MOBA_FRAME_LOG").ok().map(PathBuf::from);
-        let frame_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
-        let work_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
-        let gpu_log = frame_log_path.as_ref().map(|_| Vec::with_capacity(10_000));
+        // Every log is allocated once here at its full size (R8: no per-frame growth).
+        let frame_log_frames = launch::frame_log_frames();
+        let frame_log = frame_log_path
+            .as_ref()
+            .map(|_| Vec::with_capacity(frame_log_frames));
+        let work_log = frame_log_path
+            .as_ref()
+            .map(|_| Vec::with_capacity(frame_log_frames));
+        let gpu_log = frame_log_path
+            .as_ref()
+            .map(|_| Vec::with_capacity(frame_log_frames));
         let quality = std::env::var("MOBA_QUALITY").ok().map_or_else(
             || settings.quality_tier(),
             |name| {
@@ -364,6 +380,7 @@ impl ClientApp {
             },
             anchors: vfx::Anchors::new(),
             replay: None,
+            replay_exit: std::env::var("MOBA_REPLAY_EXIT").is_ok_and(|value| value.trim() == "1"),
             preview: None,
             ui: UiDrawList::new(),
             scoreboard_visible: std::env::var_os("MOBA_SCOREBOARD").is_some(),
@@ -556,6 +573,8 @@ impl ClientApp {
             return; // First poll (the renderer was built from these files) or no change.
         }
         let started = Instant::now();
+        // A dev reload rebuilds pipelines on purpose: not a mid-match build (R8).
+        renderer.unlock_uploads();
         match renderer.reload_shaders() {
             Ok(_) => eprintln!(
                 "[render] shaders reloaded from {} in {:.1} ms",
@@ -582,6 +601,8 @@ impl ClientApp {
         self.vfx.clear();
         self.vfx.library_mut().reload();
         if let Some(renderer) = self.renderer.as_mut() {
+            // A dev reload uploads on purpose: not a mid-match upload (R8).
+            renderer.unlock_uploads();
             self.vfx.library_mut().bind_renderer(renderer);
         }
         if let Some(preview) = self.preview.as_mut() {
@@ -617,7 +638,9 @@ impl App for ClientApp {
                 self.render_scale,
                 self.capture_path.is_some() || self.map_capture.is_some(),
             )))
-            .with_world(Some(launch::world_config(self.quality)));
+            .with_world(Some(launch::world_config(self.quality)))
+            .with_culling(launch::cull_mode())
+            .with_mesh_lod(launch::mesh_lod());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -709,6 +732,12 @@ impl App for ClientApp {
                     String::from("MOBA — local preview")
                 };
                 window.set_title(&title);
+                // R8: what the content loaded at start costs against the tier's budgets.
+                eprintln!(
+                    "[vram] {} {}",
+                    renderer.quality_tier(),
+                    launch::memory_summary(&renderer.memory_stats())
+                );
                 self.renderer = Some(renderer);
             }
             Err(error) => self.fail(format!("renderer initialisation failed: {error}")),
@@ -742,7 +771,7 @@ impl App for ClientApp {
         if measuring {
             self.measured_frames += 1;
             if let Some(samples) = self.frame_log.as_mut()
-                && samples.len() < 10_000
+                && samples.len() < samples.capacity()
             {
                 samples.push(raw_ms);
             }
@@ -898,6 +927,9 @@ impl App for ClientApp {
                                 // hero models (cached, so only new names touch the disk or
                                 // the GPU).
                                 if let Some(renderer) = renderer.as_mut() {
+                                    // A content reload is a load point, not mid-match: the
+                                    // lock goes back on with the next measured frame (R8).
+                                    renderer.unlock_uploads();
                                     map_visuals::bind_network_map(
                                         map_visuals,
                                         renderer,
@@ -1439,9 +1471,18 @@ impl App for ClientApp {
             }
         }
 
+        // R8 (ADR-0018 §4): every asset is loaded before the match plays; from the first
+        // measured frame on, any upload or pipeline build is counted and logged. A content
+        // reload or dev reload unlocks; the next measured frame locks again.
+        if measuring
+            && let Some(renderer) = self.renderer.as_mut()
+            && !renderer.memory_stats().locked
+        {
+            renderer.lock_uploads();
+        }
         if measuring
             && let (Some(started), Some(work)) = (render_started, self.work_log.as_mut())
-            && work.len() < 10_000
+            && work.len() < work.capacity()
         {
             let cpu_ms = started.duration_since(now).as_secs_f32() * 1_000.0;
             let render_ms = started.elapsed().as_secs_f32() * 1_000.0;
@@ -1451,7 +1492,7 @@ impl App for ClientApp {
                 self.renderer
                     .as_ref()
                     .and_then(moba_render::Renderer::gpu_timings),
-            ) && gpu.len() < 10_000
+            ) && gpu.len() < gpu.capacity()
                 && self.gpu_logged_frame != Some(timings.frame)
             {
                 // Only fresh samples: when no newer frame completed since the last call, the
@@ -1478,6 +1519,11 @@ impl App for ClientApp {
         }
         if frame.input().was_key_pressed(Key::Escape)
             || self.measured_frames >= self.quit_after_frames
+            || (self.replay_exit
+                && self
+                    .replay
+                    .as_ref()
+                    .is_some_and(|(replay, cursor)| *cursor >= replay.frames.len()))
         {
             return FrameOutcome::Exit;
         }

@@ -56,6 +56,9 @@ gltf = { version = "=1.4.1", default-features = false }
 bcdec_rs = "=0.2.1"
 # PNG decode/encode for the offline texture baker (moba-tools only, ADR-0010).
 png = "0.18"
+# meshoptimizer bindings (MIT OR Apache-2.0; bundles meshoptimizer, MIT) for the offline mesh
+# LOD baker (moba-tools only, R8, ADR-0018). Exact pin; the client never links it.
+meshopt = { version = "=0.7.0", default-features = false }
 gpu-allocator = "0.28"
 raw-window-handle = "0.6"
 cpal = "0.18"

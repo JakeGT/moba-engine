@@ -154,6 +154,17 @@ match the generator.
 The `.glb` loader uses the `gltf` crate family (MIT OR Apache-2.0) with default features
 disabled; see [ADR-0007](docs/adr/0007-mesh-format.md).
 
+## Mesh simplification (meshoptimizer)
+
+The offline mesh LOD baker (`moba-tools mesh-bake lod`, `crates/tools/src/bin/mesh-bake.rs`)
+simplifies meshes with the `meshopt` crate 0.7.0 (MIT OR Apache-2.0), which compiles and
+statically links the bundled C++ [meshoptimizer](https://github.com/zeux/meshoptimizer)
+library, version 1.3 (MIT, Copyright (C) 2016-2026 Arseny Kapoulkine), and its
+dependency `float-cmp` (MIT). Only the tools crate links it: the client and renderer read
+the baked `models/<model>.lod` files and never link meshoptimizer. The generated
+`content/models/*.lod` files are derived from this repository's own sample meshes and carry
+the repository's MIT OR Apache-2.0 licence. See [ADR-0018](docs/adr/0018-culling-lods-memory.md).
+
 ## Sample textures and material
 
 `content/textures/sentinel-{base,normal,mr,mask}.ktx2` (and the copy in `fuzz/corpus/ktx2/`)

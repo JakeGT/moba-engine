@@ -471,6 +471,34 @@ impl VatDescriptor {
         Ok(())
     }
 
+    /// A bounding sphere `[x, y, z, radius]` over every baked frame's model-space positions
+    /// (R8 culling, ADR-0018): exact for any frame the renderer can show. `None` unless
+    /// `texture` passes [`Self::check_texture`], or a position is not finite.
+    #[must_use]
+    pub fn position_bounds(&self, texture: &TextureData) -> Option<[f32; 4]> {
+        self.check_texture(texture).ok()?;
+        let texels = (self.frame_count as usize).checked_mul(self.vertex_count as usize)?;
+        let data = texture.data();
+        if data.len() < texels.checked_mul(8)? {
+            return None;
+        }
+        let mut positions = Vec::with_capacity(texels);
+        for texel in data.as_chunks::<8>().0.iter().take(texels) {
+            let lane = |index: usize| {
+                crate::texture::f32_from_f16(u16::from_le_bytes([
+                    texel[index * 2],
+                    texel[index * 2 + 1],
+                ]))
+            };
+            let position = [lane(0), lane(1), lane(2)];
+            if position.iter().any(|value| !value.is_finite()) {
+                return None;
+            }
+            positions.push(position);
+        }
+        Some(crate::mesh::bounding_sphere(&positions))
+    }
+
     /// Checks that `mesh` is the mesh the texture was baked from (vertex count and
     /// [`mesh_hash`]).
     ///
@@ -1166,6 +1194,19 @@ mod tests {
         assert_eq!(normal[3], 0.0);
         // The first idle frame is the rest pose.
         assert_eq!(texel(&texture, 1)[..3], [1.0, 1.0, 0.0]);
+        // R8: the culling sphere covers every frame, the rest pose and the death pose's
+        // (0, 2, 0) included, and a texture of another size has none.
+        let [cx, cy, cz, radius] = descriptor.position_bounds(&texture).expect("bounds");
+        for frame in 0..16 {
+            for vertex in 0..3 {
+                let pos = texel(&texture, frame * 3 + vertex);
+                let distance =
+                    ((pos[0] - cx).powi(2) + (pos[1] - cy).powi(2) + (pos[2] - cz).powi(2)).sqrt();
+                assert!(distance <= radius + 1e-4, "frame {frame} vertex {vertex}");
+            }
+        }
+        let small = TextureData::new(TextureFormat::Rgba16Float, 1, 1, &[vec![0; 8]]).expect("1x1");
+        assert_eq!(descriptor.position_bounds(&small), None);
     }
 
     #[test]

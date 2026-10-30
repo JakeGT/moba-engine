@@ -1,6 +1,7 @@
 # ADR-0018: Culling, mesh LODs, memory budgets and frame pacing (R8)
 
-**Status:** accepted 2026-10-30 (AAA graphics roadmap
+**Status:** accepted 2026-10-30, revised the same day after implementation (§2: the
+GPU-driven path is deferred, not built; §3: permissive simplification) (AAA graphics roadmap
 [R8](../plans/aaa-graphics-roadmap.md#r8--performance-scaling-and-platform-evidence-m-continuous),
 the last engineering phase). Builds on [ADR-0008](0008-render-graph.md) (the graph),
 [ADR-0011](0011-art-style-lighting.md) (the fitted shadow map), [ADR-0012](0012-animation-runtime.md)
@@ -63,18 +64,23 @@ so whichever side culls, the CPU uploads every candidate's 128-byte instance eve
   With culling off the whole reordered buffer is one draw, so off and on draw the same
   triangles in the same order. The terrain casts no shadow (ADR-0014), so there is no shadow
   terrain list.
-- **Switch.** `RenderConfig::culling` (`CullMode::{Off, Cpu, Gpu}`), from
-  `MOBA_GPU_CULL=off|cpu|on` in the client; the default is `cpu` on every tier. `off` draws
-  everything, the reference for the exactness check.
+- **Switch.** `RenderConfig::culling` (`CullMode::{Off, Cpu}`), from
+  `MOBA_GPU_CULL=off|cpu` in the client (`on` is accepted as `cpu`); the default is `cpu` on
+  every tier. `off` draws everything, the reference for the exactness check
+  (`scripts/cull-probe.sh`).
 
-### 2. GPU-driven culling: implemented, opt-in, not the default
+### 2. GPU-driven culling: designed, deferred until instance counts justify it
 The roadmap asks for GPU-driven frustum culling "once instance counts justify it". The table
 above says they do not yet: the CPU path's whole per-instance cost is a sphere test (a few
 nanoseconds), the upload is the same on both paths, and the render call is 0.1 ms. A GPU path
-can only remove the sphere tests while adding a compute dispatch and its barriers.
+can only remove the sphere tests while adding a compute dispatch and its barriers, and with the
+CPU path culling a 700-instance scene costs microseconds (perf/0022). The first draft of this
+ADR planned to build it opt-in anyway; that was dropped during implementation, because an
+unexercised second path is a maintenance and validation cost (every tier, culling on and off,
+lavapipe and real GPU) with no measured gain. `CullMode` is `#[non_exhaustive]`, so the variant
+can be added without an API break.
 
-It is still built, so that the switch is ready when content grows (thousands of props, or
-instance data that stays on the GPU), behind `MOBA_GPU_CULL=on`:
+The design, when it is needed:
 - the CPU buckets every candidate of the main view's camera and caster lists by mesh and LOD
   (as for `cpu`, without the sphere test) and writes one `VkDrawIndexedIndirectCommand` per
   bucket with `instanceCount = 0`;
@@ -85,30 +91,34 @@ instance data that stays on the GPU), behind `MOBA_GPU_CULL=on`:
 - static and VAT buckets draw with **`vkCmdDrawIndexedIndirectCount`** (core in 1.2, the
   `drawIndirectCount` feature): one call per mesh over its LOD commands, so trailing LODs with
   no survivors are skipped. Skinned instances (one draw per instance with a bone push
-  constant) stay CPU-culled and are copied through unchanged; hulls read the uncompacted list.
+  constant) stay CPU-culled and are copied through unchanged; hulls read the uncompacted list;
 - the graph declares the compacted buffer `VertexStorageRead` and the commands `IndirectRead`
-  for the shadow, prepass and scene passes, so the barriers are derived like every other one.
-- devices without `drawIndirectCount` (or a failed pipeline) fall back to `cpu` with a log
-  line. Offscreen views stay on the CPU path.
+  for the shadow, prepass and scene passes, so the barriers are derived like every other one;
+- devices without `drawIndirectCount` fall back to `cpu`. Offscreen views stay on the CPU path.
 
-The triggers to make it the default: a measured render call above 0.5 ms from instance work,
-more than about 10 k instances, or GPU-resident instance data (static props uploaded once).
+The triggers to build it: a measured render call above 0.5 ms from instance work, more than
+about 10 k instances, or GPU-resident instance data (static props uploaded once).
 
 ### 3. Mesh LODs: offline index-only levels, screen-space error selection
 - **Baking.** `moba-tools mesh-bake lod <model.glb>` simplifies with
   [`meshoptimizer`](https://github.com/zeux/meshoptimizer) (MIT, through the `meshopt` crate,
-  MIT OR Apache-2.0) — `meshopt_simplify` with locked borders at 50 %, 25 % and 12.5 % of the
-  triangles, keeping a level only if it removes at least 20 % of the previous one — and writes
-  `models/<model>.lod`: a small binary file (`MLOD`, version 1) with the source mesh's
-  `mesh_hash`, and per level its object-space error (meshoptimizer's relative error times the
-  mesh extent) and its indices. The baker is the only place meshoptimizer is linked; the client
-  and renderer never link it.
+  MIT OR Apache-2.0) — `meshopt_simplify` at 50 %, 25 % and 12.5 % of the triangles, keeping a
+  level only if it removes at least 20 % of the previous one — and writes `models/<model>.lod`:
+  a small binary file (`MLOD`, version 1) with the source mesh's `mesh_hash`, and per level its
+  object-space error (`ErrorAbsolute`: in model units) and its indices. The baker is the only
+  place meshoptimizer is linked; the client and renderer never link it. The sample meshes are
+  flat-shaded (split vertices per face), so every edge is an attribute seam; with the default
+  or `LockBorder` options meshoptimizer can remove almost nothing, so
+  `scripts/bake-mesh-lods.sh` bakes with `--permissive` (seams may collapse; the error metric
+  still bounds the geometric deviation). `--lock-border` is there for meshes with open
+  borders that must not move.
 - **Index-only levels.** A level is a new index list over the LOD0 vertex buffer, so one file
   serves the static mesh, the GPU-skinned mesh, every bone-LOD reduced skin (same vertices, same
   order) and the VAT minion (whose texture is per LOD0 vertex). `moba_assets::MeshLods` loads
   and validates it (hash match, indices in range, at most three levels, no level larger than
   LOD0) and the loader attaches it to the `MeshData`; a missing file is no LODs, a bad one is
-  logged and ignored. The renderer uploads the levels into a second index buffer per mesh.
+  logged and ignored. The renderer appends the levels to the mesh's index buffer after LOD0
+  and draws a level by its `firstIndex` range.
 - **Selection.** Per instance and view, the coarsest level whose error projected to pixels
   (`error × scale × ½·height·|row₁(view_proj)| / w`, which covers perspective and the
   orthographic offscreen views) is at most the tier's tolerance: Low 2 px, Medium 1 px,
@@ -136,21 +146,23 @@ more than about 10 k instances, or GPU-resident instance data (static props uplo
   counters when created and removes it when dropped, by class: textures (sampled images
   uploaded from assets), render targets (attachments, transients, offscreen images) and buffers.
   `Renderer::memory_stats()` reports them with the budgets; the client prints them at startup
-  and in the frame log (`vram_*_mb`).
+  and in the frame log (`vram_mb`, `texture_mb`, `targets_mb`, `buffers_mb` with the budgets).
 - **Degrading, never crashing.** A texture registration that would exceed the texture budget
   drops its largest mip levels until it fits (a mip bias, logged); a texture that cannot fit even
   at its smallest level is refused with `RenderError::OverBudget`, and the material keeps its
   fallback for that map (an optional map dropped). Going past the total budget only logs.
 - **Load-time only.** There is no champion select, so every hero, skin, map and effect asset
   loads at match or lobby start, as today. `Renderer::lock_uploads()` marks the start of play
-  (the client calls it when the match is `Playing` and when the local preview's first frame
-  is drawn) and `unlock_uploads()` the end (a content reload or map rotation unlocks, rebinds,
-  and locks again). While locked, every staging upload and every pipeline creation is counted
-  (`MemoryStats::locked_uploads`, `PipelineStats::locked_builds`) and logged once; the frame log
-  reports both, and the evidence runs require 0.
+  (the client calls it on the first measured frame: the match `Playing` past its warm-up, or
+  the local view's first frame) and `unlock_uploads()` the end (a content reload or map
+  rotation, or a dev shader/VFX reload, unlocks and rebinds; the next measured frame locks
+  again). While locked, every staging upload and every pipeline creation is counted
+  (`MemoryStats::locked_uploads`, `MemoryStats::locked_pipelines`) and the first is logged; the
+  lock is evidence, not a gate (the upload still happens). The frame log reports both, and
+  `perf-gate` and the evidence runs require 0.
 - **content-check** reports, per unit model, LOD0 and baked-level triangles, joints and texture
-  bytes against each tier's budget, and the pack's total texture bytes against each tier's
-  texture budget: over a tier is a warning, over Ultra an error.
+  bytes against each tier's budget (text and `--json`): `fits`, `lod<N>` (the tier draws that
+  baked level as its finest) or `over`. Over a tier is a warning, over Ultra an error.
 
 ### 5. Frame pacing evidence
 - The frame log keeps up to `MOBA_FRAME_LOG_FRAMES` samples (default 10 000, up to 1 000 000,
@@ -183,7 +195,8 @@ any machine.
   evidence and a checklist for the other machines.
 
 ## Alternatives considered
-- **GPU-driven culling by default:** no measured CPU win at today's counts (§2); kept opt-in.
+- **GPU-driven culling now (default or opt-in):** no measured CPU win at today's counts (§2);
+  designed and deferred.
 - **Hi-Z occlusion culling:** a MOBA camera looks down at a mostly flat board; little occludes.
 - **Separate LOD meshes (vertices and indices):** would need one VAT texture and one reduced skin
   per level; index-only levels share both.

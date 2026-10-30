@@ -94,6 +94,78 @@ pub(crate) fn shader_dir() -> Option<PathBuf> {
 
 /// `MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU even where the GPU samples
 /// them (to exercise the fallback path); anything else keeps the default.
+/// Frame-log samples kept (`MOBA_FRAME_LOG_FRAMES`, default 10,000, clamped to
+/// `100..=1,000,000`; R8: a 10-minute replay at 144 Hz is ≈ 86,000). Allocated once at start.
+pub(crate) fn frame_log_frames() -> usize {
+    frame_log_frames_from(std::env::var("MOBA_FRAME_LOG_FRAMES").ok().as_deref())
+}
+
+fn frame_log_frames_from(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map_or(10_000, |frames| frames.clamp(100, 1_000_000))
+}
+
+/// The culling mode from `MOBA_GPU_CULL` (`off` draws everything; `cpu`/`on`, the default,
+/// culls per view on the CPU; R8, ADR-0018 §1).
+pub(crate) fn cull_mode() -> moba_render::CullMode {
+    cull_mode_from(std::env::var("MOBA_GPU_CULL").ok().as_deref())
+}
+
+fn cull_mode_from(value: Option<&str>) -> moba_render::CullMode {
+    value.map_or(moba_render::CullMode::Cpu, |name| {
+        moba_render::CullMode::from_name(name).unwrap_or_else(|| {
+            eprintln!("MOBA_GPU_CULL={name:?} is not off/cpu/on; culling on the CPU");
+            moba_render::CullMode::Cpu
+        })
+    })
+}
+
+/// The mesh LOD selection from `MOBA_MESH_LOD`: `off` draws LOD0, a number is the pixel
+/// tolerance; unset, the tier's (R8, ADR-0018 §3).
+pub(crate) fn mesh_lod() -> Option<moba_render::LodConfig> {
+    mesh_lod_from(std::env::var("MOBA_MESH_LOD").ok().as_deref())
+}
+
+fn mesh_lod_from(value: Option<&str>) -> Option<moba_render::LodConfig> {
+    let value = value?.trim();
+    if value.eq_ignore_ascii_case("off") || value == "0" {
+        return Some(moba_render::LodConfig::OFF);
+    }
+    match value.parse::<f32>() {
+        Ok(pixels) if pixels.is_finite() && pixels > 0.0 => {
+            Some(moba_render::LodConfig::with_tolerance(pixels))
+        }
+        _ => {
+            eprintln!("MOBA_MESH_LOD={value:?} is not off or a pixel tolerance; using the tier's");
+            None
+        }
+    }
+}
+
+/// One `[vram]` line: device memory by class against the tier's budgets, and the upload
+/// counters (R8, ADR-0018 §4).
+pub(crate) fn memory_summary(stats: &moba_render::MemoryStats) -> String {
+    let mib = |bytes: u64| bytes as f64 / f64::from(1u32 << 20);
+    format!(
+        "vram_mb={:.1} vram_budget_mb={:.0} vram_peak_mb={:.1} texture_mb={:.1} \
+         texture_budget_mb={:.0} targets_mb={:.1} buffers_mb={:.1} degraded_textures={} \
+         refused_textures={} uploads={} locked_uploads={} locked_pipelines={}",
+        mib(stats.total_bytes()),
+        mib(stats.total_budget),
+        mib(stats.peak_bytes),
+        mib(stats.texture_bytes),
+        mib(stats.texture_budget),
+        mib(stats.target_bytes),
+        mib(stats.buffer_bytes),
+        stats.degraded_textures,
+        stats.refused_textures,
+        stats.uploads,
+        stats.locked_uploads,
+        stats.locked_pipelines,
+    )
+}
+
 pub(crate) fn compressed_textures() -> bool {
     std::env::var("MOBA_COMPRESSED_TEXTURES").map_or(true, |value| value.trim() != "0")
 }
@@ -738,6 +810,27 @@ impl Drop for ClientApp {
             .renderer
             .as_ref()
             .map_or_else(|| String::from("?"), quality_summary);
+        // R8: memory, mid-match uploads and the main view's culling in the last frame.
+        let memory = self.renderer.as_ref().map_or_else(String::new, |renderer| {
+            let cull = renderer.cull_stats();
+            let lods = cull
+                .lod_instances
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("/");
+            format!(
+                "{} cull={} cull_candidates={} cull_drawn={} cull_casters={} \
+                 terrain_chunks={}/{} lod_instances={lods} ",
+                memory_summary(&renderer.memory_stats()),
+                cull.mode,
+                cull.candidates,
+                cull.drawn,
+                cull.casters,
+                cull.terrain_chunks_drawn,
+                cull.terrain_chunks,
+            )
+        });
         let stress = self
             .stress
             .as_ref()
@@ -754,7 +847,7 @@ impl Drop for ClientApp {
             "frames={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
-             {gpu_columns}{stress}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
+             {gpu_columns}{stress}{memory}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             percentile(0.50),
             percentile(0.95),
@@ -944,6 +1037,10 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
                 at(0.50),
                 at(0.95)
             );
+            // R8: the frame-pacing evidence needs the GPU frame's tail too.
+            if name == "total" {
+                let _ = write!(columns, "gpu_total_p99_ms={:.3} ", at(0.99));
+            }
         }
     }
     columns
@@ -952,9 +1049,31 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        gpu_report, lighting_config_from, parse_hex32, parse_preview_camera, parse_window_size,
-        pipeline_cache_path_from, post_config_from, world_config_from,
+        cull_mode_from, frame_log_frames_from, gpu_report, lighting_config_from, mesh_lod_from,
+        parse_hex32, parse_preview_camera, parse_window_size, pipeline_cache_path_from,
+        post_config_from, world_config_from,
     };
+
+    #[test]
+    fn r8_switches_parse_with_safe_fallbacks() {
+        use moba_render::{CullMode, LodConfig};
+        assert_eq!(frame_log_frames_from(None), 10_000);
+        assert_eq!(frame_log_frames_from(Some("90000")), 90_000);
+        assert_eq!(frame_log_frames_from(Some("5")), 100);
+        assert_eq!(frame_log_frames_from(Some("999999999")), 1_000_000);
+        assert_eq!(frame_log_frames_from(Some("lots")), 10_000);
+        assert_eq!(cull_mode_from(None), CullMode::Cpu);
+        assert_eq!(cull_mode_from(Some("off")), CullMode::Off);
+        assert_eq!(cull_mode_from(Some("on")), CullMode::Cpu);
+        assert_eq!(cull_mode_from(Some("sideways")), CullMode::Cpu);
+        assert_eq!(mesh_lod_from(None), None);
+        assert_eq!(mesh_lod_from(Some("off")), Some(LodConfig::OFF));
+        assert_eq!(
+            mesh_lod_from(Some("2")),
+            Some(LodConfig::with_tolerance(2.0))
+        );
+        assert_eq!(mesh_lod_from(Some("-1")), None);
+    }
 
     #[test]
     fn pipeline_cache_path_follows_the_override_then_the_platform_cache_dir() {

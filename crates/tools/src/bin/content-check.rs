@@ -89,13 +89,41 @@ fn main() {
     let (map_errors, map_warnings) = map_consistency(&content, pack_dir);
     let map_error_count = map_errors.len();
     errors.extend(map_errors);
+    // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
+    // would load. One descriptor set per textured material; the pool is sized from this.
+    let materials = content.assets.material_report(pack_dir);
+    // Per-tier budgets of every unit model (R8, ADR-0018 §4): over a tier is a warning (the
+    // tier degrades or drops the model's optional maps); over Ultra, or a model that does
+    // not load, is an error.
+    let budgets = content.assets.budget_report(pack_dir);
+    let mut budget_warnings = Vec::new();
+    for (model, report) in &budgets {
+        match report {
+            Err(error) => errors.push(format!("models/{model}.glb: {error}")),
+            Ok(report) => {
+                for (budget, fit) in moba_assets::TIER_BUDGETS.iter().zip(report.tiers) {
+                    match fit {
+                        moba_assets::TierFit::Over if budget.name == "ultra" => {
+                            errors.push(format!(
+                                "models/{model}.glb is over the ultra budget ({})",
+                                budget_line(report)
+                            ))
+                        }
+                        moba_assets::TierFit::Over => budget_warnings.push(format!(
+                            "models/{model}.glb is over the {} budget ({})",
+                            budget.name,
+                            budget_line(report)
+                        )),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     for error in &errors {
         eprintln!("error: {error}");
     }
     let valid = errors.is_empty();
-    // Materials next to the unit models (`materials/<model>.toml`, ADR-0010): what a client
-    // would load. One descriptor set per textured material; the pool is sized from this.
-    let materials = content.assets.material_report(pack_dir);
     let attested = moba_net::crypto::verify_pack(&content);
     let publisher_hex = content
         .attestation
@@ -155,14 +183,16 @@ fn main() {
         .collect();
     let map_warning_count = map_warnings.len();
     warnings.extend(map_warnings);
+    warnings.extend(budget_warnings);
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }
     if json {
         let error_list: Vec<String> = errors.iter().map(|error| json_string(error)).collect();
         println!(
-            "{{\"file\":{},\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"materials\":{},\"textured_materials\":{},\"textures\":{},\"texture_bytes\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"map_errors\":{},\"map_warnings\":{},\"errors\":[{}]}}",
+            "{{\"file\":{},\"budgets\":[{}],\"pack\":{},\"version\":{},\"author\":{},\"items\":{},\"heroes\":{},\"abilities\":{},\"lanes\":{},\"structures\":{},\"assets\":{},\"materials\":{},\"textured_materials\":{},\"textures\":{},\"texture_bytes\":{},\"hash\":\"{:#018x}\",\"attested\":{},\"publisher\":{},\"valid\":{},\"warnings\":{},\"map_errors\":{},\"map_warnings\":{},\"errors\":[{}]}}",
             json_string(&path),
+            budgets_json(&budgets),
             json_string(&content.manifest.name),
             json_string(&content.manifest.version),
             json_string(&content.manifest.author),
@@ -208,6 +238,24 @@ fn main() {
             materials.bound_textures,
             materials.texture_bytes.div_ceil(1024)
         );
+        println!(
+            "budgets    model: triangles (LOD0/levels), joints, texture KiB; low medium high ultra"
+        );
+        for (model, report) in &budgets {
+            match report {
+                Ok(report) => println!(
+                    "  {model}: {}; {}",
+                    budget_line(report),
+                    report
+                        .tiers
+                        .iter()
+                        .map(|fit| tier_fit_name(*fit))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Err(error) => println!("  {model}: {error}"),
+            }
+        }
         println!("hash       {:#018x}", content.hash());
         println!("valid      {valid}");
     }
@@ -285,6 +333,60 @@ fn map_consistency(
         warnings.extend(report.warnings.into_iter().map(label));
     }
     (errors, warnings)
+}
+
+/// `triangles=… joints=… texture_kib=…` of one model.
+fn budget_line(report: &moba_assets::ModelBudgetReport) -> String {
+    let triangles: Vec<String> = report.triangles.iter().map(ToString::to_string).collect();
+    format!(
+        "triangles={} joints={} texture_kib={}",
+        triangles.join("/"),
+        report.joints,
+        report.texture_bytes.div_ceil(1024)
+    )
+}
+
+/// `fits`, `lod<N>` (the finest level the tier draws) or `over`.
+fn tier_fit_name(fit: moba_assets::TierFit) -> String {
+    match fit {
+        moba_assets::TierFit::Fits => String::from("fits"),
+        moba_assets::TierFit::Degrades { level } => format!("lod{level}"),
+        moba_assets::TierFit::Over => String::from("over"),
+    }
+}
+
+/// The `budgets` JSON array: one object per unit model.
+fn budgets_json(budgets: &[(String, Result<moba_assets::ModelBudgetReport, String>)]) -> String {
+    budgets
+        .iter()
+        .map(|(model, report)| match report {
+            Ok(report) => {
+                let triangles: Vec<String> =
+                    report.triangles.iter().map(ToString::to_string).collect();
+                let tiers: Vec<String> = moba_assets::TIER_BUDGETS
+                    .iter()
+                    .zip(report.tiers)
+                    .map(|(budget, fit)| {
+                        format!("\"{}\":{}", budget.name, json_string(&tier_fit_name(fit)))
+                    })
+                    .collect();
+                format!(
+                    "{{\"model\":{},\"triangles\":[{}],\"joints\":{},\"texture_bytes\":{},\"tiers\":{{{}}}}}",
+                    json_string(model),
+                    triangles.join(","),
+                    report.joints,
+                    report.texture_bytes,
+                    tiers.join(",")
+                )
+            }
+            Err(error) => format!(
+                "{{\"model\":{},\"error\":{}}}",
+                json_string(model),
+                json_string(error)
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn hex(bytes: &[u8]) -> String {

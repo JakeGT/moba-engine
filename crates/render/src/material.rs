@@ -400,10 +400,15 @@ impl Materials {
     }
 
     /// Uploads `data` (decoding BC on the CPU when needed). Load time only.
+    /// Uploads `data` within `texture_budget` bytes of textures in all (R8, ADR-0018 §4): a
+    /// texture that does not fit drops its largest mip levels until it does (counted and
+    /// logged), and one that does not fit at its smallest level is refused with
+    /// [`RenderError::OverBudget`].
     pub(crate) fn register_texture(
         &mut self,
         device: &DeviceContext,
         data: &TextureData,
+        texture_budget: u64,
     ) -> RenderResult<TextureId> {
         if self.textures.len() >= MAX_TEXTURES {
             return Err(RenderError::TooManyTextures);
@@ -426,6 +431,35 @@ impl Materials {
         if !texture::sampleable(device, texture::vk_format(upload.format())) {
             return Err(RenderError::InvalidTexture);
         }
+        let free = texture_budget.saturating_sub(crate::memory::texture_bytes());
+        let reduced;
+        let upload = match crate::memory::mips_to_drop(upload, free) {
+            Some(0) => upload,
+            Some(drop) => {
+                reduced = crate::memory::without_top_mips(upload, drop)
+                    .ok_or(RenderError::InvalidTexture)?;
+                crate::memory::note_degraded();
+                eprintln!(
+                    "[vram] texture {}x{} over the tier's texture budget ({} MiB free):                      uploaded without its {drop} largest mip level(s), {}x{}",
+                    upload.width(),
+                    upload.height(),
+                    free >> 20,
+                    reduced.width(),
+                    reduced.height(),
+                );
+                &reduced
+            }
+            None => {
+                crate::memory::note_refused();
+                let needed = upload
+                    .level(upload.level_count().saturating_sub(1))
+                    .map_or(upload.data().len(), |(_, _, bytes)| bytes.len());
+                return Err(RenderError::OverBudget {
+                    needed: needed as u64,
+                    free,
+                });
+            }
+        };
         let image = texture::upload(device, "material-texture", upload)?;
         self.stats.textures += 1;
         self.stats.decoded_textures += usize::from(upload.format() != data.format());

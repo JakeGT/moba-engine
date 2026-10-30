@@ -242,7 +242,7 @@ where
         .map_err(|error| failed(error.to_string()))?;
     let model = crate::app::models::model_path(root, &descriptor.model)
         .ok_or_else(|| failed(String::from("invalid model name")))?;
-    let mesh = moba_assets::load_glb_file(&model)
+    let mesh = crate::app::models::load_model_file(&model)
         .map_err(|error| failed(format!("{}: {error}", model.display())))?;
     descriptor
         .check_mesh(&mesh)

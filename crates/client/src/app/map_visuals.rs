@@ -766,7 +766,7 @@ impl MapLibrary {
                 }
             })
             .and_then(|path| {
-                moba_assets::load_glb_file(&path)
+                crate::app::models::load_model_file(&path)
                     .map_err(|error| format!("{}: {error}", path.display()))
             })
             .and_then(|data| {

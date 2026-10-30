@@ -23,6 +23,8 @@ const MAX_TERRAIN_HEIGHT: f32 = 1_000.0;
 /// An uploaded terrain.
 pub(crate) struct TerrainGpu {
     pub(crate) mesh: GpuMesh,
+    /// The mesh's culling chunks (R8).
+    pub(crate) chunks: Vec<TerrainChunk>,
     pub(crate) splat: GpuImage,
     pub(crate) albedo: GpuImage,
     pub(crate) normal: Option<GpuImage>,
@@ -141,8 +143,9 @@ fn check_set(
 
 /// The heightfield as an indexed grid: positions in world space, normals from central
 /// differences, the relief occlusion in `uv.x` (1 without occlusion). Two triangles per
-/// cell, split along the diagonal that follows the surface's fold.
-pub(crate) fn grid_mesh(data: &TerrainData<'_>) -> CpuMesh {
+/// cell, split along the diagonal that follows the surface's fold, emitted chunk by chunk
+/// (R8), with each chunk's index range and AABB.
+pub(crate) fn grid_mesh(data: &TerrainData<'_>) -> (CpuMesh, Vec<TerrainChunk>) {
     let n = data.resolution as usize;
     let height = |i: usize, j: usize| data.heights[j * n + i];
     let spacing = data.spacing;
@@ -174,33 +177,86 @@ pub(crate) fn grid_mesh(data: &TerrainData<'_>) -> CpuMesh {
     let cells = n - 1;
     let mut indices = Vec::with_capacity(cells * cells * 6);
     let index = |i: usize, j: usize| u32::try_from(j * n + i).expect("1025² fits u32");
-    for j in 0..cells {
-        for i in 0..cells {
-            let (corner00, corner10, corner11, corner01) = (
-                index(i, j),
-                index(i + 1, j),
-                index(i + 1, j + 1),
-                index(i, j + 1),
-            );
-            // Split along the shorter height difference, so ridges stay ridges.
-            let diagonal_ac = (height(i, j) - height(i + 1, j + 1)).abs();
-            let diagonal_bd = (height(i + 1, j) - height(i, j + 1)).abs();
-            if diagonal_ac <= diagonal_bd {
-                indices.extend_from_slice(&[
-                    corner00, corner01, corner11, corner00, corner11, corner10,
-                ]);
-            } else {
-                indices.extend_from_slice(&[
-                    corner00, corner01, corner10, corner10, corner01, corner11,
-                ]);
+    // R8 (ADR-0018): the cells are emitted chunk by chunk (row-major chunks of
+    // `TERRAIN_CHUNK_CELLS`², row-major cells inside), so each chunk is one contiguous index
+    // range and a row of visible chunks merges into one draw.
+    let chunk_side = cells.div_ceil(TERRAIN_CHUNK_CELLS);
+    let mut chunks = Vec::with_capacity(chunk_side * chunk_side);
+    for chunk_j in 0..chunk_side {
+        for chunk_i in 0..chunk_side {
+            let first = indices.len();
+            let (mut low, mut high) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            let cells_j =
+                chunk_j * TERRAIN_CHUNK_CELLS..((chunk_j + 1) * TERRAIN_CHUNK_CELLS).min(cells);
+            let cells_i =
+                chunk_i * TERRAIN_CHUNK_CELLS..((chunk_i + 1) * TERRAIN_CHUNK_CELLS).min(cells);
+            for j in cells_j.clone() {
+                for i in cells_i.clone() {
+                    let (corner00, corner10, corner11, corner01) = (
+                        index(i, j),
+                        index(i + 1, j),
+                        index(i + 1, j + 1),
+                        index(i, j + 1),
+                    );
+                    // Split along the shorter height difference, so ridges stay ridges.
+                    let diagonal_ac = (height(i, j) - height(i + 1, j + 1)).abs();
+                    let diagonal_bd = (height(i + 1, j) - height(i, j + 1)).abs();
+                    if diagonal_ac <= diagonal_bd {
+                        indices.extend_from_slice(&[
+                            corner00, corner01, corner11, corner00, corner11, corner10,
+                        ]);
+                    } else {
+                        indices.extend_from_slice(&[
+                            corner00, corner01, corner10, corner10, corner01, corner11,
+                        ]);
+                    }
+                }
             }
+            // The chunk's AABB over its vertices (cells i..=i_end, j..=j_end).
+            for j in cells_j.start..=cells_j.end {
+                for i in cells_i.start..=cells_i.end {
+                    let position = vertices[j * n + i].position;
+                    for axis in 0..3 {
+                        low[axis] = low[axis].min(position[axis]);
+                        high[axis] = high[axis].max(position[axis]);
+                    }
+                }
+            }
+            chunks.push(TerrainChunk {
+                first_index: u32::try_from(first).expect("1024² cells fit u32"),
+                index_count: u32::try_from(indices.len() - first).expect("fits u32"),
+                min: low,
+                max: high,
+            });
         }
     }
-    CpuMesh {
-        vertices,
-        indices,
-        has_uvs: false,
-    }
+    let lods = crate::mesh::MeshLodTable::single(
+        u32::try_from(indices.len()).expect("1024² cells fit u32"),
+    );
+    (
+        CpuMesh {
+            vertices,
+            indices,
+            has_uvs: false,
+            lods,
+        },
+        chunks,
+    )
+}
+
+/// Cells per side of one terrain culling chunk (R8, ADR-0018 §1).
+pub(crate) const TERRAIN_CHUNK_CELLS: usize = 32;
+/// Most chunks a terrain has (1024 cells per side).
+pub(crate) const MAX_TERRAIN_CHUNKS: usize =
+    ((MAX_TERRAIN_RESOLUTION as usize - 1).div_ceil(TERRAIN_CHUNK_CELLS)).pow(2);
+
+/// One chunk's contiguous index range and world-space AABB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TerrainChunk {
+    pub(crate) first_index: u32,
+    pub(crate) index_count: u32,
+    pub(crate) min: [f32; 3],
+    pub(crate) max: [f32; 3],
 }
 
 /// The terrain block for `data` under `config`.
@@ -241,7 +297,8 @@ pub(crate) fn upload(
     compressed: bool,
 ) -> RenderResult<TerrainGpu> {
     validate(data)?;
-    let mesh = mesh::upload(device, &grid_mesh(data))?;
+    let (cpu, chunks) = grid_mesh(data);
+    let mesh = mesh::upload(device, &cpu)?;
     let splat = texture::upload_array(device, "terrain-splat", &refs(data.splat), compressed)?;
     let albedo = texture::upload_array(device, "terrain-albedo", &refs(data.albedo), compressed)?;
     let normal = if config.terrain_normal_maps && !data.normal.is_empty() {
@@ -257,6 +314,7 @@ pub(crate) fn upload(
     let block = block(data, config, normal.is_some());
     Ok(TerrainGpu {
         mesh,
+        chunks,
         splat,
         albedo,
         normal,
@@ -281,7 +339,11 @@ mod tests {
         let albedo = [rgba(TextureFormat::Rgba8Srgb, 4)];
         let data = TerrainData::new(3, [-1.0, -1.0], 1.0, &heights, &splat, &albedo);
         validate(&data).expect("valid");
-        let mesh = grid_mesh(&data);
+        let (mesh, chunks) = grid_mesh(&data);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].index_count as usize, mesh.indices.len());
+        assert_eq!(chunks[0].min, [-1.0, 0.0, -1.0]);
+        assert_eq!(chunks[0].max, [1.0, 2.0, 1.0]);
         assert_eq!(mesh.vertices.len(), 9);
         assert_eq!(mesh.indices.len(), 2 * 2 * 6);
         let centre = mesh.vertices[4];
@@ -298,6 +360,38 @@ mod tests {
             // y of (ab x ac) in xz with y up: ab.z * ac.x - ab.x * ac.z.
             assert!(ab[1] * ac[0] - ab[0] * ac[1] > 0.0, "{triangle:?}");
         }
+    }
+
+    /// R8: a 70×70-cell grid splits into 3×3 chunks that tile the index buffer in order,
+    /// keep every cell's two triangles, and bound their own vertices.
+    #[test]
+    fn grid_chunks_tile_the_index_buffer_and_bound_their_cells() {
+        let resolution = 71u32;
+        let heights: Vec<f32> = (0..resolution * resolution)
+            .map(|k| ((k % resolution) as f32 * 0.3).sin() + (k / resolution) as f32 * 0.01)
+            .collect();
+        let splat = [rgba(TextureFormat::Rgba8Unorm, 4)];
+        let albedo = [rgba(TextureFormat::Rgba8Srgb, 4)];
+        let data = TerrainData::new(resolution, [0.0, 0.0], 2.0, &heights, &splat, &albedo);
+        let (mesh, chunks) = grid_mesh(&data);
+        assert_eq!(chunks.len(), 9);
+        assert_eq!(mesh.indices.len(), 70 * 70 * 6);
+        let mut next = 0;
+        for chunk in &chunks {
+            assert_eq!(chunk.first_index, next, "contiguous, in order");
+            next += chunk.index_count;
+            for &index in &mesh.indices[chunk.first_index as usize..next as usize] {
+                let position = mesh.vertices[index as usize].position;
+                for ((value, min), max) in position.iter().zip(chunk.min).zip(chunk.max) {
+                    assert!(*value >= min && *value <= max);
+                }
+            }
+        }
+        assert_eq!(next as usize, mesh.indices.len());
+        // The corner chunk holds 32×32 cells, the last column 6×32.
+        assert_eq!(chunks[0].index_count, 32 * 32 * 6);
+        assert_eq!(chunks[2].index_count, 6 * 32 * 6);
+        const { assert!(MAX_TERRAIN_CHUNKS >= 32 * 32) };
     }
 
     #[test]

@@ -144,6 +144,8 @@ impl SkinLod {
         if let Some(tangents) = mesh.tangents() {
             out = out.with_tangents(tangents.to_vec()).ok()?;
         }
+        // Same vertices in the same order: the mesh LODs (R8) index the reduced skin too.
+        out.lods = mesh.lods().to_vec();
         Some(Self {
             mesh: out.with_skin(reduced_skin).ok()?,
             joints,

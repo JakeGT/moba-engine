@@ -14,6 +14,7 @@
 
 #[doc(hidden)]
 pub mod bench_support;
+mod cull;
 mod descriptor_budget;
 mod device;
 mod dynres;
@@ -27,6 +28,7 @@ mod instance;
 mod lighting;
 mod lights;
 mod material;
+mod memory;
 mod mesh;
 mod passes;
 mod pipeline;
@@ -47,6 +49,7 @@ mod vat;
 mod vfx;
 mod world;
 
+pub use cull::{CullMode, CullStats, LodConfig};
 pub use error::{RenderError, RenderResult};
 pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
 pub use lighting::{
@@ -57,6 +60,7 @@ pub use lights::{LightStats, MAX_LIGHTS, MAX_LIGHTS_PER_CELL, PointLight};
 pub use material::{
     MAX_MATERIALS, MAX_TEXTURES, MaterialData, MaterialId, MaterialStats, TextureId,
 };
+pub use memory::MemoryStats;
 pub use passes::fog::vision_sources_dropped;
 pub use passes::overlay::ui_vertices_truncated;
 pub use passes::scene::{bones_truncated, skinned_instances_dropped};

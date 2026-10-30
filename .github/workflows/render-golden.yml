@@ -41,6 +41,7 @@ jobs:
               - 'tests/golden/**'
               - '.github/workflows/render-golden.yml'
               - 'scripts/outline-probe.sh'
+              - 'scripts/cull-probe.sh'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
@@ -139,6 +140,15 @@ jobs:
       - name: Outline occlusion probe
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: scripts/outline-probe.sh ./target/release/moba-client outline-probe
+        env:
+          RUN: xvfb-run -a
+      # Culling never changes what a player sees (R8, ADR-0018 §1): five scenes (the preview,
+      # the horizon view, Ultra with VAT minions, Low with hull outlines, the networked match)
+      # must be byte-identical with culling on and MOBA_GPU_CULL=off, and something must have
+      # been culled.
+      - name: Culling exactness probe
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/cull-probe.sh ./target/release/moba-client cull-probe
         env:
           RUN: xvfb-run -a
       # VAT golden (R4b): 64 stress minions in the local preview at 40 m, pinned (one tick per
@@ -265,6 +275,7 @@ jobs:
             ember-capture.log
             ember-fingerprint.log
             outline-probe/
+            cull-probe/
             render-ultra-actual.ppm
             render-ultra-diff.ppm
             ultra-capture.log

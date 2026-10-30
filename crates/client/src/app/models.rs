@@ -149,6 +149,20 @@ pub(crate) fn model_path(root: &Path, name: &str) -> Option<PathBuf> {
     valid_model_name(name).then(|| root.join("models").join(format!("{name}.glb")))
 }
 
+/// Loads a model and, when `<model>.lod` sits beside it (`moba-tools mesh-bake lod`), its
+/// mesh levels (R8, ADR-0018 §3). A level file that is stale or malformed is logged and
+/// ignored: the model draws at LOD0.
+pub(crate) fn load_model_file(path: &Path) -> Result<MeshData, moba_assets::GlbError> {
+    let (data, lod_error) = moba_assets::load_glb_file_with_lods(path)?;
+    if let Some(error) = lod_error {
+        eprintln!(
+            "[lod] {}: {error}; drawing LOD0 only (re-run scripts/bake-mesh-lods.sh)",
+            moba_assets::lod_path(path).display()
+        );
+    }
+    Ok(data)
+}
+
 /// Resolves a model name to its animation set, `<root>/animations/<name>.toml`.
 pub(crate) fn animation_set_path(root: &Path, name: &str) -> Option<PathBuf> {
     valid_model_name(name).then(|| root.join("animations").join(format!("{name}.toml")))
@@ -480,8 +494,8 @@ impl ModelLibrary {
     {
         let path = model_path(&self.root, name)
             .ok_or_else(|| String::from("invalid model name (use 1-32 of [A-Za-z0-9_-])"))?;
-        let data = moba_assets::load_glb_file(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let data =
+            load_model_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         let mesh =
             register(&data, Upload::Static).map_err(|error| format!("upload failed: {error}"))?;
         let mut model =
@@ -592,7 +606,7 @@ impl ModelLibrary {
                 let result = model_path(&self.root, model)
                     .ok_or_else(|| String::from("invalid model name"))
                     .and_then(|path| {
-                        moba_assets::load_glb_file(&path)
+                        load_model_file(&path)
                             .map_err(|error| format!("{}: {error}", path.display()))
                     })
                     .and_then(|data| register(&data, Upload::Static));
