@@ -245,6 +245,12 @@ impl BakedAoDesc {
     /// # Errors
     /// An I/O, size, TOML or range error.
     pub fn load_file(path: &Path) -> Result<Self, BakedAoError> {
+        // Check the path first: on Windows, opening a directory fails with "access denied"
+        // before the opened file's metadata could report it, so the error would differ by OS.
+        let kind = std::fs::metadata(path).map_err(|error| BakedAoError::Io(error.to_string()))?;
+        if !kind.is_file() {
+            return Err(BakedAoError::NotAFile);
+        }
         let file =
             std::fs::File::open(path).map_err(|error| BakedAoError::Io(error.to_string()))?;
         let metadata = file
