@@ -167,7 +167,25 @@ pipeline, each shader permutation included, is built at renderer creation throug
 persistent `VkPipelineCache` (a per-user file, validated before use), so nothing compiles
 mid-match. GLSL shares declarations through `#include` files and a small, enumerated set of
 permutations (`MATERIAL_TEXTURED`) is compiled to separate SPIR-V at build time; debug builds
-can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`. The scene pass draws:
+can hot-reload SPIR-V overrides from `MOBA_SHADER_DIR`.
+
+**Culling, LODs and memory** (R8, [ADR-0018](adr/0018-culling-lods-memory.md)). Each view
+(the main scene and each offscreen image) culls its units on the CPU against its camera
+frustum with per-mesh bounding spheres (VAT spheres cover every baked frame, skinned spheres
+are doubled), keeps outlined units, and picks each unit's mesh level by projected error
+against the tier's tolerance; the main view also builds a shadow caster list culled against
+the fitted shadow box's side planes (its near and far casters are depth-clamped into the map).
+Both lists bucket by mesh and level in scene order, so a culled frame draws a subset of the
+unculled draws in the same order and is byte-identical (`scripts/cull-probe.sh` in the golden
+workflow). The heightfield's index buffer is ordered in 32 × 32-cell chunks with bounds, and
+every view draws the merged runs of its visible chunks. Levels come from the asset baker
+(`mesh-bake lod`, meshoptimizer; `models/<model>.lod`) as index lists appended to the mesh's
+index buffer. Every image and buffer is counted by class (textures, targets, buffers) against
+the tier's VRAM budgets (`Renderer::memory_stats`); textures over the texture budget upload
+without their largest mips. Assets load before play: the client locks uploads on the first
+frame of the match and any later upload or pipeline build is counted and logged. The
+nightly perf workflow gates a 10-minute replay per tier on a self-hosted GPU runner
+(`perf-gate`). The scene pass draws:
 
 - terrain: the map's heightfield mesh with splat-textured layers (R3a,
   [ADR-0014](adr/0014-terrain-fog-of-war.md)): up to eight layers from two texture arrays

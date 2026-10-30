@@ -26,6 +26,13 @@ fi
 logs=()
 for tier in $tiers; do
   log="$out/frames-$tier.log"
+  # A short run first, so the measured run starts from a warm pipeline cache (perf-gate
+  # --warm-cache): the tier's every pipeline is then a cache hit.
+  # shellcheck disable=SC2086 # RUN is a command prefix.
+  env MOBA_QUALITY="$tier" MOBA_VULKAN_VALIDATION=off MOBA_SMOKE_FRAMES=30 \
+    MOBA_WINDOW_SIZE="${WINDOW:-1920x1080}" \
+    timeout 300 ${RUN:-} ./target/release/moba-client > "$out/warm-$tier.log" 2>&1 \
+    || { tail -20 "$out/warm-$tier.log"; exit 1; }
   # shellcheck disable=SC2086 # RUN is a command prefix.
   env MOBA_QUALITY="$tier" MOBA_REPLAY="$replay" MOBA_REPLAY_EXIT=1 MOBA_WARMUP_TICKS=0 \
     MOBA_VULKAN_VALIDATION="${MOBA_VULKAN_VALIDATION:-off}" MOBA_VSYNC="${MOBA_VSYNC:-0}" \
@@ -37,7 +44,7 @@ for tier in $tiers; do
   logs+=("$log")
 done
 if [ -n "$baseline" ]; then
-  ./target/release/perf-gate --baseline "$baseline" "${logs[@]}"
+  ./target/release/perf-gate --warm-cache --baseline "$baseline" "${logs[@]}"
 else
-  ./target/release/perf-gate "${logs[@]}"
+  ./target/release/perf-gate --warm-cache "${logs[@]}"
 fi

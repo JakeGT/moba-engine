@@ -96,6 +96,7 @@ pub fn finest_level_within(
 
 /// How one model fares on one tier ([`model_report`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TierFit {
     /// LOD0 is within every budget.
     Fits,
@@ -112,6 +113,7 @@ pub enum TierFit {
 
 /// A model's numbers against every tier.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ModelBudgetReport {
     /// Triangles of LOD0 then of each baked level.
     pub triangles: Vec<usize>,

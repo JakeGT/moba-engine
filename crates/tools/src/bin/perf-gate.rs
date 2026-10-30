@@ -6,12 +6,15 @@
 //! way on a developer machine.
 //!
 //! ```text
-//! perf-gate [--baseline FILE] [--max-regression FRACTION] [--pacing RATIO] <frame-log>...
+//! perf-gate [--baseline FILE] [--max-regression FRACTION] [--pacing RATIO] [--warm-cache]
+//!           <frame-log>...
 //! ```
 //!
 //! Each frame log names its tier (`quality=`); the baseline holds one `[tier]` table per tier
 //! with the reference `gpu_total_p95_ms` (and optionally `render_p95_ms`) measured on the
 //! runner's GPU. A tier without a baseline is checked against the budgets only.
+//! `--warm-cache` also requires `pipeline_cache=warm` (every pipeline came from the
+//! persistent cache: the run had no compile hitch at start either).
 #![allow(clippy::print_stdout)] // The report is the tool's output.
 
 use std::process::ExitCode;
@@ -133,6 +136,7 @@ impl Baseline {
 struct Limits {
     max_regression: f64,
     pacing: f64,
+    warm_cache: bool,
 }
 
 /// Every breach of `log` (empty: it passes), plus the lines describing what was checked.
@@ -210,6 +214,12 @@ fn check(
             ));
         }
     }
+    if limits.warm_cache && log.get("pipeline_cache") != Some("warm") {
+        failures.push(format!(
+            "{tier}: the pipeline cache was {} (warm required)",
+            log.get("pipeline_cache").unwrap_or("not reported")
+        ));
+    }
     // Load-time-only assets and pipelines.
     for key in ["locked_uploads", "locked_pipelines"] {
         match log.number(key) {
@@ -228,7 +238,7 @@ fn check(
 fn usage() -> ExitCode {
     eprintln!(
         "usage: perf-gate [--baseline FILE] [--max-regression FRACTION] [--pacing RATIO] \
-         <frame-log>..."
+         [--warm-cache] <frame-log>..."
     );
     ExitCode::from(2)
 }
@@ -238,6 +248,7 @@ fn main() -> ExitCode {
     let mut limits = Limits {
         max_regression: DEFAULT_MAX_REGRESSION,
         pacing: DEFAULT_PACING,
+        warm_cache: false,
     };
     let mut logs = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -256,6 +267,7 @@ fn main() -> ExitCode {
                 Some(value) => limits.max_regression = value,
                 None => return usage(),
             },
+            "--warm-cache" => limits.warm_cache = true,
             "--pacing" => match number() {
                 Some(value) => limits.pacing = value,
                 None => return usage(),
@@ -317,6 +329,7 @@ mod tests {
     const LIMITS: Limits = Limits {
         max_regression: 0.25,
         pacing: 1.5,
+        warm_cache: false,
     };
 
     fn log(fields: &str) -> FrameLog {
@@ -374,6 +387,17 @@ mod tests {
                 .iter()
                 .any(|failure| failure.contains("locked_pipelines"))
         );
+        let warm = Limits {
+            warm_cache: true,
+            ..LIMITS
+        };
+        let (failures, _) = check(&log("gpu_total_p95_ms=0.5 pipeline_cache=cold"), None, warm);
+        assert!(
+            failures.iter().any(|failure| failure.contains("cold")),
+            "{failures:?}"
+        );
+        let (failures, _) = check(&log("gpu_total_p95_ms=0.5 pipeline_cache=warm"), None, warm);
+        assert!(failures.is_empty(), "{failures:?}");
         let (failures, _) = check(&FrameLog::parse("frames=1 quality=epic"), None, LIMITS);
         assert_eq!(failures.len(), 1, "an unknown tier stops the check");
         assert!(Baseline::parse("[ultra]\ngpu_total_p95_ms = fast\n").is_err());

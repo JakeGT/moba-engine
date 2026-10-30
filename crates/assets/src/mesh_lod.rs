@@ -268,12 +268,18 @@ pub fn lod_path(glb: &Path) -> PathBuf {
 /// # Errors
 /// Any [`LodError`] from reading or [`MeshLods::parse`].
 pub fn load_lods_for(glb: &Path, mesh: &MeshData) -> Result<Option<MeshLods>, LodError> {
+    use std::io::Read as _;
     let path = lod_path(glb);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(LodError::Io(error.to_string())),
     };
+    // Bounded read: one byte past the limit is enough for `parse` to reject the file.
+    let mut bytes = Vec::new();
+    file.take(MAX_LOD_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| LodError::Io(error.to_string()))?;
     MeshLods::parse(&bytes, mesh).map(Some)
 }
 

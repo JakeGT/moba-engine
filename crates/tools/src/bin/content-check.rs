@@ -107,7 +107,7 @@ fn main() {
                             errors.push(format!(
                                 "models/{model}.glb is over the ultra budget ({})",
                                 budget_line(report)
-                            ))
+                            ));
                         }
                         moba_assets::TierFit::Over => budget_warnings.push(format!(
                             "models/{model}.glb is over the {} budget ({})",
@@ -351,7 +351,7 @@ fn tier_fit_name(fit: moba_assets::TierFit) -> String {
     match fit {
         moba_assets::TierFit::Fits => String::from("fits"),
         moba_assets::TierFit::Degrades { level } => format!("lod{level}"),
-        moba_assets::TierFit::Over => String::from("over"),
+        _ => String::from("over"),
     }
 }
 

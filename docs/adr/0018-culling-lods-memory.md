@@ -183,12 +183,15 @@ any machine.
 
 ## Consequences
 - The prepass, scene and minimap bake draw only the terrain chunks they can see; the shadow
-  pass draws only units that can cast into its box. Numbers: [perf/0022](../perf/0022-r8-scaling-pacing.md).
-- Culling is exact by construction and checked by the golden workflow; LODs are not exact, so
-  enabling them was a deliberate golden rebaseline if they changed pixels (perf/0022 says
-  whether they did).
-- One more index buffer per mesh with LODs and one bounding sphere per mesh; 2× the instance
-  writes for the main view (camera and caster lists).
+  pass draws only units that can cast into its box. On the RTX 5070 Ti the 512-minion stress
+  scene's GPU total fell 0.816 → 0.730 ms p50 (shadow −40 %, scene −13 %) and the Ultra
+  teamfight's 0.621 → 0.593 ms, for 9–27 µs more CPU in the render call
+  ([perf/0022](../perf/0022-r8-scaling-pacing.md)).
+- Culling is exact by construction and checked by the golden workflow (five scenes
+  byte-identical on and off). LODs are not exact: they changed 0.01–0.86 % of pixels in the
+  golden captures, all on silhouettes, so all eight fingerprints were deliberately rebaselined.
+- Baked levels are appended to each mesh's index buffer (no new buffers), one bounding sphere
+  per mesh, and 2× the instance writes for the main view (camera and caster lists).
 - Over-budget content degrades visibly (blurrier textures, missing optional maps) and is
   reported at load and by content-check, instead of failing to load.
 - The reference-GPU matrix (§7) stays a maintainer item (#9/#127): perf/0022 has the RTX 5070 Ti
