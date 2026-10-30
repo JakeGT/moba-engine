@@ -144,7 +144,7 @@ byte-identical files (the jitter is a hash of the texel, not a random stream).
 
 | Map | fingerprint | bake time (release) |
 |---|---|---|
-| ember (`content/ember-map.toml`, `maps/ember.toml`) | `0x89b6c7442c81ad1b` | 0.47 s |
+| ember (`content/ember-map.toml`, `maps/ember.toml`) | `0x1abaf6e3147d9360` | 0.47 s |
 | frost (`content/frost-map.toml`, `maps/frost.toml`) | `0x01a84e44294da8b8` | 0.45 s |
 
 The frost overview with AO off and on differs on 1.4 % of the pixels, by at most 22 of 255
@@ -177,20 +177,144 @@ Checked against ADR-0011's readability rules:
    already has from the server, and both are depth-tested: no outline through walls, brush
    or fog (no "x-ray", by design, ADR-0016).
 5. **Clutter.** Team outlines are on heroes only (minion waves are not outlined); hover
-   (any unit under the cursor) and the attack target are wider and lighter.
+   (the enemy a click there would attack, `nearest_enemy`) and the attack target are wider
+   and lighter.
 
 Open for the reviewer: outline widths (1.5 px team, 2.5 px hover, 3 px target at 1080p),
 whether allied heroes should be outlined at all, the per-map `ao_strength` (0.85 ember,
 0.8 frost) and effect light intensities.
 
+## Review round 1, on `main` with R4b and R3a
+
+Captured 2026-10-30, same machine and method, after the review fixes and the merges of R4b
+(#332) and R3a (#333): "before" is `main` at `760bd01`, "after" this branch merged with it.
+R6 (#334) has not landed; its merge is measured separately.
+
+### GPU and CPU time (RTX 5070 Ti, 1080p, teamfight replay, median of 3 interleaved rounds)
+
+| Run | GPU total | shadow | depth_prepass | contact_shadows | scene | vfx_draw | outline | cpu | render | lights max |
+|---|---|---|---|---|---|---|---|---|---|---|
+| before-low | 0.115 / 0.118 | 0.004 / 0.004 | — | — | 0.075 / 0.078 | 0.003 / 0.005 | — | 0.005 / 0.026 | 0.068 / 0.118 | — |
+| after-low | 0.127 / 0.132 | 0.004 / 0.004 | 0.000 / 0.000 | 0.000 / 0.000 | 0.086 / 0.090 | 0.003 / 0.005 | 0.000 / 0.000 | 0.006 / 0.026 | 0.132 / 0.258 | 10 |
+| before-medium | 0.188 / 0.209 | 0.005 / 0.006 | — | — | 0.121 / 0.141 | 0.008 / 0.015 | — | 0.006 / 0.027 | 0.075 / 0.132 | — |
+| after-medium | 0.212 / 0.237 | 0.005 / 0.006 | 0.000 / 0.000 | 0.000 / 0.000 | 0.131 / 0.159 | 0.008 / 0.015 | 0.000 / 0.000 | 0.006 / 0.029 | 0.137 / 0.264 | 10 |
+| before-high | 0.177 / 0.190 | 0.005 / 0.006 | — | — | 0.118 / 0.123 | 0.009 / 0.016 | — | 0.006 / 0.029 | 0.074 / 0.131 | — |
+| after-high | 0.338 / 0.355 | 0.005 / 0.006 | 0.019 / 0.024 | 0.051 / 0.051 | 0.169 / 0.186 | 0.009 / 0.014 | 0.032 / 0.032 | 0.006 / 0.030 | 0.139 / 0.291 | 10 |
+| before-ultra | 0.464 / 0.483 | 0.050 / 0.056 | — | — | 0.242 / 0.260 | 0.074 / 0.082 | — | 0.006 / 0.030 | 0.074 / 0.131 | — |
+| after-ultra | 0.766 / 0.805 | 0.052 / 0.058 | 0.096 / 0.107 | 0.091 / 0.095 | 0.312 / 0.340 | 0.060 / 0.068 | 0.032 / 0.038 | 0.006 / 0.031 | 0.111 / 0.269 | 10 |
+| after-ultra-off | 0.441 / 0.464 | 0.051 / 0.057 | 0.000 / 0.000 | 0.000 / 0.000 | 0.231 / 0.245 | 0.069 / 0.078 | 0.000 / 0.000 | 0.006 / 0.029 | 0.075 / 0.173 | 0 |
+| before-high-x8 | 0.181 / 0.201 | 0.005 / 0.006 | — | — | 0.118 / 0.123 | 0.014 / 0.026 | — | 0.006 / 0.030 | 0.073 / 0.135 | — |
+| after-high-x8 | 0.343 / 0.368 | 0.006 / 0.006 | 0.019 / 0.022 | 0.051 / 0.051 | 0.173 / 0.190 | 0.013 / 0.022 | 0.032 / 0.032 | 0.006 / 0.031 | 0.131 / 0.277 | 10 |
+
+- **Every tier is still far inside its budget**: at most 0.77 ms of GPU work at p50 (Ultra),
+  against 6–14 ms.
+- **Low +0.012 ms, Medium +0.024 ms** (`scene`: light loop, baked AO fetch, hull outlines).
+- **High +0.161 ms**, where it was +0.104 ms before R3a. The three passes cost what they
+  did (`depth_prepass` 0.019, `contact_shadows` 0.051, `outline` 0.032 ms); the change is
+  `scene`, +0.051 ms instead of +0.004 ms. Switching R2b's features off one at a time on High
+  (4,800 frames, one run each) isolates it: `scene` is 0.176 ms with everything on, 0.163
+  with lights off, 0.154 with baked AO off, **0.127 with contact shadows off** and 0.125 with
+  all four off, against 0.118 ms on `main`. On R2a's flat terrain (`MOBA_TERRAIN=flat`) the
+  same build's `scene` is 0.071 ms, as before R3a. So the cost is R2b's terms, mainly the
+  contact-shadow read, on top of R3a's splat shader (several array fetches per layer,
+  triplanar on slopes), not the pre-pass: the pre-pass does not make `scene` cheaper on this terrain either
+  (0.127 ms with it, 0.129 ms without). The plan in ADR-0016 §6 moves the contact term into
+  R6's half-resolution AO target, so the scene reads one texture it reads anyway; that
+  removes the `contact_shadows` pass and this extra `scene` time together.
+- **Ultra +0.325 ms against `after-ultra-off`.** The Ultra rows ran in the GPU's slower
+  clock state in all three rounds (`shadow` 0.050 ms on both sides, 0.011 ms in round 0's
+  fast state), so compare them with each other. The pre-pass is 0.096 ms here against
+  0.019 ms on High: it now draws R3a's Ultra heightfield (384² cells, about 295,000
+  triangles, against 256² on High); with flat terrain it is 0.015 ms. A coarser terrain
+  LOD for the pre-pass is the lever, if a reference GPU needs it; R6's GTAO will need the
+  same depth, so the cost is shared after that merge, not doubled.
+- **CPU.** The work before the render call is unchanged (0.006 ms). The render call grows by
+  0.04–0.06 ms at p50 on every tier: the 68 KiB grid copy into mapped memory, which happens
+  even when few lights are live (binning itself is microseconds, below). Its p95 is about
+  twice its p50 (0.26–0.29 ms), still well under a millisecond.
+- **Lights**: at most 10 live in the teamfight at 1080p, under every tier's global cap.
+
+### Light binning on the CPU (criterion, `cargo bench -p moba-render --bench light_binning`)
+
+| Case | time per frame |
+|---|---|
+| 256 lights of 4 m over the player camera's footprint (the global cap) | 6.3 µs |
+| 256 lights of 24 m (the largest effect radius; most columns at the 16-light cap) | 33.6 µs |
+| 16 lights of 4 m with Low's caps (16, 8 per column) | 0.80 µs |
+
+The worst case by work is 0.034 ms of one core, a fraction of the render call's own p50.
+
+### Readability under effect lights (the 1 m near-field floor and the 1.5× sun cap)
+
+A unit stood a metre behind the light (`MOBA_OUTLINE_PROBE=hit`), High, lavapipe; mean
+colour over the unit's 4,700 pixels, HSV saturation and the share of near-white pixels
+(every channel above 225):
+
+| Effect (frame) | lights off: mean RGB, sat | before (0.25 m² floor, no cap) | after (1 m² floor, 1.5× sun cap) |
+|---|---|---|---|
+| judgement-hit-3 | (193, 135, 125), sat 0.36, 0 % near-white | (227, 167, 142), sat 0.38, 0 % near-white | (227, 164, 138), sat 0.39, 0 % near-white |
+| collapse-4 | (225, 195, 175), sat 0.23, 1 % near-white | (241, 205, 182), sat 0.25, 2 % near-white | (240, 204, 181), sat 0.25, 1 % near-white |
+| collapse-8 | (229, 197, 172), sat 0.25, 0 % near-white | (239, 202, 177), sat 0.26, 0 % near-white | (239, 201, 176), sat 0.27, 0 % near-white |
+| arc-hit-3 | (192, 134, 127), sat 0.36, 0 % near-white | (210, 161, 162), sat 0.26, 2 % near-white | (209, 158, 160), sat 0.26, 0 % near-white |
+| nova-8 | (198, 142, 145), sat 0.32, 0 % near-white | (222, 157, 173), sat 0.31, 1 % near-white | (221, 156, 172), sat 0.31, 0 % near-white |
+| hero-death-6 | (197, 147, 138), sat 0.30, 0 % near-white | (215, 158, 147), sat 0.32, 0 % near-white | (213, 157, 146), sat 0.32, 0 % near-white |
+| cinder-zone-20 | (193, 134, 124), sat 0.37, 0 % near-white | (222, 149, 129), sat 0.42, 0 % near-white | (222, 147, 128), sat 0.43, 0 % near-white |
+
+The unit brightens and keeps its saturation in every case; the near-white share falls to
+at most 1 % (it was up to 2 % with the old falloff).
+
+### Relief AO × baked AO on R3a's terrain
+
+R3a darkens the terrain's albedo by its relief occlusion; R2b's baked AO multiplies the
+ambient line. Per pixel, baked AO off against on (High, lavapipe, the 3D view between the
+HUD panels), networked at tick 120 on the hero close-up (24 m) and the whole-map overview:
+
+| View | pixels baked AO changes | largest darkening (of 255) | darkest changed pixel, AO off → on | darkest pixel of the frame, off → on |
+|---|---|---|---|---|
+| ember | 0.0 % | 0 | 1000000000 → 1000000000 | 22 → 22 |
+| ember-ov | 0.4 % | 6 | 75 → 70 | 5 → 5 |
+| frost | 0.0 % | 0 | 1000000000 → 1000000000 | 49 → 49 |
+| frost-ov | 2.8 % | 15 | 133 → 131 | 3 → 3 |
+
+Baked AO darkens at most 15 of 255, on 2.8 % of the frost overview's pixels (wall and prop
+bases), and never changes the frame's darkest pixel, which is R3a's relief and the sun
+shadow. The close-ups have no wall base in view. The stack is not over-dark, so no floor on
+the product was added. R6's GTAO, the third factor, is checked on that merge.
+
+### Validation, goldens and the outline probe
+
+`MOBA_VULKAN_VALIDATION=required` (validation and synchronisation validation) after the
+merge. On the RTX 5070 Ti, the matrix of the first section (16 tier runs and the 10 switch
+and override runs), the VAT minions through the pre-pass and the hull (Low, High, Ultra,
+Ultra with hull outlines) and five R3a views (the High overview with the fog of war, the
+Ultra and Low horizon with sky and map-edge cliffs, High with `MOBA_FOW=legacy`, High with
+`MOBA_TERRAIN=flat`): **35 runs, 35 exit 0 with 0 messages**. On lavapipe, the VAT and R3a
+sets: **9 runs, 9 clean**, plus the six golden captures twice, the four probe cases and the
+ten AO-stack captures above, all clean.
+
+All six render goldens (default, networked, VAT, ember, R3a's overview and horizon) were
+regenerated from this merge: two lavapipe runs per capture are byte-identical, with no
+validation or sync-validation message. The outline occlusion probe
+(`scripts/outline-probe.sh`) passes in all four cases (a unit behind a wall draws no
+outline pixel with the hull on Low or the screen-space pass on High; an open unit does).
+Both bakes were re-run after the merge. Ember's fingerprint changed to `0x1abaf6e3147d9360`
+because R3a moved a crystal off the mid lane (from (128, 128) to (121, 138)), and its
+texture changed where the crystal was and is. Frost's inputs, and so its fingerprint, did not
+change, but its texture moved by 1–8 levels of 255 around the wall square (a few texels at
+wall ends by up to 28). The likely cause (not isolated): `ao-bake` now places walls with
+`moba_assets::wall_box`, whose `cos(atan2)` axis differs from the old normalised direction in
+the last bit, and the axis-aligned walls' faces lie exactly on texel centres, so a row of
+texels along a face can flip in or out of the wall. Both are within the bake's 0.5 m texel; the client draws the
+walls with the same `wall_box`.
+
 ## Not measured
 
-- These numbers are for this branch on `main` at `74f3087`, before R4b, R3a and R6 land.
-  The planned integration with R6's pre-pass, MSAA and GTAO (ADR-0016 §6) changes where
-  the pre-pass cost is counted and adds an MSAA ID target on Ultra; it is to be re-measured
-  after that rebase.
+- The first table is this branch on `main` at `74f3087`; [the review round](#review-round-1-on-main-with-r4b-and-r3a)
+  re-measures it on `main` at `760bd01` (R4b and R3a). R6 has not landed: the integration
+  with its pre-pass, MSAA and GTAO (ADR-0016 §6) changes where the pre-pass cost is counted
+  and adds an MSAA ID target on Ultra, and is re-measured on that merge.
 
 - The other §7 reference GPUs (UHD 620, GTX 1060, RTX 3060 classes, Apple M1) are still
   unowned (#9/#127); every number above is the RTX 5070 Ti at 1080p.
-- No scene reaches a light cap; the 256-light worst case (CPU binning and the fragment loop
-  at 16 lights per cell) is bounded by construction, not measured.
+- No shipped scene reaches a light cap. The 256-light CPU worst case is benchmarked (the
+  review round); the GPU fragment loop at 16 lights per cell is bounded by construction.

@@ -5,7 +5,7 @@
 //!   of 4 m radius scattered over the player camera's ground footprint.
 //! - `light_binning/256_large`: 256 lights at the largest effect-light radius (24 m), so each
 //!   covers many columns and most columns hit the 16-per-column cap: the worst case by work.
-//! - `light_binning/16_low`: Low's caps (16 lights, 4 per column) on the shipped-content scale.
+//! - `light_binning/16_low`: Low's caps (16 lights, 8 per column) on the shipped-content scale.
 //!
 //! The grid's count words are written once per frame from CPU scratch, so the binning never
 //! reads the (write-combined) mapped grid; these runs use heap buffers of the same shape.
@@ -40,7 +40,7 @@ fn binning(c: &mut Criterion) {
     for (name, lights, max, per_cell) in [
         ("256_spread", lights(256, 4.0), 256, 16),
         ("256_large", lights(256, 24.0), 256, 16),
-        ("16_low", lights(16, 4.0), 16, 4),
+        ("16_low", lights(16, 4.0), 16, 8),
     ] {
         group.bench_function(name, |b| {
             b.iter(|| black_box(binner.bin(black_box(&lights), camera, max, per_cell)));
