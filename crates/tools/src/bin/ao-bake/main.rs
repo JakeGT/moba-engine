@@ -41,8 +41,6 @@ const USAGE: &str = "usage:
 const WRITER: &str = concat!("moba-tools ao-bake ", env!("CARGO_PKG_VERSION"));
 /// Default metres per texel.
 const DEFAULT_TEXEL: f32 = 0.5;
-/// Wall thickness the client draws (`crates/client/src/app/map_visuals.rs`).
-const WALL_THICKNESS: f32 = 2.5;
 /// Footprint of the built-in prop block relative to its height (the client's block).
 const BLOCK_WIDTH: f32 = 0.45;
 
@@ -124,19 +122,14 @@ struct Occluders {
 
 fn rasterise(occluders: &Occluders, texel: f32, root: &Path) -> bake::HeightField {
     let mut field = bake::HeightField::new(occluders.extent, texel, MAX_BAKED_AO_TEXELS as usize);
-    for [ax, ay, bx, by] in &occluders.walls {
-        let (dx, dz) = (bx - ax, by - ay);
-        let length = dx.hypot(dz);
-        let axis = if length > 1e-4 {
-            [dx / length, dz / length]
-        } else {
-            [1.0, 0.0]
-        };
+    for &[ax, ay, bx, by] in &occluders.walls {
+        // The box the client draws for this segment (R3a's shared placement math).
+        let wall = moba_assets::wall_box([ax, ay], [bx, by], occluders.wall_height);
         field.add_box(
-            [(ax + bx) * 0.5, (ay + by) * 0.5],
-            axis,
-            [length.max(0.5) * 0.5, WALL_THICKNESS * 0.5],
-            occluders.wall_height,
+            wall.center,
+            [wall.angle.cos(), wall.angle.sin()],
+            [wall.length * 0.5, wall.thickness * 0.5],
+            wall.height,
         );
     }
     for prop in &occluders.props {

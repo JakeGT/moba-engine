@@ -15,9 +15,9 @@ are in [`.claude/agents/`](../.claude/agents), and the short GitHub Copilot entr
 | Replay format | **v5**, simulation logic **v8** | `crates/sim/src/replay.rs` |
 | Content | runtime TOML, hashed; signed packs optional | `crates/game/src/content/` |
 | Toolchain | Rust MSRV **1.88**, Vulkan **1.3** minimum | `Cargo.toml`, ADR-0002 |
-| Tests | **661 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **702 passed**, 3 ignored | `cargo test --workspace --locked` |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
-| Golden image | 64×36 fingerprints (default + networked), lavapipe + validation | `.github/workflows/render-golden.yml` |
+| Golden image | 64×36 fingerprints (default, networked, VAT, map overview + horizon, ember) + outline occlusion probe, lavapipe + validation | `.github/workflows/render-golden.yml` |
 
 Always re-run the commands rather than copying these numbers into a PR if they are stale.
 

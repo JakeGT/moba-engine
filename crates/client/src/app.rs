@@ -43,6 +43,13 @@
 //! - R2b overrides (ADR-0016): `MOBA_LIGHTS=off|<global cap>` (effect point lights),
 //!   `MOBA_OUTLINES=off|hull|screen` (team outlines), `MOBA_BAKED_AO=off` and
 //!   `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
+//! - Terrain, fog of war and atmosphere (R3a, ADR-0014) overrides of the tier's defaults:
+//!   `MOBA_TERRAIN=flat|splat` (flat: the R2a plane), `MOBA_FOW=texture|legacy|off` (the
+//!   visibility texture, the pre-R3a 16-circle loop, or none), `MOBA_FOW_SIZE=<64..1024>`,
+//!   `MOBA_FOG=off` (height fog) and `MOBA_SKY=off`. The map's `[terrain]`, `[atmosphere]`
+//!   and `[fog_of_war]` tables set the art direction.
+//! - `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>` (local preview): a fixed orbit camera
+//!   (radians, metres) instead of the slow turn; the R3a goldens use it for the horizon view.
 //! - `MOBA_CAPTURE_TICK=<n>` (network mode, with `MOBA_CAPTURE`): capture once the match is
 //!   Playing at snapshot tick `n`, with interpolation and animation pinned to `n`. A
 //!   `MOBA_SERVER=local` server is lock-stepped to the client and stops at `n`, so the frame
@@ -172,6 +179,8 @@ struct ClientApp {
     portraits: offscreen::PortraitStudio,
     /// The baked top-down minimap (R7b).
     minimap: offscreen::MinimapBaker,
+    /// The fog-of-war texture's input, rebuilt every frame in reused buffers (R3a).
+    fog_input: crate::hud::FogInput,
     frames: u64,
     quit_after_frames: u64,
     capture_path: Option<PathBuf>,
@@ -185,6 +194,8 @@ struct ClientApp {
     quality: moba_render::QualityTier,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
+    /// `MOBA_PREVIEW_CAMERA`: a fixed local-preview orbit `[yaw, pitch, distance]` (R3a).
+    preview_camera: Option<[f32; 3]>,
     /// `MOBA_SHADER_DIR` (dev): SPIR-V overrides, hot-reloaded when a `.spv` changes.
     shader_dir: Option<PathBuf>,
     /// Override file count and newest modification time at the last poll (`None` before
@@ -195,11 +206,12 @@ struct ClientApp {
     /// call, and time inside it (fence wait, acquire, recording, submit, present).
     work_log: Option<Vec<[f32; 2]>>,
     /// Per-frame GPU times `[shadow, scene, composite, ui, total, span, portraits, minimap,
-    /// vfx_simulate, vfx_draw, vfx_resolve]` plus the particle stats `[alive, overdraw]` while
-    /// logging, from the renderer's timestamp queries (empty on devices without timestamp
-    /// support; `0` for a pass that did not run: shadows off, or an offscreen pass not
-    /// re-rendered that frame). One entry per measured GPU frame: a sample whose frame number
-    /// was already logged is skipped.
+    /// vfx_simulate, vfx_draw, vfx_resolve]` plus the particle stats `[alive, overdraw]` and
+    /// the fog-of-war passes `[fow-raster, fow-resolve]` (R3a) while logging, from the
+    /// renderer's timestamp queries (empty on devices without timestamp support; `0` for a pass
+    /// that did not run: shadows off, an offscreen pass not re-rendered that frame, or no
+    /// fog-of-war texture). One entry per measured GPU frame: a sample whose frame number was
+    /// already logged is skipped.
     gpu_log: Option<Vec<[f32; launch::GPU_LANES]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
@@ -334,6 +346,7 @@ impl ClientApp {
             hud_fx: HudFx::new(team_palette),
             portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(quality)),
             minimap: offscreen::MinimapBaker::new(offscreen::MinimapMode::from_env()),
+            fog_input: crate::hud::FogInput::new(),
             frames: 0,
             quit_after_frames,
             capture_path,
@@ -349,6 +362,9 @@ impl ClientApp {
             quality,
             bindings,
             camera_sensitivity,
+            preview_camera: launch::parse_preview_camera(
+                std::env::var("MOBA_PREVIEW_CAMERA").ok().as_deref(),
+            ),
             shader_dir: launch::shader_dir(),
             shader_stamp: None,
             frame_log,
@@ -567,7 +583,8 @@ impl App for ClientApp {
             .with_shader_dir(self.shader_dir.clone())
             .with_compressed_textures(launch::compressed_textures())
             .with_lighting(Some(launch::lighting_config(self.quality)))
-            .with_vfx(self.vfx.enabled());
+            .with_vfx(self.vfx.enabled())
+            .with_world(Some(launch::world_config(self.quality)));
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -750,6 +767,7 @@ impl App for ClientApp {
                 hud_fx,
                 portraits,
                 minimap,
+                fog_input,
                 renderer,
                 capture_path,
                 capture_frame,
@@ -1052,6 +1070,14 @@ impl App for ClientApp {
                             minimap.prepare(map_visuals, crate::hud::map_extent(network));
                         portraits.hud(&mut hud_fx.images);
                         hud_fx.images.minimap = minimap.ready(map_visuals.generation());
+                        hud_fx.images.fog = renderer.as_ref().map_or_else(
+                            crate::hud::images::MinimapFog::default,
+                            |renderer| {
+                                crate::hud::images::MinimapFog::from_mode(
+                                    renderer.world_config().fog_of_war,
+                                )
+                            },
+                        );
                         build_network_hud(
                             ui,
                             network,
@@ -1087,13 +1113,25 @@ impl App for ClientApp {
                         vfx.update(vfx_dt, render_tick, &view, anchors, &socket);
                         vfx::push_placeholders(vfx, units);
                         let vision = build_vision(network);
-                        let scene = Scene::with_vision(camera, units, vision)
+                        // A pinned capture (`MOBA_CAPTURE_TICK`) settles the fog in one frame,
+                        // so the image never depends on how many frames led up to the tick.
+                        let fog_dt = if network.capture_tick.is_some() {
+                            moba_render::FOG_OF_WAR_SETTLE_DT
+                        } else {
+                            frame_ms / 1_000.0
+                        };
+                        let fog = fog_input.build(network, fog_dt);
+                        let mut scene = Scene::with_vision(camera, units, vision)
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
+                            .with_atmosphere(map_visuals.scene_atmosphere())
                             .with_bones(bones.bones())
                             .with_vfx(vfx.frame())
                             .with_lights(vfx.lights())
                             .with_outlines(outlines::palette(hud_fx.palette));
+                        if let Some(fog) = fog {
+                            scene = scene.with_fog_of_war(fog);
+                        }
                         // With `MOBA_CAPTURE_TICK` the capture waits for the match tick, not
                         // a frame count, so it does not depend on frame pacing.
                         let capture_due = if network.capture_tick.is_some() {
@@ -1241,7 +1279,9 @@ impl App for ClientApp {
                 } else {
                     frame.elapsed_secs() as f32 * 0.035
                 };
-                let local_camera = if preview.is_some() {
+                let local_camera = if let Some([yaw, pitch, distance]) = self.preview_camera {
+                    Camera::orbit(Vec3::ZERO, distance, yaw, pitch, aspect)
+                } else if preview.is_some() {
                     Camera::orbit(Vec3::ZERO, 30.0, -0.7, 0.75, aspect)
                 } else if replay.is_some() {
                     let (focus, distance) = launch::replay_focus(simulation, center);
@@ -1333,6 +1373,7 @@ impl App for ClientApp {
                     let scene = Scene::new(camera, units)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
+                        .with_atmosphere(map_visuals.scene_atmosphere())
                         .with_bones(bones.bones())
                         .with_vfx(vfx.frame())
                         .with_lights(vfx.lights())
@@ -1398,6 +1439,8 @@ impl App for ClientApp {
                     pass("depth_prepass"),
                     pass("contact_shadows"),
                     pass("outline"),
+                    pass("fow-raster"),
+                    pass("fow-resolve"),
                     stats.map_or(0.0, |stats| stats.alive as f32),
                     stats.map_or(0.0, |stats| stats.overdraw),
                     self.renderer

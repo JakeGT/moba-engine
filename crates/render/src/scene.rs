@@ -9,6 +9,7 @@ use crate::ui::UiImage;
 use crate::lighting::{FrameLighting, SceneLighting};
 use crate::lights::PointLight;
 use crate::vfx::VfxFrame;
+use crate::world::{FogOfWar, SceneAtmosphere, WorldFrame};
 
 /// A pinhole camera with Vulkan clip-space conventions (`z` in `[0, 1]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -306,8 +307,14 @@ pub struct Scene<'a> {
     pub camera: Camera,
     /// Units to draw, in any order.
     pub units: &'a [UnitInstance],
-    /// Allied vision circles; an empty set disables fog darkening.
+    /// Allied vision circles for the legacy fog of war ([`FogOfWarMode::Legacy`](crate::FogOfWarMode));
+    /// an empty set disables it.
     pub vision: VisionCircles,
+    /// This frame's fog-of-war vision for the visibility texture (ADR-0014); `None` draws no
+    /// fog of war (spectators, the local preview).
+    pub fog_of_war: Option<FogOfWar<'a>>,
+    /// Height fog, sky and fog-of-war art direction ([`SceneAtmosphere::DEFAULT`] unless set).
+    pub atmosphere: SceneAtmosphere,
     /// Terrain tint: RGB (`1.0` = default grass palette) and, in alpha, the strength of the
     /// terrain's grid lines (`1.0` = the default; R7b's baked minimap uses a fainter grid).
     pub terrain_tint: [f32; 4],
@@ -472,6 +479,8 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            fog_of_war: None,
+            atmosphere: SceneAtmosphere::DEFAULT,
             lights: &[],
             outlines: OutlinePalette::NONE,
         }
@@ -492,9 +501,25 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            fog_of_war: None,
+            atmosphere: SceneAtmosphere::DEFAULT,
             lights: &[],
             outlines: OutlinePalette::NONE,
         }
+    }
+
+    /// Sets this frame's fog-of-war vision (the visibility texture, ADR-0014).
+    #[must_use]
+    pub const fn with_fog_of_war(mut self, fog: FogOfWar<'a>) -> Self {
+        self.fog_of_war = Some(fog);
+        self
+    }
+
+    /// Sets the atmosphere and fog-of-war art direction.
+    #[must_use]
+    pub const fn with_atmosphere(mut self, atmosphere: SceneAtmosphere) -> Self {
+        self.atmosphere = atmosphere;
+        self
     }
 
     /// Sets this frame's dynamic point lights, most important first (ADR-0016).
@@ -570,6 +595,15 @@ pub(crate) struct CameraUniform {
     specular_tint: [f32; 4],
     ambient_ground: [f32; 4],
     sh: [[f32; 4]; 9],
+    // R3a (ADR-0014).
+    fog_rect: [f32; 4],
+    fog_color: [f32; 4],
+    fog_params: [f32; 4],
+    haze_color: [f32; 4],
+    haze_params: [f32; 4],
+    sky_zenith: [f32; 4],
+    sky_horizon: [f32; 4],
+    // R2b (ADR-0016).
     inv_view_proj: [[f32; 4]; 4],
     viewport: [f32; 4],
     light_grid: [f32; 4],
@@ -588,6 +622,7 @@ impl CameraUniform {
         vision: &VisionCircles,
         terrain: [f32; 4],
         lighting: &FrameLighting,
+        world: &WorldFrame,
         outlines: &OutlinePalette,
         extent: [u32; 2],
     ) -> Self {
@@ -628,6 +663,13 @@ impl CameraUniform {
             specular_tint: lighting.specular_tint,
             ambient_ground: lighting.ambient_ground,
             sh: lighting.sh,
+            fog_rect: world.fog_rect,
+            fog_color: world.fog_color,
+            fog_params: world.fog_params,
+            haze_color: world.haze_color,
+            haze_params: world.haze_params,
+            sky_zenith: world.sky_zenith,
+            sky_horizon: world.sky_horizon,
             inv_view_proj: inverse.to_cols_array_2d(),
             viewport: [width, height, 1.0 / width, 1.0 / height],
             light_grid: lighting.light_grid,
@@ -710,12 +752,14 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, light_view_proj), 928);
         assert_eq!(offset_of!(CameraUniform, ambient_ground), 1104);
         assert_eq!(offset_of!(CameraUniform, sh), 1120);
-        // R2b (ADR-0016) members follow the SH block.
-        assert_eq!(offset_of!(CameraUniform, inv_view_proj), 1264);
-        assert_eq!(offset_of!(CameraUniform, light_info), 1360);
-        assert_eq!(offset_of!(CameraUniform, contact), 1408);
-        assert_eq!(offset_of!(CameraUniform, outline_palette), 1424);
-        assert_eq!(size_of::<CameraUniform>(), 1552);
+        assert_eq!(offset_of!(CameraUniform, fog_rect), 1264);
+        assert_eq!(offset_of!(CameraUniform, sky_horizon), 1360);
+        // R2b (ADR-0016) members follow R3a's.
+        assert_eq!(offset_of!(CameraUniform, inv_view_proj), 1376);
+        assert_eq!(offset_of!(CameraUniform, light_info), 1472);
+        assert_eq!(offset_of!(CameraUniform, contact), 1520);
+        assert_eq!(offset_of!(CameraUniform, outline_palette), 1536);
+        assert_eq!(size_of::<CameraUniform>(), 1664);
     }
 
     #[test]

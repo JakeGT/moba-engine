@@ -32,13 +32,14 @@ use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
 use crate::lighting::FrameLighting;
 use crate::mesh::{self, GpuMesh};
-use crate::pipeline::{self, PipelineSpec, VertexLayout};
+use crate::pipeline::{self, PipelineSpec, VertexLayout, VertexlessDepth};
 use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
 use crate::scene::{BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Scene};
 use crate::shaders::ShaderSource;
 use crate::vat::{VatMeshes, VatPush};
+use crate::world::WorldFrame;
 
 /// Mesh slots, including the built-in cube in slot 0. Bucketing scratch is sized by this.
 pub(crate) const MAX_MESHES: usize = 64;
@@ -103,6 +104,8 @@ pub(crate) struct SceneTargets<'a> {
     pub(crate) clear_color: [f32; 4],
     /// Draw the terrain plane (the main view and the minimap; portraits do not).
     pub(crate) terrain: bool,
+    /// Draw the sky behind the scene (the main view, when the world config has it).
+    pub(crate) sky: bool,
     /// Rectangles cleared to their own colour after the full clear (portrait backdrops).
     pub(crate) clear_rects: &'a [ClearRect],
     /// The view's scene lighting set (set 3).
@@ -194,6 +197,8 @@ pub(crate) struct ScenePipelines {
     /// pre-pass / hull outlines.
     prepass_vat: Option<GraphicsPipeline>,
     hull_vat: Option<GraphicsPipeline>,
+    /// The far-plane sky (R3a): depth test only, no vertex input.
+    sky: GraphicsPipeline,
 }
 
 /// How the depth pre-pass pipelines are built (ADR-0016).
@@ -251,10 +256,22 @@ impl ScenePipelines {
             textured_fragment.handle(),
         )?;
         let terrain = build(
-            VertexLayout::Static,
+            VertexLayout::Terrain,
             terrain_vertex.handle(),
             terrain_fragment.handle(),
         )?;
+        let sky_vertex = module("sky.vert")?;
+        let sky_fragment = module("sky.frag")?;
+        let sky = pipeline::create_vertexless(
+            device,
+            layout,
+            sky_vertex.handle(),
+            sky_fragment.handle(),
+            color_format,
+            false,
+            VertexlessDepth::TestOnly(depth_format),
+        )
+        .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
         let (skinned, skinned_textured) = if skinning {
             let skinned = module("skinned.vert").and_then(|vertex| {
                 build(
@@ -395,7 +412,7 @@ impl ScenePipelines {
                     .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
                 };
                 // The terrain has no outline: depth only, the ID target keeps its clear (0).
-                let terrain = prepass(terrain_vertex.handle(), VertexLayout::Static, None)?;
+                let terrain = prepass(terrain_vertex.handle(), VertexLayout::Terrain, None)?;
                 let unit_vertex = module("unit_prepass.vert")?;
                 let unit = prepass(unit_vertex.handle(), VertexLayout::StaticShadow, fragment)?;
                 // Without it skinned meshes are drawn by the scene pass alone (correct, just
@@ -510,6 +527,7 @@ impl ScenePipelines {
             vat_shadow,
             prepass_vat,
             hull_vat,
+            sky,
         })
     }
 }
@@ -525,7 +543,10 @@ pub(crate) struct ShadowPipelineSpec {
 
 /// Pipelines, meshes and per-frame buffers of the scene pass.
 pub(crate) struct ScenePass {
+    /// The R2a plane, drawn without a map terrain.
     terrain_mesh: GpuMesh,
+    /// The map's heightfield mesh (R3a, `Renderer::set_terrain`), drawn instead of the plane.
+    map_terrain: Option<GpuMesh>,
     /// Unit meshes: slot 0 is the cube, the rest come from `register_mesh`. Never shrinks,
     /// so a `MeshId` stays valid and no frame in flight can reference a freed mesh.
     meshes: Vec<GpuMesh>,
@@ -558,6 +579,27 @@ pub(crate) struct ScenePass {
     mesh_vat: [u8; MAX_MESHES],
 }
 
+/// Bindings of the scene's set 0 (the camera block, vertex + fragment) and set 1 (binding 0
+/// instances, binding 1 joint matrices read only by `skinned.vert`; vertex).
+pub(crate) fn buffer_set_layout_bindings() -> (
+    [vk::DescriptorSetLayoutBinding<'static>; 1],
+    [vk::DescriptorSetLayoutBinding<'static>; 2],
+) {
+    let camera = [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+    let storage = |binding| {
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(binding)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+    };
+    (camera, [storage(0), storage(1)])
+}
+
 impl ScenePass {
     /// Builds the scene pipelines for `color_format`/`depth_format` and, per view in `views`
     /// (view 0 is the main scene), `frames` sets of per-frame buffers. Each view's
@@ -579,25 +621,36 @@ impl ScenePass {
         prepass: Option<PrepassPipelineSpec>,
         hull: bool,
     ) -> RenderResult<Self> {
-        let camera_binding = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+        let (camera_binding, instance_binding) = buffer_set_layout_bindings();
+        // Every scene pipeline shares one layout, so its per-stage descriptor totals must fit
+        // the device (R3a review: later set-3 bindings count for every scene pipeline).
+        // So does the VAT layout (R4b), which swaps set 2 for the VAT texture.
+        let limits = crate::descriptor_budget::StageTotals {
+            samplers: device.max_per_stage_samplers,
+            sampled_images: device.max_per_stage_sampled_images,
+        };
+        let lighting_bindings = crate::lighting::set_layout_bindings();
+        crate::descriptor_budget::check(
+            "scene",
+            &[
+                &camera_binding,
+                &instance_binding,
+                &crate::material::set_layout_bindings(),
+                &lighting_bindings,
+            ],
+            limits,
+        )?;
+        crate::descriptor_budget::check(
+            "VAT",
+            &[
+                &camera_binding,
+                &instance_binding,
+                &crate::vat::set_layout_bindings(),
+                &lighting_bindings,
+            ],
+            limits,
+        )?;
         let camera_layout = DescriptorSetLayout::new(device.device.clone(), &camera_binding)?;
-        // Binding 0: instances; binding 1: joint matrices (read only by `skinned.vert`).
-        let instance_binding = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX),
-        ];
         let instance_layout = DescriptorSetLayout::new(device.device.clone(), &instance_binding)?;
         let frame_count = u32::try_from(frames * views.len()).expect("frame count fits u32");
         let pool_sizes = [
@@ -671,6 +724,7 @@ impl ScenePass {
 
         Ok(Self {
             terrain_mesh,
+            map_terrain: None,
             meshes,
             mesh_material_sets: [vk::DescriptorSet::null(); MAX_MESHES],
             views: scene_views,
@@ -766,6 +820,11 @@ impl ScenePass {
         }
         self.mesh_material_sets[mesh.index()] = set;
         Ok(())
+    }
+
+    /// Replaces the map's terrain mesh (`None`: the R2a plane). The device must be idle.
+    pub(crate) fn set_terrain_mesh(&mut self, mesh: Option<GpuMesh>) {
+        self.map_terrain = mesh;
     }
 
     /// The main view's bone budget after clamping to the device's storage-buffer range.
@@ -881,6 +940,7 @@ impl ScenePass {
         frame: usize,
         scene: &Scene<'_>,
         lighting: &FrameLighting,
+        world: &WorldFrame,
         extent: vk::Extent2D,
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
@@ -903,6 +963,7 @@ impl ScenePass {
             &scene.vision,
             scene.terrain_tint,
             lighting,
+            world,
             &scene.outlines,
             [extent.width, extent.height],
         );
@@ -1050,19 +1111,16 @@ impl ScenePass {
         }
 
         if targets.terrain {
+            let terrain = self.map_terrain.as_ref().unwrap_or(&self.terrain_mesh);
             bind_pipeline(device, command_buffer, &self.pipelines.terrain);
-            bind_mesh(device, command_buffer, &self.terrain_mesh);
+            bind_mesh(device, command_buffer, terrain);
             // SAFETY: the mesh is uploaded and drawable; its index buffer holds `index_count`
-            // in-range `u32` indices.
+            // in-range `u32` indices (the grid is built with exact indices in
+            // `terrain::grid_mesh`).
             unsafe {
-                device.device.cmd_draw_indexed(
-                    command_buffer,
-                    self.terrain_mesh.index_count,
-                    1,
-                    0,
-                    0,
-                    0,
-                );
+                device
+                    .device
+                    .cmd_draw_indexed(command_buffer, terrain.index_count, 1, 0, 0, 0);
             }
         }
 
@@ -1088,8 +1146,16 @@ impl ScenePass {
             );
         }
 
-        // VAT minions (R4b) after the scene-layout draws: their layout re-binds sets 2/3, which
-        // the scene-layout draws need. The hulls below use only sets 0/1 (compatible).
+        if targets.sky {
+            // On the far plane: only pixels nothing else covered pass the depth test. Before
+            // the VAT draws, which re-bind sets 2/3 with their own layout.
+            bind_pipeline(device, command_buffer, &self.pipelines.sky);
+            // SAFETY: the sky reads no vertex buffers; three vertices form the covering
+            // triangle, and its sets (camera, lighting) are bound with the shared layout.
+            unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
+        }
+        // Then the VAT minions (R4b): their layout re-binds sets 2/3, which would invalidate
+        // set 3 for any scene-layout draw after them. The hulls below use only sets 0/1.
         if state.unit_count > 0
             && let Some(vat) = &self.pipelines.vat
         {
@@ -1196,18 +1262,16 @@ impl ScenePass {
         );
         self.bind_view_sets(device, command_buffer, state, frame);
         if let Some(pipeline) = &self.pipelines.prepass_terrain {
+            // The same mesh the scene pass draws: R3a's heightfield (with its cliffs), or the
+            // R2a plane.
+            let terrain = self.map_terrain.as_ref().unwrap_or(&self.terrain_mesh);
             bind_pipeline(device, command_buffer, pipeline);
-            bind_mesh(device, command_buffer, &self.terrain_mesh);
+            bind_mesh(device, command_buffer, terrain);
             // SAFETY: as for the scene pass's terrain draw.
             unsafe {
-                device.device.cmd_draw_indexed(
-                    command_buffer,
-                    self.terrain_mesh.index_count,
-                    1,
-                    0,
-                    0,
-                    0,
-                );
+                device
+                    .device
+                    .cmd_draw_indexed(command_buffer, terrain.index_count, 1, 0, 0, 0);
             }
         }
         if state.unit_count > 0 {

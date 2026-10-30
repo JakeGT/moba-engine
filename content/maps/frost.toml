@@ -1,6 +1,5 @@
 # Map visuals descriptor for `visuals = "frost"` (content/frost-map.toml), #287.
 # Client-local and cosmetic: never hashed or sent. See docs/content-authoring.md#map-visuals.
-terrain = [0.62, 0.70, 0.80]   # packed snow (linear RGB, 0..=1)
 wall = [0.30, 0.55, 0.85]      # glacier-blue ice walls (built-in blocks: no wall_mesh)
 wall_height = 9.0
 
@@ -56,3 +55,54 @@ terrain_roughness = 0.7
 # Baked AO (R2b, ADR-0016): maps/ao/frost-ao.{toml,ktx2}, scripts/bake-map-ao.sh.
 baked_ao = "frost-ao"
 ao_strength = 0.8
+
+# Terrain (R3a, ADR-0014): packed snow in a ring of drifts, icy lanes, blue-grey rock.
+[terrain]
+tint = [0.62, 0.70, 0.80]        # the flat plane's tint (packed snow, linear RGB 0..=1)
+relief = 0.25                    # metres, at most 0.5 on the board
+edge = "hills"
+edge_height = 24.0
+lane_width = 11.0
+seed = 7
+
+[[terrain.layers]]               # 1: base ground, packed snow
+albedo = "terrain-pebbles"
+normal = "terrain-pebbles-normal"
+tint = [1.60, 1.72, 1.90]
+tiling = 5.0
+
+[[terrain.layers]]               # 2: icy, trodden lanes
+albedo = "terrain-dirt"
+normal = "terrain-dirt-normal"
+tint = [0.95, 1.15, 1.50]
+tiling = 6.0
+
+[[terrain.layers]]               # 3: blue-grey rock on the slopes and under the ice walls
+albedo = "terrain-rock"
+normal = "terrain-rock-normal"
+tint = [0.75, 0.85, 1.05]
+tiling = 10.0
+
+[[terrain.layers]]               # 4: frozen tundra patches in the snow
+albedo = "terrain-moss"
+normal = "terrain-moss-normal"
+tint = [1.10, 1.30, 1.50]
+tiling = 8.0
+
+# A pale cyan haze over the snow and a cold, clear sky.
+[atmosphere]
+fog_color = [0.70, 0.84, 0.92]
+fog_density = 0.0025
+fog_height = 25.0
+fog_start = 80.0
+fog_max = 0.7
+sky_zenith = [0.35, 0.55, 0.78]
+sky_horizon = [0.75, 0.88, 0.95]
+
+# Unseen ground: dim, cold and drifting with snow mist.
+[fog_of_war]
+color = [0.10, 0.14, 0.20]
+darken = 0.6
+desaturate = 0.6
+mist_height = 4.0
+mist = 0.5

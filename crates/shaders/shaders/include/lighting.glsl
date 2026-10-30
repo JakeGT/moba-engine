@@ -32,17 +32,17 @@ layout(set = 3, binding = 3) uniform sampler2D brdf_lut;
 // Stylisation ramp: N.L remapped from [-1, 1] to u, rgb multiplier.
 layout(set = 3, binding = 4) uniform sampler2D lighting_ramp;
 // Dynamic point lights (R2b): two vec4 per light, xyz position + w radius, rgb colour.
-layout(std430, set = 3, binding = 5) readonly buffer LightList {
+layout(std430, set = 3, binding = 11) readonly buffer LightList {
     vec4 lights[];
 } light_list;
 // Light grid: per column `camera.light_info.z` words, a count then light indices.
-layout(std430, set = 3, binding = 6) readonly buffer LightGrid {
+layout(std430, set = 3, binding = 12) readonly buffer LightGrid {
     uint cells[];
 } light_grid;
 // Baked top-down ambient occlusion of the static map (R8, 1 = open).
-layout(set = 3, binding = 7) uniform sampler2D baked_ao_map;
+layout(set = 3, binding = 13) uniform sampler2D baked_ao_map;
 // Screen-space contact-shadow visibility of the main view (R8, 1 = lit).
-layout(set = 3, binding = 8) uniform sampler2D contact_map;
+layout(set = 3, binding = 14) uniform sampler2D contact_map;
 
 const float MOBA_PI = 3.14159265;
 const float MOBA_MIN_ROUGHNESS = 0.045;

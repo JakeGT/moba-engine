@@ -185,8 +185,22 @@ amendment) added vertex-animation-texture meshes: `Renderer::{register_vat_mesh,
 vat_available, vat_mesh_count, mesh_capacity}`, `UnitInstance::with_vat` (and its `vat` field),
 `MAX_VAT_MESHES`, `RenderError::InvalidVat` and re-exports of `moba-assets`'
 `VatDescriptor`, `VatPose` and `VatSample`.
-R2b
-(ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `PointLight` (`new`;
+R3a (ADR-0014) added terrain, fog of war v2 and atmosphere:
+`WorldConfig` (`for_tier`/`Default` + a `with_*` per field), `TerrainShading` and
+`FogOfWarMode` (`ALL`, `name`, `from_name`), `TerrainData` (`new` + `with_occlusion`,
+`with_normals`, `with_layer_style`, `size`), `FogOfWar` (`new` + `with_sources`,
+`with_walls`, `with_dt`), `VisionSource`/`VisionWall` (`new`), `SceneAtmosphere` (`DEFAULT`/
+`Default` + `with_height_fog`, `with_sky`, `with_fog_of_war_style`),
+`Scene::fog_of_war`/`with_fog_of_war` and `Scene::atmosphere`/`with_atmosphere`,
+`RenderConfig::world`/`with_world`/`effective_world` and `max_vision_sources`/
+`with_max_vision_sources`, `Renderer::{world_config, set_terrain, clear_terrain,
+has_terrain}`, `UiDrawList::fog_mask` and `UiVertex::MODE_FOG`, `vision_sources_dropped`
+(diagnostic counter), `RenderError::{InvalidTerrain, DescriptorLimit}` and the constants
+`MAX_TERRAIN_LAYERS`, `MAX_VISION_WALLS`, `DEFAULT_MAX_VISION_SOURCES`, `MAX_VISION_SOURCES`,
+`MIN_/MAX_FOG_OF_WAR_RESOLUTION` and `FOG_OF_WAR_SETTLE_DT`. `Scene::vision`
+(`VisionCircles`) stays for the legacy mode and is used as a fallback when a scene sets no
+`fog_of_war`.
+R2b (ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `PointLight` (`new`;
 `Scene::lights`/`with_lights`), `LightStats` (`Renderer::light_stats`), `MAX_LIGHTS`,
 `MAX_LIGHTS_PER_CELL`, `OutlineMode` (`name`, `from_name`), `OutlinePalette` (`NONE`,
 `with_slot`; `Scene::outlines`/`with_outlines`), `OUTLINE_SLOTS`, `MAX_OUTLINE_WIDTH`,
@@ -195,13 +209,16 @@ R2b
 `LightingConfig::{max_lights, lights_per_cell, outlines, baked_ao, contact_shadow_steps}`
 with a `with_*` each.
 - `#[non_exhaustive]` enums: `RenderError`, `QualityTier` (more tiers may be added; match with a
-  `_` arm).
+  `_` arm); (R3a) `TerrainShading`, `FogOfWarMode`.
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
   `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R2b): `OutlineMode`.
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
   `with_*`), `VfxFrame`, and the read-only `VfxBudget` and `VfxStats`.
+- `#[non_exhaustive]` structs (R3a): `WorldConfig`, `SceneAtmosphere`, `TerrainData`,
+  `FogOfWar`, `VisionSource` and `VisionWall`, each with a constructor and `with_*`
+  builders.
 - `#[non_exhaustive]` structs (R2b): `PointLight` (public fields, `new`), `BakedAo` (`new` +
   `with_*`), `OutlinePalette` (`NONE` + `with_slot`; public `slots`, the uniform layout) and
   the read-only `LightStats`.
@@ -256,9 +273,18 @@ spaces (`BlendSpace2d`, `BlendSpaceError::Coincident`, `Animator::evaluate_motio
 attachments (`AnimationGraph::{attachment, attachments, socket_count, planar_locomotion,
 spring_joints}`, `AnimationSet::attachment_models`). `VatError` and every `Vat*` struct with
 public fields are `#[non_exhaustive]`; `VatAnimation`, `VatPlayer`, `SkinLod` and
-`BlendSpace2d` have private fields and constructors. R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
+`BlendSpace2d` have private fields and constructors.
+R3a added the terrain (ADR-0014:
+`MapTerrain`, `TerrainLayer`, `EdgeStyle`, `MapAtmosphere`, `MapFogStyle`,
+`MapVisuals::{ground, atmosphere, fog_of_war}` with `with_*` builders and `texture_names`,
+`TerrainSite`, `Heightfield`, `GeneratedTerrain`, `generate_terrain`/`generate_heightfield`/
+`generate_splat`/`terrain_margin`, `WallBox`/`wall_box`, `EdgePlacement`/`edge_placements`
+(with the mesh footprint), `edge_footprint_radius`, `board_edge_relief`,
+`MapConsistency`/`check_map_consistency`/`check_map_consistency_with_edge_footprint`,
+`AssetFileProblem::Texture` and the terrain constants, including `TERRAIN_GRID_SIZES`).
+R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
 `end`), `MAX_VFX_LIGHT_INTENSITY`/`MAX_VFX_LIGHT_RADIUS`, `BakedAoDesc` (`new`, `with_height`,
-`to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`,
+`to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`, `PropMeshShape`,
 `baked_ao_paths`, `BAKED_AO_DIR`, `MAX_BAKED_AO_BYTES`, `MAX_BAKED_AO_TEXELS`,
 `DEFAULT_BAKED_AO_HEIGHT` and `MapLighting::{baked_ao, ao_strength}`.
 - Added to `scripts/semver-check.sh` in this review: `moba-game` and `moba-render` re-export
@@ -275,7 +301,11 @@ public fields are `#[non_exhaustive]`; `VatAnimation`, `VatPlayer`, `SkinLod` an
   private fields and constructors (`Pose::rest`, `BlendSpace1d::new`, `AnimationSet::parse`,
   `AnimationGraph::bind`, `Animator::new`).
 - `#[non_exhaustive]` structs: `AssetManifest`, `AssetEntry` (new `AssetEntry::new` +
-  `with_fallback`), `AssetFileIssue`, `MapVisuals`, `MapProp`.
+  `with_fallback`), `AssetFileIssue`, `MapVisuals`, `MapProp`; (R3a) `MapTerrain` (`new` +
+  `with_*`), `TerrainLayer`, `MapAtmosphere` and `MapFogStyle` (`Default` + `with_*`),
+  `TerrainSite` (`new` + `with_*`), `Heightfield`, `GeneratedTerrain`, `WallBox`,
+  `EdgePlacement` and `MapConsistency` (generator and checker outputs). `EdgeStyle` is a
+  `#[non_exhaustive]` enum.
 - Exhaustive by design: `JointTransform` (translation, rotation, scale).
 
 ### Embedding tier

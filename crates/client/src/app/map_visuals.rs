@@ -20,7 +20,12 @@
 //!
 //! The descriptor's `[lighting]` table sets the sun, ambient and stylisation
 //! ([`MapLibrary::scene_lighting`], [`MapLibrary::light_camera`]); unset keys keep the
-//! renderer's defaults.
+//! renderer's defaults. Its `[terrain]` table (R3a, ADR-0014) becomes the renderer's terrain
+//! at bind time ([`MapLibrary::apply_terrain`]: the heightfield and, without a `splat`
+//! texture, the splat weights come from `moba_assets::generate_terrain`, the layers from
+//! `<root>/textures/`), and `[atmosphere]`/`[fog_of_war]` the scene's height fog, sky and fog
+//! style ([`MapLibrary::scene_atmosphere`]). A missing or invalid layer texture falls back to
+//! the flat plane, logged once per bind.
 //!
 //! Everything here is cosmetic and client-local: nothing feeds the simulation, the wire or
 //! the content hash. Files are read and meshes uploaded only in [`MapLibrary::bind`]
@@ -29,18 +34,21 @@
 
 use std::path::{Path, PathBuf};
 
-use moba_assets::{DEFAULT_WALL_HEIGHT, MapLighting, MapVisuals, valid_mesh_name};
+use moba_assets::{
+    DEFAULT_WALL_HEIGHT, MapAtmosphere, MapFogStyle, MapLighting, MapTerrain, MapVisuals,
+    TerrainSite, valid_mesh_name,
+};
 use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_game::{MapSpec, MapTheme};
 use moba_net::protocol::WireMap;
-use moba_render::{Camera, MeshData, MeshId, SceneLighting, TextureId, UnitInstance};
+use moba_render::{
+    Camera, MeshData, MeshId, SceneAtmosphere, SceneLighting, TerrainData, TextureId, UnitInstance,
+};
 
 use crate::app::models::model_path;
 
 /// Directory under the asset root that holds map visuals descriptors.
 pub(crate) const MAPS_DIR: &str = "maps";
-/// Wall thickness in metres (the built-in walls' depth).
-const WALL_THICKNESS: f32 = 2.5;
 /// Descriptor and mesh caches are cleared past this many names (each content update can add
 /// at most one descriptor and four meshes, so this only bounds a pathological server).
 const MAX_CACHED: usize = 64;
@@ -49,6 +57,8 @@ const MAX_CACHED: usize = 64;
 const MAX_MAP_MESH_SLOTS: usize = 16;
 /// Most wall instances built (the content and wire limit).
 const MAX_WALLS: usize = moba_game::MAX_CONTENT_WALLS;
+/// Most edge props (`[terrain] edge_mesh`) built.
+const MAX_EDGE_PROPS: usize = 256;
 
 /// The built-in theme table: `(terrain tint, wall colour)` per wire theme id. It is the
 /// fallback whenever a map has no usable descriptor.
@@ -122,6 +132,41 @@ pub(crate) fn wire_walls(map: &WireMap) -> impl Iterator<Item = (Vec2, Vec2)> + 
                 Vec2::new(f32::from(wall.b[0]), f32::from(wall.b[1])),
             )
         })
+}
+
+/// The simulation facts of a server's map for the terrain generator (sim coordinates).
+pub(crate) fn wire_site(map: &WireMap) -> TerrainSite {
+    let point = |p: [i16; 2]| [f32::from(p[0]), f32::from(p[1])];
+    let mut site = TerrainSite::new(f32::from(map.extent));
+    for lane in map.lanes.iter().take(usize::from(map.lane_count)) {
+        let count = usize::from(lane.point_count).min(lane.points.len());
+        site = site.with_lane(lane.points[..count].iter().copied().map(point).collect());
+    }
+    for (a, b) in wire_walls(map) {
+        site = site.with_wall(a.to_array(), b.to_array());
+    }
+    for structure in map.structures.iter().take(usize::from(map.structure_count)) {
+        site = site.with_structure(point(structure.position));
+    }
+    site.with_spawn(point(map.blue_spawn))
+        .with_spawn(point(map.red_spawn))
+}
+
+/// The simulation facts of a local map for the terrain generator.
+pub(crate) fn spec_site(map: &MapSpec) -> TerrainSite {
+    let point = |p: moba_core::FixVec2| [p.x.to_f32(), p.y.to_f32()];
+    let mut site = TerrainSite::new(map.extent.to_f32());
+    for lane in &map.lanes {
+        site = site.with_lane(lane.path.iter().copied().map(point).collect());
+    }
+    for (a, b) in spec_walls(map) {
+        site = site.with_wall(a.to_array(), b.to_array());
+    }
+    for structure in &map.structures {
+        site = site.with_structure(point(structure.position));
+    }
+    site.with_spawn(point(map.blue_spawn))
+        .with_spawn(point(map.red_spawn))
 }
 
 /// Wall segments of a local map. Validated content has whole-unit endpoints, so these are
@@ -211,6 +256,15 @@ pub(crate) struct MapLibrary {
     /// until the first [`MapLibrary::apply_lighting`] after a (re)created renderer.
     #[allow(clippy::option_option)] // Outer: applied yet; inner: which bake (or none).
     applied_ao: Option<Option<(String, u64, u32)>>,
+    /// The active descriptor's `[terrain]` table (R3a), `None` for the flat plane.
+    ground: Option<MapTerrain>,
+    /// The terrain last built on the renderer: descriptor name, table, simulation site and
+    /// grid size. A rebind of the same map (reconnect, content update without a map change)
+    /// skips the rebuild; `None` until the first build after a (re)created renderer.
+    applied_terrain: Option<(Option<String>, MapTerrain, TerrainSite, u32)>,
+    /// The active descriptor's `[atmosphere]` and `[fog_of_war]` tables.
+    atmosphere: MapAtmosphere,
+    fog_style: MapFogStyle,
 }
 
 impl MapLibrary {
@@ -232,6 +286,62 @@ impl MapLibrary {
             ao_fingerprint: 0,
             prop_shapes: Vec::new(),
             applied_ao: None,
+            ground: None,
+            applied_terrain: None,
+            atmosphere: MapAtmosphere::default(),
+            fog_style: MapFogStyle::default(),
+        }
+    }
+
+    /// The height fog, sky and fog-of-war style of the active map: the renderer's defaults
+    /// with the descriptor's `[atmosphere]` and `[fog_of_war]` overrides. Never allocates.
+    pub(crate) fn scene_atmosphere(&self) -> SceneAtmosphere {
+        scene_atmosphere(&self.atmosphere, &self.fog_style)
+    }
+
+    /// Builds the active map's terrain on `renderer` (load time: after [`Self::bind`]). With
+    /// no `[terrain]` table, or any failure (logged), the renderer draws the flat plane.
+    /// `site` is the simulation map the generator follows.
+    pub(crate) fn apply_terrain(
+        &mut self,
+        renderer: &mut moba_render::Renderer,
+        site: &TerrainSite,
+    ) {
+        let Some(ground) = &self.ground else {
+            if renderer.has_terrain() {
+                let _ = renderer.clear_terrain();
+            }
+            self.applied_terrain = None;
+            return;
+        };
+        if renderer.world_config().terrain == moba_render::TerrainShading::Flat {
+            return;
+        }
+        let grid = renderer.world_config().terrain_grid;
+        if let Some((name, applied, applied_site, applied_grid)) = &self.applied_terrain
+            && *name == self.active
+            && applied == ground
+            && applied_site == site
+            && *applied_grid == grid
+            && renderer.has_terrain()
+        {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let result = build_terrain(&self.root, ground, site, renderer);
+        self.applied_terrain = result
+            .is_ok()
+            .then(|| (self.active.clone(), ground.clone(), site.clone(), grid));
+        match result {
+            Ok(layers) => eprintln!(
+                "[assets] terrain: {layers} layers, {} cells, built in {:.1} ms",
+                renderer.world_config().terrain_grid,
+                started.elapsed().as_secs_f32() * 1_000.0
+            ),
+            Err(reason) => {
+                eprintln!("[assets] terrain: {reason}; using the flat plane");
+                let _ = renderer.clear_terrain();
+            }
         }
     }
 
@@ -404,10 +514,12 @@ impl MapLibrary {
         self.ramps.clear();
         self.applied = None;
         self.applied_ao = None;
+        self.applied_terrain = None;
     }
 
     /// Resolves `key`'s visuals and rebuilds the walls and props (startup and content
     /// update). `register` uploads a mesh (normally `Renderer::register_mesh`).
+    #[allow(clippy::too_many_lines)] // Walls, edge props and props, in draw order.
     pub(crate) fn bind<R>(
         &mut self,
         key: MapKey<'_>,
@@ -435,6 +547,15 @@ impl MapLibrary {
             .as_ref()
             .map(|visuals| visuals.lighting.clone())
             .unwrap_or_default();
+        self.ground = descriptor
+            .as_ref()
+            .and_then(|visuals| visuals.ground.clone());
+        self.atmosphere = descriptor
+            .as_ref()
+            .map_or_else(MapAtmosphere::default, |visuals| visuals.atmosphere);
+        self.fog_style = descriptor
+            .as_ref()
+            .map_or_else(MapFogStyle::default, |visuals| visuals.fog_of_war);
         self.active = descriptor.as_ref().and(key.visuals.map(str::to_owned));
         self.generation = self.generation.wrapping_add(1);
         self.instances.clear();
@@ -443,14 +564,16 @@ impl MapLibrary {
         self.extent = center * 2.0;
         for (a, b) in walls.into_iter().take(MAX_WALLS) {
             self.walls.push([a.x, a.y, b.x, b.y]);
-            let direction = b - a;
-            let length = direction.length().max(0.5);
-            let angle = direction.y.atan2(direction.x);
-            let mid = (a + b) * 0.5;
+            // The placement `content-check` verifies covers the simulation's wall (ADR-0014).
+            let wall = moba_assets::wall_box(a.to_array(), b.to_array(), wall_height);
             let transform = Mat4::from_scale_rotation_translation(
-                Vec3::new(length, wall_height, WALL_THICKNESS),
-                Quat::from_rotation_y(-angle),
-                Vec3::new(mid.x - center, wall_height * 0.5, mid.y - center),
+                Vec3::new(wall.length, wall.height, wall.thickness),
+                Quat::from_rotation_y(-wall.angle),
+                Vec3::new(
+                    wall.center[0] - center,
+                    wall.height * 0.5,
+                    wall.center[1] - center,
+                ),
             );
             self.instances.push(match wall_mesh {
                 Some(fitted) => UnitInstance::new(transform * fitted.unit_box(), wall_color)
@@ -463,6 +586,40 @@ impl MapLibrary {
             return;
         };
         self.prop_shapes.clear();
+        // Cliffs as props: the descriptor's edge mesh around the board, outside it.
+        if let Some(ground) = &visuals.ground
+            && let Some(fitted) = ground
+                .edge_mesh
+                .as_deref()
+                .and_then(|name| self.mesh(name, &mut register))
+        {
+            let edge_color = color(visuals.wall);
+            // Placed by the mesh's real footprint, so a wide mesh never reaches the board.
+            let footprint = moba_assets::edge_footprint_radius(
+                fitted.min.to_array(),
+                fitted.max.to_array(),
+                ground.edge_mesh_height,
+            );
+            for placement in moba_assets::edge_placements(ground, key.center * 2.0, footprint)
+                .into_iter()
+                .take(MAX_EDGE_PROPS)
+            {
+                let ground_point = Vec3::new(
+                    placement.position[0] - center,
+                    0.0,
+                    placement.position[1] - center,
+                );
+                let rotation = Quat::from_rotation_y(-placement.yaw_degrees.to_radians());
+                self.instances.push(
+                    UnitInstance::new(
+                        Mat4::from_rotation_translation(rotation, ground_point)
+                            * fitted.standing(ground.edge_mesh_height),
+                        edge_color,
+                    )
+                    .with_mesh(fitted.mesh),
+                );
+            }
+        }
         for prop in &visuals.props {
             let ground = Vec3::new(prop.position[0] - center, 0.0, prop.position[1] - center);
             let rotation = Quat::from_rotation_y(-prop.yaw.to_radians());
@@ -684,6 +841,115 @@ pub(crate) fn scene_lighting(map: &MapLighting) -> SceneLighting {
     lighting
 }
 
+/// The renderer's default atmosphere with `map`'s and `fog`'s overrides.
+pub(crate) fn scene_atmosphere(map: &MapAtmosphere, fog: &MapFogStyle) -> SceneAtmosphere {
+    let defaults = SceneAtmosphere::DEFAULT;
+    let rgb = |value: Option<[f32; 3]>, default: Vec3| value.map_or(default, Vec3::from_array);
+    let fog_color = rgb(map.fog_color, defaults.fog_color);
+    defaults
+        .with_height_fog(
+            fog_color,
+            map.fog_density.unwrap_or(defaults.fog_density),
+            map.fog_height.unwrap_or(defaults.fog_height),
+            map.fog_start.unwrap_or(defaults.fog_start),
+            map.fog_max.unwrap_or(defaults.fog_max),
+        )
+        .with_sky(
+            rgb(map.sky_zenith, defaults.sky_zenith),
+            // The horizon defaults to the fog colour, so distant ground meets the sky.
+            rgb(map.sky_horizon, fog_color),
+        )
+        .with_fog_of_war_style(
+            rgb(fog.color, defaults.fow_color),
+            fog.darken.unwrap_or(defaults.fow_darken),
+            fog.desaturate.unwrap_or(defaults.fow_desaturate),
+            fog.mist_height.unwrap_or(defaults.fow_mist_height),
+            fog.mist.unwrap_or(defaults.fow_mist),
+        )
+}
+
+/// Generates `ground`'s heightfield (and splat, unless the descriptor names splat textures)
+/// over `site`, loads the layer textures under `root` and sets the terrain on `renderer`.
+/// Returns the layer count. Load time only (it allocates and reads files).
+fn build_terrain(
+    root: &Path,
+    ground: &MapTerrain,
+    site: &TerrainSite,
+    renderer: &mut moba_render::Renderer,
+) -> Result<usize, String> {
+    let load = |name: &str| -> Result<moba_render::TextureData, String> {
+        let path = moba_assets::texture_path(root, name)
+            .ok_or_else(|| format!("invalid texture name '{name}'"))?;
+        moba_assets::load_ktx2_file(&path).map_err(|error| format!("{}: {error}", path.display()))
+    };
+    let albedo = ground
+        .layers
+        .iter()
+        .map(|layer| load(&layer.albedo))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Normal maps are all or nothing: one missing turns them off for the map.
+    let normal = ground
+        .layers
+        .iter()
+        .map(|layer| layer.normal.as_deref().map(load).transpose())
+        .collect::<Result<Option<Vec<_>>, _>>()
+        .unwrap_or_else(|reason| {
+            eprintln!("[assets] terrain normal maps: {reason}; using the geometric normals");
+            None
+        })
+        .unwrap_or_default();
+    let cells = renderer.world_config().terrain_grid;
+    let explicit_splat = match (&ground.splat, &ground.splat2) {
+        (Some(first), second) => {
+            let mut maps = vec![load(first)?];
+            if let Some(second) = second {
+                maps.push(load(second)?);
+            }
+            Some(maps)
+        }
+        (None, _) => None,
+    };
+    let generated = moba_assets::generate_terrain(
+        ground,
+        site,
+        cells,
+        if explicit_splat.is_some() {
+            16
+        } else {
+            moba_assets::DEFAULT_SPLAT_SIZE
+        },
+    );
+    let splat = match explicit_splat {
+        Some(maps) => maps,
+        None => generated
+            .splat
+            .map(Vec::from)
+            .ok_or_else(|| String::from("the generator made no splat map"))?,
+    };
+    let heightfield = &generated.heightfield;
+    let center = site.extent * 0.5;
+    let mut data = TerrainData::new(
+        heightfield.resolution,
+        [
+            heightfield.origin[0] - center,
+            heightfield.origin[1] - center,
+        ],
+        heightfield.spacing,
+        &heightfield.heights,
+        &splat,
+        &albedo,
+    )
+    .with_occlusion(&heightfield.occlusion)
+    .with_normals(&normal);
+    for (index, layer) in ground.layers.iter().enumerate() {
+        data = data.with_layer_style(index, layer.tint, layer.tiling);
+    }
+    renderer
+        .set_terrain(&data)
+        .map_err(|error| format!("the renderer rejected it: {error}"))?;
+    Ok(ground.layers.len())
+}
+
 /// Loads `<root>/environments/<name>.{toml,ktx2}`: the SH/intensity descriptor and the
 /// prefiltered specular cube.
 fn load_environment(
@@ -753,6 +1019,7 @@ pub(crate) fn bind_network_map(
             .map_err(|error| error.to_string())
     });
     library.apply_lighting(renderer);
+    library.apply_terrain(renderer, &wire_site(map));
 }
 
 /// Binds a local preview's map.
@@ -767,6 +1034,7 @@ pub(crate) fn bind_local_map(
             .map_err(|error| error.to_string())
     });
     library.apply_lighting(renderer);
+    library.apply_terrain(renderer, &spec_site(map));
 }
 
 #[cfg(test)]

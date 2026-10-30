@@ -4,6 +4,7 @@
 //! texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|mask [--format F] [--no-mips]
 //! texture-bake generate sentinel <dir>     # the self-generated sample set, as PNG sources
 //! texture-bake generate vfx <dir>          # the procedural particle atlas (ADR-0013)
+//! texture-bake generate terrain <dir>      # self-generated terrain layers, as PNG sources
 //! texture-bake info <file.ktx2>            # format, size, levels, bytes
 //! ```
 //!
@@ -27,7 +28,7 @@ use moba_assets::{TextureData, TextureFormat};
 
 const USAGE: &str = "usage:
   texture-bake bake <in.png> <out.ktx2> --kind color|normal|data|mask [--format F] [--no-mips]
-  texture-bake generate sentinel|vfx <dir>
+  texture-bake generate sentinel|terrain|vfx <dir>
   texture-bake info <file.ktx2>";
 
 /// Largest PNG accepted, in bytes (sources are authoring files, still bounded).
@@ -235,17 +236,30 @@ fn generate(args: &[String]) -> Result<(), String> {
     let [set, dir] = args else {
         return Err(String::from(USAGE));
     };
-    if set == "vfx" {
-        return generate_vfx_atlas(Path::new(dir));
-    }
-    if set != "sentinel" {
-        return Err(format!("unknown set {set} (known: sentinel, vfx)"));
+    let mut images = Vec::new();
+    match set.as_str() {
+        "vfx" => return generate_vfx_atlas(Path::new(dir)),
+        "sentinel" => {
+            for map in ["base", "normal", "mr", "mask"] {
+                images.push((
+                    format!("sentinel-{map}.png"),
+                    patterns::sentinel(map).expect("known map"),
+                ));
+            }
+        }
+        "terrain" => {
+            for layer in patterns::TERRAIN_LAYERS {
+                let maps = patterns::terrain(layer).expect("known layer");
+                images.push((format!("terrain-{layer}.png"), maps.albedo));
+                images.push((format!("terrain-{layer}-normal.png"), maps.normal));
+            }
+        }
+        _ => return Err(format!("unknown set {set} (known: sentinel, terrain, vfx)")),
     }
     let dir = Path::new(dir);
     std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    for map in ["base", "normal", "mr", "mask"] {
-        let rgba = patterns::sentinel(map).expect("known map");
-        let path = dir.join(format!("sentinel-{map}.png"));
+    for (name, rgba) in images {
+        let path = dir.join(name);
         write_png(&path, patterns::SIZE, patterns::SIZE, &rgba)?;
         println!("{}", path.display());
     }
@@ -337,6 +351,171 @@ mod tests {
             "colour is sRGB"
         );
         assert!(!Kind::Normal.allows(TextureFormat::Bc4Unorm));
+    }
+
+    /// PSNR (dB) and 99th-percentile absolute error of channel `channel` of two RGBA8 levels.
+    fn channel_error(decoded: &[u8], source: &[u8], channel: usize) -> (f64, u8) {
+        let mut errors: Vec<u8> = decoded
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(source.as_chunks::<4>().0)
+            .map(|(a, b)| a[channel].abs_diff(b[channel]))
+            .collect();
+        let mse = errors
+            .iter()
+            .map(|&error| f64::from(error).powi(2))
+            .sum::<f64>()
+            / errors.len() as f64;
+        errors.sort_unstable();
+        let p99 = errors[errors.len() * 99 / 100];
+        let psnr = if mse == 0.0 {
+            f64::INFINITY
+        } else {
+            10.0 * (255.0 * 255.0 / mse).log10()
+        };
+        (psnr, p99)
+    }
+
+    #[test]
+    fn terrain_set_bakes_to_loadable_ktx2_at_good_quality() {
+        let size = patterns::SIZE;
+        for layer in patterns::TERRAIN_LAYERS {
+            let maps = patterns::terrain(layer).expect("known layer");
+            for (map, rgba, kind) in [
+                ("albedo", &maps.albedo, Kind::Color),
+                ("normal", &maps.normal, Kind::Normal),
+            ] {
+                let texture = bake_texture(rgba, size, size, kind, kind.default_format(), true)
+                    .expect("bakes");
+                assert_eq!(texture.level_count(), 9, "{layer} {map}");
+                let bytes = moba_assets::write_ktx2(&texture, WRITER);
+                assert_eq!(moba_assets::load_ktx2(&bytes).as_ref(), Ok(&texture));
+                let psnr = level0_psnr(&texture, &mips::extract(rgba, kind)).expect("decodes");
+                assert!(psnr > 36.0, "{layer} {map}: {psnr:.2} dB");
+            }
+            // The colour bake keeps the occlusion in alpha at every level: BC7 mode 6 fits
+            // RGBA on one line per 4x4 block, so alpha costs colour precision only where it
+            // does not follow the albedo (pebbles are the worst case, ~36 dB).
+            let texture = bake_texture(
+                &maps.albedo,
+                size,
+                size,
+                Kind::Color,
+                TextureFormat::Bc7Srgb,
+                true,
+            )
+            .expect("bakes");
+            let decoded = texture.decode_to_uncompressed().expect("decodes");
+            let mut source = maps.albedo.clone();
+            let (mut w, mut h) = (size, size);
+            for level in 0..4 {
+                let (_, _, texels) = decoded.level(level).expect("level");
+                let (psnr, p99) = channel_error(texels, &source, 3);
+                let floor = if level == 0 { 35.0 } else { 31.0 };
+                assert!(
+                    psnr > floor && p99 <= 20,
+                    "{layer} alpha level {level}: {psnr:.2} dB, p99 error {p99}"
+                );
+                source = mips::downsample(&source, w, h, Kind::Color);
+                (w, h) = ((w / 2).max(1), (h / 2).max(1));
+            }
+        }
+    }
+
+    #[test]
+    fn terrain_albedo_is_neutral_enough_to_tint() {
+        // Maps recolour each layer with a 0..2 tint, so the albedo stays mid-bright and
+        // low-to-moderately saturated, and the occlusion stays in its documented range.
+        let ao_min = (patterns::TERRAIN_AO_MIN * 255.0).round() as u8;
+        for layer in patterns::TERRAIN_LAYERS {
+            let albedo = patterns::terrain(layer).expect("known layer").albedo;
+            let texels = albedo.as_chunks::<4>().0;
+            let count = texels.len() as f32;
+            let luminance = texels
+                .iter()
+                .map(|t| {
+                    let [r, g, b] = [t[0], t[1], t[2]].map(mips::srgb_to_linear);
+                    0.2126 * r + 0.7152 * g + 0.0722 * b
+                })
+                .sum::<f32>()
+                / count;
+            assert!(
+                (0.35..=0.55).contains(&luminance),
+                "{layer}: mean linear luminance {luminance:.3}"
+            );
+            let saturation = texels
+                .iter()
+                .map(|t| {
+                    let (high, low) = (t[..3].iter().max().unwrap(), t[..3].iter().min().unwrap());
+                    f32::from(high - low) / f32::from(*high).max(1.0)
+                })
+                .sum::<f32>()
+                / count;
+            assert!(saturation < 0.4, "{layer}: mean saturation {saturation:.3}");
+            let ao: Vec<u8> = texels.iter().map(|t| t[3]).collect();
+            let mean_ao = ao.iter().map(|&a| f32::from(a)).sum::<f32>() / count / 255.0;
+            assert!(
+                ao.iter().all(|&a| a >= ao_min),
+                "{layer}: AO below {ao_min}"
+            );
+            assert!(
+                (0.7..0.95).contains(&mean_ao) && *ao.iter().min().unwrap() < 170,
+                "{layer}: AO mean {mean_ao:.3} (crevices must darken)"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_terrain_textures_match_the_generator() {
+        // As for the sample set: level 0 is bit-exact (no libm in the generator or encoder).
+        macro_rules! committed {
+            ($layer:literal) => {
+                (
+                    $layer,
+                    &include_bytes!(concat!(
+                        "../../../../../content/textures/terrain-",
+                        $layer,
+                        ".ktx2"
+                    ))[..],
+                    &include_bytes!(concat!(
+                        "../../../../../content/textures/terrain-",
+                        $layer,
+                        "-normal.ktx2"
+                    ))[..],
+                )
+            };
+        }
+        let committed = [
+            committed!("grass"),
+            committed!("dirt"),
+            committed!("rock"),
+            committed!("moss"),
+            committed!("pebbles"),
+        ];
+        assert_eq!(
+            committed.map(|(layer, _, _)| layer),
+            patterns::TERRAIN_LAYERS
+        );
+        let size = patterns::SIZE;
+        for (layer, albedo, normal) in committed {
+            let maps = patterns::terrain(layer).expect("known layer");
+            for (suffix, bytes, rgba, kind) in [
+                ("", albedo, &maps.albedo, Kind::Color),
+                ("-normal", normal, &maps.normal, Kind::Normal),
+            ] {
+                let committed = moba_assets::load_ktx2(bytes).expect("committed texture loads");
+                let level0 = bake_texture(rgba, size, size, kind, kind.default_format(), false)
+                    .expect("bakes");
+                assert_eq!(committed.format(), kind.default_format(), "{layer}{suffix}");
+                assert_eq!(committed.level_count(), 9, "{layer}{suffix}");
+                assert!(
+                    committed.level(0) == level0.level(0),
+                    "content/textures/terrain-{layer}{suffix}.ktx2 is stale; \
+                     run scripts/bake-sample-textures.sh"
+                );
+            }
+        }
     }
 
     #[test]

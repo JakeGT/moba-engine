@@ -178,7 +178,12 @@ R4b (VAT minions, #332) is merged into this branch: the instance record is 128 b
 (`model, color, vat0, vat1, params`, the outline slot in `params.x`), and VAT minions have
 `vat_prepass.vert` and `vat_outline.vert` permutations, drawn last in the pre-pass and in the
 hull draws (the VAT layout disturbs sets 2/3, and both only use sets 0/1). R3a (terrain, FoW,
-#333) and R6 (post, ADR-0015, #334) land next and touch the same frame. On each merge:
+#333) is merged too: the pre-pass draws R3a's heightfield mesh (its cliffs included; the
+edge-mesh cliffs are static instances, drawn with the units) with `terrain.vert`'s own
+`invariant` position and its `Terrain` vertex layout; the sky stays a scene-pass draw on the
+far plane, which the loaded pre-pass depth leaves at 1; `ao-bake` places walls with
+`moba_assets::wall_box`, the client's own placement math. R6 (post, ADR-0015, #334) lands
+next. On its merge:
 - **One pre-pass.** R6 adds a depth `prepass` before `scene` (when its AO is on, High and
   up) that writes the depth GTAO reads and the scene loads. R2b's `depth_prepass` folds into
   it: R6's pass gains the optional outline-ID attachment, and its condition becomes "AO,
@@ -210,23 +215,22 @@ hull draws (the VAT layout disturbs sets 2/3, and both only use sets 0/1). R3a (
   occlusion as well, the merge measures the product on ember and frost (the darkest terrain
   texel and the mean at wall bases, before and after) and, if the stack is over-dark, floors
   the product (not each term) at the stylisation's ambient floor.
-- **R3a terrain.** R3a replaces the flat plane with a heightfield and cliffs; the pre-pass
-  draws R3a's terrain and cliff meshes with their own `invariant` vertex shaders (a
-  depth-only permutation each), so the scene's `LESS_OR_EQUAL` load stays exact. `ao-bake`
-  takes walls from R3a's `moba_assets::wall_box`, so the baked occluders are the boxes the
-  client draws by construction, and the bake's height field starts from R3a's terrain
-  heights instead of 0.
-- **Set 3 and the sampler budget.** R3a uses bindings 5–9 and R6's AO the next; R2b's light
-  list, light grid, baked AO and contact term move after them. The light list and grid are
-  storage buffers, so R2b adds at most two combined image samplers to set 3 (baked AO,
-  contact), through the existing linear-clamp and plain shadow samplers (no new sampler
-  object). The budget is checked twice: a unit test counts the fragment-stage samplers the
-  scene shaders declare across sets 2 and 3 (today 4 + 7 = 11) and asserts they match
-  `SCENE_FRAGMENT_SAMPLERS` and stay ≤ 16, the Vulkan minimum of
-  `maxPerStageDescriptorSamplers` and `maxPerStageDescriptorSampledImages`; and device
-  selection rejects a device whose real limits are below that count. After R3a and R6 the
-  count is recomputed on the merge, and if it would pass 16, R3a's splat layers move to a
-  texture array (ADR-0014 notes the option) rather than R2b's terms being dropped.
+- **Relief under the bake.** The bake's height field starts at 0, not at R3a's terrain
+  heights: on the board the relief is at most 0.5 m against 3–5 m walls (a horizon change
+  below the 8-bit AO's resolution), and the cliffs are outside the baked square, where R3a's
+  own relief AO darkens them.
+- **Set 3 and the sampler budget.** Set 3 is `0–4` R2a lighting, `5` fog of war, `6–8`
+  terrain arrays, `9` the terrain block (R3a), `10` R6's AO (left free on this branch), then
+  R2b's `11` light list, `12` light grid (storage buffers), `13` baked AO and `14` contact
+  shadows (combined image samplers through the existing linear-clamp and plain shadow
+  samplers; no new sampler object). R3a's `descriptor_budget` counts every scene-layout
+  binding per stage from the same arrays the set layouts are built from: a unit test pins
+  the fragment stage at **15 of 16** (material 4, lighting 5, fog 1, terrain 3, R2b 2; the
+  VAT layout 11) against the Vulkan minimum of `maxPerStageDescriptorSamplers` and
+  `maxPerStageDescriptorSampledImages`, and renderer creation fails with
+  `RenderError::DescriptorLimit` on a device below it. R6's AO makes it exactly 16, so the
+  contact term moving into R6's AO target (next item) is also what restores headroom: back
+  to 15 once `contact_shadows` and binding 14 are gone.
 - **Contact shadows go half resolution, inside R6's AO.** At full resolution they are the
   largest R2b cost (perf/0020). R6's AO target is half resolution and bilaterally blurred,
   so it cannot hold a full-resolution contact term as a second channel. Instead the contact
@@ -269,8 +273,8 @@ hull draws (the VAT layout disturbs sets 2/3, and both only use sets 0/1). R3a (
   clear_baked_ao, has_baked_ao, light_stats}`; in `moba-assets` `VfxLight`,
   `VfxEffect::light`, `BakedAoDesc`, `ao_fingerprint`, `MapLighting::{baked_ao,
   ao_strength}`.
-- The instance record grows from 80 to 96 bytes (the outline slot); the camera uniform from
-  1,264 to 1,552 bytes.
+- The instance record grows to 128 bytes (R4b's 112 plus the outline slot `params`); the
+  camera uniform from R3a's 1,376 to 1,664 bytes.
 - No wire, replay, simulation-logic or content-hash change: effects, map visuals and bakes
   are client-local and cosmetic.
 - Cost, validation and goldens: [perf/0020](../perf/0020-lights-outlines-ao.md). Both

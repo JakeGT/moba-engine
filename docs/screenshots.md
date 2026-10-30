@@ -49,6 +49,49 @@ MOBA_CAPTURE=/tmp/vfx.ppm MOBA_CAPTURE_FRAME=30 MOBA_SMOKE_FRAMES=40 cargo run -
 MOBA_VFX_PREVIEW=nova MOBA_CAPTURE=/tmp/nova.ppm MOBA_CAPTURE_FRAME=6 cargo run --release -p moba-client
 ```
 
+### Terrain, fog of war v2 and atmosphere (R3a)
+![Networked view before and after R3a](images/r3a-network-before-after.png)
+
+The networked gameplay camera at tick 240 (`MOBA_SERVER=local`, skinned heroes), RTX 5070 Ti,
+High, 1920×1080 (shown at half size), validation and sync validation required, zero
+messages ([ADR-0014](adr/0014-terrain-fog-of-war.md), [perf/0017](perf/0017-terrain-fow.md)).
+Before: the flat grid plane and the 16-circle fog of war. After: the generated splat terrain
+(grass, dirt paths along the lanes and around structures, pebble patches), the fog-of-war
+texture from the blue team's vision (darkened, desaturated and misted outside it, soft edges)
+and height fog.
+
+![Whole-map overview before and after R3a](images/r3a-overview-before-after.png)
+
+`MOBA_CAMERA=overview`: the board reads as a basin, with the hills of the terrain margin
+rising past the edge and fading into the sky; every allied tower, minion and hero lights its
+own patch of the map (no 16-source cap). The minimap (bottom right) is masked by the same
+texture.
+
+![Legacy fog of war and the texture](images/r3a-fow-legacy-texture.png)
+
+The same overview with `MOBA_FOW=legacy` (left: the pre-R3a circle loop over the new terrain, a
+fixed darkening with no map styling and at most 16 sources) and the fog-of-war texture (right).
+
+![Ember before and after R3a](images/r3a-ember-before-after.png)
+![Frost before and after R3a](images/r3a-frost-before-after.png)
+
+The ember and frost sample maps in the local preview (`MOBA_CONTENT=content/ember-map.toml`,
+`content/frost-map.toml`): ember's terraced cliffs and basalt layers, frost's snow drifts and
+denser haze. Their `[terrain]`, `[atmosphere]` and `[fog_of_war]` tables are in
+[`content/maps/`](../content/maps/).
+
+![Low horizon orbit](images/r3a-horizon.png)
+
+`MOBA_PREVIEW_CAMERA=-0.7,0.12,170` (the horizon golden's camera): the environment sky, the
+haze towards the horizon and the map-edge hills, with no board edge in sight.
+
+```bash
+MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=240 MOBA_SMOKE_FRAMES=100000 \
+  MOBA_CAMERA=overview MOBA_CAPTURE=/tmp/overview.ppm cargo run --release -p moba-client
+MOBA_PREVIEW_CAMERA=-0.7,0.12,170 MOBA_CAPTURE=/tmp/horizon.ppm MOBA_CAPTURE_FRAME=90 \
+  MOBA_SMOKE_FRAMES=120 cargo run --release -p moba-client
+```
+
 ### VAT minions, attachments and the 150 ms RTT run (R4b)
 ![200 VAT minions: High, Low and the cube fallback](images/r4b-vat-stress.png)
 

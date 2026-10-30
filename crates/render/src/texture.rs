@@ -84,19 +84,118 @@ pub(crate) fn upload(
                 width: texture.width(),
                 height: texture.height(),
             },
-            cube: texture.is_cube(),
+            layers: if texture.is_cube() {
+                RawLayers::Cube
+            } else {
+                RawLayers::Plain
+            },
             levels: &levels[..count],
             bytes: texture.data(),
         },
     )
 }
 
+/// Uploads `layers` (2D textures of one format, size and level count) as one `2D_ARRAY`
+/// image, layer `i` from `layers[i]`, decoding block-compressed layers on the CPU unless
+/// `compressed` (and the device samples the format). Load-time only.
+///
+/// # Errors
+/// [`RenderError::InvalidTexture`] for an empty list, a cube, layers that disagree on
+/// format, size or levels, or a format the device cannot sample; upload errors.
+pub(crate) fn upload_array(
+    device: &DeviceContext,
+    name: &str,
+    layers: &[&TextureData],
+    compressed: bool,
+) -> RenderResult<GpuImage> {
+    let first = layers.first().ok_or(RenderError::InvalidTexture)?;
+    if layers.iter().any(|layer| {
+        layer.is_cube()
+            || layer.format() != first.format()
+            || layer.width() != first.width()
+            || layer.height() != first.height()
+            || layer.level_count() != first.level_count()
+    }) {
+        return Err(RenderError::InvalidTexture);
+    }
+    let native = !first.format().is_block_compressed()
+        || (compressed && sampleable(device, vk_format(first.format())));
+    let decoded: Vec<TextureData> = if native {
+        Vec::new()
+    } else {
+        layers
+            .iter()
+            .map(|layer| layer.decode_to_uncompressed())
+            .collect::<Result<_, _>>()
+            .map_err(|_| RenderError::InvalidTexture)?
+    };
+    let sources: Vec<&TextureData> = if native {
+        layers.to_vec()
+    } else {
+        decoded.iter().collect()
+    };
+    let format = vk_format(sources[0].format());
+    if !sampleable(device, format) {
+        return Err(RenderError::InvalidTexture);
+    }
+    let count = sources[0].level_count() as usize;
+    let mut levels = [(0usize, 0usize); moba_assets::MAX_MIP_LEVELS as usize];
+    let mut bytes = Vec::new();
+    for (level, slot) in levels.iter_mut().enumerate().take(count) {
+        let level = u32::try_from(level).map_err(|_| RenderError::InvalidTexture)?;
+        let start = bytes.len();
+        for source in &sources {
+            let (_, _, texels) = source.level(level).ok_or(RenderError::InvalidTexture)?;
+            bytes.extend_from_slice(texels);
+        }
+        *slot = (start, bytes.len() - start);
+    }
+    upload_raw(
+        device,
+        name,
+        &RawImage {
+            format,
+            extent: vk::Extent2D {
+                width: sources[0].width(),
+                height: sources[0].height(),
+            },
+            layers: RawLayers::Array(
+                u32::try_from(sources.len()).map_err(|_| RenderError::InvalidTexture)?,
+            ),
+            levels: &levels[..count],
+            bytes: &bytes,
+        },
+    )
+}
+
+/// How the layers of a [`RawImage`] are arranged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RawLayers {
+    /// One layer (a `2D` view).
+    Plain,
+    /// Six cube faces (a `CUBE` view).
+    Cube,
+    /// `n` layers (a `2D_ARRAY` view, even for one layer).
+    Array(u32),
+}
+
+impl RawLayers {
+    const fn count(self) -> u32 {
+        match self {
+            Self::Plain => 1,
+            Self::Cube => 6,
+            Self::Array(layers) => layers,
+        }
+    }
+}
+
 /// Texel data for [`upload_raw`]: every level's `(offset, length)` in `bytes`, largest level
-/// first; a cube level holds its six faces consecutively (+X, −X, +Y, −Y, +Z, −Z).
+/// first; a cube level holds its six faces consecutively (+X, −X, +Y, −Y, +Z, −Z), an array
+/// level its layers in order.
 pub(crate) struct RawImage<'a> {
     pub(crate) format: vk::Format,
     pub(crate) extent: vk::Extent2D,
-    pub(crate) cube: bool,
+    pub(crate) layers: RawLayers,
     pub(crate) levels: &'a [(usize, usize)],
     pub(crate) bytes: &'a [u8],
 }
@@ -122,7 +221,10 @@ pub(crate) fn upload_raw(
     {
         return Err(RenderError::InvalidTexture);
     }
-    let layers = if raw.cube { 6 } else { 1 };
+    let layers = raw.layers.count();
+    if layers == 0 {
+        return Err(RenderError::InvalidTexture);
+    }
     let mut staging = GpuBuffer::new(
         device.device.clone(),
         device.allocator(),
@@ -133,8 +235,8 @@ pub(crate) fn upload_raw(
     )?;
     staging.write_bytes(0, raw.bytes);
     let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
-    let image = if raw.cube {
-        GpuImage::cube_with_mips(
+    let image = match raw.layers {
+        RawLayers::Cube => GpuImage::cube_with_mips(
             device.device.clone(),
             device.allocator(),
             name,
@@ -142,9 +244,8 @@ pub(crate) fn upload_raw(
             raw.format,
             usage,
             levels,
-        )?
-    } else {
-        GpuImage::with_mips(
+        )?,
+        RawLayers::Plain => GpuImage::with_mips(
             device.device.clone(),
             device.allocator(),
             name,
@@ -153,7 +254,17 @@ pub(crate) fn upload_raw(
             usage,
             vk::ImageAspectFlags::COLOR,
             levels,
-        )?
+        )?,
+        RawLayers::Array(count) => GpuImage::array_with_mips(
+            device.device.clone(),
+            device.allocator(),
+            name,
+            raw.extent,
+            raw.format,
+            usage,
+            count,
+            levels,
+        )?,
     };
     let all_levels = vk::ImageSubresourceRange {
         aspect_mask: vk::ImageAspectFlags::COLOR,

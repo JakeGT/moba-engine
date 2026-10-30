@@ -6,7 +6,7 @@
 
 use arrayvec::ArrayVec;
 use moba_core::math::Vec4;
-use moba_render::UiImage;
+use moba_render::{FogOfWar, UiImage, VisionSource, VisionWall};
 
 use super::theme;
 use super::{
@@ -22,6 +22,7 @@ pub(crate) fn draw_minimap(
     hits: &mut HitList,
     palette: theme::TeamPalette,
     baked: bool,
+    fog: super::images::MinimapFog,
 ) {
     let own_team = network.client.team().index() as u8;
     let size = 188.0;
@@ -45,7 +46,18 @@ pub(crate) fn draw_minimap(
             Vec4::ONE,
         );
         if !network.spectator {
-            draw_minimap_fog(ui, network, [left, top, inner], map_extent(network));
+            match fog {
+                // R3a: the scene's visibility texture (walls respected, faded like the
+                // world): it covers exactly the board, u along x and v along y (render z).
+                super::images::MinimapFog::Texture => {
+                    ui.fog_mask(left, top, inner, inner, [0.0, 0.0, 1.0, 1.0], FOG_COLOR);
+                }
+                super::images::MinimapFog::Grid => {
+                    draw_minimap_fog(ui, network, [left, top, inner], map_extent(network));
+                }
+                // `MOBA_FOW=off`: no fog in the world, so none on the minimap.
+                super::images::MinimapFog::Off => {}
+            }
         }
     } else {
         ui.rect(left, top, inner, inner, theme::MINIMAP_GROUND);
@@ -185,6 +197,97 @@ fn fog_runs(sources: &[(f32, f32, f32)], extent: f32, mut run: impl FnMut(usize,
     }
 }
 
+/// Most vision sources and walls a [`FogInput`] holds (allocated once; more are dropped).
+const FOG_INPUT_SOURCES: usize = moba_render::DEFAULT_MAX_VISION_SOURCES;
+const FOG_INPUT_WALLS: usize = moba_render::MAX_VISION_WALLS;
+
+/// One frame's fog-of-war input (R3a, ADR-0014), rebuilt into buffers sized once.
+///
+/// **Only the client's own team** becomes a vision source: heroes, minions and structures
+/// (and wards, once the simulation has them) of `network.client.team()`, alive, from the
+/// snapshot the server sent. Enemy units in the snapshot are never sources, and the walls
+/// are the map's static line-of-sight segments from the catalogue, so the texture can only
+/// draw what the team already sees (the server withholds the rest anyway).
+#[derive(Debug)]
+pub(crate) struct FogInput {
+    sources: Vec<VisionSource>,
+    walls: Vec<VisionWall>,
+}
+
+impl FogInput {
+    pub(crate) fn new() -> Self {
+        Self {
+            sources: Vec::with_capacity(FOG_INPUT_SOURCES),
+            walls: Vec::with_capacity(FOG_INPUT_WALLS),
+        }
+    }
+
+    /// This frame's fog of war over the board, or `None` for a spectator (who sees
+    /// everything). `dt` is the frame time in seconds. Never allocates.
+    pub(crate) fn build(&mut self, network: &NetworkView, dt: f32) -> Option<FogOfWar<'_>> {
+        if network.spectator {
+            self.sources.clear();
+            self.walls.clear();
+            return None;
+        }
+        let mut walls: ArrayVec<([i16; 2], [i16; 2]), FOG_INPUT_WALLS> = ArrayVec::new();
+        map_walls(network, |a, b| {
+            let _ = walls.try_push((a, b));
+        });
+        Some(self.build_from(
+            network.client.team().index() as u8,
+            hud_units(network),
+            |unit| vision_radius(network, unit),
+            &walls,
+            map_extent(network),
+            dt,
+        ))
+    }
+
+    /// [`Self::build`] from its inputs: the own team, the snapshot's units (any team), each
+    /// unit's vision radius, the catalogue's walls and the map extent (sim coordinates).
+    pub(crate) fn build_from<'a>(
+        &mut self,
+        own_team: u8,
+        units: impl Iterator<Item = super::HudUnit<'a>>,
+        radius: impl Fn(super::HudUnit<'a>) -> f32,
+        walls: &[([i16; 2], [i16; 2])],
+        extent: f32,
+        dt: f32,
+    ) -> FogOfWar<'_> {
+        self.sources.clear();
+        self.walls.clear();
+        let center = extent * 0.5;
+        for &(a, b) in walls.iter().take(FOG_INPUT_WALLS) {
+            self.walls.push(VisionWall::new(
+                [f32::from(a[0]) - center, f32::from(a[1]) - center],
+                [f32::from(b[0]) - center, f32::from(b[1]) - center],
+            ));
+        }
+        for unit in units {
+            // Own team only: an enemy in the snapshot is visible already, and its own vision
+            // is exactly what the client must never draw.
+            if unit.team() != own_team || unit.dead() || self.sources.len() >= FOG_INPUT_SOURCES {
+                continue;
+            }
+            let radius = radius(unit);
+            if radius <= 0.0 {
+                continue;
+            }
+            let position = unit.position();
+            self.sources.push(VisionSource::new(
+                position.x.to_f32() - center,
+                position.y.to_f32() - center,
+                radius,
+            ));
+        }
+        FogOfWar::new([-center, -center], extent)
+            .with_sources(&self.sources)
+            .with_walls(&self.walls)
+            .with_dt(dt)
+    }
+}
+
 pub(crate) fn build_vision(network: &NetworkView) -> VisionCircles {
     let mut vision = VisionCircles::default();
     if network.spectator {
@@ -245,7 +348,105 @@ pub(crate) fn vision_radius(network: &NetworkView, unit: super::HudUnit<'_>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{FOG_GRID, fog_runs};
+    use super::{FOG_GRID, FogInput, fog_runs};
+    use crate::hud::HudUnit;
+    use moba_net::NetEntity;
+    use moba_net::protocol::NetProgress;
+
+    fn unit(net_id: u16, kind: u8, team: u8, x: f32, y: f32, health: u16) -> NetEntity {
+        let quantize = |value: f32| (value * 16.0) as u16;
+        NetEntity {
+            net_id,
+            kind,
+            team,
+            hero_slot: 0xFF,
+            hero_pick: 0xFF,
+            flags: u8::from(health == 0),
+            status_bits: 0,
+            max_health: 600,
+            max_mana: 0,
+            x: quantize(x),
+            y: quantize(y),
+            health,
+            mana: 0,
+            cooldowns: [0; 3],
+            progress: NetProgress::default(),
+        }
+    }
+
+    /// The fog-of-war texture is built only from the own team's living units and the map's
+    /// walls: enemies in the snapshot (and dead allies) are never vision sources, so adding,
+    /// moving or removing an enemy cannot change the texture, which therefore never shows
+    /// anything the team does not already see.
+    #[test]
+    fn fog_input_uses_only_the_own_teams_vision() {
+        let own = 0u8;
+        let allies = [
+            unit(1, 0, own, 40.0, 40.0, 500),  // hero
+            unit(2, 3, own, 60.0, 128.0, 900), // tower
+            unit(3, 1, own, 90.0, 120.0, 300), // minion
+            unit(4, 0, own, 20.0, 20.0, 0),    // dead hero: no vision
+        ];
+        let enemies = [
+            unit(10, 0, 1, 200.0, 200.0, 500),
+            unit(11, 3, 1, 190.0, 128.0, 900),
+            unit(12, 1, 1, 150.0, 130.0, 300),
+        ];
+        let walls = [([112, 60], [112, 100])];
+        let radius = |unit: HudUnit<'_>| if unit.kind() == 3 { 25.0 } else { 30.0 };
+        let mut input = FogInput::new();
+        let mixed: Vec<NetEntity> = allies.iter().chain(&enemies).copied().collect();
+        let fog = input.build_from(
+            own,
+            mixed.iter().map(HudUnit::new),
+            radius,
+            &walls,
+            256.0,
+            0.1,
+        );
+        let sources = fog.sources.to_vec();
+        assert_eq!(sources.len(), 3, "three living allies");
+        // Render space: sim minus the centre (128).
+        assert_eq!(
+            (sources[0].x, sources[0].z, sources[0].radius),
+            (-88.0, -88.0, 30.0)
+        );
+        assert!(
+            sources.iter().all(|source| source.x < 0.0),
+            "no enemy (all at x > 128)"
+        );
+        assert_eq!(fog.walls.len(), 1);
+        assert_eq!(fog.walls[0].a, [-16.0, -68.0]);
+        assert_eq!(
+            (fog.origin, fog.size, fog.dt),
+            ([-128.0, -128.0], 256.0, 0.1)
+        );
+        // Without the enemies the input is identical.
+        let mut alone = FogInput::new();
+        let fog_alone = alone.build_from(
+            own,
+            allies.iter().map(HudUnit::new),
+            radius,
+            &walls,
+            256.0,
+            0.1,
+        );
+        assert_eq!(fog_alone.sources, sources.as_slice());
+        // Rebuilding every frame reuses the buffers.
+        let ((), allocations) = crate::app::allocation_probe::probe(|| {
+            for _ in 0..10 {
+                let _ = input.build_from(
+                    own,
+                    mixed.iter().map(HudUnit::new),
+                    radius,
+                    &walls,
+                    256.0,
+                    0.1,
+                );
+            }
+        });
+        assert_eq!(allocations, 0);
+    }
 
     #[test]
     fn fog_covers_everything_outside_the_vision_circles() {

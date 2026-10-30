@@ -432,7 +432,8 @@ as `maps/<name>.toml` so the pack directory doubles as an asset root.
 [`content/maps/frost.toml`](../content/maps/frost.toml) are the examples:
 
 ```toml
-terrain = [0.24, 0.09, 0.05]   # required: terrain tint, linear RGB, each 0..=1
+terrain = [0.24, 0.09, 0.05]   # required: terrain tint, linear RGB, each 0..=1 (or `tint`
+                               #   in a [terrain] table, see "Terrain" below)
 wall = [0.55, 0.20, 0.08]      # required: wall colour
 wall_height = 6.0              # optional: metres, 0.5..=32 (default 4)
 wall_mesh = "rampart"          # optional: <root>/models/rampart.glb along every wall
@@ -453,7 +454,7 @@ mesh = "crystal"               # optional: <root>/models/crystal.glb, else a bui
   prop mesh is scaled uniformly to `height`, standing on the ground and centred on `position`.
   Meshes are static (a skin is ignored).
 - **Mesh names** are 1..=32 of `[A-Za-z0-9_-]`, and a descriptor may reference at most 4
-  distinct meshes (wall and props together). A client uploads at most 16 distinct map meshes
+  distinct meshes (wall, props and the `[terrain]` edge mesh together). A client uploads at most 16 distinct map meshes
   per session (renderer mesh slots are shared with hero models and never freed); later ones
   draw the built-in block.
 - **Limits.** A descriptor is at most 16 KiB. Unknown keys, wrong types and out-of-range or
@@ -471,7 +472,8 @@ mesh = "crystal"               # optional: <root>/models/crystal.glb, else a bui
 A shipped descriptor for a built-in name restyles every pack that uses that theme without a
 `visuals` name. The repository ships one, [`content/maps/map-grass.toml`](../content/maps/map-grass.toml):
 the built-in grass colours plus a `[lighting]` table with the `meadow` environment, so the
-default map (and both golden images) are lit with IBL (R2a; see [Lighting](#lighting)).
+default map (and both golden images) are lit with IBL (R2a; see [Lighting](#lighting)), and
+meadow `[terrain]`, `[atmosphere]` and `[fog_of_war]` tables (R3a; see [Terrain](#terrain)).
 
 **Switching maps.** Descriptors and meshes are read only when the map changes: at startup, on
 a `ContentUpdate` (hot reload) and on map rotation. Each name is loaded once per session, so
@@ -481,6 +483,11 @@ restyled. To see two maps back to back in one client session, rotate packs on th
 `--reload-content`. `MOBA_CAPTURE_MAPS=<prefix>` (network mode) writes `<prefix>-<n>.ppm` after
 `MOBA_CAPTURE_FRAME` frames on each map and keeps playing; see
 [screenshots](screenshots.md#per-map-visuals).
+
+Further optional tables restyle the ground and the air: [`[lighting]`](#lighting),
+[`[terrain]`](#terrain), [`[atmosphere]`](#atmosphere) and [`[fog_of_war]`](#fog-of-war),
+and `content-check` checks the descriptor against the pack's map
+([Map consistency checks](#map-consistency-checks)).
 
 **Nothing about a descriptor is hashed or sent.** Only the `visuals` name is (see above).
 Descriptors are client-local and cosmetic like models: two players with different files see
@@ -1026,6 +1033,164 @@ stand-in caster and target and replays `vfx/<name>.toml` as soon as each play en
 the target point, a projectile from the caster to the target if the effect has a trail, or a
 3 s, 4 m zone if it sets `event_duration`. Saving any file in `vfx/` reloads the effects
 within half a second, without restarting.
+
+### Terrain
+
+A map can replace the flat ground with a **heightfield terrain**: gentle relief on the board,
+hills or cliffs beyond its edge, and up to eight texture layers blended by a splat map
+([ADR-0014](adr/0014-terrain-fog-of-war.md)). It lives in the descriptor's `[terrain]` table
+and, like the rest of the descriptor, is client-local: never hashed, signed or sent, and
+never seen by the simulation. The shipped examples are
+[`content/maps/map-grass.toml`](../content/maps/map-grass.toml) (a meadow basin),
+[`content/maps/ember.toml`](../content/maps/ember.toml) (terraced basalt cliffs) and
+[`content/maps/frost.toml`](../content/maps/frost.toml) (snow drifts).
+
+A TOML key cannot be both a value and a table, so with a `[terrain]` table the top-level
+`terrain = [r, g, b]` tint moves into the table as `tint`:
+
+```toml
+wall = [0.55, 0.20, 0.08]        # top-level keys as before, without `terrain = [...]`
+
+[terrain]
+tint = [0.24, 0.09, 0.05]        # required: the flat plane's tint (the fallback look)
+relief = 0.35                    # board relief amplitude, metres, 0..=0.5 (default 0.25)
+edge = "cliffs"                  # "none" | "hills" (default) | "cliffs" outside the board
+edge_height = 22.0               # metres, 0..=48 (default 18)
+edge_mesh = "rampart"            # optional <root>/models/<name>.glb placed around the edge
+edge_spacing = 24.0              # metres between edge props, 8..=128 (default 24)
+edge_mesh_height = 10.0          # edge prop height, metres, 1..=48 (default 10)
+lane_width = 12.0                # generated path width along lanes, metres, 2..=40 (default 12)
+seed = 3                         # u32 noise seed (default 1)
+splat = "ember-splat"            # optional <root>/textures/<name>.ktx2: weights of layers 1-4
+splat2 = "ember-splat2"          # optional: layers 5-8 (only with splat and > 4 layers)
+
+[[terrain.layers]]               # 1..=8 layers; the position is the role (below)
+albedo = "terrain-grass"         # required <root>/textures/<name>.ktx2
+normal = "terrain-grass-normal"  # optional <root>/textures/<name>.ktx2
+tint = [0.55, 0.75, 0.45]        # linear RGB multiplier, 0..=2 (default 1)
+tiling = 6.0                     # metres per texture repeat, 0.5..=64 (default 8)
+```
+
+**Layers and roles.** A layer's position in the list is its role:
+
+| Layer | Role | Where the generated splat puts it |
+|---|---|---|
+| 1 | base ground | everywhere nothing else covers |
+| 2 | path | lane corridors (`lane_width` wide along the lane polyline, with a noisy ±2 m edge), 7 m discs around structures and 12 m discs around spawns |
+| 3 | rock | slopes (fully rock where the gradient passes ~0.5: the edge hills and cliffs) and the feet of walls (~0.7 within 3 m of a wall segment) |
+| 4 | variation | noise patches on the base ground |
+| 5-8 | extra variation | sparser noise patches, one seed each |
+
+Rock covers path, and path covers the ground layers. A role without a layer (for example a
+two-layer terrain has no rock) folds its weight into the base, so only the listed layers ever
+get weight. Albedo textures are sRGB colour (`texture-bake --kind color`: `bc7-srgb`, or
+`rgba8-srgb`) with ambient occlusion in alpha, which also drives the height blend between
+layers; normal maps are `bc5` or `rg8` (`--kind normal`). All albedo layers must have the
+same size and mip count, and so must all normal maps: the renderer assembles them into
+texture arrays. A layer without a normal map is drawn flat.
+
+**Splat.** Without `splat`, the client generates the weights at map bind (`moba_assets::
+generate_terrain`, 512² by default, about 35 ms with a 384-cell heightfield in a release build) from
+the simulation's map alone: lanes, structures, spawns and walls. A baked `splat` is a linear
+RGBA texture (`texture-bake --kind data`; `rgba8` or `bc7`) whose channels are the weights of
+layers 1-4 over the terrain square (the board plus its margin, texel (0, 0) at the corner
+before `[0, 0]`, rows along +y); `splat2` holds layers 5-8 and must match `splat`'s size and
+mip count. With `splat` but no `splat2`, layers 5-8 get no weight.
+
+**Relief rules.** Units stand at height 0 and the simulation's board is flat, so the terrain
+may never suggest a ramp, ridge, pit or cliff the simulation does not have:
+
+- **Inside the board** the height stays within ±`relief`, at most 0.5 m, and tapers to 0 over
+  the last 2 m to the edge.
+- **Outside the board** the ground only rises: a flat apron (`none`), rolling hills over the
+  first third of the margin (`hills`) or a steep terraced rise a few metres past the edge
+  (`cliffs`), up to `edge_height`. The board reads as a basin; the foot of the slope is the
+  edge of the walkable space. The margin is 0.6 × the map extent, clamped to 96-240 m. Every
+  style starts its rise one Low-tier grid cell (`(extent + 2 × margin) / 128`, 2-4 m) past
+  the edge, so the cells that straddle the edge stay flat on every tier.
+
+The generator clamps to these rules and `content-check` verifies them on the generated
+heightfield of every tier's grid (128, 192, 256 and 384 cells), including the interpolated
+surface of the cells that straddle the edge (see
+[Map consistency checks](#map-consistency-checks)).
+
+**Edge props.** `edge_mesh` places a model around the board every `edge_spacing` metres (at
+most 256), offset outward so its footprint stays off the board: the half diagonal of the
+mesh's x/z bounds scaled to `edge_mesh_height` (never less than `edge_mesh_height × 0.25 +
+2` m, at most half the margin), facing inward (a mesh authored along +X runs along the edge). It counts
+toward the four distinct meshes a descriptor may name. Walls are still drawn along every
+simulation wall segment (`wall_mesh` or the built-in block).
+
+**Fallback.** No `[terrain]` table, a missing or mismatched layer texture, or
+`MOBA_TERRAIN=flat`: the flat R2a plane in `tint`. A match never fails because of terrain.
+
+### Atmosphere
+
+The `[atmosphere]` table sets the height fog and the sky (ADR-0014 §4). Every key is
+optional; unset keys keep the engine defaults.
+
+```toml
+[atmosphere]
+fog_color = [0.62, 0.72, 0.85]   # linear RGB 0..=4; also the sky's horizon blend
+fog_density = 0.005              # per metre at the ground, 0..=0.2
+fog_height = 30.0                # height falloff scale, metres, 1..=400
+fog_start = 70.0                 # metres from the camera before fog begins, 0..=2000
+fog_max = 0.65                   # maximum opacity, 0..=0.85
+sky_zenith = [0.18, 0.36, 0.75]  # gradient sky (maps without an environment), linear 0..=8
+sky_horizon = [0.62, 0.72, 0.85]
+```
+
+The fog is exponential in height and integrated along the view ray, so it is thin near the
+camera and thick towards the low horizon. The gameplay camera sits about 40 m above the
+ground looking at points 18-80 m away; a `fog_start` around 60-70 m and a density of
+0.005-0.008 keep the board clear there while the horizon and the spectator's low orbit fade
+into the sky. `fog_max` is capped at 0.85 so fog never fully hides a unit (ADR-0011 rule 1).
+Keep `sky_horizon` close to `fog_color` so distant terrain meets the sky without a seam.
+`MOBA_FOG=off` and `MOBA_SKY=off` switch them off.
+
+### Fog of war
+
+The `[fog_of_war]` table styles unseen areas (ADR-0014 §3). Every key is optional.
+
+```toml
+[fog_of_war]
+color = [0.03, 0.05, 0.08]       # linear RGB 0..=1, the colour unseen areas tend towards
+darken = 0.65                    # 0.2..=0.9
+desaturate = 0.45                # 0..=1
+mist_height = 2.5                # metres, 0..=32: ground mist in unseen areas
+mist = 0.3                       # mist strength, 0..=1
+```
+
+`darken` is limited to 0.2..=0.9: below it the vision boundary is hard to see, above it
+unseen ground stops being readable. The mist thins with height, so unseen ground fogs while
+the tops of tall walls stay legible. The fog texture is built only from the client's own
+team's vision; the server still decides what each client is sent. It is a smoothed
+presentation, so static ground up to about one fog texel past the server's vision can show,
+and lost vision drops to half visible at once before it fades.
+
+### Map consistency checks
+
+`content-check` runs `moba_assets::check_map_consistency` on every `[[assets.maps]]`
+descriptor whose name the pack's map uses (its `visuals`, or the theme's name), and on
+`maps/<visuals>.toml` next to the pack whenever it exists, listed or not (the client loads
+it by name; one that does not parse is an error), against the pack's map (ADR-0014 §2). Errors fail the check; warnings are reported and may be accepted
+by art direction. Each message names the wall, prop or edge prop and its position:
+
+```text
+error: map visuals 'ember': wall 0 ([112, 60] to [112, 100]): wall_height 1.5 m is below 2 m, too low to read as a line-of-sight blocker next to a hero
+warning: map visuals 'ember': prop 2 at [128, 128] (16 m tall, footprint radius 3.60 m) overlaps lane 0's corridor (0.0 m from the lane, half-width 6 m): looks like an obstacle units walk through
+```
+
+| Rule | Kind | Why |
+|---|---|---|
+| Board relief above 0.5 m, or edge ground below 0 (on the generated heightfield of every tier's grid, sampled across the cells straddling the edge) | error | units stand at height 0: more relief reads as a ramp or pit, and the board must read as the basin |
+| A simulation wall without a visual wall covering both endpoints, or `wall_height` below 2 m | error | walls block line of sight; a missing or knee-high wall hides a gameplay rule |
+| A simulation wall endpoint outside the board | error | its visual would stand on the edge slope |
+| An edge prop whose footprint (from `models/<edge_mesh>.glb`'s bounds, as the client places it) reaches the board | error | edge props mark the end of the walkable space |
+| A missing or mis-formatted terrain texture, or layers that disagree on size or mip count | error (file check) | the client would fall back to the flat plane |
+| A prop at least 2 m tall whose footprint (radius `height × 0.225`) overlaps a lane corridor (`lane_width / 2`, 12 m wide without `[terrain]`) or comes within 4 m of a structure | warning | it looks like an obstacle units walk through (props elsewhere are decoration by design) |
+
+The JSON output adds `map_errors` and `map_warnings` counts; the errors are also in `errors`.
 
 ## Hot reload
 

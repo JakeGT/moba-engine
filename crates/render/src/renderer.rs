@@ -5,7 +5,9 @@
 //! HDR target with stylised PBR (ADR-0011), the composite pass tonemaps it into the swapchain
 //! image and the UI pass draws the HUD on top. Frames that re-render an offscreen image (R7b:
 //! hero portraits, the baked minimap) run that image's pass first, with the scene pipelines,
-//! shadows off and the environment kept. The
+//! shadows off and the environment kept. With the fog-of-war texture (R3a, ADR-0014) two
+//! passes rasterise and resolve the team's vision before the shadow pass, and the scene
+//! draws the map's terrain, height fog and the sky. The
 //! pass code lives in [`crate::passes`]; this module owns acquisition, submission,
 //! presentation, resize and the capture readback.
 
@@ -33,6 +35,7 @@ use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
 use crate::passes::composite::CompositePass;
 use crate::passes::contact::ContactPass;
+use crate::passes::fog::FogPass;
 use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::scene::{
@@ -51,8 +54,19 @@ use crate::swapchain::Swapchain;
 use crate::targets::{self, OffscreenTarget, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
+use crate::world::{
+    DEFAULT_MAX_VISION_SOURCES, FogOfWarMode, FogShaderMode, TerrainData, TerrainShading,
+    WorldConfig, WorldFrame,
+};
 
 const FRAMES_IN_FLIGHT: usize = 2;
+// The fog-of-war ping-pong (image `f` written in frame slot `f`, the other read as history)
+// and the lighting set per frame slot that names image `f` assume exactly this many frames in
+// flight (R3a review).
+const _: () = assert!(
+    crate::passes::fog::FOG_IMAGES == FRAMES_IN_FLIGHT
+        && crate::lighting::MAIN_SETS == FRAMES_IN_FLIGHT
+);
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
 /// Largest side of an offscreen [`UiImage`] (the guaranteed `maxImageDimension2D`).
@@ -118,6 +132,15 @@ pub struct RenderConfig {
     /// [`LightingConfig::for_tier`] of [`RenderConfig::quality_tier`]; set it to override a
     /// tier default or turn a feature off.
     pub lighting: Option<LightingConfig>,
+    /// Terrain, fog-of-war and atmosphere features (ADR-0014). `None` (the default) uses
+    /// [`WorldConfig::for_tier`] of [`RenderConfig::quality_tier`].
+    pub world: Option<WorldConfig>,
+    /// Vision sources uploaded per frame for the fog-of-war texture; more are dropped and
+    /// counted ([`vision_sources_dropped`](crate::vision_sources_dropped)). Default
+    /// [`DEFAULT_MAX_VISION_SOURCES`](crate::DEFAULT_MAX_VISION_SOURCES); clamped to
+    /// `1..=`[`MAX_VISION_SOURCES`](crate::MAX_VISION_SOURCES) and to the device's
+    /// `maxStorageBufferRange / 16`.
+    pub max_vision_sources: usize,
 }
 
 impl Default for RenderConfig {
@@ -139,6 +162,8 @@ impl Default for RenderConfig {
             vfx: true,
             ui_image_sizes: DEFAULT_UI_IMAGE_SIZES,
             lighting: None,
+            world: None,
+            max_vision_sources: DEFAULT_MAX_VISION_SOURCES,
         }
     }
 }
@@ -259,6 +284,30 @@ impl RenderConfig {
         self
     }
 
+    /// Returns this config with [`RenderConfig::world`] set.
+    #[must_use]
+    pub const fn with_world(mut self, world: Option<WorldConfig>) -> Self {
+        self.world = world;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::max_vision_sources`] set.
+    #[must_use]
+    pub const fn with_max_vision_sources(mut self, sources: usize) -> Self {
+        self.max_vision_sources = sources;
+        self
+    }
+
+    /// The world features this config asks for: [`RenderConfig::world`], else the tier's
+    /// defaults.
+    #[must_use]
+    pub const fn effective_world(&self) -> WorldConfig {
+        match self.world {
+            Some(world) => world,
+            None => WorldConfig::for_tier(self.quality_tier),
+        }
+    }
+
     /// Returns this config with the size of offscreen `image` set
     /// ([`RenderConfig::ui_image_sizes`]).
     #[must_use]
@@ -318,6 +367,10 @@ pub struct Renderer {
     scene: ScenePass,
     composite: CompositePass,
     ui: UiPass,
+    /// The fog-of-war passes; `None` unless the fog of war uses the texture.
+    fog: Option<FogPass>,
+    /// The map's terrain splat and layer arrays (the mesh lives in the scene pass).
+    terrain: Option<TerrainImages>,
     lighting: LightingResources,
     /// GPU particles; `None` when disabled or unsupported (the frame then has no VFX passes).
     vfx: Option<VfxPass>,
@@ -352,6 +405,8 @@ pub struct Renderer {
     lighting_config: LightingConfig,
     /// The shadow map, when shadows are on.
     shadow: Option<ShadowSpec>,
+    /// The world features in use (ADR-0014).
+    world_config: WorldConfig,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -448,6 +503,14 @@ impl Renderer {
                  are clipped (the fit's lift covers 32 m casters)"
             );
         }
+        let world_config = config.effective_world();
+        let world_config = world_config.with_fog_of_war_resolution(
+            world_config
+                .clamped_fog_resolution()
+                .min(device.max_image_dimension_2d),
+        );
+        let fog_resolution = (world_config.fog_of_war == FogOfWarMode::Texture)
+            .then_some(world_config.fog_of_war_resolution);
         let graph_error =
             |error: crate::graph::GraphError| RenderError::RenderGraph(error.to_string());
         let mut budget = config.quality_tier.vfx_budget();
@@ -496,6 +559,7 @@ impl Renderer {
                         depth_format,
                         depth_aspect,
                         shadow,
+                        fog_resolution,
                         capture,
                         offscreen,
                         vfx_mode,
@@ -551,12 +615,32 @@ impl Renderer {
             max_bones: config.max_bones,
         };
         let (default_shadow_format, shadow_linear) = shadow_format.unwrap_or((depth_format, false));
-        let lighting = LightingResources::new(
+        let mut lighting = LightingResources::new(
             &device,
-            FRAMES_IN_FLIGHT,
             default_shadow_format,
             shadow_linear,
+            config.quality_tier.max_anisotropy(),
         )?;
+        let fog = fog_resolution
+            .map(|resolution| {
+                FogPass::new(
+                    &device,
+                    &shaders,
+                    FRAMES_IN_FLIGHT,
+                    resolution,
+                    config.max_vision_sources,
+                )
+            })
+            .transpose()?;
+        let fog_views = fog.as_ref().map(FogPass::views);
+        lighting.bind_world(
+            &device,
+            crate::lighting::WorldViews {
+                fog: fog_views,
+                terrain: None,
+            },
+            &crate::lighting::TerrainBlock::default(),
+        );
         let scene = ScenePass::new(
             &device,
             &shaders,
@@ -594,6 +678,7 @@ impl Renderer {
             config.ui_scale,
             &UiImages {
                 views: core::array::from_fn(|slot| offscreen[slot].color().view()),
+                fog: fog_views,
                 exposure: composite.exposure(),
             },
         )?;
@@ -642,6 +727,8 @@ impl Renderer {
             scene,
             composite,
             ui,
+            fog,
+            terrain: None,
             lighting,
             vfx,
             contact,
@@ -666,6 +753,7 @@ impl Renderer {
             depth_aspect,
             lighting_config,
             shadow,
+            world_config,
             device,
             surface,
             instance,
@@ -673,6 +761,92 @@ impl Renderer {
         };
         renderer.bind_transients();
         Ok(renderer)
+    }
+
+    /// The terrain, fog-of-war and atmosphere features in use (ADR-0014), with the fog-of-war
+    /// resolution clamped to the device.
+    #[must_use]
+    pub fn world_config(&self) -> WorldConfig {
+        self.world_config
+    }
+
+    /// Sets the map's terrain (ADR-0014): uploads the heightfield mesh and the splat and
+    /// layer arrays, replacing the previous terrain. BC layers are decoded on the CPU when the
+    /// device cannot sample them. With [`TerrainShading::Flat`] the data is validated and
+    /// ignored (the R2a plane stays). Load-time only: it waits for the device to idle.
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidTerrain`] for an inconsistent terrain (see [`TerrainData`]),
+    /// [`RenderError::InvalidTexture`] for a layer format the device cannot sample, or
+    /// allocation and Vulkan errors from the upload. On error the previous terrain stays.
+    pub fn set_terrain(&mut self, data: &TerrainData<'_>) -> RenderResult<()> {
+        crate::terrain::validate(data)?;
+        if self.world_config.terrain == TerrainShading::Flat {
+            return Ok(());
+        }
+        let gpu = crate::terrain::upload(
+            &self.device,
+            data,
+            self.world_config,
+            self.materials.compressed(),
+        )?;
+        // SAFETY: waiting for the device to idle guarantees no submitted frame still uses
+        // the terrain mesh, arrays or the scene sets being replaced.
+        unsafe { self.device.device.device_wait_idle() }?;
+        let crate::terrain::TerrainGpu {
+            mesh,
+            splat,
+            albedo,
+            normal,
+            block,
+        } = gpu;
+        self.scene.set_terrain_mesh(Some(mesh));
+        let images = TerrainImages {
+            splat,
+            albedo,
+            normal,
+        };
+        let views = [
+            Some(images.splat.view()),
+            Some(images.albedo.view()),
+            images.normal.as_ref().map(GpuImage::view),
+        ];
+        self.lighting.bind_world(
+            &self.device,
+            crate::lighting::WorldViews {
+                fog: self.fog.as_ref().map(FogPass::views),
+                terrain: Some(views),
+            },
+            &block,
+        );
+        self.terrain = Some(images);
+        Ok(())
+    }
+
+    /// Removes the map's terrain: the R2a plane draws again. Waits for the device to idle.
+    ///
+    /// # Errors
+    /// Vulkan errors from the idle wait.
+    pub fn clear_terrain(&mut self) -> RenderResult<()> {
+        // SAFETY: as in `set_terrain`.
+        unsafe { self.device.device.device_wait_idle() }?;
+        self.scene.set_terrain_mesh(None);
+        self.lighting.bind_world(
+            &self.device,
+            crate::lighting::WorldViews {
+                fog: self.fog.as_ref().map(FogPass::views),
+                terrain: None,
+            },
+            &crate::lighting::TerrainBlock::default(),
+        );
+        self.terrain = None;
+        Ok(())
+    }
+
+    /// Whether a map terrain is set (else the R2a plane draws).
+    #[must_use]
+    pub fn has_terrain(&self) -> bool {
+        self.terrain.is_some()
     }
 
     /// The lighting features in use: the configured ones, with the shadow resolution clamped
@@ -1260,6 +1434,34 @@ impl Renderer {
                 view(resources.reveal),
             );
         }
+        if let (Some(fog), Some(raw)) = (
+            &self.fog,
+            plan.resources
+                .fog
+                .and_then(|resources| plan.graph.slot_of(resources.raw)),
+        ) {
+            fog.bind_raw(&self.device, self.transients.image(raw).view());
+        }
+    }
+
+    /// The main view's fog-of-war and atmosphere uniform values.
+    fn world_frame(&self, scene: &Scene<'_>) -> WorldFrame {
+        let mode = match self.world_config.fog_of_war {
+            FogOfWarMode::Off => FogShaderMode::Off,
+            _ if self.fog.is_some() && scene.fog_of_war.is_some() => FogShaderMode::Texture,
+            // Scenes that only fill the legacy circles keep their fog in every mode but off.
+            _ if scene.vision.count > 0 => FogShaderMode::Legacy,
+            _ => FogShaderMode::Off,
+        };
+        let environment = self.lighting.state();
+        let lod = environment.specular.then_some(environment.max_lod.min(1.5));
+        WorldFrame::main(
+            &scene.atmosphere,
+            self.world_config,
+            mode,
+            scene.fog_of_war.as_ref(),
+            lod,
+        )
     }
 
     /// The main view's lighting uniform values: the shadow map fitted to the camera (when
@@ -1387,13 +1589,18 @@ impl Renderer {
             frame_lighting = frame_lighting.with_contact_shadows(self.lighting_config);
         }
         self.frame_outlines = scene.outlines;
+        let world_frame = self.world_frame(scene);
         self.scene.prepare(
             0,
             frame_index,
             scene,
             &frame_lighting,
+            &world_frame,
             self.swapchain.extent,
         )?;
+        if let Some(fog) = self.fog.as_mut() {
+            fog.prepare(frame_index, scene.fog_of_war.as_ref());
+        }
         let mut offscreen_mask = 0usize;
         for render in offscreen {
             let slot = render.image.index();
@@ -1415,8 +1622,14 @@ impl Renderer {
                 self.lighting_config,
             );
             let extent = self.offscreen[slot].extent();
-            self.scene
-                .prepare(1 + slot, frame_index, &render.scene, &view_lighting, extent)?;
+            self.scene.prepare(
+                1 + slot,
+                frame_index,
+                &render.scene,
+                &view_lighting,
+                &WorldFrame::OFFSCREEN,
+                extent,
+            )?;
         }
         self.ui.prepare(frame_index, ui)?;
         // Last of the uploads: its slot allocations are committed only when the frame is
@@ -1557,6 +1770,17 @@ impl Renderer {
             self.profiler
                 .begin_pass(command_buffer, frame_index, pass.name);
             match pass.tag {
+                PassKind::FogRaster => {
+                    if let (Some(fog), Some(resources)) = (&self.fog, resources.fog) {
+                        let raw = self.transient(resources.raw).view();
+                        fog.record_raster(&self.device, command_buffer, frame_index, raw);
+                    }
+                }
+                PassKind::FogResolve => {
+                    if let Some(fog) = &self.fog {
+                        fog.record_resolve(&self.device, command_buffer, frame_index);
+                    }
+                }
                 PassKind::Shadow => {
                     if let (Some(depth), Some(spec)) = (shadow_view, self.shadow) {
                         self.scene.record_shadow(
@@ -1581,6 +1805,7 @@ impl Renderer {
                         extent,
                         clear_color: self.config.clear_color,
                         terrain: true,
+                        sky: self.world_config.sky,
                         clear_rects: &[],
                         lighting: self.lighting.set(frame_index),
                         store_depth: resources.vfx.is_some(),
@@ -1668,8 +1893,9 @@ impl Renderer {
                                 extent: target.extent(),
                                 clear_color: render.clear_color,
                                 terrain: render.terrain,
+                                sky: false,
                                 clear_rects: render.backdrops,
-                                lighting: self.lighting.offscreen_set(frame_index),
+                                lighting: self.lighting.offscreen_set(),
                                 store_depth: false,
                                 load_depth: false,
                                 hull_outlines: false,
@@ -1748,6 +1974,15 @@ impl Renderer {
         {
             bindings.set(resource, image(resource));
         }
+        if let (Some(fog), Some(pass)) = (resources.fog, &self.fog) {
+            bindings.set(fog.raw, image(fog.raw));
+            let persistent = |frame| Binding::Image {
+                image: pass.image(frame).image(),
+                aspect: vk::ImageAspectFlags::COLOR,
+            };
+            bindings.set(fog.current, persistent(frame_index));
+            bindings.set(fog.history, persistent(frame_index + 1));
+        }
         bindings.set(
             resources.bones,
             Binding::Buffer(self.scene.bone_buffer(0, frame_index)),
@@ -1824,6 +2059,13 @@ impl Renderer {
         self.frame_index = 0;
         Ok(())
     }
+}
+
+/// The map terrain's texture arrays (R3a), kept alive while set 3 names them.
+struct TerrainImages {
+    splat: GpuImage,
+    albedo: GpuImage,
+    normal: Option<GpuImage>,
 }
 
 /// A captured frame, in tightly packed RGBA8.
@@ -1971,6 +2213,7 @@ impl core::fmt::Debug for Renderer {
             .field("validation", &self.validation_enabled())
             .field("quality_tier", &self.config.quality_tier)
             .field("lighting", &self.lighting_config)
+            .field("world", &self.world_config)
             .finish_non_exhaustive()
     }
 }

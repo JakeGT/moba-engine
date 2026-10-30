@@ -12,6 +12,7 @@
 
 #include "camera.glsl"
 #include "lighting.glsl"
+#include "atmosphere.glsl"
 #ifdef MATERIAL_TEXTURED
 #include "material.glsl"
 #endif
@@ -46,5 +47,7 @@ void main() {
     surface.specular = vec4(camera.specular_tint.rgb * material.specular_tint.rgb,
                             camera.specular_tint.w * material.emissive.w);
 #endif
-    out_color = vec4(shade(surface), 1.0);
+    // Height fog (R3a, ADR-0014). Units are never fogged by the fog of war: the server
+    // decides what the client sees, so darkening a unit could only hide a visible one.
+    out_color = vec4(apply_height_fog(shade(surface), in_world_pos), 1.0);
 }

@@ -38,7 +38,52 @@
 //! terrain_roughness = 0.9        # 0..=1
 //! baked_ao = "map-grass-ao"      # <root>/maps/ao/map-grass-ao.{toml,ktx2} (ADR-0016)
 //! ao_strength = 1.0              # baked AO strength, 0..=1 (default 1)
+//!
+//! [atmosphere]                   # optional height fog and sky, every key optional
+//! fog_color = [0.5, 0.6, 0.7]    # linear RGB 0..=4
+//! fog_density = 0.012            # per metre at the ground, 0..=0.2
+//! fog_height = 40.0              # height falloff scale, metres, 1..=400
+//! fog_start = 60.0               # metres before fog begins, 0..=2000
+//! fog_max = 0.7                  # maximum opacity, 0..=0.85
+//! sky_zenith = [0.2, 0.3, 0.6]   # linear RGB 0..=8
+//! sky_horizon = [0.6, 0.65, 0.7] # linear RGB 0..=8
+//!
+//! [fog_of_war]                   # optional fog-of-war style, every key optional
+//! color = [0.02, 0.03, 0.05]     # linear RGB 0..=1
+//! darken = 0.72                  # 0.2..=0.9
+//! desaturate = 0.5               # 0..=1
+//! mist_height = 3.0              # metres, 0..=32: ground mist in unseen areas
+//! mist = 0.4                     # 0..=1
 //! ```
+//!
+//! For a heightfield terrain (ADR-0014), `terrain` is a table instead of the tint, with the
+//! tint inside it (a TOML key cannot be both):
+//!
+//! ```toml
+//! wall = [0.58, 0.22, 0.10]
+//!
+//! [terrain]                      # replaces `terrain = [...]`; without it, the flat plane
+//! tint = [0.30, 0.11, 0.06]      # required: the flat plane's tint (the fallback)
+//! relief = 0.35                  # board relief amplitude, metres, 0..=0.5 (default 0.25)
+//! edge = "cliffs"                # "none" | "hills" (default) | "cliffs" outside the board
+//! edge_height = 22.0             # metres, 0..=48 (default 18)
+//! edge_mesh = "rampart"          # optional <root>/models/<name>.glb around the board edge
+//! edge_spacing = 24.0            # metres between edge props, 8..=128 (default 24)
+//! edge_mesh_height = 10.0        # metres, 1..=48 (default 10)
+//! lane_width = 12.0              # generated path width along lanes, 2..=40 (default 12)
+//! seed = 3                       # u32 noise seed (default 1)
+//! splat = "ember-splat"          # optional <root>/textures/<name>.ktx2, else generated
+//! splat2 = "ember-splat2"        # optional: layers 5-8 (needs splat and > 4 layers)
+//!
+//! [[terrain.layers]]             # 1..=8; by position: base, path, rock, variation, extras
+//! albedo = "terrain-grass"       # <root>/textures/<name>.ktx2 (sRGB colour, AO in alpha)
+//! normal = "terrain-grass-normal"  # optional <root>/textures/<name>.ktx2 (BC5/RG8)
+//! tint = [0.55, 0.75, 0.45]      # linear RGB multiplier 0..=2 (default 1)
+//! tiling = 6.0                   # metres per texture repeat, 0.5..=64 (default 8)
+//! ```
+//!
+//! The `[terrain]` generator and the visual-versus-simulation consistency rules live in
+//! [`crate::generate_terrain`] and [`crate::check_map_consistency`].
 //!
 //! Descriptors are untrusted, client-local and cosmetic: they never reach the simulation, the
 //! wire or the content hash. [`MapVisuals::load_file`] reads at most
@@ -49,6 +94,8 @@ use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
+
+use crate::terrain::{MAX_EDGE_HEIGHT, MAX_PLAY_RELIEF, MAX_TERRAIN_LAYERS};
 
 /// Largest descriptor file accepted, in bytes.
 pub const MAX_MAP_VISUALS_BYTES: u64 = 16 * 1024;
@@ -73,6 +120,30 @@ pub const MAX_SHADOW_STRENGTH: f32 = 0.9;
 /// shadows past what one fitted map covers well.
 pub const MIN_SUN_ELEVATION: f32 = 0.2;
 
+/// Board relief amplitude when `[terrain]` sets none, metres.
+pub const DEFAULT_TERRAIN_RELIEF: f32 = 0.25;
+/// Edge height when `[terrain]` sets none, metres.
+pub const DEFAULT_EDGE_HEIGHT: f32 = 18.0;
+/// Distance between edge props when `[terrain]` sets none, metres.
+pub const DEFAULT_EDGE_SPACING: f32 = 24.0;
+/// Edge prop height when `[terrain]` sets none, metres.
+pub const DEFAULT_EDGE_MESH_HEIGHT: f32 = 10.0;
+/// Width of the generated path along lanes when `[terrain]` sets none, metres.
+pub const DEFAULT_LANE_WIDTH: f32 = 12.0;
+/// Terrain noise seed when `[terrain]` sets none.
+pub const DEFAULT_TERRAIN_SEED: u32 = 1;
+/// Metres per texture repeat when a terrain layer sets none.
+pub const DEFAULT_LAYER_TILING: f32 = 8.0;
+/// Highest accepted `[atmosphere] fog_max`: height fog never fully hides a unit.
+pub const MAX_FOG_OPACITY: f32 = 0.85;
+/// Accepted `[fog_of_war] darken` range: below it the fog boundary is hard to see, above it
+/// unseen ground stops being readable.
+pub const FOW_DARKEN_RANGE: (f32, f32) = (0.2, 0.9);
+
+pub(crate) const EDGE_SPACING_RANGE: (f32, f32) = (8.0, 128.0);
+pub(crate) const EDGE_MESH_HEIGHT_RANGE: (f32, f32) = (1.0, MAX_EDGE_HEIGHT);
+pub(crate) const LANE_WIDTH_RANGE: (f32, f32) = (2.0, 40.0);
+const LAYER_TILING_RANGE: (f32, f32) = (0.5, 64.0);
 const WALL_HEIGHT_RANGE: (f32, f32) = (0.5, 32.0);
 const PROP_HEIGHT_RANGE: (f32, f32) = (0.1, 32.0);
 const YAW_RANGE: (f32, f32) = (-360.0, 360.0);
@@ -83,7 +154,8 @@ const POSITION_RANGE: (f32, f32) = (-65_536.0, 65_536.0);
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct MapVisuals {
-    /// Terrain tint, linear RGB in `0..=1`.
+    /// Terrain tint, linear RGB in `0..=1`: the flat plane's colour (the top-level
+    /// `terrain = [r, g, b]`, or `tint` in a `[terrain]` table).
     pub terrain: [f32; 3],
     /// Wall colour, linear RGB in `0..=1`.
     pub wall: [f32; 3],
@@ -95,6 +167,298 @@ pub struct MapVisuals {
     pub props: Vec<MapProp>,
     /// Lighting and art-style overrides (`[lighting]`); unset keys keep the engine defaults.
     pub lighting: MapLighting,
+    /// Heightfield terrain (the `[terrain]` table, ADR-0014); `None` (the top-level
+    /// `terrain = [r, g, b]` form) keeps the flat R2a plane.
+    pub ground: Option<MapTerrain>,
+    /// Height fog and sky (`[atmosphere]`); unset keys keep the engine defaults.
+    pub atmosphere: MapAtmosphere,
+    /// Fog-of-war styling (`[fog_of_war]`); unset keys keep the engine defaults.
+    pub fog_of_war: MapFogStyle,
+}
+
+/// How the ground outside the board rises (`[terrain] edge`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EdgeStyle {
+    /// A flat apron (tiny non-negative noise only).
+    None,
+    /// Rolling hills rising over a third of the margin.
+    #[default]
+    Hills,
+    /// A steep, terraced rise a few metres past the board edge.
+    Cliffs,
+}
+
+impl EdgeStyle {
+    /// The descriptor spelling (`"none"`, `"hills"`, `"cliffs"`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Hills => "hills",
+            Self::Cliffs => "cliffs",
+        }
+    }
+
+    /// Parses the descriptor spelling.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "none" => Some(Self::None),
+            "hills" => Some(Self::Hills),
+            "cliffs" => Some(Self::Cliffs),
+            _ => None,
+        }
+    }
+}
+
+/// One terrain texture layer (`[[terrain.layers]]`). Its role comes from its position (see
+/// [`crate::generate_splat`]).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct TerrainLayer {
+    /// Albedo texture name: `<root>/textures/<name>.ktx2`, sRGB colour with AO in alpha.
+    pub albedo: String,
+    /// Optional normal map name: `<root>/textures/<name>.ktx2`, BC5 or RG8.
+    pub normal: Option<String>,
+    /// Linear RGB multiplier, `0..=2`.
+    pub tint: [f32; 3],
+    /// Metres per texture repeat, `0.5..=64`.
+    pub tiling: f32,
+}
+
+impl TerrainLayer {
+    /// A layer with `albedo`, no normal map, a white tint and the default tiling.
+    #[must_use]
+    pub fn new(albedo: impl Into<String>) -> Self {
+        Self {
+            albedo: albedo.into(),
+            normal: None,
+            tint: [1.0; 3],
+            tiling: DEFAULT_LAYER_TILING,
+        }
+    }
+
+    /// Returns this layer with a normal map.
+    #[must_use]
+    pub fn with_normal(mut self, normal: impl Into<String>) -> Self {
+        self.normal = Some(normal.into());
+        self
+    }
+
+    /// Returns this layer with a tint.
+    #[must_use]
+    pub fn with_tint(mut self, tint: [f32; 3]) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    /// Returns this layer with a tiling distance in metres.
+    #[must_use]
+    pub fn with_tiling(mut self, tiling: f32) -> Self {
+        self.tiling = tiling;
+        self
+    }
+}
+
+/// The `[terrain]` table of a map visuals descriptor (ADR-0014): layers, an optional splat
+/// map and the generator's parameters. Values built in code are not range-checked; the
+/// generator clamps them to the limits the parser enforces.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct MapTerrain {
+    /// 1..=[`MAX_TERRAIN_LAYERS`] layers, in role order.
+    pub layers: Vec<TerrainLayer>,
+    /// Splat map for layers 1-4 (`<root>/textures/<name>.ktx2`, linear RGBA); `None` means
+    /// the generator's.
+    pub splat: Option<String>,
+    /// Splat map for layers 5-8; only with `splat` and more than four layers.
+    pub splat2: Option<String>,
+    /// Board relief amplitude, metres, `0..=`[`MAX_PLAY_RELIEF`].
+    pub relief: f32,
+    /// How the ground outside the board rises.
+    pub edge: EdgeStyle,
+    /// Height of the edge rise, metres, `0..=`[`MAX_EDGE_HEIGHT`].
+    pub edge_height: f32,
+    /// Optional mesh (`<root>/models/<name>.glb`) placed around the board edge.
+    pub edge_mesh: Option<String>,
+    /// Metres between edge props, `8..=128`.
+    pub edge_spacing: f32,
+    /// Edge prop height, metres, `1..=48`.
+    pub edge_mesh_height: f32,
+    /// Width of the generated path along lanes, metres, `2..=40`.
+    pub lane_width: f32,
+    /// Noise seed.
+    pub seed: u32,
+}
+
+impl MapTerrain {
+    /// Terrain with these layers and every other value at its default.
+    #[must_use]
+    pub fn new(layers: Vec<TerrainLayer>) -> Self {
+        Self {
+            layers,
+            splat: None,
+            splat2: None,
+            relief: DEFAULT_TERRAIN_RELIEF,
+            edge: EdgeStyle::default(),
+            edge_height: DEFAULT_EDGE_HEIGHT,
+            edge_mesh: None,
+            edge_spacing: DEFAULT_EDGE_SPACING,
+            edge_mesh_height: DEFAULT_EDGE_MESH_HEIGHT,
+            lane_width: DEFAULT_LANE_WIDTH,
+            seed: DEFAULT_TERRAIN_SEED,
+        }
+    }
+
+    /// Returns this terrain with a splat map for layers 1-4.
+    #[must_use]
+    pub fn with_splat(mut self, splat: impl Into<String>) -> Self {
+        self.splat = Some(splat.into());
+        self
+    }
+
+    /// Returns this terrain with a splat map for layers 5-8.
+    #[must_use]
+    pub fn with_splat2(mut self, splat2: impl Into<String>) -> Self {
+        self.splat2 = Some(splat2.into());
+        self
+    }
+
+    /// Returns this terrain with a board relief amplitude.
+    #[must_use]
+    pub fn with_relief(mut self, relief: f32) -> Self {
+        self.relief = relief;
+        self
+    }
+
+    /// Returns this terrain with an edge style and height.
+    #[must_use]
+    pub fn with_edge(mut self, edge: EdgeStyle, height: f32) -> Self {
+        self.edge = edge;
+        self.edge_height = height;
+        self
+    }
+
+    /// Returns this terrain with an edge prop mesh, its spacing and height.
+    #[must_use]
+    pub fn with_edge_mesh(mut self, mesh: impl Into<String>, spacing: f32, height: f32) -> Self {
+        self.edge_mesh = Some(mesh.into());
+        self.edge_spacing = spacing;
+        self.edge_mesh_height = height;
+        self
+    }
+
+    /// Returns this terrain with a lane path width.
+    #[must_use]
+    pub fn with_lane_width(mut self, lane_width: f32) -> Self {
+        self.lane_width = lane_width;
+        self
+    }
+
+    /// Returns this terrain with a noise seed.
+    #[must_use]
+    pub fn with_seed(mut self, seed: u32) -> Self {
+        self.seed = seed;
+        self
+    }
+}
+
+/// The `[atmosphere]` table: height fog and sky (ADR-0014 §4). Every field is optional:
+/// `None` keeps the renderer's default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MapAtmosphere {
+    /// Fog colour (also the sky's horizon blend), linear RGB `0..=4`.
+    pub fog_color: Option<[f32; 3]>,
+    /// Fog density per metre at the ground, `0..=0.2`.
+    pub fog_density: Option<f32>,
+    /// Height falloff scale, metres, `1..=400`.
+    pub fog_height: Option<f32>,
+    /// Distance before fog begins, metres, `0..=2000`.
+    pub fog_start: Option<f32>,
+    /// Maximum fog opacity, `0..=`[`MAX_FOG_OPACITY`].
+    pub fog_max: Option<f32>,
+    /// Sky gradient zenith colour, linear RGB `0..=8`.
+    pub sky_zenith: Option<[f32; 3]>,
+    /// Sky gradient horizon colour, linear RGB `0..=8`.
+    pub sky_horizon: Option<[f32; 3]>,
+}
+
+impl MapAtmosphere {
+    /// Returns this atmosphere with a fog colour.
+    #[must_use]
+    pub fn with_fog_color(mut self, color: [f32; 3]) -> Self {
+        self.fog_color = Some(color);
+        self
+    }
+
+    /// Returns this atmosphere with fog density (per metre), height falloff (metres) and
+    /// start distance (metres).
+    #[must_use]
+    pub fn with_fog(mut self, density: f32, height: f32, start: f32) -> Self {
+        self.fog_density = Some(density);
+        self.fog_height = Some(height);
+        self.fog_start = Some(start);
+        self
+    }
+
+    /// Returns this atmosphere with a maximum fog opacity.
+    #[must_use]
+    pub fn with_fog_max(mut self, fog_max: f32) -> Self {
+        self.fog_max = Some(fog_max);
+        self
+    }
+
+    /// Returns this atmosphere with sky gradient colours.
+    #[must_use]
+    pub fn with_sky(mut self, zenith: [f32; 3], horizon: [f32; 3]) -> Self {
+        self.sky_zenith = Some(zenith);
+        self.sky_horizon = Some(horizon);
+        self
+    }
+}
+
+/// The `[fog_of_war]` table: how unseen areas look (ADR-0014 §3). Every field is optional:
+/// `None` keeps the renderer's default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MapFogStyle {
+    /// Fog-of-war colour, linear RGB `0..=1`.
+    pub color: Option<[f32; 3]>,
+    /// How much unseen areas darken, within [`FOW_DARKEN_RANGE`].
+    pub darken: Option<f32>,
+    /// How much unseen areas desaturate, `0..=1`.
+    pub desaturate: Option<f32>,
+    /// Ground mist height in unseen areas, metres, `0..=32`.
+    pub mist_height: Option<f32>,
+    /// Ground mist strength, `0..=1`.
+    pub mist: Option<f32>,
+}
+
+impl MapFogStyle {
+    /// Returns this style with a colour.
+    #[must_use]
+    pub fn with_color(mut self, color: [f32; 3]) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Returns this style with darkening and desaturation.
+    #[must_use]
+    pub fn with_tone(mut self, darken: f32, desaturate: f32) -> Self {
+        self.darken = Some(darken);
+        self.desaturate = Some(desaturate);
+        self
+    }
+
+    /// Returns this style with a ground mist height (metres) and strength.
+    #[must_use]
+    pub fn with_mist(mut self, height: f32, mist: f32) -> Self {
+        self.mist_height = Some(height);
+        self.mist = Some(mist);
+        self
+    }
 }
 
 /// The `[lighting]` table of a map visuals descriptor (ADR-0011). Every field is optional:
@@ -164,7 +528,8 @@ pub struct MapProp {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMapVisuals {
-    terrain: [f32; 3],
+    /// `[r, g, b]` (the tint alone) or a `[terrain]` table ([`RawTerrain`]).
+    terrain: toml::Value,
     wall: [f32; 3],
     #[serde(default)]
     wall_height: Option<f32>,
@@ -174,6 +539,83 @@ struct RawMapVisuals {
     props: Vec<RawProp>,
     #[serde(default)]
     lighting: Option<RawLighting>,
+    #[serde(default)]
+    atmosphere: Option<RawAtmosphere>,
+    #[serde(default)]
+    fog_of_war: Option<RawFogStyle>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTerrain {
+    tint: [f32; 3],
+    layers: Vec<RawLayer>,
+    #[serde(default)]
+    splat: Option<String>,
+    #[serde(default)]
+    splat2: Option<String>,
+    #[serde(default)]
+    relief: Option<f32>,
+    #[serde(default)]
+    edge: Option<String>,
+    #[serde(default)]
+    edge_height: Option<f32>,
+    #[serde(default)]
+    edge_mesh: Option<String>,
+    #[serde(default)]
+    edge_spacing: Option<f32>,
+    #[serde(default)]
+    edge_mesh_height: Option<f32>,
+    #[serde(default)]
+    lane_width: Option<f32>,
+    #[serde(default)]
+    seed: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLayer {
+    albedo: String,
+    #[serde(default)]
+    normal: Option<String>,
+    #[serde(default)]
+    tint: Option<[f32; 3]>,
+    #[serde(default)]
+    tiling: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAtmosphere {
+    #[serde(default)]
+    fog_color: Option<[f32; 3]>,
+    #[serde(default)]
+    fog_density: Option<f32>,
+    #[serde(default)]
+    fog_height: Option<f32>,
+    #[serde(default)]
+    fog_start: Option<f32>,
+    #[serde(default)]
+    fog_max: Option<f32>,
+    #[serde(default)]
+    sky_zenith: Option<[f32; 3]>,
+    #[serde(default)]
+    sky_horizon: Option<[f32; 3]>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFogStyle {
+    #[serde(default)]
+    color: Option<[f32; 3]>,
+    #[serde(default)]
+    darken: Option<f32>,
+    #[serde(default)]
+    desaturate: Option<f32>,
+    #[serde(default)]
+    mist_height: Option<f32>,
+    #[serde(default)]
+    mist: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -422,6 +864,170 @@ fn check_readability(lighting: &MapLighting) -> Result<(), MapVisualsError> {
     Ok(())
 }
 
+fn check_name(name: Option<String>, what: &'static str) -> Result<Option<String>, MapVisualsError> {
+    match name {
+        Some(name) if !valid_mesh_name(&name) => Err(MapVisualsError::Invalid(what)),
+        other => Ok(other),
+    }
+}
+
+/// The `terrain` key: the tint, and the `[terrain]` table when it is one.
+fn split_terrain(value: toml::Value) -> Result<([f32; 3], Option<MapTerrain>), MapVisualsError> {
+    let toml_error = |error: toml::de::Error| MapVisualsError::Toml(format!("terrain: {error}"));
+    match value {
+        toml::Value::Table(_) => {
+            let raw: RawTerrain = value.try_into().map_err(toml_error)?;
+            let tint = check_color(raw.tint, "terrain tint must be RGB in 0..=1")?;
+            Ok((tint, Some(check_terrain(raw)?)))
+        }
+        value => {
+            let tint: [f32; 3] = value.try_into().map_err(toml_error)?;
+            Ok((check_color(tint, "terrain must be RGB in 0..=1")?, None))
+        }
+    }
+}
+
+fn check_terrain(raw: RawTerrain) -> Result<MapTerrain, MapVisualsError> {
+    if raw.layers.is_empty() || raw.layers.len() > MAX_TERRAIN_LAYERS {
+        return Err(MapVisualsError::Invalid("terrain needs 1..=8 layers"));
+    }
+    let mut layers = Vec::with_capacity(raw.layers.len());
+    for layer in raw.layers {
+        if !valid_mesh_name(&layer.albedo) {
+            return Err(MapVisualsError::Invalid(
+                "terrain layer albedo names must be 1-32 of [A-Za-z0-9_-]",
+            ));
+        }
+        let tint = layer.tint.unwrap_or([1.0; 3]);
+        if !tint
+            .iter()
+            .all(|c| c.is_finite() && (0.0..=2.0).contains(c))
+        {
+            return Err(MapVisualsError::Invalid(
+                "terrain layer tint must be RGB in 0..=2",
+            ));
+        }
+        layers.push(TerrainLayer {
+            albedo: layer.albedo,
+            normal: check_name(
+                layer.normal,
+                "terrain layer normal names must be 1-32 of [A-Za-z0-9_-]",
+            )?,
+            tint,
+            tiling: check_range(
+                layer.tiling.unwrap_or(DEFAULT_LAYER_TILING),
+                LAYER_TILING_RANGE,
+                "terrain layer tiling must be 0.5..=64 metres",
+            )?,
+        });
+    }
+    let splat = check_name(raw.splat, "splat names must be 1-32 of [A-Za-z0-9_-]")?;
+    let splat2 = check_name(raw.splat2, "splat2 names must be 1-32 of [A-Za-z0-9_-]")?;
+    if splat2.is_some() && (splat.is_none() || layers.len() <= 4) {
+        return Err(MapVisualsError::Invalid(
+            "splat2 (layers 5-8) needs splat and more than 4 layers",
+        ));
+    }
+    let edge = match raw.edge.as_deref() {
+        None => EdgeStyle::default(),
+        Some(name) => EdgeStyle::from_name(name).ok_or(MapVisualsError::Invalid(
+            "terrain edge must be \"none\", \"hills\" or \"cliffs\"",
+        ))?,
+    };
+    Ok(MapTerrain {
+        layers,
+        splat,
+        splat2,
+        relief: check_range(
+            raw.relief.unwrap_or(DEFAULT_TERRAIN_RELIEF),
+            (0.0, MAX_PLAY_RELIEF),
+            "terrain relief must be 0..=0.5 metres (units stand on flat ground, ADR-0014)",
+        )?,
+        edge,
+        edge_height: check_range(
+            raw.edge_height.unwrap_or(DEFAULT_EDGE_HEIGHT),
+            (0.0, MAX_EDGE_HEIGHT),
+            "terrain edge_height must be 0..=48 metres",
+        )?,
+        edge_mesh: check_mesh(raw.edge_mesh)?,
+        edge_spacing: check_range(
+            raw.edge_spacing.unwrap_or(DEFAULT_EDGE_SPACING),
+            EDGE_SPACING_RANGE,
+            "terrain edge_spacing must be 8..=128 metres",
+        )?,
+        edge_mesh_height: check_range(
+            raw.edge_mesh_height.unwrap_or(DEFAULT_EDGE_MESH_HEIGHT),
+            EDGE_MESH_HEIGHT_RANGE,
+            "terrain edge_mesh_height must be 1..=48 metres",
+        )?,
+        lane_width: check_range(
+            raw.lane_width.unwrap_or(DEFAULT_LANE_WIDTH),
+            LANE_WIDTH_RANGE,
+            "terrain lane_width must be 2..=40 metres",
+        )?,
+        seed: raw.seed.unwrap_or(DEFAULT_TERRAIN_SEED),
+    })
+}
+
+fn check_in(
+    value: Option<f32>,
+    range: (f32, f32),
+    what: &'static str,
+) -> Result<Option<f32>, MapVisualsError> {
+    value
+        .map(|value| check_range(value, range, what))
+        .transpose()
+}
+
+fn check_atmosphere(raw: Option<RawAtmosphere>) -> Result<MapAtmosphere, MapVisualsError> {
+    let Some(raw) = raw else {
+        return Ok(MapAtmosphere::default());
+    };
+    Ok(MapAtmosphere {
+        fog_color: check_rgb(raw.fog_color, 4.0, "fog_color must be RGB in 0..=4")?,
+        fog_density: check_scalar(
+            raw.fog_density,
+            0.2,
+            "fog_density must be 0..=0.2 per metre",
+        )?,
+        fog_height: check_in(
+            raw.fog_height,
+            (1.0, 400.0),
+            "fog_height must be 1..=400 metres",
+        )?,
+        fog_start: check_scalar(raw.fog_start, 2000.0, "fog_start must be 0..=2000 metres")?,
+        fog_max: check_scalar(
+            raw.fog_max,
+            MAX_FOG_OPACITY,
+            "fog_max must be 0..=0.85 (fog never fully hides a unit, ADR-0011 rule 1)",
+        )?,
+        sky_zenith: check_rgb(raw.sky_zenith, 8.0, "sky_zenith must be RGB in 0..=8")?,
+        sky_horizon: check_rgb(raw.sky_horizon, 8.0, "sky_horizon must be RGB in 0..=8")?,
+    })
+}
+
+fn check_fog_style(raw: Option<RawFogStyle>) -> Result<MapFogStyle, MapVisualsError> {
+    let Some(raw) = raw else {
+        return Ok(MapFogStyle::default());
+    };
+    Ok(MapFogStyle {
+        color: check_rgb(raw.color, 1.0, "fog_of_war color must be RGB in 0..=1")?,
+        darken: check_in(
+            raw.darken,
+            FOW_DARKEN_RANGE,
+            "fog_of_war darken must be 0.2..=0.9 (the boundary stays legible and unseen \
+             ground readable)",
+        )?,
+        desaturate: check_scalar(raw.desaturate, 1.0, "fog_of_war desaturate must be 0..=1")?,
+        mist_height: check_scalar(
+            raw.mist_height,
+            32.0,
+            "fog_of_war mist_height must be 0..=32 metres",
+        )?,
+        mist: check_scalar(raw.mist, 1.0, "fog_of_war mist must be 0..=1")?,
+    })
+}
+
 fn check_mesh(name: Option<String>) -> Result<Option<String>, MapVisualsError> {
     match name {
         Some(name) if !valid_mesh_name(&name) => Err(MapVisualsError::Invalid(
@@ -474,8 +1080,9 @@ impl MapVisuals {
                 mesh: check_mesh(prop.mesh)?,
             });
         }
+        let (terrain, ground) = split_terrain(raw.terrain)?;
         let visuals = Self {
-            terrain: check_color(raw.terrain, "terrain must be RGB in 0..=1")?,
+            terrain,
             wall: check_color(raw.wall, "wall must be RGB in 0..=1")?,
             wall_height: check_range(
                 raw.wall_height.unwrap_or(DEFAULT_WALL_HEIGHT),
@@ -485,6 +1092,9 @@ impl MapVisuals {
             wall_mesh: check_mesh(raw.wall_mesh)?,
             props,
             lighting: check_lighting(raw.lighting)?,
+            ground,
+            atmosphere: check_atmosphere(raw.atmosphere)?,
+            fog_of_war: check_fog_style(raw.fog_of_war)?,
         };
         if visuals.mesh_names().count() > MAX_MAP_MESHES {
             return Err(MapVisualsError::Invalid(
@@ -518,23 +1128,74 @@ impl MapVisuals {
         Self::parse(&text)
     }
 
-    /// Distinct mesh names the descriptor references (wall first, then props in order).
+    /// Distinct mesh names the descriptor references (wall first, then the terrain's edge
+    /// mesh, then props in order).
     pub fn mesh_names(&self) -> impl Iterator<Item = &str> {
         let all = self
             .wall_mesh
             .as_deref()
             .into_iter()
+            .chain(
+                self.ground
+                    .as_ref()
+                    .and_then(|ground| ground.edge_mesh.as_deref()),
+            )
             .chain(self.props.iter().filter_map(|prop| prop.mesh.as_deref()));
-        let mut seen: Vec<&str> = Vec::new();
-        all.filter(move |name| {
-            if seen.contains(name) {
-                false
-            } else {
-                seen.push(name);
-                true
-            }
-        })
+        distinct(all)
     }
+
+    /// Distinct texture names the `[terrain]` table references: each layer's albedo and
+    /// normal map in layer order, then the splat maps. (The `[lighting]` ramp is not
+    /// included.)
+    pub fn texture_names(&self) -> impl Iterator<Item = &str> {
+        let terrain = self.ground.as_ref();
+        let layers = terrain.into_iter().flat_map(|terrain| {
+            terrain.layers.iter().flat_map(|layer| {
+                core::iter::once(layer.albedo.as_str()).chain(layer.normal.as_deref())
+            })
+        });
+        let splats = terrain.into_iter().flat_map(|terrain| {
+            terrain
+                .splat
+                .as_deref()
+                .into_iter()
+                .chain(terrain.splat2.as_deref())
+        });
+        distinct(layers.chain(splats))
+    }
+
+    /// Returns this descriptor with a `[terrain]` table (or none: the flat plane).
+    #[must_use]
+    pub fn with_ground(mut self, ground: Option<MapTerrain>) -> Self {
+        self.ground = ground;
+        self
+    }
+
+    /// Returns this descriptor with an `[atmosphere]` table.
+    #[must_use]
+    pub fn with_atmosphere(mut self, atmosphere: MapAtmosphere) -> Self {
+        self.atmosphere = atmosphere;
+        self
+    }
+
+    /// Returns this descriptor with a `[fog_of_war]` table.
+    #[must_use]
+    pub fn with_fog_of_war(mut self, fog_of_war: MapFogStyle) -> Self {
+        self.fog_of_war = fog_of_war;
+        self
+    }
+}
+
+fn distinct<'a>(names: impl Iterator<Item = &'a str>) -> impl Iterator<Item = &'a str> {
+    let mut seen: Vec<&str> = Vec::new();
+    names.filter(move |name| {
+        if seen.contains(name) {
+            false
+        } else {
+            seen.push(name);
+            true
+        }
+    })
 }
 
 #[cfg(test)]
@@ -675,6 +1336,235 @@ color = [0.2, 0.2, 0.2]
         ] {
             assert!(MapVisuals::parse(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    const TERRAIN: &str = r#"
+wall = [0.2, 0.2, 0.2]
+wall_mesh = "rampart"
+
+[terrain]
+tint = [0.3, 0.1, 0.05]
+relief = 0.35
+edge = "cliffs"
+edge_height = 22.0
+edge_mesh = "cliff"
+edge_spacing = 30.0
+edge_mesh_height = 12.0
+lane_width = 10.0
+seed = 3
+splat = "ember-splat"
+splat2 = "ember-splat2"
+
+[[terrain.layers]]
+albedo = "terrain-grass"
+normal = "terrain-grass-normal"
+tint = [0.55, 0.75, 0.45]
+tiling = 6.0
+
+[[terrain.layers]]
+albedo = "terrain-dirt"
+normal = "terrain-dirt-normal"
+
+[[terrain.layers]]
+albedo = "terrain-rock"
+normal = "terrain-grass-normal"
+
+[[terrain.layers]]
+albedo = "terrain-moss"
+
+[[terrain.layers]]
+albedo = "terrain-grass"
+
+[atmosphere]
+fog_color = [0.5, 0.6, 0.7]
+fog_density = 0.012
+fog_height = 40.0
+fog_start = 60.0
+fog_max = 0.7
+sky_zenith = [0.2, 0.3, 0.6]
+sky_horizon = [0.6, 0.65, 0.7]
+
+[fog_of_war]
+color = [0.02, 0.03, 0.05]
+darken = 0.72
+desaturate = 0.5
+mist_height = 3.0
+mist = 0.4
+"#;
+
+    #[test]
+    fn terrain_atmosphere_and_fog_of_war_tables_parse() {
+        let visuals = MapVisuals::parse(TERRAIN).expect("descriptor");
+        assert_eq!(visuals.terrain, [0.3, 0.1, 0.05], "the table's tint");
+        let terrain = visuals.ground.as_ref().expect("terrain table");
+        assert_eq!(terrain.layers.len(), 5);
+        assert_eq!(terrain.layers[0].tint, [0.55, 0.75, 0.45]);
+        assert_eq!(terrain.layers[0].tiling, 6.0);
+        assert_eq!(terrain.layers[1].tint, [1.0; 3]);
+        assert_eq!(terrain.layers[1].tiling, DEFAULT_LAYER_TILING);
+        assert_eq!(terrain.layers[3].normal, None);
+        assert_eq!(terrain.edge, EdgeStyle::Cliffs);
+        assert_eq!(
+            (terrain.relief, terrain.edge_height, terrain.seed),
+            (0.35, 22.0, 3)
+        );
+        assert_eq!(
+            (
+                terrain.edge_spacing,
+                terrain.edge_mesh_height,
+                terrain.lane_width
+            ),
+            (30.0, 12.0, 10.0)
+        );
+        assert_eq!(terrain.splat2.as_deref(), Some("ember-splat2"));
+        assert_eq!(
+            visuals.mesh_names().collect::<Vec<_>>(),
+            ["rampart", "cliff"],
+            "the edge mesh counts as a map mesh"
+        );
+        assert_eq!(
+            visuals.texture_names().collect::<Vec<_>>(),
+            [
+                "terrain-grass",
+                "terrain-grass-normal",
+                "terrain-dirt",
+                "terrain-dirt-normal",
+                "terrain-rock",
+                "terrain-moss",
+                "ember-splat",
+                "ember-splat2"
+            ]
+        );
+        assert_eq!(
+            visuals.atmosphere,
+            MapAtmosphere::default()
+                .with_fog_color([0.5, 0.6, 0.7])
+                .with_fog(0.012, 40.0, 60.0)
+                .with_fog_max(0.7)
+                .with_sky([0.2, 0.3, 0.6], [0.6, 0.65, 0.7])
+        );
+        assert_eq!(
+            visuals.fog_of_war,
+            MapFogStyle::default()
+                .with_color([0.02, 0.03, 0.05])
+                .with_tone(0.72, 0.5)
+                .with_mist(3.0, 0.4)
+        );
+        // Defaults: a minimal table, and no tables at all.
+        let minimal = MapVisuals::parse(
+            "wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n[[terrain.layers]]\nalbedo = \"a\"\n",
+        )
+        .expect("minimal");
+        let expected = MapTerrain::new(vec![TerrainLayer::new("a")]);
+        assert_eq!(minimal.ground.as_ref(), Some(&expected));
+        assert_eq!(expected.edge, EdgeStyle::Hills);
+        assert_eq!(
+            (expected.relief, expected.edge_height, expected.lane_width),
+            (0.25, 18.0, 12.0)
+        );
+        let flat = MapVisuals::parse("terrain = [0, 0, 0]\nwall = [1, 1, 1]").expect("flat");
+        assert_eq!(flat.ground, None);
+        assert_eq!(flat.texture_names().count(), 0);
+        assert_eq!(flat.atmosphere, MapAtmosphere::default());
+        assert_eq!(flat.fog_of_war, MapFogStyle::default());
+        for style in [EdgeStyle::None, EdgeStyle::Hills, EdgeStyle::Cliffs] {
+            assert_eq!(EdgeStyle::from_name(style.name()), Some(style));
+        }
+        assert_eq!(EdgeStyle::from_name("mountains"), None);
+    }
+
+    #[test]
+    fn terrain_atmosphere_and_fog_of_war_reject_out_of_range_values() {
+        let terrain = |body: &str| {
+            format!(
+                "wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n{body}\n\
+                 [[terrain.layers]]\nalbedo = \"a\"\n"
+            )
+        };
+        let layer = |body: &str| {
+            format!(
+                "wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n\
+                 [[terrain.layers]]\nalbedo = \"a\"\n{body}\n"
+            )
+        };
+        let base = "terrain = [0.1, 0.1, 0.1]\nwall = [0.2, 0.2, 0.2]\n";
+        let five = "[[terrain.layers]]\nalbedo = \"a\"\n".repeat(4);
+        for bad in [
+            // The tint and the table cannot both be `terrain`.
+            format!("{base}[terrain]\ntint = [0, 0, 0]\n[[terrain.layers]]\nalbedo = \"a\"\n"),
+            String::from("terrain = 3\nwall = [0, 0, 0]"),
+            String::from("wall = [0, 0, 0]\n[terrain]\n[[terrain.layers]]\nalbedo = \"a\"\n"),
+            String::from("wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n"),
+            terrain("tint = [2, 0, 0]").replace("tint = [0, 0, 0]\n", ""),
+            format!(
+                "wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n{}",
+                "[[terrain.layers]]\nalbedo = \"a\"\n".repeat(9)
+            ),
+            terrain("relief = 0.6"),
+            terrain("relief = -0.1"),
+            terrain("relief = nan"),
+            terrain("edge = \"mountains\""),
+            terrain("edge_height = 49"),
+            terrain("edge_height = -1"),
+            terrain("edge_mesh = \"../x\""),
+            terrain("edge_spacing = 4"),
+            terrain("edge_spacing = 200"),
+            terrain("edge_mesh_height = 0.5"),
+            terrain("edge_mesh_height = 60"),
+            terrain("lane_width = 1"),
+            terrain("lane_width = 41"),
+            terrain("seed = -1"),
+            terrain("splat = \"a/b\""),
+            terrain("splat2 = \"b\""),
+            terrain("splat = \"a\"\nsplat2 = \"b\""),
+            terrain("unknown = 1"),
+            layer("tint = [3, 0, 0]"),
+            layer("tint = [0, 0]"),
+            layer("tiling = 0.1"),
+            layer("tiling = 100"),
+            layer("normal = \"c:x\""),
+            layer("roughness = 1"),
+            String::from(
+                "wall = [0, 0, 0]\n[terrain]\ntint = [0, 0, 0]\n[[terrain.layers]]\nalbedo = \"\"\n",
+            ),
+            format!("{base}[atmosphere]\nfog_color = [5, 0, 0]"),
+            format!("{base}[atmosphere]\nfog_density = 0.3"),
+            format!("{base}[atmosphere]\nfog_height = 0.5"),
+            format!("{base}[atmosphere]\nfog_height = 500"),
+            format!("{base}[atmosphere]\nfog_start = -1"),
+            format!("{base}[atmosphere]\nfog_start = 3000"),
+            format!("{base}[atmosphere]\nfog_max = 0.9"),
+            format!("{base}[atmosphere]\nsky_zenith = [9, 0, 0]"),
+            format!("{base}[atmosphere]\nsky_horizon = [nan, 0, 0]"),
+            format!("{base}[atmosphere]\nsun = 1"),
+            format!("{base}[fog_of_war]\ncolor = [1.5, 0, 0]"),
+            format!("{base}[fog_of_war]\ndarken = 0.1"),
+            format!("{base}[fog_of_war]\ndarken = 0.95"),
+            format!("{base}[fog_of_war]\ndesaturate = 1.5"),
+            format!("{base}[fog_of_war]\nmist_height = 40"),
+            format!("{base}[fog_of_war]\nmist = -0.5"),
+            format!("{base}[fog_of_war]\nopacity = 1"),
+            // The edge mesh counts toward the four-mesh limit.
+            format!(
+                "wall = [0, 0, 0]\nwall_mesh = \"m0\"\n{}[terrain]\ntint = [0, 0, 0]\n\
+                 edge_mesh = \"m4\"\n[[terrain.layers]]\nalbedo = \"a\"\n",
+                ["m1", "m2", "m3"]
+                    .map(|mesh| format!(
+                        "[[props]]\nposition = [1, 1]\ncolor = [1, 1, 1]\nmesh = \"{mesh}\"\n"
+                    ))
+                    .concat()
+            ),
+        ] {
+            assert!(MapVisuals::parse(&bad).is_err(), "{bad:?}");
+        }
+        // splat2 is fine with splat and more than four layers.
+        assert!(
+            MapVisuals::parse(&format!(
+                "{}{five}",
+                terrain("splat = \"a\"\nsplat2 = \"b\"")
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

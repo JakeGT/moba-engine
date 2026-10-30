@@ -165,6 +165,35 @@ jobs:
           status=$?
           cat vat-fingerprint.log
           exit $status
+      # R3a map coverage (ADR-0014): the terrain, fog of war, height fog, sky and map edge
+      # from two more cameras. The whole-map overview is networked (fog of war from the blue
+      # team's vision, pinned to tick 120); the horizon view is the local preview's low
+      # orbit, where the sky and the map-edge hills fill the top of the frame.
+      - name: Map overview and horizon captures with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          MOBA_SERVER=local MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 \
+            MOBA_SMOKE_FRAMES=100000 MOBA_CAMERA=overview MOBA_CAPTURE=render-overview-actual.ppm \
+            timeout 300 xvfb-run -a ./target/release/moba-client \
+            > overview-capture.log 2>&1 || { cat overview-capture.log; exit 1; }
+          test -s render-overview-actual.ppm
+          MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_PREVIEW_CAMERA=-0.7,0.12,170 \
+            MOBA_CAPTURE=render-horizon-actual.ppm \
+            timeout 180 xvfb-run -a ./target/release/moba-client \
+            > horizon-capture.log 2>&1 || { cat horizon-capture.log; exit 1; }
+          test -s render-horizon-actual.ppm
+      - name: Compare map fingerprints
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set +e
+          status=0
+          for view in overview horizon; do
+            ./target/release/image-check render-$view-actual.ppm \
+              --expected tests/golden/render-$view-fingerprint.rgb \
+              --diff render-$view-diff.ppm > $view-fingerprint.log 2>&1 || status=1
+            cat $view-fingerprint.log
+          done
+          exit $status
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -187,4 +216,12 @@ jobs:
             ember-capture.log
             ember-fingerprint.log
             outline-probe/
+            render-overview-actual.ppm
+            render-overview-diff.ppm
+            overview-capture.log
+            overview-fingerprint.log
+            render-horizon-actual.ppm
+            render-horizon-diff.ppm
+            horizon-capture.log
+            horizon-fingerprint.log
           if-no-files-found: ignore

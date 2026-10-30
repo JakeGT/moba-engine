@@ -620,6 +620,7 @@ fn build_match_hud(
         hits,
         fx.palette,
         fx.images.minimap,
+        fx.images.fog,
     );
     if scoreboard {
         super::scoreboard::draw_scoreboard(
@@ -1109,6 +1110,7 @@ mod tests {
             portraits: u16::MAX,
             portrait_cells: 16,
             minimap: true,
+            fog: crate::hud::images::MinimapFog::Texture,
         };
         build(&mut ui, &mut hits, &fx);
         let warm_images = ui.len();

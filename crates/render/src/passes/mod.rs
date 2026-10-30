@@ -4,6 +4,7 @@
 pub(crate) mod capture;
 pub(crate) mod composite;
 pub(crate) mod contact;
+pub(crate) mod fog;
 pub(crate) mod outline;
 pub(crate) mod overlay;
 pub(crate) mod scene;

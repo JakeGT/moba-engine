@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Regenerates the self-generated sample texture set shipped in content/textures/ (ADR-0010)
+# Regenerates the self-generated textures shipped in content/textures/ (ADR-0010): the
+# `sentinel` material sample set and the `terrain-*` layer set (albedo + AO, normal; ADR-0014),
 # and the particle atlas content/vfx/atlas.ktx2 (ADR-0013).
 #
 #   scripts/bake-sample-textures.sh
@@ -19,6 +20,11 @@ mkdir -p content/textures
 "$bake" bake "$src/sentinel-normal.png" content/textures/sentinel-normal.ktx2 --kind normal
 "$bake" bake "$src/sentinel-mr.png" content/textures/sentinel-mr.ktx2 --kind data
 "$bake" bake "$src/sentinel-mask.png" content/textures/sentinel-mask.ktx2 --kind mask
+"$bake" generate terrain "$src"
+for layer in grass dirt rock moss pebbles; do
+  "$bake" bake "$src/terrain-$layer.png" "content/textures/terrain-$layer.ktx2" --kind color
+  "$bake" bake "$src/terrain-$layer-normal.png" "content/textures/terrain-$layer-normal.ktx2" --kind normal
+done
 "$bake" generate vfx "$src"
 mkdir -p content/vfx
 "$bake" bake "$src/vfx-atlas.png" content/vfx/atlas.ktx2 --kind data

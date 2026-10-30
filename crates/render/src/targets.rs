@@ -155,7 +155,10 @@ impl OffscreenTarget {
 /// Clears `image` (one colour level) to opaque black and transitions it to
 /// `SHADER_READ_ONLY_OPTIMAL`, waiting for the graphics queue. On error, the flag says
 /// whether the submitted clear may still be running (the caller must then not free `image`).
-fn initialise_sampled(device: &DeviceContext, image: vk::Image) -> Result<(), (RenderError, bool)> {
+pub(crate) fn initialise_sampled(
+    device: &DeviceContext,
+    image: vk::Image,
+) -> Result<(), (RenderError, bool)> {
     let idle = |error: vk::Result| (RenderError::from(error), false);
     let range = vk::ImageSubresourceRange {
         aspect_mask: vk::ImageAspectFlags::COLOR,

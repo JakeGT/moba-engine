@@ -199,7 +199,41 @@ impl GpuImage {
         mip_levels: u32,
     ) -> RenderResult<Self> {
         Self::create(
-            device, allocator, name, extent, format, usage, aspect, mip_levels, false,
+            device,
+            allocator,
+            name,
+            extent,
+            format,
+            usage,
+            aspect,
+            mip_levels,
+            Layers::Single,
+        )
+    }
+
+    /// A 2D array of `layers` colour layers with `mip_levels` levels; the view is a
+    /// `2D_ARRAY` view of every layer and level (R3a terrain layers and splat maps).
+    #[allow(clippy::too_many_arguments)] // The create info, flattened.
+    pub(crate) fn array_with_mips(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        layers: u32,
+        mip_levels: u32,
+    ) -> RenderResult<Self> {
+        Self::create(
+            device,
+            allocator,
+            name,
+            extent,
+            format,
+            usage,
+            vk::ImageAspectFlags::COLOR,
+            mip_levels,
+            Layers::Array(layers.max(1)),
         )
     }
 
@@ -227,7 +261,7 @@ impl GpuImage {
             usage,
             vk::ImageAspectFlags::COLOR,
             mip_levels,
-            true,
+            Layers::Cube,
         )
     }
 
@@ -241,14 +275,14 @@ impl GpuImage {
         usage: vk::ImageUsageFlags,
         aspect: vk::ImageAspectFlags,
         mip_levels: u32,
-        cube: bool,
+        kind: Layers,
     ) -> RenderResult<Self> {
         assert!(extent.width > 0 && extent.height > 0);
         assert!(mip_levels > 0);
-        let (layers, flags) = if cube {
-            (6, vk::ImageCreateFlags::CUBE_COMPATIBLE)
-        } else {
-            (1, vk::ImageCreateFlags::empty())
+        let (layers, flags) = match kind {
+            Layers::Single => (1, vk::ImageCreateFlags::empty()),
+            Layers::Cube => (6, vk::ImageCreateFlags::CUBE_COMPATIBLE),
+            Layers::Array(layers) => (layers, vk::ImageCreateFlags::empty()),
         };
         let create_info = vk::ImageCreateInfo::default()
             .flags(flags)
@@ -300,7 +334,7 @@ impl GpuImage {
             return Err(error.into());
         }
 
-        let view = match create_view(&device, image, format, aspect, mip_levels, cube) {
+        let view = match create_view(&device, image, format, aspect, mip_levels, kind) {
             Ok(view) => view,
             Err(error) => {
                 drop_allocator_free(&allocator, allocation);
@@ -359,22 +393,33 @@ pub(crate) fn create_image_view_levels(
     aspect: vk::ImageAspectFlags,
     levels: u32,
 ) -> RenderResult<vk::ImageView> {
-    create_view(device, image, format, aspect, levels, false)
+    create_view(device, image, format, aspect, levels, Layers::Single)
 }
 
-/// A 2D (or, for `cube`, a six-layer cube) view of mip levels `0..levels`.
+/// The layer structure of a [`GpuImage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layers {
+    /// One layer, a `2D` view.
+    Single,
+    /// Six layers, `CUBE_COMPATIBLE`, a `CUBE` view.
+    Cube,
+    /// `n` layers, a `2D_ARRAY` view.
+    Array(u32),
+}
+
+/// A view of mip levels `0..levels` and every layer: `2D`, `CUBE` or `2D_ARRAY` by `kind`.
 fn create_view(
     device: &ash::Device,
     image: vk::Image,
     format: vk::Format,
     aspect: vk::ImageAspectFlags,
     levels: u32,
-    cube: bool,
+    kind: Layers,
 ) -> RenderResult<vk::ImageView> {
-    let (view_type, layers) = if cube {
-        (vk::ImageViewType::CUBE, 6)
-    } else {
-        (vk::ImageViewType::TYPE_2D, 1)
+    let (view_type, layers) = match kind {
+        Layers::Single => (vk::ImageViewType::TYPE_2D, 1),
+        Layers::Cube => (vk::ImageViewType::CUBE, 6),
+        Layers::Array(layers) => (vk::ImageViewType::TYPE_2D_ARRAY, layers),
     };
     let create_info = vk::ImageViewCreateInfo::default()
         .image(image)

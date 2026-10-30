@@ -160,6 +160,46 @@ fn lighting_config_from(
     config
 }
 
+/// The terrain, fog-of-war and atmosphere features for `tier` (ADR-0014) with the
+/// `MOBA_TERRAIN=flat|splat`, `MOBA_FOW=texture|legacy|off`, `MOBA_FOW_SIZE=<64..1024>`,
+/// `MOBA_FOG=off` (height fog) and `MOBA_SKY=off` overrides.
+pub(crate) fn world_config(tier: moba_render::QualityTier) -> moba_render::WorldConfig {
+    world_config_from(tier, |name| std::env::var(name).ok())
+}
+
+fn world_config_from(
+    tier: moba_render::QualityTier,
+    var: impl Fn(&str) -> Option<String>,
+) -> moba_render::WorldConfig {
+    let mut config = moba_render::WorldConfig::for_tier(tier);
+    if let Some(value) = var("MOBA_TERRAIN") {
+        match moba_render::TerrainShading::from_name(&value) {
+            Some(shading) => config = config.with_terrain(shading),
+            None => eprintln!("MOBA_TERRAIN={value:?} is not flat/splat; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_FOW") {
+        match moba_render::FogOfWarMode::from_name(&value) {
+            Some(mode) => config = config.with_fog_of_war(mode),
+            None => eprintln!("MOBA_FOW={value:?} is not texture/legacy/off; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_FOW_SIZE") {
+        match value.trim().parse::<u32>() {
+            Ok(size) => config = config.with_fog_of_war_resolution(size),
+            Err(_) => eprintln!("MOBA_FOW_SIZE={value:?} is not a number; using the tier's"),
+        }
+    }
+    let off = |name| var(name).is_some_and(|value| value.trim().eq_ignore_ascii_case("off"));
+    if off("MOBA_FOG") {
+        config = config.with_height_fog(false);
+    }
+    if off("MOBA_SKY") {
+        config = config.with_sky(false);
+    }
+    config
+}
+
 /// Number of `.spv` files in a shader override directory and their newest modification time.
 pub(crate) type ShaderStamp = (usize, Option<std::time::SystemTime>);
 
@@ -299,6 +339,18 @@ pub(crate) fn parse_capture_tick() -> Option<u32> {
 }
 
 /// `MOBA_WINDOW_SIZE=<w>x<h>` (logical pixels, 320-7680 × 240-4320), else 1280×720.
+/// `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>` (radians, radians, metres): a fixed orbit
+/// for the local preview (R3a goldens). Pitch is clamped by the orbit camera; the distance
+/// to 8–600 m.
+pub(crate) fn parse_preview_camera(value: Option<&str>) -> Option<[f32; 3]> {
+    let mut parts = value?
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().ok());
+    let (yaw, pitch, distance) = (parts.next()??, parts.next()??, parts.next()??);
+    (parts.next().is_none() && [yaw, pitch, distance].iter().all(|value| value.is_finite()))
+        .then(|| [yaw, pitch, distance.clamp(8.0, 600.0)])
+}
+
 pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
     value
         .and_then(|value| {
@@ -521,6 +573,7 @@ pub(crate) fn write_ppm(path: &Path, frame: &CapturedFrame) -> std::io::Result<(
 }
 
 impl Drop for ClientApp {
+    #[allow(clippy::too_many_lines)] // One linear frame-log report.
     fn drop(&mut self) {
         if let Some(stress) = &self.stress {
             stress.report();
@@ -579,9 +632,11 @@ impl Drop for ClientApp {
             |renderer| {
                 let pipelines = renderer.pipeline_stats();
                 let lighting = renderer.lighting_config();
+                let world = renderer.world_config();
                 format!(
                     "{} hdr={} shadows={} shadow_size={} ibl={} specular_ibl={} vat_meshes={} \
-                     pipelines={} pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
+                     terrain={} fow={} fow_size={} fog={} sky={} pipelines={} \
+                     pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
                     renderer.quality_tier(),
                     renderer.hdr_format_name(),
                     lighting.shadows,
@@ -593,6 +648,15 @@ impl Drop for ClientApp {
                     },
                     if lighting.specular_ibl { "on" } else { "off" },
                     renderer.vat_mesh_count(),
+                    if renderer.has_terrain() {
+                        world.terrain.name()
+                    } else {
+                        "flat"
+                    },
+                    world.fog_of_war.name(),
+                    world.fog_of_war_resolution,
+                    if world.height_fog { "on" } else { "off" },
+                    if world.sky { "on" } else { "off" },
                     pipelines.pipelines,
                     pipelines.build_ms,
                     pipelines.cache,
@@ -629,7 +693,7 @@ impl Drop for ClientApp {
 }
 
 /// Lanes of one GPU frame-log sample (see [`gpu_report`]).
-pub(crate) const GPU_LANES: usize = 17;
+pub(crate) const GPU_LANES: usize = 19;
 const GPU_LANE_NAMES: [&str; GPU_LANES] = [
     "shadow",
     "scene",
@@ -645,28 +709,31 @@ const GPU_LANE_NAMES: [&str; GPU_LANES] = [
     "depth_prepass",
     "contact_shadows",
     "outline",
+    "fow_raster",
+    "fow_resolve",
     "vfx_alive",
     "vfx_overdraw",
     "lights",
 ];
 /// First lane that is a statistic rather than a pass time.
-const GPU_STAT_LANES: usize = 14;
+const GPU_STAT_LANES: usize = 16;
 
 /// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[shadow, scene, composite,
 /// ui, total, span, portraits, minimap, vfx_simulate, vfx_draw, vfx_resolve, depth_prepass,
-/// contact_shadows, outline]` pass times (a pass that is off reads 0) plus the particle stats
-/// `vfx_alive` (live particles) and `vfx_overdraw` (projected particle pixels per screen
-/// pixel, ADR-0013) and `lights` (dynamic lights binned, ADR-0016), which get
+/// contact_shadows, outline, fow_raster, fow_resolve]` pass times (a pass that is off reads 0;
+/// the fog-of-war passes (R3a) are 0 without the texture) plus the stats `vfx_alive` (live
+/// particles), `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013) and
+/// `lights` (dynamic lights binned, ADR-0016), which get
 /// `_p50`/`_p95`/`_max` columns without the unit. `total` sums the passes; `span` runs from
 /// the first pass's start to the last pass's end, so `span - total` is the time spent in
-/// barriers between passes. The offscreen passes (R7b) run only in some frames, so their
-/// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
-/// columns are left out.
+/// barriers between passes. The offscreen passes (R7b) and fog-of-war passes run only in some
+/// frames or configurations, so their percentiles cover just those frames, and
+/// `gpu_<pass>_runs` counts them; with no run the columns are left out.
 fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
     for (lane, name) in GPU_LANE_NAMES.into_iter().enumerate() {
-        let offscreen = matches!(lane, 6 | 7);
+        let offscreen = matches!(lane, 6 | 7 | 14 | 15);
         let mut values: Vec<f32> = samples
             .iter()
             .map(|sample| sample[lane])
@@ -708,7 +775,8 @@ fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        gpu_report, lighting_config_from, parse_hex32, parse_window_size, pipeline_cache_path_from,
+        gpu_report, lighting_config_from, parse_hex32, parse_preview_camera, parse_window_size,
+        pipeline_cache_path_from, world_config_from,
     };
 
     #[test]
@@ -808,6 +876,40 @@ mod tests {
     }
 
     #[test]
+    fn world_overrides_turn_terrain_fog_and_sky_off() {
+        use moba_render::{FogOfWarMode, QualityTier, TerrainShading, WorldConfig};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        let medium = WorldConfig::for_tier(QualityTier::Medium);
+        assert_eq!(world_config_from(QualityTier::Medium, env(&[])), medium);
+        let off = world_config_from(
+            QualityTier::High,
+            env(&[
+                ("MOBA_TERRAIN", "flat"),
+                ("MOBA_FOW", "Legacy"),
+                ("MOBA_FOW_SIZE", "128"),
+                ("MOBA_FOG", "off"),
+                ("MOBA_SKY", "OFF"),
+            ]),
+        );
+        assert_eq!(off.terrain, TerrainShading::Flat);
+        assert_eq!(off.fog_of_war, FogOfWarMode::Legacy);
+        assert_eq!(off.fog_of_war_resolution, 128);
+        assert!(!off.height_fog && !off.sky);
+        let bad = world_config_from(
+            QualityTier::Low,
+            env(&[("MOBA_FOW", "circles"), ("MOBA_TERRAIN", "3d")]),
+        );
+        assert_eq!(bad, WorldConfig::for_tier(QualityTier::Low));
+    }
+
+    #[test]
     fn gpu_report_lists_each_pass_percentile() {
         let samples: Vec<[f32; super::GPU_LANES]> = (0..=100)
             .map(|index| {
@@ -829,6 +931,8 @@ mod tests {
                     ms,
                     0.0,
                     ms,
+                    0.0,
+                    0.0,
                     index as f32,
                     ms,
                     2.0,
@@ -847,6 +951,7 @@ mod tests {
             "gpu_portraits_runs=11 gpu_portraits_p50_ms=0.020 gpu_portraits_p95_ms=0.020 "
         ));
         assert!(!report.contains("gpu_minimap"));
+        assert!(!report.contains("gpu_fow"));
         assert!(report.contains("gpu_vfx_draw_p95_ms=0.950 "));
         assert!(
             report.contains("gpu_depth_prepass_p95_ms=0.950 gpu_contact_shadows_p50_ms=0.000 ")
@@ -857,6 +962,22 @@ mod tests {
              vfx_overdraw_p50=0.500 vfx_overdraw_p95=0.950 vfx_overdraw_max=1.000 \
              lights_p50=2.000 lights_p95=2.000 lights_max=2.000 "
         ));
+    }
+
+    #[test]
+    fn preview_camera_parses_three_numbers() {
+        assert_eq!(
+            parse_preview_camera(Some("-0.7, 0.2, 260")),
+            Some([-0.7, 0.2, 260.0])
+        );
+        assert_eq!(
+            parse_preview_camera(Some("1,2,9000")),
+            Some([1.0, 2.0, 600.0])
+        );
+        for bad in ["", "1,2", "1,2,3,4", "a,b,c", "nan,1,1"] {
+            assert_eq!(parse_preview_camera(Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(parse_preview_camera(None), None);
     }
 
     #[test]

@@ -106,6 +106,71 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Terrain, fog of war v2 and atmosphere (AAA roadmap R3a, ADR-0014):**
+  - **Terrain:** a map visuals `[terrain]` table (`moba_assets::MapTerrain`, in
+    `MapVisuals::ground`; the old `terrain = [r, g, b]` tint still parses and moves into the
+    table as `tint`) gives 1–8 layers (`textures/<albedo>.ktx2`, BC7 sRGB with cavity AO in
+    alpha, optional BC5 normals; a tint and tiling each), an optional KTX2 splat map, the
+    board relief, the map-edge style (`none`/`hills`/`cliffs`, `edge_height`) and optional
+    edge props (`edge_mesh`). `moba_assets::generate_terrain` builds the heightfield (board
+    relief ≤ 0.5 m, the margin only rising) and the splat (base, paths along lanes and around
+    structures and spawns, rock on slopes and at wall feet, variation patches) from the
+    simulation's map, deterministically. The renderer draws it as one grid mesh
+    (`Renderer::set_terrain`, `TerrainData`) with the layers in two texture arrays and the
+    splat in a two-layer array (set 3), triplanar on slopes (High+), normal maps (Medium+),
+    baked relief AO; Low samples 4 layers top-down. Walls are placed by the shared
+    `moba_assets::wall_box`. The sample maps (meadow, ember, frost) have terrain,
+    atmosphere and fog-of-war tables; ember's centre crystal moved off the mid lane.
+  - **Self-generated layer textures:** `texture-bake generate terrain` makes five tileable
+    256² layers (grass, dirt, rock, moss, pebbles) with normals and AO, committed under
+    `content/textures/` and checked against the generator; BC7 keeps the AO alpha.
+  - **Visual-versus-simulation checks:** `content-check` runs
+    `moba_assets::check_map_consistency` for the pack's map descriptor: errors for board
+    relief over 0.5 m (on every tier's grid, including the interpolated surface of the
+    cells straddling the board edge: `board_edge_relief`), edges dipping below the board,
+    simulation walls not covered by a visual wall at least 2 m tall or outside the board,
+    edge props whose real mesh footprint reaches the board (`edge_footprint_radius`,
+    `check_map_consistency_with_edge_footprint`; the client places them by the same
+    footprint) and bad layer or splat textures; warnings for tall props on lane corridors or
+    next to structures. It checks the listed `[[assets.maps]]` descriptors and
+    `maps/<visuals>.toml` whenever it exists, since the client loads it by name. The edge
+    rise starts one Low-tier cell outside the board. The JSON output gains
+    `map_errors`/`map_warnings`.
+  - **Fog of war v2:** a GPU visibility texture replaces the 16-circle uniform loop:
+    `fow-raster` draws one quad per own-team vision source (up to 1,024; walls up to 256)
+    into a fixed-size `R8` transient with line-of-sight walls and `MAX` blending, and
+    `fow-resolve` blurs it and eases it from the previous frame (reveal 0.08 s; lost vision
+    drops to half at once, then fades in 0.3 s) into ping-pong persistent images. The disc
+    is inset one texel so the blurred edge stays within half a texel of the vision radius,
+    and a property test checks the wall test blocks whatever the simulation blocks. The
+    scene's terrain samples it (darkened, desaturated, ground mist, styled per map by
+    `[fog_of_war]`), and the minimap masks with it (`UiDrawList::fog_mask`; the 24×24 grid
+    that ignored walls remains for `MOBA_FOW=legacy`, and `MOBA_FOW=off` turns the minimap's
+    fog off too). The client builds
+    the input from its own team only (`hud::FogInput`, unit-tested with enemies in the
+    snapshot); spectators get none. 128² (Low) to 512² (Ultra). `MOBA_FOW=legacy` keeps the
+    old loop, `MOBA_FOW=off` none, `MOBA_FOW_SIZE` overrides the size. With both offscreen
+    passes, VFX, shadows and a capture the frame uses all 12 passes of the graph limits
+    (22 of 24 resources). `RenderConfig::max_vision_sources` is clamped to 65,536
+    (`MAX_VISION_SOURCES`) and the device's storage-buffer range.
+  - **Descriptor budget:** renderer creation sums the scene layout's per-stage samplers and
+    sampled images and fails with `RenderError::DescriptorLimit` over the device limits;
+    the scene's fragment stage uses 13 of the 16 guaranteed (set-3 map in ADR-0014 §6).
+  - **Atmosphere:** analytic height fog on the terrain and units (`[atmosphere]`,
+    `SceneAtmosphere`), a far-plane sky (environment cube on Medium+, else a gradient) whose
+    horizon meets the fog, and hills or cliffs past the board, so no board edge shows.
+    `MOBA_FOG=off` keeps the R2a distance fade; `MOBA_SKY=off` the clear colour.
+  - **Tiers and switches:** `WorldConfig::for_tier`, `RenderConfig::with_world`;
+    `MOBA_TERRAIN=flat|splat`, `MOBA_FOW`, `MOBA_FOW_SIZE`, `MOBA_FOG=off`, `MOBA_SKY=off`;
+    `MOBA_PREVIEW_CAMERA=<yaw>,<pitch>,<distance>` for the local preview. The frame log gains
+    `gpu_fow_raster_*`/`gpu_fow_resolve_*` columns and `terrain=`, `fow=`, `fow_size=`,
+    `fog=`, `sky=`.
+  - **Evidence** ([perf/0017](docs/perf/0017-terrain-fow.md)): validation and synchronisation
+    validation report 0 messages on lavapipe and on the RTX 5070 Ti on every tier and with
+    every switch; per-pass GPU timings before and after; all goldens rebaselined
+    deliberately, plus two new map goldens (networked overview, low horizon orbit).
+  - No wire, replay, simulation-logic or content-hash change: terrain, atmosphere and fog
+    styling are client-local map visuals. Decals, foliage and water are R3b.
 - **Lighting: stylised PBR, image-based lighting and shadows (AAA roadmap R2a, ADR-0011):**
   - **PBR:** every lit surface (units, GPU-skinned heroes, terrain) goes through one
     `shade()` in `include/lighting.glsl`: GGX, height-correlated Smith-GGX visibility,
@@ -165,7 +230,7 @@ the semver check):
     camera's ground footprint. `Scene::with_lights(&[PointLight])` (linear colour with the
     intensity premultiplied, windowed inverse-square falloff to `radius`); the CPU bins at
     most `MAX_LIGHTS` (256) lights, `MAX_LIGHTS_PER_CELL` (16) per column, into two
-    host-visible storage buffers per frame in flight (set 3 bindings 5 and 6, so the lighting
+    host-visible storage buffers per frame in flight (set 3 bindings 11 and 12, after R3a's and R6's, so the lighting
     set is now one per frame in flight), and `shade()` loops over the fragment's column after
     the sun (wrap diffuse + GGX, no shadows; falloff floored at 1 m and the summed irradiance
     clamped to 1.5× the sun's, so stacked flashes never bleach a team colour). The footprint
@@ -214,7 +279,10 @@ the semver check):
     (depth_prepass) → (contact_shadows) → scene → vfx_draw → (vfx_resolve) → composite →
     (outline) → ui`; the graph's limits are 32 passes and 48 resources (a `u64` mask, as in
     R6). The instance record is 128 bytes (R4b's 112 plus the outline slot),
-    the camera uniform 1,552 (was 1,264). New (additive) API: `PointLight`, `LightStats`,
+    the camera uniform 1,664 (R3a's 1,376 plus 288).
+    Set 3 gains bindings 11–14 (light list, light grid, baked AO, contact shadows; 10 is
+    R6's AO), and the scene's fragment stage uses 15 of the 16 samplers Vulkan guarantees
+    (R3a's `descriptor_budget`). New (additive) API: `PointLight`, `LightStats`,
     `MAX_LIGHTS`, `MAX_LIGHTS_PER_CELL`, `OutlineMode`, `OutlinePalette`, `OUTLINE_SLOTS`,
     `MAX_OUTLINE_WIDTH`, `BakedAo`, `MAX_CONTACT_SHADOW_STEPS`, `LightingConfig::{max_lights,
     lights_per_cell, outlines, baked_ao, contact_shadow_steps}` and their builders,
@@ -230,9 +298,8 @@ the semver check):
     rounds: High +0.10 ms GPU, contact shadows 0.05 ms the largest pass; Low +0.01 ms). The
     golden fingerprints were rebaselined deliberately (hero outlines and contact shadows on
     High), two lavapipe runs byte-identical, and a new ember golden covers walls, baked AO
-    and outlines beside walls. A device whose per-stage sampler or sampled-image limit is
-    below the scene's fragment samplers is rejected at selection (a unit test keeps that
-    count within Vulkan's minimum of 16).
+    and outlines beside walls. R3a's per-stage descriptor budget covers R2b's set-3
+    bindings (15 of 16 fragment samplers).
   - No wire, replay, simulation-logic or content-hash change (protocol v41, replay v5, logic
     v8): effects, map visuals and bakes are client-local.
 - **Animation runtime R4b: VAT minions, bone LOD, attachments (AAA roadmap R4, ADR-0012
