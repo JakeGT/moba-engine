@@ -42,6 +42,8 @@ jobs:
         run: cargo +nightly fuzz run vfx -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
       - name: Fuzz grading LUTs
         run: cargo +nightly fuzz run grading -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
+      - name: Fuzz mesh LODs
+        run: cargo +nightly fuzz run mesh_lod -- -max_total_time=${{ inputs.seconds || '120' }} -print_final_stats=1
       - name: Upload crash artifacts
         if: always()
         uses: actions/upload-artifact@v7

@@ -69,9 +69,13 @@ fn tangents(data: &moba_assets::MeshData) -> Vec<[f32; 4]> {
 /// CPU-side interleaved skinned mesh, ready for [`upload_bytes`].
 pub(crate) struct CpuSkinnedMesh {
     pub(crate) vertices: Vec<SkinnedVertex>,
+    /// LOD0's indices, then every baked level's (see [`CpuMesh::lods`]).
     pub(crate) indices: Vec<u32>,
     pub(crate) joint_count: u32,
     pub(crate) has_uvs: bool,
+    pub(crate) lods: MeshLodTable,
+    /// Culling sphere over the clips' sampled poses ([`moba_assets::MeshData::cull_sphere`]).
+    pub(crate) bounds: [f32; 4],
 }
 
 impl CpuSkinnedMesh {
@@ -117,23 +121,67 @@ impl CpuSkinnedMesh {
             indices: base.indices,
             joint_count: u32::try_from(joint_count).ok()?,
             has_uvs: base.has_uvs,
+            lods: base.lods,
+            bounds: data.cull_sphere(),
         })
+    }
+}
+
+/// Levels per mesh: LOD0 plus up to [`moba_assets::MAX_MESH_LODS`] baked levels (R8).
+pub(crate) const MAX_LODS: usize = 1 + moba_assets::MAX_MESH_LODS;
+
+/// One level's index range in the mesh's index buffer and its object-space error.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LodRange {
+    pub(crate) first_index: u32,
+    pub(crate) index_count: u32,
+    /// Deviation from LOD0 in model units (0 for LOD0).
+    pub(crate) error: f32,
+}
+
+/// A mesh's levels (R8, ADR-0018): level 0 is the full mesh, levels `1..count` the baked
+/// index-only levels appended after it in the same index buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MeshLodTable {
+    pub(crate) levels: [LodRange; MAX_LODS],
+    pub(crate) count: u8,
+}
+
+impl MeshLodTable {
+    /// A single level of `index_count` indices.
+    pub(crate) fn single(index_count: u32) -> Self {
+        let mut levels = [LodRange::default(); MAX_LODS];
+        levels[0].index_count = index_count;
+        Self { levels, count: 1 }
+    }
+
+    /// Level `level`, clamped to the coarsest one.
+    pub(crate) fn level(&self, level: usize) -> LodRange {
+        self.levels[level.min(usize::from(self.count.max(1)) - 1)]
     }
 }
 
 /// CPU-side interleaved mesh, ready for [`upload`].
 pub(crate) struct CpuMesh {
     pub(crate) vertices: Vec<Vertex>,
+    /// LOD0's indices, then every baked level's, back to back ([`Self::lods`] has the ranges).
     pub(crate) indices: Vec<u32>,
     /// Whether the UVs are real texture coordinates (a textured material needs them).
     pub(crate) has_uvs: bool,
+    pub(crate) lods: MeshLodTable,
 }
 
 /// Device-local vertex/index buffers.
 pub(crate) struct GpuMesh {
     pub(crate) vertices: GpuBuffer,
     pub(crate) indices: GpuBuffer,
+    /// LOD0's index count (the first `index_count` indices of the buffer).
     pub(crate) index_count: u32,
+    /// Every level's range (R8); level 0 is `0..index_count`.
+    pub(crate) lods: MeshLodTable,
+    /// Model-space bounding sphere `[x, y, z, radius]` for culling (R8, ADR-0018); skinned
+    /// meshes' radius is widened for poses, VAT meshes' covers every baked frame.
+    pub(crate) bounds: [f32; 4],
     /// `0` for a static [`Vertex`] mesh; otherwise the skin's joint count and the vertices
     /// are [`SkinnedVertex`].
     pub(crate) joint_count: u32,
@@ -231,10 +279,12 @@ impl CpuMesh {
                 vertex.tangent = tangent;
             }
         }
+        let lods = MeshLodTable::single(u32::try_from(indices.len()).expect("built-in mesh"));
         Self {
             vertices,
             indices,
             has_uvs: true,
+            lods,
         }
     }
 
@@ -292,22 +342,68 @@ impl CpuMesh {
                 tangent,
             })
             .collect();
+        let (indices, lods) = with_levels(data)?;
         Some(Self {
             vertices,
-            indices: data.indices().to_vec(),
+            indices,
             has_uvs: uvs.is_some(),
+            lods,
         })
     }
 }
 
+/// `data`'s LOD0 indices followed by its baked levels (R8), and their ranges. A level that is
+/// empty, not a triangle list or indexes past the vertices is dropped with every level after
+/// it (`MeshData` already guarantees this; the renderer re-checks because the draws' memory
+/// safety depends on it).
+fn with_levels(data: &moba_assets::MeshData) -> Option<(Vec<u32>, MeshLodTable)> {
+    let vertex_count = data.positions().len();
+    let lod0 = data.indices();
+    let extra: usize = data.lods().iter().map(|level| level.indices().len()).sum();
+    let mut indices = Vec::with_capacity(lod0.len() + extra);
+    indices.extend_from_slice(lod0);
+    let mut table = MeshLodTable::single(u32::try_from(lod0.len()).ok()?);
+    for level in data.lods().iter().take(MAX_LODS - 1) {
+        let level_indices = level.indices();
+        if level_indices.is_empty()
+            || !level_indices.len().is_multiple_of(3)
+            || level_indices
+                .iter()
+                .any(|&index| index as usize >= vertex_count)
+            || !level.error().is_finite()
+        {
+            break;
+        }
+        let slot = usize::from(table.count);
+        table.levels[slot] = LodRange {
+            first_index: u32::try_from(indices.len()).ok()?,
+            index_count: u32::try_from(level_indices.len()).ok()?,
+            error: level.error().max(0.0),
+        };
+        table.count += 1;
+        indices.extend_from_slice(level_indices);
+    }
+    Some((indices, table))
+}
+
+fn sphere_of<T>(vertices: &[T], position: impl Fn(&T) -> [f32; 3]) -> [f32; 4] {
+    let positions: Vec<[f32; 3]> = vertices.iter().map(position).collect();
+    moba_assets::bounding_sphere(&positions)
+}
+
 /// Uploads a static mesh to device-local memory through staging buffers.
 pub(crate) fn upload(device: &DeviceContext, data: &CpuMesh) -> RenderResult<GpuMesh> {
+    let bounds = sphere_of(&data.vertices, |vertex| vertex.position);
     upload_bytes(
         device,
         bytemuck::cast_slice(&data.vertices),
         &data.indices,
-        0,
-        data.has_uvs,
+        MeshShape {
+            joint_count: 0,
+            has_uvs: data.has_uvs,
+            lods: data.lods,
+            bounds,
+        },
     )
 }
 
@@ -320,9 +416,22 @@ pub(crate) fn upload_skinned(
         device,
         bytemuck::cast_slice(&data.vertices),
         &data.indices,
-        data.joint_count,
-        data.has_uvs,
+        MeshShape {
+            joint_count: data.joint_count,
+            has_uvs: data.has_uvs,
+            lods: data.lods,
+            bounds: data.bounds,
+        },
     )
+}
+
+/// What [`upload_bytes`] records about a mesh besides its buffers.
+#[derive(Clone, Copy)]
+struct MeshShape {
+    joint_count: u32,
+    has_uvs: bool,
+    lods: MeshLodTable,
+    bounds: [f32; 4],
 }
 
 /// Uploads raw interleaved vertex bytes and `u32` indices (the R3b water mesh).
@@ -331,7 +440,21 @@ pub(crate) fn upload_raw(
     vertex_bytes: &[u8],
     indices: &[u32],
 ) -> RenderResult<GpuMesh> {
-    upload_bytes(device, vertex_bytes, indices, 0, false)
+    let index_count = u32::try_from(indices.len()).map_err(|_| {
+        crate::RenderError::NoSuitableDevice(String::from("water mesh has too many indices"))
+    })?;
+    upload_bytes(
+        device,
+        vertex_bytes,
+        indices,
+        MeshShape {
+            joint_count: 0,
+            has_uvs: false,
+            lods: MeshLodTable::single(index_count),
+            // Water is drawn whole, never culled by its sphere.
+            bounds: [0.0, 0.0, 0.0, f32::MAX],
+        },
+    )
 }
 
 /// Uploads `bytes` into a new device-local storage buffer read by vertex shaders (the R3b
@@ -351,6 +474,7 @@ pub(crate) fn upload_storage(
         MemoryLocation::CpuToGpu,
     )?;
     staging.write_bytes(0, bytes);
+    crate::memory::count_upload();
     let buffer = GpuBuffer::new(
         device.device.clone(),
         allocator,
@@ -419,8 +543,7 @@ fn upload_bytes(
     device: &DeviceContext,
     vertex_bytes: &[u8],
     indices_data: &[u32],
-    joint_count: u32,
-    has_uvs: bool,
+    shape: MeshShape,
 ) -> RenderResult<GpuMesh> {
     let allocator = device.allocator();
     let index_bytes: &[u8] = bytemuck::cast_slice(indices_data);
@@ -552,11 +675,19 @@ fn upload_bytes(
     drop(vertex_staging);
     drop(index_staging);
 
-    let index_count = u32::try_from(indices_data.len()).expect("index count fits u32");
+    crate::memory::count_upload();
+    let MeshShape {
+        joint_count,
+        has_uvs,
+        lods,
+        bounds,
+    } = shape;
     Ok(GpuMesh {
         vertices,
         indices,
-        index_count,
+        index_count: lods.levels[0].index_count,
+        lods,
+        bounds,
         joint_count,
         has_uvs,
     })

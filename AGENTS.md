@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x8db35a0f5aab5190` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **780 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **810 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -70,7 +70,9 @@ crates/server     headless dedicated server
 crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wire,
                   state-hash, image-check, vulkan-probe, bake-ui-atlas, sample-mesh,
                   texture-bake, teamfight (the R5 VFX evidence replay), vat-bake (R4b
-                  minion VATs), link-proxy (RTT/jitter/loss UDP proxy), grade-bake (LUTs)
+                  minion VATs), link-proxy (RTT/jitter/loss UDP proxy), grade-bake (LUTs),
+                  mesh-bake (R8 meshoptimizer LODs; `--features mesh-bake`),
+                  perf-gate (R8 frame-log budget gate)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
@@ -161,6 +163,9 @@ MOBA_VFX_PREVIEW=nova cargo run -p moba-client        # live-reload effect previ
 scripts/terrain-decal-check.sh                          # terrain decal-cost guard: timing + registers (after decals.glsl/terrain.frag changes; real GPU)
 cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/render-fingerprint.rgb
 cargo run -p moba-tools --bin vulkan-probe
+scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)
+scripts/cull-probe.sh                                 # culling on == off, byte for byte (R8)
+scripts/perf-replay.sh                                # 10-minute replay per tier + perf-gate (R8, real GPU)
 ```
 
 Fuzz and model checking:
@@ -197,7 +202,10 @@ cargo run -p moba-engine --example custom_content
 - CI goldens use lavapipe; local software Vulkan setup is in
   [`docs/dev/software-vulkan.md`](docs/dev/software-vulkan.md).
 - Real GPU frame logging: `MOBA_VSYNC=0 MOBA_FRAME_LOG=/tmp/frames.log` (see
-  [`docs/perf/0007-real-hardware.md`](docs/perf/0007-real-hardware.md)).
+  [`docs/perf/0007-real-hardware.md`](docs/perf/0007-real-hardware.md)); R8 adds
+  `MOBA_FRAME_LOG_FRAMES`, `MOBA_REPLAY_EXIT=1`, `MOBA_GPU_CULL=off` and `MOBA_MESH_LOD=off|<px>`
+  ([perf/0022](docs/perf/0022-r8-scaling-pacing.md)). Assets load before play: a frame log with
+  `locked_uploads` or `locked_pipelines` above 0 is a bug.
 - Linux/NVIDIA evidence exists (RTX 5070 Ti, p95 4.197 ms at 1920×1080). macOS hosted-runner
   p95 is 16.945 ms and Windows hosted runners expose no Vulkan GPU; this is tracked in #9/#127.
 

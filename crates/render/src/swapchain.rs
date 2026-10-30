@@ -18,6 +18,8 @@ pub(crate) struct Swapchain {
     pub(crate) views: Vec<vk::ImageView>,
     pub(crate) render_finished: Vec<Semaphore>,
     pub(crate) transfer_src: bool,
+    /// Bytes accounted for the images (R8, `memory::MemoryClass::Swapchain`).
+    tracked: u64,
 }
 
 impl Swapchain {
@@ -142,6 +144,12 @@ impl Swapchain {
             render_finished.push(semaphore);
         }
 
+        // R8: the WSI owns the images' memory; account an estimate.
+        let tracked = u64::from(extent.width)
+            * u64::from(extent.height)
+            * crate::memory::swapchain_texel_bytes(format)
+            * images.len() as u64;
+        crate::memory::track_alloc(crate::memory::MemoryClass::Swapchain, tracked);
         Ok(Self {
             device: device_context.device.clone(),
             loader,
@@ -152,6 +160,7 @@ impl Swapchain {
             views,
             render_finished,
             transfer_src,
+            tracked,
         })
     }
 
@@ -214,6 +223,7 @@ impl Drop for Swapchain {
         }
         // SAFETY: the swapchain belongs to this device and is destroyed once.
         unsafe { self.loader.destroy_swapchain(self.handle, None) };
+        crate::memory::track_free(crate::memory::MemoryClass::Swapchain, self.tracked);
     }
 }
 

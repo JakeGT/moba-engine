@@ -423,6 +423,62 @@ match. Visuals never affect the simulation, the state hash or server authority. 
 override `MOBA_HERO_MODELS=hero=model,...` (dev only) replaces the catalogue's model for the
 heroes it matches. Map visuals resolve the same way, to a descriptor (next section).
 
+### Mesh LODs and per-tier budgets
+
+**LOD files** (R8, [ADR-0018](adr/0018-culling-lods-memory.md)). A model may have up to three
+coarser levels in `models/<model>.lod` beside its `.glb`. Bake them with meshoptimizer:
+
+```text
+$ cargo run --release -p moba-tools --features mesh-bake --bin mesh-bake -- lod content/models/knight.glb
+$ scripts/bake-mesh-lods.sh        # every content/models/*.glb
+$ cargo run -p moba-tools --features mesh-bake --bin mesh-bake -- info content/models/knight.glb
+```
+
+The default ratios are 50 %, 25 % and 12.5 % of the triangles (`--ratios 0.5,0.25,0.125`); a
+level is kept only if it removes at least 20 % of the previous one. The baker (behind the
+`mesh-bake` feature, so plain workspace builds never compile meshoptimizer) may collapse
+across attribute seams, which flat-shaded meshes need (every edge is a seam), but weights each
+collapse by how far it moves the normals and, on a textured mesh, the UVs, so it avoids
+smearing the texture. `--protect-uv-seams` locks every UV-seam vertex instead (exact seams,
+but a mesh whose faces are all UV islands gets no levels); `--keep-seams` turns seam collapses
+off for smooth-shaded meshes; `--lock-border` keeps open borders in place. Each level's error
+is measured against the full mesh (and, for a skinned mesh, over poses sampled from its
+clips), so a level that folds at a joint is not picked up close. A level is an index list over the model's own
+vertices, so one file serves the static mesh, the GPU-skinned mesh (and every bone-LOD
+reduced skin) and a VAT minion. The file records the mesh's hash: **re-bake after changing the
+`.glb`**. A stale or malformed file is logged (`[lod] ... drawing LOD0 only`) and ignored; a
+missing one means no levels. The renderer draws, per unit and view, the coarsest level whose
+error projected to the screen is within the tier's tolerance (Low 2 px, Medium 1, High 0.75,
+Ultra 0.5); `MOBA_MESH_LOD=off` draws LOD0 everywhere, `MOBA_MESH_LOD=<px>` overrides the
+tolerance.
+
+**Budgets.** `content-check` reports every `[[assets.units]]` model against each quality tier
+(`moba_assets::TIER_BUDGETS`):
+
+| Tier | Triangles per model | Joints | Texture bytes per model | Texture VRAM | Total VRAM |
+|---|---|---|---|---|---|
+| Low | 8 k | 32 | 4 MiB | 384 MiB | 1 GiB |
+| Medium | 16 k | 48 | 16 MiB | 1 GiB | 2 GiB |
+| High | 32 k | 64 | 32 MiB | 2.5 GiB | 4 GiB |
+| Ultra | 64 k | 64 | 64 MiB | 4 GiB | 6 GiB |
+
+```text
+budgets    model: triangles (LOD0/levels), joints, texture KiB; low medium high ultra
+  sentinel: triangles=462/230/114/56 joints=0 texture_kib=299; fits fits fits fits
+```
+
+`fits` is within every budget; `lod<N>` means LOD0 is over the triangle budget and the tier
+draws baked level N as its finest; `over` is a triangle count no level fixes, or too many
+joints or texture bytes. Over a tier is a warning (the model still loads; a texture that does
+not fit the tier's texture VRAM uploads without its largest mips, logged as `[vram]`); over
+Ultra is an error. `--json` adds a `budgets` array (`model`, `triangles`, `joints`,
+`texture_bytes`, `tiers`).
+
+**Load, never mid-match.** Every model, texture and effect a match uses is loaded when the
+match (or the local view) starts. The client counts any upload or pipeline build after the
+first frame of play (`locked_uploads`, `locked_pipelines` in the frame log and the `[vram]`
+line); both must stay 0.
+
 ### Map visuals
 
 A map's visuals name (its explicit `visuals`, else the theme's `map-<theme>`) resolves on each

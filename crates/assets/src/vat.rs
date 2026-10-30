@@ -471,6 +471,34 @@ impl VatDescriptor {
         Ok(())
     }
 
+    /// A bounding sphere `[x, y, z, radius]` over every baked frame's model-space positions
+    /// (R8 culling, ADR-0018): exact for any frame the renderer can show. `None` unless
+    /// `texture` passes [`Self::check_texture`], or a position is not finite.
+    #[must_use]
+    pub fn position_bounds(&self, texture: &TextureData) -> Option<[f32; 4]> {
+        self.check_texture(texture).ok()?;
+        let texels = (self.frame_count as usize).checked_mul(self.vertex_count as usize)?;
+        let data = texture.data();
+        if data.len() < texels.checked_mul(8)? {
+            return None;
+        }
+        let mut positions = Vec::with_capacity(texels);
+        for texel in data.as_chunks::<8>().0.iter().take(texels) {
+            let lane = |index: usize| {
+                crate::texture::f32_from_f16(u16::from_le_bytes([
+                    texel[index * 2],
+                    texel[index * 2 + 1],
+                ]))
+            };
+            let position = [lane(0), lane(1), lane(2)];
+            if position.iter().any(|value| !value.is_finite()) {
+                return None;
+            }
+            positions.push(position);
+        }
+        Some(crate::mesh::bounding_sphere(&positions))
+    }
+
     /// Checks that `mesh` is the mesh the texture was baked from (vertex count and
     /// [`mesh_hash`]).
     ///
@@ -637,6 +665,90 @@ pub fn bake_vat(
         playback,
     };
     Ok((texture, descriptor))
+}
+
+/// Frames per second at which [`for_each_sampled_pose`] samples clips by default.
+pub const POSE_SAMPLE_FPS: f32 = 15.0;
+/// Default cap on the poses [`for_each_sampled_pose`] visits (spread evenly over every clip).
+pub const MAX_POSE_SAMPLES: usize = 256;
+/// A skinned mesh's culling radius is at least this multiple of its bind-pose radius (R8):
+/// the floor covers what clip sampling cannot see (spring bones, additive layers, blends
+/// between clips). See [`MeshData::cull_sphere`].
+pub const SKINNED_CULL_FLOOR: f32 = 2.0;
+/// Margin on the farthest sampled-pose vertex, for motion between two samples.
+pub(crate) const POSE_SAMPLE_MARGIN: f32 = 1.05;
+
+/// Skins `mesh` on the CPU (the GPU skinning formula) in sampled poses of every clip of its
+/// skeleton, and calls `visit` with each pose's vertex positions: the bind pose first, then
+/// every clip sampled at `fps` from its first to its last key. More than `max_poses` clip
+/// frames are thinned evenly (always keeping each clip's first and last frame when the cap
+/// allows), so the cost is bounded by `max_poses` × vertices. Load-time and offline analysis
+/// only (R8: culling bounds, LOD error): it allocates one position buffer.
+///
+/// Returns the number of poses visited; 0 (and no call) for a mesh without a skin.
+pub fn for_each_sampled_pose(
+    mesh: &MeshData,
+    fps: f32,
+    max_poses: usize,
+    mut visit: impl FnMut(&[[f32; 3]]),
+) -> usize {
+    let Some(skin) = mesh.skin() else {
+        return 0;
+    };
+    visit(mesh.positions());
+    let skeleton = skin.skeleton();
+    let joints = skeleton.joint_count();
+    let fps = if fps.is_finite() {
+        fps.clamp(1.0, 120.0)
+    } else {
+        POSE_SAMPLE_FPS
+    };
+    // (clip, time) of every frame, then an even subset of at most `max_poses`.
+    let frames: Vec<(usize, f32)> = skeleton
+        .clips()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, clip)| {
+            let count = clip_frames(clip.duration(), fps, false);
+            let duration = clip.duration().max(0.0);
+            (0..count).map(move |frame| {
+                let time = if count > 1 {
+                    duration * frame as f32 / (count - 1) as f32
+                } else {
+                    0.0
+                };
+                (index, time)
+            })
+        })
+        .collect();
+    let take = frames.len().min(max_poses);
+    let mut pose = Pose::default();
+    let mut model_space = [moba_core::math::Mat4::IDENTITY; MAX_JOINTS];
+    let mut matrices: [JointMatrix; MAX_JOINTS] = [[[0.0; 4]; 3]; MAX_JOINTS];
+    let mut posed = vec![[0.0f32; 3]; mesh.vertex_count()];
+    for pick in 0..take {
+        let frame = if take > 1 {
+            pick * (frames.len() - 1) / (take - 1)
+        } else {
+            0
+        };
+        let (clip, time) = frames[frame];
+        skeleton.sample_clip(clip, time, ClipWrap::Clamp, &mut pose);
+        skeleton.model_transforms(&pose, &mut model_space[..joints]);
+        skeleton.skinning_matrices(&model_space[..joints], &mut matrices[..joints]);
+        for (out, ((position, normal), (lanes, weights))) in posed.iter_mut().zip(
+            mesh.positions()
+                .iter()
+                .zip(mesh.normals())
+                .zip(skin.joints().iter().zip(skin.weights())),
+        ) {
+            let (skinned, _) =
+                skin_vertex(&matrices[..joints], *position, *normal, *lanes, *weights);
+            *out = skinned.to_array();
+        }
+        visit(&posed);
+    }
+    1 + take
 }
 
 /// Skins one vertex like `skinned.vert`: the weight-blended joint matrix (normalised by the
@@ -1142,6 +1254,123 @@ mod tests {
         .expect("bake")
     }
 
+    /// `mesh()` with a root-motion clip `lunge` that carries the whole rig `reach` m along +X.
+    fn lunging(reach: f32) -> MeshData {
+        let base = mesh();
+        let skin = base.skin().expect("skinned");
+        let skeleton = skin.skeleton();
+        let lunge = Track::new(
+            0,
+            TrackPath::Translation,
+            Interpolation::Linear,
+            vec![0.0, 0.5],
+            vec![[0.0; 4], [reach, 0.0, 0.0, 0.0]],
+        )
+        .expect("track");
+        let mut clips = skeleton.clips().to_vec();
+        clips.push(
+            AnimationClip::new(vec![lunge])
+                .expect("clip")
+                .with_name("lunge")
+                .expect("name"),
+        );
+        let skeleton = Skeleton::new(
+            skeleton.parents().to_vec(),
+            skeleton.rest().to_vec(),
+            vec![Mat4::IDENTITY; 2],
+            vec![Mat4::IDENTITY, Mat4::from_translation(-Vec3::Y)],
+            None,
+        )
+        .expect("skeleton")
+        .with_clips(clips)
+        .expect("clips");
+        let skin =
+            MeshSkin::new(skin.joints().to_vec(), skin.weights().to_vec(), skeleton).expect("skin");
+        MeshData::new(
+            base.positions().to_vec(),
+            base.normals().to_vec(),
+            base.indices().to_vec(),
+        )
+        .expect("mesh")
+        .with_skin(skin)
+        .expect("skinned")
+    }
+
+    /// R8 review: a hero whose clips reach past twice its bind radius (root motion, long
+    /// reach) must still be inside its culling sphere in every sampled pose, or it pops out
+    /// of view and loses its shadow; one whose clips stay close keeps the 2x floor, and a
+    /// reduced (bone-LOD) skin, whose skeleton has no clips, keeps the full mesh's sphere.
+    #[test]
+    fn skinned_cull_spheres_contain_every_sampled_pose() {
+        let [x, y, z, bind] = mesh().bounding_sphere();
+        // No clips to sample: the floor applies.
+        let base = mesh();
+        let skin = base.skin().expect("skinned");
+        let still_skeleton = Skeleton::new(
+            skin.skeleton().parents().to_vec(),
+            skin.skeleton().rest().to_vec(),
+            vec![Mat4::IDENTITY; 2],
+            vec![Mat4::IDENTITY, Mat4::from_translation(-Vec3::Y)],
+            None,
+        )
+        .expect("skeleton");
+        let still = MeshData::new(
+            base.positions().to_vec(),
+            base.normals().to_vec(),
+            base.indices().to_vec(),
+        )
+        .expect("mesh")
+        .with_skin(
+            MeshSkin::new(
+                skin.joints().to_vec(),
+                skin.weights().to_vec(),
+                still_skeleton,
+            )
+            .expect("skin"),
+        )
+        .expect("skinned");
+        assert_eq!(still.cull_sphere(), [x, y, z, bind * SKINNED_CULL_FLOOR]);
+        // The swing clip turns a vertex 1.66 × the bind radius out: measured, not floored.
+        assert!(base.cull_sphere()[3] > bind * SKINNED_CULL_FLOOR);
+        for reach in [3.0f32, 10.0, 40.0] {
+            let lunging = lunging(reach);
+            let sphere = lunging.cull_sphere();
+            assert!(sphere[3] > bind * SKINNED_CULL_FLOOR, "reach {reach}");
+            let mut poses = 0;
+            let visited =
+                for_each_sampled_pose(&lunging, POSE_SAMPLE_FPS, MAX_POSE_SAMPLES, |positions| {
+                    poses += 1;
+                    for position in positions {
+                        let distance = (0..3)
+                            .map(|axis| (position[axis] - sphere[axis]).powi(2))
+                            .sum::<f32>()
+                            .sqrt();
+                        assert!(
+                            distance <= sphere[3],
+                            "reach {reach}: {position:?} outside {sphere:?}"
+                        );
+                    }
+                });
+            assert_eq!(visited, poses);
+            assert!(poses > 3, "bind pose plus every clip's frames");
+            // The lunge's end pose: the farthest vertex is about `reach` m from the centre.
+            assert!(sphere[3] >= reach, "reach {reach}: radius {}", sphere[3]);
+            let reduced = crate::SkinLod::build(&lunging, 1, 1, &[]).expect("reduced skin");
+            assert_eq!(reduced.mesh().cull_sphere(), sphere, "reach {reach}");
+        }
+        let unskinned = MeshData::new(
+            mesh().positions().to_vec(),
+            mesh().normals().to_vec(),
+            mesh().indices().to_vec(),
+        )
+        .expect("mesh");
+        assert_eq!(unskinned.cull_sphere(), [x, y, z, bind]);
+        assert_eq!(
+            for_each_sampled_pose(&unskinned, 15.0, 16, |_| panic!("no skin")),
+            0
+        );
+    }
+
     #[test]
     fn bakes_skinned_positions_and_normals() {
         let (texture, descriptor) = bake();
@@ -1166,6 +1395,19 @@ mod tests {
         assert_eq!(normal[3], 0.0);
         // The first idle frame is the rest pose.
         assert_eq!(texel(&texture, 1)[..3], [1.0, 1.0, 0.0]);
+        // R8: the culling sphere covers every frame, the rest pose and the death pose's
+        // (0, 2, 0) included, and a texture of another size has none.
+        let [cx, cy, cz, radius] = descriptor.position_bounds(&texture).expect("bounds");
+        for frame in 0..16 {
+            for vertex in 0..3 {
+                let pos = texel(&texture, frame * 3 + vertex);
+                let distance =
+                    ((pos[0] - cx).powi(2) + (pos[1] - cy).powi(2) + (pos[2] - cz).powi(2)).sqrt();
+                assert!(distance <= radius + 1e-4, "frame {frame} vertex {vertex}");
+            }
+        }
+        let small = TextureData::new(TextureFormat::Rgba16Float, 1, 1, &[vec![0; 8]]).expect("1x1");
+        assert_eq!(descriptor.position_bounds(&small), None);
     }
 
     #[test]

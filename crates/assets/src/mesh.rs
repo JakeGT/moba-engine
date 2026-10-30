@@ -91,6 +91,11 @@ pub struct MeshData {
     uvs: Option<Vec<[f32; 2]>>,
     tangents: Option<Vec<[f32; 4]>>,
     skin: Option<MeshSkin>,
+    /// Baked index-only levels of detail (R8, ADR-0018), LOD1 first; empty without a `.lod`.
+    pub(crate) lods: Vec<crate::mesh_lod::MeshLod>,
+    /// A culling sphere computed from another mesh with the same vertices (a reduced skin's
+    /// full mesh, whose skeleton has the clips); see [`Self::cull_sphere`].
+    pub(crate) cull_sphere: Option<[f32; 4]>,
 }
 
 impl MeshData {
@@ -144,6 +149,8 @@ impl MeshData {
             uvs: None,
             tangents: None,
             skin: None,
+            lods: Vec::new(),
+            cull_sphere: None,
         })
     }
 
@@ -248,6 +255,79 @@ impl MeshData {
         Ok(self)
     }
 
+    /// Attaches baked levels of detail ([`crate::MeshLods`], validated against this mesh when
+    /// they were built or parsed). They index this mesh's vertices, so they survive
+    /// [`Self::with_skin`], UVs and tangents, and a reduced skin keeps them
+    /// ([`crate::SkinLod`]).
+    #[must_use]
+    pub fn with_lods(mut self, lods: crate::MeshLods) -> Self {
+        let vertex_count = self.positions.len();
+        // `MeshLods` is only built against a mesh with this vertex count; re-check so a level
+        // set from another mesh can never index past the vertices.
+        if lods
+            .levels()
+            .iter()
+            .flat_map(crate::MeshLod::indices)
+            .all(|&index| (index as usize) < vertex_count)
+        {
+            self.lods = lods.into_levels();
+        }
+        self
+    }
+
+    /// The baked levels of detail below LOD0 (LOD1 first); empty without any.
+    #[must_use]
+    pub fn lods(&self) -> &[crate::mesh_lod::MeshLod] {
+        &self.lods
+    }
+
+    /// A bounding sphere `[centre x, y, z, radius]` of the positions: the AABB's centre and
+    /// the distance to the farthest vertex.
+    #[must_use]
+    pub fn bounding_sphere(&self) -> [f32; 4] {
+        bounding_sphere(&self.positions)
+    }
+
+    /// The sphere `[centre x, y, z, radius]` the renderer culls this mesh with (R8,
+    /// ADR-0018 §1). A static mesh's is its [`Self::bounding_sphere`]. A skinned mesh's is
+    /// centred on the bind-pose sphere, with the radius
+    /// `max(farthest vertex over every clip's sampled poses × 1.05, bind radius ×`
+    /// [`crate::SKINNED_CULL_FLOOR`]`)`: a clip with root motion or long reach widens it, and
+    /// the floor covers spring bones, additive layers and clip blends, which sampling the
+    /// clips does not see. Skins every vertex in up to [`crate::MAX_POSE_SAMPLES`] poses, so
+    /// call it once, at load.
+    #[must_use]
+    pub fn cull_sphere(&self) -> [f32; 4] {
+        if let Some(sphere) = self.cull_sphere {
+            return sphere;
+        }
+        let [x, y, z, bind] = self.bounding_sphere();
+        if self.skin.is_none() {
+            return [x, y, z, bind];
+        }
+        let centre = [x, y, z];
+        let mut farthest = 0.0f32;
+        crate::for_each_sampled_pose(
+            self,
+            crate::POSE_SAMPLE_FPS,
+            crate::MAX_POSE_SAMPLES,
+            |positions| {
+                for position in positions {
+                    let distance = (0..3)
+                        .map(|axis| (position[axis] - centre[axis]).powi(2))
+                        .sum::<f32>()
+                        .sqrt();
+                    if distance.is_finite() {
+                        farthest = farthest.max(distance);
+                    }
+                }
+            },
+        );
+        let radius =
+            (farthest * crate::vat::POSE_SAMPLE_MARGIN).max(bind * crate::SKINNED_CULL_FLOOR);
+        [x, y, z, radius]
+    }
+
     /// The skin, if the mesh is skinned.
     #[must_use]
     pub fn skin(&self) -> Option<&MeshSkin> {
@@ -297,6 +377,32 @@ impl MeshData {
         }
         (min, max)
     }
+}
+
+/// A bounding sphere `[x, y, z, radius]` of `positions` (the AABB's centre, radius to the
+/// farthest point); a zero sphere at the origin for no points.
+#[must_use]
+pub fn bounding_sphere(positions: &[[f32; 3]]) -> [f32; 4] {
+    if positions.is_empty() {
+        return [0.0; 4];
+    }
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    let centre = scale(add(min, max), 0.5);
+    let radius_squared = positions
+        .iter()
+        .map(|position| {
+            let offset = sub(*position, centre);
+            dot(offset, offset)
+        })
+        .fold(0.0f32, f32::max);
+    [centre[0], centre[1], centre[2], radius_squared.sqrt()]
 }
 
 type V3 = [f32; 3];

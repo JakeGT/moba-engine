@@ -468,6 +468,8 @@ impl DeviceContext {
         let (count, time) = self.pipeline_builds.get();
         self.pipeline_builds
             .set((count + 1, time + started.elapsed()));
+        // Counted as a mid-match build while uploads are locked (R8, ADR-0018 §4).
+        crate::memory::count_pipelines(1);
         match pipelines {
             Ok(mut pipelines) => pipelines
                 .pop()
@@ -560,6 +562,8 @@ impl DeviceContext {
         let (count, time) = self.pipeline_builds.get();
         self.pipeline_builds
             .set((count + 1, time + started.elapsed()));
+        // Counted as a mid-match build while uploads are locked (R8, ADR-0018 §4).
+        crate::memory::count_pipelines(1);
         match pipelines {
             Ok(mut pipelines) => pipelines
                 .pop()

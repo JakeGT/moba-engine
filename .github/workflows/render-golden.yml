@@ -18,7 +18,9 @@ jobs:
   renderer-gate:
     name: renderer-gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Twelve lavapipe captures, the outline probe and the R8 culling probe's five extra
+    # captures run in sequence; the limit is a safety margin above that.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -41,6 +43,7 @@ jobs:
               - 'tests/golden/**'
               - '.github/workflows/render-golden.yml'
               - 'scripts/outline-probe.sh'
+              - 'scripts/cull-probe.sh'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
@@ -69,6 +72,7 @@ jobs:
         env:
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE: render-actual.ppm
+          MOBA_FRAME_LOG: render.frames
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -181,6 +185,7 @@ jobs:
           MOBA_LOCAL_CAMERA_DISTANCE: "40"
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE: render-ultra-actual.ppm
+          MOBA_FRAME_LOG: render-ultra.frames
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare Ultra fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -203,6 +208,7 @@ jobs:
           MOBA_RENDER_SCALE: "0.75"
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE: render-low-actual.ppm
+          MOBA_FRAME_LOG: render-low.frames
           MOBA_CAPTURE_FRAME: "90"
       - name: Compare Low scaled fingerprint
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -227,7 +233,7 @@ jobs:
             > overview-capture.log 2>&1 || { cat overview-capture.log; exit 1; }
           test -s render-overview-actual.ppm
           MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_PREVIEW_CAMERA=-0.7,0.12,170 \
-            MOBA_CAPTURE=render-horizon-actual.ppm \
+            MOBA_CAPTURE=render-horizon-actual.ppm MOBA_FRAME_LOG=render-horizon.frames \
             timeout 180 xvfb-run -a ./target/release/moba-client \
             > horizon-capture.log 2>&1 || { cat horizon-capture.log; exit 1; }
           test -s render-horizon-actual.ppm
@@ -243,6 +249,20 @@ jobs:
             cat $view-fingerprint.log
           done
           exit $status
+      # Culling never changes what a player sees (R8, ADR-0018 §1): five scenes (the preview,
+      # the horizon view, Ultra with VAT minions, Low with hull outlines, the networked match)
+      # must be byte-identical with culling on and MOBA_GPU_CULL=off, and something must have
+      # been culled. For the four local scenes the culled images are the golden captures
+      # above (same environment, culling on by default, with frame logs), so the probe adds
+      # only their culling-off captures; the networked scene captures its own pair at
+      # 640x360 (its HUD can differ by a few pixels between separate runs). Any validation
+      # message fails.
+      - name: Culling exactness probe
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/cull-probe.sh ./target/release/moba-client cull-probe
+        env:
+          RUN: xvfb-run -a
+          CULL_PROBE_REUSE: .
       # R3b environment coverage (ADR-0017): the showcase river close up from a low camera on
       # the default tier (full water with refraction, foliage, reeds, the carved bed), on Low
       # (simple water, thinned foliage) and on Ultra through the reeds on the bank (4x MSAA
@@ -307,6 +327,8 @@ jobs:
             ember-capture.log
             ember-fingerprint.log
             outline-probe/
+            cull-probe/
+            render*.frames
             render-ultra-actual.ppm
             render-ultra-diff.ppm
             ultra-capture.log

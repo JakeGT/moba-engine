@@ -22,6 +22,7 @@ use gpu_allocator::MemoryLocation;
 use moba_platform::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::cull::{CullMode, CullStats, LodConfig};
 use crate::device::DeviceContext;
 use crate::dynres::{self, DynamicResolution};
 use crate::environment::{DecalUpload, EnvironmentConfig, FoliageData, WaterData, WaterMode};
@@ -37,14 +38,15 @@ use crate::lighting::{
 };
 use crate::lights::LightStats;
 use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, TextureId};
+use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
 use crate::passes::fog::FogPass;
 use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
-    MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve, SceneTargets,
-    ShadowPipelineSpec, ShadowTarget, ViewBudget, WaterTargets,
+    CullSettings, MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve,
+    SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget, WaterTargets,
 };
 use crate::passes::vfx::{VfxPass, VfxTargets};
 use crate::pipeline_cache::PipelineCacheState;
@@ -154,6 +156,14 @@ pub struct RenderConfig {
     /// `1..=`[`MAX_VISION_SOURCES`](crate::MAX_VISION_SOURCES) and to the device's
     /// `maxStorageBufferRange / 16`.
     pub max_vision_sources: usize,
+    /// Per-view frustum culling of units and terrain chunks (R8, ADR-0018 §1). Default
+    /// [`CullMode::Cpu`]; [`CullMode::Off`] draws everything and is the reference a culled
+    /// frame must equal byte for byte.
+    pub culling: CullMode,
+    /// Mesh level-of-detail selection (R8, ADR-0018 §3). `None` (the default) uses
+    /// [`LodConfig::for_tier`] of [`RenderConfig::quality_tier`]; [`LodConfig::OFF`] draws
+    /// every mesh at LOD0.
+    pub mesh_lod: Option<LodConfig>,
     /// Decal, foliage and water features (ADR-0017). `None` (the default) uses
     /// [`EnvironmentConfig::for_tier`] of [`RenderConfig::quality_tier`].
     pub environment: Option<EnvironmentConfig>,
@@ -182,6 +192,8 @@ impl Default for RenderConfig {
             post: None,
             world: None,
             max_vision_sources: DEFAULT_MAX_VISION_SOURCES,
+            culling: CullMode::Cpu,
+            mesh_lod: None,
             environment: None,
         }
     }
@@ -331,6 +343,27 @@ impl RenderConfig {
     pub const fn with_world(mut self, world: Option<WorldConfig>) -> Self {
         self.world = world;
         self
+    }
+
+    /// Returns this config with [`RenderConfig::culling`] set.
+    #[must_use]
+    pub const fn with_culling(mut self, culling: CullMode) -> Self {
+        self.culling = culling;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::mesh_lod`] set.
+    #[must_use]
+    pub const fn with_mesh_lod(mut self, lod: Option<LodConfig>) -> Self {
+        self.mesh_lod = lod;
+        self
+    }
+
+    /// The level selection this config asks for: [`RenderConfig::mesh_lod`], else the tier's.
+    #[must_use]
+    pub fn effective_mesh_lod(&self) -> LodConfig {
+        self.mesh_lod
+            .unwrap_or_else(|| LodConfig::for_tier(self.quality_tier))
     }
 
     /// Returns this config with [`RenderConfig::max_vision_sources`] set.
@@ -504,6 +537,8 @@ impl Renderer {
     pub fn new(window: &Window, mut config: RenderConfig) -> RenderResult<Self> {
         assert!(config.max_instances > 0, "max_instances must be positive");
         let started = Instant::now();
+        // R8: a new renderer loads its assets unlocked, whatever a previous one left.
+        crate::memory::begin_renderer(config.quality_tier.budget().total_bytes);
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
         // SAFETY: ash-window returns the static list of surface extensions for this
@@ -719,10 +754,13 @@ impl Renderer {
         let mut views = [ViewBudget {
             max_instances: OFFSCREEN_MAX_INSTANCES,
             max_bones: OFFSCREEN_MAX_BONES,
+            casters: false,
         }; 1 + UI_IMAGE_SLOTS];
+        // The main view also builds the shadow caster list (R8) when there is a shadow map.
         views[0] = ViewBudget {
             max_instances: config.max_instances,
             max_bones: config.max_bones,
+            casters: shadow.is_some(),
         };
         let (default_shadow_format, shadow_linear) = shadow_format.unwrap_or((depth_format, false));
         let mut lighting = LightingResources::new(
@@ -775,6 +813,11 @@ impl Renderer {
                 hull: lighting_config.outlines == OutlineMode::Hull,
             },
             config.skinning,
+            CullSettings {
+                mode: config.culling,
+                lod: config.effective_mesh_lod(),
+                model_triangles: config.quality_tier.budget().model_triangles,
+            },
             environment_config,
         )?;
         config.max_bones = scene.max_bones();
@@ -942,12 +985,13 @@ impl Renderer {
         unsafe { self.device.device.device_wait_idle() }?;
         let crate::terrain::TerrainGpu {
             mesh,
+            chunks,
             splat,
             albedo,
             normal,
             block,
         } = gpu;
-        self.scene.set_terrain_mesh(Some(mesh));
+        self.scene.set_terrain_mesh(Some((mesh, chunks)));
         let images = TerrainImages {
             splat,
             albedo,
@@ -1483,11 +1527,18 @@ impl Renderer {
     /// 8-bit equivalent on the CPU when the device cannot sample them or
     /// [`RenderConfig::compressed_textures`] is off. Up to [`MAX_TEXTURES`](crate::MAX_TEXTURES).
     ///
+    /// The quality tier's texture budget (R8, ADR-0018 §4) applies: a texture that does not
+    /// fit what is left of it is uploaded without its largest mip levels (counted in
+    /// [`MemoryStats::degraded_textures`] and logged), never refused while a smaller level
+    /// fits.
+    ///
     /// # Errors
     /// [`RenderError::TooManyTextures`], [`RenderError::InvalidTexture`] when the format cannot
-    /// be sampled even after decoding, otherwise allocation or Vulkan errors.
+    /// be sampled even after decoding, [`RenderError::OverBudget`] when not even its smallest
+    /// level fits the texture budget, otherwise allocation or Vulkan errors.
     pub fn register_texture(&mut self, data: &crate::TextureData) -> RenderResult<TextureId> {
-        self.materials.register_texture(&self.device, data)
+        let budget = self.config.quality_tier.budget().texture_bytes;
+        self.materials.register_texture(&self.device, data, budget)
     }
 
     /// Creates materials. The textured ones get a descriptor set each, from one descriptor
@@ -1538,6 +1589,44 @@ impl Renderer {
     #[must_use]
     pub fn pipeline_stats(&self) -> PipelineStats {
         self.pipeline_stats
+    }
+
+    /// What the main view culled and which mesh levels it drew in the latest frame (R8).
+    #[must_use]
+    pub fn cull_stats(&self) -> CullStats {
+        self.scene.cull_stats()
+    }
+
+    /// Device memory in use by class against the tier's budgets, and the upload counters
+    /// (R8, ADR-0018 §4).
+    #[must_use]
+    pub fn memory_stats(&self) -> MemoryStats {
+        let reserved = self
+            .device
+            .allocator()
+            .lock()
+            .map_or(0, |allocator| allocator.capacity());
+        crate::memory::stats(self.config.quality_tier.budget(), reserved)
+    }
+
+    /// Whether uploads are locked now (cheap: no allocator query, unlike
+    /// [`Self::memory_stats`]).
+    #[must_use]
+    pub fn uploads_locked(&self) -> bool {
+        crate::memory::locked()
+    }
+
+    /// Marks the start of the match: from now until [`Self::unlock_uploads`] every asset
+    /// upload and pipeline build is counted in [`MemoryStats::locked_uploads`] /
+    /// [`MemoryStats::locked_pipelines`] and the first is logged. Uploads still work: the
+    /// lock is evidence that nothing loads mid-match, not a gate (ADR-0018 §4).
+    pub fn lock_uploads(&mut self) {
+        crate::memory::set_locked(true);
+    }
+
+    /// Ends the locked period (the match ended, or content reloads on purpose).
+    pub fn unlock_uploads(&mut self) {
+        crate::memory::set_locked(false);
     }
 
     /// Dev builds: rebuilds the scene and post pipelines (every permutation) from
@@ -1913,6 +2002,7 @@ impl Renderer {
             &frame_lighting,
             &world_frame,
             self.render_extent,
+            self.extents.render.height,
         )?;
         // R3b: this frame's decals (enemy telegraphs first) and the environment block.
         let environment = self.scene.environment().config();
@@ -1962,6 +2052,7 @@ impl Renderer {
                 &view_lighting,
                 &WorldFrame::OFFSCREEN,
                 extent,
+                extent.height,
             )?;
         }
         self.ui.prepare(frame_index, ui)?;
@@ -2757,6 +2848,7 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
+        crate::memory::set_locked(false);
         if let Some(path) = &self.config.pipeline_cache
             && let Err(error) = self.device.save_pipeline_cache(path)
         {

@@ -215,6 +215,13 @@ R2b (ADR-0016) added dynamic lights, outlines, baked AO and contact shadows: `Po
 `Renderer::{set_baked_ao, clear_baked_ao, has_baked_ao}`), `MAX_CONTACT_SHADOW_STEPS` and
 `LightingConfig::{max_lights, lights_per_cell, outlines, baked_ao, contact_shadow_steps}`
 with a `with_*` each.
+R8 (ADR-0018) added culling, mesh LODs and memory budgets: `CullMode` (`Off`, `Cpu`; `name`,
+`from_name`), `LodConfig` (`OFF`, `for_tier`, `with_tolerance`), `CullStats`
+(`Renderer::cull_stats`; `dropped`), `MemoryStats` (`total_bytes`, `over_budget`,
+`swapchain_bytes`, `reserved_bytes`; `Renderer::memory_stats`),
+`Renderer::{lock_uploads, unlock_uploads, uploads_locked}`, `RenderConfig::{culling, mesh_lod}` with
+`with_culling`/`with_mesh_lod` and `effective_mesh_lod`, `QualityTier::budget` and
+`RenderError::OverBudget`.
 
 R3b (ADR-0017) added decals, foliage and water: `Decal` (`new` + `with_role`, `with_style`,
 `with_colors`, `with_angle`, `with_width`, `with_progress`, `with_fade`, `with_yaw`,
@@ -235,7 +242,7 @@ clear_water, has_water, decals_dropped}` and `RenderError::InvalidWater`.
 - `#[non_exhaustive]` enums (R1b): `PipelineCacheState`, `PipelineCacheRejection`; (R2a):
   `ShadowFilter`; (R5): `ParticleShape`, `ParticleBlend`, `ParticleRole`; (R6):
   `AntiAliasing`, `UpscaleFilter`; (R2b): `OutlineMode`; (R3b): `DecalShape`, `DecalStyle`,
-  `DecalRole`, `WaterMode`.
+  `DecalRole`, `WaterMode`; (R8): `CullMode` (a GPU-driven variant may be added).
 - `#[non_exhaustive]` structs (R2a): `LightingConfig` (`for_tier`/`Default` + `with_*`) and
   `SceneLighting` (`DEFAULT`/`Default` + `with_*`).
 - `#[non_exhaustive]` structs (R5): `ParticleSpawn` (public fields, built with `new` and
@@ -320,6 +327,15 @@ readability check), `grading_path`, `GRADING_DIR`, `MIN_GRADING_LUT_SIZE`/
 `MAX_GRADING_LUT_SIZE`/`MAX_GRADING_LUT_BYTES`, and the readability rule's
 `READABILITY_TEAMS`, `MAX_TEAM_HUE_SHIFT`, `MIN_TEAM_CHROMA`, `MIN_TEAM_HUE_SEPARATION`; `GradingLut`, `GradingLutError` and `MapPost`
 are `#[non_exhaustive]`).
+R8's additions (ADR-0018): mesh LODs and tier budgets: `MeshLods` (`new`, `parse`, `to_bytes`,
+`levels`, `into_levels`), `MeshLod` (`error`, `indices`, `triangle_count`), `LodError`
+(`#[non_exhaustive]`), `MAX_MESH_LODS`, `MAX_LOD_FILE_BYTES`, `lod_path`, `load_lods_for`,
+`load_glb_file_with_lods` (`glb`), `MeshData::{with_lods, lods, bounding_sphere, cull_sphere}`,
+the free `bounding_sphere`, `for_each_sampled_pose` with `POSE_SAMPLE_FPS`, `MAX_POSE_SAMPLES`
+and `SKINNED_CULL_FLOOR`, `VatDescriptor::position_bounds`, `TierBudget`, `TIER_BUDGETS`,
+`tier_budget`, `finest_level_within`, `TierFit`, `ModelBudgetReport` (`lod_problem`),
+`model_report` and
+`AssetManifest::budget_report` (`glb`).
 R2b's additions (ADR-0016): effect lights and baked AO: `VfxLight` (`VfxEffect::light`, `envelope`,
 `end`), `MAX_VFX_LIGHT_INTENSITY`/`MAX_VFX_LIGHT_RADIUS`, `BakedAoDesc` (`new`, `with_height`,
 `to_toml`, `parse`, `load_file`), `BakedAoError` (`#[non_exhaustive]`), `ao_fingerprint`, `PropMeshShape`,

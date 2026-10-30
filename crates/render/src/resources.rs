@@ -23,6 +23,8 @@ pub(crate) struct GpuBuffer {
     allocation: Option<Allocation>,
     size: u64,
     mapped: Option<NonNull<u8>>,
+    /// Bytes counted in `crate::memory` (the allocation's size), released on drop.
+    tracked: u64,
 }
 
 impl GpuBuffer {
@@ -89,6 +91,7 @@ impl GpuBuffer {
             return Err(error.into());
         }
 
+        crate::memory::track_alloc(crate::memory::MemoryClass::Buffer, requirements.size);
         Ok(Self {
             device,
             allocator,
@@ -96,6 +99,7 @@ impl GpuBuffer {
             allocation: Some(allocation),
             size,
             mapped,
+            tracked: requirements.size,
         })
     }
 
@@ -149,6 +153,7 @@ impl Drop for GpuBuffer {
         if let Some(allocation) = self.allocation.take() {
             drop_allocator_free(&self.allocator, allocation);
         }
+        crate::memory::track_free(crate::memory::MemoryClass::Buffer, self.tracked);
     }
 }
 
@@ -171,6 +176,8 @@ pub(crate) struct GpuImage {
     image: vk::Image,
     view: vk::ImageView,
     allocation: Option<Allocation>,
+    /// The accounting class and bytes counted in `crate::memory`, released on drop.
+    tracked: (crate::memory::MemoryClass, u64),
 }
 
 impl GpuImage {
@@ -418,12 +425,15 @@ impl GpuImage {
             }
         };
 
+        let class = crate::memory::MemoryClass::of_image(usage);
+        crate::memory::track_alloc(class, requirements.size);
         Ok(Self {
             device,
             allocator,
             image,
             view,
             allocation: Some(allocation),
+            tracked: (class, requirements.size),
         })
     }
 
@@ -447,6 +457,7 @@ impl Drop for GpuImage {
         if let Some(allocation) = self.allocation.take() {
             drop_allocator_free(&self.allocator, allocation);
         }
+        crate::memory::track_free(self.tracked.0, self.tracked.1);
     }
 }
 

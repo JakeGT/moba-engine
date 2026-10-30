@@ -512,6 +512,23 @@ cargo run --release -p moba-client
 # MOBA_CONTACT_SHADOWS=off|<steps> turn individual features off or override the tier.
 ```
 
+### Culling and mesh LODs (R8): the golden rebaseline
+![VAT golden with mesh LODs off (left) and on (right)](images/r8-lod-off-on.png)
+
+The VAT golden frame (64 stress minions at 40 m, High, lavapipe 1280×720, crop) with
+`MOBA_MESH_LOD=off` (left) and the default High tolerance of 0.75 px (right): the minions
+draw their meshoptimizer LOD1–LOD3 levels. The two are indistinguishable at this size; 0.86 %
+of the pixels differ, all on silhouette edges (the most changed of the eight goldens). Frustum
+culling changes nothing: every golden and five probe scenes are byte-identical with
+`MOBA_GPU_CULL=off` (`scripts/cull-probe.sh`). This is the deliberate rebaseline of all eight
+golden fingerprints for the LODs (two runs gave byte-identical captures; with
+`MOBA_MESH_LOD=off` every capture matched the old fingerprints exactly).
+[perf/0022](perf/0022-r8-scaling-pacing.md) has the numbers.
+
+```bash
+MOBA_STRESS_MINIONS=64 MOBA_LOCAL_CAMERA_DISTANCE=40 MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_CAPTURE=/tmp/r8.ppm MOBA_VULKAN_VALIDATION=required [MOBA_MESH_LOD=off] [MOBA_GPU_CULL=off] cargo run --release -p moba-client
+```
+
 ### HUD polish (R7a): before and after
 ![HUD before (left) and after (right) R7a](images/r7-hud-before-after.png)
 

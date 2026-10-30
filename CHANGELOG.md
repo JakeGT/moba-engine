@@ -106,6 +106,65 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Culling, mesh LODs, VRAM budgets and frame pacing (AAA roadmap R8, ADR-0018;
+  [perf/0022](docs/perf/0022-r8-scaling-pacing.md)):**
+  - **Frustum culling:** every view culls its units against its camera (bounding spheres per
+    mesh: VAT spheres over every baked frame, skinned bind-pose spheres doubled), and the main
+    view builds a separate shadow caster list culled against the fitted shadow box's four side
+    planes. Outlined units are never culled (the hull outline reaches past the silhouette).
+    The terrain heightfield is split into 32 × 32-cell chunks with bounds, and each view draws
+    the runs of its visible chunks. Culled frames are byte-identical to unculled ones
+    (`scripts/cull-probe.sh`, a new render-golden step). `RenderConfig::culling`
+    (`CullMode::{Off, Cpu}`), `MOBA_GPU_CULL=off` in the client. GPU-driven culling with
+    indirect-count draws is designed but deferred: at today's instance counts the CPU path
+    costs microseconds (ADR-0018 §2).
+  - **Mesh LODs:** `moba-tools mesh-bake lod` simplifies a `.glb` with meshoptimizer (through
+    the `meshopt` crate, behind the optional `mesh-bake` feature) into `models/<model>.lod`
+    (`MLOD` v1: up to three index-only levels over the LOD0 vertices, each with its
+    object-space error, tied to the mesh by `mesh_hash`); `scripts/bake-mesh-lods.sh` bakes
+    every sample model. Collapses are weighted by normals and UVs (`--protect-uv-seams` locks
+    UV seams instead), and each level's error is measured against LOD0 over the bind pose and
+    sampled clip poses. A `fuzz/fuzz_targets/mesh_lod.rs` target fuzzes the `.lod` parser,
+    seeded with the committed files; content-check warns on a stale or malformed `.lod`.
+    `moba_assets::{MeshLods, MeshLod, load_lods_for, load_glb_file_with_lods}`,
+    `MeshData::{with_lods, lods, bounding_sphere}`. The renderer appends the levels to the
+    mesh's index buffer and picks, per unit and view, the coarsest level whose projected
+    error is within the tier's tolerance (Low 2 px, Medium 1, High 0.75, Ultra 0.5); one
+    level file serves static, skinned (every bone-LOD skin) and VAT meshes.
+    `RenderConfig::mesh_lod` (`LodConfig`), `MOBA_MESH_LOD=off|<px>`.
+  - **VRAM budgets and load-time-only uploads:** per-tier budgets in
+    `moba_assets::TIER_BUDGETS` (`QualityTier::budget`): total and texture VRAM, per-model
+    triangles, joints and texture bytes, the LOD tolerance. Every image and buffer is counted
+    by class (`Renderer::memory_stats`, `MemoryStats`); a texture over the texture budget
+    uploads without its largest mips, one that fits at no level is refused with
+    `RenderError::OverBudget`. The swapchain images are counted too, the allocator's reserved
+    block bytes are reported (`MemoryStats::{swapchain_bytes, reserved_bytes, over_budget}`),
+    and the first allocation over the tier's total logs a warning.
+    `Renderer::lock_uploads`/`unlock_uploads` mark the match: any upload or pipeline build
+    while locked is counted (`locked_uploads`, `locked_pipelines`) and logged. The client
+    locks on the first measured frame while the match is `Playing` and unlocks when it leaves
+    `Playing`; `Renderer::new` starts unlocked and a dropped renderer unlocks
+    (`Renderer::uploads_locked`). It prints a `[vram]` line at start.
+  - **Culling bounds and cap:** a skinned mesh culls with a sphere measured over its clips'
+    sampled poses (at least twice the bind sphere; `MeshData::cull_sphere`,
+    `moba_assets::for_each_sampled_pose`); the instance cap applies after culling
+    (`CullStats::dropped`, `cull_dropped`); the LOD metric uses the configured render height,
+    so dynamic resolution never flips levels.
+  - **Frame log:** `MOBA_FRAME_LOG_FRAMES` (default 10,000) sizes the log for 10-minute runs;
+    the line adds `frames_dropped`, `gpu_total_p99_ms`, the VRAM counters, the locked counts
+    and the main view's culling (`cull_drawn`, `cull_casters`, `cull_dropped`,
+    `terrain_chunks`, `lod_instances`).
+    `MOBA_REPLAY_EXIT=1` exits when a replay ends. `Renderer::cull_stats` (`CullStats`).
+  - **Perf gate:** `moba-tools perf-gate` checks frame logs against the roadmap's §7 GPU
+    budget per tier, frame pacing (p99 ≤ 1.5 × p50), zero mid-match uploads and pipeline
+    builds, no dropped frames, the VRAM peak within the tier's budget, and
+    `tests/perf/baseline.toml` (strict: bound to the GPU it was recorded on, a table per
+    logged tier, no unknown keys); `scripts/perf-replay.sh` records the 10-minute
+    teamfight (`teamfight --ticks 18000`) and runs it per tier; `.github/workflows/nightly-perf.yml`
+    runs both on a `[self-hosted, gpu]` runner when `vars.HAS_GPU_RUNNER` is `true`.
+  - **content-check** reports every unit model's triangles (LOD0 and baked levels), joints and
+    texture bytes against each tier (`fits`, `lod<N>`, `over`; `budgets` in `--json`): over a
+    tier warns, over Ultra is an error; a stale or malformed `.lod` warns.
 - **Decals, foliage and water (AAA roadmap R3b, ADR-0017; completes R3):**
   - **Decals:** effect descriptors gain up to four `[[decals]]` (`moba_assets::VfxDecal`:
     ring, disc or splat; `paint` tints the ground's albedo before lighting, `glow` adds light

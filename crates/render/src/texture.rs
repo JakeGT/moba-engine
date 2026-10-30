@@ -235,6 +235,8 @@ pub(crate) fn upload_raw(
     if layers == 0 {
         return Err(RenderError::InvalidTexture);
     }
+    // Every texture upload (assets, the renderer's defaults, LUTs) passes here (R8).
+    crate::memory::count_upload();
     let mut staging = GpuBuffer::new(
         device.device.clone(),
         device.allocator(),

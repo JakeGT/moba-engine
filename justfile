@@ -130,6 +130,12 @@ ci-tools:
     cargo run --release -p moba-tools --bin fuzz-wire -- --seconds 30
     cargo run --release -p moba-tools --bin load-test -- --matches 8 --clients 10 --seconds 60
     cargo bench --workspace --no-run
+    # The offline mesh LOD baker (optional meshoptimizer, R8): lint, test, and the committed
+    # content/models/*.lod files must be exactly what it bakes.
+    cargo clippy -p moba-tools --features mesh-bake --bin mesh-bake --locked -- -D warnings
+    cargo test -p moba-tools --features mesh-bake --bin mesh-bake --locked
+    ./scripts/bake-mesh-lods.sh
+    git diff --exit-code -- content/models fuzz/corpus/mesh_lod
     # The checked-in MSDF HUD font (R7a) must be exactly what the baker produces.
     cargo run --release --locked --manifest-path crates/tools/font-bake/Cargo.toml
     git diff --exit-code -- crates/render/assets/ui-font.rgba crates/render/src/font_metrics.rs
