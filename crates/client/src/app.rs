@@ -1631,6 +1631,25 @@ fn send_demo_order(network: &mut NetworkView, order: launch::DemoOrder, own: mob
                 .client
                 .send_command(WireCommand::CastAbility { slot, x, y });
         }
+        launch::DemoOrder::Attack => {
+            let team = network.client.team().index() as u8;
+            let nearest = network.client.snapshot().and_then(|snapshot| {
+                snapshot
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.team != team && entity.team <= 1 && !entity.is_dead())
+                    .min_by_key(|entity| entity.position().distance(own).to_bits())
+                    .map(|entity| entity.net_id)
+            });
+            if let Some(net_id) = nearest
+                && network
+                    .client
+                    .send_command(WireCommand::Attack { net_id })
+                    .is_ok()
+            {
+                network.attack_target = Some(net_id);
+            }
+        }
         launch::DemoOrder::Move(target) => {
             let (x, y) = quantize_position(target);
             if network

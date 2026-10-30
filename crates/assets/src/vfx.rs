@@ -6,7 +6,7 @@
 //! ```toml
 //! duration = 0.6           # seconds the effect emits (0..=30)
 //! importance = "high"      # low | normal | high: budget priority (default normal)
-//! event_duration = false   # zones: emit for the event's lifetime instead of `duration`
+//! event_duration = false   # zones and recalls: emit for the event's lifetime instead of `duration`
 //!
 //! [[emitters]]
 //! primitive = "sprite"     # sprite | flipbook | trail | beam | ring | mesh

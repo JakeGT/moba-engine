@@ -21,7 +21,7 @@ spectator camera, status effects and runtime-content examples.
 
 | Area | Capability |
 |---|---|
-| Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, rules, levels/XP, gold, items and shop |
+| Simulation | Deterministic 30 Hz MOBA (5v5 default, 1v1/ARAM packs), three lanes, towers/nexus, heroes/abilities, minions, vision-respecting bots, respawns, recall, rules, levels/XP, gold, items and shop |
 | Networking | Custom UDP protocol (v42): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing, compute GPU-particle VFX bound to presentation events) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, MSDF text, 3D hero portraits and a baked minimap rendered to texture, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
@@ -49,7 +49,7 @@ MOBA_CONTENT=content/aram.toml cargo run -p moba-client   # local preview of a p
 ```
 
 **Controls:** right-click move, left-click attack, Q/W/E cast at the cursor, Space stop,
-R ready up in the lobby, F5 surrender vote, B shop (click/1–8 buy, hover tooltip, Left/Right page), hover Q/W/E for details, click minimap to move, Tab scoreboard,
+B recall (an 8 s channel to the spawn), R ready up in the lobby, F5 surrender vote, P shop (click/1–8 buy, hover tooltip, Left/Right page), hover Q/W/E for details, click minimap to move, Tab scoreboard,
 Escape quit. `MOBA_SPECTATE=1` joins read-only with full-map visibility; WASD pans, arrows
 rotate/zoom the spectator camera.
 

@@ -159,6 +159,29 @@ impl NetworkView {
             // carries this event stamps its start.
             self.own_recall = None;
         }
+        if event.kind == moba_net::protocol::EVENT_RECALL && !self.demo_orders.is_empty() {
+            // Evidence runs (`MOBA_DEMO_ORDERS`): every recall edge this client is sent.
+            let what = match event.value {
+                moba_net::protocol::RECALL_STARTED => "started",
+                moba_net::protocol::RECALL_CANCELLED => "cancelled",
+                _ => "completed",
+            };
+            let (from, to) = (
+                dequantize_position(event.x, event.y),
+                dequantize_position(event.x2, event.y2),
+            );
+            eprintln!(
+                "[recall] after tick {} net id {} (team {} slot {}) {what} at ({:.1}, {:.1}) -> ({:.1}, {:.1})",
+                self.last_tick,
+                event.source,
+                event.team,
+                event.source_slot,
+                from.x.to_f32(),
+                from.y.to_f32(),
+                to.x.to_f32(),
+                to.y.to_f32()
+            );
+        }
         match event.kind {
             EVENT_CAST => self.audio.play(crate::audio::Sound::Cast),
             EVENT_PROJECTILE_SPAWN => {

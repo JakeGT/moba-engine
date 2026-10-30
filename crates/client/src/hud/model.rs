@@ -782,7 +782,8 @@ fn draw_recall_bar(ui: &mut UiDrawList, width: f32, height: f32, progress: f32) 
     const BAR_WIDTH: f32 = 260.0;
     const BAR_HEIGHT: f32 = 10.0;
     let x = (width - BAR_WIDTH) * 0.5;
-    let y = height * 0.70;
+    // Just above the hero panel (196 px tall, 24 px from the bottom).
+    let y = (height - 268.0).max(30.0);
     ui.panel(
         x - 8.0,
         y - 26.0,

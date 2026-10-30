@@ -173,7 +173,8 @@ the public key is malformed or weak, the client exits with an error instead of c
 without protection.
 
 Controls: right-click moves, left-click attacks, **Q/W/E** cast at the cursor, **Space**
-stops, **B** opens the shop, **Tab** shows the scoreboard, **R** readies up, **F5** votes to
+stops, **B** recalls (8 s; moving, attacking, casting or taking damage cancels it), **P**
+opens the shop, **Tab** shows the scoreboard, **R** readies up, **F5** votes to
 surrender and **Escape** quits. Quit with Escape, not by killing the process, or the frame log
 isn't written. The HUD's top-left panel shows `PING n MS`; that is the RTT to report.
 

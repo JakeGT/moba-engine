@@ -24,8 +24,9 @@
 //! - **recall** (protocol v42) from `EVENT_RECALL` (`RECALL_STARTED` loops the recall
 //!   state from the snapshot tick; `RECALL_CANCELLED` and `RECALL_COMPLETED` fade it out)
 //!   and, when those events are lost, from the recall entity flag starting or clearing.
-//!   The snap to the spawn on completion is the interpolator's ([`moba_net::interpolation::
-//!   is_teleport`]); the recall loop's `interrupt_on_move` also stops it if the hero walks.
+//!   The snap to the spawn on completion is the interpolator's
+//!   ([`moba_net::interpolation::is_teleport`]); the recall loop's `interrupt_on_move` also
+//!   stops it if the hero walks.
 //!
 //! Time is the render tick in seconds, so a pinned capture tick (`MOBA_CAPTURE_TICK`) gives
 //! a pose that does not depend on frame pacing; while pinned, spring bones restart from the

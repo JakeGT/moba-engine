@@ -493,6 +493,8 @@ pub(crate) enum DemoOrder {
     Cast(u8),
     /// Walk to a map position.
     Move(FixVec2),
+    /// Attack the nearest living enemy unit or structure in the latest snapshot.
+    Attack,
 }
 
 /// Most orders `MOBA_DEMO_ORDERS` takes.
@@ -500,7 +502,8 @@ const MAX_DEMO_ORDERS: usize = 32;
 
 /// `MOBA_DEMO_ORDERS=<order>@<tick>,...` (capture and evidence runs): scripted orders sent
 /// at the first Playing snapshot at or after each tick, in tick order. An order is
-/// `recall`, `stop`, `q`/`w`/`e` (cast at four units from the hero) or `move:<x>:<y>`. An
+/// `recall`, `stop`, `attack` (the nearest enemy), `q`/`w`/`e` (cast at four units from the
+/// hero) or `move:<x>:<y>`. An
 /// entry that does not parse is skipped (and logged); at most 32 are kept.
 pub(crate) fn parse_demo_orders() -> Vec<(u32, DemoOrder)> {
     std::env::var("MOBA_DEMO_ORDERS").map_or_else(|_| Vec::new(), |value| demo_orders(&value))
@@ -516,6 +519,7 @@ pub(crate) fn demo_orders(value: &str) -> Vec<(u32, DemoOrder)> {
                 let order = match order.trim().to_ascii_lowercase().as_str() {
                     "recall" => DemoOrder::Recall,
                     "stop" => DemoOrder::Stop,
+                    "attack" => DemoOrder::Attack,
                     "q" => DemoOrder::Cast(0),
                     "w" => DemoOrder::Cast(1),
                     "e" => DemoOrder::Cast(2),
@@ -1212,9 +1216,12 @@ mod tests {
     fn demo_orders_parse_in_tick_order() {
         use super::{DemoOrder, demo_orders};
         assert_eq!(
-            demo_orders("recall@450, stop@360,recall@300,move:118:127@30,e@9,bogus@1,q@x"),
+            demo_orders(
+                "recall@450, stop@360,recall@300,move:118:127@30,e@9,bogus@1,q@x,attack@10"
+            ),
             vec![
                 (9, DemoOrder::Cast(2)),
+                (10, DemoOrder::Attack),
                 (30, DemoOrder::Move(moba_core::FixVec2::from_ints(118, 127))),
                 (300, DemoOrder::Recall),
                 (360, DemoOrder::Stop),

@@ -10,12 +10,12 @@ use crate::protocol::{NetEntity, NetId, SnapshotState};
 /// A step between two snapshots longer than this (world units), plus
 /// [`TELEPORT_SPEED_PER_TICK`] per tick between them, is a teleport (a recall or a respawn),
 /// not movement: the entity stays where it was until the later snapshot's tick and then
-/// appears at its new position, instead of sliding across the map. Dashes (at most a few
-/// world units) still interpolate.
-pub const TELEPORT_DISTANCE: f32 = 16.0;
-/// Movement allowance per tick between two snapshots for [`TELEPORT_DISTANCE`] (about four
-/// times a hero's walking speed).
-pub const TELEPORT_SPEED_PER_TICK: f32 = 1.0;
+/// appears at its new position, instead of sliding across the map. Dashes (the built-in
+/// ones move at most 8 world units in a tick) still interpolate.
+pub const TELEPORT_DISTANCE: f32 = 10.0;
+/// Movement allowance per tick between two snapshots for [`TELEPORT_DISTANCE`] (15 world
+/// units a second, about twice a hero's walking speed).
+pub const TELEPORT_SPEED_PER_TICK: f32 = 0.5;
 
 /// Whether moving from `from` to `to` over `ticks` ticks is a teleport, not movement.
 #[must_use]
@@ -214,9 +214,11 @@ mod tests {
             interpolator.position(1, 10.5),
             Some(FixVec2::from_ints(4, 0))
         );
-        // So does a long walk across a gap of lost snapshots (30 units over 30 ticks).
-        assert!(!is_teleport(FixVec2::ZERO, FixVec2::from_ints(30, 0), 30.0));
-        assert!(is_teleport(FixVec2::ZERO, FixVec2::from_ints(30, 0), 1.0));
+        // So does a walk across a gap of lost snapshots (20 units over 30 ticks, three times
+        // a hero's walking speed). A recall from 18 units from the spawn is a teleport.
+        assert!(!is_teleport(FixVec2::ZERO, FixVec2::from_ints(20, 0), 30.0));
+        assert!(is_teleport(FixVec2::ZERO, FixVec2::from_ints(20, 0), 1.0));
+        assert!(is_teleport(FixVec2::ZERO, FixVec2::from_ints(18, 0), 2.0));
     }
 
     #[test]
