@@ -290,10 +290,12 @@ already shows, by a few pixels. Nothing hidden is drawn, so nothing hidden can b
   haze in view only) and the `vfx_distortion` statistic (live haze sprites, p50/p95/max).
 - Goldens: a new distortion golden (the `cinder-zone` preview on Ultra: MSAA, the prepass
   IDs, the stand-in units inside the haze). Its 64×36 fingerprint cannot see a few-pixel
-  shimmer, so CI also captures the same frame with `MOBA_DISTORTION=nodraw` and requires
-  `vfx_distortion_max > 0` in both logs, the two frames to differ by at least a set number of
-  pixels, and boxes inside the stand-in units to be byte-identical (`image-check --against
-  --min-changed --same-box`). No existing golden changed: their pixels' colour is the
+  shimmer, so CI also captures the same frame with bloom off, drawn and with
+  `MOBA_DISTORTION=nodraw`, and requires `vfx_distortion_max > 0` in every log, the pair to
+  differ by at least a set number of pixels, and boxes inside the stand-in units to be
+  byte-identical (`image-check --against --min-changed --same-box`). Bloom is off in the pair
+  because it blurs the haze's HDR change tens of pixels past the haze at 1–2 LSB, onto unit
+  faces the haze never touched; the unit mask is what the boxes test. No existing golden changed: their pixels' colour is the
   same, and the telegraph mark lives only in the HDR alpha, which nothing downstream reads.
 - Costs and validation: [perf/0023](../perf/0023-distortion.md) (lavapipe; the RTX 5070 Ti
   timings are pending, its memory was held by another process).

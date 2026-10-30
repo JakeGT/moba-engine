@@ -120,21 +120,34 @@ on, as in `render-golden.yml`):
 
 The fingerprint (64×36, tolerance mean 2.0 / max 24) is too coarse to see a few-pixel
 shimmer: the no-draw capture of the same frame still passes it (`mean 0.008, max 3`). So
-`render-golden.yml` captures the frame twice, live and with `MOBA_DISTORTION=nodraw`, and
-requires all of:
+`render-golden.yml` captures the frame twice more with `MOBA_BLOOM=off`, drawn
+(`render-distortion-flat.ppm`) and with `MOBA_DISTORTION=nodraw`, and requires all of:
 
-- the live capture's log shows `vfx_distortion_max` > 0 and at least one frame with the
-  distortion passes, and no `distortion off` line;
+- the golden and the drawn bloom-off logs show `vfx_distortion_max` > 0 and at least one
+  frame with the distortion passes, and no `distortion off` line;
 - the no-draw log shows `vfx_distortion_max` > 0 (the haze was there) and no distortion
   pass;
-- the two images are not byte-identical (`cmp -s`), and `image-check --against
+- the pair is not byte-identical (`cmp -s`), and `image-check --against
   render-distortion-nodraw.ppm --min-changed 5000` passes;
 - the stand-in units' boxes are byte-identical in both (`--same-box 640,448,684,505` for the
   red caster at the haze's edge, `--same-box 700,245,732,300` for the blue target).
 
+**Why bloom is off in the pair.** The first CI run of the pair (with bloom on, run
+41052647919, the runner's lavapipe on LLVM 21.1.8) found **one** changed pixel in the red
+stand-in's box: (648, 477), a flat face pixel (`221,149,133` vs `220,149,133`), 27 px right
+of the nearest refracted pixel and well inside the silhouette, so neither a mask leak at the
+silhouette edge nor an outline. It is bloom: bloom blurs the HDR target, so the haze's
+change reaches tens of pixels past the haze at 1–2 LSB after tonemapping. On that run the
+1–2 LSB changes span x 424–664, y 276–529, while every change above 2 LSB stays inside
+x 437–621, y 330–492; with bloom off (locally) every change, of any size, stays inside
+x 424–621, y 316–498, and both boxes are untouched. Whether a 1-LSB bloom change rounds over
+on a given pixel depends on the driver's float rounding, which is why the local LLVM 23
+build happened to give 0. Every other pass after the haze is per-pixel at Ultra (MSAA, no
+FXAA), so with bloom off the boxes test the unit mask alone.
+
 **Refraction evidence (full resolution, 1280×720, on vs no-draw).** Ultra: **18,833 pixels**
-change, High: **18,001**, all inside x 384–637, y 295–520 (the zone and its haze). Both unit
-boxes: **0 changed pixels**. In the diff image the zone's telegraph ring band is a dark gap
+change (18,873 with bloom off), High: **18,001**, all inside x 384–637, y 295–520 (the zone,
+its haze and its bloom). Both unit boxes: **0 changed pixels** locally. In the diff image the zone's telegraph ring band is a dark gap
 inside the changed area: the telegraph mask keeps every rim and halo pixel of the enemy
 zone's decal in place (the ring particles draw after the haze anyway). Two lavapipe runs of
 each capture are byte-identical, so the CI check is stable on one driver. The golden guards
@@ -154,9 +167,12 @@ MOBA_CAPTURE=render-distortion-actual.ppm MOBA_FRAME_LOG=render-distortion.frame
 MOBA_VULKAN_VALIDATION=required ./target/release/moba-client
 ./target/release/image-check render-distortion-actual.ppm \
   --expected tests/golden/render-distortion-fingerprint.rgb
-MOBA_DISTORTION=nodraw MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=ultra MOBA_SMOKE_FRAMES=120 \
-MOBA_CAPTURE_FRAME=90 MOBA_CAPTURE=render-distortion-nodraw.ppm ./target/release/moba-client
-./target/release/image-check render-distortion-actual.ppm --against render-distortion-nodraw.ppm \
+MOBA_BLOOM=off MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=ultra MOBA_SMOKE_FRAMES=120 \
+MOBA_CAPTURE_FRAME=90 MOBA_CAPTURE=render-distortion-flat.ppm ./target/release/moba-client
+MOBA_BLOOM=off MOBA_DISTORTION=nodraw MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=ultra \
+MOBA_SMOKE_FRAMES=120 MOBA_CAPTURE_FRAME=90 MOBA_CAPTURE=render-distortion-nodraw.ppm \
+./target/release/moba-client
+./target/release/image-check render-distortion-flat.ppm --against render-distortion-nodraw.ppm \
   --min-changed 5000 --same-box 640,448,684,505 --same-box 700,245,732,300 --diff haze.ppm
 # timings (validation off), with and without MOBA_DISTORTION=nodraw
 MOBA_VFX_PREVIEW=cinder-zone MOBA_QUALITY=high MOBA_SMOKE_FRAMES=90 MOBA_VSYNC=0 \

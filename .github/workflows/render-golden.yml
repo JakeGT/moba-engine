@@ -18,7 +18,7 @@ jobs:
   renderer-gate:
     name: renderer-gate
     runs-on: ubuntu-latest
-    # Fourteen lavapipe captures (ADR-0019 added the distortion one and its no-draw twin),
+    # Fifteen lavapipe captures (ADR-0019 added the distortion one and a bloom-off pair),
     # the outline probe and the R8 culling probe's five extra captures run in sequence; the
     # limit is a safety margin above that.
     timeout-minutes: 45
@@ -308,11 +308,15 @@ jobs:
           exit $status
       # ADR-0019: heat haze on Ultra (MSAA resolved, the prepass unit mask, the telegraph
       # mark, a stand-in unit at the haze's edge). The fingerprint's tolerance cannot see a
-      # few-pixel shimmer, so the same pinned frame is captured again with
-      # MOBA_DISTORTION=nodraw (every haze spawn and its simulation identical, only the
-      # refraction skipped; `off` would change the particle RNG): both logs must show live
-      # haze sprites (vfx_distortion_max > 0), the frames must differ by at least 5000 pixels
-      # (18.8k on lavapipe), and boxes inside both stand-in units must be byte-identical.
+      # few-pixel shimmer, so the same pinned frame is captured twice more with bloom off,
+      # drawn and with MOBA_DISTORTION=nodraw (every haze spawn and its simulation identical,
+      # only the refraction skipped; `off` would change the particle RNG): every log must show
+      # live haze sprites (vfx_distortion_max > 0), the pair must differ by at least 5000
+      # pixels (18.9k on lavapipe), and boxes inside both stand-in units must be
+      # byte-identical. Bloom is off in the pair because it blurs the haze's HDR change ~40 px
+      # past the haze at 1-2 LSB (it reached a flat face of the red stand-in, 27 px from the
+      # nearest refracted pixel, on the runner's LLVM 21 lavapipe): that is the post chain,
+      # not the unit mask, and every other post pass is per-pixel.
       - name: Distortion capture with validation + sync validation
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
@@ -331,10 +335,21 @@ jobs:
           MOBA_CAPTURE_FRAME: "90"
           MOBA_CAPTURE: render-distortion-actual.ppm
           MOBA_FRAME_LOG: render-distortion.frames
-      - name: Distortion no-draw capture with validation
+      - name: Distortion bloom-off pair (drawn and no-draw) with validation
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
-          timeout 180 xvfb-run -a ./target/release/moba-client \
+          MOBA_CAPTURE=render-distortion-flat.ppm MOBA_FRAME_LOG=render-distortion-flat.frames \
+            timeout 180 xvfb-run -a ./target/release/moba-client \
+            > distortion-flat-capture.log 2>&1 || { cat distortion-flat-capture.log; exit 1; }
+          test -s render-distortion-flat.ppm
+          if grep -F "distortion off" distortion-flat-capture.log; then exit 1; fi
+          grep -Eo "vfx_distortion_max=[0-9.]+" distortion-flat-capture.log | tail -1 \
+            | grep -Ev "=0(\.0+)?$" || { cat distortion-flat-capture.log; exit 1; }
+          grep -Eo "gpu_distortion_runs=[1-9][0-9]*" distortion-flat-capture.log | tail -1 \
+            | grep . || { cat distortion-flat-capture.log; exit 1; }
+          MOBA_DISTORTION=nodraw MOBA_CAPTURE=render-distortion-nodraw.ppm \
+            MOBA_FRAME_LOG=render-distortion-nodraw.frames \
+            timeout 180 xvfb-run -a ./target/release/moba-client \
             > distortion-nodraw-capture.log 2>&1 \
             || { cat distortion-nodraw-capture.log; exit 1; }
           test -s render-distortion-nodraw.ppm
@@ -344,11 +359,10 @@ jobs:
         env:
           MOBA_VFX_PREVIEW: cinder-zone
           MOBA_QUALITY: ultra
-          MOBA_DISTORTION: nodraw
+          MOBA_BLOOM: "off"
           MOBA_SMOKE_FRAMES: "120"
           MOBA_CAPTURE_FRAME: "90"
-          MOBA_CAPTURE: render-distortion-nodraw.ppm
-          MOBA_FRAME_LOG: render-distortion-nodraw.frames
+
       - name: Compare distortion fingerprint and the drawn haze
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
@@ -357,12 +371,12 @@ jobs:
             --expected tests/golden/render-distortion-fingerprint.rgb \
             --diff render-distortion-diff.ppm > distortion-fingerprint.log 2>&1
           status=$?
-          if cmp -s render-distortion-actual.ppm render-distortion-nodraw.ppm; then
+          if cmp -s render-distortion-flat.ppm render-distortion-nodraw.ppm; then
             echo "the haze changed no pixel" >> distortion-fingerprint.log
             status=1
           fi
           # The red stand-in (at the haze's edge) and the blue one: their faces, never bent.
-          ./target/release/image-check render-distortion-actual.ppm \
+          ./target/release/image-check render-distortion-flat.ppm \
             --against render-distortion-nodraw.ppm --min-changed 5000 \
             --same-box 640,448,684,505 --same-box 700,245,732,300 \
             --diff render-distortion-haze.ppm >> distortion-fingerprint.log 2>&1 || status=1
@@ -427,6 +441,8 @@ jobs:
             render-distortion-actual.ppm
             render-distortion-diff.ppm
             render-distortion-nodraw.ppm
+            render-distortion-flat.ppm
+            distortion-flat-capture.log
             render-distortion-haze.ppm
             distortion-capture.log
             distortion-nodraw-capture.log

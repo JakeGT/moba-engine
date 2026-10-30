@@ -138,9 +138,9 @@ the semver check):
     off: ...` line); `MOBA_DISTORTION=nodraw` (`RenderConfig::distortion_draw`) simulates
     the haze but never draws it. `Renderer::distortion_available`; the frame log gains
     `distortion_copy` and `distortion` lanes and the `vfx_distortion` statistic. New
-    `render-distortion` golden (the `cinder-zone` preview on Ultra), plus a no-draw capture
-    of the same frame that must differ by at least 5000 pixels with the stand-in units'
-    pixels identical (`image-check --against --min-changed --same-box`); the
+    `render-distortion` golden (the `cinder-zone` preview on Ultra), plus a bloom-off pair
+    of the same frame, drawn and no-draw, that must differ by at least 5000 pixels with the
+    stand-in units' pixels identical (`image-check --against --min-changed --same-box`); the
     `renderer-gate` job's timeout is 45 minutes.
 - **Culling, mesh LODs, VRAM budgets and frame pacing (AAA roadmap R8, ADR-0018;
   [perf/0022](docs/perf/0022-r8-scaling-pacing.md)):**
