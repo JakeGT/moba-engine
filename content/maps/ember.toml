@@ -105,3 +105,14 @@ darken = 0.72
 desaturate = 0.55
 mist_height = 3.5
 mist = 0.45
+# Post-processing (R6): the warm ember grade, a little more bloom for the glowing crystals,
+# and eye adaptation (the bright crystals make this the auto-exposure demo). Captures and
+# goldens pin auto exposure off.
+[post]
+exposure = 0.0                   # EV stops
+auto_exposure = true
+exposure_min = -1.0              # adaptation stays within +-1 EV
+exposure_max = 1.0
+bloom = 0.06
+grading = "ember"                # grading/ember.cube: grade-bake bake --preset ember --size 17
+grading_strength = 0.9

@@ -11,6 +11,10 @@
 // tangents; `SHADOW_PASS` is the depth-only shadow caster (position, joints and weights).
 
 #include "camera.glsl"
+
+// The depth prepass (R6, ADR-0015) draws with this shader and no fragment stage; the scene
+// pass then tests LESS_OR_EQUAL against that depth, so both must compute the same position.
+invariant gl_Position;
 #include "instance.glsl"
 
 layout(set = 1, binding = 1) readonly buffer BoneBlock {

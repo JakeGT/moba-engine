@@ -7,6 +7,7 @@ use moba_core::math::{Mat4, Quat, Vec3, Vec4, look_at_rh, orthographic_rh, persp
 use crate::ui::UiImage;
 
 use crate::lighting::{FrameLighting, SceneLighting};
+use crate::post::ScreenEffects;
 use crate::vfx::VfxFrame;
 use crate::world::{FogOfWar, SceneAtmosphere, WorldFrame};
 
@@ -245,6 +246,10 @@ pub struct Scene<'a> {
     pub lighting: SceneLighting,
     /// Particles to spawn and the particle time step ([`VfxFrame::EMPTY`] by default).
     pub vfx: VfxFrame<'a>,
+    /// Gameplay screen effects (R6, ADR-0015): death desaturation and the damage /
+    /// low-health vignette; [`ScreenEffects::NONE`] unless set. Ignored for offscreen
+    /// renders.
+    pub effects: ScreenEffects,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -394,6 +399,7 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            effects: ScreenEffects::NONE,
             fog_of_war: None,
             atmosphere: SceneAtmosphere::DEFAULT,
         }
@@ -414,6 +420,7 @@ impl<'a> Scene<'a> {
             bones: &[],
             lighting: SceneLighting::DEFAULT,
             vfx: VfxFrame::EMPTY,
+            effects: ScreenEffects::NONE,
             fog_of_war: None,
             atmosphere: SceneAtmosphere::DEFAULT,
         }
@@ -437,6 +444,13 @@ impl<'a> Scene<'a> {
     #[must_use]
     pub const fn with_lighting(mut self, lighting: SceneLighting) -> Self {
         self.lighting = lighting;
+        self
+    }
+
+    /// Sets the gameplay screen effects ([`Scene::effects`]).
+    #[must_use]
+    pub const fn with_effects(mut self, effects: ScreenEffects) -> Self {
+        self.effects = effects;
         self
     }
 
@@ -500,6 +514,9 @@ pub(crate) struct CameraUniform {
     haze_params: [f32; 4],
     sky_zenith: [f32; 4],
     sky_horizon: [f32; 4],
+    // R6 (ADR-0015).
+    post_params: [f32; 4],
+    post_clamp: [f32; 4],
 }
 
 impl CameraUniform {
@@ -546,6 +563,8 @@ impl CameraUniform {
             haze_params: world.haze_params,
             sky_zenith: world.sky_zenith,
             sky_horizon: world.sky_horizon,
+            post_params: lighting.post_params,
+            post_clamp: lighting.post_clamp,
         }
     }
 }
@@ -606,6 +625,8 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, sh), 1120);
         assert_eq!(offset_of!(CameraUniform, fog_rect), 1264);
         assert_eq!(offset_of!(CameraUniform, sky_horizon), 1360);
-        assert_eq!(size_of::<CameraUniform>(), 1376);
+        // R6 (ADR-0015) appends after R3a's block.
+        assert_eq!(offset_of!(CameraUniform, post_params), 1376);
+        assert_eq!(size_of::<CameraUniform>(), 1408);
     }
 }

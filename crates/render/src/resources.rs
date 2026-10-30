@@ -208,6 +208,7 @@ impl GpuImage {
             aspect,
             mip_levels,
             Layers::Single,
+            vk::SampleCountFlags::TYPE_1,
         )
     }
 
@@ -234,6 +235,61 @@ impl GpuImage {
             vk::ImageAspectFlags::COLOR,
             mip_levels,
             Layers::Array(layers.max(1)),
+            vk::SampleCountFlags::TYPE_1,
+        )
+    }
+
+    /// A single-level 3D texture (`TYPE_3D`, a `3D` view), for colour-grading LUTs
+    /// (ADR-0015).
+    pub(crate) fn volume(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        size: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+    ) -> RenderResult<Self> {
+        Self::create(
+            device,
+            allocator,
+            name,
+            vk::Extent2D {
+                width: size,
+                height: size,
+            },
+            format,
+            usage,
+            vk::ImageAspectFlags::COLOR,
+            1,
+            Layers::Volume(size),
+            vk::SampleCountFlags::TYPE_1,
+        )
+    }
+
+    /// A single-level image with `samples` samples per pixel (an MSAA attachment when not
+    /// `TYPE_1`, ADR-0015).
+    #[allow(clippy::too_many_arguments)] // The create info, flattened.
+    pub(crate) fn with_samples(
+        device: ash::Device,
+        allocator: AllocatorHandle,
+        name: &str,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+        samples: vk::SampleCountFlags,
+    ) -> RenderResult<Self> {
+        Self::create(
+            device,
+            allocator,
+            name,
+            extent,
+            format,
+            usage,
+            aspect,
+            1,
+            Layers::Single,
+            samples,
         )
     }
 
@@ -262,6 +318,7 @@ impl GpuImage {
             vk::ImageAspectFlags::COLOR,
             mip_levels,
             Layers::Cube,
+            vk::SampleCountFlags::TYPE_1,
         )
     }
 
@@ -276,26 +333,43 @@ impl GpuImage {
         aspect: vk::ImageAspectFlags,
         mip_levels: u32,
         kind: Layers,
+        samples: vk::SampleCountFlags,
     ) -> RenderResult<Self> {
         assert!(extent.width > 0 && extent.height > 0);
         assert!(mip_levels > 0);
-        let (layers, flags) = match kind {
-            Layers::Single => (1, vk::ImageCreateFlags::empty()),
-            Layers::Cube => (6, vk::ImageCreateFlags::CUBE_COMPATIBLE),
-            Layers::Array(layers) => (layers, vk::ImageCreateFlags::empty()),
+        let (layers, flags, image_type, depth) = match kind {
+            Layers::Single => (1, vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_2D, 1),
+            Layers::Cube => (
+                6,
+                vk::ImageCreateFlags::CUBE_COMPATIBLE,
+                vk::ImageType::TYPE_2D,
+                1,
+            ),
+            Layers::Array(layers) => (
+                layers,
+                vk::ImageCreateFlags::empty(),
+                vk::ImageType::TYPE_2D,
+                1,
+            ),
+            Layers::Volume(depth) => (
+                1,
+                vk::ImageCreateFlags::empty(),
+                vk::ImageType::TYPE_3D,
+                depth.max(1),
+            ),
         };
         let create_info = vk::ImageCreateInfo::default()
             .flags(flags)
-            .image_type(vk::ImageType::TYPE_2D)
+            .image_type(image_type)
             .format(format)
             .extent(vk::Extent3D {
                 width: extent.width,
                 height: extent.height,
-                depth: 1,
+                depth,
             })
             .mip_levels(mip_levels)
             .array_layers(layers)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(samples)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -405,9 +479,12 @@ enum Layers {
     Cube,
     /// `n` layers, a `2D_ARRAY` view.
     Array(u32),
+    /// A 3D image `n` slices deep, a `3D` view (R6).
+    Volume(u32),
 }
 
-/// A view of mip levels `0..levels` and every layer: `2D`, `CUBE` or `2D_ARRAY` by `kind`.
+/// A view of mip levels `0..levels` and every layer: `2D`, `CUBE`, `2D_ARRAY` or `3D` by
+/// `kind`.
 fn create_view(
     device: &ash::Device,
     image: vk::Image,
@@ -420,6 +497,7 @@ fn create_view(
         Layers::Single => (vk::ImageViewType::TYPE_2D, 1),
         Layers::Cube => (vk::ImageViewType::CUBE, 6),
         Layers::Array(layers) => (vk::ImageViewType::TYPE_2D_ARRAY, layers),
+        Layers::Volume(_) => (vk::ImageViewType::TYPE_3D, 1),
     };
     let create_info = vk::ImageViewCreateInfo::default()
         .image(image)

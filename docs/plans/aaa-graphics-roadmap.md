@@ -25,7 +25,7 @@ The engine has a solid base to build on, but today's picture is a prototype. Com
 | Materials and textures | **R1b** ([ADR-0010](../adr/0010-texture-pipeline.md)): client-local material descriptors (permutation + parameter block + base colour/normal/metallic-roughness/mask set), one descriptor set per material from a pool sized by the loaded content, KTX2 textures (BC7/BC5/BC4 with baked mips, CPU decode where BC is unsupported) from the `texture-bake` tool. One sample textured material (the static `sentinel`). R2a reads metallic/roughness and emissive, and normal maps use vertex tangents (glTF `TANGENT` or a MikkTSpace-style generator). |
 | Animation | R4a ([ADR-0012](../adr/0012-animation-runtime.md), 2026-10-28): named clips, idle↔run blend space, crossfades, upper-body masks, additive hit reactions, a client-local content-defined state machine driven by snapshots and cast/death events (basic attacks inferred: no attack event on the wire), spring bones, sockets and a distance LOD; 200 units ≈ 0.12 ms CPU per frame. R4b (2026-10-29, [perf/0018](../perf/0018-vat-anim-lod.md)): VAT minions (baked by `vat-bake`, instanced, shadow-casting, cube fallback), tiered bone-count LOD, visible socket attachments, 2D blend spaces and the local preview/replays on the same runtime; 200 VAT minions ≈ 0.01 ms CPU per frame. |
 | VFX | **R5** ([ADR-0013](../adr/0013-vfx-runtime.md), 2026-10-29): compute-simulated GPU particles in a fixed per-tier buffer (sprites, flipbooks, trails, beams, ground rings, mesh particles), additive plus weighted blended OIT (unsorted on Low), soft particles from the scene depth, client-local effect descriptors bound to presentation events and animation sockets, per-tier particle/overdraw budgets with distance culling and enemy-telegraph/ally-dimming rules, and a live-reload preview. Distortion moved to R6. |
-| Image quality | **R1a:** exposure + AgX tonemap (with a saturation look) in the composite pass. No anti-aliasing, bloom or colour grading. |
+| Image quality | **R6** ([ADR-0015](../adr/0015-post-processing.md), 2026-10-29): AgX with per-map exposure and opt-in eye adaptation, per-map 3D colour-grading LUTs, a physically based 5-level bloom chain (Medium+), FXAA (Low–High) and MSAA 4× (Ultra), half-resolution GTAO from a depth prepass on the ambient terms (High+), render scale with dynamic resolution (Low) and a native-resolution HUD, and accessibility-toggleable death desaturation, damage vignette and low-health pulse. No TAA, SMAA, FSR or distortion yet. |
 | UI | **R7a:** MSDF font (Open Sans Condensed, baked offline by `bake-ui-font`) with derivative anti-aliasing, outlines and soft shadows; the RGBA atlas keeps pixel-art icons. Styled health bars (damage ghost, shield, ticks, colour-blind palette), pooled floating combat text, cooldown sweeps, screen fades and a loading screen ([perf/0014](../perf/0014-ui.md)). **R7b:** render-to-texture through the graph (persistent offscreen images the UI samples): 3D hero portraits (animated idle above `Low`) and a minimap baked from a top-down render of the map at load. |
 | Evidence | Golden 64×36 fingerprints on lavapipe with validation (rebaselined for the tonemap in R1a). Per-pass GPU timestamps in `MOBA_FRAME_LOG` (R1a); real-GPU timings exist only for an RTX 5070 Ti (p95 4.2 ms @1080p, GPU work 0.046 ms, [perf/0011](../perf/0011-render-graph.md)). |
 
@@ -228,6 +228,14 @@ still unowned (#9/#127).
 
 **Exit:** reference captures per tier, and a blind A/B readability check against the R2 build.
 
+**Status (2026-10-29):** items 1–6 done ([ADR-0015](../adr/0015-post-processing.md),
+[perf/0019](../perf/0019-post.md)): every feature tiered with an off switch, validation and sync
+validation clean on lavapipe and the RTX 5070 Ti, per-pass GPU timings before/after on the R5
+teamfight replay inside every §7 budget, reference captures per tier and the blind A/B image
+set with its protocol in perf/0019. The A/B **sign-off is a maintainer item**. Not done:
+item 7 (distortion / heat haze, moved here from R5), TAA (optional; not started for the
+readability reason above), SMAA and FSR (ADR-0015 §4, §6), and baked AO for Low (R2b).
+
 ### R7 — UI, HUD and presentation polish (M)
 **Status:** done. R7a (2026-10-28) and R7b (2026-10-29), [perf/0014](../perf/0014-ui.md).
 - Signed-distance-field or MSDF text and icons, so they stay crisp at any UI scale or 4K. Keep the atlas for pixel-art elements. **R7a: text done** (MTSDF atlas, outline and shadow styles); icons stay pixel art.
@@ -267,6 +275,7 @@ Indicative engineering timeline, with 2–3 graphics/engine engineers: R0 ~2 mon
 | ADR-0012 | Animation runtime | **Accepted** ([ADR-0012](../adr/0012-animation-runtime.md)): in-house sampler + content-defined state machine; VAT for minions in R4b |
 | ADR-0013 | VFX runtime | **Accepted** (R5, [ADR-0013](../adr/0013-vfx-runtime.md)): GPU compute particles over a fixed per-tier buffer with a CPU slot allocator; WBOIT with log revealage (no `independentBlend`); client-local effects bound to presentation events and sockets |
 | ADR-0014 | Terrain and fog of war | **Accepted** (R3a, [ADR-0014](../adr/0014-terrain-fog-of-war.md)): a generated heightfield with splat-textured layers, a GPU fog-of-war visibility texture from own-team vision, height fog and a sky; visual-vs-simulation rules in content-check |
+| ADR-0015 | Post-processing | **Accepted** (R6, [ADR-0015](../adr/0015-post-processing.md)): post chain fixed per renderer; grading after AgX on display-referred `.cube` LUTs; FXAA below Ultra, MSAA 4× on Ultra (single-sample VFX after the resolve); GTAO from a depth prepass on ambient only; sub-rectangle dynamic resolution |
 | — | Quality tiers | Low = min-spec 1080p/60; High = mid-range 1440p/144 |
 
 ## 7. Performance targets and evidence

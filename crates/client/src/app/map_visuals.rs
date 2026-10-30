@@ -31,14 +31,15 @@
 use std::path::{Path, PathBuf};
 
 use moba_assets::{
-    DEFAULT_WALL_HEIGHT, MapAtmosphere, MapFogStyle, MapLighting, MapTerrain, MapVisuals,
+    DEFAULT_WALL_HEIGHT, MapAtmosphere, MapFogStyle, MapLighting, MapPost, MapTerrain, MapVisuals,
     TerrainSite, valid_mesh_name,
 };
 use moba_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use moba_game::{MapSpec, MapTheme};
 use moba_net::protocol::WireMap;
 use moba_render::{
-    Camera, MeshData, MeshId, SceneAtmosphere, SceneLighting, TerrainData, TextureId, UnitInstance,
+    Camera, MeshData, MeshId, PostLook, SceneAtmosphere, SceneLighting, TerrainData, TextureId,
+    UnitInstance,
 };
 
 use crate::app::models::model_path;
@@ -233,9 +234,13 @@ pub(crate) struct MapLibrary {
     generation: u32,
     /// The active descriptor's `[lighting]` table (defaults without one).
     lighting: MapLighting,
-    /// Environment and ramp names last applied to the renderer; `None` until the first
-    /// [`MapLibrary::apply_lighting`] after a (re)created renderer.
-    applied: Option<(Option<String>, Option<String>)>,
+    /// The active descriptor's `[post]` table (R6; defaults without one).
+    post: MapPost,
+    /// Player/developer overrides of the map's exposure (`MOBA_EXPOSURE`).
+    exposure: ExposureOverride,
+    /// Environment, ramp and grading names last applied to the renderer; `None` until the
+    /// first [`MapLibrary::apply_lighting`] after a (re)created renderer.
+    applied: Option<(Option<String>, Option<String>, Option<String>)>,
     /// Ramp textures uploaded to this renderer (texture slots are never freed).
     ramps: Vec<(String, Option<TextureId>)>,
     /// The active descriptor's `[terrain]` table (R3a), `None` for the flat plane.
@@ -261,6 +266,8 @@ impl MapLibrary {
             active: None,
             generation: 0,
             lighting: MapLighting::default(),
+            post: MapPost::default(),
+            exposure: ExposureOverride::default(),
             applied: None,
             ramps: Vec::new(),
             ground: None,
@@ -322,6 +329,18 @@ impl MapLibrary {
         }
     }
 
+    /// Returns the library with `MOBA_EXPOSURE`-style overrides of every map's exposure.
+    pub(crate) fn with_exposure_override(mut self, exposure: ExposureOverride) -> Self {
+        self.exposure = exposure;
+        self
+    }
+
+    /// The active map's post-processing look: the engine defaults with the descriptor's
+    /// `[post]` overrides, then the exposure override.
+    pub(crate) fn post_look(&self) -> PostLook {
+        post_look(&self.post, self.exposure)
+    }
+
     /// The scene lighting for the active map: the renderer's defaults with the descriptor's
     /// `[lighting]` overrides. Never allocates.
     pub(crate) fn scene_lighting(&self) -> SceneLighting {
@@ -346,14 +365,18 @@ impl MapLibrary {
     /// since the last call (load time: startup and content updates). Failures are logged
     /// and fall back to the hemispheric ambient / no ramp.
     pub(crate) fn apply_lighting(&mut self, renderer: &mut moba_render::Renderer) {
+        // Cheap and per map: the look (exposure, bloom, grading strength) is always re-sent,
+        // which also restarts eye adaptation from the new map's metering.
+        renderer.set_post_look(self.post_look());
         let wanted = (
             self.lighting.environment.clone(),
             self.lighting.ramp.clone(),
+            self.post.grading.clone(),
         );
         if self.applied.as_ref() == Some(&wanted) {
             return;
         }
-        let (environment, ramp) = &wanted;
+        let (environment, ramp, grading) = &wanted;
         let result = match environment {
             Some(name) => load_environment(&self.root, name).and_then(|(desc, specular)| {
                 renderer
@@ -379,6 +402,28 @@ impl MapLibrary {
         if let Err(error) = renderer.set_lighting_ramp(texture) {
             eprintln!("[assets] lighting ramp: {error}; no ramp");
             let _ = renderer.set_lighting_ramp(None);
+        }
+        let look = self.post_look();
+        let lut = grading.as_deref().and_then(|name| {
+            load_grading(&self.root, name)
+                .and_then(|lut| {
+                    // ADR-0011 rule 1: a grade must keep team colours readable. Eye
+                    // adaptation keeps the metered scene near mid-grey, so the map's fixed
+                    // EV ± 1 stop covers lit and shadowed units.
+                    let ev = look.exposure_ev;
+                    lut.check_team_readability(look.grading_strength, &[ev - 1.0, ev, ev + 1.0])
+                        .map(|()| lut)
+                        .map_err(|error| error.to_string())
+                })
+                .inspect_err(|reason| {
+                    eprintln!("[assets] grading '{name}': {reason}; no grading");
+                })
+                .ok()
+        });
+        if let Err(error) = renderer.set_grading_lut(lut.as_ref()) {
+            eprintln!("[assets] grading LUT: {error}; no grading");
+        } else if let (Some(name), Some(lut)) = (grading, &lut) {
+            eprintln!("[assets] grading '{name}' loaded ({0}x{0}x{0})", lut.size());
         }
         self.applied = Some(wanted);
     }
@@ -479,6 +524,10 @@ impl MapLibrary {
         self.lighting = descriptor
             .as_ref()
             .map(|visuals| visuals.lighting.clone())
+            .unwrap_or_default();
+        self.post = descriptor
+            .as_ref()
+            .map(|visuals| visuals.post.clone())
             .unwrap_or_default();
         self.ground = descriptor
             .as_ref()
@@ -761,6 +810,65 @@ pub(crate) fn scene_lighting(map: &MapLighting) -> SceneLighting {
     lighting
 }
 
+/// How `MOBA_EXPOSURE` overrides the map's `[post]` exposure (R6).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ExposureOverride {
+    /// Exposure compensation in EV for every map.
+    pub(crate) ev: Option<f32>,
+    /// `Some(true)`: eye adaptation on every map (`auto`); `Some(false)`: never (`fixed`).
+    pub(crate) auto: Option<bool>,
+}
+
+impl ExposureOverride {
+    /// Parses `MOBA_EXPOSURE`: `auto`, `fixed` or an EV number (`-4..4`).
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("auto") {
+            return Some(Self {
+                ev: None,
+                auto: Some(true),
+            });
+        }
+        if value.eq_ignore_ascii_case("fixed") {
+            return Some(Self {
+                ev: None,
+                auto: Some(false),
+            });
+        }
+        let ev = value.parse::<f32>().ok().filter(|ev| ev.is_finite())?;
+        Some(Self {
+            ev: Some(ev),
+            auto: None,
+        })
+    }
+}
+
+/// The renderer's default post look with `map`'s `[post]` overrides and `exposure`'s.
+pub(crate) fn post_look(map: &MapPost, exposure: ExposureOverride) -> PostLook {
+    let defaults = PostLook::DEFAULT;
+    PostLook::DEFAULT
+        .with_exposure_ev(exposure.ev.or(map.exposure).unwrap_or(defaults.exposure_ev))
+        .with_auto_exposure(
+            exposure
+                .auto
+                .or(map.auto_exposure)
+                .unwrap_or(defaults.auto_exposure),
+            map.exposure_min.unwrap_or(defaults.exposure_min),
+            map.exposure_max.unwrap_or(defaults.exposure_max),
+        )
+        .with_adaptation(map.adaptation.unwrap_or(defaults.adaptation))
+        .with_bloom(map.bloom.unwrap_or(defaults.bloom))
+        .with_grading_strength(map.grading_strength.unwrap_or(defaults.grading_strength))
+}
+
+/// Loads `<root>/grading/<name>.cube`, the map's colour-grading LUT (R6).
+fn load_grading(root: &Path, name: &str) -> Result<moba_assets::GradingLut, String> {
+    let path = moba_assets::grading_path(root, name)
+        .ok_or_else(|| String::from("invalid grading name (use 1-32 of [A-Za-z0-9_-])"))?;
+    moba_assets::GradingLut::load_file(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 /// The renderer's default atmosphere with `map`'s and `fog`'s overrides.
 pub(crate) fn scene_atmosphere(map: &MapAtmosphere, fog: &MapFogStyle) -> SceneAtmosphere {
     let defaults = SceneAtmosphere::DEFAULT;
@@ -931,6 +1039,51 @@ mod tests {
     use super::*;
 
     const CRYSTAL: &[u8] = include_bytes!("../../../../content/models/crystal.glb");
+
+    #[test]
+    fn post_look_takes_the_map_then_the_override() {
+        let defaults = post_look(&MapPost::default(), ExposureOverride::default());
+        assert_eq!(defaults, PostLook::DEFAULT);
+        let ember = MapVisuals::parse(include_str!("../../../../content/maps/ember.toml"))
+            .expect("ember map visuals");
+        let look = post_look(&ember.post, ExposureOverride::default());
+        assert!(look.auto_exposure);
+        assert_eq!((look.exposure_min, look.exposure_max), (-1.0, 1.0));
+        assert_eq!(ember.post.grading.as_deref(), Some("ember"));
+        let fixed = ExposureOverride::parse("fixed").expect("fixed");
+        assert!(!post_look(&ember.post, fixed).auto_exposure);
+        let brighter = ExposureOverride::parse(" 1.5 ").expect("an EV");
+        assert_eq!(post_look(&ember.post, brighter).exposure_ev, 1.5);
+        assert!(post_look(&ember.post, brighter).auto_exposure);
+        assert_eq!(
+            ExposureOverride::parse("AUTO").and_then(|e| e.auto),
+            Some(true)
+        );
+        assert_eq!(ExposureOverride::parse("nan"), None);
+        assert_eq!(ExposureOverride::parse("bright"), None);
+        // Every shipped map's LUT loads and keeps team colours readable with that map's
+        // exposure and grading strength (the check `apply_lighting` makes).
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+        for (map, text) in [
+            ("ember", include_str!("../../../../content/maps/ember.toml")),
+            ("frost", include_str!("../../../../content/maps/frost.toml")),
+            (
+                "map-grass",
+                include_str!("../../../../content/maps/map-grass.toml"),
+            ),
+        ] {
+            let visuals = MapVisuals::parse(text).expect("shipped map visuals");
+            let name = visuals.post.grading.as_deref().expect("every map grades");
+            let lut = load_grading(&root, name).expect("shipped LUT");
+            assert_eq!(lut.size(), 17);
+            let look = post_look(&visuals.post, ExposureOverride::default());
+            let ev = look.exposure_ev;
+            lut.check_team_readability(look.grading_strength, &[ev - 1.0, ev, ev + 1.0])
+                .unwrap_or_else(|error| panic!("{map}: {error}"));
+        }
+        assert!(load_grading(&root, "../maps").is_err());
+        assert!(load_grading(&root, "missing").is_err());
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

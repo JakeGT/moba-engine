@@ -8,7 +8,38 @@ use crate::graph::{ImageSize, PhysicalImage};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, GpuImage};
 
-/// One `GpuImage` per transient slot, sized to the swapchain. Recreated only on resize.
+/// The two window-dependent extents transient slots are sized from (ADR-0015).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TargetExtents {
+    /// The swapchain image size.
+    pub(crate) swapchain: vk::Extent2D,
+    /// The render allocation: the swapchain size times the maximum render scale. Dynamic
+    /// resolution renders a sub-rectangle of it.
+    pub(crate) render: vk::Extent2D,
+}
+
+impl TargetExtents {
+    /// The size of a slot of `size`.
+    pub(crate) fn of(self, size: ImageSize) -> vk::Extent2D {
+        match size {
+            ImageSize::Swapchain => self.swapchain,
+            ImageSize::Render { shift } => shifted(self.render, shift),
+            ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
+        }
+    }
+}
+
+/// `extent >> shift` per side, at least 1.
+pub(crate) fn shifted(extent: vk::Extent2D, shift: u8) -> vk::Extent2D {
+    let shift = u32::from(shift.min(31));
+    vk::Extent2D {
+        width: (extent.width >> shift).max(1),
+        height: (extent.height >> shift).max(1),
+    }
+}
+
+/// One `GpuImage` per transient slot, sized to the swapchain or the render allocation.
+/// Recreated only on resize.
 pub(crate) struct TransientPool {
     images: Vec<GpuImage>,
 }
@@ -17,28 +48,30 @@ impl TransientPool {
     pub(crate) fn new(
         device: &DeviceContext,
         slots: &[PhysicalImage],
-        extent: vk::Extent2D,
+        extents: TargetExtents,
     ) -> RenderResult<Self> {
         let mut images = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            images.push(create_slot(device, index, slot, extent)?);
+            images.push(create_slot(device, index, slot, extents)?);
         }
         Ok(Self { images })
     }
 
-    /// Reallocates the swapchain-sized slots for `extent` (a resize) and keeps the
-    /// fixed-size ones (the shadow map: up to 64 MiB that a resize must not churn). Every new
-    /// image is created before any is replaced, so a failed allocation changes nothing.
+    /// Reallocates the window-sized slots for `extents` (a resize) and keeps the fixed-size
+    /// ones (the shadow map: up to 64 MiB that a resize must not churn). Every new image is
+    /// created before any is replaced, so a failed allocation changes nothing.
     pub(crate) fn resize(
         &mut self,
         device: &DeviceContext,
         slots: &[PhysicalImage],
-        extent: vk::Extent2D,
+        extents: TargetExtents,
     ) -> RenderResult<()> {
         let mut fresh = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
             fresh.push(match slot.desc.size {
-                ImageSize::Swapchain => Some(create_slot(device, index, slot, extent)?),
+                ImageSize::Swapchain | ImageSize::Render { .. } => {
+                    Some(create_slot(device, index, slot, extents)?)
+                }
                 ImageSize::Fixed { .. } => None,
             });
         }
@@ -59,20 +92,17 @@ fn create_slot(
     device: &DeviceContext,
     index: usize,
     slot: &PhysicalImage,
-    extent: vk::Extent2D,
+    extents: TargetExtents,
 ) -> RenderResult<GpuImage> {
-    let size = match slot.desc.size {
-        ImageSize::Swapchain => extent,
-        ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
-    };
-    GpuImage::new(
+    GpuImage::with_samples(
         device.device.clone(),
         device.allocator(),
         &format!("graph-transient-{index}"),
-        size,
+        extents.of(slot.desc.size),
         slot.desc.format,
         slot.usage,
         slot.desc.aspect,
+        slot.desc.samples,
     )
 }
 
@@ -243,7 +273,10 @@ pub(crate) fn initialise_sampled(
     Ok(())
 }
 
-fn optimal_features(device: &DeviceContext, format: vk::Format) -> vk::FormatFeatureFlags {
+pub(crate) fn optimal_features(
+    device: &DeviceContext,
+    format: vk::Format,
+) -> vk::FormatFeatureFlags {
     // SAFETY: the physical device belongs to the instance the device context was made from.
     let properties = unsafe {
         device
@@ -251,6 +284,39 @@ fn optimal_features(device: &DeviceContext, format: vk::Format) -> vk::FormatFea
             .get_physical_device_format_properties(device.physical, format)
     };
     properties.optimal_tiling_features
+}
+
+/// Usage of the multisampled scene colour (R6 MSAA 4×): only ever an attachment, resolved
+/// at the end of the scene pass and never stored, so tilers may keep it on chip.
+pub(crate) const MSAA_COLOR_USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
+    vk::ImageUsageFlags::COLOR_ATTACHMENT.as_raw()
+        | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT.as_raw(),
+);
+
+/// Whether 4× multisampled images of the actual scene formats can be created: `hdr` with
+/// [`MSAA_COLOR_USAGE`] and `depth` as a depth attachment (the device-wide
+/// `framebuffer*SampleCounts` limits do not cover every format).
+pub(crate) fn supports_msaa4(device: &DeviceContext, hdr: vk::Format, depth: vk::Format) -> bool {
+    let samples = |format, usage| {
+        // SAFETY: the physical device belongs to the instance the device context was made
+        // from; the call only reads properties.
+        unsafe {
+            device.instance.get_physical_device_image_format_properties(
+                device.physical,
+                format,
+                vk::ImageType::TYPE_2D,
+                vk::ImageTiling::OPTIMAL,
+                usage,
+                vk::ImageCreateFlags::empty(),
+            )
+        }
+        .is_ok_and(|properties| {
+            properties
+                .sample_counts
+                .contains(vk::SampleCountFlags::TYPE_4)
+        })
+    };
+    samples(hdr, MSAA_COLOR_USAGE) && samples(depth, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
 }
 
 /// The tier's HDR colour format if it can be rendered to, blended and sampled; otherwise
@@ -264,6 +330,39 @@ pub(crate) fn choose_hdr_format(device: &DeviceContext, tier: QualityTier) -> vk
         preferred
     } else {
         vk::Format::R16G16B16A16_SFLOAT
+    }
+}
+
+/// The bloom mip format (R6): the packed `B10G11R11_UFLOAT_PACK32` (half the bandwidth of
+/// the 64-bit format, no alpha, positive values only) where it can be rendered to, blended
+/// into and sampled with linear filtering; otherwise `R16G16B16A16_SFLOAT`.
+pub(crate) fn choose_bloom_format(device: &DeviceContext) -> vk::Format {
+    let required = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+    let packed = vk::Format::B10G11R11_UFLOAT_PACK32;
+    if optimal_features(device, packed).contains(required) {
+        packed
+    } else {
+        vk::Format::R16G16B16A16_SFLOAT
+    }
+}
+
+/// The adapted-exposure format (R6): `R32_SFLOAT` where it can be rendered to, blended into
+/// and sampled, so a slow adaptation at a high frame rate never stalls on half-float
+/// precision; otherwise `R16_SFLOAT` (blendable everywhere), which
+/// [`crate::post::adaptation_step`] then feeds in steps no smaller than
+/// [`crate::post::MIN_HALF_ADAPTATION_STEP`].
+pub(crate) fn choose_exposure_format(device: &DeviceContext) -> vk::Format {
+    let required = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE;
+    let full = vk::Format::R32_SFLOAT;
+    if optimal_features(device, full).contains(required) {
+        full
+    } else {
+        vk::Format::R16_SFLOAT
     }
 }
 

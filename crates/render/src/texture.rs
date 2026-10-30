@@ -177,14 +177,24 @@ pub(crate) enum RawLayers {
     Cube,
     /// `n` layers (a `2D_ARRAY` view, even for one layer).
     Array(u32),
+    /// A 3D image of `n` slices (a square `extent` × `n` volume, one level; R6's grading LUTs).
+    Volume(u32),
 }
 
 impl RawLayers {
     const fn count(self) -> u32 {
         match self {
-            Self::Plain => 1,
+            Self::Plain | Self::Volume(_) => 1,
             Self::Cube => 6,
             Self::Array(layers) => layers,
+        }
+    }
+
+    /// Slices of a 3D image; 1 otherwise.
+    const fn depth(self) -> u32 {
+        match self {
+            Self::Volume(depth) => depth,
+            _ => 1,
         }
     }
 }
@@ -236,6 +246,14 @@ pub(crate) fn upload_raw(
     staging.write_bytes(0, raw.bytes);
     let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
     let image = match raw.layers {
+        RawLayers::Volume(_) => GpuImage::volume(
+            device.device.clone(),
+            device.allocator(),
+            name,
+            raw.extent.width,
+            raw.format,
+            usage,
+        )?,
         RawLayers::Cube => GpuImage::cube_with_mips(
             device.device.clone(),
             device.allocator(),
@@ -317,7 +335,7 @@ pub(crate) fn upload_raw(
                 .image_extent(vk::Extent3D {
                     width,
                     height,
-                    depth: 1,
+                    depth: raw.layers.depth().max(1),
                 }),
         );
     }

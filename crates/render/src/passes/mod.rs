@@ -5,6 +5,7 @@ pub(crate) mod capture;
 pub(crate) mod composite;
 pub(crate) mod fog;
 pub(crate) mod overlay;
+pub(crate) mod post;
 pub(crate) mod scene;
 pub(crate) mod vfx;
 

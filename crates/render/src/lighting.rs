@@ -577,6 +577,11 @@ pub(crate) struct FrameLighting {
     pub(crate) specular_tint: [f32; 4],
     pub(crate) ambient_ground: [f32; 4],
     pub(crate) sh: [[f32; 4]; 9],
+    /// R6 AO lookup (`camera.post_params`): strength, AO uv per render pixel; zero (no AO
+    /// fetch) unless the renderer sets it for the main view.
+    pub(crate) post_params: [f32; 4],
+    /// Largest AO uv inside the rendered sub-rectangle (`camera.post_clamp`).
+    pub(crate) post_clamp: [f32; 4],
 }
 
 impl FrameLighting {
@@ -676,6 +681,8 @@ impl FrameLighting {
             ],
             ambient_ground: [ground[0], ground[1], ground[2], 0.0],
             sh,
+            post_params: [0.0; 4],
+            post_clamp: [0.0; 4],
         }
     }
 }
@@ -685,15 +692,20 @@ impl FrameLighting {
 const IMAGE_BINDINGS: u32 = 9;
 /// Binding of the terrain parameter block (a uniform buffer, `terrain.frag`).
 const TERRAIN_BLOCK_BINDING: u32 = IMAGE_BINDINGS;
+/// Binding of the R6 ambient-occlusion image (`lighting.glsl`, ADR-0015 §5): the blurred GTAO
+/// transient on the main view, white elsewhere.
+const AO_BINDING: u32 = TERRAIN_BLOCK_BINDING + 1;
+/// Every binding of set 3.
+const SET_BINDINGS: usize = AO_BINDING as usize + 1;
 /// Main-view sets: one per frame in flight, because each names that frame's fog-of-war image.
 pub(crate) const MAIN_SETS: usize = 2;
 
-/// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6): combined image
-/// samplers `0..IMAGE_BINDINGS` and the terrain block, all fragment-only. Also counted by the
-/// scene layout's descriptor budget (`descriptor_budget`).
-pub(crate) fn set_layout_bindings()
--> [vk::DescriptorSetLayoutBinding<'static>; IMAGE_BINDINGS as usize + 1] {
-    let mut bindings: [vk::DescriptorSetLayoutBinding<'static>; IMAGE_BINDINGS as usize + 1] =
+/// Bindings of set 3 (lighting and world; the binding map is in ADR-0014 §6, binding 10 in
+/// ADR-0015 §5): combined image samplers `0..IMAGE_BINDINGS`, the terrain block and the AO
+/// image, all fragment-only. Also counted by the scene layout's descriptor budget
+/// (`descriptor_budget`).
+pub(crate) fn set_layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] {
+    let mut bindings: [vk::DescriptorSetLayoutBinding<'static>; SET_BINDINGS] =
         core::array::from_fn(|index| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(index as u32)
@@ -762,6 +774,8 @@ pub(crate) struct LightingResources {
     ramp: Option<vk::ImageView>,
     /// The bound shadow-map view: the graph transient, or the default.
     shadow_view: vk::ImageView,
+    /// The bound AO view (R6): the graph transient, or `default_ramp` (white).
+    ao_view: vk::ImageView,
     /// 1×1 `R8` white: fully visible (offscreen views, fog of war off).
     default_visibility: GpuImage,
     /// 1×1 defaults for the terrain arrays (flat terrain): splat, albedo, normal.
@@ -790,7 +804,7 @@ impl LightingResources {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(set_count * IMAGE_BINDINGS),
+                .descriptor_count(set_count * (IMAGE_BINDINGS + 1)),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(set_count),
@@ -945,6 +959,7 @@ impl LightingResources {
         )?;
         terrain_block.write_bytes(0, bytemuck::bytes_of(&TerrainBlock::default()));
         let shadow_view = default_shadow.view();
+        let ao_view = default_ramp.view();
         let resources = Self {
             sets,
             offscreen_set,
@@ -961,6 +976,7 @@ impl LightingResources {
             default_ramp,
             ramp: None,
             shadow_view,
+            ao_view,
             default_visibility,
             default_terrain,
             terrain_block,
@@ -994,6 +1010,13 @@ impl LightingResources {
     /// idle or the set unused by pending work (creation, resize).
     pub(crate) fn bind_shadow(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
         self.shadow_view = view.unwrap_or(self.default_shadow.view());
+        self.write(device);
+    }
+
+    /// Points the main view's sets at `view` (the blurred AO transient, R6) or white. The
+    /// device must be idle or the sets unused by pending work (creation, resize).
+    pub(crate) fn bind_ao(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
+        self.ao_view = view.unwrap_or(self.default_ramp.view());
         self.write(device);
     }
 
@@ -1036,13 +1059,15 @@ impl LightingResources {
                 .world
                 .fog
                 .map_or(self.default_visibility.view(), |views| views[frame]);
-            self.write_set(device, set, self.shadow_view, fog);
+            self.write_set(device, set, self.shadow_view, fog, self.ao_view);
         }
+        // Offscreen views: the default shadow image, full visibility and white AO.
         self.write_set(
             device,
             self.offscreen_set,
             self.default_shadow.view(),
             self.default_visibility.view(),
+            self.default_ramp.view(),
         );
     }
 
@@ -1052,6 +1077,7 @@ impl LightingResources {
         set: vk::DescriptorSet,
         shadow: vk::ImageView,
         fog: vk::ImageView,
+        ao: vk::ImageView,
     ) {
         let environment = self
             .environment
@@ -1083,6 +1109,10 @@ impl LightingResources {
                     .image_view(entries[index].1)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
             });
+        let ao_info = [vk::DescriptorImageInfo::default()
+            .sampler(self.linear_clamp.handle())
+            .image_view(ao)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         let block = [vk::DescriptorBufferInfo::default()
             .buffer(self.terrain_block.handle())
             .offset(0)
@@ -1100,6 +1130,11 @@ impl LightingResources {
             .dst_binding(TERRAIN_BLOCK_BINDING)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&block);
+        let ao_write = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(AO_BINDING)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&ao_info);
         // SAFETY: the set, samplers, views and the terrain block are live, and the callers
         // guarantee no pending command buffer uses the set (creation, or after a device-idle
         // wait).
@@ -1108,7 +1143,7 @@ impl LightingResources {
         unsafe {
             device
                 .device
-                .update_descriptor_sets(core::slice::from_ref(&buffer), &[]);
+                .update_descriptor_sets(&[buffer, ao_write], &[]);
         }
     }
 }

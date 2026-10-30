@@ -131,6 +131,113 @@ fn lighting_config_from(
     config
 }
 
+/// The post-processing passes for `tier` (ADR-0015) with the settings' `render_scale` and
+/// the environment overrides: `MOBA_BLOOM=off|on`, `MOBA_AA=off|fxaa|msaa4`,
+/// `MOBA_AO=off|on`, `MOBA_RENDER_SCALE=0.5..1`, `MOBA_DYNRES=off|on|<target ms>`,
+/// `MOBA_GRADING=off`, `MOBA_EXPOSURE=fixed|auto|<EV>` (only `fixed`/`auto` change the
+/// passes; an EV is a map-look override), `MOBA_UPSCALE=bilinear|bicubic` and
+/// `MOBA_SCREEN_EFFECTS=off`. With `capture` (`MOBA_CAPTURE`), auto exposure and dynamic
+/// resolution are pinned off unless set explicitly, so captures stay byte-identical.
+pub(crate) fn post_config(
+    tier: moba_render::QualityTier,
+    render_scale: f32,
+    capture: bool,
+) -> moba_render::PostConfig {
+    post_config_from(tier, render_scale, capture, |name| std::env::var(name).ok())
+}
+
+fn post_config_from(
+    tier: moba_render::QualityTier,
+    render_scale: f32,
+    capture: bool,
+    var: impl Fn(&str) -> Option<String>,
+) -> moba_render::PostConfig {
+    let mut config = moba_render::PostConfig::for_tier(tier).with_render_scale(render_scale);
+    let switch = |name: &str| {
+        let value = var(name)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => Some(false),
+            "on" | "1" | "true" => Some(true),
+            _ => {
+                eprintln!("{name}={value:?} is not off/on; using the tier's");
+                None
+            }
+        }
+    };
+    if let Some(on) = switch("MOBA_BLOOM") {
+        config = config.with_bloom(on);
+    }
+    if let Some(on) = switch("MOBA_AO") {
+        config = config.with_ambient_occlusion(on);
+    }
+    if let Some(on) = switch("MOBA_GRADING") {
+        config = config.with_grading(on);
+    }
+    if let Some(on) = switch("MOBA_SCREEN_EFFECTS") {
+        config = config.with_screen_effects(on);
+    }
+    if let Some(value) = var("MOBA_AA") {
+        match moba_render::AntiAliasing::from_name(&value) {
+            Some(mode) => config = config.with_anti_aliasing(mode),
+            None => eprintln!("MOBA_AA={value:?} is not off/fxaa/msaa4; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_UPSCALE") {
+        match moba_render::UpscaleFilter::from_name(&value) {
+            Some(filter) => config = config.with_upscale(filter),
+            None => eprintln!("MOBA_UPSCALE={value:?} is not bilinear/bicubic; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_RENDER_SCALE") {
+        match value.trim().parse::<f32>() {
+            Ok(scale) if scale.is_finite() => config = config.with_render_scale(scale),
+            _ => eprintln!("MOBA_RENDER_SCALE={value:?} is not a number; using the setting"),
+        }
+    }
+    match var("MOBA_DYNRES") {
+        None => {
+            if capture {
+                config = config.with_dynamic_resolution(false);
+            }
+        }
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" => config = config.with_dynamic_resolution(false),
+            "on" | "1" => config = config.with_dynamic_resolution(true),
+            other => match other.parse::<f32>() {
+                Ok(target) if target.is_finite() => {
+                    config = config
+                        .with_dynamic_resolution(true)
+                        .with_dynamic_target_ms(target);
+                }
+                _ => eprintln!("MOBA_DYNRES={value:?} is not off/on/<ms>; using the tier's"),
+            },
+        },
+    }
+    let exposure = var("MOBA_EXPOSURE");
+    let parsed = exposure
+        .as_deref()
+        .and_then(crate::app::map_visuals::ExposureOverride::parse);
+    if let (Some(value), None) = (&exposure, parsed) {
+        eprintln!("MOBA_EXPOSURE={value:?} is not fixed/auto/<EV>; using the map's");
+    }
+    // Only an explicit `auto`/`fixed` decides; captures otherwise pin eye adaptation off.
+    match parsed.and_then(|parsed| parsed.auto) {
+        Some(auto) => config = config.with_auto_exposure(auto),
+        None if capture => config = config.with_auto_exposure(false),
+        None => {}
+    }
+    config.sanitized()
+}
+
+/// `MOBA_EXPOSURE` as a map-look override (an EV, or forcing eye adaptation on/off).
+pub(crate) fn exposure_override() -> crate::app::map_visuals::ExposureOverride {
+    std::env::var("MOBA_EXPOSURE")
+        .ok()
+        .as_deref()
+        .and_then(crate::app::map_visuals::ExposureOverride::parse)
+        .unwrap_or_default()
+}
+
 /// The terrain, fog-of-war and atmosphere features for `tier` (ADR-0014) with the
 /// `MOBA_TERRAIN=flat|splat`, `MOBA_FOW=texture|legacy|off`, `MOBA_FOW_SIZE=<64..1024>`,
 /// `MOBA_FOG=off` (height fog) and `MOBA_SKY=off` overrides.
@@ -598,43 +705,10 @@ impl Drop for ClientApp {
         } else {
             String::from("gpu_timing=unavailable ")
         };
-        let quality = self.renderer.as_ref().map_or_else(
-            || String::from("?"),
-            |renderer| {
-                let pipelines = renderer.pipeline_stats();
-                let lighting = renderer.lighting_config();
-                let world = renderer.world_config();
-                format!(
-                    "{} hdr={} shadows={} shadow_size={} ibl={} specular_ibl={} vat_meshes={} \
-                     terrain={} fow={} fow_size={} fog={} sky={} pipelines={} \
-                     pipeline_build_ms={:.3} pipeline_cache={} startup_ms={:.1}",
-                    renderer.quality_tier(),
-                    renderer.hdr_format_name(),
-                    lighting.shadows,
-                    lighting.shadow_resolution,
-                    if lighting.ibl && renderer.has_environment() {
-                        "on"
-                    } else {
-                        "off"
-                    },
-                    if lighting.specular_ibl { "on" } else { "off" },
-                    renderer.vat_mesh_count(),
-                    if renderer.has_terrain() {
-                        world.terrain.name()
-                    } else {
-                        "flat"
-                    },
-                    world.fog_of_war.name(),
-                    world.fog_of_war_resolution,
-                    if world.height_fog { "on" } else { "off" },
-                    if world.sky { "on" } else { "off" },
-                    pipelines.pipelines,
-                    pipelines.build_ms,
-                    pipelines.cache,
-                    pipelines.startup_ms,
-                )
-            },
-        );
+        let quality = self
+            .renderer
+            .as_ref()
+            .map_or_else(|| String::from("?"), quality_summary);
         let stress = self
             .stress
             .as_ref()
@@ -663,15 +737,70 @@ impl Drop for ClientApp {
     }
 }
 
-/// Lanes of one GPU frame-log sample (see [`gpu_report`]).
-pub(crate) const GPU_LANES: usize = 15;
-const GPU_LANE_NAMES: [&str; GPU_LANES] = [
+/// The renderer's quality, post and pipeline fields of the frame-log summary line.
+fn quality_summary(renderer: &moba_render::Renderer) -> String {
+    let pipelines = renderer.pipeline_stats();
+    let lighting = renderer.lighting_config();
+    let post = renderer.post_config();
+    let world = renderer.world_config();
+    let [render_width, render_height] = renderer.render_extent();
+    format!(
+        "{} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
+             auto_exposure={} grading={} render={render_width}x{render_height} \
+             dynres={} ibl={} specular_ibl={} vat_meshes={} terrain={} fow={} fow_size={} \
+             fog={} sky={} pipelines={} pipeline_build_ms={:.3} pipeline_cache={} \
+             startup_ms={:.1}",
+        renderer.quality_tier(),
+        renderer.hdr_format_name(),
+        lighting.shadows,
+        lighting.shadow_resolution,
+        post.anti_aliasing,
+        on_off(post.bloom),
+        on_off(post.ambient_occlusion),
+        on_off(post.auto_exposure && renderer.post_look().auto_exposure),
+        on_off(post.grading),
+        on_off(post.dynamic_resolution),
+        if lighting.ibl && renderer.has_environment() {
+            "on"
+        } else {
+            "off"
+        },
+        if lighting.specular_ibl { "on" } else { "off" },
+        renderer.vat_mesh_count(),
+        if renderer.has_terrain() {
+            world.terrain.name()
+        } else {
+            "flat"
+        },
+        world.fog_of_war.name(),
+        world.fog_of_war_resolution,
+        on_off(world.height_fog),
+        on_off(world.sky),
+        pipelines.pipelines,
+        pipelines.build_ms,
+        pipelines.cache,
+        pipelines.startup_ms,
+    )
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
+pub(crate) const GPU_LANES: [&str; 21] = [
     "shadow",
     "scene",
     "composite",
     "ui",
     "total",
     "span",
+    "prepass",
+    "ao",
+    "bloom",
+    "exposure",
+    "fxaa",
+    "upscale",
     "portraits",
     "minimap",
     "vfx_simulate",
@@ -682,31 +811,77 @@ const GPU_LANE_NAMES: [&str; GPU_LANES] = [
     "fow_raster",
     "fow_resolve",
 ];
+/// First lane of a pass that only some configurations have (R6 post, ADR-0015).
+const OPTIONAL_LANES: usize = 6;
+/// First lane of a pass that runs only in some frames (R7b offscreen).
+const OFFSCREEN_LANES: usize = 12;
+/// First lane after the offscreen passes (the VFX passes, ADR-0013).
+const VFX_LANES: usize = 14;
+/// First lane that is a particle statistic rather than a pass time.
+const STAT_LANES: usize = 17;
+/// First fog-of-war pass lane (R3a; runs only with the fog-of-war texture).
+const FOG_LANES: usize = 19;
 
-/// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from `[shadow, scene, composite,
-/// ui, total, span, portraits, minimap, vfx_simulate, vfx_draw, vfx_resolve, …, fow_raster,
-/// fow_resolve]` pass times (`shadow` is 0 when shadows are off; the fog-of-war passes (R3a)
-/// are 0 without the texture) plus the particle stats `vfx_alive` (live particles) and
-/// `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013), which get
+/// One frame-log sample from `timings` and the same frame's particle `stats`, in
+/// [`GPU_LANES`] order (`0` for a pass that did not run). `ao` sums GTAO and its blur,
+/// `bloom` every bloom down- and up-sample.
+pub(crate) fn gpu_sample(
+    timings: &moba_render::GpuTimings,
+    stats: Option<moba_render::VfxStats>,
+) -> [f32; GPU_LANES.len()] {
+    let pass = |name| timings.pass_ms(name).unwrap_or(0.0);
+    [
+        pass("shadow"),
+        pass("scene"),
+        pass("composite"),
+        pass("ui"),
+        timings.total_ms,
+        timings.span_ms,
+        pass("prepass"),
+        timings.group_ms("ao"),
+        timings.group_ms("bloom"),
+        pass("exposure"),
+        pass("fxaa"),
+        pass("upscale"),
+        pass("portraits"),
+        pass("minimap"),
+        pass("vfx_simulate"),
+        pass("vfx_draw"),
+        pass("vfx_resolve"),
+        stats.map_or(0.0, |stats| stats.alive as f32),
+        stats.map_or(0.0, |stats| stats.overdraw),
+        pass("fow-raster"),
+        pass("fow-resolve"),
+    ]
+}
+
+/// `gpu_<lane>_p50_ms`/`_p95_ms` columns for the frame log, from [`gpu_sample`] samples
+/// (`shadow` is 0 when shadows are off) plus the particle stats `vfx_alive` (live particles)
+/// and `vfx_overdraw` (projected particle pixels per screen pixel, ADR-0013), which get
 /// `_p50`/`_p95`/`_max` columns without the unit. `total` sums the passes; `span` runs from
 /// the first pass's start to the last pass's end, so `span - total` is the time spent in
-/// barriers between passes. The offscreen passes (R7b) and fog-of-war passes run only in some
-/// frames or configurations, so their percentiles cover just those frames, and
-/// `gpu_<pass>_runs` counts them; with no run the columns are left out.
-fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
+/// barriers between passes. The R6 post lanes (`prepass` … `upscale`) are printed only when
+/// the configuration has the pass. The offscreen passes (R7b) run only in some frames and the
+/// fog-of-war passes (R3a, `fow_raster`, `fow_resolve`) only with the texture, so their
+/// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
+/// columns are left out.
+fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
-    for (lane, name) in GPU_LANE_NAMES.into_iter().enumerate() {
-        let offscreen = matches!(lane, 6 | 7 | 13 | 14);
+    for (lane, name) in GPU_LANES.into_iter().enumerate() {
+        // The offscreen passes and the fog-of-war passes (R3a, 0 without the texture) are
+        // reported over the frames that ran them.
+        let offscreen = (OFFSCREEN_LANES..VFX_LANES).contains(&lane) || lane >= FOG_LANES;
         let mut values: Vec<f32> = samples
             .iter()
             .map(|sample| sample[lane])
             .filter(|&value| !offscreen || value > 0.0)
             .collect();
+        let optional = (OPTIONAL_LANES..VFX_LANES).contains(&lane) || lane >= FOG_LANES;
+        if optional && !values.iter().any(|&value| value > 0.0) {
+            continue;
+        }
         if offscreen {
-            if values.is_empty() {
-                continue;
-            }
             let _ = write!(columns, "gpu_{name}_runs={} ", values.len());
         }
         values.sort_by(f32::total_cmp);
@@ -716,7 +891,7 @@ fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
                 .copied()
                 .unwrap_or(0.0)
         };
-        if matches!(lane, 11 | 12) {
+        if (STAT_LANES..FOG_LANES).contains(&lane) {
             let _ = write!(
                 columns,
                 "{name}_p50={:.3} {name}_p95={:.3} {name}_max={:.3} ",
@@ -740,7 +915,7 @@ fn gpu_report(samples: &[[f32; GPU_LANES]]) -> String {
 mod tests {
     use super::{
         gpu_report, lighting_config_from, parse_hex32, parse_preview_camera, parse_window_size,
-        pipeline_cache_path_from, world_config_from,
+        pipeline_cache_path_from, post_config_from, world_config_from,
     };
 
     #[test]
@@ -811,6 +986,95 @@ mod tests {
     }
 
     #[test]
+    fn post_overrides_switch_passes_and_captures_pin_feedback_loops() {
+        use moba_render::{AntiAliasing, PostConfig, QualityTier, UpscaleFilter};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        let high = PostConfig::for_tier(QualityTier::High);
+        assert_eq!(
+            post_config_from(QualityTier::High, 1.0, false, env(&[])),
+            high
+        );
+        let off = post_config_from(
+            QualityTier::High,
+            1.0,
+            false,
+            env(&[
+                ("MOBA_BLOOM", "off"),
+                ("MOBA_AA", "OFF"),
+                ("MOBA_AO", "0"),
+                ("MOBA_GRADING", "off"),
+                ("MOBA_SCREEN_EFFECTS", "off"),
+                ("MOBA_EXPOSURE", "fixed"),
+            ]),
+        );
+        assert!(!off.bloom && !off.ambient_occlusion && !off.grading && !off.screen_effects);
+        assert!(!off.auto_exposure);
+        assert_eq!(off.anti_aliasing, AntiAliasing::Off);
+        let scaled = post_config_from(
+            QualityTier::Medium,
+            0.9,
+            false,
+            env(&[
+                ("MOBA_RENDER_SCALE", "0.6"),
+                ("MOBA_DYNRES", "8.5"),
+                ("MOBA_UPSCALE", "bilinear"),
+                ("MOBA_AA", "msaa4"),
+            ]),
+        );
+        assert_eq!(scaled.render_scale, 0.6);
+        assert!(scaled.dynamic_resolution);
+        assert_eq!(scaled.dynamic_target_ms, 8.5);
+        assert_eq!(scaled.upscale, UpscaleFilter::Bilinear);
+        assert_eq!(scaled.anti_aliasing, AntiAliasing::Msaa4);
+        // The settings' scale applies without an override, clamped.
+        assert_eq!(
+            post_config_from(QualityTier::High, 0.1, false, env(&[])).render_scale,
+            0.5
+        );
+        // Captures: Low's dynamic resolution and Medium's auto exposure are pinned off...
+        let capture = post_config_from(QualityTier::Low, 1.0, true, env(&[]));
+        assert!(!capture.dynamic_resolution && !capture.auto_exposure);
+        assert!(
+            !post_config_from(
+                QualityTier::High,
+                1.0,
+                true,
+                env(&[("MOBA_EXPOSURE", "1.5")])
+            )
+            .auto_exposure
+        );
+        // ...unless asked for explicitly.
+        let explicit = post_config_from(
+            QualityTier::Low,
+            1.0,
+            true,
+            env(&[("MOBA_DYNRES", "on"), ("MOBA_EXPOSURE", "auto")]),
+        );
+        assert!(explicit.dynamic_resolution && explicit.auto_exposure);
+        // Garbage keeps the tier's values.
+        let bad = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            env(&[
+                ("MOBA_AA", "taa"),
+                ("MOBA_BLOOM", "maybe"),
+                ("MOBA_RENDER_SCALE", "big"),
+                ("MOBA_DYNRES", "fast"),
+                ("MOBA_EXPOSURE", "bright"),
+            ]),
+        );
+        assert_eq!(bad, PostConfig::for_tier(QualityTier::Ultra));
+    }
+
+    #[test]
     fn world_overrides_turn_terrain_fog_and_sky_off() {
         use moba_render::{FogOfWarMode, QualityTier, TerrainShading, WorldConfig};
         let env = |pairs: &'static [(&'static str, &'static str)]| {
@@ -846,11 +1110,12 @@ mod tests {
 
     #[test]
     fn gpu_report_lists_each_pass_percentile() {
-        let samples: Vec<[f32; super::GPU_LANES]> = (0..=100)
+        let samples: Vec<[f32; super::GPU_LANES.len()]> = (0..=100)
             .map(|index| {
                 let ms = index as f32 / 100.0;
                 // The portrait pass ran in every tenth frame; the minimap never did.
                 let portraits = if index % 10 == 0 { 0.02 } else { 0.0 };
+                // R6: this configuration has bloom and FXAA but no AO or upscale.
                 [
                     ms * 0.5,
                     ms,
@@ -858,6 +1123,12 @@ mod tests {
                     0.5,
                     ms * 3.0,
                     ms * 4.0,
+                    0.0,
+                    0.0,
+                    0.1,
+                    0.0,
+                    0.03,
+                    0.0,
                     portraits,
                     0.0,
                     ms,
@@ -877,6 +1148,9 @@ mod tests {
         assert!(report.contains("gpu_ui_p50_ms=0.500 gpu_ui_p95_ms=0.500 "));
         assert!(report.contains("gpu_total_p50_ms=1.500 gpu_total_p95_ms=2.850 "));
         assert!(report.contains("gpu_span_p50_ms=2.000 gpu_span_p95_ms=3.800 "));
+        assert!(report.contains("gpu_bloom_p50_ms=0.100 "));
+        assert!(report.contains("gpu_fxaa_p95_ms=0.030 "));
+        assert!(!report.contains("gpu_ao") && !report.contains("gpu_upscale"));
         // Offscreen passes: percentiles over the frames they ran in, plus a run count.
         assert!(report.contains(
             "gpu_portraits_runs=11 gpu_portraits_p50_ms=0.020 gpu_portraits_p95_ms=0.020 "

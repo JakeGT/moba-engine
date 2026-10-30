@@ -109,6 +109,8 @@ pub(crate) struct PipelineSpec {
     pub(crate) color_format: vk::Format,
     pub(crate) depth_format: vk::Format,
     pub(crate) cull_mode: vk::CullModeFlags,
+    /// Rasterisation samples (`TYPE_4` for the MSAA scene, ADR-0015).
+    pub(crate) samples: vk::SampleCountFlags,
 }
 
 pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResult<vk::Pipeline> {
@@ -149,8 +151,8 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
         .depth_bias_enable(false)
         .line_width(1.0);
 
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(spec.samples);
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
@@ -191,18 +193,50 @@ pub(crate) fn create(device: &DeviceContext, spec: &PipelineSpec) -> RenderResul
     device.create_graphics_pipeline(&create_info)
 }
 
-/// Creates a depth-only shadow-caster pipeline: no fragment shader and no colour attachment,
-/// depth test/write `LESS_OR_EQUAL`, no culling (sample meshes are not all closed), a dynamic
-/// slope-scaled depth bias and, with `depth_clamp` (the device feature), depth clamping, so a
-/// caster nearer the light than the map's near plane is flattened onto it instead of clipped
-/// ("pancaking").
+/// How a depth-only pipeline rasterises.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DepthOnly {
+    /// Dynamic slope-scaled depth bias (shadow casters).
+    pub(crate) bias: bool,
+    /// Depth clamping (shadow casters on devices with `depthClamp`).
+    pub(crate) clamp: bool,
+    /// Rasterisation samples (the MSAA prepass).
+    pub(crate) samples: vk::SampleCountFlags,
+}
+
+impl DepthOnly {
+    /// A shadow caster: biased, clamped when `depth_clamp`, single-sample.
+    pub(crate) const fn shadow(depth_clamp: bool) -> Self {
+        Self {
+            bias: true,
+            clamp: depth_clamp,
+            samples: vk::SampleCountFlags::TYPE_1,
+        }
+    }
+
+    /// The scene's depth prepass (R6, ADR-0015): no bias or clamp, so the depth matches the
+    /// scene pass exactly.
+    pub(crate) const fn prepass(samples: vk::SampleCountFlags) -> Self {
+        Self {
+            bias: false,
+            clamp: false,
+            samples,
+        }
+    }
+}
+
+/// Creates a depth-only pipeline (shadow casters and the depth prepass): no fragment shader
+/// and no colour attachment, depth test/write `LESS_OR_EQUAL`, no culling (sample meshes are
+/// not all closed). Shadow casters add a dynamic slope-scaled depth bias and, with depth
+/// clamping (the device feature), a caster nearer the light than the map's near plane is
+/// flattened onto it instead of clipped ("pancaking").
 pub(crate) fn create_depth_only(
     device: &DeviceContext,
     layout: vk::PipelineLayout,
     vertex_layout: VertexLayout,
     vertex: vk::ShaderModule,
     depth_format: vk::Format,
-    depth_clamp: bool,
+    mode: DepthOnly,
 ) -> RenderResult<vk::Pipeline> {
     let stages = [vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::VERTEX)
@@ -222,15 +256,15 @@ pub(crate) fn create_depth_only(
         .viewport_count(1)
         .scissor_count(1);
     let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-        .depth_clamp_enable(depth_clamp)
+        .depth_clamp_enable(mode.clamp)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .depth_bias_enable(true)
+        .depth_bias_enable(mode.bias)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(mode.samples);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
         .depth_test_enable(true)
         .depth_write_enable(true)
@@ -243,7 +277,9 @@ pub(crate) fn create_depth_only(
         vk::DynamicState::SCISSOR,
         vk::DynamicState::DEPTH_BIAS,
     ];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let dynamic_count = if mode.bias { 3 } else { 2 };
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&dynamic_states[..dynamic_count]);
     let mut rendering =
         vk::PipelineRenderingCreateInfo::default().depth_attachment_format(depth_format);
     let create_info = vk::GraphicsPipelineCreateInfo::default()
@@ -380,13 +416,25 @@ pub(crate) fn create_ui(
     device.create_graphics_pipeline(&create_info)
 }
 
-/// Creates a fullscreen-triangle pipeline: no vertex input, no depth, no blending.
+/// How a fullscreen pass combines its output with the target (R6 post chain, ADR-0015).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FullscreenBlend {
+    /// Overwrite.
+    None,
+    /// `dst + src` (bloom up-samples).
+    Additive,
+    /// `src * k + dst * (1 - k)` with dynamic blend constants `k` (exposure adaptation).
+    Constant,
+}
+
+/// Creates a fullscreen-triangle pipeline: no vertex input, no depth, and `blend`.
 pub(crate) fn create_fullscreen(
     device: &DeviceContext,
     layout: vk::PipelineLayout,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
     color_format: vk::Format,
+    blend: FullscreenBlend,
 ) -> RenderResult<vk::Pipeline> {
     let entry_point = c"main";
     let stages = [
@@ -417,14 +465,39 @@ pub(crate) fn create_fullscreen(
         .depth_test_enable(false)
         .depth_write_enable(false)
         .depth_compare_op(vk::CompareOp::ALWAYS);
+    let (src, dst) = match blend {
+        FullscreenBlend::None | FullscreenBlend::Additive => {
+            (vk::BlendFactor::ONE, vk::BlendFactor::ONE)
+        }
+        FullscreenBlend::Constant => (
+            vk::BlendFactor::CONSTANT_COLOR,
+            vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR,
+        ),
+    };
     let attachment = vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(false)
+        .blend_enable(blend != FullscreenBlend::None)
+        .src_color_blend_factor(src)
+        .dst_color_blend_factor(dst)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(src)
+        .dst_alpha_blend_factor(dst)
+        .alpha_blend_op(vk::BlendOp::ADD)
         .color_write_mask(vk::ColorComponentFlags::RGBA);
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
         .attachments(core::slice::from_ref(&attachment));
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let dynamic_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::BLEND_CONSTANTS,
+    ];
+    let dynamic_count = if blend == FullscreenBlend::Constant {
+        3
+    } else {
+        2
+    };
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&dynamic_states[..dynamic_count]);
     let color_formats = [color_format];
     let mut rendering = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(&color_formats)
@@ -450,8 +523,9 @@ pub(crate) fn create_fullscreen(
 pub(crate) enum VertexlessDepth {
     /// No depth attachment.
     None,
-    /// Test `LESS_OR_EQUAL` against `format` without writing (the R3a sky on the far plane).
-    TestOnly(vk::Format),
+    /// Test `LESS_OR_EQUAL` against `format` without writing (the R3a sky on the far plane),
+    /// rasterising with the given samples (the main view's MSAA set has its own sky, R6).
+    TestOnly(vk::Format, vk::SampleCountFlags),
 }
 
 /// Creates a pipeline with no vertex input (the vertex shader builds its own geometry from
@@ -490,8 +564,12 @@ pub(crate) fn create_vertexless(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let samples = match depth {
+        VertexlessDepth::None => vk::SampleCountFlags::TYPE_1,
+        VertexlessDepth::TestOnly(_, samples) => samples,
+    };
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
     let (depth_format, depth_stencil) = match depth {
         VertexlessDepth::None => (
             vk::Format::UNDEFINED,
@@ -500,7 +578,7 @@ pub(crate) fn create_vertexless(
                 .depth_write_enable(false)
                 .depth_compare_op(vk::CompareOp::ALWAYS),
         ),
-        VertexlessDepth::TestOnly(format) => (
+        VertexlessDepth::TestOnly(format, _) => (
             format,
             vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)

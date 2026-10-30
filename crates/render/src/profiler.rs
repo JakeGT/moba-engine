@@ -60,6 +60,18 @@ impl GpuTimings {
             .find(|pass| pass.name == name)
             .map(|pass| pass.ms)
     }
+
+    /// Total milliseconds of every pass whose name starts with `prefix` (for example
+    /// `"bloom"`: the R6 down- and up-sample passes, or `"ao"`: GTAO and its blur); `0.0`
+    /// when none ran.
+    #[must_use]
+    pub fn group_ms(&self, prefix: &str) -> f32 {
+        self.passes()
+            .iter()
+            .filter(|pass| pass.name.starts_with(prefix))
+            .map(|pass| pass.ms)
+            .sum()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -293,5 +305,16 @@ mod tests {
         assert_eq!(timings.pass_ms("ui"), Some(0.25));
         assert_eq!(timings.pass_ms("composite"), None);
         assert_eq!(timings.passes().len(), 2);
+        timings.passes[2] = PassTiming {
+            name: "bloom_d0",
+            ms: 0.5,
+        };
+        timings.passes[3] = PassTiming {
+            name: "bloom_u0",
+            ms: 0.125,
+        };
+        timings.count = 4;
+        assert_eq!(timings.group_ms("bloom"), 0.625);
+        assert_eq!(timings.group_ms("fxaa"), 0.0);
     }
 }
