@@ -27,10 +27,11 @@ inside the 20/40 KB/s downstream and 4 KB/s upstream budgets.
     `UseItem` arm, tag 7, it had been missing), `ENTITY_FLAG_RECALL` (entity flag bit 7) while
     a hero channels, `EVENT_RECALL` (9; `value` `RECALL_STARTED`/`RECALL_CANCELLED`/
     `RECALL_COMPLETED`, `aux` the channel length on a start, `x2`/`y2` the arrival on a
-    completion) and `WireRules::recall_ticks`. A start or cancel needs the hero in the
-    viewer's vision now; a completion also goes to viewers who saw it in their previous
-    snapshot, since it teleports out of their vision that tick. Interpolation snaps a step
-    longer than 10 units plus 0.5 per tick (`interpolation::is_teleport`) instead of lerping it.
+    completion) and `WireRules::recall_ticks`. A start needs the hero in the viewer's vision
+    now; a cancel or completion needs it in the viewer's previous snapshot (on the reported
+    channel spot), since it may teleport or dash out of vision that tick. Interpolation snaps
+    when the recall flag clears or a dead hero respawns (`interpolation::is_teleport`) instead
+    of lerping.
 - **Transport**: non-blocking UDP, application-level fragmentation/reassembly (1200-byte
   datagrams), ack tracker.
 - **Server**: handshake and slot assignment, session tokens, input sequencing, bot fill for

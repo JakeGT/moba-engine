@@ -332,18 +332,27 @@ read by the driver:
   ended the loop on the same tick.
 
 Fog of war comes from the server: the flag is part of the entity (only sent while the viewer
-sees the hero), a start or cancel is sent only to viewers who see the hero, and a completion
-also to those who saw it in their previous snapshot (it teleports out of their vision in the
-tick it completes).
+sees the hero), a start is sent only to viewers who see the hero, and a cancel or completion
+only to those who saw it in their previous snapshot, standing on the channel spot the event
+reports (seeing it now is not enough: at its spawn, or where a dash put it, it would reveal
+a spot the viewer never saw).
+
+The recall effect (ADR-0013) follows the same flag: it starts when the start event was lost,
+and stops when the flag clears, the hero leaves the snapshot or dies (a killer never gets the
+cancel of the hero it killed), as well as on the events.
 
 **Teleports.** The interpolator used to lerp every step, so a recall (or a respawn) slid the
 hero across the map for one tick and the driver saw a run speed and a facing towards the
-spawn. `moba_net::interpolation::is_teleport` now treats a step longer than 10 world units
-plus 0.5 per tick between the two snapshots as a teleport: the earlier position holds until
-the later snapshot's tick, then the hero appears at the new one. Dashes (≤ 8 units in a tick)
-still interpolate. The network scene ignores such a step for the hero's speed and facing, so
+spawn. `moba_net::interpolation::is_teleport` now treats the step between two snapshots as a
+teleport when a living hero's recall flag cleared (a completion; a cancel moves it at most a
+tick's walk or a dash) or a dead hero came back alive: the earlier position holds until the
+later snapshot's tick, then the hero appears at the new one. It reads those replicated
+signals rather than a distance (an earlier draft snapped steps over 10 units plus 0.5 per
+tick), so a content pack's long dash or fast hero still interpolates. The network scene ignores such a step for the hero's speed and facing, so
 the recall loop is not cut short by `interrupt_on_move` and the hero does not turn on
-arrival. The own hero's prediction already snapped corrections over 8 units.
+arrival. The own hero's prediction already snapped corrections over 8 units; it stops for a
+recall only when the flag confirms the channel, so a recall that never starts does not
+rubber-band it.
 
 The local preview and replays map `SimEvent::RecallStarted` / `RecallEnded` to the same
 events, and the flag comes from `ObservedUnit::recalling` through `NetEntity::from_observed`.

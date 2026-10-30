@@ -222,7 +222,7 @@ shared_xp_percent = 130
 structure_heroes_first = false
 nexus_win = true
 score_limit = 0
-recall_ticks = 240            # recall channel, ticks (0..=3600; 0 disables recall)
+recall_ticks = 240            # recall channel, ticks (0..=900; 0 disables recall)
 
 [rules.rewards.melee_minion]
 xp = 32
@@ -296,8 +296,8 @@ Every hashed `[rules]` field is carried in the handshake (since protocol **v38**
 `nexus_win`, `score_limit`) and the recall channel (`recall_ticks`, since **v42**) reach a
 joining client, so its rules match the server's instead of falling back to defaults.
 `recall_ticks` is the channel a recall (**B**) runs before the hero teleports to its spawn;
-it is cancelled by moving, attacking, stopping, casting, taking damage, a stun or death. It is
-hashed and signed only when it differs from 240, so packs written before recall keep their
+it is cancelled by moving, attacking, stopping, casting, taking damage, a stun or death. At
+most 900 ticks (30 s), the longest the client's recall effect plays. It is hashed and signed only when it differs from 240, so packs written before recall keep their
 content hash and attestation. `content/economy-override.toml` is the regression pack;
 `cargo test -p moba-net --test content` joins a real UDP client against it and compares the
 client's rules and content hash with the server's. Adding a `RulesSpec` field fails to compile
@@ -985,7 +985,7 @@ hero_death = "hero-death"
 minion_death = "minion-death"
 structure_destroyed = "collapse"  # a tower or nexus
 attack = "attack-hit"             # a basic attack lands (at the target)
-recall = "recall"                 # a hero channels a recall, at the hero, until it ends
+recall = "recall"                 # a hero channels a recall, at the hero, until it ends (its recall flag clears, or it dies)
 
 [[abilities]]                     # at most 128
 name = "Arc Bolt"

@@ -110,20 +110,30 @@ the semver check):
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).
-    A settings file saved before recall binds the shop to `B`: it keeps that key and recall is
-    left unbound with a warning until `controls.recall` is set. New `Key::P`.
+    A settings file saved before recall (no `recall` key) with the old `shop = "B"` is
+    migrated to shop P, recall B, with a note on stderr; one with another shop key keeps it.
+    A recall key another action (or the camera, item, shop or page keys) uses leaves recall
+    unbound, with a warning. New `Key::P`.
+  - **Prediction:** pressing recall sends the order only (none when the pack disables recall
+    or the hero is dead); the predicted hero stops when a snapshot's recall flag confirms the
+    channel, unless another order was given since. A recall that never starts (a stun the
+    client is not told about, a lost packet) no longer stops the drawn hero while the
+    server's walks on.
   - **Animation:** `EVENT_RECALL` starts the set's `recall` loop on its snapshot tick and a
     cancel or completion fades it out; the recall flag starts or ends it when those events
-    are lost. Interpolation no longer slides a hero across the map on a teleport: a step
-    longer than 10 world units plus 0.5 per tick between two snapshots
-    (`moba_net::interpolation::is_teleport`) holds the old position until the later
-    snapshot's tick and then snaps (recalls and respawns; dashes still interpolate), and the
-    hero's facing and run speed ignore that step. The local preview and replays map the
+    are lost. Interpolation no longer slides a hero across the map on a teleport: between two
+    snapshots where a living hero's recall flag cleared or a dead hero came back alive
+    (`moba_net::interpolation::is_teleport`, `Interpolator::teleported_between`) it holds the
+    old position until the later snapshot's tick and then snaps. It decides from those flags,
+    not a distance, so a pack's long dashes or fast heroes still interpolate. The hero's
+    facing and run speed ignore that step. The local preview and replays map the
     recall events too.
   - **VFX:** a `recall` default binding (`[defaults] recall = "recall"` in
     `vfx/bindings.toml`) plays `content/vfx/recall.toml` at the hero for the channel
     (`event_duration`): a contracting ground ring, a rising column of motes and a soft light,
-    with no telegraph styling. A cancel or completion stops it emitting.
+    with no telegraph styling. A cancel or completion stops it emitting, and so do the hero's
+    death and its recall flag clearing (or the hero leaving the snapshot); the flag also
+    starts it when the start event was lost. One channel plays one effect.
   - **HUD:** a "RECALLING" channel bar above the hero panel while the local hero channels.
   - **Evidence runs:** `MOBA_DEMO_ORDERS=<order>@<tick>,...` (`recall`, `stop`, `attack`,
     `q`/`w`/`e`, `move:<x>:<y>`) scripts the local player; such runs log every recall event
@@ -964,12 +974,15 @@ the semver check):
     entity, and it survives lost events.
   - `EVENT_RECALL` (9), a full 26-byte event: `value` is `RECALL_STARTED` (`aux` = the channel
     length in ticks), `RECALL_CANCELLED` or `RECALL_COMPLETED` (`x2`/`y2` = the spawn it
-    arrived at); `x`/`y` is where the hero channelled. A start or a cancel is sent only to
-    viewers who see the hero in that tick; a completion also to those who saw it in their
-    previous snapshot (the hero teleports out of their vision in the tick it completes), so an
-    enemy recalling out of vision is never reported. Priority: with casts and zones.
+    arrived at); `x`/`y` is where the hero channelled. A start is sent only to viewers who see
+    the hero in that tick; a cancel or completion only to viewers who saw it in their previous
+    snapshot (where it stood still on `x`/`y`), whether or not they see it now: it may have
+    teleported to its spawn, or a dash that cancelled it may have carried it out of the fog,
+    in that tick. An enemy recalling out of vision is never reported, not even to a viewer
+    watching its spawn. Priority: with casts and zones.
   - `WireRules::recall_ticks` (u32) carries the content rule in the catalogue.
-- **Content:** `[rules] recall_ticks` (0..=3600, default 240). It is hashed and signed only
+- **Content:** `[rules] recall_ticks` (0..=900, i.e. up to 30 s, the longest effect the
+  client plays; default 240). It is hashed and signed only
   when it is not the default, so every existing pack keeps its content hash and attestation.
 - **Protocol v41** (not wire-compatible with v40). Snapshots carry **`EVENT_ATTACK`** (8), one
   per visible basic attack (R4b-1): `source`/`target` net ids and hero slots, `team`,
