@@ -57,7 +57,8 @@ crates/assets     asset manifests, fallback resolution, bounded .glb mesh loader
                   animation sampling/blending/state machine (ADR-0012), bounded KTX2
                   textures and material descriptors (ADR-0010), VFX descriptors and the
                   procedural particle atlas (ADR-0013), terrain generator and
-                  visual-vs-simulation map checks (ADR-0014)
+                  visual-vs-simulation map checks (ADR-0014), MikkTSpace tangents and
+                  the asset provenance/licence gate (ADR-0022)
 crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, splat terrain, fog-of-war
                   texture, height fog + sky, MSDF UI text,
                   animated rig, GPU skinning, materials, pipeline cache, per-pass GPU timestamps,
@@ -147,6 +148,7 @@ Tools (release recommended for soak/fuzz):
 ```bash
 cargo run -p moba-tools --bin content-check -- content/example-pack.toml
 cargo run -p moba-tools --bin content-check -- --json content/example-pack.toml
+cargo run -p moba-tools --bin content-check -- --provenance   # asset licence gate; writes THIRD_PARTY.md section, CREDITS, AI disclosure (A0)
 cargo run -p moba-tools --bin content-sign -- content/1v1-mid.toml   # MOBA_SIGNING_SEED
 cargo run -p moba-tools --bin replay -- --items content/example-pack.toml match.mbr
 cargo run --release -p moba-tools --bin match-soak -- --matches 10 --ticks 12000

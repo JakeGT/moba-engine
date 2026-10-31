@@ -1,0 +1,11 @@
+# Provenance of every file in this directory (A0, ADR-0022). `content-check --provenance`
+# checks it and generates THIRD_PARTY.md's content section, content/CREDITS.txt and
+# content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
+
+[[asset]]
+files = ["*.toml"]
+title = "Map visuals descriptors (ember, frost, grass)"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Hand-written TOML"
