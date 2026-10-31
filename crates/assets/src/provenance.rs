@@ -140,12 +140,67 @@ pub const LICENCE_EXCEPTIONS: &[LicenceException] = &[
     },
 ];
 
+/// A proprietary generation service the maintainer approved for concept art only (art bible,
+/// concept generation, 2026-10-31). Its output is a reference that people model from by hand:
+/// it is never a shipped asset, never an input to a generator for one, and no shipped asset is
+/// generated with it. Its licence id and model names are therefore rejected everywhere, with a
+/// message saying why, so a concept image cannot reach `content/` under another label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConceptOnlyService {
+    /// The licence id concept images from the service carry.
+    pub id: &'static str,
+    /// Human-readable name.
+    pub name: &'static str,
+    /// Lower-case substrings of `ai.model` that name the service's models.
+    pub model_markers: &'static [&'static str],
+}
+
+/// The concept-only services.
+pub const CONCEPT_ONLY_SERVICES: &[ConceptOnlyService] = &[ConceptOnlyService {
+    id: "LicenseRef-Gemini-API-Output",
+    name: "Google Gemini API image output (Nano Banana)",
+    model_markers: &["gemini", "nano banana", "nano-banana", "nanobanana"],
+}];
+
+fn concept_only_licence(licence: &str) -> Option<&'static ConceptOnlyService> {
+    CONCEPT_ONLY_SERVICES
+        .iter()
+        .find(|service| service.id == licence)
+}
+
+fn concept_only_model(model: &str) -> Option<&'static ConceptOnlyService> {
+    let model = model.to_ascii_lowercase();
+    CONCEPT_ONLY_SERVICES.iter().find(|service| {
+        service
+            .model_markers
+            .iter()
+            .any(|marker| model.contains(marker))
+    })
+}
+
+fn concept_only(name: &str) -> String {
+    format!(
+        "{name} is concept-only art: model from it by hand and say so in `notes`, but never \
+         ship it or feed it to a generator"
+    )
+}
+
 /// `Ok` when `licence` is allowed, or an approved exception for `usage` in `dir` (the
 /// content-root-relative directory of the manifest), else why it is rejected.
 ///
 /// # Errors
 /// A human-readable reason.
 pub fn licence_status(licence: &str, usage: LicenceUse, dir: &str) -> Result<(), String> {
+    if let Some(service) = CONCEPT_ONLY_SERVICES
+        .iter()
+        .find(|service| service.id == licence)
+    {
+        return Err(format!(
+            "licence \"{licence}\": {}",
+            concept_only(service.name)
+        ));
+    }
     if ALLOWED_LICENCES.contains(&licence) {
         return Ok(());
     }
@@ -473,6 +528,9 @@ fn check_entry(at: &str, dir: &str, asset: &AssetProvenance, errors: &mut Vec<St
             fail(format!("{field} is empty"));
         }
     }
+    if let Some(service) = concept_only_model(&ai.model) {
+        fail(format!("ai.model: {}", concept_only(service.name)));
+    }
     if let Err(reason) = licence_status(&ai.weights_licence, LicenceUse::Weights, dir) {
         fail(format!("ai.weights_licence: {reason}"));
     }
@@ -492,7 +550,7 @@ fn check_entry(at: &str, dir: &str, asset: &AssetProvenance, errors: &mut Vec<St
                 "{label}: source must be \"original\" or an http(s) URL"
             ));
         }
-        if input.source == "original" {
+        if input.source == "original" || concept_only_licence(&input.licence).is_some() {
             if let Err(reason) = licence_status(&input.licence, LicenceUse::Input, dir) {
                 fail(format!("{label}: {reason}"));
             }
@@ -1034,6 +1092,12 @@ mod tests {
         }
         assert!(needs_attribution("CC-BY-4.0"));
         assert!(!needs_attribution("CC0-1.0"));
+        // Concept-only service output is rejected in every field and directory.
+        for usage in [LicenceUse::Asset, LicenceUse::Weights, LicenceUse::Input] {
+            let error = licence_status("LicenseRef-Gemini-API-Output", usage, "concept")
+                .expect_err("concept-only");
+            assert!(error.contains("concept-only art"), "{error}");
+        }
     }
 
     #[test]
@@ -1375,6 +1439,26 @@ licence = "MIT OR Apache-2.0"
         );
         let kimodo = AI.replace("\"MIT\"", "\"LicenseRef-NVIDIA-Open-Model-License\"");
         assert_eq!(entry_errors(&kimodo), Vec::<String>::new());
+        // Concept-only services: no shipped asset is generated with them or from their output,
+        // whatever licence the entry claims.
+        let gemini = entry_errors(&AI.replace("TRELLIS.2-4B", "Gemini 3 Pro Image"));
+        assert!(
+            gemini
+                .iter()
+                .any(|e| e.contains("ai.model") && e.contains("concept-only")),
+            "{gemini:?}"
+        );
+        for source in ["original", "https://example.org/sheet"] {
+            let fed = entry_errors(&format!(
+                "{AI}[[ai.inputs]]\nname = \"sheet.png\"\nsource = \"{source}\"\n\
+                 licence = \"LicenseRef-Gemini-API-Output\"\n"
+            ));
+            assert!(
+                fed.iter()
+                    .any(|e| e.contains("sheet.png") && e.contains("concept-only")),
+                "{source}: {fed:?}"
+            );
+        }
         let no_prompt = entry_errors(&AI.replace("a bronze brazier", ""));
         assert!(
             no_prompt

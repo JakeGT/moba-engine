@@ -90,6 +90,12 @@ to use it.
   `NOASSERTION`, and all-rights-reserved or proprietary, each with its own message; anything
   else not listed is "not on the allow-list". Brand marks (§9.6) will need an exception when
   they arrive.
+- **Concept-only services** (`moba_assets::provenance::CONCEPT_ONLY_SERVICES`): the
+  maintainer approved the Gemini API ("Nano Banana") for concept art and model sheets only
+  (2026-10-31). Its output is a reference people model from by hand, so its licence id
+  `LicenseRef-Gemini-API-Output` is rejected in every field, and so is an `ai.model` naming
+  it. Using a concept as a reference is recorded in the asset's `notes`; the asset itself is
+  original work. Allowing a generator to consume such output would be a new decision.
 - **CC-BY needs attribution text**, which goes verbatim into the notices.
 - **AI-generated assets** (an `[asset.ai]` table) follow §9.5: the asset itself is `CC0-1.0`,
   or `CC-BY-*` only with `ai.human_modified = true` and non-empty `notes` saying what a person

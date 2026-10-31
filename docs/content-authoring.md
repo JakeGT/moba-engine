@@ -1554,6 +1554,12 @@ exists, or a licence is not allowed:
   `moba_assets::provenance`, approved by the maintainer;
 - rejected: non-commercial (`NC`), no-derivatives (`ND`), share-alike, unknown and
   all-rights-reserved.
+- concept only, rejected everywhere: `LicenseRef-Gemini-API-Output` (Gemini API, "Nano
+  Banana", images). The maintainer approved the service for concept art and model sheets
+  only (art bible, concept generation). Model from those images by hand and say so in the
+  asset's `notes` (for example "modelled from the Kiln Warden sheet, Gemini concept"), but
+  never ship one or feed one to a generator. An `ai.model` naming Gemini or Nano Banana, or an
+  AI input with that licence, fails the gate whatever licence the entry claims.
 
 `CC-BY-*` needs `attribution`. An AI-generated asset is `CC0-1.0`, or `CC-BY-*` only with
 `ai.human_modified = true` and `notes` saying what a person changed; it records its model,
