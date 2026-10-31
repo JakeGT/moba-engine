@@ -39,6 +39,7 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-10-30 | Map 1 / vertical slice: **Ember Crossing** | Maintainer |
 | 2026-10-30 | Slice hero picked from **three drafted concepts** | Maintainer |
 | 2026-10-30 | Concept generation with **Apache-licensed local models only**; outputs CC0 with provenance | Maintainer |
+| 2026-10-31 | Also the **Gemini API ("Nano Banana"), paid tier, for concept art and model sheets only**: a reference people model from, never shipped and never fed to a generator (enforced by the A0 provenance gate) | Maintainer |
 
 ## Decisions needed
 
@@ -74,10 +75,38 @@ recommendation. In priority order for the slice:
 - **Reference and concept images** in this folder are **CC0 or team-owned** only: CC0 photos
   and HDRIs (Poly Haven, ambientCG and others in [references.md](references.md)), and
   AI-generated images (CC0 per roadmap §9.5, each with a provenance record).
+- **Gemini concept images** (model sheets, turnarounds, callouts) are the one exception:
+  they come from a proprietary service under Google's terms and carry a SynthID watermark.
+  They may appear on boards here, labelled "Gemini, concept only" in
+  [boards/PROVENANCE.md](boards/PROVENANCE.md), but never in `content/`. See
+  [concept generation](#concept-generation).
 - Work made by team members goes in only as **CC0 or CC-BY**, or under a written assignment.
 - **Brand marks (logo, name) are the exception:** all-rights-reserved, and listed as such.
 - Images in git are kept small: ≤ 400 KB each and ≤ 25 MB for the folder. Variants and raw
   generations stay in the review app's folder, outside the repository.
+
+## Concept generation
+
+Two lanes, both recorded per image in the review app's `manifest.json`:
+
+| Lane | Tool | Licence of the output | Use |
+|---|---|---|---|
+| Local | Z-Image-Turbo (Apache-2.0) in ComfyUI, `tools/gen.py` | CC0 (roadmap §9.5) | Exploration in bulk: moods, readings, variants |
+| Gemini | Gemini API, paid tier, `tools/gen_gemini.py` | Concept only (`LicenseRef-Gemini-API-Output`) | Model sheets from a chosen concept: turnarounds, A-pose fronts, detail callouts, fixes the local model can't draw |
+
+The path from concept to final art:
+
+1. Pick one concept per subject in the review app.
+2. Make its **model sheet** in the Gemini lane, sending the pick as a reference image, and
+   write down the answer to every inconsistency (left or right hand, counts, attachments).
+3. **Model it by hand** from the sheet. The model is original work; its `provenance.toml`
+   `notes` name the sheet it was modelled from. The A0 gate rejects any shipped asset
+   generated with Gemini or from a Gemini image, whatever licence the entry claims.
+4. Make **final artwork from the model**: renders, portraits and key art.
+
+The Gemini lane needs an API key in `~/.config/moba/gemini.env`, outside every repository.
+Paid-tier prompts and outputs are not used to improve Google's products (Gemini API pricing
+page, 2026-10-31); the free tier's are, so it is not used.
 
 ## Review app
 
