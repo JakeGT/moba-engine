@@ -167,7 +167,8 @@ vertices, and the mesh skips MikkTSpace and takes the fallback tangent everywher
 position has more than **1024** corners (`MeshData::TANGENT_MAX_SHARED_CORNERS`, about 7 ms
 of quadratic work, 16× below the stack overflow and far above the ~6 corners per position of
 a real mesh or the few hundred at a UV-sphere pole) or the sum of corners² over positions
-exceeds **2^24** (`TANGENT_MAX_SHARING_COST`, about 0.1 s; a dense mesh at the vertex cap is
+exceeds **2^24** (`TANGENT_MAX_SHARING_COST`; the worst case measured under it is about 1 s, from 16
+twisted-UV fans of 1020 corners; a dense mesh at the vertex cap is
 about 2.4 M), so many positions just under the cap cannot add up. Degenerate triangles (two
 corners at one position, MikkTSpace's own test) escape both, because each of their corners
 scans every good corner for a tangent to copy (upstream: "O(N^2)"): a 181 × 181 grid plus

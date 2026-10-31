@@ -110,8 +110,8 @@ impl MeshData {
     /// position and well under 1 Ki at a UV-sphere pole.
     pub const TANGENT_MAX_SHARED_CORNERS: usize = 1024;
     /// [`Self::generate_tangents`] also skips `MikkTSpace` when the sum over positions of
-    /// (corners sharing the position)² exceeds this (2^24, about 0.1 s of `MikkTSpace`'s
-    /// quadratic work), so many positions just under [`Self::TANGENT_MAX_SHARED_CORNERS`]
+    /// (corners sharing the position)² exceeds this (2^24; the worst case measured under it is
+    /// about 1 s, from 16 twisted-UV fans of 1020 corners), so many positions just under [`Self::TANGENT_MAX_SHARED_CORNERS`]
     /// cannot add up. A dense mesh at the vertex cap is about 2.4 M.
     pub const TANGENT_MAX_SHARING_COST: u64 = 1 << 24;
     /// [`Self::generate_tangents`] also skips `MikkTSpace` when (corners of degenerate
