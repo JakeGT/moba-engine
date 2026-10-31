@@ -34,6 +34,14 @@ second hero for A4.
 > **Decision needed (maintainer): the slice hero** — Warden (recommended), Oracle or Strider.
 > Pick in the review app; comments there feed v1.
 
+Each concept also has a **take B** in the review app, so the pick isn't tied to one rendering:
+
+| | Take B | What it changes |
+|---|---|---|
+| Kiln Warden | Lighter | A cream ceramic cuirass and a **sun-disc crest on the helm** instead of the back halo; the hammer held low. Tests whether the radial tell still reads at 30 px when it is smaller and higher |
+| Still Oracle | Monastic | One pewter **astrolabe ring** behind the head instead of the crescent crown; two slabs at the waist. Fewer floating parts (cheaper to rig) |
+| Ash Strider | Scavenger | A **spear-thrower and glass darts** instead of the bow; smoked goggles. A different long diagonal for the 40 px tell |
+
 > **Decision needed (maintainer): does the slice hero keep its old name?** Blade, Mage and
 > Ranger are kit names today. **Recommendation:** new display names; kit IDs unchanged.
 
