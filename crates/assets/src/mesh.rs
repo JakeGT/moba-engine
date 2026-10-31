@@ -114,6 +114,12 @@ impl MeshData {
     /// quadratic work), so many positions just under [`Self::TANGENT_MAX_SHARED_CORNERS`]
     /// cannot add up. A dense mesh at the vertex cap is about 2.4 M.
     pub const TANGENT_MAX_SHARING_COST: u64 = 1 << 24;
+    /// [`Self::generate_tangents`] also skips `MikkTSpace` when (corners of degenerate
+    /// triangles) × (corners of the others) exceeds this (2^28). Each corner of a triangle
+    /// with two corners at one position scans every good corner for a tangent to copy, about
+    /// 0.1 ns per pair, so the cap is about 30 ms; a 65 536-vertex mesh may still have about
+    /// 220 degenerate triangles, and a 10 k-vertex one about 1500.
+    pub const TANGENT_MAX_DEGENERATE_COST: u64 = 1 << 28;
 
     /// Builds a mesh after checking every invariant listed in the module docs.
     ///
@@ -238,7 +244,8 @@ impl MeshData {
     /// mesh exported with its seams split gets exact `MikkTSpace` everywhere. A vertex with
     /// no tangent space (only degenerate triangles touch it, or a zero tangent) gets a fixed
     /// unit vector perpendicular to its normal and `w = +1`. A mesh over
-    /// [`Self::TANGENT_MAX_SHARED_CORNERS`] or [`Self::TANGENT_MAX_SHARING_COST`] gets that
+    /// [`Self::TANGENT_MAX_SHARED_CORNERS`], [`Self::TANGENT_MAX_SHARING_COST`] or
+    /// [`Self::TANGENT_MAX_DEGENERATE_COST`] gets that
     /// fallback for every vertex, without running `MikkTSpace` (untrusted input must not
     /// stall the loader; ADR-0022). Only `+ - * /` and `sqrt` are
     /// used (the angle weights use an `acos` series in those operations), so the result is
@@ -498,21 +505,36 @@ fn generate_tangents(
         .collect()
 }
 
-/// Whether `MikkTSpace` stays within [`MeshData::TANGENT_MAX_SHARED_CORNERS`] and
-/// [`MeshData::TANGENT_MAX_SHARING_COST`]. Corners are counted per **position** (bit
+/// Whether `MikkTSpace` stays within [`MeshData::TANGENT_MAX_SHARED_CORNERS`],
+/// [`MeshData::TANGENT_MAX_SHARING_COST`] and [`MeshData::TANGENT_MAX_DEGENERATE_COST`].
+/// A triangle is degenerate, as `MikkTSpace` decides it, when two of its corners have equal
+/// positions. Corners are counted per **position** (bit
 /// pattern, `-0.0` as `0.0`), not per welded vertex: `MikkTSpace` is also quadratic in
 /// vertices that share a position but differ in UV or normal, or in degenerate triangles
 /// collapsed onto one point, so the position is the conservative key. O(V log V).
 fn mikktspace_is_bounded(positions: &[V3], indices: &[u32]) -> bool {
+    // `+ 0.0` turns `-0.0` into `0.0`; for finite values (a `MeshData` invariant) equal
+    // keys are exactly `MikkTSpace`'s `==`.
+    let key = |vertex: u32| positions[vertex as usize].map(|value| (value + 0.0).to_bits());
+    let (triangles, _) = indices.as_chunks::<3>();
+    let degenerate = triangles
+        .iter()
+        .filter(|&&[a, b, c]| {
+            let (a, b, c) = (key(a), key(b), key(c));
+            a == b || b == c || a == c
+        })
+        .count() as u64;
+    let good = triangles.len() as u64 - degenerate;
+    if 3 * degenerate * 3 * good > MeshData::TANGENT_MAX_DEGENERATE_COST {
+        return false;
+    }
     let mut corners = vec![0_u32; positions.len()];
     for &index in indices {
         corners[index as usize] += 1;
     }
-    // `+ 0.0` turns `-0.0` into `0.0`, which `MikkTSpace` treats as equal.
-    let mut keyed: Vec<([u32; 3], u32)> = positions
-        .iter()
+    let mut keyed: Vec<([u32; 3], u32)> = (0..positions.len() as u32)
         .zip(&corners)
-        .map(|(position, &count)| (position.map(|value| (value + 0.0).to_bits()), count))
+        .map(|(vertex, &count)| (key(vertex), count))
         .collect();
     keyed.sort_unstable_by_key(|&(key, _)| key);
     let mut cost = 0_u64;
@@ -1192,5 +1214,56 @@ mod tests {
         .and_then(|mesh| mesh.with_uvs(many.uvs().expect("uvs")[..16 * count as usize].to_vec()))
         .expect("valid");
         assert!(!is_fallback(&sixteen), "16 M is within the sharing cost");
+    }
+
+    /// A `side × side` grid (good triangles) plus `degenerate` triangles `(a, a, b)` on
+    /// their own vertices, which match no good corner, so `MikkTSpace`'s degenerate pass
+    /// scans every good corner for each of their corners.
+    fn grid_with_degenerates(side: u32, degenerate: u32) -> MeshData {
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        for row in 0..side {
+            for column in 0..side {
+                positions.push([column as f32, row as f32, 0.0]);
+                uvs.push([column as f32 / side as f32, row as f32 / side as f32]);
+            }
+        }
+        for row in 0..side - 1 {
+            for column in 0..side - 1 {
+                let at = row * side + column;
+                indices.extend([at, at + 1, at + side, at + 1, at + side + 1, at + side]);
+            }
+        }
+        for d in 0..degenerate {
+            let at = positions.len() as u32;
+            positions.extend([[-1.0 - d as f32, -5.0, 0.0], [-1.0 - d as f32, -6.0, 0.0]]);
+            uvs.extend([[0.0, 0.0], [0.0, 1.0]]);
+            indices.extend([at, at, at + 1]);
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid grid")
+    }
+
+    /// Degenerate triangles spread over many positions trip neither sharing cap, but their
+    /// pass is quadratic too: past the degenerate cost every vertex gets the fallback, fast.
+    #[test]
+    fn many_degenerate_triangles_skip_mikktspace() {
+        // A few degenerates on a normal mesh: MikkTSpace runs.
+        assert!(!is_fallback(&grid_with_degenerates(20, 3)));
+        // 50 × 50 grid: 14 406 good corners; 2^28 / 14 406 / 3 ≈ 6211 degenerate triangles.
+        let bounded = |mesh: &MeshData| mikktspace_is_bounded(mesh.positions(), mesh.indices());
+        assert!(bounded(&grid_with_degenerates(50, 6211)));
+        let over = grid_with_degenerates(50, 6212);
+        assert!(!bounded(&over));
+        let start = std::time::Instant::now();
+        assert!(is_fallback(&over));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }

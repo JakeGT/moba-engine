@@ -168,8 +168,16 @@ position has more than **1024** corners (`MeshData::TANGENT_MAX_SHARED_CORNERS`,
 of quadratic work, 16× below the stack overflow and far above the ~6 corners per position of
 a real mesh or the few hundred at a UV-sphere pole) or the sum of corners² over positions
 exceeds **2^24** (`TANGENT_MAX_SHARING_COST`, about 0.1 s; a dense mesh at the vertex cap is
-about 2.4 M), so many positions just under the cap cannot add up. The count is a sort of the
-positions, within the bench's noise.
+about 2.4 M), so many positions just under the cap cannot add up. Degenerate triangles (two
+corners at one position, MikkTSpace's own test) escape both, because each of their corners
+scans every good corner for a tangent to copy (upstream: "O(N^2)"): a 181 × 181 grid plus
+16 Ki degenerate triangles on their own vertices takes 0.88 s, about 0.1 ns per (degenerate
+corner, good corner) pair. So the mesh also falls back when that product exceeds **2^28**
+(`TANGENT_MAX_DEGENERATE_COST`, about 30 ms), which still allows about 220 degenerate
+triangles at the vertex cap and about 1500 on a 10 k-vertex hero, enough for decimated or
+exported slivers; a tighter 2^26 would drop real meshes with a few dozen to the fallback.
+The checks are one pass over the triangles and a sort of the positions, within the bench's
+noise.
 `mesh/generate_tangents/{10k,65k}` (`crates/assets/benches/mesh_tangents.rs`) measures the
 cost: about 13 ms for a 10 k-vertex grid and 92 ms at the 65 536-vertex cap on the
 reference machine, load-time only.
@@ -210,8 +218,8 @@ triangle and a position-degenerate one.
   `MAX_PROVENANCE_BYTES`, `THIRD_PARTY_BEGIN`, `THIRD_PARTY_END`), and
   `content-check --provenance [--check]` (exit 0 pass, 1 gate failure or stale notice, 2
   usage).
-- New `MeshData::TANGENT_MAX_SHARED_CORNERS` and `MeshData::TANGENT_MAX_SHARING_COST`; a mesh
-  over either gets fallback tangents (`w = +1`, perpendicular to the normal) everywhere.
+- New `MeshData::TANGENT_MAX_SHARED_CORNERS`, `MeshData::TANGENT_MAX_SHARING_COST` and
+  `MeshData::TANGENT_MAX_DEGENERATE_COST`; a mesh over any gets fallback tangents (`w = +1`, perpendicular to the normal) everywhere.
 - New dependency `bevy_mikktspace =1.0.0` in `moba-assets` (so the client, the tools and the
   fuzz crate); `cargo-deny`'s allow-list already has Zlib, MIT and Apache-2.0.
 - The committed sample meshes `content/models/{sentinel,crystal,rampart}.glb` (and
