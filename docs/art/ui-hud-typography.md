@@ -39,8 +39,10 @@ designer decides the look.
 ## Faction flavour in the UI
 
 The two factions can flavour the UI frame without touching the team layer:
-- the **player's own side's faction** can skin the frame (Forge: brass, riveted, stepped
-  corners; Void: thin pewter lines, floating panels with gaps);
+- the **player's own side's faction** can skin the frame (Forge: gold-bronze, machined seams,
+  stepped corners; Void: thin silver lines, floating panels with gaps). Physical frames only:
+  the art direction rules out holographic interfaces in the world, so the HUD never imitates
+  one either;
 - or the UI stays **faction-neutral** (a Builder-relic style) and only the loading screen and
   victory screen are faction-skinned.
 

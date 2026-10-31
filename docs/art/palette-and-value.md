@@ -100,22 +100,22 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 
 | Swatch | sRGB | L | C | H | Use |
 |---|---|---|---|---|---|
-| Sun-brass | `#A98C62` | 0.66 | 0.067 | 76 | Armour plates, tower crowns (display swatch: the authored metal base colour is in [material-vocabulary.md](material-vocabulary.md)) |
-| Worn brass | `#8C6E43` | 0.56 | 0.071 | 75 | Older plates, recesses |
-| Gilt | `#C4A86E` | 0.74 | 0.083 | 85 | Accent only (PAL-3), worn through to the brass |
-| Kiln terracotta | `#A06C55` | 0.58 | 0.075 | 45 | Tiles, unglazed ceramic |
+| Sun-alloy | `#A98C62` | 0.66 | 0.067 | 76 | Armour plates, tower crowns (display swatch: the authored metal base colour is in [material-vocabulary.md](material-vocabulary.md)) |
+| Worn sun-alloy | `#8C6E43` | 0.56 | 0.071 | 75 | Older plates, recesses |
+| Gilt | `#C4A86E` | 0.74 | 0.083 | 85 | Accent only (PAL-3), worn through to the alloy |
+| Heat-shield ochre | `#A06C55` | 0.58 | 0.075 | 45 | Unglazed heat-shield tiles |
 | Forge sandstone | `#C4AE8C` | 0.76 | 0.053 | 79 | Masonry |
-| Slag | `#4A3F38` | 0.38 | 0.019 | 54 | Ground at the Forge base, cast-off |
-| Soot | `#2E2A26` | 0.29 | 0.009 | 67 | Streaks, recesses |
+| Scorch | `#4A3F38` | 0.38 | 0.019 | 54 | Heat-scorched stone and ground at the Forge base |
+| Heat stain | `#2E2A26` | 0.29 | 0.009 | 67 | Streaks above radiator fins, recesses |
 | Sun-glass core (emissive) | `#FFF0C8` | 0.96 | 0.054 | 90 | Light sources (PAL-4) |
 
 ### Void: dark polish, pale inlay, violet-white light
 
 | Swatch | sRGB | L | C | H | Use |
 |---|---|---|---|---|---|
-| Void ceramic | `#2E2B33` | 0.30 | 0.015 | 303 | Bodies, monoliths |
-| Obsidian | `#22212A` | 0.25 | 0.017 | 290 | Polished faces (reads by **specular**, not albedo) |
-| Pewter | `#8A8A90` | 0.64 | 0.009 | 286 | Rings, fittings |
+| Void composite | `#2E2B33` | 0.30 | 0.015 | 303 | Bodies, monoliths |
+| Obsidian metamaterial | `#22212A` | 0.25 | 0.017 | 290 | Polished faces (reads by **specular**, not albedo) |
+| Gravity-ring alloy | `#8A8A90` | 0.64 | 0.009 | 286 | Hovering rings, fittings (pewter-like) |
 | Tarnished silver | `#B8B8BC` | 0.78 | 0.006 | 286 | Bright metal edges |
 | Bone inlay | `#D6CFC2` | 0.86 | 0.019 | 83 | Star-chart lines, masks: keeps Void units off "black blob" |
 | Plum lacquer | `#4A3646` | 0.36 | 0.038 | 333 | Cloth, lacquered panels |

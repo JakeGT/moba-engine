@@ -24,12 +24,22 @@ brand decisions are theirs.
 1. **The game's name** (and the public faction names, if the working ones change).
 2. **Logo and wordmark.**
 3. **The key-art idea.** Agents' draft directions, mocked up in the review app:
-   - *The Crossing*: sunlit Forge brass in the west against floating Void stone in the east,
+   - *The Crossing*: sunlit Forge ceramic and gold-bronze in the west against floating Void
+     terraces in the east,
      across the basin at golden hour. The two factions in one frame.
-   - *Light vs gravity*: a Kiln Warden's halo blazing against a Still Oracle's lensing dark,
+   - *Light vs gravity*: a Kiln Warden's collector halo blazing against a Still Oracle's lensing dark,
      a tight two-hero composition.
-   - *The fallen engine*: the Builder rib arching over the Crossing, both armies tiny below
-     it. Scale and mystery.
+   - *The fallen engine*: the Builder sky-engine falling, long ago, its rings breaking apart
+     over the desert that becomes the Crossing. Scale and mystery.
+
+   Round G4 drew all three in the advanced-tech direction (review app *Key art*;
+   [boards/g4-neutral-keyart.jpg](boards/g4-neutral-keyart.jpg)); every image there is
+   concept only (Gemini), so final key art is rendered from the models. What it showed:
+   *The Crossing* gives the clearest read of the two factions, with the sunlit stepped Forge
+   left and the Void's floating terraces right. *Light vs gravity* is the strongest hero
+   image, but the Warden's halo drifted into a fan. *The fallen engine* is dramatic but reads
+   as **a crashing spaceship**, which the art direction rules out; if it is developed, show
+   the aftermath (the arches in the glassed basin), not the fall.
 4. **Store capsules** (Steam's header, small, main and vertical capsules) built from the key
    art; a legible logo at the small capsule size (231 × 87) is the hardest constraint.
 5. **Trailer look:** in-engine showcase preset vs pre-rendered.
@@ -42,7 +52,7 @@ brand decisions are theirs.
   concept-only designs.
 - Team colours (green/blue/red) are a gameplay convention, not the brand palette. The brand
   palette should come from the faction palettes ([palette-and-value.md](palette-and-value.md) §5):
-  Forge brass and white-gold against Void black, pewter and violet-white.
+  Forge gold-bronze, cream ceramic and white-gold against Void black, silver and violet-white.
 
 > **Decision needed (marketing): the name and logo brief.** Nothing in the repo commits to a
 > name yet: the workspace and crates are named `moba-*`.
