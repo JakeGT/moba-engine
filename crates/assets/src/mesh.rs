@@ -227,7 +227,7 @@ impl MeshData {
     /// mesh exported with its seams split gets exact `MikkTSpace` everywhere. A vertex with
     /// no tangent space (only degenerate triangles touch it, or a zero tangent) gets a fixed
     /// unit vector perpendicular to its normal and `w = +1`. Only `+ - * /` and `sqrt` are
-    /// used (the angle weights use [`acos`], a series in those operations), so the result is
+    /// used (the angle weights use an `acos` series in those operations), so the result is
     /// bit-identical on every platform.
     #[must_use]
     pub fn generate_tangents(&self) -> Option<Vec<[f32; 4]>> {
