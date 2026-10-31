@@ -10,11 +10,39 @@ says *Decided*.
 |---|---|
 | Fidelity | Full photoreal (roadmap §1). Fidelity is not a setting: nothing here is cyberpunk. |
 | Setting | **Science fantasy**: ancient super-technology and magic coexist, and most people can't tell them apart. |
+| Technology (2026-10-31) | **Technology so advanced it looks like magic.** Weapons, armour, architecture, units and the Builders' relics are all technology, and people treat them as sacred. See [the visual rule](#technology-that-looks-like-magic). |
 | Tone | **Epic, weathered.** Heroic scale, with wear, dust, repair and history on every surface. Not grimdark: the playable space stays mid-value so units read at 40 px. |
 | Sides | **Two opposed factions**, each with its own architecture and palette. |
 | The pair | **The Solar Forge vs the Void.** |
 | Team identity | **Factions by shape and material; teams by rim.** Ally/enemy is told only by rims, outlines, health bars and the HUD, and stays player-relative and colour-blind safe ([palette-and-value.md](palette-and-value.md)). |
 | Map 1 | **Ember Crossing.** |
+
+## Technology that looks like magic
+
+The maintainer's direction (2026-10-31): science fantasy in the sense that technology this
+advanced is indistinguishable from magic. It applies to weapons and armour, architecture, the
+Builders' relics and the Ember crystals, and units and machines.
+
+- **From a distance it reads as magic.** Things float silently and effortlessly, light appears
+  without flame, power moves without wires. No jets, thrusters, exhaust, engines, pistons or
+  vents in view.
+- **Up close it is technology.** Precise machined seams, emitter rings, fine lattices, lenses
+  and hard-light projections are the visible source of every "magical" effect.
+- **Ancient and ceremonial forms.** Seamless advanced materials (ceramic composites,
+  precision-machined alloys, light-conducting crystal) shaped as temples, regalia and
+  ceremonial weapons, worn by millennia of use: dust, patina, scorching, chipped edges.
+- **Never:** screens or holographic user interfaces, cables or hazard stripes, spaceships,
+  modern guns, neon, bulky power armour.
+- **Solar Forge = solar and fusion technology.** Sun discs are collector mirrors and fusion
+  lenses; furnaces are contained fusion cores; light is near-white with a pale gold edge.
+- **Void = gravity technology.** Levitation, gravity wells and lensing, with a faint shimmer of
+  distorted air around floating parts and violet-white light only in seams and gaps.
+- Soldiers' faces are hidden by helms or masks.
+
+First previews (Gemini round G3, 2026-10-31) showed the two ways this goes wrong: bulky power
+armour reads as conventional sci-fi, and levitation shown with jets of dust reads as rocket
+thrusters. Both are fixed by the "from a distance" rule. Prompts: the review app's
+`prompts/build_gemini3.py`.
 
 ## Premise (placeholder lore)
 
@@ -204,9 +232,10 @@ with Forge A's sun-disc emblems and glazed friezes **used sparingly** and Forge 
 on towers and minions. **Void B** (Gravity Monastery), with Void A's star-chart inlay and
 astrolabe rings as the ornament. Round 2 in the review app explored "A + C" and "B + A" mixes
 before this revision ([boards/faction-mixes.jpg](boards/faction-mixes.jpg)). It showed two things:
-- **Literal star motifs turn the Void into sci-fi.** The B + A mix produced pods with painted
-  stars and porthole rings, closer to a space station than a monastery. Keep Void A's inlay
-  as fine engraving, visible only at the zoom camera.
+- **Literal star motifs turn the Void into a space station.** The B + A mix produced pods
+  with painted stars and porthole rings. Keep Void A's inlay as fine engraving, visible only
+  at the zoom camera. (This is about clichés, not technology: the Void *is* advanced
+  technology; see [above](#technology-that-looks-like-magic).)
 - **The 46 m base mock-ups are far too busy for a play surface** in both factions: gilt,
   domes and machinery everywhere. Ornament belongs on structures' upper thirds and the
   out-of-bounds skyline, not on the walkable base floor (VAL-2/VAL-4).
