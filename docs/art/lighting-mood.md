@@ -98,6 +98,14 @@ What this says:
 - These are Compat-renderer numbers: the photoreal renderer's baked GI changes the absolute
   values, but the ranking between moods should hold.
 
+**Concept images agree:** AI aerials of the same four moods
+([boards/ember-concepts.jpg](boards/ember-concepts.jpg)) all paint the lane a saturated rust
+red. Measured on three of them, the lane's median chroma is **C 0.10–0.11 at hue 15–55°**:
+inside the enemy-red zone and about twice the proposed lane grit (`#7E5A47`, C 0.056). The
+ground p99 is 0.115–0.132. The lane is the part of the board most likely to break PAL-1, in
+concept art and in today's content alike, so the photoreal lane material must be specified
+desaturated from the start.
+
 > **Decision needed (maintainer): the ground chroma cap.** Keep PAL-1 at 0.06 and treat
 > today's Ember content as needing the photoreal rework (recommended); or set the cap from
 > these measurements (≈ 0.10 p99) and accept a warmer, more saturated board.
