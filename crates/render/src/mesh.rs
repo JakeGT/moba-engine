@@ -40,7 +40,7 @@ pub(crate) struct SkinnedVertex {
 const DEFAULT_TANGENT: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 /// Per-vertex tangents for `data`: the file's (renormalised), else generated from the UVs
-/// (MikkTSpace-style, `MeshData::generate_tangents`), else [`DEFAULT_TANGENT`].
+/// (`MikkTSpace`, `MeshData::generate_tangents`), else [`DEFAULT_TANGENT`].
 fn tangents(data: &moba_assets::MeshData) -> Vec<[f32; 4]> {
     let count = data.vertex_count();
     let normalised = |tangent: &[f32; 4]| {

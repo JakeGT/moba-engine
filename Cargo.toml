@@ -59,6 +59,10 @@ png = "0.18"
 # meshoptimizer bindings (MIT OR Apache-2.0; bundles meshoptimizer, MIT) for the offline mesh
 # LOD baker (moba-tools only, R8, ADR-0018). Exact pin; the client never links it.
 meshopt = { version = "=0.7.0", default-features = false }
+# MikkTSpace tangents (A0, ADR-0022): a safe, dependency-free Rust port of the reference C,
+# byte-identical to it (Zlib AND (MIT OR Apache-2.0)). Exact pin; `no_std`, so moba-assets
+# supplies its own deterministic `acos` and the result is the same on every platform.
+bevy_mikktspace = { version = "=1.0.0", default-features = false }
 gpu-allocator = "0.28"
 raw-window-handle = "0.6"
 cpal = "0.18"

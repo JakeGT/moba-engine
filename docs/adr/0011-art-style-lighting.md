@@ -205,6 +205,10 @@ accumulation, Gram–Schmidt, handedness from the bitangent; no vertex splitting
 seams, unlike full MikkTSpace). The sample-mesh tool writes generated tangents into the
 static samples. Static vertices grow from 32 to 48 bytes and skinned ones from 40 to 56.
 
+*Amended by [ADR-0022](0022-provenance-gate-mikktspace.md) (next-gen A0, 2026-10-31):* the
+generator is now the reference MikkTSpace (`bevy_mikktspace` with a deterministic `acos`),
+with the same glTF convention; the "full MikkTSpace port" alternative below was taken.
+
 ## Alternatives considered
 - **Cascaded shadow maps (2–4 cascades).** The standard for open worlds; for a fixed top-down
   board the single sphere-fitted map is already 4–9 cm/texel at the player cameras, and

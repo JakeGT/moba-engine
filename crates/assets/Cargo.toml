@@ -20,11 +20,14 @@ workspace = true
 moba-core.workspace = true
 serde.workspace = true
 toml.workspace = true
+bevy_mikktspace.workspace = true
 gltf = { workspace = true, optional = true, features = ["names"] }
 bcdec_rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
+# The reference `MikkTSpace` build (platform `acos`) the deterministic one is checked against.
+bevy_mikktspace = { workspace = true, features = ["std"] }
 moba-test-support = { path = "../test-support" }
 
 [[bench]]

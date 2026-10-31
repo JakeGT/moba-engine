@@ -166,6 +166,14 @@ never link meshoptimizer. The generated
 `content/models/*.lod` files are derived from this repository's own sample meshes and carry
 the repository's MIT OR Apache-2.0 licence. See [ADR-0018](docs/adr/0018-culling-lods-memory.md).
 
+## MikkTSpace tangents (bevy_mikktspace)
+
+`moba-assets` generates missing vertex tangents with `bevy_mikktspace` 1.0.0 (Zlib AND
+(MIT OR Apache-2.0)), a Rust reimplementation of Morten S. Mikkelsen's MikkTSpace reference
+(<https://github.com/mmikk/MikkTSpace>, Copyright (C) 2011 by Morten S. Mikkelsen, zlib
+licence). The engine supplies its own deterministic `acos`; see
+[ADR-0022](docs/adr/0022-provenance-gate-mikktspace.md).
+
 ## Sample textures and material
 
 `content/textures/sentinel-{base,normal,mr,mask}.ktx2` (and the copy in `fuzz/corpus/ktx2/`)
