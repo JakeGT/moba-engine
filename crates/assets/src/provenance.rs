@@ -1,8 +1,10 @@
 //! Asset provenance and the licence gate (A0, ADR-0022).
 //!
-//! Every file in a content root's asset directories (any directory below the root; the pack
-//! files at the root itself are data, not assets) is covered by exactly one entry of the
-//! [`PROVENANCE_FILE`] manifest in its own directory:
+//! Every file in a content root's asset directories (any directory below the root) is
+//! covered by exactly one entry of the [`PROVENANCE_FILE`] manifest in its own directory. The
+//! root itself may hold only pack files (`*.toml`, gameplay data) and the generated
+//! [`CREDITS_FILE`] and [`AI_DISCLOSURE_FILE`]; dot-files, dot-directories and symlinks are
+//! errors anywhere, so nothing can hide from the gate:
 //!
 //! ```toml
 //! [[asset]]
@@ -20,6 +22,7 @@
 //! # model_version = "2025-12"
 //! # weights_licence = "MIT"
 //! # seed = 1234
+//! # human_modified = false                 # true (with notes) for a CC-BY licence
 //! # prompt = "..."
 //! # tools = ["ComfyUI 0.3.40"]
 //! # [[asset.ai.inputs]]
@@ -32,8 +35,10 @@
 //! [`ALLOWED_LICENCES`] or [`LICENCE_EXCEPTIONS`] (non-commercial, no-derivatives,
 //! share-alike, unknown and all-rights-reserved are rejected), attribution text for CC-BY,
 //! and for AI-generated assets the model, version, weights licence, seed, prompt or inputs,
-//! and tools, with the roadmap's rules (the asset is CC0 or CC-BY, and third-party inputs
-//! are CC0). [`third_party_section`], [`credits_text`] and [`ai_disclosure`] render the
+//! and tools, with the roadmap's rules (the asset is CC0, or CC-BY once a person modified
+//! it, and third-party inputs are CC0). Exceptions apply only to the use and directories
+//! they were approved for. Manifest text may not contain control characters or HTML comment
+//! markers, so it cannot break the generated notices. [`third_party_section`], [`credits_text`] and [`ai_disclosure`] render the
 //! notices `content-check --provenance` writes; they are deterministic, so `--check` can
 //! compare them with the committed files.
 //!
@@ -45,9 +50,16 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// The manifest's file name in each asset directory. `provenance` is therefore a reserved
-/// asset name (no effect, map visuals or environment may be called that).
+/// The manifest's file name in each asset directory. It is never an asset itself, and
+/// `check_vfx_dir` skips `vfx/provenance.toml`, so do not name an effect, map visuals or
+/// other by-name asset `provenance` (no name validator rejects it).
 pub const PROVENANCE_FILE: &str = "provenance.toml";
+
+/// The generated credits file at the content root.
+pub const CREDITS_FILE: &str = "CREDITS.txt";
+
+/// The generated Steam AI-disclosure list at the content root.
+pub const AI_DISCLOSURE_FILE: &str = "AI-DISCLOSURE.md";
 
 /// Largest manifest accepted, in bytes.
 pub const MAX_PROVENANCE_BYTES: u64 = 64 * 1024;
@@ -65,9 +77,32 @@ pub const ALLOWED_LICENCES: &[&str] = &[
     "OFL-1.1",
 ];
 
+/// Where a licence id appears in a manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LicenceUse {
+    /// The asset's own `licence`.
+    Asset,
+    /// An AI asset's `ai.weights_licence`.
+    Weights,
+    /// An AI input's `licence`.
+    Input,
+}
+
+impl LicenceUse {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Asset => "licence",
+            Self::Weights => "ai.weights_licence",
+            Self::Input => "an ai input licence",
+        }
+    }
+}
+
 /// A licence the maintainer approved for specific sources although it is not on
 /// [`ALLOWED_LICENCES`] (roadmap §9.2, §9.4: approving exceptions is a human step, so adding
-/// one is a reviewed code change).
+/// one is a reviewed code change). It is accepted only for [`Self::uses`] and, when
+/// [`Self::dirs`] is not empty, only in those asset directories (and below them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LicenceException {
@@ -79,6 +114,10 @@ pub struct LicenceException {
     pub url: &'static str,
     /// What it was approved for, and where.
     pub approved: &'static str,
+    /// The manifest fields it may appear in.
+    pub uses: &'static [LicenceUse],
+    /// The content-root-relative directories it may appear in; empty for any.
+    pub dirs: &'static [&'static str],
 }
 
 /// The approved exceptions (next-gen roadmap §9.2).
@@ -88,26 +127,57 @@ pub const LICENCE_EXCEPTIONS: &[LicenceException] = &[
         name: "CMU Graphics Lab Motion Capture Database terms",
         url: "http://mocap.cs.cmu.edu/faqs.php",
         approved: "animation source, next-gen roadmap §9.2 (2026-10-30)",
+        uses: &[LicenceUse::Asset],
+        dirs: &["animations"],
     },
     LicenceException {
         id: "LicenseRef-NVIDIA-Open-Model-License",
         name: "NVIDIA Open Model License",
         url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
         approved: "Kimodo text-to-motion weights, next-gen roadmap §9.2-9.3 (2026-10-30)",
+        uses: &[LicenceUse::Weights],
+        dirs: &[],
     },
 ];
 
-/// `Ok` when `licence` is allowed or an approved exception, else why it is rejected.
+/// `Ok` when `licence` is allowed, or an approved exception for `usage` in `dir` (the
+/// content-root-relative directory of the manifest), else why it is rejected.
 ///
 /// # Errors
 /// A human-readable reason.
-pub fn licence_status(licence: &str) -> Result<(), String> {
-    if ALLOWED_LICENCES.contains(&licence)
-        || LICENCE_EXCEPTIONS
-            .iter()
-            .any(|exception| exception.id == licence)
-    {
+pub fn licence_status(licence: &str, usage: LicenceUse, dir: &str) -> Result<(), String> {
+    if ALLOWED_LICENCES.contains(&licence) {
         return Ok(());
+    }
+    if let Some(exception) = LICENCE_EXCEPTIONS
+        .iter()
+        .find(|exception| exception.id == licence)
+    {
+        let in_dir = exception.dirs.is_empty()
+            || exception
+                .dirs
+                .iter()
+                .any(|scope| dir == *scope || dir.starts_with(&format!("{scope}/")));
+        if exception.uses.contains(&usage) && in_dir {
+            return Ok(());
+        }
+        let uses: Vec<&str> = exception.uses.iter().map(|usage| usage.field()).collect();
+        let dirs = if exception.dirs.is_empty() {
+            String::from("any directory")
+        } else {
+            exception
+                .dirs
+                .iter()
+                .map(|scope| format!("{scope}/"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(format!(
+            "licence \"{licence}\" is an approved exception only as {} in {dirs}, not as {} \
+             in {dir}/",
+            uses.join(" or "),
+            usage.field()
+        ));
     }
     let upper = licence.to_ascii_uppercase();
     let has = |part: &str| {
@@ -185,6 +255,10 @@ pub struct AiProvenance {
     pub weights_licence: String,
     /// Generation seed.
     pub seed: u64,
+    /// A person modified the output, which permits a CC-BY licence (roadmap §9.5); the
+    /// asset's `notes` must then say what was changed.
+    #[serde(default)]
+    pub human_modified: bool,
     /// The prompt; may be empty when [`Self::inputs`] drive the generation.
     #[serde(default)]
     pub prompt: String,
@@ -282,9 +356,63 @@ fn is_source(source: &str) -> bool {
     source == "original" || source.starts_with("https://") || source.starts_with("http://")
 }
 
-/// The policy checks of one entry, as error lines prefixed with `at`.
-fn check_entry(at: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
+/// Why `value` cannot go into the generated notices, if it cannot: control characters
+/// (line breaks included) and HTML comment markers, which could end the generated section.
+fn unsafe_text(value: &str) -> Option<&'static str> {
+    if value.chars().any(char::is_control) {
+        Some("contains a control character (line breaks included)")
+    } else if value.contains("<!--") || value.contains("-->") {
+        Some("contains an HTML comment marker")
+    } else {
+        None
+    }
+}
+
+/// Every text field of an entry, as `(field, value)`.
+fn text_fields(asset: &AssetProvenance) -> Vec<(&'static str, &str)> {
+    let mut fields = vec![
+        ("title", asset.title.as_str()),
+        ("source", asset.source.as_str()),
+        ("author", asset.author.as_str()),
+        ("licence", asset.licence.as_str()),
+    ];
+    fields.extend(asset.files.iter().map(|file| ("files", file.as_str())));
+    for (field, value) in [
+        ("attribution", &asset.attribution),
+        ("made_with", &asset.made_with),
+        ("notes", &asset.notes),
+    ] {
+        if let Some(value) = value {
+            fields.push((field, value.as_str()));
+        }
+    }
+    if let Some(ai) = &asset.ai {
+        fields.extend([
+            ("ai.model", ai.model.as_str()),
+            ("ai.model_version", ai.model_version.as_str()),
+            ("ai.weights_licence", ai.weights_licence.as_str()),
+            ("ai.prompt", ai.prompt.as_str()),
+        ]);
+        fields.extend(ai.tools.iter().map(|tool| ("ai.tools", tool.as_str())));
+        for input in &ai.inputs {
+            fields.extend([
+                ("ai.inputs.name", input.name.as_str()),
+                ("ai.inputs.source", input.source.as_str()),
+                ("ai.inputs.licence", input.licence.as_str()),
+            ]);
+        }
+    }
+    fields
+}
+
+/// The policy checks of one entry in `dir`, as error lines prefixed with `at`.
+fn check_entry(at: &str, dir: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
     let mut fail = |message: String| errors.push(format!("{at}: {message}"));
+    for (field, value) in text_fields(asset) {
+        if let Some(problem) = unsafe_text(value) {
+            fail(format!("{field} {problem}"));
+        }
+    }
     for (field, value) in [
         ("title", &asset.title),
         ("author", &asset.author),
@@ -300,7 +428,7 @@ fn check_entry(at: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
             asset.source
         ));
     }
-    if let Err(reason) = licence_status(&asset.licence) {
+    if let Err(reason) = licence_status(&asset.licence, LicenceUse::Asset, dir) {
         fail(reason);
     }
     if needs_attribution(&asset.licence)
@@ -317,12 +445,25 @@ fn check_entry(at: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
     let Some(ai) = &asset.ai else {
         return;
     };
-    if asset.licence != "CC0-1.0" && !needs_attribution(&asset.licence) {
-        fail(format!(
-            "an AI-generated asset is licensed CC0-1.0 (or CC-BY when a person modified it), \
-             not {}",
-            asset.licence
-        ));
+    if asset.licence != "CC0-1.0" {
+        if !needs_attribution(&asset.licence) {
+            fail(format!(
+                "an AI-generated asset is licensed CC0-1.0 (or CC-BY once a person modified \
+                 it), not {}",
+                asset.licence
+            ));
+        } else if !ai.human_modified
+            || asset
+                .notes
+                .as_deref()
+                .is_none_or(|notes| notes.trim().is_empty())
+        {
+            fail(format!(
+                "AI output is CC0-1.0; {} needs `ai.human_modified = true` and notes saying \
+                 what a person changed",
+                asset.licence
+            ));
+        }
     }
     for (field, value) in [
         ("ai.model", &ai.model),
@@ -332,7 +473,7 @@ fn check_entry(at: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
             fail(format!("{field} is empty"));
         }
     }
-    if let Err(reason) = licence_status(&ai.weights_licence) {
+    if let Err(reason) = licence_status(&ai.weights_licence, LicenceUse::Weights, dir) {
         fail(format!("ai.weights_licence: {reason}"));
     }
     if ai.prompt.trim().is_empty() && ai.inputs.is_empty() {
@@ -352,7 +493,7 @@ fn check_entry(at: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
             ));
         }
         if input.source == "original" {
-            if let Err(reason) = licence_status(&input.licence) {
+            if let Err(reason) = licence_status(&input.licence, LicenceUse::Input, dir) {
                 fail(format!("{label}: {reason}"));
             }
         } else if input.licence != "CC0-1.0" {
@@ -365,23 +506,67 @@ fn check_entry(at: &str, asset: &AssetProvenance, errors: &mut Vec<String>) {
 }
 
 /// Checks every asset file below `root` against its directory's manifest and the licence
-/// policy (see the module docs). Files directly in `root` are not assets and are skipped,
-/// as are dot-files. Directories and files are visited in sorted order, so the report is
+/// policy (see the module docs), and that the root holds only packs and the generated
+/// notices. Directories and files are visited in sorted order, so the report is
 /// deterministic.
 #[must_use]
 pub fn check_provenance(root: &Path) -> ProvenanceReport {
     let mut report = ProvenanceReport::default();
-    match sorted_entries(root) {
-        Ok(entries) => {
-            for (name, is_dir) in entries {
-                if is_dir {
-                    walk(root, &name, &mut report);
-                }
-            }
+    let entries = match sorted_entries(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.errors.push(format!("{}: {error}", root.display()));
+            return report;
         }
-        Err(error) => report.errors.push(format!("{}: {error}", root.display())),
+    };
+    for (name, kind) in entries {
+        if refuse_entry("", &name, kind, &mut report) {
+            continue;
+        }
+        if kind == EntryKind::Dir {
+            walk(root, &name, &mut report);
+        } else if !(Path::new(&name)
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+            || name == CREDITS_FILE
+            || name == AI_DISCLOSURE_FILE)
+        {
+            report.errors.push(format!(
+                "{name}: only packs (*.toml), {CREDITS_FILE} and {AI_DISCLOSURE_FILE} may sit at \
+                 the content root; move assets into a directory with a {PROVENANCE_FILE}"
+            ));
+        }
     }
     report
+}
+
+/// What a directory entry is. Symlinks are never followed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum EntryKind {
+    File,
+    Dir,
+    /// A symlink, socket, device or anything else that is not a plain file or directory.
+    Other,
+}
+
+/// Reports (and returns `true` for) an entry the gate never accepts: a dot-file or
+/// dot-directory (hidden from listings, so it could carry anything unseen), or a symlink or
+/// special file (its target is outside the gate). `dir` is `""` at the root.
+fn refuse_entry(dir: &str, name: &str, kind: EntryKind, report: &mut ProvenanceReport) -> bool {
+    let path = if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    };
+    let problem = if name.starts_with('.') {
+        "dot-files and dot-directories are not allowed in a content root"
+    } else if kind == EntryKind::Other {
+        "symlinks and special files are not allowed in a content root"
+    } else {
+        return false;
+    };
+    report.errors.push(format!("{path}: {problem}"));
+    true
 }
 
 /// Checks `dir` (relative to `root`), then its subdirectories, depth first.
@@ -393,29 +578,36 @@ fn walk(root: &Path, dir: &str, report: &mut ProvenanceReport) {
             return;
         }
     };
+    let entries: Vec<(String, EntryKind)> = entries
+        .into_iter()
+        .filter(|(name, kind)| !refuse_entry(dir, name, *kind, report))
+        .collect();
     let files: Vec<String> = entries
         .iter()
-        .filter(|(name, is_dir)| !is_dir && name != PROVENANCE_FILE)
+        .filter(|(name, kind)| *kind == EntryKind::File && name != PROVENANCE_FILE)
         .map(|(name, _)| name.clone())
         .collect();
     check_dir(root, dir, &files, report);
-    for (name, is_dir) in &entries {
-        if *is_dir {
+    for (name, kind) in &entries {
+        if *kind == EntryKind::Dir {
             walk(root, &format!("{dir}/{name}"), report);
         }
     }
 }
 
-/// `(name, is_dir)` of a directory's entries, sorted by name, dot-files skipped.
-fn sorted_entries(dir: &Path) -> std::io::Result<Vec<(String, bool)>> {
+/// `(name, kind)` of a directory's entries, sorted by name, dot entries included.
+fn sorted_entries(dir: &Path) -> std::io::Result<Vec<(String, EntryKind)>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        entries.push((name, entry.file_type()?.is_dir()));
+        // `DirEntry::file_type` does not follow symlinks.
+        let kind = match entry.file_type()? {
+            kind if kind.is_dir() => EntryKind::Dir,
+            kind if kind.is_file() => EntryKind::File,
+            _ => EntryKind::Other,
+        };
+        entries.push((name, kind));
     }
     entries.sort();
     Ok(entries)
@@ -453,13 +645,13 @@ fn check_dir(root: &Path, dir: &str, files: &[String], report: &mut ProvenanceRe
             report.errors.push(format!("{at}: files is empty"));
         }
         for pattern in &asset.files {
-            if pattern.is_empty()
-                || pattern.contains(['/', '\\'])
-                || pattern.starts_with('.')
-                || pattern == PROVENANCE_FILE
-            {
+            let plain = pattern.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'*')
+            });
+            if !plain || pattern.starts_with('.') || pattern == PROVENANCE_FILE {
                 report.errors.push(format!(
-                    "{at}: \"{pattern}\" must be a file name or `*` pattern in {dir}/"
+                    "{at}: \"{pattern}\" must be a file name or `*` pattern in {dir}/ \
+                     (ASCII letters, digits, `.`, `_`, `-`, `*`)"
                 ));
                 continue;
             }
@@ -484,7 +676,7 @@ fn check_dir(root: &Path, dir: &str, files: &[String], report: &mut ProvenanceRe
                 ));
             }
         }
-        check_entry(&at, &asset, &mut report.errors);
+        check_entry(&at, dir, &asset, &mut report.errors);
         let mut matched: Vec<String> = files
             .iter()
             .enumerate()
@@ -529,9 +721,22 @@ pub const THIRD_PARTY_BEGIN: &str =
 /// The last line of the generated section.
 pub const THIRD_PARTY_END: &str = "<!-- END content provenance -->";
 
-/// Escapes text for a Markdown table cell.
+/// Escapes text for a Markdown table cell or list item: `|`, backticks, brackets and `<`
+/// (the gate already rejects control characters and comment markers).
 fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace('\n', " ")
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '|' | '`' | '[' | ']' => {
+                out.push('\\');
+                out.push(character);
+            }
+            '<' => out.push_str("&lt;"),
+            character if character.is_control() => out.push(' '),
+            character => out.push(character),
+        }
+    }
+    out
 }
 
 /// The generated `THIRD_PARTY.md` section (markers included, trailing newline): one table
@@ -547,8 +752,8 @@ pub fn third_party_section(report: &ProvenanceReport, content: &str) -> String {
         out,
         "Every file in `{content}/`'s asset directories has a provenance entry in its \
          directory's `{PROVENANCE_FILE}` (A0, ADR-0022); `content-check --provenance` checks \
-         them and writes this section, `{content}/CREDITS.txt` and \
-         `{content}/AI-DISCLOSURE.md`. {} entries cover {} files.",
+         them and writes this section, `{content}/{CREDITS_FILE}` and \
+         `{content}/{AI_DISCLOSURE_FILE}`. {} entries cover {} files.",
         report.entries.len(),
         report.files
     );
@@ -612,27 +817,60 @@ pub fn third_party_section(report: &ProvenanceReport, content: &str) -> String {
     out
 }
 
-/// `existing` with its generated section replaced by `section` (or `section` appended after
-/// a blank line when there is none yet; `section` alone for an empty file).
-#[must_use]
-pub fn splice_third_party(existing: &str, section: &str) -> String {
-    if let (Some(begin), Some(end)) = (
-        existing.find(THIRD_PARTY_BEGIN),
-        existing.find(THIRD_PARTY_END),
-    ) && begin < end
-    {
-        let mut after = end + THIRD_PARTY_END.len();
-        if existing[after..].starts_with('\n') {
-            after += 1;
+/// `existing` with its generated section replaced by `section`, or `section` appended
+/// after a blank line when `existing` has no markers (`section` alone for an empty file).
+///
+/// # Errors
+/// When the markers are not exactly one [`THIRD_PARTY_BEGIN`] followed by one
+/// [`THIRD_PARTY_END`] on their own lines: a duplicate, missing or reversed marker is a
+/// hand edit the tool will not guess at.
+pub fn splice_third_party(existing: &str, section: &str) -> Result<String, String> {
+    let begins: Vec<usize> = existing
+        .match_indices(THIRD_PARTY_BEGIN)
+        .map(|(at, _)| at)
+        .collect();
+    let ends: Vec<usize> = existing
+        .match_indices(THIRD_PARTY_END)
+        .map(|(at, _)| at)
+        .collect();
+    match (begins.as_slice(), ends.as_slice()) {
+        ([], []) => {
+            let mut out = existing.trim_end().to_string();
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(section);
+            Ok(out)
         }
-        return format!("{}{section}{}", &existing[..begin], &existing[after..]);
+        (&[begin], &[end]) if begin < end => {
+            let line_start = |at: usize| at == 0 || existing.as_bytes()[at - 1] == b'\n';
+            let mut after = end + THIRD_PARTY_END.len();
+            if !line_start(begin) || !line_start(end) {
+                return Err(String::from(
+                    "the content provenance markers must start their own lines",
+                ));
+            }
+            if existing[after..].starts_with('\n') {
+                after += 1;
+            }
+            Ok(format!(
+                "{}{section}{}",
+                &existing[..begin],
+                &existing[after..]
+            ))
+        }
+        _ => Err(format!(
+            "expected one BEGIN then one END content provenance marker, found {} BEGIN and {} \
+             END{}; fix the file by hand",
+            begins.len(),
+            ends.len(),
+            if begins.len() == 1 && ends.len() == 1 {
+                " in the wrong order"
+            } else {
+                ""
+            }
+        )),
     }
-    let mut out = existing.trim_end().to_string();
-    if !out.is_empty() {
-        out.push_str("\n\n");
-    }
-    out.push_str(section);
-    out
 }
 
 /// A credits heading and which entries it lists.
@@ -771,13 +1009,13 @@ mod tests {
     #[test]
     fn the_licence_policy_follows_the_roadmap() {
         for allowed in ["CC0-1.0", "CC-BY-4.0", "MIT OR Apache-2.0", "OFL-1.1"] {
-            assert_eq!(licence_status(allowed), Ok(()), "{allowed}");
-        }
-        for exception in [
-            "LicenseRef-CMU-Mocap",
-            "LicenseRef-NVIDIA-Open-Model-License",
-        ] {
-            assert_eq!(licence_status(exception), Ok(()), "{exception}");
+            for usage in [LicenceUse::Asset, LicenceUse::Weights, LicenceUse::Input] {
+                assert_eq!(
+                    licence_status(allowed, usage, "models"),
+                    Ok(()),
+                    "{allowed}"
+                );
+            }
         }
         for (rejected, why) in [
             ("CC-BY-NC-4.0", "non-commercial"),
@@ -791,14 +1029,51 @@ mod tests {
             ("LicenseRef-Proprietary", "all-rights-reserved"),
             ("GPL-3.0-only", "allow-list"),
         ] {
-            let error = licence_status(rejected).expect_err(rejected);
+            let error = licence_status(rejected, LicenceUse::Asset, "models").expect_err(rejected);
             assert!(error.contains(why), "{rejected}: {error}");
         }
         assert!(needs_attribution("CC-BY-4.0"));
         assert!(!needs_attribution("CC0-1.0"));
     }
 
-    /// A scratch content root under the target directory, removed on drop.
+    #[test]
+    fn exceptions_apply_only_to_their_approved_use_and_directories() {
+        const CMU: &str = "LicenseRef-CMU-Mocap";
+        const OML: &str = "LicenseRef-NVIDIA-Open-Model-License";
+        assert_eq!(licence_status(CMU, LicenceUse::Asset, "animations"), Ok(()));
+        assert_eq!(
+            licence_status(CMU, LicenceUse::Asset, "animations/hero"),
+            Ok(())
+        );
+        for (usage, dir) in [
+            (LicenceUse::Asset, "models"),
+            (LicenceUse::Asset, "animations-extra"),
+            (LicenceUse::Weights, "animations"),
+            (LicenceUse::Input, "animations"),
+        ] {
+            let error = licence_status(CMU, usage, dir).expect_err(dir);
+            assert!(error.contains("only as licence in animations/"), "{error}");
+        }
+        for dir in ["animations", "textures"] {
+            assert_eq!(licence_status(OML, LicenceUse::Weights, dir), Ok(()));
+        }
+        for usage in [LicenceUse::Asset, LicenceUse::Input] {
+            let error = licence_status(OML, usage, "animations").expect_err("not weights");
+            assert!(error.contains("only as ai.weights_licence"), "{error}");
+        }
+        // Through a manifest entry, too: CMU motion is not a texture licence.
+        let cmu = |dir| {
+            entry_errors_in(
+                dir,
+                "source = \"https://mocap.cs.cmu.edu/\"\nlicence = \"LicenseRef-CMU-Mocap\"\n\
+                 attribution = \"CMU Graphics Lab Motion Capture Database\"",
+            )
+        };
+        assert_eq!(cmu("animations"), Vec::<String>::new());
+        assert!(cmu("textures").iter().any(|e| e.contains("exception only")));
+    }
+
+    /// A scratch content root under the system temporary directory, removed on drop.
     struct Scratch(std::path::PathBuf);
 
     impl Scratch {
@@ -842,7 +1117,6 @@ licence = "MIT OR Apache-2.0"
         scratch.write("pack.toml", "# a pack: not an asset");
         scratch.write("models/a.glb", "");
         scratch.write("models/b.glb", "");
-        scratch.write("models/.keep", "");
         // No manifest: both files are reported.
         let found = errors(&scratch);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -899,13 +1173,84 @@ licence = "MIT OR Apache-2.0"
         );
     }
 
+    #[test]
+    fn the_root_holds_only_packs_and_notices_and_nothing_hides() {
+        let scratch = Scratch::new("root");
+        scratch.write("pack.toml", "");
+        scratch.write(CREDITS_FILE, "");
+        scratch.write(AI_DISCLOSURE_FILE, "");
+        scratch.write("models/a.glb", "");
+        scratch.write("models/provenance.toml", ORIGINAL);
+        assert_eq!(errors(&scratch), Vec::<String>::new());
+        // A binary or stray document at the root is not a pack.
+        scratch.write("loose.png", "");
+        scratch.write("README.md", "");
+        let found = errors(&scratch);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].starts_with("README.md: only packs"), "{found:?}");
+        assert!(found[1].starts_with("loose.png: only packs"), "{found:?}");
+        std::fs::remove_file(scratch.0.join("loose.png")).expect("rm");
+        std::fs::remove_file(scratch.0.join("README.md")).expect("rm");
+        // Dot-files and dot-directories are errors at the root and below, even when a
+        // pattern would match them.
+        scratch.write(".secret.png", "");
+        scratch.write(".cache/x.glb", "");
+        scratch.write("models/.hidden.glb", "");
+        scratch.write("models/.git/blob", "");
+        let found = errors(&scratch);
+        assert_eq!(
+            found,
+            [
+                ".cache: dot-files and dot-directories are not allowed in a content root",
+                ".secret.png: dot-files and dot-directories are not allowed in a content root",
+                "models/.git: dot-files and dot-directories are not allowed in a content root",
+                "models/.hidden.glb: dot-files and dot-directories are not allowed in a content \
+                 root",
+            ]
+        );
+    }
+
+    /// A symlinked directory is reported, not followed, so it cannot pull unchecked files
+    /// (or a loop) into the gate; a symlinked file likewise.
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_reported_not_followed() {
+        let scratch = Scratch::new("symlink");
+        let outside = Scratch::new("symlink-target");
+        outside.write("unvetted.glb", "");
+        scratch.write("models/a.glb", "");
+        scratch.write("models/provenance.toml", ORIGINAL);
+        std::os::unix::fs::symlink(&outside.0, scratch.0.join("models/linked")).expect("link");
+        std::os::unix::fs::symlink(&outside.0, scratch.0.join("textures")).expect("link");
+        std::os::unix::fs::symlink(
+            outside.0.join("unvetted.glb"),
+            scratch.0.join("models/b.glb"),
+        )
+        .expect("link");
+        let report = check_provenance(&scratch.0);
+        let symlink = "symlinks and special files are not allowed in a content root";
+        assert_eq!(
+            report.errors,
+            [
+                format!("models/b.glb: {symlink}"),
+                format!("models/linked: {symlink}"),
+                format!("textures: {symlink}"),
+            ]
+        );
+        assert_eq!(report.files, 1, "only models/a.glb is a checked asset");
+    }
+
     fn entry_errors(extra: &str) -> Vec<String> {
+        entry_errors_in("models", extra)
+    }
+
+    fn entry_errors_in(dir: &str, extra: &str) -> Vec<String> {
         let asset: AssetProvenance = toml::from_str(&format!(
             "files = [\"x\"]\ntitle = \"T\"\nauthor = \"A\"\n{extra}"
         ))
         .expect("entry parses");
         let mut errors = Vec::new();
-        check_entry("at", &asset, &mut errors);
+        check_entry("at", dir, &asset, &mut errors);
         errors
     }
 
@@ -933,6 +1278,52 @@ licence = "MIT OR Apache-2.0"
         );
     }
 
+    #[test]
+    fn manifest_text_cannot_break_the_generated_notices() {
+        let ok = "source = \"original\"\nlicence = \"CC0-1.0\"\n";
+        assert_eq!(entry_errors(ok), Vec::<String>::new());
+        for (field, value, problem) in [
+            ("notes", "x <!-- THIRD_PARTY_END", "comment marker"),
+            ("made_with", "end -->", "comment marker"),
+            ("notes", "two\\nlines", "control character"),
+            ("attribution", "tab\\there", "control character"),
+            ("notes", "bell\\u0007", "control character"),
+        ] {
+            let found = entry_errors(&format!("{ok}{field} = \"{value}\"\n"));
+            assert!(
+                found
+                    .iter()
+                    .any(|e| e.starts_with(&format!("at: {field} ")) && e.contains(problem)),
+                "{field} = {value:?}: {found:?}"
+            );
+        }
+        // Inside the AI block too.
+        let prompt = entry_errors(&AI.replace("a bronze brazier", "a <!-- b"));
+        assert!(
+            prompt.iter().any(|e| e.contains("ai.prompt contains")),
+            "{prompt:?}"
+        );
+        // Patterns are plain ASCII file names.
+        let scratch = Scratch::new("patterns");
+        scratch.write("models/a.glb", "");
+        for bad in ["a`.glb", "[a].glb", "a b.glb", "<a>.glb", "../a.glb"] {
+            scratch.write(
+                "models/provenance.toml",
+                &ORIGINAL.replace("\"*.glb\"", &format!("\"*.glb\", '{bad}'")),
+            );
+            let found = errors(&scratch);
+            assert!(
+                found.iter().any(|e| e.contains("must be a file name")),
+                "{bad}: {found:?}"
+            );
+        }
+        // Markdown and HTML that the gate allows are escaped in the tables.
+        assert_eq!(
+            cell("a|b `c` [d](e) <img>"),
+            "a\\|b \\`c\\` \\[d\\](e) &lt;img>"
+        );
+    }
+
     const AI: &str = "source = \"original\"\nlicence = \"CC0-1.0\"\n[ai]\nmodel = \"TRELLIS.2-4B\"\n\
         model_version = \"2025-12\"\nweights_licence = \"MIT\"\nseed = 7\n\
         prompt = \"a bronze brazier\"\ntools = [\"ComfyUI\"]\n";
@@ -945,6 +1336,38 @@ licence = "MIT OR Apache-2.0"
             all_rights.iter().any(|e| e.contains("licensed CC0-1.0")),
             "{all_rights:?}"
         );
+        // CC-BY needs a person's modification, recorded with what they changed.
+        let by = AI.replace(
+            "licence = \"CC0-1.0\"",
+            "licence = \"CC-BY-4.0\"\nattribution = \"Brazier by A, CC BY 4.0\"",
+        );
+        let unmodified = entry_errors(&by);
+        assert!(
+            unmodified
+                .iter()
+                .any(|e| e.contains("needs `ai.human_modified = true`")),
+            "{unmodified:?}"
+        );
+        let modified = by.replace("seed = 7", "seed = 7\nhuman_modified = true");
+        let no_notes = entry_errors(&modified);
+        assert!(
+            no_notes
+                .iter()
+                .any(|e| e.contains("notes saying what a person changed")),
+            "{no_notes:?}"
+        );
+        let blank_notes = entry_errors(&modified.replace("[ai]", "notes = \" \"\n[ai]"));
+        assert!(
+            blank_notes
+                .iter()
+                .any(|e| e.contains("notes saying what a person changed")),
+            "{blank_notes:?}"
+        );
+        let noted = modified.replace(
+            "[ai]",
+            "notes = \"Retopologised and repainted by A.\"\n[ai]",
+        );
+        assert_eq!(entry_errors(&noted), Vec::<String>::new());
         let nc_weights = entry_errors(&AI.replace("\"MIT\"", "\"LicenseRef-FLUX-dev-NC\""));
         assert!(
             nc_weights.iter().any(|e| e.contains("ai.weights_licence")),
@@ -1012,10 +1435,12 @@ licence = "MIT OR Apache-2.0"
         assert!(section.contains("| `content/models/*.glb` (1) | Sample meshes | original |"));
         assert!(section.contains("Rock \\| 042 (AI-generated)"), "{section}");
         // Splicing replaces the old section and keeps the hand-written text around it.
-        let spliced = splice_third_party("# Notices\n\nHand-written.\n", &section);
+        let spliced = splice_third_party("# Notices\n\nHand-written.\n", &section).expect("append");
         assert_eq!(spliced, format!("# Notices\n\nHand-written.\n\n{section}"));
-        let again = splice_third_party(&format!("{spliced}\n## After\n"), &section);
+        let again =
+            splice_third_party(&format!("{spliced}\n## After\n"), &section).expect("replace");
         assert_eq!(again, format!("{spliced}\n## After\n"));
+        assert_eq!(splice_third_party("", &section), Ok(section.clone()));
         let credits = credits_text(&report);
         assert!(credits.contains(
             "Original content\n  Sample meshes - MOBA Engine contributors - MIT OR Apache-2.0\n"
@@ -1027,6 +1452,30 @@ licence = "MIT OR Apache-2.0"
         let disclosure = ai_disclosure(&report, "content");
         assert!(disclosure.contains("1 of 2 manifest entries are AI-generated."));
         assert!(disclosure.contains("| `content/textures/rock.ktx2` | Rock \\| 042 | TRELLIS.2-4B | 2025-12 | MIT | CC0-1.0 | ComfyUI |"));
+    }
+
+    #[test]
+    fn the_generated_section_needs_exactly_one_marker_pair_in_order() {
+        let section = format!("{THIRD_PARTY_BEGIN}\nnew\n{THIRD_PARTY_END}\n");
+        let begin = THIRD_PARTY_BEGIN;
+        let end = THIRD_PARTY_END;
+        for broken in [
+            format!("a\n{begin}\nold\n"),
+            format!("a\n{end}\nold\n"),
+            format!("a\n{end}\nold\n{begin}\n"),
+            format!("{begin}\nx\n{end}\n{begin}\ny\n{end}\n"),
+            format!("{begin}\n{begin}\nx\n{end}\n"),
+            format!("{begin}\nx\n{end}\n{end}\n"),
+        ] {
+            let error = splice_third_party(&broken, &section).expect_err(&broken);
+            assert!(error.contains("expected one BEGIN then one END"), "{error}");
+        }
+        let reversed =
+            splice_third_party(&format!("{end}\n{begin}\n"), &section).expect_err("reversed");
+        assert!(reversed.contains("wrong order"), "{reversed}");
+        let inline =
+            splice_third_party(&format!("text {begin}\nx\n{end}\n"), &section).expect_err("inline");
+        assert!(inline.contains("own lines"), "{inline}");
     }
 
     /// The repository's own content passes the gate and its committed notices are current
@@ -1046,7 +1495,7 @@ licence = "MIT OR Apache-2.0"
         let third_party = read("THIRD_PARTY.md");
         assert_eq!(
             splice_third_party(&third_party, &third_party_section(&report, "content")),
-            third_party,
+            Ok(third_party.clone()),
             "THIRD_PARTY.md is {stale}"
         );
         assert_eq!(

@@ -468,7 +468,7 @@ fn hex(bytes: &[u8]) -> String {
 /// The licence and provenance gate (A0, ADR-0022): checks every asset under `content` and
 /// writes, or with `check` compares, the generated notices: the content section of
 /// `third_party`, `content/CREDITS.txt` and `content/AI-DISCLOSURE.md`. Returns the exit
-/// status: 0 when the gate passes (and, with `check`, every notice is current).
+/// status: 0 when the gate passes (and, with `check`, every notice is current), else 1.
 fn provenance_gate(content: &std::path::Path, third_party: &std::path::Path, check: bool) -> i32 {
     use moba_assets::provenance;
     let report = provenance::check_provenance(content);
@@ -476,6 +476,10 @@ fn provenance_gate(content: &std::path::Path, third_party: &std::path::Path, che
         eprintln!("error: {error}");
     }
     let label = content.to_string_lossy().replace('\\', "/");
+    let label = match label.trim_end_matches('/') {
+        "" => label.as_str(),
+        trimmed => trimmed,
+    };
     // A missing notices file starts empty (written, or reported stale with `check`).
     let existing = match std::fs::read_to_string(third_party) {
         Ok(text) => text,
@@ -487,19 +491,23 @@ fn provenance_gate(content: &std::path::Path, third_party: &std::path::Path, che
     };
     // Compare and write with LF line endings, whatever the checkout uses.
     let existing = existing.replace("\r\n", "\n");
-    let section = provenance::third_party_section(&report, &label);
+    let section = provenance::third_party_section(&report, label);
+    let spliced = match provenance::splice_third_party(&existing, &section) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("error: {}: {error}", third_party.display());
+            return 1;
+        }
+    };
     let outputs = [
+        (third_party.to_path_buf(), spliced),
         (
-            third_party.to_path_buf(),
-            provenance::splice_third_party(&existing, &section),
-        ),
-        (
-            content.join("CREDITS.txt"),
+            content.join(provenance::CREDITS_FILE),
             provenance::credits_text(&report),
         ),
         (
-            content.join("AI-DISCLOSURE.md"),
-            provenance::ai_disclosure(&report, &label),
+            content.join(provenance::AI_DISCLOSURE_FILE),
+            provenance::ai_disclosure(&report, label),
         ),
     ];
     let mut status = i32::from(!report.errors.is_empty());
