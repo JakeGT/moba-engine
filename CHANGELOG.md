@@ -124,7 +124,12 @@ the semver check):
   - `content-check --provenance` fails on an asset without provenance, a licence off the
     allow-list (CC0, CC-BY, MIT, Apache-2.0, OFL-1.1, plus the CMU and NVIDIA Open Model
     License exceptions; NC, ND, share-alike, unknown and all-rights-reserved are rejected),
-    CC-BY without attribution text, or an AI asset that breaks the roadmap's rules. It writes
+    CC-BY without attribution text, or an AI asset that breaks the roadmap's rules (CC-BY
+    only with `ai.human_modified = true` and notes). Exceptions are scoped (CMU mocap only as
+    an asset licence under `animations/`, the NVIDIA licence only as `ai.weights_licence`);
+    the content root may hold only packs and the generated notices; dot entries and
+    symlinks are errors; manifest text may not hold control characters or comment markers;
+    and `THIRD_PARTY.md` needs exactly one marker pair. It writes
     the content section of `THIRD_PARTY.md`, `content/CREDITS.txt` and the Steam
     AI-disclosure list `content/AI-DISCLOSURE.md`; `--check` (in `scripts/agent-verify.sh`,
     `just ci-tools` and a unit test) fails when they are stale. New `moba_assets::provenance`
@@ -135,7 +140,10 @@ the semver check):
     "MikkTSpace-style" generator, so normal maps baked by MikkTSpace tools shade correctly on
     smooth meshes. The flat-shaded sample meshes `content/models/{sentinel,crystal,rampart}.glb`
     were regenerated (tangents move by at most 1.8e-7); the renderer's built-in cube and
-    plane are now wound counter-clockwise about their normals, as MikkTSpace assumes. LODs,
+    plane are now wound counter-clockwise about their normals, as MikkTSpace assumes. The
+    `.glb` loader generates tangents once at load (so bone-count skin LODs inherit them) and
+    reverses the corner order under a mirroring node, keeping front faces counter-clockwise;
+    new bench `mesh/generate_tangents/{10k,65k}`. LODs,
     VAT, baked AO and captured frames are unchanged. No wire, replay, simulation or
     content-hash change.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;

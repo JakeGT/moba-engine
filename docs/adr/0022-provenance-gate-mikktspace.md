@@ -34,13 +34,16 @@ linked only by `mesh-bake` for LODs, which are index-only and never touch tangen
 ## Decision
 
 ### 1. One `provenance.toml` per asset directory
-Every file below the content root (not the pack files at the root itself, which are gameplay
-data, and not dot-files) must be covered by exactly one `[[asset]]` entry of the
-`provenance.toml` in **its own directory**:
+Every file below the content root must be covered by exactly one `[[asset]]` entry of the
+`provenance.toml` in **its own directory**. The root itself may hold only pack files
+(`*.toml`, gameplay data) and the generated `CREDITS.txt` and `AI-DISCLOSURE.md`; anything
+else there is an error. Dot-files, dot-directories and symlinks are errors at every level
+and symlinks are never followed, so no file in a content root escapes the gate by being
+hidden, by sitting at the root, or by living behind a link:
 
 ```toml
 [[asset]]
-files = ["terrain-*.ktx2"]          # names or `*` patterns in this directory
+files = ["terrain-rock.ktx2"]       # names or `*` patterns in this directory
 title = "Terrain layer textures"
 source = "original"                 # or the http(s) page it came from
 author = "MOBA Engine contributors"
@@ -54,6 +57,7 @@ model = "TRELLIS.2-4B"
 model_version = "2025-12"
 weights_licence = "MIT"
 seed = 1234
+human_modified = false              # true (with notes) permits CC-BY
 prompt = "…"                        # may be empty when inputs drive it
 tools = ["ComfyUI 0.3.x", "mesh-bake"]
 [[asset.ai.inputs]]
@@ -66,26 +70,35 @@ Per-directory manifests keep related files (a model and its LOD, a texture set) 
 need ten files for today's content instead of 76 sidecars, and sit where an agent downloading
 or generating an asset will write it. Unknown keys are errors (`deny_unknown_fields`), so a
 typo such as `license` fails. A file covered twice, an uncovered file, a directory without a
-manifest and a pattern that matches nothing (a stale entry) are all errors. `provenance` is
-therefore a reserved asset name; `check_vfx_dir` skips `vfx/provenance.toml`.
+manifest and a pattern that matches nothing (a stale entry) are all errors. Patterns are plain
+ASCII names (letters, digits, `.`, `_`, `-`, `*`). The shipped manifests list binary assets by
+name and keep `*` only for families of text descriptors, so each new binary is a reviewed
+manifest change. `provenance.toml` is never an asset (`check_vfx_dir` skips
+`vfx/provenance.toml`); nothing rejects `provenance` as an asset name, so the docs say not
+to use it.
 
 ### 2. The licence policy
 - **Allowed:** `CC0-1.0`, `CC-BY-3.0`, `CC-BY-4.0`, `MIT`, `Apache-2.0`, `MIT OR Apache-2.0`
   (the repository's own licence, which every current asset carries) and `OFL-1.1` (fonts).
-- **Exceptions** (`moba_assets::provenance::LICENCE_EXCEPTIONS`), each with its approval:
-  `LicenseRef-CMU-Mocap` (the CMU motion-capture database) and
-  `LicenseRef-NVIDIA-Open-Model-License` (Kimodo), both from §9.2. Approving an exception is a
-  human step (§9.4), so the list is code: adding one is a reviewed PR, not a data edit an
-  agent can make alongside the asset that needs it.
+- **Exceptions** (`moba_assets::provenance::LICENCE_EXCEPTIONS`), each with its approval and
+  scope, both from §9.2: `LicenseRef-CMU-Mocap` (the CMU motion-capture database) only as an
+  asset `licence` under `animations/`, and `LicenseRef-NVIDIA-Open-Model-License` (Kimodo)
+  only as `ai.weights_licence`. Approving an exception is a human step (§9.4), so the list,
+  its `uses` and its `dirs` are code: adding or widening one is a reviewed PR, not a data
+  edit an agent can make alongside the asset that needs it.
 - **Rejected:** non-commercial and no-derivatives (`NC`, `ND`), share-alike, unknown or
   `NOASSERTION`, and all-rights-reserved or proprietary, each with its own message; anything
   else not listed is "not on the allow-list". Brand marks (§9.6) will need an exception when
   they arrive.
 - **CC-BY needs attribution text**, which goes verbatim into the notices.
-- **AI-generated assets** (an `[asset.ai]` table) follow §9.5: the asset itself is `CC0-1.0`
-  (or `CC-BY-*` once a person modified it); model, version, weights licence (allowed or an
-  exception), seed and at least one tool are required, and either a prompt or an input; a
-  third-party input must be `CC0-1.0`, and our own inputs any allowed licence.
+- **AI-generated assets** (an `[asset.ai]` table) follow §9.5: the asset itself is `CC0-1.0`,
+  or `CC-BY-*` only with `ai.human_modified = true` and non-empty `notes` saying what a person
+  changed (raw model output carries no copyright to license); model, version, weights licence
+  (allowed or an exception), seed and at least one tool are required, and either a prompt or
+  an input; a third-party input must be `CC0-1.0`, and our own inputs any allowed licence.
+- **Manifest text is inert.** Control characters (line breaks included) and `<!--`/`-->` are
+  errors in every string, so no entry can end the generated section or forge a marker, and
+  table cells escape `|`, backticks, brackets and `<`.
 
 ### 3. Generated notices, checked in CI
 `content-check --provenance [--content DIR] [--third-party FILE]` runs the gate and writes:
@@ -93,7 +106,10 @@ therefore a reserved asset name; `check_vfx_dir` skips `vfx/provenance.toml`.
 - the **content section of `THIRD_PARTY.md`**, between `<!-- BEGIN content provenance … -->`
   and `<!-- END content provenance -->` markers. The file already covers code dependencies and
   embedded fonts by hand, so the generated table is appended to it rather than replacing it,
-  and the release archives that already ship `THIRD_PARTY.md` carry it;
+  and the release archives that already ship `THIRD_PARTY.md` carry it. The file must hold
+  exactly one `BEGIN` then one `END` marker, each starting a line (or neither, and the
+  section is appended); anything else is a hand edit the tool will not guess at, so it exits
+  1 without writing;
 - **`content/CREDITS.txt`**, plain text the game can show: original, third-party and
   AI-generated sections, one line per entry and its attribution;
 - **`content/AI-DISCLOSURE.md`**, the Steam AI-disclosure list: every AI entry's files, model,
@@ -134,6 +150,16 @@ the reference's edge-sort and welding quirks. Our adapter:
   with no tangent space (only degenerate triangles) keeps the old fallback, a fixed unit vector
   perpendicular to its normal with `w = +1`.
 
+The `.glb` loader generates tangents **once, at load**, for a mesh without `TANGENT` and with
+UVs, so every consumer (the renderer, bone-count skin LODs, tools) sees the same tangents
+and none regenerates them. A node whose transform mirrors (negative determinant) reverses
+the triangle winding (glTF 2.0 §3.7.4), so the loader writes its corners as `(i0, i2, i1)`
+and takes a missing flat normal from the reordered corners; front faces then stay
+counter-clockwise and MikkTSpace gives the mirrored handedness, as file tangents do.
+`mesh/generate_tangents/{10k,65k}` (`crates/assets/benches/mesh_tangents.rs`) measures the
+cost: about 13 ms for a 10 k-vertex grid and 92 ms at the 65 536-vertex cap on the
+reference machine, load-time only.
+
 Tests pin the result against an independent `f64` implementation of Mikkelsen's definition
 on a smooth fan, where the old area weighting is 0.06 away, and against `bevy_mikktspace`
 with the platform `acos` (the reference build) on a fan, a mirrored island, a UV-degenerate
@@ -164,10 +190,12 @@ triangle and a position-degenerate one.
 ## Consequences
 - New public API (additive): the `moba_assets::provenance` module (`check_provenance`,
   `ProvenanceReport`, `ProvenanceEntry`, `AssetProvenance`, `AiProvenance`, `AiInput`,
-  `LicenceException`, `ALLOWED_LICENCES`, `LICENCE_EXCEPTIONS`, `licence_status`,
-  `needs_attribution`, `third_party_section`, `splice_third_party`, `credits_text`,
-  `ai_disclosure`, `PROVENANCE_FILE`, `MAX_PROVENANCE_BYTES`, `THIRD_PARTY_BEGIN`,
-  `THIRD_PARTY_END`), and `content-check --provenance [--check]`.
+  `LicenceException`, `LicenceUse`, `ALLOWED_LICENCES`, `LICENCE_EXCEPTIONS`,
+  `licence_status`, `needs_attribution`, `third_party_section`, `splice_third_party`,
+  `credits_text`, `ai_disclosure`, `PROVENANCE_FILE`, `CREDITS_FILE`, `AI_DISCLOSURE_FILE`,
+  `MAX_PROVENANCE_BYTES`, `THIRD_PARTY_BEGIN`, `THIRD_PARTY_END`), and
+  `content-check --provenance [--check]` (exit 0 pass, 1 gate failure or stale notice, 2
+  usage).
 - New dependency `bevy_mikktspace =1.0.0` in `moba-assets` (so the client, the tools and the
   fuzz crate); `cargo-deny`'s allow-list already has Zlib, MIT and Apache-2.0.
 - The committed sample meshes `content/models/{sentinel,crystal,rampart}.glb` (and
@@ -181,7 +209,10 @@ triangle and a position-degenerate one.
   back faces but enough to give the plane `w = -1`; their index order is reversed, and a test
   now checks every built-in triangle's winding and bitangent direction.
 - Local lavapipe captures of the default scene, the textured `sentinel-pack` scene and the
-  ember golden scene are byte-identical before and after (`main` @ 0745fc3).
+  ember golden scene are byte-identical before and after (`main` @ 0745fc3). That shows no
+  regression, not that MikkTSpace works: every shipped mesh is flat-faceted, where the old
+  and new generators agree to rounding. The unit tests above are the evidence for smooth
+  meshes.
 - No wire, replay, simulation-logic, golden-state-hash or content-hash change; tangents are
   render-only.
 - Every new asset needs a provenance entry before `scripts/agent-verify.sh` passes, which is
