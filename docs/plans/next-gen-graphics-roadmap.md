@@ -760,7 +760,9 @@ exception: they stay all-rights-reserved and are listed as such.
 1. Draft art bible v0 (§9.6) with the maintainer and team, starting with palette, lighting
    mood and material vocabulary for the first map.
 2. **ADR-0020 (N0):** bindings, capability gate and Compat, bindless, Slang, tier presets and
-   budgets, and the cargo-feature layout for the NVIDIA, AMD and Intel SDKs.
+   budgets, and the cargo-feature layout for the NVIDIA, AMD and Intel SDKs. Drafted as
+   [ADR-0020](../adr/0020-next-gen-foundations.md) (proposed, 2026-10-31), with the vendor
+   claims re-checked and its corrections to this plan listed there.
 3. **ADR-0021 (N1):** the temporal foundation, the upscaler interface and the overlay layer.
 4. **A0:** the licence and provenance gate in `content-check`, and the MikkTSpace tangent fix.
 5. Set up the local AI workstation (ComfyUI + TRELLIS.2, Z-Image, StableMaterials, Kimodo) and
