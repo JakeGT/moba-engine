@@ -134,8 +134,10 @@ the semver check):
     (MIT OR Apache-2.0)) with a deterministic `acos`, instead of the area-weighted
     "MikkTSpace-style" generator, so normal maps baked by MikkTSpace tools shade correctly on
     smooth meshes. The flat-shaded sample meshes `content/models/{sentinel,crystal,rampart}.glb`
-    were regenerated (tangents move by at most 1.8e-7); LODs, VAT, baked AO and captured frames
-    are unchanged. No wire, replay, simulation or content-hash change.
+    were regenerated (tangents move by at most 1.8e-7); the renderer's built-in cube and
+    plane are now wound counter-clockwise about their normals, as MikkTSpace assumes. LODs,
+    VAT, baked AO and captured frames are unchanged. No wire, replay, simulation or
+    content-hash change.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).

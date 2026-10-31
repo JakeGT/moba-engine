@@ -175,6 +175,13 @@ triangle and a position-degenerate one.
   move by at most 1.8e-7 per component (rounding), with no handedness change. The skinned
   sample has no UVs and is unchanged, and so are every `.lod` (re-baked and diffed), the VAT
   and the baked AO, which do not read tangents.
+- MikkTSpace takes a triangle's handedness from its UV winding and assumes front faces are
+  counter-clockwise about the normal (glTF's convention, which the sample meshes follow). The
+  renderer's built-in cube and ground plane were wound clockwise, harmless while nothing culls
+  back faces but enough to give the plane `w = -1`; their index order is reversed, and a test
+  now checks every built-in triangle's winding and bitangent direction.
+- Local lavapipe captures of the default scene, the textured `sentinel-pack` scene and the
+  ember golden scene are byte-identical before and after (`main` @ 0745fc3).
 - No wire, replay, simulation-logic, golden-state-hash or content-hash change; tangents are
   render-only.
 - Every new asset needs a provenance entry before `scripts/agent-verify.sh` passes, which is
