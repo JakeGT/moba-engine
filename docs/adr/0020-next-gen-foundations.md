@@ -40,10 +40,12 @@ What the code does today (`main` at 9a487f2):
     - `VK_KHR_swapchain`, plus core `dynamicRendering` and `synchronization2`.
   - Optional extras: `VK_KHR_portability_subset` (MoltenVK), `VK_KHR_pipeline_executable_properties`
     (statistics), and the BC, anisotropy and depth-clamp core features.
-  - Devices are scored by device type only. There is no capability table.
+  - Devices are scored by device type (discrete 1000, integrated 500, virtual 200, CPU 100),
+    plus 10 when graphics and present share a queue family. There is no capability table.
+  - `maintenance4` is not enabled today.
   - `vulkan-probe` prints the API version, the device count and whether portability is in use.
 - **Shaders** (`crates/shaders/build.rs`).
-  - 38 GLSL sources plus enumerated permutations are compiled at build time by the system
+  - 37 GLSL stage sources plus enumerated permutations are compiled at build time by the system
     `glslc` or `glslangValidator`, with `--target-env=vulkan1.3`.
   - Each output is checked with `spirv-val` when one is installed.
   - CI installs `glslang-tools` (apt), `glslang` (brew) or the Vulkan SDK (choco, Windows).
@@ -138,7 +140,8 @@ gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", re
 
 - **The API break is cheapest to take now.** Master renames constructors, reshapes pNext
   chaining (`push`/`extend` on `TaggedStructure`) and merges the `Extends*` traits.
-  - Today `moba-render` has 16 `push_next` call sites and 4 extension-loader constructors.
+  - Today `moba-render` has 16 `push_next` call sites and 6 extension-loader `::new` calls
+    across 4 loader types (surface, swapchain, debug utils, pipeline executable properties).
   - Taking the break once, mechanically, before the new RT code is written means none of N1–N4
     is written twice.
 
@@ -195,11 +198,11 @@ Extensions and features enabled on the **tiered** path:
 
 | Group | Requirement | Contents |
 |---|---|---|
-| Core 1.3 (today) | required | `dynamicRendering`, `synchronization2`, `maintenance4`; `VK_KHR_swapchain` |
+| Core 1.3 | required | `dynamicRendering`, `synchronization2` (both enabled today); `maintenance4` (new); `VK_KHR_swapchain` |
 | Core 1.2 | required | `bufferDeviceAddress`, `descriptorIndexing` (§3 list), `runtimeDescriptorArray`, `scalarBlockLayout`, `timelineSemaphore`, `drawIndirectCount`, `hostQueryReset` |
 | Ray tracing | required | `VK_KHR_acceleration_structure` (+ `VK_KHR_deferred_host_operations`), `VK_KHR_ray_query` |
 | Ray tracing | optional; required for Overdrive | `VK_KHR_ray_tracing_pipeline`, `VK_KHR_ray_tracing_maintenance1`, `VK_KHR_ray_tracing_position_fetch` |
-| SER | optional (always emitted; no-op without it) | `VK_EXT_ray_tracing_invocation_reorder` |
+| SER | optional (separate SER and non-SER pipeline permutations; see below) | `VK_EXT_ray_tracing_invocation_reorder` |
 | Opacity micromaps | optional (N4; fallback: any-hit alpha test) | `VK_KHR_opacity_micromap` (its `VK_KHR_device_address_commands` dependency), else `VK_EXT_opacity_micromap` |
 | Geometry | optional (fallback: compute culling + indirect draws, N7) | `VK_EXT_mesh_shader` (`meshShader`, `taskShader`) |
 | Shading rate | optional (fallback: software VRS in compute lighting, §6.8) | `VK_KHR_fragment_shading_rate` |
@@ -207,15 +210,27 @@ Extensions and features enabled on the **tiered** path:
 | NVIDIA-only | optional, later phases | `VK_NV_cluster_acceleration_structure`, `VK_NV_partitioned_acceleration_structure`, `VK_NV_cooperative_vector` |
 | Existing | unchanged | `VK_KHR_portability_subset` (Compat only), `VK_KHR_pipeline_executable_properties` |
 
+**SER needs its own permutation.** SPIR-V that declares the `ShaderInvocationReorderEXT`
+capability is invalid on a device without the extension, so it cannot be "always emitted"
+as roadmap §5.5 puts it. Each ray-generation shader that reorders is built twice by the
+permutation table: with SER and without it (`hitObject` calls compiled out). The renderer
+creates only the pipeline whose capabilities the device enables. The same rule holds for
+every optional capability (OMM, mesh shaders, fragment shading rate, cooperative vectors):
+a module is created only on a device that enables what it declares.
+
 **Mesh shaders and VRS are optional, not required.** This is a deliberate deviation from
 roadmap §5.1, which listed them as required.
 - **Low does not use them.** In the §3 feature matrix, Low uses "GPU-driven, discrete LODs",
   and the mesh-shader path starts at Medium.
 - **Each has a planned fallback:** compute culling with indirect count (N7), and software VRS
   in the compute lighting (§6.8).
-- **The gain is not proven.** Making them required would push any RT-capable device without
-  them into Compat. One example is a Turing driver: `VK_EXT_mesh_shader` on RTX 20 was
-  **unverified** in this pass.
+- **Requiring them gains nothing in N0.** No N0 code uses them, and requiring them only
+  turns a missing extension into a Compat device.
+- **The cost of requiring them is probably small, though.** Secondary sources consistently
+  say Turing supports `VK_EXT_mesh_shader`, and RADV exposes both on RDNA 2. No primary source
+  (driver notes or a recorded dump) for RTX 20 was found in this pass, so it is not treated as
+  verified. If the RTX 2060 and RX 6600 dumps confirm both, requiring them costs nothing and
+  removes two fallbacks.
 - **The final call** is left to the maintainer as [question 3](#open-questions-for-the-maintainer).
 
 Local evidence on 2026-10-31 (`vulkaninfo`):
@@ -253,19 +268,40 @@ created.
   - a device with RT but no mesh shaders.
 - **Admission rules:**
   - A device that misses any required item is **Compat**, and `missing` names what it lacks.
-  - A device with `VK_KHR_portability_subset` enabled is **always Compat** (macOS policy, §2d),
-    even if a future MoltenVK exposes ray tracing behind an opt-in.
+  - **macOS is always Compat** (§2d), even if a future MoltenVK exposes ray tracing behind an
+    opt-in. The gate checks three things, any one of which is enough:
+    - `cfg!(target_os = "macos")`;
+    - a driver ID of `MOLTENVK` or `MESA_KOSMICKRISP` (`VkPhysicalDeviceDriverProperties`);
+    - `VK_KHR_portability_subset` enabled.
+    The portability subset alone is not enough: KosmicKrisp is a conformant driver and does not
+    advertise it.
+  - **A CPU device (`PhysicalDeviceType::CPU`, such as lavapipe) is never admitted to Tiered
+    automatically.** `MOBA_RENDER_PATH=tiered` admits it (for CI's RT goldens).
   - Overdrive also needs `VK_KHR_ray_tracing_pipeline`. A device without it tops out at
     Ultra.
-  - Ultra and Overdrive features that need SDKs (§6) are listed as unavailable in the settings
-    menu with the reason ("built without `rtxdi`", "needs an NVIDIA RTX GPU"). The tier
-    stays selectable with those features off, following roadmap §7.
-- **Device choice.** A device admitted to Tiered beats a Compat-only one, then the existing
-  device-type score breaks ties. On a hybrid laptop, the RT-capable dGPU wins.
-- **Overrides.** `MOBA_RENDER_PATH=auto|tiered|compat`, with a matching settings entry,
-  forces Compat on any GPU for testing and player choice. Forcing `tiered` on a device that
-  fails admission is an error that names the missing items; it never yields a half-working
-  frame.
+  - Ultra and Overdrive need the SDK features (roadmap §7). In a build without them, or on a
+    GPU they do not support, the two tiers are shown disabled with the reason ("built without
+    `rtxdi`", "needs an NVIDIA RTX GPU"). They are not selectable with their features
+    silently off.
+- **Device choice: device type first, path second.** Devices are ranked by:
+  1. device type: discrete > integrated > virtual > CPU (today's order);
+  2. then, within one type, admitted to Tiered over Compat-only;
+  3. then the existing +10 for a shared graphics and present family.
+
+  So a non-RT discrete GPU (a GTX 1060) beats an RT-capable iGPU (the Radeon 610M) and runs
+  Compat. A GPU always beats lavapipe. On a hybrid laptop with an RT dGPU, the dGPU wins on
+  type anyway.
+- **Overrides.** `MOBA_RENDER_PATH=auto|tiered|compat`, with a matching settings entry:
+  - `auto` (default): the ranking above, then the chosen device's own admission. CPU devices
+    are Compat.
+  - `compat`: the same ranking; the chosen device runs Compat. This is for testing and player
+    choice.
+  - `tiered`: the ranking is applied **only to devices admitted to Tiered**, CPU devices
+    included. With none, renderer creation fails with an error that lists each device and
+    what it lacks. It never yields a half-working frame.
+  - The ranking never overrides a user's choice of device. The existing loader and driver
+    mechanisms for that (for example `MESA_VK_DEVICE_SELECT`) keep working, because they
+    filter the device list before the ranking.
 - **The default tier.**
   - A small table keyed by PCI vendor and device ID maps the reference GPUs (§10) to their §3
     tier.
@@ -297,8 +333,9 @@ created.
   - today's presets, which keep their names in code (`CompatPreset::{Low, Medium, High,
     Ultra}`, today's `QualityTier` values) and show as "Compat Low … Compat Ultra" in the
     menu;
-  - today's `perf-gate` budgets (14, 6, 6 and 7.5 ms, measured on the hardware those presets
-    target).
+  - today's `perf-gate` budgets (14, 6, 6 and 7.5 ms). They are checked against the RTX 5070
+    Ti baseline, as today. That is not the hardware the Compat presets target (GTX 1060 / RX
+    580, Apple M1), so they guard against regressions rather than proving those targets.
 - **Timeline:**
   1. **N0 to C1:** Compat changes only where shared code moves, for example the `ash` bump.
      Its goldens stay byte-identical.
@@ -330,11 +367,17 @@ pipeline layout and never rebound within a frame. Its layout uses
 
 | Binding | Type | Capacity | Notes |
 |---|---|---|---|
-| 0 | `SAMPLED_IMAGE[]` | 16,384 (`VARIABLE_DESCRIPTOR_COUNT`) | Every 2D/3D/cube texture: materials, terrain layers, VAT, LUTs, baked lighting, render targets read as textures |
-| 1 | `SAMPLER[]` | 32 | A fixed palette: wrap/clamp × point/linear/aniso × compare; written once at creation |
-| 2 | `STORAGE_IMAGE[]` | 1,024 | Compute writes; needs `shaderStorageImageWriteWithoutFormat` |
+| 0 | `SAMPLER[]` | 32 | A fixed palette: wrap/clamp × point/linear/aniso × compare; written once at creation |
+| 1 | `STORAGE_IMAGE[]` | 1,024 | Compute writes; needs `shaderStorageImageWriteWithoutFormat` |
+| 2 | `SAMPLED_IMAGE[]` | 16,384 (`VARIABLE_DESCRIPTOR_COUNT`) | Every 2D/3D/cube texture: materials, terrain layers, VAT, LUTs, baked lighting, render targets read as textures |
 
-- **Buffers use buffer device address, not a descriptor array.** Instance, material, light,
+- **The variable-count array is the last binding.** The spec allows
+  `VARIABLE_DESCRIPTOR_COUNT` only on the highest-numbered binding of a set
+  (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03004). That is why the
+  texture array is binding 2.
+
+- **Buffers use buffer device address, not a descriptor array.** This departs from roadmap
+  §5.1, which describes texture, sampler **and buffer** arrays. Instance, material, light,
   meshlet and BVH-instance buffers are passed as 64-bit addresses in push constants or in a
   per-frame constant block.
   - BDA is already mandatory with `VK_KHR_acceleration_structure`.
@@ -423,9 +466,11 @@ smaller table.
   - `linux-x86_64`, `linux-aarch64`;
   - `windows-x86_64`;
   - `macos-aarch64`, `macos-x86_64`.
-- **Checksums are ours.** Upstream publishes no checksums or attestations, so the script
-  checks a SHA-256 that we record per archive in `crates/shaders/slang-version.txt` when we
-  pin a version.
+- **Checksums.** Upstream publishes no checksum files or attestations. GitHub's release API
+  does report a SHA-256 `digest` for each asset. For example, `slang-2026.20-linux-x86_64.tar.gz`
+  is `sha256:e863e568…347c9`. The script checks the SHA-256 we record per archive in
+  `crates/shaders/slang-version.txt`. The PR that pins a version cross-checks those values
+  against the API digests.
 - **No network access in build scripts.** `build.rs` never downloads anything; offline and
   sandboxed builds work once the toolchain is present.
 - **The Vulkan SDK** has shipped Slang since 1.3.296.0, and its latest version is 1.4.363.0
@@ -435,12 +480,23 @@ smaller table.
     `[[vk::binding]]` layout, column-major matrices and `-O2`.
   - **`spirv-val --target-env vulkan1.3` becomes mandatory** for Slang modules: a missing
     validator is a build error. For GLSL it stays optional, as today.
+  - **`build.rs` declares `cargo:rerun-if-env-changed`** for `SLANGC` and
+    `MOBA_SLANG_ANY_VERSION` (and keeps watching `GLSLC`), so switching compilers rebuilds the
+    shaders.
+- **Device safety.** The tiered-only modules (bindless, ray query, SER) are built on every
+  platform, but only a device admitted to Tiered creates them (§1e). A Compat device never
+  loads a module that declares a capability it lacks.
 - **Layout check.** `slangc -reflection-json` output for the shared structures (frame
   constants, the instance record, the material record) is compared in a unit test with the
   Rust `#[repr(C)]` sizes and offsets. Layouts therefore have one source of truth per path,
   and drift fails a test, not a frame.
-- **CI.** `ci.yml`, `release.yml` and `macos-vulkan.yml` run `fetch-slang` on Linux, Windows
-  and macOS, cached by version. macOS compiles the Slang modules even though it only runs
+- **CI.** Every workflow that builds the shaders runs `fetch-slang`, cached by version:
+  `ci.yml`, `release.yml`, `nightly.yml`, `render-golden.yml`, `macos-vulkan.yml`,
+  `macos-frame.yml`, `windows-probe.yml` and `nightly-perf.yml` (self-hosted). Those jobs also
+  install `spirv-val`, since today the Linux and macOS jobs install only glslang:
+  - `spirv-tools` (apt) on Linux;
+  - `spirv-tools` (brew) on macOS;
+  - the Vulkan SDK, which already ships it, on Windows. macOS compiles the Slang modules even though it only runs
   Compat, so shader errors are caught on every platform and the build has one shape
   everywhere.
 
@@ -485,8 +541,10 @@ read the same numbers.
   - Its target is the tier's GPU budget.
   - The controller's existing 0.95 high-water and 0.75 low-water marks provide the headroom.
   - It replaces today's fixed 14 ms.
-- The scale range is the upscaler's: the ceiling is the preset's mode, the floor is one mode
-  lower.
+- The scale range is the upscaler's. The ceiling is the preset's mode, Quality at 0.67, or
+  Performance at 0.50 on Overdrive. The floor is **Performance (0.50)**, or **Ultra Performance
+  (0.33)** on Overdrive. That is two modes down, skipping Balanced (0.58), so the controller has
+  room to hold the budget. The table's ranges are exactly these values.
 - **Until N1 ships the upscalers,** the range is applied to today's render scale with
   bicubic upscaling. The 0.5 floor is today's lower bound.
 - The budget is measured as today:
@@ -513,14 +571,27 @@ read the same numbers.
   show them greyed out.
 - Until the phases land, the tiered presets map onto today's switches. Today's "Ultra" is
   roughly the new Medium:
-  - **Tiered Low** uses today's High post and lighting configuration, with FXAA and no MSAA.
-  - **Medium, High, Ultra and Overdrive** use today's Ultra configuration with FXAA. MSAA is
-    retired on tiered tiers, ahead of N1's TAA (roadmap §5.2).
-- **VRAM budgets** gain an Overdrive entry, and the tiered values are re-derived from the
-  reference cards (6, 12, 8–16 and 16 GB), keeping ≥ 25 % headroom for the driver and
-  compositor.
-  - Proposed: Low 4 GiB, Medium 6 GiB, High 7 GiB, Ultra 12 GiB, Overdrive 14 GiB.
+  - **Tiered Low** uses today's High post and lighting configuration, with FXAA.
+  - **Medium, High, Ultra and Overdrive** use today's Ultra configuration, **MSAA 4×
+    included**.
+  - MSAA is retired in N1, when TAA and the upscalers replace it (roadmap §5.2, §8), not in N0.
+    Retiring it earlier would leave tiered Medium and up on FXAA only, below today's Ultra.
+- **VRAM budgets** gain an Overdrive entry. The tiered values are re-derived from the
+  smallest card in each tier's reference class, keeping ≥ 25 % headroom for the driver and
+  compositor, so a budget is at most 75 % of that card:
+
+| Tier | Smallest reference card | 75 % of it | Proposed budget |
+|---|---|---|---|
+| Low | RTX 2060, 6 GB (RX 6600: 8 GB) | 4.5 GiB | 4 GiB |
+| Medium | RTX 3060 8 GB variant (12 GB model, RX 6700 XT: 12 GB) | 6 GiB | 6 GiB |
+| High | RTX 4060 Ti 8 GB (4070: 12 GB, RX 7700 XT: 12 GB) | 6 GiB | 6 GiB |
+| Ultra | RTX 4070 Ti Super, 5070 Ti, RX 9070 XT: 16 GB | 12 GiB | 12 GiB |
+| Overdrive | RTX 4080 / 5080: 16 GB | 12 GiB | 12 GiB |
+
   - These are to be validated by A3 and N11, not taken as measured.
+  - If a tier needs more than its smallest card allows, the fix is to drop that card from
+    the tier's class, not to break the headroom rule. High and Medium are both capped by
+    8 GB cards today.
 
 ### 6. Cargo features for the NVIDIA, AMD and Intel SDKs
 
@@ -535,7 +606,7 @@ read the same numbers.
 | Feature | Default | SDK (pinned, verified 2026-10-31) | Platforms | Licence and obligations | Source of the binary |
 |---|---|---|---|---|---|
 | *(none)*: `VK_NV_low_latency2` (Reflex), `VK_AMD_anti_lag` | **on** (no feature) | Vulkan extensions only | Linux, Windows | Registry extensions; no SDK code is used [S18][S23] | — |
-| `fsr3` | **on** | FSR 3.1.6 upscaler shaders from FidelityFX SDK **v2.4.0** (2026-10-28) [S22] | Linux, Windows (our own Vulkan back end) | **MIT**: vendored under `third_party/fidelityfx/` with its licence and listed in `THIRD_PARTY.md` | Compiled from source in-tree |
+| `fsr3` | **on** | FSR 3.1.6 upscaler shaders from FidelityFX SDK **v2.4.0** (2026-10-28) [S22]; they are **HLSL only** there | Linux, Windows (our own Vulkan back end) | **MIT**: the one SDK whose source is vendored, under `third_party/fidelityfx/` with its licence and listed in `THIRD_PARTY.md` | HLSL compiled in-tree by `slangc`; fallback: FSR 3.1.4's GLSL from SDK v1.1.4, compiled by glslang |
 | `dlss` | off | DLSS SDK **v310.9.16** (2026-10-16): SR presets L/M ("DLSS 4.5"), RR transformer preset F [S16] | Linux (`.so`), Windows (`.dll`); NVIDIA RTX only | NVIDIA RTX SDKs License (DLSS `LICENSE.txt`): object code only (§1c); not subject to an open-source licence (§4e); NVIDIA GPUs only (supplement §1); **notify NVIDIA before commercial release** (supplement §4); attribution and NVIDIA marks (supplement §7.1(b)); NVIDIA may update or disable over the air (supplement §6) | Fetched |
 | `streamline` (implied by `dlss-fg`) | off | Streamline **v2.14.16** (2026-10-16) [S17] | **Windows only** | Streamline itself is **MIT**; the DLSS-G binaries it loads fall under the RTX SDKs License above | Fetched |
 | `nrd` | off | NRD **v4.18.0** (2026-10-30), built from source [S19] | Linux, Windows; any vendor | NVIDIA RTX SDKs License (NRD copy): §4e; credits attribution (supplement §7.1(c)); must stay interoperable with NVIDIA hardware; **not** NVIDIA-only | Fetched source, built by `build.rs` (CMake) |
@@ -552,16 +623,35 @@ Aggregate features:
 NRC (Windows, CUDA and `NRC_Vulkan.dll`, experimental) and RTX NTC get feature names only
 when their phases start.
 
-**6b. Fetching, never vendoring.**
+**6b. Closed SDKs are fetched, never vendored.** The only exception is MIT-licensed FSR 3.1
+source (§6a), which may sit in the tree like any other permissive dependency. Everything
+under the RTX SDKs, Intel or AMD binary licences is fetched.
 - **The manifest.** `vendor-sdks.toml` at the repository root lists each SDK with:
   - its name and pinned tag;
   - the archive URL (an official GitHub release or tag archive);
+  - **its git submodules and CMake downloads, each pinned as an entry of its own,** because
+    GitHub tag archives leave submodules out. Each entry has the repository, the commit and a
+    SHA-256 of the archive at that commit:
+    - **RTXDI** v3.1.0 keeps its shader library in a submodule, `Libraries/Rtxdi` →
+      `NVIDIA-RTX/RTXDI-Library` at `f12037fa8e97` ("3.1 Update", 2026-09-03). The `rtxdi`
+      feature pins that library directly, not the sample repository.
+    - **SHaRC** 1.8.3 lives in the standalone `NVIDIA-RTX/SHARC` repository as an **untagged
+      commit**, `4e21b585c33c` ("v1.8.3", 2026-08-02). RTXGI v2.8.0's `Libraries/Sharc`
+      submodule points at it. The `sharc` feature pins it directly.
+    - **NRD** v4.18.0's CMake fetches ShaderMake (archive of `3f01623a76b0`) and MathLib
+      (`v11`) with `FetchContent`, and NRI (`v191`) when `NRD_NRI` is on. All are MIT. The
+      fetch script pre-fetches ShaderMake and MathLib. `build.rs` configures NRD with
+      `FETCHCONTENT_FULLY_DISCONNECTED=ON`, `FETCHCONTENT_SOURCE_DIR_SHADERMAKE`,
+      `FETCHCONTENT_SOURCE_DIR_MATHLIB` and `NRD_NRI=OFF`, so the build never downloads.
+      ShaderMake compiles NRD's HLSL with DXC, which the Vulkan SDK provides. That makes DXC a
+      build requirement of the `nrd` feature only.
   - the archive's **SHA-256**;
   - the path of its licence file inside the archive, and **that file's SHA-256**;
   - its platforms.
 - **The fetch command.** `scripts/fetch-sdks.sh [--only dlss,…]` (`.ps1` on Windows) downloads
   into `target/vendor-sdks/<name>-<tag>/`, which is gitignored and outside the source tree, and
-  verifies both hashes.
+  verifies every hash. It unpacks submodules and CMake dependencies at the paths the SDK's
+  build expects.
   - **A changed licence text fails the fetch.** That forces the re-read roadmap §7 asks for
     at each bump; the PR that updates the hash records the re-read.
 - **Building with a feature.** The feature's `build.rs` code reads `MOBA_SDK_DIR` (default
@@ -584,8 +674,8 @@ when their phases start.
 - `cargo build` with default features needs no proprietary SDK. That build contains Reflex
   and Anti-Lag through extensions, the FSR 3.1 MIT upscaler, and in-house TAA (N1),
   denoising and shadow-ray lighting.
-- It **runs Low to High** (roadmap §7). Ultra and Overdrive are selectable, and the features
-  they lack are listed with the reason.
+- It **runs Low to High** (roadmap §7). Ultra and Overdrive are shown disabled, with the
+  missing features named (§2b), as roadmap §7 says.
 - **Upscaler and denoiser selection** is a run-time trait object chosen from what is both
   compiled in and supported by the device. It never depends on `cfg` at call sites outside
   `vendor/`.
@@ -596,7 +686,27 @@ when their phases start.
   - A new CI job, `vendor-sdks` (Linux and Windows), fetches the pinned SDKs and builds and
     links `--features vendor-sdks`. Run-time evidence comes from the self-hosted GPU runner
     and the Windows VM (§10).
-  - `cargo-deny`'s `all-features` graph adds only `bindgen` and `libloading` from crates.io.
+  - `cargo-deny`'s `all-features` graph gains `bindgen` and its transitive build-time crates
+    (`clang-sys` and others). `libloading` is already in the graph through `ash`. `bindgen`
+    also needs **libclang** on the build machine, but only for the vendor features.
+
+## Departures from the roadmap
+
+These are the places where this ADR decides differently from the roadmap's text. Each needs
+the maintainer's agreement when the ADR is accepted.
+
+| Roadmap says | This ADR decides | Why |
+|---|---|---|
+| §5.1: mesh shaders and `VK_KHR_fragment_shading_rate` are required for the tiered renderer | Optional, with fallbacks (§1e) | Low does not use them, and the fallbacks are planned anyway. To be revisited with the reference-GPU dumps (Q3) |
+| §5.1: bindless is "large texture, sampler and buffer arrays" | Texture, sampler and storage-image arrays. Buffers go through buffer device address (§3a) | BDA is already mandatory with acceleration structures, and it removes the per-stage storage-buffer limits |
+| §5.1: the budget table "fails `perf-gate`" | Tiered budgets are report-only until N1 merges; Compat budgets keep failing it (§5d) | Before upscaling, tiered presets render natively, so failures would only measure N1's absence (Q11) |
+| §5.5: SER "always emitted, a no-op where the hardware lacks it" | Separate SER and non-SER permutations (§1e) | SPIR-V declaring `ShaderInvocationReorderEXT` is invalid without the extension |
+| §7: the SDK feature list has no FSR 3.1 entry, and SDKs are fetched | A default-on `fsr3` feature with the MIT FSR 3.1 shaders vendored in-tree (§6a, §6b) | They are MIT and the only cross-platform vendor upscaler. SDK 2.4 cannot build them on Linux |
+
+The two points below follow the roadmap, after review:
+- **MSAA stays on tiered Medium and up until N1** (roadmap §8), not retired in N0.
+- **Ultra and Overdrive are not selectable in a build without the SDK features**
+  (roadmap §7). They are shown disabled with the reason.
 
 ## Alternatives considered
 
@@ -771,15 +881,18 @@ These follow roadmap §10, applied to N0.
 
 ## Corrections to the roadmap
 
-These were re-checked on 2026-10-31. The roadmap text is unchanged in this PR. The maintainer
+These were re-checked on 2026-10-31. This PR only adds a link to this ADR from roadmap §12;
+the corrections themselves are not folded into the roadmap text. The maintainer
 may fold the corrections in when this ADR is accepted.
 
 - **§5.1 bindings.** "Pin `ash` to a git revision" is not enough on its own: released
   `gpu-allocator` 0.28.0 does not compile against ash master, so it needs a git revision too
   (§1a). Ash master is at headers 1.4.352, as the roadmap says, but Khronos headers are at
   1.4.367 [S5].
-- **§5.1 capability gate.** This ADR makes mesh shaders and VRS optional (§1e). Separately,
-  `VK_EXT_mesh_shader` on RTX 20 is **unverified**.
+- **§5.1 capability gate.** This ADR makes mesh shaders and VRS optional (§1e). See
+  [Departures from the roadmap](#departures-from-the-roadmap). `VK_EXT_mesh_shader` on RTX 20
+  is widely reported by secondary sources but has no primary source yet. The RTX 2060 dump
+  settles it.
 - **§5.3 and §7, FSR 3.1.6.**
   - The version, the MIT licence and Vulkan support are correct (FidelityFX SDK v2.4.0,
     2026-10-28).
@@ -797,8 +910,9 @@ may fold the corrections in when this ADR is accepted.
   Mesa 25.3 provides it as an implicit layer [S23].
 - **§7 DLSS FG.** The DLSS SDK also ships Linux `.so` files for frame generation (`dlssg`).
   The roadmap's "Windows only" holds for Streamline, but NGX-direct on Linux is open (Q8).
-- **§6.3 SHaRC.** It ships in RTXGI v2.8.0 as SHaRC 1.8.3. The standalone `NVIDIA-RTX/SHARC`
-  repository's latest tag is older (v1.6.5.0). Cite RTXGI.
+- **§6.3 SHaRC.** SHaRC 1.8.3 is in the standalone `NVIDIA-RTX/SHARC` repository, as the
+  untagged commit `4e21b585c33c` ("v1.8.3"). The repository's latest *tag* is older, v1.6.5.0.
+  RTXGI v2.8.0 pulls it in as a submodule. Pin that commit (§6b).
 - **§6.2 RTXDI.** Upstream compiles its HLSL with DXC. Compiling it through Slang is
   unverified (§4d).
 - **§6.3 NRC.** "Windows plus CUDA only" is correct. It *does* have a Vulkan DLL
