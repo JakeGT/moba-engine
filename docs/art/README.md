@@ -88,12 +88,13 @@ recommendation. In priority order for the slice:
 
 ## Concept generation
 
-Two lanes, both recorded per image in the review app's `manifest.json`:
+Three lanes, all recorded per image in the review app's `manifest.json`:
 
 | Lane | Tool | Licence of the output | Use |
 |---|---|---|---|
 | Local | Z-Image-Turbo (Apache-2.0) in ComfyUI, `tools/gen.py` | CC0 (roadmap §9.5) | Exploration in bulk: moods, readings, variants |
-| Gemini | Gemini API, paid tier, `tools/gen_gemini.py` | Concept only (`LicenseRef-Gemini-API-Output`) | Model sheets from a chosen concept: turnarounds, A-pose fronts, detail callouts, fixes the local model can't draw |
+| Gemini drafts | Gemini API, paid tier, **Nano Banana 2.1** (2K, batch: about $0.025 per image), `tools/gen_gemini.py` | Concept only (`LicenseRef-Gemini-API-Output`) | Bible reference and exploration: readings, structures, units, set pieces, VFX, fixes the local model can't draw |
+| Gemini model sheets | Gemini API, paid tier, **Nano Banana Pro** (2K, batch: about $0.067 per image) | Concept only | Anything a modeller works from directly: turnarounds, A-pose fronts, detail callouts from a chosen concept |
 
 The path from concept to final art:
 
@@ -104,6 +105,11 @@ The path from concept to final art:
    `notes` name the sheet it was modelled from. The A0 gate rejects any shipped asset
    generated with Gemini or from a Gemini image, whatever licence the entry claims.
 4. Make **final artwork from the model**: renders, portraits and key art.
+
+Why two Gemini models: a side-by-side of four faction prompts (2026-10-31) showed 2.1 matching
+Pro's detail at the same resolution, with better wide establishing shots, for about 38% of the
+price. Pro followed long lists of constraints slightly better and copies reference images more
+closely, which is what a model sheet needs.
 
 The Gemini lane needs an API key in `~/.config/moba/gemini.env`, outside every repository.
 Paid-tier prompts and outputs are not used to improve Google's products (Gemini API pricing
