@@ -23,8 +23,10 @@
 //! flipped by a mirroring transform). Missing normals are replaced by flat face normals, as
 //! the glTF specification requires. When any primitive has `TEXCOORD_0`, primitives without it
 //! get `(0, 0)`. Tangents are kept only when *every* primitive supplied them (flat-normal
-//! primitives never do); otherwise the mesh carries none and consumers generate them
-//! ([`MeshData::with_generated_tangents`]). Sparse accessors, external buffers and any `extensionsRequired` entry are
+//! primitives never do); otherwise, when the mesh has UVs, the loader generates `MikkTSpace`
+//! tangents once ([`MeshData::with_generated_tangents`]). A mirroring node transform
+//! (negative determinant) reverses each triangle's corner order, so front faces stay
+//! counter-clockwise about their normals, as `MikkTSpace` and flat normals assume. Sparse accessors, external buffers and any `extensionsRequired` entry are
 //! rejected; glTF materials, images and morph targets are ignored (materials come from a
 //! client-local descriptor, ADR-0010).
 //!
@@ -237,9 +239,12 @@ pub fn load_glb(bytes: &[u8]) -> Result<MeshData, GlbError> {
     if let Some(uvs) = uvs {
         mesh = mesh.with_uvs(uvs)?;
     }
-    if let Some(tangents) = tangents {
-        mesh = mesh.with_tangents(tangents)?;
-    }
+    mesh = match tangents {
+        Some(tangents) => mesh.with_tangents(tangents)?,
+        // Generated once here (MikkTSpace, A0), so every consumer, bone-LOD skins included,
+        // shares them instead of regenerating; a no-op without UVs.
+        None => mesh.with_generated_tangents(),
+    };
     let SkinMode::Skinned(skin) = skin else {
         return Ok(mesh);
     };
@@ -1109,15 +1114,26 @@ impl Builder {
             self.push_streams(streams, element)?;
         }
         let vertex_count = positions.count as u32; // <= MAX_VERTICES, checked by `reserve`.
-        for element in 0..index_count {
-            let index = match indices {
-                Some(data) => data.index(element).ok_or(GlbError::BadAccessor)?,
-                None => element as u32,
-            };
-            if index >= vertex_count {
-                return Err(MeshError::IndexOutOfRange.into());
+        // glTF: a negative determinant makes the node's front faces clockwise; reverse each
+        // triangle so they are counter-clockwise again in the baked (world) space.
+        let mirrored = linear.determinant() < 0.0;
+        for triangle in 0..index_count / 3 {
+            let mut corners = [0u32; 3];
+            for (corner, slot) in corners.iter_mut().enumerate() {
+                let element = triangle * 3 + corner;
+                let index = match indices {
+                    Some(data) => data.index(element).ok_or(GlbError::BadAccessor)?,
+                    None => element as u32,
+                };
+                if index >= vertex_count {
+                    return Err(MeshError::IndexOutOfRange.into());
+                }
+                *slot = base + index;
             }
-            self.indices.push(base + index);
+            if mirrored {
+                corners.swap(1, 2);
+            }
+            self.indices.extend_from_slice(&corners);
         }
         Ok(())
     }
@@ -1133,6 +1149,9 @@ impl Builder {
     ) -> Result<(), GlbError> {
         self.reserve(index_count, index_count)?;
         let base = u32::try_from(self.positions.len()).map_err(|_| MeshError::TooManyVertices)?;
+        // See `append_indexed`: a mirroring transform reverses the corner order, before the
+        // face normal is taken from the corners, so it points out of the front face.
+        let mirrored = Mat3::from_mat4(world).determinant() < 0.0;
         let mut corners = [Vec3::ZERO; 3];
         let mut sources = [0usize; 3];
         for triangle in 0..index_count / 3 {
@@ -1148,6 +1167,10 @@ impl Builder {
                 let position = positions.f32_vec3(index).ok_or(GlbError::BadAccessor)?;
                 *slot = world.transform_point3(Vec3::from_array(position));
                 sources[corner] = index;
+            }
+            if mirrored {
+                corners.swap(1, 2);
+                sources.swap(1, 2);
             }
             let normal = (corners[1] - corners[0])
                 .cross(corners[2] - corners[0])
@@ -1276,6 +1299,54 @@ mod tests {
                 .uvs()
                 .is_none()
         );
+    }
+
+    /// A mirroring node keeps front faces counter-clockwise (it reverses the corners), so
+    /// generated `MikkTSpace` tangents flip handedness under the mirror, as file tangents do,
+    /// and missing normals still point out of the front face.
+    #[test]
+    fn a_mirroring_node_reverses_the_winding() {
+        let uv_mesh = |extra_node: &str, attributes: &str| {
+            let json = triangle_json(extra_node, POSITION_ACCESSOR)
+                .replace(r#""NORMAL":1}"#, attributes)
+                .replace(r#""byteLength":80}"#, r#""byteLength":128}"#)
+                .replace(
+                    r#""byteLength":6}],"#,
+                    r#""byteLength":6},{"buffer":0,"byteOffset":80,"byteLength":24}],"#,
+                )
+                .replace(
+                    r#""type":"SCALAR"}]"#,
+                    r#""type":"SCALAR"},{"bufferView":3,"componentType":5126,"count":3,"type":"VEC2"}]"#,
+                );
+            let mut bin = triangle_bin();
+            bin.extend([0, 0]);
+            bin.extend(floats(&[0.0, 1.0, 1.0, 1.0, 0.0, 0.0]));
+            load_glb(&glb(&json, Some(&bin))).expect("loads")
+        };
+        let smooth = r#""NORMAL":1,"TEXCOORD_0":3}"#;
+        let plain = uv_mesh("", smooth);
+        let mirrored = uv_mesh(r#","scale":[-1,1,1]"#, smooth);
+        assert_eq!(plain.indices(), &[0, 1, 2]);
+        assert_eq!(mirrored.indices(), &[0, 2, 1]);
+        let (plain, mirrored) = (
+            plain.tangents().expect("generated at load"),
+            mirrored.tangents().expect("generated at load"),
+        );
+        for (a, b) in plain.iter().zip(mirrored) {
+            assert_eq!(a[3], 1.0);
+            assert_eq!(b[3], -1.0, "mirrored handedness");
+            assert_eq!([-a[0], a[1], a[2]], [b[0], b[1], b[2]], "mirrored xyz");
+        }
+        // Without NORMAL: the flat normal of the mirrored triangle still faces +Z (the
+        // mirror keeps the triangle in the XY plane and its front towards +Z).
+        let flat = uv_mesh(r#","scale":[-1,1,1]"#, r#""TEXCOORD_0":3}"#);
+        assert_eq!(flat.normals(), &[[0.0, 0.0, 1.0]; 3]);
+        assert_eq!(
+            flat.positions()[1],
+            [0.0, 1.0, 0.0],
+            "corners 1 and 2 swapped"
+        );
+        assert!(flat.tangents().expect("generated")[0][3] < 0.0);
     }
 
     /// The triangle with a `TANGENT` accessor (bufferView 3, at byte 80) of `data`.
