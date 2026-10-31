@@ -103,6 +103,17 @@ impl MeshData {
     pub const MAX_VERTICES: usize = 65_536;
     /// Maximum indices per mesh (128 Ki triangles).
     pub const MAX_INDICES: usize = 3 * 131_072;
+    /// [`Self::generate_tangents`] skips `MikkTSpace` when more triangle corners than this
+    /// share one position. `MikkTSpace`'s time grows with the square of that count (8 Ki
+    /// corners take about 0.4 s, and 16 Ki overflow its recursion's stack), so a hostile
+    /// `.glb` could otherwise stall or abort a loader. Real meshes have about 6 corners per
+    /// position and well under 1 Ki at a UV-sphere pole.
+    pub const TANGENT_MAX_SHARED_CORNERS: usize = 1024;
+    /// [`Self::generate_tangents`] also skips `MikkTSpace` when the sum over positions of
+    /// (corners sharing the position)² exceeds this (2^24, about 0.1 s of `MikkTSpace`'s
+    /// quadratic work), so many positions just under [`Self::TANGENT_MAX_SHARED_CORNERS`]
+    /// cannot add up. A dense mesh at the vertex cap is about 2.4 M.
+    pub const TANGENT_MAX_SHARING_COST: u64 = 1 << 24;
 
     /// Builds a mesh after checking every invariant listed in the module docs.
     ///
@@ -226,7 +237,10 @@ impl MeshData {
     /// index) takes its first corner's, in index order; exporters split such vertices, so a
     /// mesh exported with its seams split gets exact `MikkTSpace` everywhere. A vertex with
     /// no tangent space (only degenerate triangles touch it, or a zero tangent) gets a fixed
-    /// unit vector perpendicular to its normal and `w = +1`. Only `+ - * /` and `sqrt` are
+    /// unit vector perpendicular to its normal and `w = +1`. A mesh over
+    /// [`Self::TANGENT_MAX_SHARED_CORNERS`] or [`Self::TANGENT_MAX_SHARING_COST`] gets that
+    /// fallback for every vertex, without running `MikkTSpace` (untrusted input must not
+    /// stall the loader; ADR-0022). Only `+ - * /` and `sqrt` are
     /// used (the angle weights use an `acos` series in those operations), so the result is
     /// bit-identical on every platform.
     #[must_use]
@@ -460,6 +474,13 @@ fn generate_tangents(
         .iter()
         .map(|&normal| normalize(normal).unwrap_or([0.0, 1.0, 0.0]))
         .collect();
+    let fallback = |normal: &V3| {
+        let t = perpendicular(*normal);
+        [t[0], t[1], t[2], 1.0]
+    };
+    if !mikktspace_is_bounded(positions, indices) {
+        return unit_normals.iter().map(fallback).collect();
+    }
     let mut geometry = MikkGeometry {
         positions,
         normals: &unit_normals,
@@ -473,13 +494,39 @@ fn generate_tangents(
         .tangents
         .iter()
         .zip(&unit_normals)
-        .map(|(tangent, &normal)| {
-            tangent.unwrap_or_else(|| {
-                let t = perpendicular(normal);
-                [t[0], t[1], t[2], 1.0]
-            })
-        })
+        .map(|(tangent, normal)| tangent.unwrap_or_else(|| fallback(normal)))
         .collect()
+}
+
+/// Whether `MikkTSpace` stays within [`MeshData::TANGENT_MAX_SHARED_CORNERS`] and
+/// [`MeshData::TANGENT_MAX_SHARING_COST`]. Corners are counted per **position** (bit
+/// pattern, `-0.0` as `0.0`), not per welded vertex: `MikkTSpace` is also quadratic in
+/// vertices that share a position but differ in UV or normal, or in degenerate triangles
+/// collapsed onto one point, so the position is the conservative key. O(V log V).
+fn mikktspace_is_bounded(positions: &[V3], indices: &[u32]) -> bool {
+    let mut corners = vec![0_u32; positions.len()];
+    for &index in indices {
+        corners[index as usize] += 1;
+    }
+    // `+ 0.0` turns `-0.0` into `0.0`, which `MikkTSpace` treats as equal.
+    let mut keyed: Vec<([u32; 3], u32)> = positions
+        .iter()
+        .zip(&corners)
+        .map(|(position, &count)| (position.map(|value| (value + 0.0).to_bits()), count))
+        .collect();
+    keyed.sort_unstable_by_key(|&(key, _)| key);
+    let mut cost = 0_u64;
+    for run in keyed.chunk_by(|a, b| a.0 == b.0) {
+        let shared: u64 = run.iter().map(|&(_, count)| u64::from(count)).sum();
+        if shared > MeshData::TANGENT_MAX_SHARED_CORNERS as u64 {
+            return false;
+        }
+        cost += shared * shared;
+        if cost > MeshData::TANGENT_MAX_SHARING_COST {
+            return false;
+        }
+    }
+    true
 }
 
 /// A [`MeshData`]'s streams as `bevy_mikktspace` reads them (one triangle per face), and the
@@ -1060,5 +1107,90 @@ mod tests {
         // The shared vertices keep the first triangle's right-handed space.
         assert_eq!(tangents[0], [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(tangents[2], [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// A fan of `triangles` around one centre position. With `split`, every triangle has
+    /// its own centre vertex (same position, distinct UV), which `MikkTSpace` does not weld
+    /// but is still quadratic in.
+    fn high_valence_fan(triangles: u32, split: bool) -> MeshData {
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        for i in 0..=triangles {
+            let angle = i as f32 / triangles as f32 * 6.0;
+            positions.push([angle.cos(), angle.sin(), 0.0]);
+            uvs.push([0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()]);
+        }
+        let mut indices = Vec::new();
+        for i in 0..triangles {
+            if split || i == 0 {
+                positions.push([0.0, 0.0, 0.1]);
+                uvs.push([0.5, 0.5 + i as f32 * 1e-5]);
+            }
+            let centre = positions.len() as u32 - 1;
+            indices.extend([centre, i, i + 1]);
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid fan")
+    }
+
+    fn is_fallback(mesh: &MeshData) -> bool {
+        let fallback = perpendicular([0.0, 0.0, 1.0]);
+        mesh.generate_tangents().expect("uvs").iter().all(|t| {
+            t.map(f32::to_bits) == [fallback[0], fallback[1], fallback[2], 1.0].map(f32::to_bits)
+        })
+    }
+
+    /// Untrusted meshes cannot make `MikkTSpace` stall or overflow its stack: past the
+    /// shared-corner cap every vertex gets the fallback, quickly. (Unguarded, the
+    /// 16 Ki-triangle fan overflows a test thread's stack.)
+    #[test]
+    fn high_valence_meshes_skip_mikktspace() {
+        let at_cap = MeshData::TANGENT_MAX_SHARED_CORNERS as u32;
+        assert!(
+            !is_fallback(&high_valence_fan(at_cap, false)),
+            "at the cap: MikkTSpace"
+        );
+        for (triangles, split) in [(at_cap + 1, false), (at_cap + 1, true), (16_384, false)] {
+            let fan = high_valence_fan(triangles, split);
+            let start = std::time::Instant::now();
+            assert!(is_fallback(&fan), "{triangles} triangles, split {split}");
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(1),
+                "{triangles}: {:?}",
+                start.elapsed()
+            );
+        }
+        // Many positions under the per-position cap still add up: 17 fans of 1000 corners
+        // cost 17 M > 2^24.
+        let fan = high_valence_fan(1000, false);
+        let count = fan.positions().len() as u32;
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        for copy in 0..17_u32 {
+            let offset = [copy as f32 * 3.0, 0.0, 0.0];
+            positions.extend(
+                fan.positions()
+                    .iter()
+                    .map(|p| [p[0] + offset[0], p[1], p[2]]),
+            );
+            uvs.extend_from_slice(fan.uvs().expect("uvs"));
+            indices.extend(fan.indices().iter().map(|i| i + copy * count));
+        }
+        let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+        let many = MeshData::new(positions, normals, indices)
+            .and_then(|mesh| mesh.with_uvs(uvs))
+            .expect("valid");
+        assert!(is_fallback(&many), "over the sharing cost");
+        let sixteen = MeshData::new(
+            many.positions()[..16 * count as usize].to_vec(),
+            many.normals()[..16 * count as usize].to_vec(),
+            many.indices()[..16 * 3000].to_vec(),
+        )
+        .and_then(|mesh| mesh.with_uvs(many.uvs().expect("uvs")[..16 * count as usize].to_vec()))
+        .expect("valid");
+        assert!(!is_fallback(&sixteen), "16 M is within the sharing cost");
     }
 }
