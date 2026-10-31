@@ -764,6 +764,8 @@ exception: they stay all-rights-reserved and are listed as such.
    [ADR-0020](../adr/0020-next-gen-foundations.md) (proposed, 2026-10-31), with the vendor
    claims re-checked and its corrections to this plan listed there.
 3. **ADR-0021 (N1):** the temporal foundation, the upscaler interface and the overlay layer.
+   Drafted as [ADR-0021](../adr/0021-temporal-upscaling-overlay.md) (proposed, 2026-10-31),
+   with the vendor claims re-checked and its corrections to this plan listed there.
 4. **A0:** the licence and provenance gate in `content-check`, and the MikkTSpace tangent fix.
 5. Set up the local AI workstation (ComfyUI + TRELLIS.2, Z-Image, StableMaterials, Kimodo) and
    produce a first test hero through the full §9.4 pipeline. That measures where the human

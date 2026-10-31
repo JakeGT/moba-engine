@@ -26,8 +26,9 @@
   [snapshot/simulation profiling](perf/0007-profiling.md).
 - [ADRs](adr/) — architecture decisions, including
   [open-source distribution](adr/0004-open-source-distribution.md),
-  [server-authoritative netcode](adr/0001-server-authoritative-netcode.md) and the proposed
-  [next-gen foundations (N0)](adr/0020-next-gen-foundations.md).
+  [server-authoritative netcode](adr/0001-server-authoritative-netcode.md), and the proposed
+  [next-gen foundations (N0)](adr/0020-next-gen-foundations.md) and
+  [temporal foundation, upscaling and overlay layer (N1)](adr/0021-temporal-upscaling-overlay.md).
 - [Development notes](dev/) — software Vulkan setup and local workflow.
 - [Agent instructions](../AGENTS.md), [agentic coding runbook](agents.md) and
   [local agent environment](../agents.local.example.md).
