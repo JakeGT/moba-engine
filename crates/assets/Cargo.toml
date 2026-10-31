@@ -38,6 +38,10 @@ harness = false
 name = "vat_minions"
 harness = false
 
+[[bench]]
+name = "mesh_tangents"
+harness = false
+
 [features]
 default = []
 # Bounded binary glTF (.glb) static-mesh loader (ADR-0007).
