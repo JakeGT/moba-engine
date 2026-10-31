@@ -19,6 +19,7 @@ material**, not shipped game assets, so they don't go through the `content-check
 | `ember-concepts.jpg` | Ember Crossing in the four moods: aerial (seed 6101) and vista (6200) | As above. These are concept images, not engine captures | Prompts in `prompts/round1-ember.json` |
 | `hero-silhouettes.jpg` | Flat silhouettes of the round-1 hero concepts and their round-2 take B at true 30 px and 40 px, plus 40 px at 4× | Cut out from the AI images by the review app's `tools/build_data.py` (per-row background estimate, largest connected shape), board by `tools/boards.py silhouettes` | Derived from the CC0 hero images above |
 | `faction-mixes.jpg` | Round 2: the A + C Forge and B + A Void mixes, architecture, tower and two 46 m base mock-ups each (seeds 11100–11101, 12100–12101) | AI-generated, Z-Image-Turbo; contact sheet by `tools/boards.py sheet` | Prompts in `prompts/round2-factions.json` |
+| `round3-fixes.jpg` | Round 3: prompts aimed at the problems rounds 1 and 2 showed (seeds 15101–15700), plus the round-1 hammer (8100) for comparison | AI-generated, Z-Image-Turbo; contact sheet by `tools/boards.py sheet` | Prompts in `prompts/round3-*.json` |
 
 **AI model for every generated board:** Z-Image-Turbo (Tongyi-MAI), weights **Apache-2.0**
 (<https://huggingface.co/Tongyi-MAI/Z-Image-Turbo>), run locally in ComfyUI from the

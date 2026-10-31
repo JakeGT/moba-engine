@@ -70,6 +70,14 @@ Each concept also has a **take B** in the review app, so the pick isn't tied to 
   and its pale cloak risks CON-1 on sand. **Neither Strider take has a working 40 px tell**,
   which strengthens the case for the Warden as the slice hero.
 
+**Round 3** ([boards/round3-fixes.jpg](boards/round3-fixes.jpg)) tried fixes directly:
+- **Strider C**, with a charcoal cloak and a large bone-white bow held diagonally, is the best
+  Strider so far. The dark cloak solves the sand contrast, and the bow survives in about half
+  the 40 px cut-outs. A thicker limb would make it reliable.
+- **Oracle C** fixes the mask: smooth, with no skull read. But the slabs still float out
+  sideways (the generator ignores "angled down"), and the crown drops out in several cut-outs.
+  The slab placement is a model-sheet decision, not a prompt one.
+
 > **Decision needed (maintainer): does the slice hero keep its old name?** Blade, Mage and
 > Ranger are kit names today. **Recommendation:** new display names; kit IDs unchanged.
 
@@ -128,6 +136,15 @@ bronze automaton, though it renders **copper-orange**. Keep it in brass and bron
 and came out as a plain silver knight, so the gaps must be drawn into the model sheet
 explicitly. The Monolith siege (a slab carried by two acolytes) reads at once. The Crucible
 Walker is the weakest; try a squatter, wider shape.
+
+**Round 3:**
+- **The Hollow's floating plates failed again**, even with an explicit "gap of air" prompt.
+  Current generators don't draw detached parts reliably, so the gaps must be drawn in the
+  model sheet and built in the mesh.
+- **Thrall C in brass is too saturated.** Measured, its body sits at median hue 77° with p90
+  C 0.114. That is the centre of the enemy colour-blind zone and over the 0.11 accent cap
+  (PAL-3). Bright brass is a PAL-3 risk for the whole Forge: keep it worn and dull, like
+  sun-brass `#A98C62` (C 0.067).
 
 ## Structures
 
