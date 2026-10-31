@@ -58,6 +58,18 @@ Each concept also has a **take B** in the review app, so the pick isn't tied to 
 | Still Oracle | Monastic | One pewter **astrolabe ring** behind the head instead of the crescent crown; two slabs at the waist. Fewer floating parts (cheaper to rig) |
 | Ash Strider | Scavenger | A **spear-thrower and glass darts** instead of the bow; smoked goggles. A different long diagonal for the 40 px tell |
 
+**What round 2 showed** (18 take-B images; [boards/hero-silhouettes.jpg](boards/hero-silhouettes.jpg)):
+**take A wins for the Warden and the Oracle.**
+- **Warden B** loses the base-heavy mass, and its crest shrinks to a bump at 40 px. It reads
+  as a generic knight, and the model drifted to an axe.
+- **Oracle B's** astrolabe ring merges with the head into one round blob, and the waist ring
+  becomes a horizontal line. The crescent crown and the floating slabs (take A) give a far
+  stronger tell, so keep A and solve the wing and skull reads in the model sheet: slabs
+  angled down, a smooth mask without eye sockets.
+- **Strider B** holds the spear upright, parallel to the body, which adds nothing at 40 px,
+  and its pale cloak risks CON-1 on sand. **Neither Strider take has a working 40 px tell**,
+  which strengthens the case for the Warden as the slice hero.
+
 > **Decision needed (maintainer): does the slice hero keep its old name?** Blade, Mage and
 > Ranger are kit names today. **Recommendation:** new display names; kit IDs unchanged.
 

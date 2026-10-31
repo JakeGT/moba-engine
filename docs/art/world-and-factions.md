@@ -203,7 +203,13 @@ establishing shot, a tower, a common soldier and a material close-up.
 with Forge A's sun-disc emblems and glazed friezes **used sparingly** and Forge C's machinery
 on towers and minions. **Void B** (Gravity Monastery), with Void A's star-chart inlay and
 astrolabe rings as the ornament. Round 2 in the review app explored "A + C" and "B + A" mixes
-before this revision; judge the readings on the round-1 images first.
+before this revision ([boards/faction-mixes.jpg](boards/faction-mixes.jpg)). It showed two things:
+- **Literal star motifs turn the Void into sci-fi.** The B + A mix produced pods with painted
+  stars and porthole rings, closer to a space station than a monastery. Keep Void A's inlay
+  as fine engraving, visible only at the zoom camera.
+- **The 46 m base mock-ups are far too busy for a play surface** in both factions: gilt,
+  domes and machinery everywhere. Ornament belongs on structures' upper thirds and the
+  out-of-bounds skyline, not on the walkable base floor (VAL-2/VAL-4).
 
 > **Decision needed (maintainer): faction readings.** Pick one reading per faction, or a mix
 > (recommended: Forge B with A's emblems and C's machinery; Void B with A's ornament).
