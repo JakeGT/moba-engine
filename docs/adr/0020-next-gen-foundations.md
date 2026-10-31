@@ -279,10 +279,14 @@ created.
     automatically.** `MOBA_RENDER_PATH=tiered` admits it (for CI's RT goldens).
   - Overdrive also needs `VK_KHR_ray_tracing_pipeline`. A device without it tops out at
     Ultra.
-  - Ultra and Overdrive need the SDK features (roadmap §7). In a build without them, or on a
-    GPU they do not support, the two tiers are shown disabled with the reason ("built without
-    `rtxdi`", "needs an NVIDIA RTX GPU"). They are not selectable with their features
-    silently off.
+  - Ultra and Overdrive need the SDK features (roadmap §7), **once those features exist**.
+    - **Until then they are selectable in every build.** That covers N0 up to the phases that
+      land the SDK-backed features: ReSTIR DI and SHaRC (N8), DLSS RR and the path tracer
+      (N9). Neither tier yet has a feature that needs an SDK.
+    - **From the phase that makes a tier depend on an SDK feature,** that tier is shown
+      disabled in a build without the feature, or on a GPU it does not support. The reason is
+      given ("built without `rtxdi`", "needs an NVIDIA RTX GPU"). It is not selectable with the
+      feature silently off.
 - **Device choice: device type first, path second.** Devices are ranked by:
   1. device type: discrete > integrated > virtual > CPU (today's order);
   2. then, within one type, admitted to Tiered over Compat-only;
@@ -496,9 +500,9 @@ smaller table.
   install `spirv-val`, since today the Linux and macOS jobs install only glslang:
   - `spirv-tools` (apt) on Linux;
   - `spirv-tools` (brew) on macOS;
-  - the Vulkan SDK, which already ships it, on Windows. macOS compiles the Slang modules even though it only runs
-  Compat, so shader errors are caught on every platform and the build has one shape
-  everywhere.
+  - the Vulkan SDK, which already ships it, on Windows.
+- **macOS also compiles the Slang modules,** although it only runs Compat. Shader errors are
+  therefore caught on every platform, and the build has one shape everywhere.
 
 **4d. Migration path.**
 - **N0 adds the pipeline plus two smoke shaders, not a port:**
@@ -541,10 +545,15 @@ read the same numbers.
   - Its target is the tier's GPU budget.
   - The controller's existing 0.95 high-water and 0.75 low-water marks provide the headroom.
   - It replaces today's fixed 14 ms.
-- The scale range is the upscaler's. The ceiling is the preset's mode, Quality at 0.67, or
-  Performance at 0.50 on Overdrive. The floor is **Performance (0.50)**, or **Ultra Performance
-  (0.33)** on Overdrive. That is two modes down, skipping Balanced (0.58), so the controller has
-  room to hold the budget. The table's ranges are exactly these values.
+- **The scale range follows the upscaler modes.** The ceiling is the preset's mode at the
+  output resolution:
+  - Quality (0.67) at 1080p and 1440p;
+  - Performance (0.50) for Ultra at 4K and for Overdrive.
+
+  The floor is **Performance (0.50)** where the ceiling is Quality, which is two modes down,
+  skipping Balanced (0.58). Where the ceiling is already Performance, the floor is **Ultra
+  Performance (0.33)**, one mode down. The table shows the 1440p ranges. Ultra at 4K uses
+  0.33–0.50, like Overdrive.
 - **Until N1 ships the upscalers,** the range is applied to today's render scale with
   bicubic upscaling. The 0.5 floor is today's lower bound.
 - The budget is measured as today:
@@ -642,8 +651,18 @@ under the RTX SDKs, Intel or AMD binary licences is fetched.
       (`v11`) with `FetchContent`, and NRI (`v191`) when `NRD_NRI` is on. All are MIT. The
       fetch script pre-fetches ShaderMake and MathLib. `build.rs` configures NRD with
       `FETCHCONTENT_FULLY_DISCONNECTED=ON`, `FETCHCONTENT_SOURCE_DIR_SHADERMAKE`,
-      `FETCHCONTENT_SOURCE_DIR_MATHLIB` and `NRD_NRI=OFF`, so the build never downloads.
-      ShaderMake compiles NRD's HLSL with DXC, which the Vulkan SDK provides. That makes DXC a
+      `FETCHCONTENT_SOURCE_DIR_MATHLIB` and `NRD_NRI=OFF`.
+    - **ShaderMake's own downloads are turned off as well.** As a subproject it enables
+      `SHADERMAKE_FIND_COMPILERS`. Its `SHADERMAKE_FIND_DXC` defaults to ON on non-Apple hosts
+      and `FetchContent`-downloads DXC v1.9.2609. Its `SHADERMAKE_FIND_FXC` defaults to ON on
+      Windows. This is in ShaderMake@`3f01623`'s `CMakeLists.txt`, checked 2026-10-31.
+      `build.rs` therefore sets:
+      - `SHADERMAKE_FIND_DXC=OFF` and `SHADERMAKE_FIND_FXC=OFF`;
+      - `SHADERMAKE_FIND_DXC_VK=ON`, which uses the Vulkan SDK's DXC;
+      - `NRD_EMBEDS_SPIRV_SHADERS=ON`, with `NRD_EMBEDS_DXIL_SHADERS=OFF` and
+        `NRD_EMBEDS_DXBC_SHADERS=OFF`. Those two default to ON on Windows and would need
+        DXIL and FXC.
+    - With these settings the configure step never downloads. The Vulkan SDK's DXC becomes a
       build requirement of the `nrd` feature only.
   - the archive's **SHA-256**;
   - the path of its licence file inside the archive, and **that file's SHA-256**;
@@ -674,7 +693,8 @@ under the RTX SDKs, Intel or AMD binary licences is fetched.
 - `cargo build` with default features needs no proprietary SDK. That build contains Reflex
   and Anti-Lag through extensions, the FSR 3.1 MIT upscaler, and in-house TAA (N1),
   denoising and shadow-ray lighting.
-- It **runs Low to High** (roadmap §7). Ultra and Overdrive are shown disabled, with the
+- It **runs Low to High** (roadmap §7). Ultra and Overdrive stay selectable until N8 and N9
+  land their SDK-backed features. After that they are shown disabled in this build, with the
   missing features named (§2b), as roadmap §7 says.
 - **Upscaler and denoiser selection** is a run-time trait object chosen from what is both
   compiled in and supported by the device. It never depends on `cfg` at call sites outside
@@ -705,8 +725,9 @@ the maintainer's agreement when the ADR is accepted.
 
 The two points below follow the roadmap, after review:
 - **MSAA stays on tiered Medium and up until N1** (roadmap §8), not retired in N0.
-- **Ultra and Overdrive are not selectable in a build without the SDK features**
-  (roadmap §7). They are shown disabled with the reason.
+- **Ultra and Overdrive follow roadmap §7.** Once their SDK-backed features land (N8, N9),
+  they are not selectable in a build without those features; they are shown disabled with
+  the reason. Until then they are selectable.
 
 ## Alternatives considered
 
@@ -782,8 +803,9 @@ The two points below follow the roadmap, after review:
 - **Existing goldens.**
   - Existing goldens are captured with `MOBA_RENDER_PATH=compat` and stay byte-identical.
     N0 changes no Compat pixel.
-  - Lavapipe would otherwise admit Tiered if it exposes ray query, and change the path under
-    the goldens.
+  - Under `auto`, lavapipe is a CPU device and always runs Compat (§2b), so the existing
+    goldens keep their path anyway. The explicit `compat` pins them against later changes
+    to the admission rules. The new tiered smoke goldens run with `MOBA_RENDER_PATH=tiered`.
 - **Public API (additive, `#[non_exhaustive]`).**
   - `QualityTier::Overdrive`;
   - `RenderPath`, `DeviceCapabilities`, `Admission`;
