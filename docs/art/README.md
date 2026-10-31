@@ -39,6 +39,7 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-10-30 | Map 1 / vertical slice: **Ember Crossing** | Maintainer |
 | 2026-10-30 | Slice hero picked from **three drafted concepts** | Maintainer |
 | 2026-10-30 | Concept generation with **Apache-licensed local models only**; outputs CC0 with provenance | Maintainer |
+| 2026-10-31 | **Technology so advanced it looks like magic**: weapons, armour, architecture, units and the Builders' relics are all technology ([world](world-and-factions.md#technology-that-looks-like-magic)) | Maintainer |
 | 2026-10-31 | Also the **Gemini API ("Nano Banana"), paid tier, for concept art and model sheets only**: a reference people model from, never shipped and never fed to a generator (enforced by the A0 provenance gate) | Maintainer |
 
 ## Decisions needed
