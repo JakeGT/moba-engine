@@ -31,3 +31,34 @@ Comfy-Org repack. Components:
 Sampler: `res_multistep`/`simple`, 9 steps, CFG 1.0, AuraFlow shift 3.0, no negative
 prompt. Every image's full record (prompt, seed, workflow JSON, date) is in the review app's
 `manifest.json`. No image inputs, LoRAs, or real people's likenesses were used.
+
+## Gemini boards (concept only)
+
+These boards are made from **Gemini API** images (Nano Banana Pro, `gemini-3-pro-image`, and
+Nano Banana 2.1, `gemini-nano-banana-2.1`, paid tier, batch mode, 2026-10-31). They are the
+one exception to the CC0 rule above:
+
+- **Licence: none granted.** The outputs come from a proprietary service under Google's terms
+  and carry a SynthID watermark. The manifest records them as
+  `LicenseRef-Gemini-API-Output` with the source class `proprietary-service-concept-only`.
+- **Concept only.** They are a reference for people to model from by hand: never shipped,
+  never placed in `content/`, never used as input to a generator. The A0 provenance gate
+  rejects any asset entry naming this licence or a Gemini model.
+- Each board's title says "Gemini, concept only". The contact sheets themselves are made by the
+  review app's `tools/gemini_boards.py` (Pillow), with Noto Sans labels (SIL OFL 1.1).
+
+| Board | What it shows | Prompts |
+|---|---|---|
+| `g3-factions.jpg` | Round G3: every faction reading as advanced technology, architecture and tower | `prompts/build_gemini3.py` |
+| `g3-soldiers.jpg` | Round G3: soldiers and material details of the recommended readings and Forge A / Void B | `prompts/build_gemini3.py` |
+| `g4-heroes.jpg` | Round G4: the three slice heroes redesigned, studio and gameplay angle | `prompts/build_gemini4.py` |
+| `g5-sheets.jpg` | Round G5: model sheets (turnaround, front A-pose, details) of the three redesigns, sent the G4 picks as references | `prompts/build_gemini5.py` |
+| `g4-units.jpg` | Round G4 minions, plus the G5 Thrall and Hollow sheets | `prompts/build_gemini4.py`, `build_gemini5.py` |
+| `g4-structures.jpg` | Round G4: towers, cores and walls of both factions, with the G3 recommended readings as style references | `prompts/build_gemini4.py` |
+| `g4-ember.jpg` | Round G5's corrected Ember Crossing (hull arches, not ribs) in the four moods, aerial and vista | `prompts/build_gemini5.py` |
+| `g4-vfx.jpg` | Round G4: Forge, Void and Ashen effects | `prompts/build_gemini4.py` |
+| `g4-neutral-keyart.jpg` | Round G4: ember scarabs, a Builder hull arch, the Builder warden, the Ashen camp and two key-art directions | `prompts/build_gemini4.py` |
+| `g4-materials.jpg` | Rounds G4 and G5: technology and environment material swatches | `prompts/build_gemini4.py`, `build_gemini5.py` |
+
+Every image's full record (model, prompt, reference images with their SHA-256, date) is in
+the review app's `manifest.json`.

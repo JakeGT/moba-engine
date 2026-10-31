@@ -42,7 +42,41 @@ Builders' relics and the Ember crystals, and units and machines.
 First previews (Gemini round G3, 2026-10-31) showed the two ways this goes wrong: bulky power
 armour reads as conventional sci-fi, and levitation shown with jets of dust reads as rocket
 thrusters. Both are fixed by the "from a distance" rule. Prompts: the review app's
-`prompts/build_gemini3.py`.
+`prompts/build_gemini3.py` (factions) and `prompts/build_gemini4.py` (everything else).
+
+What the full rounds added (G3: 72 faction images on Nano Banana Pro; G4: 143 images on Nano
+Banana 2.1 for the rest of the bible):
+
+- **Collector discs turn into satellite dishes.** A sun disc must be drawn as a **flat disc
+  with radial fins** set into the architecture, never a parabolic dish on a mount.
+- **Generators add flying craft to skies** (saucer shapes in Forge B and Void C), even when
+  told not to. Skies stay empty: anything that flies is a floating architectural piece.
+- **Close-fitting armour reads as a sci-fi bodysuit.** Soldiers need ceremonial layering
+  (tabards, wraps, mantles, stacked plates) so the silhouette says "order" before "suit".
+- **Violet seam lines drift towards neon.** Void light stays in thin, sparse seams and gaps;
+  never a continuous outline traced around the body.
+- **"Ribs" draws a skeleton.** Asked for the fallen engine's curved ribs, the map concepts
+  drew a whale's skeleton in bone. Builder wreckage is **machined hull arches** of pale alloy
+  with panel seams and dead emitter rings: manufactured, never organic. Redrawn that way
+  (round G5, [boards/g4-ember.jpg](boards/g4-ember.jpg)), the wreck reads as a row of
+  half-buried hull rings: clearly a machine, and a strong landmark from the gameplay camera.
+- **Glowing discs inside rings of fins read as jet turbines** (the Lens Gunner, the Crucible
+  Walker). A Forge lens sits in a stepped collar, not a finned cowling.
+- **Fusion described as "contained energy released"** (a near-white flash, a pale gold
+  shockwave) finally stopped generators painting Forge heat as orange fire.
+
+### What changes from the fantasy-era drafts
+
+| Was (rounds 1–3, local) | Now |
+|---|---|
+| Brass, bronze and forged iron | **Sun-alloy**: aged, dull gold-bronze alloy with precise machined seams (brass stays the measured stand-in for its PBR numbers) |
+| Kiln ceramic and terracotta tiles | **Heat-shield ceramic**: crazed cream and ochre tiles on stepped forms |
+| Furnaces, chimneys, bellows, steam, slag | **Contained fusion cores** behind lattice grilles; heat-radiator fins and spires; no smoke, steam or exhaust |
+| Sun discs as emblems | Sun discs as **solar collector arrays and fusion lenses** (flat, finned) |
+| Brass automata with furnace bellies | Bronze-alloy **automata with fusion cores**, moving without visible pistons |
+| Void ceramic and obsidian | **Void composite** (matte black-violet, engraved) and obsidian-like metamaterial |
+| Pewter astrolabe rings | **Gravity rings**: hovering pewter-like alloy and tarnished silver |
+| Ashen cloth and scavenged brass | Ashen cloth over **salvaged Builder panels**; scavenged devices that still work, worn as charms |
 
 ## Premise (placeholder lore)
 
@@ -55,8 +89,9 @@ thrusters. Both are fixed by the "from a distance" rule. Prompts: the review app
 > Two powers grew out of the Builders' ruins and both claim the Crossing.
 >
 > **The Solar Forge** reads the Builders' engines as scripture: the sun must be fed and the
-> world must work. It is an empire of foundries, guild-priests and brass automata that mines
-> the ember shards to keep its furnaces — and, it believes, the sun — alight.
+> world must work. It is an empire of guild-priests who keep the Builders' solar collectors
+> and fusion furnaces running without understanding them, served by bronze-alloy automata.
+> It mines the ember shards to keep its furnaces — and, it believes, the sun — alight.
 >
 > **The Void** learned the other half of the Builders' craft: the dark engines that bent
 > gravity and kept the sky in its place. It is an old, quiet order of astronomers and
@@ -65,6 +100,9 @@ thrusters. Both are fixed by the "from a distance" rule. Prompts: the review app
 
 Why this premise works for the game:
 - It explains **why everything is old and repaired**: weathered tone without grimdark.
+- It explains **why technology looks like magic**: both factions inherited machines they
+  operate by ritual, not understanding. The Builders' relics are as far beyond them as they
+  are beyond us.
 - **Science and magic share one source** (Builder technology), so VFX can be physical light,
   heat and gravity rather than arbitrary sparkle. That suits photoreal lighting.
 - **Ember Crossing becomes a real place**: the crash basin explains the terraced basalt, the
@@ -88,11 +126,12 @@ Why this premise works for the game:
 |---|---|---|
 | Idea | Light, heat, industry, faith in work | Gravity, silence, the night sky, patience |
 | Shape | **Mass and stacking**: wide bases, stepped profiles, radial fans | **Suspension and gaps**: floating segments, arcs, rings, hollow cores |
-| Materials | Brass, bronze, forged iron, kiln ceramic, sandstone, amber sun-glass, slag | Black ceramic, obsidian, pewter and tarnished silver, levitating basalt, cool void-glass, bone-white inlay |
+| Technology | Solar and fusion: collector arrays, fusion lenses, contained cores behind lattices | Gravity: levitation, gravity wells, lensing rings |
+| Materials | Sun-alloy (dull gold-bronze), heat-shield ceramic, sandstone and basalt masonry, fusion lenses (sun-glass), emitter lattices | Void composite (black-violet), obsidian-like metamaterial, gravity-ring alloy (pewter-like and tarnished silver), levitating basalt, void-glass, bone-white inlay |
 | Value | Mid to light, warm highlights | Mid to dark bodies with **strong cool speculars** and bone-white accents, never a black blob |
 | Light motif | Light comes **out of** things: glowing seams, sun-glass cores, radiant halos | Light **bends round** things: lensing, dark cores with bright rims, starfield glints |
-| Motion | Heavy, grounded, piston rhythms, sparks falling | Weightless, slow orbits, debris drifting **upwards** |
-| Sound (for audio) | Bellows, hammering, hissing steam | Low hum, glass chimes, pressure drops |
+| Motion | Heavy, grounded: planted strikes, power building in seams, molten droplets falling | Weightless, slow orbits, debris drifting **upwards** |
+| Sound (for audio) | A deep resonant hum of contained fusion, heavy strikes, metal ticking as it cools | Low hum, glass chimes, pressure drops |
 
 ## Shape language
 
@@ -108,8 +147,8 @@ These rules are written so the review renders can check them ([silhouettes-and-s
 - **Radial fans**: sunburst crests, halo discs and fin crowns. A Forge hero carries **one**
   radial element (crest, back-halo or shield boss). It's the faction's 40 px tell.
 - **Straight lines meet at hard angles**; curves only as segments of a circle (sun discs).
-- **Upward triangles** and chimneys on architecture.
-- Surfaces are **plated and riveted**; seams glow on special units only.
+- **Upward triangles**, heat-radiator fins and spires on architecture (never chimneys).
+- Surfaces are **plated, with precise machined seams**; seams glow on special units only.
 
 ### Void: suspension and gaps
 
@@ -118,7 +157,8 @@ These rules are written so the review renders can check them ([silhouettes-and-s
 - **Constant gaps.** Pieces are separated by clear, regular air gaps that read as negative
   space in the silhouette. It's the faction's 40 px tell, alongside orbiting fragments.
 - **Arcs, crescents and rings**, plus long slender verticals.
-- **Smooth monolithic slabs**, polished, with fine engraved star-map lines (zoom camera only).
+- **Smooth monolithic slabs** of void composite, with fine engraved star-map lines (zoom camera
+  only) and hovering gravity rings.
 - Debris and cloth drift **upwards** around Void units (a VFX and animation rule, not geometry).
 
 ### Shared rules
@@ -133,33 +173,42 @@ These rules are written so the review renders can check them ([silhouettes-and-s
 
 ### Solar Forge
 
-- **Massing:** stepped sandstone and basalt platforms; foundry halls with **sawtooth roofs**
-  and **sun-funnel chimneys**; bronze-banded drums; colonnades of squat columns.
-- **Details:** brass sun discs; kiln-glazed tile friezes (mid-saturation ochre, cream,
-  terracotta); chain hoists; slag heaps; heat-stained stone around vents.
-- **Light:** warm interior glow through grilles; sun-glass lenses on tower crowns that focus
-  light into beams (the tower attack).
-- **Wear:** soot streaks up from vents, sand drifts against the windward side, edge wear on
-  every step, repaired plates of a different alloy.
+- **Massing:** stepped heat-shield ceramic and basalt platforms (ziggurats that are solar
+  megastructures); squat colonnades that are radiator fins; banded drum-shaped fusion cores;
+  heat-radiator spires.
+- **Details:** flat, finned sun-disc collectors (never dishes), one per building at most;
+  crazed cream and ochre heat-shield tiles; gold-bronze banding with machined seams; fine
+  lattice grilles; heat-stained stone around radiator fins.
+- **Light:** white-gold light through lattice grilles; fusion lenses on tower crowns that fire
+  the tower's attack as a beam.
+- **Wear:** heat-scorching above radiator fins, sand drifts against the windward side, edge
+  wear on every step, tiles replaced with a different glaze.
 
 ### Void
 
 - **Massing:** dark monoliths and **ring gates**; terraces whose top courses float a metre
   above the courses below; observatory domes open to the sky.
-- **Details:** star-chart inlays in pale stone; pewter astrolabe rings; obsidian mirrors;
+- **Details:** star-chart lines engraved in black composite; hovering gravity rings of
+  pewter-like alloy and tarnished silver; ring gates that lens the view through them;
   suspended basalt fragments locked in slow orbits.
-- **Light:** almost none emitted. Thin cool rims along floating edges, and occasional
-  void-glass cores (violet-white, low chroma).
+- **Light:** almost none emitted. Thin violet-white light only in the seams and gaps of
+  floating parts, and occasional void-glass cores (low chroma). Never a traced neon outline.
 - **Wear:** pitted, sand-scoured polish; cracks lit faintly from inside; dust collecting
   **under** floating stones in a circle (gravity has moved it).
 
 ### Neutral (the Crossing itself)
 
-- Builder wreckage: huge curved ribs of a fallen engine, half buried, fused with glassed rock.
-- Ember shards growing out of fractures in the basalt.
-- Nomad camps and shrines of the Crossing's own people (the **Ashen**, placeholder): cloth,
-  bone, scavenged brass and obsidian alike. This is a third, small visual vocabulary for
-  neutral heroes, camps and monsters.
+- Builder wreckage: huge curved ribs of a fallen sky-engine in seamless pale grey **Builder
+  alloy**, with dead emitter rings, half buried and fused with glassed rock.
+- Ember shards growing out of fractures in the basalt: smoky crystal with a white-gold glow
+  deep inside.
+- Nomad camps and shrines of the Crossing's own people (the **Ashen**, placeholder): layered
+  charcoal and ash-grey cloth over salvaged Builder panels, small lights hovering above the
+  camp, and scavenged Forge alloy and Void composite worn as charms. Their devices still work
+  and look like talismans. This is a third, small visual vocabulary for neutral heroes, camps
+  and monsters.
+- **Builder machines** are the only Builder presence: ember scarabs (small maintenance
+  machines) and a dormant Builder warden, all seamless pale alloy with hovering plates.
 
 ## Ember Crossing: who stands where
 
@@ -197,20 +246,37 @@ vertical slice (A3). For world and factions that means:
 
 ## Interpretations for review
 
-Each faction has three readings of the same identity. All of them keep the shape rules above;
-they differ in culture, era and material emphasis. The review app shows each one as an
-establishing shot, a tower, a common soldier and a material close-up.
+Each faction has three readings of the same identity, plus the mixes the earlier rounds
+suggested. All of them keep the shape rules and the [technology rule](#technology-that-looks-like-magic);
+they differ in culture, era and emphasis. The review app shows each one, drawn as advanced
+technology (round G3), as an establishing shot, a tower, a soldier and a material close-up.
 
 | | Reading | What it emphasises | Risk |
 |---|---|---|---|
-| Forge A | Foundry Theocracy | Temple-foundries: stepped sandstone with brass banding, sun-disc emblems, sawtooth roofs and sun-funnel chimneys, kiln-glazed tile friezes, light through iron grilles | Busy ornament; needs restraint at 46 m |
-| **Forge B** | **Sun-Kiln Empire** (recommended after round 1) | An ancient ziggurat civilisation in terracotta and glazed ceramic, bronze sun discs, squat colonnades | Terracotta sits near the enemy hue zone (PAL-3) |
-| Forge C | Iron Dawn | Heavy industry built into basalt: forged iron, slag heaps, chain hoists, sun-glass lenses | Darkest and least "solar"; can blur into the Void's value range |
-| Void A | Observatory Order | Astronomers: black ceramic monoliths, pewter astrolabe rings, open domes, bone-white star-chart inlay | Static; motion has to come from VFX |
-| **Void B** | **Gravity Monastery** (recommended) | Basalt terraces whose upper courses float, ring gates, dust drifting upwards | Floating masses cost RT/BLAS refits if they move (static is fine) |
-| Void C | Obsidian Court | Polished obsidian and black lacquer, silver fittings, plum banners, bone-white masks | Highly reflective black: VAL-1 and the "never a black blob" rule |
+| Forge A | Foundry Theocracy | Temple-foundries of heat-shield ceramic and gold-bronze around contained fusion furnaces; sun-disc collector emblems; white-gold light through lattices | Busy ornament; collector emblems drawn as dishes |
+| Forge B | Sun-Kiln Empire | Ziggurats that are solar megastructures: crazed cream and ochre heat-shield terraces, colossal collector mirrors, radiator colonnades | Mirrors dominate and read as satellite dishes |
+| Forge C | Iron Dawn | Colossal fusion engines and kinetic presses in basalt cliffs; banded drum reactors; lens towers | Industrial: beams and heat haze everywhere; darkest Forge |
+| **Forge rec** | **B + A emblems + C machinery** (recommended) | Sun-Kiln ziggurats, at most one collector disc per building, Iron Dawn machinery on towers and gates | Needs the "flat finned disc" rule |
+| Void A | Observatory Order | Black composite monoliths that are gravity sensors, hovering rings round open domes, engraved star maps | Static; literal stars creep in |
+| Void B | Gravity Monastery | Terraces whose upper courses float with clear gaps, orbiting blocks, lensing ring gates, dust drifting up | Floating masses cost RT/BLAS refits if they move (static is fine) |
+| Void C | Obsidian Court | Mirror-smooth black metamaterial, tarnished silver, plum banners, floating crescents, bone-white masks | Highly reflective black (VAL-1); reads as a villain's court |
+| **Void rec** | **B + A ornament** (recommended) | The Gravity Monastery with the Observatory's hovering rings and fine engraved star maps | Violet seams drifting towards neon |
 
-**What the first concept round showed** (96 images, review app *Factions*;
+**What round G3 showed** (72 images on Nano Banana Pro, review app *Factions*):
+
+- **Forge rec is the strongest Forge reading**: stepped cream ceramic ziggurats with drum
+  machinery, and lens towers that fire beams read at once as "a tower that shoots light".
+  Its collector discs, like Forge A's and B's, came out as dishes: see the rule above.
+- **Forge C** makes the best towers (a lens on a column) but its bases are a haze of beams and
+  heat: take its towers, not its massing.
+- **Void B and Void rec** are the most original readings of the whole set: tower segments
+  hanging above each other with violet rings in the gaps survive as a silhouette at any size.
+- **Void A** reads as an observatory, but its details went back to literal painted stars.
+- **Void C** produced saucer craft and a villain's-court look. Not recommended.
+- **Soldiers** in every reading came out as close-fitting bodysuits: the layering rule above.
+
+**Earlier rounds (fantasy-era look, kept for the record).** What the first concept round
+showed (96 images, review app *Factions*;
 [boards/factions.jpg](boards/factions.jpg)):
 
 - **Forge A came out as colourful, fairy-tale castles**: multicoloured tile, spires and gilt.
@@ -240,8 +306,10 @@ before this revision ([boards/faction-mixes.jpg](boards/faction-mixes.jpg)). It 
   domes and machinery everywhere. Ornament belongs on structures' upper thirds and the
   out-of-bounds skyline, not on the walkable base floor (VAL-2/VAL-4).
 
-> **Decision needed (maintainer): faction readings.** Pick one reading per faction, or a mix
-> (recommended: Forge B with A's emblems and C's machinery; Void B with A's ornament).
+> **Decision needed (maintainer): faction readings.** Pick one reading per faction, or a mix.
+> **Recommended (unchanged by the advanced-tech rounds): Forge rec** (B with A's emblems and
+> C's machinery) and **Void rec** (B with A's ornament). Rounds G4's structures and minions
+> were drawn with these two as style references.
 
 ## Concept boards
 

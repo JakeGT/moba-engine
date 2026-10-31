@@ -156,7 +156,15 @@ checks every texel against the right class; (c) multiplies draw calls.
 
 ## 3. Named material vocabulary
 
-These are the allowed "look" materials. A new look material needs a row here first. Hex values
+These are the allowed "look" materials. A new look material needs a row here first.
+
+**Technology names, measured stand-ins (2026-10-31).** The world's materials are advanced
+technology ([world](world-and-factions.md#technology-that-looks-like-magic)): sun-alloy, heat-shield
+ceramic, void composite and so on. They have no measured values, so each row keeps a **real
+material as its physical stand-in** (brass for sun-alloy, terracotta and glazed ceramic for
+heat-shield ceramic, pewter for gravity-ring alloy). The PBR numbers come from the stand-in;
+the name, the forms and the wear come from the fiction. The rows below were renamed, not
+re-measured. Hex values
 are targets for the clean base; the ranges allow for weathering (§4). "Tier" refers to the
 roadmap's feature matrix: the multi-layer model (§6.6) is the same on every tier; what changes
 is skin SSS, and reflection quality on smooth surfaces (RT reflections below roughness 0.45
@@ -166,29 +174,35 @@ base layer alone.
 
 ### 3.1 The Solar Forge
 
-A sun-worshipping foundry empire. Warm metals, fired clay and pale stone; light and heat as
-material, never as saturated colour. Hue family 60–95°, chroma kept low so the enemy red and
+A sun-worshipping empire of solar and fusion technology. Warm alloys, heat-shield ceramics and
+pale stone; light and heat as material, never as saturated colour. Hue family 60–95°, chroma kept low so the enemy red and
 the CB orange and yellow stay unique.
 
 | Material | Look | Class | Albedo target | Roughness | Metal | Layers | Tier note |
 |---|---|---|---|---|---|---|---|
-| Sun-brass, polished | Ceremonial plates, sun discs; bright where hands and sand rub | `METAL` | measured Brass `#F5E4AE` (luma 228, C 0.072) | 0.15–0.35 | 1 | none | RT reflections on High+; probes below |
-| Sun-brass, worn | The default Forge metal: brushed, dulled, dust in recesses | `METAL` + `OXIDE` | Brass on raised areas; brown oxide luma 60–90 in recesses | 0.35–0.60 metal; 0.7–0.9 oxide | 1 / 0 | none | all tiers alike |
-| Cast bronze, patinated | Statues, bells, armour; dark statuary patina, bright on wear | `METAL` + `OXIDE` | engine target `#DDB98F`–`#E2C29C` (luma 191–199, between Copper and Brass); patina `#4A3E36` | 0.30–0.55 metal; 0.65–0.9 patina | 1 / 0 | none | all tiers alike |
-| Forge iron, heat-tinted | Blades, hoops, grilles; straw-to-bronze-to-purple temper colours near hot zones | `METAL` | measured Iron `#C0BEBB` (luma 190) | 0.30–0.60 | 1 | iridescence (thin film) for temper colours | thin film on all tiers; Compat: tint baked into albedo within G2 |
-| Forge iron, scaled | Blackened iron with forge scale; the Forge's dark metal | `OXIDE` | `#3A3836` (luma 56), C ≤ 0.01 | 0.60–0.85 | 0 (1 where scale is chipped) | none | all tiers alike |
-| Kiln ceramic, unglazed | Fired buff-ochre clay: tiles, pipes, kiln walls | `CERAM` | engine target `#B49272` (luma 152, C 0.061); desaturated from measured Terracotta | 0.75–0.95 | 0 | none | all tiers alike |
-| Kiln ceramic, glazed | Cream and honey glaze on domes and urns, crazed and chipped | `CERAM` | base `#D8C9A6` (luma 202, C 0.050) | base 0.6–0.8; clear coat 0.08–0.20 | 0 | clear coat | Compat: base only, roughness 0.3 |
-| Sun-glass | Thick amber-honey lenses and windows; bright white-gold core when charged | `GLASS` | tint `#D9B98A` (C 0.072); emissive core `#FFE6BE` (C 0.059) | 0.05–0.20 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque base + emissive |
-| Slag | Glassy black-brown crust in heaps and runnels | `CHAR` / `GLASS` | `#3A3634` (luma 55), C ≤ 0.02 | crust 0.7–0.9; fracture faces 0.15–0.35 | 0 | optional molten seam (below) | all tiers alike |
-| Molten seam | Thin cracks of white-hot metal in slag, kilns and forge floors | emissive only | emissive `#FFE6BE`, never orange | n/a | n/a | emissive | counts towards the emissive budget |
+| Sun-alloy, polished (stand-in: brass) | Ceremonial plates, collector discs; bright where hands and sand rub | `METAL` | measured Brass `#F5E4AE` (luma 228, C 0.072) | 0.15–0.35 | 1 | none | RT reflections on High+; probes below |
+| Sun-alloy, worn | The default Forge metal: brushed, dulled, dust in recesses | `METAL` + `OXIDE` | Brass on raised areas; brown oxide luma 60–90 in recesses | 0.35–0.60 metal; 0.7–0.9 oxide | 1 / 0 | none | all tiers alike |
+| Cast sun-alloy, patinated (stand-in: bronze) | Statues, drum cores, armour; dark statuary patina, bright on wear | `METAL` + `OXIDE` | engine target `#DDB98F`–`#E2C29C` (luma 191–199, between Copper and Brass); patina `#4A3E36` | 0.30–0.55 metal; 0.65–0.9 patina | 1 / 0 | none | all tiers alike |
+| Forge dark alloy, heat-tinted (stand-in: iron) | Blades, bands, lattice grilles; straw-to-bronze-to-purple temper colours near hot zones | `METAL` | measured Iron `#C0BEBB` (luma 190) | 0.30–0.60 | 1 | iridescence (thin film) for temper colours | thin film on all tiers; Compat: tint baked into albedo within G2 |
+| Forge dark alloy, scaled | Blackened alloy with heat scale; the Forge's dark metal | `OXIDE` | `#3A3836` (luma 56), C ≤ 0.01 | 0.60–0.85 | 0 (1 where scale is chipped) | none | all tiers alike |
+| Heat-shield ceramic, unglazed (stand-in: terracotta) | Buff-ochre heat-shield tiles on stepped walls and armour | `CERAM` | engine target `#B49272` (luma 152, C 0.061); desaturated from measured Terracotta | 0.75–0.95 | 0 | none | all tiers alike |
+| Heat-shield ceramic, glazed | Cream and honey glaze on terraces, domes and breastplates, crazed and chipped | `CERAM` | base `#D8C9A6` (luma 202, C 0.050) | base 0.6–0.8; clear coat 0.08–0.20 | 0 | clear coat | Compat: base only, roughness 0.3 |
+| Sun-glass (fusion lens) | Thick honey-tinted lenses on tower crowns and hammers; bright white-gold core when charged | `GLASS` | tint `#D9B98A` (C 0.072); emissive core `#FFE6BE` (C 0.059) | 0.05–0.20 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque base + emissive |
+| Fused scorch (stand-in: slag) | Glassy black-brown crust where fusion energy has struck stone | `CHAR` / `GLASS` | `#3A3634` (luma 55), C ≤ 0.02 | crust 0.7–0.9; fracture faces 0.15–0.35 | 0 | optional molten seam (below) | all tiers alike |
+| Molten seam | Thin cracks of white-hot metal in fused scorch, cores and impact points | emissive only | emissive `#FFE6BE`, never orange | n/a | n/a | emissive | counts towards the emissive budget |
 | Forge sandstone | Dressed ashlar of temples and walls; pale buff, sand-scoured | `STONE-1` | engine target `#B8A07C` (luma 163, C 0.057); Sand entry as parent mineral | 0.75–0.95 | 0 | none | all tiers alike |
 | Forge basalt masonry | Dark dressed basalt plinths and thresholds; pairs with sandstone | `STONE-1` | engine target `#4A4744` (luma 71) | 0.65–0.85 (polished treads 0.35–0.5) | 0 | none | all tiers alike |
 | Gilt leaf | Thin gold on brass, stone or wood, rubbed through to the base | `METAL` | engine target `#EBD7A6` (luma 216, C 0.068); desaturated from measured Gold | 0.20–0.45 | 1 | none | all tiers alike |
 | Linen | Sun-bleached undyed wraps and banners | `CLOTH` | engine target `#CBBFA6` (luma 192, C 0.037) | 0.80–0.95 | 0 | sheen | Compat: base only |
 | Forge leather | Oiled tan straps, aprons and grips | `LEATHER` | engine target `#7A5A40` (luma 96, C 0.057) | 0.45–0.80 | 0 | none | all tiers alike |
 
-**Decision needed (maintainer): how saturated the Forge's brass may be.** Brass (h 93°) sits
+**Technology materials with no row above:**
+
+| Material | Look | Class | Albedo target | Roughness | Metal | Layers | Tier note |
+|---|---|---|---|---|---|---|---|
+| Emitter lattice | A fine machined grille of dark alloy with a contained white-gold glow behind it: the visible source of Forge light | `METAL` + emissive | Forge dark alloy, scaled; emissive `#FFE6BE` behind the grille | 0.35–0.60 | 1 | emissive (behind) | counts towards the emissive budget; lit only in gameplay states |
+
+**Decision needed (maintainer): how saturated the Forge's sun-alloy may be.** Brass (its stand-in, h 93°) sits
 between the CB orange (77°) and CB yellow (105°). Options: (a) measured brass chroma
 (≈ 0.07) as the ceiling, with a rich look coming from roughness and reflection; (b) a warmer,
 more golden brass up to C 0.10; (c) a pale, almost silver "white brass" at C ≤ 0.04.
@@ -220,19 +234,19 @@ bronze, purple, then blue, which falls near the ally blue (259°) and CB sky (23
 
 ### 3.2 The Void
 
-A gravity- and void-bending order. Cold dark ceramics and glassy stone, tarnished pale metals,
-suspended masses. Value is low and surfaces are smoother than the Forge's; colour lives in
+A gravity-bending order. Cold dark composites and glassy stone, tarnished pale alloys,
+suspended masses held by gravity rings. Value is low and surfaces are smoother than the Forge's; colour lives in
 the free bands (violet 284–345°, teal 167–211°) and only in small accents.
 
 | Material | Look | Class | Albedo target | Roughness | Metal | Layers | Tier note |
 |---|---|---|---|---|---|---|---|
-| Void ceramic, matte | The Void's main body material: black with a violet cast, fine and dense | `CERAM` | engine target `#302C36` (luma 46, C 0.019, h 304) | 0.55–0.80 | 0 | none | all tiers alike |
-| Void ceramic, glazed | Gloss black panels and masks; mirror-dark highlights | `CERAM` | base `#35303D` (luma 50) | base 0.5–0.7; clear coat 0.05–0.15 | 0 | clear coat | RT reflections High+; Compat: base 0.25 |
-| Obsidian, polished | Blades, inlaid panels, monoliths; reflects the sky darkly | `STONE-2` | engine target `#2B292F` (luma 42); IOR as Glass (1.52, F0 0.043) | 0.05–0.20 | 0 | none (opaque) | relies on reflections: RT High+, probes below |
+| Void composite, matte (stand-in: black ceramic) | The Void's main body material: black with a violet cast, fine and dense | `CERAM` | engine target `#302C36` (luma 46, C 0.019, h 304) | 0.55–0.80 | 0 | none | all tiers alike |
+| Void composite, glazed | Gloss black panels and masks; mirror-dark highlights | `CERAM` | base `#35303D` (luma 50) | base 0.5–0.7; clear coat 0.05–0.15 | 0 | clear coat | RT reflections High+; Compat: base 0.25 |
+| Obsidian metamaterial, polished (stand-in: obsidian) | Blades, inlaid panels, monoliths; reflects the sky darkly | `STONE-2` | engine target `#2B292F` (luma 42); IOR as Glass (1.52, F0 0.043) | 0.05–0.20 | 0 | none (opaque) | relies on reflections: RT High+, probes below |
 | Obsidian, knapped | Raw conchoidal fractures; sharp, glassy facets with rough cortex | `STONE-1` / `STONE-2` | `#2B292F` facets; cortex luma 60–80 | facets 0.08–0.25; cortex 0.7–0.9 | 0 | none | all tiers alike |
 | Polished black stone | Dressed architectural stone, less glassy than obsidian | `STONE-2` | engine target `#34323A` (luma 51) | 0.15–0.40 | 0 | none | all tiers alike |
 | Levitating basalt | Raw basalt masses held in the air; cut undersides with void-glass seams | `STONE-1` | as Ember basalt `#4A4744`; cut faces 0.4–0.55 roughness | 0.55–0.85 | 0 | void-glass seam (below) | all tiers alike |
-| Pewter | Cool soft-grey vessels, fittings, filigree; dull and soft-edged | `METAL` | engine target `#C4C6C8` (luma 198), near measured Lead | 0.35–0.60 | 1 | none | all tiers alike |
+| Gravity-ring alloy (stand-in: pewter) | Hovering rings, fittings, filigree; dull and soft-edged | `METAL` | engine target `#C4C6C8` (luma 198), near measured Lead | 0.35–0.60 | 1 | none | all tiers alike |
 | Tarnished silver | Bright silver on raised edges, brown-grey tarnish in recesses | `METAL` + `OXIDE` | measured Silver `#FEFDFC` (luma 253) on wear; tarnish `#5A5048` (luma 82) | 0.15–0.35 metal; 0.6–0.85 tarnish | 1 / 0 | none | RT reflections High+ |
 | Void-glass | Cold, nearly clear glass with a teal or violet emissive edge | `GLASS` | tint near neutral (C ≤ 0.04); emissive edge teal `#7CCFC4` (h 185, C 0.083) or violet `#A58AD6` (h 300, C 0.113) | 0.045–0.15 | 0 | transmission; emissive edge | transmission from Medium; Low and Compat: dark opaque base + emissive edge |
 | Void lacquer | Deep violet-black lacquer on wood and metal armour | `PAINT` | `#2C2430` (luma 39, C 0.024) | base 0.4–0.6; clear coat 0.05–0.15 | 0 | clear coat | Compat: base only, roughness 0.25 |
@@ -268,6 +282,8 @@ lane and ember crystals, under a low warm sun. The ground stays matte (C ≤ 0.0
 | Rust-red lane grit | The trodden lane: iron-oxide grit, compacted, rutted | `SOIL` | engine target `#7A5444`–`#84604C` (luma 93–104, C 0.055–0.057, h 44–50); hue from measured Rust | 0.85–0.98 | 0 | none | all tiers alike |
 | Desert sand | Wind-blown drifts against cliffs and ruins | `SOIL` | engine target `#BDAE8C` (luma 175, C 0.050); measured Sand `#B1A784` is the anchor | 0.90–1.0 | 0 | none | all tiers alike |
 | Ember crystal | Clusters of dark smoky crystal with a white-gold glow deep inside | `GLASS` | body `#4A3430` (luma 57, C 0.033); emissive core `#FFE6BE` | 0.08–0.25 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque body + core |
+| Builder alloy | The fallen sky-engine's ribs and the Builder machines: seamless pale grey, fine precise seams, dead emitter rings | `METAL` | engine target `#AEB0B2` (luma 175, C ≤ 0.01); stand-in: titanium | 0.30–0.55; dust 0.85+ | 1 | dust layer on up-facing surfaces | all tiers alike |
+| Hard light | The Ashen bowstring and arrows: a thin line of pale light, no body | emissive only | emissive `#F2F0EA` (C ≤ 0.02) | n/a | n/a | emissive | counts towards the emissive budget |
 | Sun-bleached bone | Huge old skeletons half-buried in sand | `BONE` | engine target `#D8D2C2` (luma 210), below measured Bone (230) for age and dust | 0.70–0.95 | 0 | none | all tiers alike |
 | Dead wood | Silvered, cracked trunks and old timber | `WOOD` | engine target `#9A9086` (luma 146, C 0.019) | 0.75–0.95 | 0 | none | all tiers alike |
 | Charred wood | Burnt beams and stumps; alligator-cracked | `CHAR` | engine target `#2F2B29` (luma 44) | 0.85–1.0 | 0 | none (no glow: G7) | all tiers alike |
@@ -300,6 +316,17 @@ from generated images. Three of them confirm risks this document already names:
   normal map, because the albedo alone reads as a flat void.
 - **Void glass** came out as clear cracked glass with no inner light. The violet-white
   emissive must be explicit in the material, within the PAL-5 limits.
+
+**Round G4** (advanced tech, Nano Banana 2.1, two swatches per material in the review app):
+
+- **The technology materials read as intended:** the emitter lattice (a fine grille over a
+  white-gold glow), the fusion lens, heat-shield tiles and the gravity ring all show where
+  the "magic" comes from. They are the reference for normal-map detail, not for albedo.
+- **Void composite** finally carries its engraved star-map lines, so it no longer reads as a
+  flat black void.
+- **Sun-alloy** came out dull gold-bronze: within the PAL-3 cap, as intended.
+- The first environment swatches (ash, basalt, lane grit, ember crystal) were cluttered with
+  Ashen cloth and bones by a prompt error; round G5 redrew them as natural ground only.
 
 ## 4. Weathering and wear vocabulary
 

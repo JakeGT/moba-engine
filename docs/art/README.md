@@ -41,15 +41,17 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-10-30 | Concept generation with **Apache-licensed local models only**; outputs CC0 with provenance | Maintainer |
 | 2026-10-31 | **Technology so advanced it looks like magic**: weapons, armour, architecture, units and the Builders' relics are all technology ([world](world-and-factions.md#technology-that-looks-like-magic)) | Maintainer |
 | 2026-10-31 | Also the **Gemini API ("Nano Banana"), paid tier, for concept art and model sheets only**: a reference people model from, never shipped and never fed to a generator (enforced by the A0 provenance gate) | Maintainer |
+| 2026-10-31 | **Nano Banana 2.1 for drafts, Pro for model sheets** (after a side-by-side test) | Maintainer |
+| 2026-10-31 | Whole bible redrawn and rewritten for technology that looks like magic: rounds G3 (factions), G4 (everything else) and G5 (hero model sheets); materials renamed to technology names with measured stand-ins | Agent draft, for the maintainer to approve |
 
 ## Decisions needed
 
 Every open choice is marked **"Decision needed (…)"** in its file, with options and a
 recommendation. In priority order for the slice:
 
-1. **The slice hero:** Kiln Warden (recommended), Still Oracle or Ash Strider. See [heroes](heroes-and-minions-v0.md).
+1. **The slice hero:** Kiln Warden (recommended), Still Oracle or Ash Strider, now as advanced-tech redesigns with model sheets. See [heroes](heroes-and-minions-v0.md).
 2. **Map 1's lighting mood:** Golden Crossing (recommended). See [lighting](lighting-mood.md).
-3. **Faction readings:** Forge B (Sun-Kiln) with A's emblems and C's machinery, Void B (Gravity Monastery) with A's ornament (recommended after the first concept round). See [world](world-and-factions.md#interpretations-for-review).
+3. **Faction readings:** Forge rec (B with A's emblems and C's machinery) and Void rec (B with A's ornament), recommended after both the fantasy-era rounds and the advanced-tech round G3. See [world](world-and-factions.md#interpretations-for-review).
 4. **Which faction holds which base:** Forge west, Void east (recommended). See [world](world-and-factions.md#ember-crossing-who-stands-where).
 5. **Are heroes faction-bound?** Free agents (recommended). See [world](world-and-factions.md#ember-crossing-who-stands-where).
 6. **The ember crystals' colour:** white-gold cores (recommended). See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
@@ -127,5 +129,9 @@ python3 ~/Projects/MOBA/art-review/serve.py
 ```
 
 It then runs at <http://127.0.0.1:8765>; the tailnet URL is in the session's morning report.
-Readability tools: **actual size** (30 px / 40 px heroes), **value only** (greyscale), and
-**colour-blind** simulation (protanopia, deuteranopia, tritanopia).
+It works on a phone as well as a desktop. A *Start here* page summarises the direction and
+progress; in every section the **current direction** comes first and the fantasy-era
+**earlier rounds** are folded away underneath. Tap an image to open it, then swipe or use the
+arrow keys to move through its group. Readability tools: **actual size** (30 px / 40 px
+silhouettes), **value only** (greyscale), and **colour-blind** simulation (protanopia,
+deuteranopia, tritanopia), under *View*.

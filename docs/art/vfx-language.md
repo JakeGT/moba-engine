@@ -17,15 +17,21 @@ inside a **blue** one.
 
 ## Faction element languages
 
+Every effect is **technology that looks like magic** ([world](world-and-factions.md#technology-that-looks-like-magic)):
+from a distance it reads as a spell; up close it has a visible source (an emitter ring, a
+lens, a lattice, a seam). Nothing burns, smokes or exhausts: Forge heat is contained fusion,
+Void force is gravity, Ashen force is pressure and hard light from scavenged Builder devices.
+
 | | **Solar Forge** | **Void** | **Ashen** (neutral, placeholder) |
 |---|---|---|---|
-| Element | Light and heat | Gravity and absence | Wind, ash and bone |
+| Element | Fusion light and heat | Gravity and absence | Pressure, ash and hard light |
+| Visible source | Fusion lenses, lattice grilles, collector fins | Gravity rings, lensing cores, seams of floating parts | Scavenged Builder charms, hard-light bowstrings |
 | Core colour | White-gold `#FFF0C8` (C 0.05) | Violet-white `#D9CCFF` (C 0.07) | Pale ash `#D8D2C8` |
 | Accent | Thin amber edges, ≤ 5 % of the effect's area | Violet edge `#9F86D9`, thin | Dust ochre, low chroma |
-| Light | Emits real light (RT/clustered lights): warm, hard-edged | Emits little light; **dark cores with bright rims**; screen-space lensing (distortion pass) | No light; reads by value against the ground |
-| Particles | Sparks falling with gravity, molten droplets, heat shimmer, black smoke | Debris and dust drifting **upwards**, slow orbits, starfield glints, implosion | Sand ribbons, ash flakes, bone shards |
+| Light | Emits real light (RT/clustered lights): warm, hard-edged | Emits little light; **dark cores with bright rims**; screen-space lensing (distortion pass) | Little light: thin pale hard light only; reads by value against the ground |
+| Particles | Sparks falling with gravity, molten droplets, heat shimmer; **no smoke** | Debris and dust drifting **upwards**, slow orbits, faint glints, implosion | Sand ribbons, ash flakes, bone shards, dust trails |
 | Motion | Fast start, heavy fall-off: hammer blows | Slow wind-up, sudden collapse: a held breath | Swirls and gusts |
-| Impact | Flash, then sparks and a scorch decal | Inward pull, then a soundless pop and a crater ring | Dust burst |
+| Impact | Near-white flash, a pale gold shockwave ring, then sparks and a scorch decal | Inward pull, then a soundless pop and a crater ring | Dust burst; a hard-light arrow pins a shard |
 
 > **Decision needed (maintainer + designer): ability-type coding.** The team colours take
 > most of the hue wheel, so ability types can't be colour-coded the usual way. Options:
@@ -37,6 +43,10 @@ inside a **blue** one.
 
 ### What the concept images showed
 
+**Round G4 (advanced tech, Nano Banana 2.1):** see [below](#round-g4-advanced-tech).
+
+**Earlier rounds (local model, fantasy-era look):**
+
 In round 1 ([review app](README.md#review-app), *VFX language*), the **Void language
 generated true to the bible**: an implosion with a thin violet rim, a dark lens with a bright
 edge, and stones orbiting upwards. The **Forge hammer strike came out as orange fire and black
@@ -47,6 +57,23 @@ Forge effects. Round 3 retried it with an explicit "no orange" prompt. The shock
 ring became white-gold, but orange flames still appeared at the impact point
 ([boards/round3-fixes.jpg](boards/round3-fixes.jpg)). The hue check in the review renders is
 needed, not optional.
+
+### Round G4 (advanced tech)
+
+16 images (review app *VFX language*; [boards/g4-vfx.jpg](boards/g4-vfx.jpg)):
+
+- **The Forge hammer strike came out white-gold with no orange flame**, the first time in any
+  round. Describing it as *contained fusion released* (a near-white flash and a pale gold
+  shockwave ring) worked where "white-gold fire" kept failing. Use that wording everywhere.
+- **The Forge tower beam** and the **halo ultimate** read well; the halo glowing from its
+  centre outwards is a clear "charging" state.
+- **Void implosion and lens:** a dark core with a thin violet-white rim, the ground and dust
+  pulled into a lensing swirl. Exactly the bible's language; keep the swirl out of enemy
+  telegraphs (VFX-7).
+- **The Void orbit shield** turned into a ring of slabs at waist height: it reads as a shield
+  at once.
+- **Ashen:** the hard-light arrow (a pale streak with an obsidian tip and a dust trail) works;
+  the gust is a plain dust burst, which is right for a no-light element.
 
 ## Telegraphs (overlay layer)
 
@@ -87,11 +114,11 @@ unit they are **shape-coded** so they read without colour:
 
 | Status | On-unit cue |
 |---|---|
-| Root | Ground ring with chains or binding glyphs at the feet |
+| Root | Ground ring with binding rings of light (Forge) or a gravity ring (Void) at the feet |
 | Slow | Heavy particles falling around the unit, plus a dragging trail |
 | Silence | A broken halo or a rune slashed above the head |
-| Shield | A thin plated shell (Forge) or orbiting slabs (Void), following the caster's faction |
-| Burn | Embers rising from the body, with a char decal |
+| Shield | A thin shell of hard light with lattice seams (Forge) or orbiting slabs (Void), following the caster's faction |
+| Burn | Heat shimmer and white-gold sparks rising from the body, with a scorch decal (no flames) |
 | Haste | Streaks behind, plus dust kicked up |
 | Regeneration | Rising motes |
 
