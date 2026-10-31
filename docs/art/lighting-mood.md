@@ -104,7 +104,9 @@ red. Measured on three of them, the lane's median chroma is **C 0.10–0.11 at h
 inside the enemy-red zone and about twice the proposed lane grit (`#7E5A47`, C 0.056). The
 ground p99 is 0.115–0.132. The lane is the part of the board most likely to break PAL-1, in
 concept art and in today's content alike, so the photoreal lane material must be specified
-desaturated from the start.
+desaturated from the start. **Round 3** prompted the same mood with "a muted grey-brown
+road, not red". The ground's median chroma fell to **0.027** and its p99 to **0.070–0.098**.
+That is close to the cap, and it shows a calm lane still reads as a lane.
 
 > **Decision needed (maintainer): the ground chroma cap.** Keep PAL-1 at 0.06 and treat
 > today's Ember content as needing the photoreal rework (recommended); or set the cap from

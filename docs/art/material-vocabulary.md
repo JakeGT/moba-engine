@@ -288,6 +288,19 @@ which collides with the enemy red and CB orange; (c) give them a gameplay meanin
 the glow appear only in that state (≤ +2 EV). Recommendation: **(a)**, with **(c)** if
 design gives them a mechanic. Saturated orange is ruled out by G8.
 
+### 3.4 Concept-image cross-check
+
+The review app's *Materials* section has two AI swatches per named material (round 1). They
+are **look references only**: PBR values come from the tables above and from CC0 scans, never
+from generated images. Three of them confirm risks this document already names:
+- **Lane grit** came out saturated orange-red. It is the same lane problem the
+  [lighting measurements](lighting-mood.md#first-measurements-compat-renderer-2026-10-31)
+  found.
+- **Void ceramic** came out as plain matte black. The fine engraved lines must be in the
+  normal map, because the albedo alone reads as a flat void.
+- **Void glass** came out as clear cracked glass with no inner light. The violet-white
+  emissive must be explicit in the material, within the PAL-5 limits.
+
 ## 4. Weathering and wear vocabulary
 
 Weathering is what makes the world "epic, weathered". At 46 m it reads only through broad

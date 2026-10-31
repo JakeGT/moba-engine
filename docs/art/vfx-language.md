@@ -35,6 +35,19 @@ inside a **blue** one.
 > inside the free hue bands (teal for healing, violet for control). It conflicts with the
 > Void's violet.
 
+### What the concept images showed
+
+In round 1 ([review app](README.md#review-app), *VFX language*), the **Void language
+generated true to the bible**: an implosion with a thin violet rim, a dark lens with a bright
+edge, and stones orbiting upwards. The **Forge hammer strike came out as orange fire and black
+smoke**, even though the prompt asked for white-gold. Generators (and artists) default "fire"
+to orange, which sits in the enemy hue zone (28°, PAL-5). Forge heat must be specified as
+near-white with a pale gold edge every time, and the review renders must check the hue of
+Forge effects. Round 3 retried it with an explicit "no orange" prompt. The shockwave
+ring became white-gold, but orange flames still appeared at the impact point
+([boards/round3-fixes.jpg](boards/round3-fixes.jpg)). The hue check in the review renders is
+needed, not optional.
+
 ## Telegraphs (overlay layer)
 
 R5 rules stay: enemy telegraphs are exempt from every cull and budget and keep at least
