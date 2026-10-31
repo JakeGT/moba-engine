@@ -14,6 +14,9 @@
 - [Next-gen graphics roadmap](plans/next-gen-graphics-roadmap.md) — accepted plan: photoreal,
   ray-traced five-tier renderer (Low–Overdrive), vendor stack, phases N0–N11 and the
   licence-clean asset and AI-generation pipeline.
+- [Art bible](art/README.md) — v0 draft for review: Solar Forge vs Void, Ember Crossing,
+  palette and value budgets, lighting moods, materials, silhouettes, VFX language and the
+  decisions still needed.
 - [Second audit remediation plan](plans/audit-remediation-2026-10-19.md) — completed
   security-first remediation; post-1.0 asset/skinning work is in #276.
 - [First audit remediation plan](plans/audit-remediation-2026-10.md) — the W0–W5 train that

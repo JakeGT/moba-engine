@@ -691,7 +691,7 @@ a marketing executive. Agents draft, research and turn decisions into checks; pe
   the bible is enforced on every asset rather than remembered;
 - review-render contact sheets for every new asset against the bible.
 
-**Where it lives:** `docs/art/`, holding the text, the rules and CC0 or team-owned reference
+**Where it lives:** [`docs/art/`](../art/README.md) (v0 draft, 2026-10-31), holding the text, the rules and CC0 or team-owned reference
 images. Work made by team members goes in the repo only under CC0 or CC-BY (or a written
 assignment), so it can sit alongside the rest of the content. Brand marks (logo, name) are the
 exception: they stay all-rights-reserved and are listed as such.
