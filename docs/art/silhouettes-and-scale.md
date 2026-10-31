@@ -35,6 +35,8 @@ not in faces or belts (those are for the 8 m zoom and showcase cameras).
 | Core | 18–24 | — | — | 10–14 | |
 | Tall prop | ≤ 11 | — | — | — | Off the lane corridor (content-check warns today) |
 
+[boards/scale.jpg](boards/scale.jpg) draws every class at its true pixel size (view it at 100 %).
+
 > **Decision needed (maintainer): one hero scale or role-scaled heroes?** (a) **Role-scaled
 > S/M/L (recommended):** the size itself tells the role; (b) one height for all heroes, with
 > role carried by shape only. (b) is fairer for hit-box perception; (a) reads faster.
