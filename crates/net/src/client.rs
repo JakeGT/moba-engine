@@ -758,14 +758,20 @@ impl NetClient {
     ///
     /// While the handshake is pending (after [`NetClient::start`] and friends), it
     /// retransmits the hello every 250 ms instead, so a lost hello or a lost Welcome
-    /// fragment does not leave a non-blocking client stuck in `Connecting`.
+    /// fragment does not leave a non-blocking client stuck in `Connecting`. A failed
+    /// retransmission is not an error: the next one, 250 ms later, covers it. The
+    /// non-blocking handshake has no deadline of its own; callers that need one check
+    /// [`NetClient::state`] against their own timeout (the blocking `connect*` functions
+    /// do exactly that).
     ///
     /// # Errors
-    /// Returns OS send errors.
+    /// Returns OS send errors once connected.
     pub fn update(&mut self) -> io::Result<()> {
         if self.state == ClientState::Connecting {
             if self.last_hello.elapsed() >= HANDSHAKE_RETRY {
-                self.send_hello()?;
+                // Arm the timer first so a failing send backs off like a lost one.
+                self.last_hello = Instant::now();
+                let _ = self.send_hello();
             }
             return Ok(());
         }

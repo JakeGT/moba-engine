@@ -89,12 +89,17 @@ impl Drop for Relay {
 
 /// A plaintext server running until the returned flag is set.
 fn start_server() -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
+    start_server_with_key(None)
+}
+
+/// A server (keyed when `key` is set) running until the returned flag is set.
+fn start_server_with_key(key: Option<[u8; 32]>) -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
     let config = ServerConfig::default()
         .with_bind("127.0.0.1:0".parse().unwrap())
         .with_sim(SimConfig::default())
         .with_countdown_ticks(0)
         .with_results_ticks(0)
-        .with_pre_shared_key(None)
+        .with_pre_shared_key(key)
         .with_record(None)
         .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("server binds");
@@ -141,6 +146,27 @@ fn first_welcome_fragment_rule() -> impl FnMut(Direction, &[u8]) -> bool + Send 
         let index = u16::from_le_bytes([payload[2], payload[3]]);
         dropped = payload[6] == PacketKind::Welcome as u8 && index == 1;
         dropped
+    }
+}
+
+/// Drops every fragment of the first fragmented Welcome, so that whole copy is lost.
+fn whole_first_welcome_rule() -> impl FnMut(Direction, &[u8]) -> bool + Send + 'static {
+    let mut first: Option<u16> = None;
+    move |direction, datagram| {
+        if direction != Direction::ToClient {
+            return false;
+        }
+        let Ok((header, payload)) = decode_packet(datagram) else {
+            return false;
+        };
+        if header.kind != PacketKind::Fragment
+            || payload.len() < 7
+            || payload[6] != PacketKind::Welcome as u8
+        {
+            return false;
+        }
+        let message_id = u16::from_le_bytes([payload[0], payload[1]]);
+        *first.get_or_insert(message_id) == message_id
     }
 }
 
@@ -196,6 +222,37 @@ fn blocking_connect_recovers_a_lost_welcome_fragment() {
     let client = NetClient::connect(relay.addr, Duration::from_secs(3)).expect("connect");
     assert_eq!(client.state(), ClientState::Connected);
     assert_eq!(relay.dropped(), 1, "the Welcome must be fragmented");
+    drop(relay);
+    shutdown.store(true, Ordering::Relaxed);
+    thread.join().expect("server thread");
+}
+
+#[test]
+fn keyed_handshake_survives_a_lost_welcome_and_keys_match() {
+    const KEY: [u8; 32] = [0x5A; 32];
+    let (server, shutdown, thread) = start_server_with_key(Some(KEY));
+    let relay = Relay::start(server, whole_first_welcome_rule());
+    let mut client = NetClient::start_with_key(relay.addr, KEY).expect("client starts");
+    assert!(
+        pump_until_connected(&mut client, Duration::from_secs(3)),
+        "a keyed client never recovered its lost Welcome"
+    );
+    assert!(
+        relay.dropped() >= 2,
+        "the whole first Welcome must be dropped"
+    );
+    // Snapshots are encrypted after a keyed handshake: receiving one proves both sides
+    // installed the same session key despite the retried, challenge-answered hello.
+    let start = Instant::now();
+    while client.stats().snapshots == 0 && start.elapsed() < Duration::from_secs(3) {
+        client.poll().expect("poll");
+        client.update().expect("update");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        client.stats().snapshots > 0,
+        "no encrypted snapshot arrived"
+    );
     drop(relay);
     shutdown.store(true, Ordering::Relaxed);
     thread.join().expect("server thread");

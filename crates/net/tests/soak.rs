@@ -78,6 +78,13 @@ fn ten_clients_over_a_lossy_150ms_link() {
     };
     while connected(&clients) < clients.len() && connect_start.elapsed() < CONNECT_DEADLINE {
         pump(&mut clients);
+        // A rejected handshake fails at once instead of waiting out the deadline.
+        assert!(
+            clients
+                .iter()
+                .all(|client| client.state() != moba_net::client::ClientState::Disconnected),
+            "the server rejected a handshake"
+        );
         std::thread::sleep(Duration::from_millis(2));
     }
     if connected(&clients) < clients.len() {
