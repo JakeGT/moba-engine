@@ -1,0 +1,64 @@
+# Boards: provenance
+
+Every board here is a curated, size-capped JPEG (≤ 400 KB). The full sets, with a per-image
+provenance record (model, version, weights licence, seed, prompt, workflow, date), are in the
+review app's `manifest.json` (outside the repo; see [../README.md](../README.md#review-app)).
+
+**Licence of the boards:** CC0-1.0 (roadmap §9.5: AI-generated output is CC0 in the repo; the
+other boards are made by the project's own scripts). They are **concept and reference
+material**, not shipped game assets, so they don't go through the `content-check` licence gate.
+
+| Board | What it shows | How it was made | Inputs and licences |
+|---|---|---|---|
+| `ember-moods.jpg` | Ember Crossing under the four candidate lighting moods (gameplay camera) | Real engine captures (Compat renderer, Ultra, 1920×1080) by the review app's `tools/moods.sh`, after `env-bake` with each mood's inputs; montage with ImageMagick | Today's `content/` (project-original); no third-party inputs |
+| `palettes.jpg` | Team, faction and map palettes with OKLCH values; the hue wheel of reserved team-colour zones | `tools/boards.py palettes` (Pillow), from the values in [../palette-and-value.md](../palette-and-value.md) | Noto Sans font for labels (SIL OFL 1.1, rendered into the image only) |
+| `scale.jpg` | Every size class drawn at its true pixel height at 1080p, 1440p and 4K, heroes plain and with ally and enemy rims | `tools/boards.py scale` (Pillow), from the table in [../silhouettes-and-scale.md](../silhouettes-and-scale.md) | Noto Sans font for labels (SIL OFL 1.1) |
+| `factions.jpg` | The three readings of each faction: architecture (seeds 1100/2100) and tower (1101/2101) | AI-generated, Z-Image-Turbo; contact sheet by `tools/boards.py sheet` | Text prompts only (no image inputs); prompts in the review app's `prompts/round1-factions.json` |
+| `heroes.jpg` | The three slice-hero concepts: full body (seeds 3100, 3103, 3105) and a portrait (3200) | As above | Prompts in `prompts/round1-heroes.json` |
+| `units.jpg` | Minions (seed 4100) and structures (seed 5101) for both factions | As above | Prompts in `prompts/round1-minions.json` and `round1-structures.json` |
+| `ember-concepts.jpg` | Ember Crossing in the four moods: aerial (seed 6101) and vista (6200) | As above. These are concept images, not engine captures | Prompts in `prompts/round1-ember.json` |
+| `hero-silhouettes.jpg` | Flat silhouettes of the round-1 hero concepts and their round-2 take B at true 30 px and 40 px, plus 40 px at 4× | Cut out from the AI images by the review app's `tools/build_data.py` (per-row background estimate, largest connected shape), board by `tools/boards.py silhouettes` | Derived from the CC0 hero images above |
+| `faction-mixes.jpg` | Round 2: the A + C Forge and B + A Void mixes, architecture, tower and two 46 m base mock-ups each (seeds 11100–11101, 12100–12101) | AI-generated, Z-Image-Turbo; contact sheet by `tools/boards.py sheet` | Prompts in `prompts/round2-factions.json` |
+| `round3-fixes.jpg` | Round 3: prompts aimed at the problems rounds 1 and 2 showed (seeds 15101–15700), plus the round-1 hammer (8100) for comparison | AI-generated, Z-Image-Turbo; contact sheet by `tools/boards.py sheet` | Prompts in `prompts/round3-*.json` |
+
+**AI model for every generated board:** Z-Image-Turbo (Tongyi-MAI), weights **Apache-2.0**
+(<https://huggingface.co/Tongyi-MAI/Z-Image-Turbo>), run locally in ComfyUI from the
+Comfy-Org repack. Components:
+- `z_image_turbo_bf16.safetensors`, SHA-256 `2407613050b8…74a6` (matches Hugging Face);
+- the Qwen3-4B text encoder (Apache-2.0);
+- the FLUX.1-schnell autoencoder (Apache-2.0).
+
+Sampler: `res_multistep`/`simple`, 9 steps, CFG 1.0, AuraFlow shift 3.0, no negative
+prompt. Every image's full record (prompt, seed, workflow JSON, date) is in the review app's
+`manifest.json`. No image inputs, LoRAs, or real people's likenesses were used.
+
+## Gemini boards (concept only)
+
+These boards are made from **Gemini API** images (Nano Banana Pro, `gemini-3-pro-image`, and
+Nano Banana 2.1, `gemini-nano-banana-2.1`, paid tier, batch mode, 2026-10-31). They are the
+one exception to the CC0 rule above:
+
+- **Licence: none granted.** The outputs come from a proprietary service under Google's terms
+  and carry a SynthID watermark. The manifest records them as
+  `LicenseRef-Gemini-API-Output` with the source class `proprietary-service-concept-only`.
+- **Concept only.** They are a reference for people to model from by hand: never shipped,
+  never placed in `content/`, never used as input to a generator. The A0 provenance gate
+  rejects any asset entry naming this licence or a Gemini model.
+- Each board's title says "Gemini, concept only". The contact sheets themselves are made by the
+  review app's `tools/gemini_boards.py` (Pillow), with Noto Sans labels (SIL OFL 1.1).
+
+| Board | What it shows | Prompts |
+|---|---|---|
+| `g3-factions.jpg` | Round G3: every faction reading as advanced technology, architecture and tower | `prompts/build_gemini3.py` |
+| `g3-soldiers.jpg` | Round G3: soldiers and material details of the recommended readings and Forge A / Void B | `prompts/build_gemini3.py` |
+| `g4-heroes.jpg` | Round G4: the three slice heroes redesigned, studio and gameplay angle | `prompts/build_gemini4.py` |
+| `g5-sheets.jpg` | Round G5: model sheets (turnaround, front A-pose, details) of the three redesigns, sent the G4 picks as references | `prompts/build_gemini5.py` |
+| `g4-units.jpg` | Round G4 minions, plus the G5 Thrall and Hollow sheets | `prompts/build_gemini4.py`, `build_gemini5.py` |
+| `g4-structures.jpg` | Round G4: towers, cores and walls of both factions, with the G3 recommended readings as style references | `prompts/build_gemini4.py` |
+| `g4-ember.jpg` | Round G5's corrected Ember Crossing (hull arches, not ribs) in the four moods, aerial and vista | `prompts/build_gemini5.py` |
+| `g4-vfx.jpg` | Round G4: Forge, Void and Ashen effects | `prompts/build_gemini4.py` |
+| `g4-neutral-keyart.jpg` | Round G4: ember scarabs, a Builder hull arch, the Builder warden, the Ashen camp and two key-art directions | `prompts/build_gemini4.py` |
+| `g4-materials.jpg` | Rounds G4 and G5: technology and environment material swatches | `prompts/build_gemini4.py`, `build_gemini5.py` |
+
+Every image's full record (model, prompt, reference images with their SHA-256, date) is in
+the review app's `manifest.json`.
