@@ -3,7 +3,7 @@
 # content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
 
 [[asset]]
-files = ["*-ao.ktx2", "*-ao.toml"]
+files = ["ember-ao.ktx2", "frost-ao.ktx2", "*-ao.toml"]
 title = "Baked map ambient occlusion (ember, frost)"
 source = "original"
 author = "MOBA Engine contributors"

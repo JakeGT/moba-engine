@@ -3,7 +3,7 @@
 # content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
 
 [[asset]]
-files = ["*.ktx2", "*.toml"]
+files = ["ember.ktx2", "frost.ktx2", "meadow.ktx2", "*.toml"]
 title = "Lighting environments (meadow, ember, frost)"
 source = "original"
 author = "MOBA Engine contributors"

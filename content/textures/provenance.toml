@@ -3,7 +3,12 @@
 # content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
 
 [[asset]]
-files = ["sentinel-*.ktx2"]
+files = [
+    "sentinel-base.ktx2",
+    "sentinel-mask.ktx2",
+    "sentinel-mr.ktx2",
+    "sentinel-normal.ktx2",
+]
 title = "Sentinel sample material textures"
 source = "original"
 author = "MOBA Engine contributors"
@@ -11,7 +16,18 @@ licence = "MIT OR Apache-2.0"
 made_with = "Procedural patterns (crates/tools/src/bin/texture-bake/patterns.rs, texture-bake generate sentinel) baked by texture-bake (scripts/bake-sample-textures.sh)"
 
 [[asset]]
-files = ["terrain-*.ktx2"]
+files = [
+    "terrain-dirt-normal.ktx2",
+    "terrain-dirt.ktx2",
+    "terrain-grass-normal.ktx2",
+    "terrain-grass.ktx2",
+    "terrain-moss-normal.ktx2",
+    "terrain-moss.ktx2",
+    "terrain-pebbles-normal.ktx2",
+    "terrain-pebbles.ktx2",
+    "terrain-rock-normal.ktx2",
+    "terrain-rock.ktx2",
+]
 title = "Terrain layer textures (grass, dirt, rock, moss, pebbles)"
 source = "original"
 author = "MOBA Engine contributors"

@@ -221,16 +221,16 @@ Every file in `content/`'s asset directories has a provenance entry in its direc
 | Files | Title | Source | Author | Licence |
 |---|---|---|---|---|
 | `content/animations/sentinel-skinned.toml` (1) | Sentinel animation set | original | MOBA Engine contributors | MIT OR Apache-2.0 |
-| `content/environments/*.ktx2`, `content/environments/*.toml` (6) | Lighting environments (meadow, ember, frost) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
-| `content/grading/*.cube` (3) | Colour-grading LUTs (ember, frost, meadow) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
+| `content/environments/ember.ktx2`, `content/environments/frost.ktx2`, `content/environments/meadow.ktx2`, `content/environments/*.toml` (6) | Lighting environments (meadow, ember, frost) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
+| `content/grading/ember.cube`, `content/grading/frost.cube`, `content/grading/meadow.cube` (3) | Colour-grading LUTs (ember, frost, meadow) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/maps/*.toml` (3) | Map visuals descriptors (ember, frost, grass) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
-| `content/maps/ao/*-ao.ktx2`, `content/maps/ao/*-ao.toml` (4) | Baked map ambient occlusion (ember, frost) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
+| `content/maps/ao/ember-ao.ktx2`, `content/maps/ao/frost-ao.ktx2`, `content/maps/ao/*-ao.toml` (4) | Baked map ambient occlusion (ember, frost) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/materials/sentinel.toml` (1) | Sentinel sample material descriptor | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/models/sentinel.glb`, `content/models/sentinel.lod` (2) | Sentinel sample hero model | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/models/sentinel-skinned.glb`, `content/models/sentinel-skinned.lod` (2) | Sentinel sample hero model, rigged and animated | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/models/crystal.glb`, `content/models/crystal.lod`, `content/models/rampart.glb`, `content/models/rampart.lod` (4) | Sample map meshes (crystal prop, rampart wall) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
-| `content/textures/sentinel-*.ktx2` (4) | Sentinel sample material textures | original | MOBA Engine contributors | MIT OR Apache-2.0 |
-| `content/textures/terrain-*.ktx2` (10) | Terrain layer textures (grass, dirt, rock, moss, pebbles) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
+| `content/textures/sentinel-base.ktx2`, `content/textures/sentinel-mask.ktx2`, `content/textures/sentinel-mr.ktx2`, `content/textures/sentinel-normal.ktx2` (4) | Sentinel sample material textures | original | MOBA Engine contributors | MIT OR Apache-2.0 |
+| `content/textures/terrain-dirt-normal.ktx2`, `content/textures/terrain-dirt.ktx2`, `content/textures/terrain-grass-normal.ktx2`, `content/textures/terrain-grass.ktx2`, `content/textures/terrain-moss-normal.ktx2`, `content/textures/terrain-moss.ktx2`, `content/textures/terrain-pebbles-normal.ktx2`, `content/textures/terrain-pebbles.ktx2`, `content/textures/terrain-rock-normal.ktx2`, `content/textures/terrain-rock.ktx2` (10) | Terrain layer textures (grass, dirt, rock, moss, pebbles) | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/vat/minion.ktx2`, `content/vat/minion.toml` (2) | Minion vertex-animation texture | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/vfx/atlas.ktx2` (1) | Particle sprite atlas | original | MOBA Engine contributors | MIT OR Apache-2.0 |
 | `content/vfx/*.toml` (33) | Effect descriptors and bindings | original | MOBA Engine contributors | MIT OR Apache-2.0 |

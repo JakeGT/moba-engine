@@ -3,7 +3,7 @@
 # content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
 
 [[asset]]
-files = ["*.cube"]
+files = ["ember.cube", "frost.cube", "meadow.cube"]
 title = "Colour-grading LUTs (ember, frost, meadow)"
 source = "original"
 author = "MOBA Engine contributors"
