@@ -504,7 +504,6 @@ impl NetClient {
             spectator,
         )?;
         let start = Instant::now();
-        let mut next_hello = Instant::now();
         while start.elapsed() < timeout {
             client.poll()?;
             if client.state == ClientState::Connected {
@@ -516,11 +515,8 @@ impl NetClient {
                     "server rejected the handshake",
                 ));
             }
-            let now = Instant::now();
-            if now >= next_hello {
-                client.send_hello()?;
-                next_hello = now + HANDSHAKE_RETRY;
-            }
+            // Retransmits the hello every `HANDSHAKE_RETRY` until a Welcome arrives.
+            client.update()?;
             std::thread::sleep(Duration::from_millis(2));
         }
         Err(io::Error::new(
@@ -760,9 +756,19 @@ impl NetClient {
 
     /// Sends periodic keepalives and retransmits the pending command. Call every tick.
     ///
+    /// While the handshake is pending (after [`NetClient::start`] and friends), it
+    /// retransmits the hello every 250 ms instead, so a lost hello or a lost Welcome
+    /// fragment does not leave a non-blocking client stuck in `Connecting`.
+    ///
     /// # Errors
     /// Returns OS send errors.
     pub fn update(&mut self) -> io::Result<()> {
+        if self.state == ClientState::Connecting {
+            if self.last_hello.elapsed() >= HANDSHAKE_RETRY {
+                self.send_hello()?;
+            }
+            return Ok(());
+        }
         if self.state != ClientState::Connected {
             return Ok(());
         }

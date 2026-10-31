@@ -1,5 +1,12 @@
 //! Lossy 150 ms RTT soak: ten clients, five percent loss, 30 ms jitter, bandwidth check.
+//!
+//! Timing robustness: the clients handshake concurrently and every client is pumped from
+//! the start, and the server runs until the test stops it rather than for a fixed time. A
+//! slow or overloaded runner then makes the test slower, not flaky. The handshake's own
+//! loss recovery is covered deterministically in `handshake_loss.rs`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use moba_core::FixVec2;
@@ -7,6 +14,10 @@ use moba_net::protocol::{WireCommand, quantize_position};
 use moba_net::{ClientEvent, NetClient, NetServer, ServerConfig};
 use moba_netsim::{LinkConfig, LinkProxy};
 use moba_sim::SimConfig;
+
+/// Generous on purpose: a 150 ms RTT handshake takes about 0.2 s; this bounds a stalled CI
+/// runner, not the handshake.
+const CONNECT_DEADLINE: Duration = Duration::from_secs(20);
 
 #[test]
 #[allow(clippy::too_many_lines)] // End-to-end soak setup and assertions.
@@ -28,8 +39,13 @@ fn ten_clients_over_a_lossy_150ms_link() {
         .with_require_ready(false);
     let mut server = NetServer::bind(config).expect("server binds");
     let server_addr = server.local_addr().expect("addr");
+    // Upper bound only: the test sets `shutdown` once it has measured everything.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
     let server_thread = std::thread::spawn(move || {
-        server.run_for(Duration::from_secs(8)).expect("server runs");
+        server
+            .run_until(Duration::from_secs(60), &server_shutdown)
+            .expect("server runs");
         (server.stats(), server.simulation().state_hash())
     });
 
@@ -47,19 +63,40 @@ fn ten_clients_over_a_lossy_150ms_link() {
         })
         .collect();
 
+    // All ten handshake at once, as players joining a lobby do, and every client is pumped
+    // throughout, so none idles towards the server's client timeout while others connect.
     let mut clients: Vec<NetClient> = proxies
         .iter()
-        .map(|proxy| {
-            NetClient::connect(proxy.local_addr(), Duration::from_secs(4)).expect("connect")
-        })
+        .map(|proxy| NetClient::start(proxy.local_addr()).expect("client starts"))
         .collect();
-    assert_eq!(
+    let connect_start = Instant::now();
+    let connected = |clients: &[NetClient]| {
         clients
             .iter()
             .filter(|client| client.state() == moba_net::client::ClientState::Connected)
-            .count(),
-        10
+            .count()
+    };
+    while connected(&clients) < clients.len() && connect_start.elapsed() < CONNECT_DEADLINE {
+        pump(&mut clients);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    if connected(&clients) < clients.len() {
+        for (index, (client, proxy)) in clients.iter().zip(&proxies).enumerate() {
+            let link = proxy.stats();
+            eprintln!(
+                "client {index}: state={:?} link forwarded={} dropped={}",
+                client.state(),
+                link.forwarded(),
+                link.dropped()
+            );
+        }
+    }
+    assert_eq!(
+        connected(&clients),
+        10,
+        "not every client connected within {CONNECT_DEADLINE:?}"
     );
+    eprintln!("all clients connected in {:?}", connect_start.elapsed());
 
     // Warm up snapshots/deltas before measuring bandwidth.
     let warm = Instant::now();
@@ -127,6 +164,7 @@ fn ten_clients_over_a_lossy_150ms_link() {
     for mut client in clients {
         let _ = client.disconnect();
     }
+    shutdown.store(true, Ordering::Relaxed);
     let (stats, hash) = server_thread.join().expect("server thread");
     eprintln!(
         "server: clients={} ticks={} snapshots={} sent={} KiB recv={} KiB hash={:#x}",
