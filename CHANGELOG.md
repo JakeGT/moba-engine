@@ -114,6 +114,42 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Asset licence and provenance gate, and MikkTSpace tangents (next-gen roadmap A0,
+  [ADR-0022](docs/adr/0022-provenance-gate-mikktspace.md)):**
+  - Every file in `content/`'s asset directories now has a provenance entry in its
+    directory's `provenance.toml` (source, author, SPDX-like licence, how it was made; for
+    AI-generated assets the model, version, weights licence, seed, prompt or inputs, and
+    tools). All 76 current files are the project's own, generated from code or hand-written,
+    under the repository's licence.
+  - `content-check --provenance` fails on an asset without provenance, a licence off the
+    allow-list (CC0, CC-BY, MIT, Apache-2.0, OFL-1.1, plus the CMU and NVIDIA Open Model
+    License exceptions; NC, ND, share-alike, unknown and all-rights-reserved are rejected),
+    CC-BY without attribution text, or an AI asset that breaks the roadmap's rules (CC-BY
+    only with `ai.human_modified = true` and notes). Exceptions are scoped (CMU mocap only as
+    an asset licence under `animations/`, the NVIDIA licence only as `ai.weights_licence`);
+    the content root may hold only packs and the generated notices; dot entries and
+    symlinks are errors; manifest text may not hold control characters or comment markers;
+    and `THIRD_PARTY.md` needs exactly one marker pair. It writes
+    the content section of `THIRD_PARTY.md`, `content/CREDITS.txt` and the Steam
+    AI-disclosure list `content/AI-DISCLOSURE.md`; `--check` (in `scripts/agent-verify.sh`,
+    `just ci-tools` and a unit test) fails when they are stale. New `moba_assets::provenance`
+    module.
+  - `MeshData::generate_tangents` is now the reference MikkTSpace (angle-weighted, grouped by
+    handedness) through `bevy_mikktspace` 1.0.0 (new dependency of `moba-assets`, Zlib AND
+    (MIT OR Apache-2.0)) with a deterministic `acos`, instead of the area-weighted
+    "MikkTSpace-style" generator, so normal maps baked by MikkTSpace tools shade correctly on
+    smooth meshes. The flat-shaded sample meshes `content/models/{sentinel,crystal,rampart}.glb`
+    were regenerated (tangents move by at most 1.8e-7); the renderer's built-in cube and
+    plane are now wound counter-clockwise about their normals, as MikkTSpace assumes. The
+    `.glb` loader generates tangents once at load (so bone-count skin LODs inherit them) and
+    reverses the corner order under a mirroring node, keeping front faces counter-clockwise.
+    A mesh with more than 1024 triangle corners at one position, a total sharing cost over
+    2^24, or degenerate × good triangle corners over 2^28 gets the fallback tangent instead
+    of MikkTSpace, whose time is quadratic in those counts (a hostile `.glb` could stall or
+    stack-overflow the loader);
+    new bench `mesh/generate_tangents/{10k,65k}`. LODs,
+    VAT, baked AO and captured frames are unchanged. No wire, replay, simulation or
+    content-hash change.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).

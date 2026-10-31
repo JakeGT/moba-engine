@@ -1,0 +1,28 @@
+# Provenance of every file in this directory (A0, ADR-0022). `content-check --provenance`
+# checks it and generates THIRD_PARTY.md's content section, content/CREDITS.txt and
+# content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
+
+[[asset]]
+files = ["sentinel.glb", "sentinel.lod"]
+title = "Sentinel sample hero model"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Generated from code by moba-tools sample-mesh (crates/tools/src/bin/sample-mesh.rs); LODs by mesh-bake (scripts/bake-mesh-lods.sh)"
+notes = "Unit tests check the committed .glb matches the generator; ci-tools re-bakes and diffs the .lod."
+
+[[asset]]
+files = ["sentinel-skinned.glb", "sentinel-skinned.lod"]
+title = "Sentinel sample hero model, rigged and animated"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Generated from code (mesh, skeleton and clips) by moba-tools sample-mesh; LODs by mesh-bake (scripts/bake-mesh-lods.sh)"
+
+[[asset]]
+files = ["crystal.glb", "crystal.lod", "rampart.glb", "rampart.lod"]
+title = "Sample map meshes (crystal prop, rampart wall)"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Generated from code by moba-tools sample-mesh; LODs by mesh-bake (scripts/bake-mesh-lods.sh)"

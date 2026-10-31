@@ -2,7 +2,8 @@
 # One-shot local verification for coding agents.
 #
 # Usage:
-#   scripts/agent-verify.sh          # fast gate: fmt, clippy, tests, docs, layering, hash, packs
+#   scripts/agent-verify.sh          # fast gate: fmt, clippy, tests, docs, layering, hash, packs,
+#                                    # asset provenance
 #   scripts/agent-verify.sh --full   # adds release tests, feature matrix, fuzz/loom/bench compile
 #
 # The script never pushes, publishes, records, or edits files. Run it from the repository root.
@@ -62,6 +63,9 @@ for pack in content/*.toml; do
   cargo run -q -p moba-tools --bin content-check -- "$pack" >/dev/null
   echo "ok $pack"
 done
+
+section "content provenance (A0 licence gate)"
+cargo run -q -p moba-tools --bin content-check -- --provenance --check
 
 section "fuzz crate (compile only)"
 cargo check --manifest-path fuzz/Cargo.toml
