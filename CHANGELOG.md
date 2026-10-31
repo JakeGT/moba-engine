@@ -142,7 +142,10 @@ the semver check):
     were regenerated (tangents move by at most 1.8e-7); the renderer's built-in cube and
     plane are now wound counter-clockwise about their normals, as MikkTSpace assumes. The
     `.glb` loader generates tangents once at load (so bone-count skin LODs inherit them) and
-    reverses the corner order under a mirroring node, keeping front faces counter-clockwise;
+    reverses the corner order under a mirroring node, keeping front faces counter-clockwise.
+    A mesh with more than 1024 triangle corners at one position, or a total sharing cost
+    over 2^24, gets the fallback tangent instead of MikkTSpace, whose time is quadratic in
+    that count (a hostile `.glb` could stall or stack-overflow the loader);
     new bench `mesh/generate_tangents/{10k,65k}`. LODs,
     VAT, baked AO and captured frames are unchanged. No wire, replay, simulation or
     content-hash change.

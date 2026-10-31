@@ -1507,7 +1507,9 @@ and so on) needs a provenance entry in the `provenance.toml` of its own director
 [ADR-0022](adr/0022-provenance-gate-mikktspace.md)). The root itself may hold only packs
 (`*.toml`) and the generated `CREDITS.txt` and `AI-DISCLOSURE.md`; put any other file in an
 asset directory. Dot-files and dot-directories (`.gitkeep`, `.cache/`, ...) and symlinks are
-rejected everywhere, so nothing in a content root is hidden from the gate.
+rejected everywhere, so nothing in a content root is hidden from the gate. On macOS, Finder
+writes `.DS_Store` files that fail the gate (and its unit test); clear them with
+`find content -name .DS_Store -delete`.
 
 One entry can cover several files. List binary assets (textures, meshes, LUTs, audio) by
 name, so each new one is a reviewed manifest change; keep `*` patterns for families of text

@@ -156,6 +156,20 @@ and none regenerates them. A node whose transform mirrors (negative determinant)
 the triangle winding (glTF 2.0 §3.7.4), so the loader writes its corners as `(i0, i2, i1)`
 and takes a missing flat normal from the reordered corners; front faces then stay
 counter-clockwise and MikkTSpace gives the mirrored handedness, as file tangents do.
+Because that puts MikkTSpace on the untrusted-file path (ADR-0007: `content-check`, the
+`glb` fuzz target), generation is bounded. MikkTSpace's time is quadratic in the triangle
+corners sharing one position: measured in release, a fan whose 8 Ki triangles share a centre
+vertex takes 0.42 s, and 16 Ki overflows its recursion's stack (an abort, not an error); a
+centre split per triangle (same position, distinct UVs, so not welded) or triangles collapsed
+onto one point are quadratic too (1.1 s and 6.4 s at 32 Ki). So corners are counted per
+position bit pattern (with `-0.0` as `0.0`), which over-approximates MikkTSpace's welded
+vertices, and the mesh skips MikkTSpace and takes the fallback tangent everywhere when one
+position has more than **1024** corners (`MeshData::TANGENT_MAX_SHARED_CORNERS`, about 7 ms
+of quadratic work, 16× below the stack overflow and far above the ~6 corners per position of
+a real mesh or the few hundred at a UV-sphere pole) or the sum of corners² over positions
+exceeds **2^24** (`TANGENT_MAX_SHARING_COST`, about 0.1 s; a dense mesh at the vertex cap is
+about 2.4 M), so many positions just under the cap cannot add up. The count is a sort of the
+positions, within the bench's noise.
 `mesh/generate_tangents/{10k,65k}` (`crates/assets/benches/mesh_tangents.rs`) measures the
 cost: about 13 ms for a 10 k-vertex grid and 92 ms at the 65 536-vertex cap on the
 reference machine, load-time only.
@@ -196,6 +210,8 @@ triangle and a position-degenerate one.
   `MAX_PROVENANCE_BYTES`, `THIRD_PARTY_BEGIN`, `THIRD_PARTY_END`), and
   `content-check --provenance [--check]` (exit 0 pass, 1 gate failure or stale notice, 2
   usage).
+- New `MeshData::TANGENT_MAX_SHARED_CORNERS` and `MeshData::TANGENT_MAX_SHARING_COST`; a mesh
+  over either gets fallback tangents (`w = +1`, perpendicular to the normal) everywhere.
 - New dependency `bevy_mikktspace =1.0.0` in `moba-assets` (so the client, the tools and the
   fuzz crate); `cargo-deny`'s allow-list already has Zlib, MIT and Apache-2.0.
 - The committed sample meshes `content/models/{sentinel,crystal,rampart}.glb` (and
