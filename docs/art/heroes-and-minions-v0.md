@@ -34,6 +34,22 @@ second hero for A4.
 > **Decision needed (maintainer): the slice hero** — Warden (recommended), Oracle or Strider.
 > Pick in the review app; comments there feed v1.
 
+### First read of the generated concepts (round 1)
+
+24 full-body concepts (8 seeds per hero) were cut out as flat silhouettes at 30 px and 40 px
+(the review app's *Slice heroes* section; [boards/hero-silhouettes.jpg](boards/hero-silhouettes.jpg)):
+
+- **Kiln Warden:** the sun-disc halo survives at 30 px as a spiky crown on a blocky,
+  base-heavy body. **The tell works.** Risk confirmed: without the halo it reads as a generic
+  armoured knight.
+- **Still Oracle:** the crescent crown and the orbiting slabs read at 40 px, and the hover gap
+  under the robe shows. But the slabs often read as **wings**, and the bone-white mask reads
+  close to a **skull** in the portraits: both pull towards "angel" or "death" clichés. Take B
+  (one astrolabe ring) tests a cleaner tell.
+- **Ash Strider:** **fails SIL rules at 40 px.** The bow is too thin to survive and is lost
+  in the cloak, leaving a generic hooded figure. The scarf is the only distinct shape. It
+  needs a thicker, brighter bow limb, or take B's spear-thrower held as a diagonal.
+
 Each concept also has a **take B** in the review app, so the pick isn't tied to one rendering:
 
 | | Take B | What it changes |
@@ -94,6 +110,13 @@ identity from rims only.
 | Silhouette tell | Domes and cylinders, broad bases | Verticals with fixed gaps, masks |
 | Death | Collapses, steam vents, the furnace goes dark | Pieces fall as gravity lets go, a dust ring |
 
+**First concept round** ([boards/units.jpg](boards/units.jpg)): the Thrall reads well as a
+bronze automaton, though it renders **copper-orange**. Keep it in brass and bronze
+(H ≈ 75–90°) to stay out of the enemy zone. The **Hollow lost its floating shoulder plates**
+and came out as a plain silver knight, so the gaps must be drawn into the model sheet
+explicitly. The Monolith siege (a slab carried by two acolytes) reads at once. The Crucible
+Walker is the weakest; try a squatter, wider shape.
+
 ## Structures
 
 | | **Forge** | **Void** |
@@ -102,6 +125,12 @@ identity from rims only.
 | Core (18–24 m) | **The Sunheart Crucible:** a domed foundry drum, a ring of chimneys and a white-gold core visible through grilles | **The Still Well:** a ring of floating stones around a dark gravity well; dust spirals inward |
 | Base walls | Sandstone ramparts with brass sun discs; the wall mesh follows today's `rampart` placement | Black ceramic slabs, each course floating slightly above the last |
 | Destruction | Collapses outward, with fire and slag | Implodes: the blocks fall inward, then drop |
+
+**First concept round:** the **Void tower** (stacked blocks, the top two floating over a
+glowing core) and the **Void core** (a ring of floating stones around a gravity well) match
+the shape language closely and are the strongest structures. The Forge tower (a lens-crowned
+obelisk) and core (a domed foundry drum) are serviceable but less distinctive. Push the
+stepped Sun-Kiln forms (Forge B).
 
 > **Decision needed (maintainer): the neutral monsters.** The slice needs at least one camp.
 > **Recommendation:** **ember scarabs**, glass-backed beetles that feed on the ember shards

@@ -175,19 +175,38 @@ establishing shot, a tower, a common soldier and a material close-up.
 
 | | Reading | What it emphasises | Risk |
 |---|---|---|---|
-| **Forge A** | **Foundry Theocracy** (recommended) | Temple-foundries: stepped sandstone with brass banding, sun-disc emblems, sawtooth roofs and sun-funnel chimneys, kiln-glazed tile friezes, light through iron grilles | Busy ornament; needs restraint at 46 m |
-| Forge B | Sun-Kiln Empire | An ancient ziggurat civilisation in terracotta and glazed ceramic, bronze sun discs, squat colonnades | Terracotta sits near the enemy hue zone (PAL-3) |
+| Forge A | Foundry Theocracy | Temple-foundries: stepped sandstone with brass banding, sun-disc emblems, sawtooth roofs and sun-funnel chimneys, kiln-glazed tile friezes, light through iron grilles | Busy ornament; needs restraint at 46 m |
+| **Forge B** | **Sun-Kiln Empire** (recommended after round 1) | An ancient ziggurat civilisation in terracotta and glazed ceramic, bronze sun discs, squat colonnades | Terracotta sits near the enemy hue zone (PAL-3) |
 | Forge C | Iron Dawn | Heavy industry built into basalt: forged iron, slag heaps, chain hoists, sun-glass lenses | Darkest and least "solar"; can blur into the Void's value range |
 | Void A | Observatory Order | Astronomers: black ceramic monoliths, pewter astrolabe rings, open domes, bone-white star-chart inlay | Static; motion has to come from VFX |
 | **Void B** | **Gravity Monastery** (recommended) | Basalt terraces whose upper courses float, ring gates, dust drifting upwards | Floating masses cost RT/BLAS refits if they move (static is fine) |
 | Void C | Obsidian Court | Polished obsidian and black lacquer, silver fittings, plum banners, bone-white masks | Highly reflective black: VAL-1 and the "never a black blob" rule |
 
-**Recommendation:** Forge A for culture and ornament, with Forge C's machinery for towers and
-minions; Void B for the gravity shape language, with Void A's astrolabe rings and star-chart
-inlay as the ornament. The mixes keep both factions' 40 px tells (Forge radial fans, Void gaps).
+**What the first concept round showed** (96 images, review app *Factions*;
+[boards/factions.jpg](boards/factions.jpg)):
+
+- **Forge A came out as colourful, fairy-tale castles**: multicoloured tile, spires and gilt.
+  It's charming but not "epic, weathered", and too busy for 46 m.
+- **Forge B is the strongest Forge reading**: monumental stepped temples, colonnades,
+  weathered terracotta and sandstone, with bronze sun discs (their patina reads teal, which sits
+  in the free 167–211° band).
+- **Forge C drifts into generic steampunk** (brass pipes and boilers). Its machinery still
+  works in small doses on towers and minions.
+- **Void A's monoliths** read clearly as "the night sky" (star inlay on black stone), but the
+  soldier prompt never produced a person.
+- **Void B is the strongest Void reading**: vast floating terraces, ring gates and violet light
+  in the gaps. It is the most original of all six.
+- **Void C turned the bone-white masks into skulls everywhere.** That is a death/necromancer
+  cliché that clashes with the patient-astronomer premise: **avoid it**.
+
+**Recommendation (revised after the first round):** **Forge B** (Sun-Kiln) for architecture,
+with Forge A's sun-disc emblems and glazed friezes **used sparingly** and Forge C's machinery
+on towers and minions. **Void B** (Gravity Monastery), with Void A's star-chart inlay and
+astrolabe rings as the ornament. Round 2 in the review app explored "A + C" and "B + A" mixes
+before this revision; judge the readings on the round-1 images first.
 
 > **Decision needed (maintainer): faction readings.** Pick one reading per faction, or a mix
-> (recommended: Forge A + C machinery, Void B + A ornament).
+> (recommended: Forge B with A's emblems and C's machinery; Void B with A's ornament).
 
 ## Concept boards
 

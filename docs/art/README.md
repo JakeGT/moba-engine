@@ -47,7 +47,7 @@ recommendation. In priority order for the slice:
 
 1. **The slice hero:** Kiln Warden (recommended), Still Oracle or Ash Strider. See [heroes](heroes-and-minions-v0.md).
 2. **Map 1's lighting mood:** Golden Crossing (recommended). See [lighting](lighting-mood.md).
-3. **Faction readings:** Forge A + Iron Dawn machinery, Void B + Observatory ornament (recommended). See [world](world-and-factions.md#interpretations-for-review).
+3. **Faction readings:** Forge B (Sun-Kiln) with A's emblems and C's machinery, Void B (Gravity Monastery) with A's ornament (recommended after the first concept round). See [world](world-and-factions.md#interpretations-for-review).
 4. **Which faction holds which base:** Forge west, Void east (recommended). See [world](world-and-factions.md#ember-crossing-who-stands-where).
 5. **Are heroes faction-bound?** Free agents (recommended). See [world](world-and-factions.md#ember-crossing-who-stands-where).
 6. **The ember crystals' colour:** white-gold cores (recommended). See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
