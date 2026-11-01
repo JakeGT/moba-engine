@@ -22,6 +22,7 @@ use gpu_allocator::MemoryLocation;
 use moba_platform::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::caps::{Admission, DeviceCapabilities, PathChoice};
 use crate::cull::{CullMode, CullStats, LodConfig};
 use crate::device::DeviceContext;
 use crate::dynres::{self, DynamicResolution};
@@ -177,6 +178,9 @@ pub struct RenderConfig {
     /// Decal, foliage and water features (ADR-0017). `None` (the default) uses
     /// [`EnvironmentConfig::for_tier`] of [`RenderConfig::quality_tier`].
     pub environment: Option<EnvironmentConfig>,
+    /// Which render path to use (`MOBA_RENDER_PATH`, ADR-0020 §2b). Default
+    /// [`PathChoice::Auto`]: rank the devices, then the chosen one's own admission.
+    pub render_path: PathChoice,
 }
 
 impl Default for RenderConfig {
@@ -207,6 +211,7 @@ impl Default for RenderConfig {
             culling: CullMode::Cpu,
             mesh_lod: None,
             environment: None,
+            render_path: PathChoice::Auto,
         }
     }
 }
@@ -300,6 +305,13 @@ impl RenderConfig {
     #[must_use]
     pub fn with_pipeline_stats(mut self, enabled: bool) -> Self {
         self.pipeline_stats = enabled;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::render_path`] set.
+    #[must_use]
+    pub fn with_render_path(mut self, choice: PathChoice) -> Self {
+        self.render_path = choice;
         self
     }
 
@@ -594,7 +606,12 @@ impl Renderer {
             handle: surface_handle,
         };
 
-        let mut device = DeviceContext::new(&instance, surface_handle, config.pipeline_stats)?;
+        let mut device = DeviceContext::new(
+            &instance,
+            surface_handle,
+            config.pipeline_stats,
+            config.render_path,
+        )?;
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
         let shaders = ShaderSource::new(config.shader_dir.clone());
@@ -1393,6 +1410,19 @@ impl Renderer {
     #[must_use]
     pub fn device_name(&self) -> &str {
         &self.device.name
+    }
+
+    /// The render-path gate's decision for the selected GPU (ADR-0020 §2): its path, highest
+    /// tier and what it lacks. Logged as `path=` / `max_tier=` / `missing=`.
+    #[must_use]
+    pub fn admission(&self) -> &Admission {
+        &self.device.admission
+    }
+
+    /// The selected GPU's probed capabilities (ADR-0020 §1e).
+    #[must_use]
+    pub fn capabilities(&self) -> &DeviceCapabilities {
+        &self.device.capabilities
     }
 
     /// Whether the Khronos validation layer is active.

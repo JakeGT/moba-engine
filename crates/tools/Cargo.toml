@@ -26,6 +26,7 @@ moba-render.workspace = true
 moba-assets = { workspace = true, features = ["glb", "bc-decode"] }
 bcdec_rs.workspace = true
 png.workspace = true
+serde_json.workspace = true
 # The mesh LOD baker's meshoptimizer (C++) is optional, so the released tools
 # (content-check, replay, ...) do not compile it (R8).
 meshopt = { workspace = true, optional = true }

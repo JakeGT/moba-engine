@@ -41,4 +41,21 @@ jobs:
       - name: Build probe
         run: cargo build --release --locked -p moba-tools --bin vulkan-probe
       - name: Probe instance and devices
-        run: ./target/release/vulkan-probe
+        # ADR-0020 gate 2: macOS is Compat only, so the chosen device must report path=compat.
+        # Even forcing the tiered path must stay Compat (vulkan-probe then exits 1).
+        run: |
+          ./target/release/vulkan-probe | tee probe.txt
+          grep -q '^chosen: .* path=compat ' probe.txt
+          if ./target/release/vulkan-probe --path tiered; then
+            echo "--path tiered admitted a device on macOS" >&2
+            exit 1
+          fi
+          ./target/release/vulkan-probe --json > capabilities.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: moltenvk-capabilities
+          path: |
+            probe.txt
+            capabilities.json
+          if-no-files-found: ignore
