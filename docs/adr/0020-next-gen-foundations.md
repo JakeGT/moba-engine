@@ -1,10 +1,13 @@
 # ADR-0020: Next-gen foundations: bindings, capability gate, bindless, Slang, tiers and vendor SDKs (N0)
 
-**Status:** proposed 2026-10-31. This is phase N0 of the
+**Status:** accepted 2026-11-01 by the maintainer, with every recommendation under
+[Open questions](#open-questions-for-the-maintainer) taken (see
+[Maintainer answers](#maintainer-answers-2026-11-01)). Proposed 2026-10-31. This is phase N0 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§5.1, §8 and §12 step 2),
 and it is written before the code.
 - **Builds on:** [ADR-0002](0002-vulkan-baseline.md), which stays in force: Vulkan 1.3 is
-  still the minimum.
+  still the minimum. The maintainer allowed raising the **tiered path** to Vulkan 1.4 if it
+  helps (see the answers below). Compat stays on 1.3 in any case.
 - **Amends, for the tiered renderer only:**
   - [ADR-0009](0009-descriptor-model.md): the tiered renderer goes bindless, and plain sets
     stay for Compat;
@@ -900,6 +903,41 @@ These follow roadmap §10, applied to N0.
     replace them with measurements.
 11. **Tiered `perf-gate` budgets report-only until N1?** *Recommendation:* yes. Before
     upscaling they would only measure the absence of N1.
+
+### Maintainer answers (2026-11-01)
+
+The maintainer accepted this ADR with **every recommendation above taken**, Q1 to Q11:
+- the `ash` pin in N0;
+- the upstream `gpu-allocator` revision;
+- mesh shaders and VRS optional;
+- Slang everywhere;
+- `bindgen`;
+- `fsr4` development-only;
+- the open build only for public releases;
+- no promise of Linux DLSS FG;
+- our own FSR 3.1 port in N1;
+- the provisional tier table and VRAM budgets;
+- report-only tiered `perf-gate` budgets until N1.
+
+**Vulkan 1.4 (added with the acceptance).** The maintainer allowed raising the minimum if it
+helps. The rule is:
+- **What to raise.** The **tiered path may require Vulkan 1.4**, with Compat staying on 1.3,
+  if both of these hold:
+  - **Support.** The tier floor exposes 1.4 on the drivers we support, checked against primary
+    sources (driver notes or `vulkaninfo` dumps), not secondary reports. The tier floor is the
+    RTX 2060 and RX 6600, on Linux (NVIDIA proprietary and RADV) and on Windows.
+  - **Benefit.** It removes code or fallbacks the tiered path would otherwise carry. Candidates
+    from the 1.4 core promotions:
+    - dynamic rendering local read, for N2's G-buffer reads;
+    - `maintenance5` and `maintenance6`;
+    - push descriptors;
+    - scalar block layout;
+    - 8-bit indices;
+    - the raised push-constant and attachment limits.
+- **How to record it.** The first N0 implementation PR checks both conditions and records the
+  result here as an amendment. Every 1.4 feature the tiered path relies on is added to the
+  capability gate (§2), so a device that fails it falls back to Compat with a logged reason.
+  ADR-0002 is amended only for the tiered path.
 
 ## Corrections to the roadmap
 

@@ -3,7 +3,7 @@
 **Status:** proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
-- **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, proposed). That ADR settles the
+- **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
   capability gate, the `Tiered`/`Compat` paths, Slang, bindless, the tier budgets and
   budget-driven dynamic resolution, and the vendor-SDK cargo features. This ADR uses all of
   them and does not re-decide them.
