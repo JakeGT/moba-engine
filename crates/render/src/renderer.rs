@@ -581,18 +581,14 @@ impl Renderer {
             .collect();
 
         let instance = InstanceContext::new(&required, config.validation)?;
-        let loader = khr::surface::Instance::new(&instance.entry, &instance.instance);
+        let loader = khr::surface::Instance::load(&instance.entry, &instance.instance);
+        let factory =
+            ash_window::SurfaceFactory::new(&instance.entry, &instance.instance, display_handle)?;
         // SAFETY: the instance was created with exactly these surface extensions for this
-        // display/window handle pair.
-        let surface_handle = unsafe {
-            ash_window::create_surface(
-                &instance.entry,
-                &instance.instance,
-                display_handle,
-                window_handle,
-                None,
-            )
-        }?;
+        // display handle, and the factory was loaded for the same display. The window handle is
+        // valid now; keeping the window alive while the surface exists is the caller's side of
+        // `Renderer::new`, unchanged by the ash bump.
+        let surface_handle = unsafe { factory.create_surface(window_handle, None) }?;
         let surface = Surface {
             loader,
             handle: surface_handle,

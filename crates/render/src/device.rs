@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ash::vk::TaggedStructure as _;
 use ash::{Instance, vk};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
@@ -98,7 +99,7 @@ impl DeviceContext {
         pipeline_stats: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
-        let surface_loader = ash::khr::surface::Instance::new(&context.entry, instance);
+        let surface_loader = ash::khr::surface::Instance::load(&context.entry, instance);
         // SAFETY: the instance is live; enumeration returns owned handles.
         let devices = unsafe { instance.enumerate_physical_devices() }?;
         if devices.is_empty() {
@@ -244,8 +245,7 @@ impl DeviceContext {
         let portability = candidate.extensions.contains(&PORTABILITY_SUBSET);
         let mut portability_features = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
         if portability {
-            let mut query =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut portability_features);
+            let mut query = vk::PhysicalDeviceFeatures2::default().push(&mut portability_features);
             // SAFETY: the physical device belongs to this instance, it exposes the
             // portability-subset extension, and the chain is valid for the call.
             unsafe { instance.get_physical_device_features2(physical, &mut query) };
@@ -259,8 +259,7 @@ impl DeviceContext {
             .extensions
             .contains(&PIPELINE_EXECUTABLE_PROPERTIES)
         {
-            let mut query =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut executable_features);
+            let mut query = vk::PhysicalDeviceFeatures2::default().push(&mut executable_features);
             // SAFETY: the physical device belongs to this instance, it exposes the extension,
             // and the chain is valid for the call.
             unsafe { instance.get_physical_device_features2(physical, &mut query) };
@@ -268,12 +267,12 @@ impl DeviceContext {
         let pipeline_stats = executable_features.pipeline_executable_info == vk::TRUE;
         let mut features_2 = vk::PhysicalDeviceFeatures2::default()
             .features(base_features)
-            .push_next(&mut features_13);
+            .push(&mut features_13);
         if portability {
-            features_2 = features_2.push_next(&mut portability_features);
+            features_2 = features_2.push(&mut portability_features);
         }
         if pipeline_stats {
-            features_2 = features_2.push_next(&mut executable_features);
+            features_2 = features_2.push(&mut executable_features);
         }
 
         let priorities = [1.0f32];
@@ -298,8 +297,10 @@ impl DeviceContext {
             .collect();
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .enabled_extension_names(&extension_names)
-            .push_next(&mut features_2);
+            .enabled_extension_names(&extension_names);
+        // SAFETY: `features_2` heads a chain built above with `push`, so every `p_next` in it
+        // points to a live, valid feature structure, and its tail is writable.
+        let create_info = unsafe { create_info.extend(&mut features_2) };
 
         // SAFETY: the physical device was enumerated from this instance, all requested
         // extensions/features were checked above, and the pointers in `create_info` are
@@ -486,23 +487,34 @@ impl DeviceContext {
             return Vec::new();
         }
         let loader =
-            ash::khr::pipeline_executable_properties::Device::new(&self.instance, &self.device);
+            ash::khr::pipeline_executable_properties::Device::load(&self.instance, &self.device);
         let info = vk::PipelineInfoKHR::default().pipeline(pipeline);
         // SAFETY: the extension and its feature are enabled, and the pipeline is live and
         // belongs to this device.
-        let Ok(executables) = (unsafe { loader.get_pipeline_executable_properties(&info) }) else {
+        let Ok(count) = (unsafe { loader.get_pipeline_executable_properties_len(&info) }) else {
             return Vec::new();
         };
+        let mut executables = vec![vk::PipelineExecutablePropertiesKHR::default(); count];
+        // SAFETY: as above; `executables` holds exactly the count the driver just reported.
+        if unsafe { loader.get_pipeline_executable_properties(&info, &mut executables) }.is_err() {
+            return Vec::new();
+        }
         let mut lines = Vec::with_capacity(executables.len());
         for (index, executable) in executables.iter().enumerate() {
             let info = vk::PipelineExecutableInfoKHR::default()
                 .pipeline(pipeline)
                 .executable_index(index as u32);
             // SAFETY: as above; `index` is within the executables just enumerated.
-            let Ok(statistics) = (unsafe { loader.get_pipeline_executable_statistics(&info) })
+            let Ok(count) = (unsafe { loader.get_pipeline_executable_statistics_len(&info) })
             else {
                 continue;
             };
+            let mut statistics = vec![vk::PipelineExecutableStatisticKHR::default(); count];
+            // SAFETY: as above; `statistics` holds exactly the count the driver just reported.
+            if unsafe { loader.get_pipeline_executable_statistics(&info, &mut statistics) }.is_err()
+            {
+                continue;
+            }
             let name = executable.name_as_c_str().map_or_else(
                 |_| String::from("?"),
                 |name| name.to_string_lossy().into_owned(),
@@ -666,7 +678,7 @@ fn query_vulkan13(
 ) -> vk::PhysicalDeviceVulkan13Features<'static> {
     let mut features = vk::PhysicalDeviceVulkan13Features::default();
     {
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push(&mut features);
         // SAFETY: the physical device belongs to this instance and the feature chain is
         // valid for the duration of the call.
         unsafe { instance.get_physical_device_features2(physical, &mut features_2) };

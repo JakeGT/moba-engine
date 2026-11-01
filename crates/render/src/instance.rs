@@ -1,5 +1,6 @@
 //! Vulkan instance, validation layer and debug messenger.
 
+use ash::vk::TaggedStructure as _;
 use ash::{Entry, Instance, vk};
 use core::ffi::{CStr, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -155,7 +156,7 @@ impl InstanceContext {
                 vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
             ]);
         if validation_enabled && validation == ValidationMode::Required {
-            create_info = create_info.push_next(&mut synchronization_validation);
+            create_info = create_info.push(&mut synchronization_validation);
         }
 
         // SAFETY: `create_info` points at live arrays for the duration of the call, and
@@ -174,7 +175,7 @@ impl InstanceContext {
                         | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
                 )
                 .pfn_user_callback(Some(debug_callback));
-            let debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
+            let debug_utils = ash::ext::debug_utils::Instance::load(&entry, &instance);
             // SAFETY: the instance is live and owns the debug-utils entry points that the
             // callback info references.
             Some(unsafe { debug_utils.create_debug_utils_messenger(&callback_info, None) }?)
@@ -204,7 +205,7 @@ impl InstanceContext {
 impl Drop for InstanceContext {
     fn drop(&mut self) {
         if let Some(messenger) = self.debug_messenger.take() {
-            let debug_utils = ash::ext::debug_utils::Instance::new(&self.entry, &self.instance);
+            let debug_utils = ash::ext::debug_utils::Instance::load(&self.entry, &self.instance);
             // SAFETY: the messenger was created from this instance and is destroyed once.
             unsafe { debug_utils.destroy_debug_utils_messenger(messenger, None) };
         }
