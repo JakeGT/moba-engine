@@ -298,8 +298,11 @@ impl DeviceContext {
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extension_names);
-        // SAFETY: `features_2` heads a chain built above with `push`, so every `p_next` in it
-        // points to a live, valid feature structure, and its tail is writable.
+        // SAFETY: `features_2` heads a chain built above with `push`: every `p_next` in it
+        // points to a live feature structure, and its tail (the last structure pushed, whose
+        // own `p_next` is still null) is writable. Each link is a `&mut` borrow held by
+        // `features_2`, which `create_info` borrows in turn, so all of them outlive
+        // `create_device` below.
         let create_info = unsafe { create_info.extend(&mut features_2) };
 
         // SAFETY: the physical device was enumerated from this instance, all requested
@@ -488,33 +491,27 @@ impl DeviceContext {
         }
         let loader =
             ash::khr::pipeline_executable_properties::Device::load(&self.instance, &self.device);
+        let fp = loader.fp();
+        let handle = self.device.handle();
         let info = vk::PipelineInfoKHR::default().pipeline(pipeline);
-        // SAFETY: the extension and its feature are enabled, and the pipeline is live and
-        // belongs to this device.
-        let Ok(count) = (unsafe { loader.get_pipeline_executable_properties_len(&info) }) else {
-            return Vec::new();
-        };
-        let mut executables = vec![vk::PipelineExecutablePropertiesKHR::default(); count];
-        // SAFETY: as above; `executables` holds exactly the count the driver just reported.
-        if unsafe { loader.get_pipeline_executable_properties(&info, &mut executables) }.is_err() {
-            return Vec::new();
-        }
+        let executables = enumerate_two_call(|count, out| {
+            // SAFETY: the extension and its feature are enabled, the pipeline is live and
+            // belongs to this device, and `out` is null or holds `*count` default elements.
+            unsafe {
+                (fp.get_pipeline_executable_properties_khr)(handle, &raw const info, count, out)
+            }
+        });
         let mut lines = Vec::with_capacity(executables.len());
         for (index, executable) in executables.iter().enumerate() {
             let info = vk::PipelineExecutableInfoKHR::default()
                 .pipeline(pipeline)
                 .executable_index(index as u32);
-            // SAFETY: as above; `index` is within the executables just enumerated.
-            let Ok(count) = (unsafe { loader.get_pipeline_executable_statistics_len(&info) })
-            else {
-                continue;
-            };
-            let mut statistics = vec![vk::PipelineExecutableStatisticKHR::default(); count];
-            // SAFETY: as above; `statistics` holds exactly the count the driver just reported.
-            if unsafe { loader.get_pipeline_executable_statistics(&info, &mut statistics) }.is_err()
-            {
-                continue;
-            }
+            let statistics = enumerate_two_call(|count, out| {
+                // SAFETY: as above; `index` is within the executables just enumerated.
+                unsafe {
+                    (fp.get_pipeline_executable_statistics_khr)(handle, &raw const info, count, out)
+                }
+            });
             let name = executable.name_as_c_str().map_or_else(
                 |_| String::from("?"),
                 |name| name.to_string_lossy().into_owned(),
@@ -684,4 +681,24 @@ fn query_vulkan13(
         unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
     }
     features
+}
+
+/// One Vulkan two-call enumeration through `call(count, out)`, keeping what the driver wrote.
+/// A count that shrinks between the calls truncates the result and one that grows
+/// (`INCOMPLETE`) keeps the entries written: ash's own fill wrappers assert that the count is
+/// stable, which would abort the process on a misbehaving driver.
+fn enumerate_two_call<T: Default + Clone>(
+    mut call: impl FnMut(&mut u32, *mut T) -> vk::Result,
+) -> Vec<T> {
+    let mut count = 0;
+    if call(&mut count, core::ptr::null_mut()) != vk::Result::SUCCESS {
+        return Vec::new();
+    }
+    let mut out = vec![T::default(); count as usize];
+    let result = call(&mut count, out.as_mut_ptr());
+    if result != vk::Result::SUCCESS && result != vk::Result::INCOMPLETE {
+        return Vec::new();
+    }
+    out.truncate(count as usize);
+    out
 }

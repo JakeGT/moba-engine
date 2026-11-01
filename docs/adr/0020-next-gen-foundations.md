@@ -89,7 +89,9 @@ Constraints:
 
 **1a. The pin.** `ash` and `ash-window` come from a single reviewed revision of
 `ash-rs/ash` master through a workspace `[patch.crates-io]` entry. The dependency lines stay
-`ash = "0.38"` and `ash-window = "0.13"`.
+`ash = "0.38"` and `ash-window = "0.13"`. `ash` also enables its `provisional` feature, because
+master gates `VK_KHR_portability_subset` (MoltenVK) behind it; ash exempts provisional
+extensions from semver, so a re-pin re-checks that struct.
 
 ```toml
 [patch.crates-io]
