@@ -483,8 +483,8 @@ impl DeviceContext {
     }
 
     /// The driver's compiled statistics of `pipeline` (built with
-    /// `CAPTURE_STATISTICS_KHR`), one line per executable: its name and every statistic as
-    /// `name=value`. Empty without [`Self::pipeline_stats`] or when the driver reports none.
+    /// `CAPTURE_STATISTICS_KHR`), one line per executable that reports statistics: its name
+    /// and every statistic as `name=value`. Empty without [`Self::pipeline_stats`] or when the driver reports none.
     pub(crate) fn pipeline_statistics(&self, pipeline: vk::Pipeline) -> Vec<String> {
         if !self.pipeline_stats {
             return Vec::new();
@@ -513,7 +513,7 @@ impl DeviceContext {
                 }
             });
             if statistics.is_empty() {
-                // A failed query prints no line, as before.
+                // A failed query (or one with no statistics) prints no line.
                 continue;
             }
             let name = executable.name_as_c_str().map_or_else(
