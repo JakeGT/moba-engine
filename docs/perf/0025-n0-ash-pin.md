@@ -15,7 +15,7 @@ Captured 2026-11-01 on the development workstation, not a CI runner, for
 
 ## Goldens: byte-identical (lavapipe)
 
-Seven of the golden workflow's scenes were captured once on `main` and twice on the branch.
+All fifteen of the golden workflow's scenes were captured once on `main` and twice on the branch.
 Every capture ran at 1280×720 on lavapipe with `MOBA_VULKAN_VALIDATION=required`, which
 includes synchronization validation. The full PPMs were compared with `cmp`, not the 64×36
 fingerprints. Every run exited cleanly with no validation message.
@@ -29,6 +29,14 @@ fingerprints. Every run exited cleanly with no validation message.
 | Low at render scale 0.75 (frame 90) | identical | `25aa95a501ac7ad1` |
 | Ember map, camera 24 (tick 120) | identical | `342a3fa53facf1df` |
 | teamfight decals (replay, frame 30) | identical | `8a07fb957cb153b2` |
+| overview camera, skinned heroes (tick 120) | identical | `b0c819a49b7f3843` |
+| horizon (frame 90) | identical | `79f126b8576a82bc` |
+| river (frame 90) | identical | `b34379f7ad633a4d` |
+| river, Low (frame 90) | identical | `6d4feae28f6f3160` |
+| river, Ultra (frame 90) | identical | `217e397eef618b00` |
+| heat haze, cinder zone, Ultra (frame 90) | identical | `cedc451ffedcc6f3` |
+| heat haze, bloom off | identical | `ba6f715199a7c375` |
+| heat haze, bloom off, distortion no-draw | identical | `a3846daa3f69e8cf` |
 
 CI's `renderer-gate` runs the complete fingerprint set on this PR.
 
