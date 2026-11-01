@@ -37,6 +37,7 @@ mod passes;
 mod pipeline;
 mod pipeline_cache;
 mod post;
+mod preset;
 mod profiler;
 mod quality;
 mod renderer;
@@ -55,8 +56,8 @@ mod world;
 pub use caps::{
     Admission, AdmissionReason, BINDLESS_SAMPLED_IMAGES, BINDLESS_SAMPLERS,
     BINDLESS_STORAGE_IMAGES, DeviceCapabilities, DeviceKind, EXTENSIONS, ExtensionSpec, Overrides,
-    PathChoice, REQUIRED_FEATURES, REQUIRED_LIMITS, RenderPath, Requirement, Tier,
-    VULKAN14_OPTIONAL, admit, max_tier, missing_items,
+    PathChoice, REQUIRED_FEATURES, REQUIRED_LIMITS, RenderPath, Requirement, VULKAN14_OPTIONAL,
+    admit, default_tier, max_tier, missing_items,
 };
 pub use cull::{CullMode, CullStats, LodConfig};
 pub use environment::{
@@ -66,7 +67,9 @@ pub use environment::{
     WaterVertexData, glow_reference, telegraph_mark,
 };
 pub use error::{RenderError, RenderResult};
-pub use instance::{ProbedDevice, ValidationMode, VulkanProbe, probe_devices, probe_vulkan};
+pub use instance::{
+    ProbedDevice, ValidationMode, VulkanProbe, choose_device, probe_devices, probe_vulkan,
+};
 pub use lighting::{
     BakedAo, LightingConfig, MAX_CONTACT_SHADOW_STEPS, MAX_SHADOW_RESOLUTION,
     MIN_SHADOW_RESOLUTION, OutlineMode, SceneLighting, ShadowFilter,
@@ -83,6 +86,9 @@ pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use post::{
     AntiAliasing, MAX_RENDER_SCALE, MIN_RENDER_SCALE, PostConfig, PostLook, ScreenEffects,
     UpscaleFilter,
+};
+pub use preset::{
+    FeatureState, Phase, PresetFeature, TierPreset, config_tier, total_memory_budget,
 };
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;

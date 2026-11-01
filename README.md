@@ -59,8 +59,13 @@ Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_sc
 `MOBA_UI_SCALE` overrides it for one run; HUD text is a signed-distance-field font, so it
 stays sharp at any scale. `team_palette` (`standard` or `colorblind`, default `standard`) picks
 the health-bar and minimap team colours; `colorblind` uses Okabe-Ito yellow/sky-blue/orange,
-and `MOBA_TEAM_PALETTE` overrides it. `quality` (`low`/`medium`/`high`/`ultra`, default
-`high`) is the rendering quality tier; `MOBA_QUALITY` overrides it. Today it picks the HDR
+and `MOBA_TEAM_PALETTE` overrides it. `quality` (`auto`/`low`/`medium`/`high`/`ultra`/`overdrive`,
+default `auto`) is the rendering quality tier; `MOBA_QUALITY` overrides it. `auto` is resolved
+once, on the first interactive run, from the GPU (ADR-0020 §2c: the tiered path's reference
+table, Medium on Compat) and saved to the file; automated runs (smoke frames, captures) never
+detect and use High. `overdrive` is the tiered path's top tier and runs as `ultra` on Compat.
+On the tiered path dynamic resolution is on for every tier, aimed at the tier's GPU budget
+(§5c). Today it picks the HDR
 target format (Low uses the packed 32-bit format) and the hero-portrait rate (static on Low,
 re-rendered only when the heroes change; `MOBA_PORTRAITS=off|static|animated|<hz>` and `MOBA_MINIMAP_BAKE=off|once` switch
 the portraits and the baked minimap). `render_path` (`auto`/`tiered`/`compat`, default `auto`)

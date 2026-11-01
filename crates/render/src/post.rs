@@ -130,7 +130,8 @@ pub struct PostConfig {
     pub dynamic_resolution: bool,
     /// Dynamic resolution's floor, `0.5..=render_scale`.
     pub min_render_scale: f32,
-    /// Dynamic resolution's GPU-time target per frame, milliseconds.
+    /// Dynamic resolution's GPU-time target per frame, milliseconds, `0.1..=100` (low enough
+    /// for a forced target to bite on a fast GPU, ADR-0020 gate 4).
     pub dynamic_target_ms: f32,
     /// The upscale filter when the image is scaled (`MOBA_UPSCALE`).
     pub upscale: UpscaleFilter,
@@ -168,7 +169,7 @@ impl PostConfig {
                     false,
                     UpscaleFilter::Bicubic,
                 ),
-                QualityTier::Ultra => (
+                QualityTier::Ultra | QualityTier::Overdrive => (
                     true,
                     AntiAliasing::Msaa4,
                     true,
@@ -308,7 +309,7 @@ impl PostConfig {
             .min(self.render_scale);
         self.ao_slices = self.ao_slices.clamp(2, 4);
         self.ao_radius = finite(self.ao_radius, 1.5).clamp(0.25, 8.0);
-        self.dynamic_target_ms = finite(self.dynamic_target_ms, 14.0).clamp(1.0, 100.0);
+        self.dynamic_target_ms = finite(self.dynamic_target_ms, 14.0).clamp(0.1, 100.0);
         self
     }
 
@@ -652,7 +653,7 @@ mod tests {
             .sanitized();
         assert_eq!(config.render_scale, 1.0);
         assert_eq!(config.min_render_scale, MIN_RENDER_SCALE);
-        assert_eq!(config.dynamic_target_ms, 1.0);
+        assert_eq!(config.dynamic_target_ms, 0.1);
         let scaled = PostConfig::default()
             .with_render_scale(0.7)
             .with_min_render_scale(0.9)

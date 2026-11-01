@@ -65,7 +65,7 @@ fn fixtures_are_labelled_sorted_and_plain() {
 type Expected = (
     &'static str,
     RenderPath,
-    Option<Tier>,
+    Option<QualityTier>,
     &'static [&'static str],
     AdmissionReason,
 );
@@ -82,21 +82,21 @@ fn every_fixture_admits_exactly_as_expected() {
         (
             "rtx-5070-ti",
             RenderPath::Tiered,
-            Some(Tier::Overdrive),
+            Some(QualityTier::Overdrive),
             &[],
             AdmissionReason::Admitted,
         ),
         (
             "radeon-610m",
             RenderPath::Tiered,
-            Some(Tier::Overdrive),
+            Some(QualityTier::Overdrive),
             &[],
             AdmissionReason::Admitted,
         ),
         (
             "rt-no-mesh",
             RenderPath::Tiered,
-            Some(Tier::Overdrive),
+            Some(QualityTier::Overdrive),
             &[],
             AdmissionReason::Admitted,
         ),
@@ -162,7 +162,7 @@ fn every_fixture_admits_exactly_as_expected() {
         on(PathChoice::Tiered).with_cpu_devices(true),
     );
     assert_eq!(lavapipe.path, RenderPath::Tiered);
-    assert_eq!(lavapipe.max_tier, Some(Tier::Overdrive));
+    assert_eq!(lavapipe.max_tier, Some(QualityTier::Overdrive));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn low_latency_needs_present_id() {
 fn the_rtx_5070_ti_is_tiered_up_to_overdrive() {
     let admission = admit(&fixture("rtx-5070-ti"), on(PathChoice::Auto));
     assert_eq!(admission.path, RenderPath::Tiered);
-    assert_eq!(admission.max_tier, Some(Tier::Overdrive));
+    assert_eq!(admission.max_tier, Some(QualityTier::Overdrive));
     assert!(admission.missing.is_empty(), "{:?}", admission.missing);
     assert_eq!(admission.reason, AdmissionReason::Admitted);
     assert_eq!(
@@ -210,7 +210,7 @@ fn the_radeon_610m_is_tiered() {
         "{:?}",
         admission.missing
     );
-    assert!(admission.max_tier >= Some(Tier::Ultra));
+    assert!(admission.max_tier >= Some(QualityTier::Ultra));
 }
 
 #[test]
@@ -299,12 +299,12 @@ fn overdrive_needs_the_ray_tracing_pipeline() {
         .retain(|name| name != "VK_KHR_ray_tracing_pipeline");
     let admission = admit(&caps, on(PathChoice::Auto));
     assert_eq!(admission.path, RenderPath::Tiered);
-    assert_eq!(admission.max_tier, Some(Tier::Ultra));
+    assert_eq!(admission.max_tier, Some(QualityTier::Ultra));
     // An advertised extension with its feature bit off does not count either.
     let mut caps = fixture("rtx-5070-ti");
     caps.features
         .insert(String::from("rayTracingPipeline"), false);
-    assert_eq!(max_tier(&caps), Tier::Ultra);
+    assert_eq!(max_tier(&caps), QualityTier::Ultra);
 }
 
 #[test]
@@ -398,7 +398,50 @@ fn path_choices_parse() {
     assert_eq!(PathChoice::parse("COMPAT"), Some(PathChoice::Compat));
     assert_eq!(PathChoice::parse("fast"), None);
     assert_eq!(
-        Tier::ALL.map(Tier::name),
+        QualityTier::ALL
+            .iter()
+            .map(|tier| tier.name())
+            .collect::<Vec<_>>(),
         ["low", "medium", "high", "ultra", "overdrive"]
+    );
+}
+
+#[test]
+fn default_tiers_come_from_the_reference_table() {
+    let tier = |name: &str, choice| {
+        let caps = fixture(name);
+        default_tier(&caps, &admit(&caps, on(choice)))
+    };
+    // The RTX 5070 Ti is an Ultra reference GPU; the Radeon 610M is not in the table.
+    assert_eq!(tier("rtx-5070-ti", PathChoice::Auto), QualityTier::Ultra);
+    assert_eq!(tier("radeon-610m", PathChoice::Auto), QualityTier::Low);
+    // Compat devices start on Compat Medium, whatever their ID.
+    assert_eq!(tier("gtx-1060", PathChoice::Auto), QualityTier::Medium);
+    assert_eq!(tier("lavapipe", PathChoice::Auto), QualityTier::Medium);
+    assert_eq!(tier("rtx-5070-ti", PathChoice::Compat), QualityTier::Medium);
+    assert_eq!(tier("lavapipe", PathChoice::Tiered), QualityTier::Low);
+    // A table tier is capped by what the device admits: an Overdrive card without the RT
+    // pipeline starts on Ultra.
+    let mut caps = fixture("rtx-5070-ti");
+    caps.device_id = 0x2C02; // RTX 5080
+    assert_eq!(
+        default_tier(&caps, &admit(&caps, on(PathChoice::Auto))),
+        QualityTier::Overdrive
+    );
+    caps.extensions
+        .retain(|name| name != "VK_KHR_ray_tracing_pipeline");
+    assert_eq!(
+        default_tier(&caps, &admit(&caps, on(PathChoice::Auto))),
+        QualityTier::Ultra
+    );
+    // Every entry is unique and names a known vendor.
+    let mut keys: Vec<_> = DEFAULT_TIERS.iter().map(|&(v, d, _)| (v, d)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), DEFAULT_TIERS.len());
+    assert!(
+        DEFAULT_TIERS
+            .iter()
+            .all(|&(v, _, _)| v == NVIDIA || v == AMD)
     );
 }

@@ -115,12 +115,12 @@ impl EnvironmentConfig {
             QualityTier::Low => (48, 0.3, 8_192, 3, 60.0, 32),
             QualityTier::Medium => (96, 0.6, 24_576, 4, 90.0, 32),
             QualityTier::High => (128, 1.0, 49_152, 5, 130.0, 32),
-            QualityTier::Ultra => (128, 1.0, 65_536, 6, 180.0, 32),
+            QualityTier::Ultra | QualityTier::Overdrive => (128, 1.0, 65_536, 6, 180.0, 32),
         };
         let (water, water_octaves) = match tier {
             QualityTier::Low => (WaterMode::Simple, 1),
             QualityTier::Medium => (WaterMode::Simple, 2),
-            QualityTier::High | QualityTier::Ultra => (WaterMode::Full, 2),
+            QualityTier::High | QualityTier::Ultra | QualityTier::Overdrive => (WaterMode::Full, 2),
         };
         Self {
             decals: true,

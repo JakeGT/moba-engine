@@ -190,6 +190,95 @@ pub(crate) fn compressed_textures() -> bool {
 /// and the R2b switches (ADR-0016): `MOBA_LIGHTS=off|<global cap>`,
 /// `MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and
 /// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
+/// The render path the client builds its configuration for (ADR-0020 §2b, §5e), probed once
+/// at start with the renderer's own device ranking.
+#[derive(Clone, Debug)]
+pub(crate) struct RenderTarget {
+    /// The path the chosen device is admitted to.
+    pub(crate) path: moba_render::RenderPath,
+    /// The choice passed to the renderer: `Tiered` when the probe admitted the device to it,
+    /// so the renderer cannot pick a device whose path differs from the configuration;
+    /// otherwise the player's choice.
+    pub(crate) choice: moba_render::PathChoice,
+    /// `Tiered` may admit CPU devices: only `MOBA_RENDER_PATH=tiered` sets it (ADR-0020
+    /// amendment 2), and the renderer gets the same flag.
+    pub(crate) allow_cpu: bool,
+    /// The chosen device's default tier ([`moba_render::default_tier`]).
+    pub(crate) default_tier: moba_render::QualityTier,
+    /// The chosen device's name, for the detection log.
+    pub(crate) device: String,
+}
+
+impl RenderTarget {
+    /// Probes every device under `choice` (an instance without a surface) and keeps the one
+    /// the renderer would choose. Without Vulkan or a device it is Compat; the renderer then
+    /// reports the failure itself.
+    pub(crate) fn probe(choice: moba_render::PathChoice, allow_cpu: bool) -> Self {
+        let fallback = Self {
+            path: moba_render::RenderPath::Compat,
+            choice,
+            allow_cpu,
+            default_tier: moba_render::QualityTier::Medium,
+            device: String::from("?"),
+        };
+        let devices = match moba_render::probe_devices(choice, allow_cpu) {
+            Ok(devices) => devices,
+            Err(error) => {
+                eprintln!("[render] device probe failed ({error}); configuring for compat");
+                return fallback;
+            }
+        };
+        let Some(device) = moba_render::choose_device(&devices, choice) else {
+            return fallback;
+        };
+        let path = device.admission.path;
+        Self {
+            path,
+            choice: if path == moba_render::RenderPath::Tiered {
+                moba_render::PathChoice::Tiered
+            } else {
+                choice
+            },
+            allow_cpu,
+            default_tier: moba_render::default_tier(&device.capabilities, &device.admission),
+            device: device.capabilities.name.clone(),
+        }
+    }
+}
+
+/// The tier to run: `MOBA_QUALITY`, else the settings, detecting the device's default once
+/// for a player (ADR-0020 §2b; [`crate::settings::Settings::resolve_quality`]). A detection
+/// is saved when a settings file exists or `MOBA_SAVE_SETTINGS` is set.
+pub(crate) fn resolve_quality(
+    settings: &mut crate::settings::Settings,
+    path: &std::path::Path,
+    target: &RenderTarget,
+    automated: bool,
+) -> moba_render::QualityTier {
+    if let Ok(name) = std::env::var("MOBA_QUALITY") {
+        match moba_render::QualityTier::from_name(&name) {
+            Some(tier) => return tier,
+            None => eprintln!(
+                "MOBA_QUALITY={name:?} is not low/medium/high/ultra/overdrive; using settings"
+            ),
+        }
+    }
+    let (tier, detected) = settings.resolve_quality(target.default_tier, automated);
+    if detected {
+        let save = path.exists() || std::env::var_os("MOBA_SAVE_SETTINGS").is_some();
+        eprintln!(
+            "[render] quality {tier} detected for {:?} on the {} path{}",
+            target.device,
+            target.path.name(),
+            if save { " (saved)" } else { "" }
+        );
+        if save && let Err(error) = settings.save(path) {
+            eprintln!("settings: save failed: {error}");
+        }
+    }
+    tier
+}
+
 pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
     lighting_config_from(tier, |name| std::env::var(name).ok())
 }
@@ -254,21 +343,68 @@ fn lighting_config_from(
 /// passes; an EV is a map-look override), `MOBA_UPSCALE=bilinear|bicubic` and
 /// `MOBA_SCREEN_EFFECTS=off`. With `capture` (`MOBA_CAPTURE`), auto exposure and dynamic
 /// resolution are pinned off unless set explicitly, so captures stay byte-identical.
+///
+/// On the tiered path, `tiered` (from [`tiered_scale`]) turns dynamic resolution on with the
+/// tier's GPU budget as its target and the tier's scale range (ADR-0020 §5c); the settings'
+/// scale can lower the ceiling, not raise it.
 pub(crate) fn post_config(
     tier: moba_render::QualityTier,
     render_scale: f32,
     capture: bool,
+    tiered: Option<TieredScale>,
 ) -> moba_render::PostConfig {
-    post_config_from(tier, render_scale, capture, |name| std::env::var(name).ok())
+    post_config_from(tier, render_scale, capture, tiered, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// Dynamic resolution's defaults on the tiered path (ADR-0020 §5c).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TieredScale {
+    /// The tier's GPU budget, ms (`moba_assets::GPU_BUDGETS`).
+    pub(crate) target_ms: f32,
+    /// The scale range's floor, at least today's 0.5 until N1 ships the upscalers.
+    pub(crate) floor: f32,
+    /// The scale ceiling. From N1 it is the preset's upscaler mode
+    /// ([`moba_assets::GpuBudget::scale_range_at`]); until an upscaler fills the gap it is
+    /// today's full scale, so the tiered path does not render softer than Compat.
+    pub(crate) ceiling: f32,
+}
+
+/// The tiered defaults of `tier` at an output `height` pixels tall; `None` on Compat, whose
+/// presets keep today's numbers.
+pub(crate) fn tiered_scale(
+    path: moba_render::RenderPath,
+    tier: moba_render::QualityTier,
+    height: u32,
+) -> Option<TieredScale> {
+    if path != moba_render::RenderPath::Tiered {
+        return None;
+    }
+    let budget = moba_assets::gpu_budget(tier.name())?;
+    let (floor, _upscaler_mode) = budget.scale_range_at(height);
+    Some(TieredScale {
+        target_ms: budget.budget_ms,
+        floor: floor.max(moba_render::MIN_RENDER_SCALE),
+        ceiling: 1.0,
+    })
 }
 
 fn post_config_from(
     tier: moba_render::QualityTier,
     render_scale: f32,
     capture: bool,
+    tiered: Option<TieredScale>,
     var: impl Fn(&str) -> Option<String>,
 ) -> moba_render::PostConfig {
     let mut config = moba_render::PostConfig::for_tier(tier).with_render_scale(render_scale);
+    if let Some(tiered) = tiered {
+        config = config
+            .with_dynamic_resolution(true)
+            .with_dynamic_target_ms(tiered.target_ms)
+            .with_render_scale(render_scale.min(tiered.ceiling))
+            .with_min_render_scale(tiered.floor);
+    }
     let switch = |name: &str| {
         let value = var(name)?;
         match value.trim().to_ascii_lowercase().as_str() {
@@ -939,6 +1075,8 @@ impl Drop for ClientApp {
         };
         let (cpu_p50, cpu_p95) = split(0);
         let (render_p50, render_p95) = split(1);
+        let scales: Vec<f32> = work.iter().map(|sample| sample[2]).collect();
+        let scale = scale_report(&scales);
         // GPU pass times from timestamp queries, same warm-up skipped.
         let gpu_samples = self.gpu_log.take().unwrap_or_default();
         let gpu_columns = if gpu_samples.len() > warmup {
@@ -992,7 +1130,7 @@ impl Drop for ClientApp {
         let report = format!(
             "frames={} frames_dropped={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
-             render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
+             render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} {scale}\
              {gpu_columns}{stress}{memory}quality={quality} {admission} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             self.frames_dropped,
@@ -1015,12 +1153,13 @@ fn quality_summary(renderer: &moba_render::Renderer) -> String {
     let environment = renderer.environment_config();
     let [render_width, render_height] = renderer.render_extent();
     format!(
-        "{} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
+        "{} config_tier={} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
              auto_exposure={} grading={} render={render_width}x{render_height} \
              dynres={} ibl={} specular_ibl={} vat_meshes={} terrain={} fow={} fow_size={} \
              fog={} sky={} decals={} foliage={} water={} pipelines={} pipeline_build_ms={:.3} \
              pipeline_cache={} startup_ms={:.1}",
         renderer.quality_tier(),
+        renderer.config_tier(),
         renderer.hdr_format_name(),
         lighting.shadows,
         lighting.shadow_resolution,
@@ -1164,6 +1303,29 @@ pub(crate) fn gpu_sample(
 /// fog-of-war passes (R3a, `fow_raster`, `fow_resolve`) only with the texture, so their
 /// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
 /// columns are left out.
+/// The dynamic-resolution columns of the frame log (ADR-0020 §5c gate 4): the scale of the
+/// first and last measured frames, its range, and how often it changed in the second half,
+/// where a settled controller holds it. Empty without samples.
+fn scale_report(scales: &[f32]) -> String {
+    let (Some(&first), Some(&last)) = (scales.first(), scales.last()) else {
+        return String::new();
+    };
+    let (min, max) = scales
+        .iter()
+        .fold((f32::INFINITY, 0.0_f32), |(min, max), &scale| {
+            (min.min(scale), max.max(scale))
+        });
+    let late = &scales[scales.len() / 2..];
+    let changes = late
+        .windows(2)
+        .filter(|pair| (pair[0] - pair[1]).abs() > f32::EPSILON)
+        .count();
+    format!(
+        "scale_first={first:.3} scale_final={last:.3} scale_min={min:.3} scale_max={max:.3} \
+         scale_changes_late={changes} "
+    )
+}
+
 fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
@@ -1390,13 +1552,14 @@ mod tests {
         };
         let high = PostConfig::for_tier(QualityTier::High);
         assert_eq!(
-            post_config_from(QualityTier::High, 1.0, false, env(&[])),
+            post_config_from(QualityTier::High, 1.0, false, None, env(&[])),
             high
         );
         let off = post_config_from(
             QualityTier::High,
             1.0,
             false,
+            None,
             env(&[
                 ("MOBA_BLOOM", "off"),
                 ("MOBA_AA", "OFF"),
@@ -1413,6 +1576,7 @@ mod tests {
             QualityTier::Medium,
             0.9,
             false,
+            None,
             env(&[
                 ("MOBA_RENDER_SCALE", "0.6"),
                 ("MOBA_DYNRES", "8.5"),
@@ -1427,17 +1591,18 @@ mod tests {
         assert_eq!(scaled.anti_aliasing, AntiAliasing::Msaa4);
         // The settings' scale applies without an override, clamped.
         assert_eq!(
-            post_config_from(QualityTier::High, 0.1, false, env(&[])).render_scale,
+            post_config_from(QualityTier::High, 0.1, false, None, env(&[])).render_scale,
             0.5
         );
         // Captures: Low's dynamic resolution and Medium's auto exposure are pinned off...
-        let capture = post_config_from(QualityTier::Low, 1.0, true, env(&[]));
+        let capture = post_config_from(QualityTier::Low, 1.0, true, None, env(&[]));
         assert!(!capture.dynamic_resolution && !capture.auto_exposure);
         assert!(
             !post_config_from(
                 QualityTier::High,
                 1.0,
                 true,
+                None,
                 env(&[("MOBA_EXPOSURE", "1.5")])
             )
             .auto_exposure
@@ -1447,6 +1612,7 @@ mod tests {
             QualityTier::Low,
             1.0,
             true,
+            None,
             env(&[("MOBA_DYNRES", "on"), ("MOBA_EXPOSURE", "auto")]),
         );
         assert!(explicit.dynamic_resolution && explicit.auto_exposure);
@@ -1455,6 +1621,7 @@ mod tests {
             QualityTier::Ultra,
             1.0,
             false,
+            None,
             env(&[
                 ("MOBA_AA", "taa"),
                 ("MOBA_BLOOM", "maybe"),
@@ -1464,6 +1631,56 @@ mod tests {
             ]),
         );
         assert_eq!(bad, PostConfig::for_tier(QualityTier::Ultra));
+    }
+
+    #[test]
+    fn tiered_presets_turn_dynamic_resolution_on_with_the_budget() {
+        use super::{TieredScale, tiered_scale};
+        use moba_render::QualityTier;
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        // The tiered path: dynamic resolution on, the tier's budget, the settings' scale
+        // capped at the preset's ceiling; captures still pin it off.
+        let tiered = tiered_scale(moba_render::RenderPath::Tiered, QualityTier::Ultra, 1440);
+        assert_eq!(
+            tiered,
+            Some(TieredScale {
+                target_ms: 9.0,
+                floor: 0.5,
+                ceiling: 1.0
+            })
+        );
+        let ultra = post_config_from(QualityTier::Ultra, 1.0, false, tiered, env(&[]));
+        assert!(ultra.dynamic_resolution);
+        assert_eq!((ultra.render_scale, ultra.min_render_scale), (1.0, 0.5));
+        assert_eq!(ultra.dynamic_target_ms, 9.0);
+        // The settings' scale is kept; the ceiling only lowers it.
+        let lowered = post_config_from(QualityTier::Ultra, 0.8, false, tiered, env(&[]));
+        assert_eq!(lowered.render_scale, 0.8);
+        // Until N1 ships the upscalers: Overdrive's 0.33 floor is held at today's 0.5 and
+        // its Performance-mode ceiling at full scale.
+        let overdrive = tiered_scale(
+            moba_render::RenderPath::Tiered,
+            QualityTier::Overdrive,
+            1080,
+        );
+        assert_eq!(
+            overdrive.map(|scale| (scale.floor, scale.ceiling)),
+            Some((0.5, 1.0))
+        );
+        let capture = post_config_from(QualityTier::Ultra, 1.0, true, tiered, env(&[]));
+        assert!(!capture.dynamic_resolution);
+        assert_eq!(capture.render_scale, 1.0);
+        assert_eq!(
+            tiered_scale(moba_render::RenderPath::Compat, QualityTier::Ultra, 1440),
+            None
+        );
     }
 
     #[test]
@@ -1535,6 +1752,21 @@ mod tests {
         assert_eq!(none.water, WaterMode::Off);
         let bad = environment_config_from(QualityTier::Medium, env(&[("MOBA_WATER", "lava")]));
         assert_eq!(bad, EnvironmentConfig::for_tier(QualityTier::Medium));
+    }
+
+    #[test]
+    fn scale_report_shows_the_range_and_late_changes() {
+        assert_eq!(super::scale_report(&[]), "");
+        // Steps down twice early, then holds: settled.
+        let scales = [1.0, 1.0, 0.8, 0.8, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75];
+        assert_eq!(
+            super::scale_report(&scales),
+            "scale_first=1.000 scale_final=0.750 scale_min=0.750 scale_max=1.000 \
+             scale_changes_late=0 "
+        );
+        // Oscillating in the second half.
+        let scales = [1.0, 0.9, 1.0, 0.9, 1.0, 0.9];
+        assert!(super::scale_report(&scales).ends_with("scale_changes_late=2 "));
     }
 
     #[test]

@@ -91,6 +91,26 @@ pub fn probe_devices(
     Ok(probed)
 }
 
+/// The device the renderer would pick from `devices` under `choice`: the highest score, the
+/// earlier device on a tie; with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only
+/// devices admitted to Tiered are candidates. `None` when nothing qualifies.
+#[must_use]
+pub fn choose_device(
+    devices: &[ProbedDevice],
+    choice: crate::caps::PathChoice,
+) -> Option<&ProbedDevice> {
+    devices
+        .iter()
+        .filter(|device| {
+            choice != crate::caps::PathChoice::Tiered
+                || device.admission.path == crate::caps::RenderPath::Tiered
+        })
+        .fold(None::<&ProbedDevice>, |best, device| match best {
+            Some(best) if best.score >= device.score => Some(best),
+            _ => Some(device),
+        })
+}
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const PORTABILITY_ENUMERATION: &CStr = c"VK_KHR_portability_enumeration";
 static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);

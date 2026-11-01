@@ -166,6 +166,7 @@ cargo run -p moba-tools --bin vulkan-probe
 scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)
 scripts/cull-probe.sh                                 # culling on == off, byte for byte (R8)
 scripts/perf-replay.sh                                # 10-minute replay per tier + perf-gate (R8, real GPU)
+scripts/dynres-check.sh                               # forced dynres target holds on the teamfight replay (ADR-0020 §5c, real GPU)
 ```
 
 Fuzz and model checking:

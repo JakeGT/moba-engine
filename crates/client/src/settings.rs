@@ -149,14 +149,22 @@ impl Bindings {
     }
 }
 
+/// The `quality` value that asks for the detected default tier.
+pub(crate) const QUALITY_AUTO: &str = "auto";
+
 /// User settings persisted as TOML.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Independent player preferences.
 pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
-    /// Rendering quality tier: `low`, `medium`, `high` or `ultra` (`MOBA_QUALITY` overrides).
+    /// Rendering quality tier: `auto`, `low`, `medium`, `high`, `ultra` or `overdrive`
+    /// (`MOBA_QUALITY` overrides). `auto` detects the device's default tier (ADR-0020 §2b).
     pub(crate) quality: String,
+    /// Whether `quality` was set by the device detection or by the player since it existed.
+    /// A file without it (written before the tiered path) is detected once, rather than
+    /// reading its old "ultra" as the new tier scale's Ultra.
+    pub(crate) quality_detected: bool,
     /// Render path: `auto`, `tiered` or `compat` (`MOBA_RENDER_PATH` overrides; ADR-0020 §2b).
     pub(crate) render_path: String,
     pub(crate) audio_volume: f32,
@@ -186,7 +194,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ui_scale: 1.0,
-            quality: String::from(moba_render::QualityTier::default().name()),
+            quality: String::from(QUALITY_AUTO),
+            quality_detected: false,
             render_path: String::from("auto"),
             audio_volume: 0.7,
             audio_mute: false,
@@ -376,10 +385,33 @@ impl Settings {
         Some(key)
     }
 
-    /// The configured rendering quality tier (validated by [`Self::sanitize`]).
+    /// The configured rendering quality tier (validated by [`Self::sanitize`]); `None` for
+    /// `auto`.
     #[must_use]
-    pub(crate) fn quality_tier(&self) -> moba_render::QualityTier {
-        moba_render::QualityTier::from_name(&self.quality).unwrap_or_default()
+    pub(crate) fn quality_tier(&self) -> Option<moba_render::QualityTier> {
+        moba_render::QualityTier::from_name(&self.quality)
+    }
+
+    /// The tier to run (ADR-0020 §2b, §5a), from the setting and the detected `default` tier.
+    /// A player's run detects once: `auto`, or a file from before the tiered path, takes
+    /// `default` and records it, and `true` is returned when the settings changed and should
+    /// be saved. An `automated` run (captures, smoke runs) never detects, so evidence does not
+    /// depend on the machine: `auto` is today's default, High.
+    pub(crate) fn resolve_quality(
+        &mut self,
+        default: moba_render::QualityTier,
+        automated: bool,
+    ) -> (moba_render::QualityTier, bool) {
+        match (self.quality_tier(), automated) {
+            (Some(tier), true) => (tier, false),
+            (None, true) => (moba_render::QualityTier::default(), false),
+            (Some(tier), false) if self.quality_detected => (tier, false),
+            (_, false) => {
+                self.quality = String::from(default.name());
+                self.quality_detected = true;
+                (default, true)
+            }
+        }
     }
 
     /// The configured render path (validated by [`Self::sanitize`]).
@@ -404,12 +436,14 @@ impl Settings {
             ));
             self.team_palette = String::from(crate::hud::theme::TeamPalette::default().name());
         }
-        if moba_render::QualityTier::from_name(&self.quality).is_none() {
+        if !self.quality.trim().eq_ignore_ascii_case(QUALITY_AUTO)
+            && moba_render::QualityTier::from_name(&self.quality).is_none()
+        {
             warnings.push(format!(
-                "settings: unknown quality {:?} (low/medium/high/ultra); using high",
+                "settings: unknown quality {:?} (auto/low/medium/high/ultra/overdrive); using auto",
                 self.quality
             ));
-            self.quality = String::from(moba_render::QualityTier::default().name());
+            self.quality = String::from(QUALITY_AUTO);
         }
         if moba_render::PathChoice::parse(&self.render_path).is_none() {
             warnings.push(format!(
@@ -581,15 +615,50 @@ mod tests {
         assert_eq!(warnings.len(), 3);
         assert_eq!(settings.camera_sensitivity, SENSITIVITY_MAX);
         assert_eq!(settings.camera_zoom, CAMERA_ZOOM_MIN);
-        assert_eq!(settings.quality_tier(), moba_render::QualityTier::High);
+        assert_eq!(
+            settings.quality_tier(),
+            None,
+            "an unknown tier becomes auto"
+        );
         settings.quality = String::from("Low");
         assert_eq!(settings.sanitize(), Vec::<String>::new());
-        assert_eq!(settings.quality_tier(), moba_render::QualityTier::Low);
+        assert_eq!(settings.quality_tier(), Some(moba_render::QualityTier::Low));
+        settings.quality = String::from("overdrive");
+        assert_eq!(settings.sanitize(), Vec::<String>::new());
+        assert_eq!(
+            settings.quality_tier(),
+            Some(moba_render::QualityTier::Overdrive)
+        );
 
         settings.controls.attack_button = String::from("right");
         let (bindings, warnings) = settings.bindings();
         assert_eq!(warnings.len(), 0);
         assert_eq!(bindings.attack_button, MouseBinding::Right);
+    }
+
+    #[test]
+    fn quality_is_detected_once_and_never_in_automated_runs() {
+        use moba_render::QualityTier::{High, Low, Ultra};
+        // A new player's `auto` takes the detected tier and asks to be saved.
+        let mut fresh = Settings::default();
+        assert_eq!(fresh.resolve_quality(Ultra, false), (Ultra, true));
+        assert_eq!(
+            (fresh.quality.as_str(), fresh.quality_detected),
+            ("ultra", true)
+        );
+        // Then the saved tier sticks, whatever the device later detects.
+        assert_eq!(fresh.resolve_quality(Low, false), (Ultra, false));
+        // A file from before the tiered path ("ultra", no flag) is re-detected once.
+        let mut old: Settings =
+            toml::from_str("quality = \"ultra\"").expect("a pre-N0 settings file");
+        assert!(!old.quality_detected);
+        assert_eq!(old.resolve_quality(Low, false), (Low, true));
+        // Automated runs never detect: `auto` is High, a set tier is kept, nothing is saved.
+        let mut automated = Settings::default();
+        assert_eq!(automated.resolve_quality(Ultra, true), (High, false));
+        assert_eq!(automated.quality, "auto");
+        let mut set: Settings = toml::from_str("quality = \"low\"").expect("settings");
+        assert_eq!(set.resolve_quality(Ultra, true), (Low, false));
     }
 
     #[test]

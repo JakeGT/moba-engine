@@ -218,9 +218,12 @@ struct ClientApp {
     frame_ms: f32,
     fps: f32,
     ui_scale: f32,
+    /// The tier asked for (`MOBA_QUALITY`, the settings or the detected default).
     quality: moba_render::QualityTier,
-    /// `MOBA_RENDER_PATH`, else the settings entry (ADR-0020 §2b).
-    render_path: moba_render::PathChoice,
+    /// The tier whose switches the frame runs on the probed path (ADR-0020 §5e).
+    config_quality: moba_render::QualityTier,
+    /// The probed render path and the renderer's path choice.
+    render_target: launch::RenderTarget,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
     /// `MOBA_PREVIEW_CAMERA`: a fixed local-preview orbit `[yaw, pitch, distance, x, z]`.
@@ -231,9 +234,10 @@ struct ClientApp {
     /// the first one), for the hot-reload poll.
     shader_stamp: Option<launch::ShaderStamp>,
     frame_log: Option<Vec<f32>>,
-    /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
-    /// call, and time inside it (fence wait, acquire, recording, submit, present).
-    work_log: Option<Vec<[f32; 2]>>,
+    /// Per-frame `[cpu_ms, render_ms, render_scale]` while logging: time from frame start
+    /// to the render call, time inside it (fence wait, acquire, recording, submit, present),
+    /// and the dynamic-resolution scale the frame rendered at (ADR-0020 §5c).
+    work_log: Option<Vec<[f32; 3]>>,
     /// Per-frame GPU times in [`launch::GPU_LANES`] order (`shadow` … `vfx_resolve`) plus the
     /// particle stats `[alive, overdraw]` while logging, from the renderer's timestamp
     /// queries (empty on devices without timestamp support; `0` for a pass that did not run:
@@ -265,7 +269,7 @@ impl ClientApp {
         if std::env::var_os("MOBA_RESET_SETTINGS").is_some() {
             let _ = crate::settings::Settings::default().save(&settings_path);
         }
-        let (settings, warnings) = crate::settings::Settings::load(&settings_path);
+        let (mut settings, warnings) = crate::settings::Settings::load(&settings_path);
         let camera_zoom = settings.camera_zoom;
         let vfx_setting = settings.vfx;
         let ally_vfx_opacity = std::env::var("MOBA_VFX_ALLY_OPACITY")
@@ -316,15 +320,6 @@ impl ClientApp {
         let gpu_log = frame_log_path
             .as_ref()
             .map(|_| Vec::with_capacity(frame_log_frames));
-        let quality = std::env::var("MOBA_QUALITY").ok().map_or_else(
-            || settings.quality_tier(),
-            |name| {
-                moba_render::QualityTier::from_name(&name).unwrap_or_else(|| {
-                    eprintln!("MOBA_QUALITY={name:?} is not low/medium/high/ultra; using settings");
-                    settings.quality_tier()
-                })
-            },
-        );
         // An empty value is unset, as for `MOBA_QUALITY`.
         let render_path = std::env::var("MOBA_RENDER_PATH")
             .ok()
@@ -340,6 +335,21 @@ impl ClientApp {
                     })
                 },
             );
+        // ADR-0020 §2b, §5e: the path decides what each tier configures, so it is probed
+        // once before anything is built from the tier.
+        // Only `MOBA_RENDER_PATH=tiered`, never the settings entry, may run on a CPU device
+        // such as lavapipe (ADR-0020 amendment 2).
+        let allow_cpu = std::env::var("MOBA_RENDER_PATH")
+            .ok()
+            .and_then(|name| moba_render::PathChoice::parse(&name))
+            == Some(moba_render::PathChoice::Tiered);
+        let render_target = launch::RenderTarget::probe(render_path, allow_cpu);
+        let automated =
+            quit_after_frames != u64::MAX || capture_path.is_some() || map_capture.is_some();
+        let quality =
+            launch::resolve_quality(&mut settings, &settings_path, &render_target, automated);
+        // The tier whose switches this path runs; every client system below keys off it.
+        let config_quality = moba_render::config_tier(render_target.path, quality);
         let team_palette = std::env::var("MOBA_TEAM_PALETTE").ok().map_or_else(
             || settings.team_palette(),
             |name| {
@@ -371,7 +381,7 @@ impl ClientApp {
             ),
             models: {
                 let mut models = models::ModelLibrary::from_env();
-                models.set_bone_lod(bone_lod::BoneLod::from_env(quality).enabled());
+                models.set_bone_lod(bone_lod::BoneLod::from_env(config_quality).enabled());
                 models
             },
             map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env())
@@ -387,8 +397,8 @@ impl ClientApp {
                         .flatten(),
                 ),
             minions: minions::MinionDriver::new(30),
-            minion_library: minions::MinionLibrary::from_env(quality),
-            bone_lod: bone_lod::BoneLod::from_env(quality),
+            minion_library: minions::MinionLibrary::from_env(config_quality),
+            bone_lod: bone_lod::BoneLod::from_env(config_quality),
             local_feed: local_feed::LocalFeed::new(),
             stress: stress::StressScene::from_env(),
             vfx: {
@@ -401,7 +411,7 @@ impl ClientApp {
                 };
                 let mut system = vfx::VfxSystem::new(
                     library,
-                    quality.vfx_budget(),
+                    config_quality.vfx_budget(),
                     vfx::vfx_enabled_from_env(vfx_setting),
                 );
                 system.set_ally_opacity(ally_vfx_opacity);
@@ -418,7 +428,9 @@ impl ClientApp {
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
             hit_rects: HitList::new(),
             hud_fx: HudFx::new(team_palette),
-            portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(quality)),
+            portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(
+                config_quality,
+            )),
             minimap: offscreen::MinimapBaker::new(offscreen::MinimapMode::from_env()),
             screen_fx: screen_fx::ScreenFx::new(screen_fx_settings, screen_fx_preview),
             render_scale: settings.render_scale,
@@ -436,7 +448,8 @@ impl ClientApp {
                 .unwrap_or(settings.ui_scale)
                 .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
             quality,
-            render_path,
+            config_quality,
+            render_target,
             bindings,
             camera_sensitivity,
             preview_camera: launch::parse_preview_camera(
@@ -663,34 +676,28 @@ impl App for ClientApp {
             .with_vsync(std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"))
             .with_ui_scale(self.ui_scale)
             .with_quality_tier(self.quality)
-            .with_render_path(self.render_path)
-            // Only `MOBA_RENDER_PATH=tiered`, never the settings entry, may run on a CPU device
-            // such as lavapipe (ADR-0020 amendment 2).
-            .with_tiered_cpu_devices(
-                std::env::var("MOBA_RENDER_PATH")
-                    .ok()
-                    .and_then(|name| moba_render::PathChoice::parse(&name))
-                    == Some(moba_render::PathChoice::Tiered),
-            )
+            .with_render_path(self.render_target.choice)
+            .with_tiered_cpu_devices(self.render_target.allow_cpu)
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
             .with_shader_dir(self.shader_dir.clone())
             .with_pipeline_stats(std::env::var_os("MOBA_PIPELINE_STATS").is_some_and(|v| v == "1"))
             .with_compressed_textures(launch::compressed_textures())
-            .with_lighting(Some(launch::lighting_config(self.quality)))
+            .with_lighting(Some(launch::lighting_config(self.config_quality)))
             .with_vfx(self.vfx.enabled())
             .with_distortion(launch::distortion_switch().0)
             .with_distortion_draw(launch::distortion_switch().1)
             .with_post(Some(launch::post_config(
-                self.quality,
+                self.config_quality,
                 self.render_scale,
                 self.capture_path.is_some() || self.map_capture.is_some(),
+                launch::tiered_scale(self.render_target.path, self.quality, window.size()[1]),
             )))
-            .with_world(Some(launch::world_config(self.quality)))
+            .with_world(Some(launch::world_config(self.config_quality)))
             .with_culling(launch::cull_mode())
             .with_mesh_lod(launch::mesh_lod())
-            .with_environment(Some(launch::environment_config(self.quality)));
+            .with_environment(Some(launch::environment_config(self.config_quality)));
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -723,6 +730,21 @@ impl App for ClientApp {
                     },
                     renderer.admission().log_fields()
                 );
+                eprintln!(
+                    "[render] quality {} runs the {} configuration on the {} path",
+                    renderer.quality_tier(),
+                    renderer.config_tier(),
+                    renderer.admission().path.name()
+                );
+                if renderer.admission().path != self.render_target.path {
+                    // The configuration was built for the probed path; say so if the
+                    // renderer's device (the one that can present) differs.
+                    eprintln!(
+                        "[render] warning: configured for the {} path, but the renderer runs {}",
+                        self.render_target.path.name(),
+                        renderer.admission().path.name()
+                    );
+                }
                 // `on_start` may run again after a resume with a fresh mesh table.
                 self.models.renderer_recreated();
                 self.map_visuals.renderer_recreated();
@@ -1161,7 +1183,7 @@ impl App for ClientApp {
                             minions,
                             minion_library,
                             bone_lod: *bone_lod,
-                            far_attachments: self.quality != moba_render::QualityTier::Low,
+                            far_attachments: self.config_quality != moba_render::QualityTier::Low,
                         },
                         anchors,
                         !vfx.enabled(),
@@ -1455,7 +1477,7 @@ impl App for ClientApp {
                             minions,
                             minion_library,
                             bone_lod: *bone_lod,
-                            far_attachments: self.quality != moba_render::QualityTier::Low,
+                            far_attachments: self.config_quality != moba_render::QualityTier::Low,
                         },
                         anchors,
                         center,
@@ -1576,7 +1598,11 @@ impl App for ClientApp {
         {
             let cpu_ms = started.duration_since(now).as_secs_f32() * 1_000.0;
             let render_ms = started.elapsed().as_secs_f32() * 1_000.0;
-            work.push([cpu_ms, render_ms]);
+            let scale = self
+                .renderer
+                .as_ref()
+                .map_or(1.0, moba_render::Renderer::render_scale);
+            work.push([cpu_ms, render_ms, scale]);
             if let (Some(gpu), Some(timings)) = (
                 self.gpu_log.as_mut(),
                 self.renderer
