@@ -633,7 +633,8 @@ source / generate → licence gate → repair (voxel/SDF manifold) → simplify 
   under each map's grading) with numeric readability checks.
 
 **A correctness fix to make early:** tangents must be MikkTSpace. `meshopt_generateTangents`
-only matches it with `meshopt_TangentCompatible`.
+only matches it with `meshopt_TangentCompatible`. (Done in A0, ADR-0022: the engine never used
+meshoptimizer for tangents; its own generator is now the reference MikkTSpace.)
 
 **What an agent automates end to end:**
 - licence filtering;
@@ -764,7 +765,8 @@ exception: they stay all-rights-reserved and are listed as such.
    [ADR-0020](../adr/0020-next-gen-foundations.md) (accepted 2026-11-01), with the vendor
    claims re-checked and its corrections to this plan listed there.
 3. **ADR-0021 (N1):** the temporal foundation, the upscaler interface and the overlay layer.
-4. **A0:** the licence and provenance gate in `content-check`, and the MikkTSpace tangent fix.
+4. **A0:** the licence and provenance gate in `content-check`, and the MikkTSpace tangent fix
+   (done: [ADR-0022](../adr/0022-provenance-gate-mikktspace.md)).
 5. Set up the local AI workstation (ComfyUI + TRELLIS.2, Z-Image, StableMaterials, Kimodo) and
    produce a first test hero through the full §9.4 pipeline. That measures where the human
    effort actually goes.

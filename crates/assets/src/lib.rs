@@ -47,6 +47,10 @@
 //! [`generate_water`] builds the water surface mesh on the terrain's own grid, and
 //! [`generate_foliage`] scatters the foliage instances; all three are deterministic and shared
 //! by the client and `content-check`.
+//!
+//! Provenance (A0, ADR-0022): [`provenance`] reads the `provenance.toml` manifest of every
+//! asset directory, applies the licence policy and renders the third-party notices, credits
+//! and AI disclosure that `content-check --provenance` writes.
 
 #![forbid(unsafe_code)]
 
@@ -63,6 +67,7 @@ mod material;
 mod mesh;
 mod mesh_lod;
 mod pose;
+pub mod provenance;
 mod skin;
 mod skin_lod;
 mod terrain;

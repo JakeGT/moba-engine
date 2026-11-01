@@ -1,0 +1,11 @@
+# Provenance of every file in this directory (A0, ADR-0022). `content-check --provenance`
+# checks it and generates THIRD_PARTY.md's content section, content/CREDITS.txt and
+# content/AI-DISCLOSURE.md from it. Format: docs/content-authoring.md#provenance.
+
+[[asset]]
+files = ["minion.ktx2", "minion.toml"]
+title = "Minion vertex-animation texture"
+source = "original"
+author = "MOBA Engine contributors"
+licence = "MIT OR Apache-2.0"
+made_with = "Baked by moba-tools vat-bake from models/sentinel-skinned.glb (vat-bake content/models/sentinel-skinned.glb content/vat/minion)"
