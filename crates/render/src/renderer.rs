@@ -581,18 +581,15 @@ impl Renderer {
             .collect();
 
         let instance = InstanceContext::new(&required, config.validation)?;
-        let loader = khr::surface::Instance::new(&instance.entry, &instance.instance);
-        // SAFETY: the instance was created with exactly these surface extensions for this
-        // display/window handle pair.
-        let surface_handle = unsafe {
-            ash_window::create_surface(
-                &instance.entry,
-                &instance.instance,
-                display_handle,
-                window_handle,
-                None,
-            )
-        }?;
+        let loader = khr::surface::Instance::load(&instance.entry, &instance.instance);
+        let factory =
+            ash_window::SurfaceFactory::new(&instance.entry, &instance.instance, display_handle)?;
+        // SAFETY: the instance was created with at least these surface extensions for this
+        // display handle, and the factory was loaded for the same display. The window handle is
+        // valid now. The window outlives the surface because `Renderer` keeps its own handle to
+        // it in `window`, its last field; the display connection belongs to the caller's event
+        // loop, which outlives the renderer.
+        let surface_handle = unsafe { factory.create_surface(window_handle, None) }?;
         let surface = Surface {
             loader,
             handle: surface_handle,

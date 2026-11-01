@@ -28,3 +28,9 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# ADR-0020 §1: ash (Vulkan 1.4 headers) and the gpu-allocator branch that builds against it,
+# each pinned to a full revision in Cargo.toml. Nothing else may come from git.
+allow-git = [
+    "https://github.com/ash-rs/ash",
+    "https://github.com/Traverse-Research/gpu-allocator",
+]
