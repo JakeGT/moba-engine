@@ -1026,6 +1026,26 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
 - **`gpu-allocator` keeps buffer device address off.** Tiered enables the
   `bufferDeviceAddress` feature, but no buffer uses an address yet. The first pass that
   allocates one (bindless, §3a) turns the allocator flag on, so N0.2 changes no allocation.
+### Amendment 3 (2026-11-01, N0.3): dynamic resolution before the upscalers
+
+Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Four departures from §5, each
+until the phase named:
+
+- **The scale ceiling stays at full scale until N1.** §5c sets the ceiling to the preset's
+  upscaler mode (0.67 at 1080p and 1440p, 0.5 for Ultra at 4K and Overdrive). Until N1 there
+  is no upscaler to fill that gap: today's bilinear or bicubic stretch would make the tiered
+  path, which `auto` picks on every RT-capable GPU, render visibly softer than Compat. N0
+  keeps the tier budget as the target and dynamic resolution on for every tier, from full
+  scale down to the floor. `GpuBudget::scale_range_at` still carries the §5c ranges, and N1
+  switches the ceiling on with the upscalers.
+- **The floor stays at 0.5 until N1.** The 0.33 (Ultra Performance) floors of Ultra at 4K
+  and Overdrive go below today's `MIN_RENDER_SCALE`; they arrive with the upscalers.
+- **The dynamic-resolution target may go down to 0.1 ms** (it was clamped to 1 ms). The RTX
+  5070 Ti runs the 1080p teamfight replay in about 0.5–0.7 ms of GPU time, so gate 4's forced
+  target could not bite under the old clamp. `scripts/dynres-check.sh` is that gate's test.
+- **Ultra's budget (9 ms) exceeds its 120 fps frame (8.33 ms).** §5b's table is kept as
+  written, and the budget test exempts Ultra by name. The maintainer decides whether to lower
+  it before N1 makes the tiered gate binding.
 
 ## Corrections to the roadmap
 
