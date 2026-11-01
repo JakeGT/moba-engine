@@ -512,6 +512,10 @@ impl DeviceContext {
                     (fp.get_pipeline_executable_statistics_khr)(handle, &raw const info, count, out)
                 }
             });
+            if statistics.is_empty() {
+                // A failed query prints no line, as before.
+                continue;
+            }
             let name = executable.name_as_c_str().map_or_else(
                 |_| String::from("?"),
                 |name| name.to_string_lossy().into_owned(),
@@ -684,21 +688,26 @@ fn query_vulkan13(
 }
 
 /// One Vulkan two-call enumeration through `call(count, out)`, keeping what the driver wrote.
-/// A count that shrinks between the calls truncates the result and one that grows
-/// (`INCOMPLETE`) keeps the entries written: ash's own fill wrappers assert that the count is
-/// stable, which would abort the process on a misbehaving driver.
+/// `INCOMPLETE` (the count grew between the calls) retries, as ash's own enumerations do; a
+/// count that shrank truncates. ash's fill wrappers instead assert that the count is stable,
+/// which would abort the process on a misbehaving driver. Any error gives an empty result.
 fn enumerate_two_call<T: Default + Clone>(
     mut call: impl FnMut(&mut u32, *mut T) -> vk::Result,
 ) -> Vec<T> {
-    let mut count = 0;
-    if call(&mut count, core::ptr::null_mut()) != vk::Result::SUCCESS {
-        return Vec::new();
+    for _ in 0..4 {
+        let mut count = 0;
+        if call(&mut count, core::ptr::null_mut()) != vk::Result::SUCCESS {
+            return Vec::new();
+        }
+        let mut out = vec![T::default(); count as usize];
+        match call(&mut count, out.as_mut_ptr()) {
+            vk::Result::SUCCESS => {
+                out.truncate(count as usize);
+                return out;
+            }
+            vk::Result::INCOMPLETE => {}
+            _ => return Vec::new(),
+        }
     }
-    let mut out = vec![T::default(); count as usize];
-    let result = call(&mut count, out.as_mut_ptr());
-    if result != vk::Result::SUCCESS && result != vk::Result::INCOMPLETE {
-        return Vec::new();
-    }
-    out.truncate(count as usize);
-    out
+    Vec::new()
 }

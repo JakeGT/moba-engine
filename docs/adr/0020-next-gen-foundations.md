@@ -945,9 +945,11 @@ helps. The rule is:
 ### Amendment 1 (2026-11-01, N0.1): the tiered path stays on Vulkan 1.3
 
 This applies the Vulkan 1.4 rule from the maintainer's answers. The check was made in the
-bindings PR (`feat/n0-ash-pin`).
+bindings PR, [#351](https://github.com/JakeGT/moba-engine/pull/351).
 
-**Support: met.** Each tier-floor GPU exposes 1.4 on a released driver:
+**Support: met.** Each tier-floor GPU exposes 1.4 on a conformant driver. For NVIDIA, the
+first such drivers are developer betas. This check did not confirm which general release
+first carried 1.4. Today's drivers do: the local 615.78.08 reports 1.4.351.
 
 | Tier-floor GPU and driver | First driver exposing Vulkan 1.4 | Primary source |
 |---|---|---|
@@ -973,12 +975,17 @@ Radeon 610M (RADV 26.2.5, 1.4.354). Each reports every 1.4 feature named below.
 
 **Decision:**
 - **The tiered minimum stays Vulkan 1.3.** ADR-0002 is unchanged.
-- **The probe records the 1.4-promoted features as optional capabilities:**
+- **The capability probe (N0.2) records the 1.4-promoted features as optional capabilities:**
   - `pushDescriptor`;
   - `maintenance5` and `maintenance6`;
   - `dynamicRenderingLocalRead`;
   - `indexTypeUint8`;
   - `hostImageCopy`.
+
+  The instance asks for API 1.3, so the probe reads them through their KHR and EXT feature
+  structures, never through `VkPhysicalDeviceVulkan14Features`. Each device here advertises
+  every one of those extensions. Push descriptors have no feature structure, so advertising
+  `VK_KHR_push_descriptor` counts as support.
 - **A tiered pass that adopts one of them** makes it a *required* item in the gate (§1e) in
   the same PR: the 1.4 feature, or the KHR extension on a 1.3 device.
 - **Revisit** if N2 moves to in-pass deferred, or if a feature appears that only 1.4 offers.

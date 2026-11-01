@@ -52,7 +52,7 @@ MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 MOBA_FRAME_LOG
   ./target/release/moba-client
 ```
 
-| Tier | Build | GPU total p50 (range) | GPU total p95 | scene p50 | VRAM | `locked_uploads` / `locked_pipelines` |
+| Tier | Build | GPU total p50, ms (range) | GPU total p95, ms | scene p50, ms | VRAM | `locked_uploads` / `locked_pipelines` |
 |---|---|---|---|---|---|---|
 | Low | main | 0.207 (0.206–0.209) | 0.222 | 0.133 | 82.2 MB | 0 / 0 |
 | Low | branch | 0.207 (0.207–0.207) | 0.224 | 0.133 | 82.2 MB | 0 / 0 |
@@ -61,5 +61,6 @@ MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 MOBA_FRAME_LOG
 | Ultra | main | 0.661 (0.657–0.661) | 0.671 | 0.252 | 286.7 MB | 0 / 0 |
 | Ultra | branch | 0.660 (0.660–0.661) | 0.670 | 0.252 | 286.7 MB | 0 / 0 |
 
-The branch is within 0.002 ms of `main` on every tier, at p50 and at p95. That is inside the
-rounds' own spread. VRAM is identical, and so are the upload and pipeline counters.
+The branch is within 0.002 ms of `main` on every tier, at p50 and at p95. At p50 that is
+inside the rounds' own spread, shown in the table. The p95 values are medians of the rounds,
+and their spread is not tabulated. VRAM is identical, and so are the upload and pipeline counters.
