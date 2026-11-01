@@ -608,7 +608,8 @@ impl<'a> Scene<'a> {
 }
 
 /// GPU layout of the per-frame camera uniform. Must match `include/camera.glsl` (std140:
-/// every member is a `vec4`, `uvec4` or `mat4`, so there is no padding).
+/// every member is a `vec4`, `uvec4` or `mat4`, so there is no padding) and its Slang mirror
+/// `slang/lib/frame_constants.slang` (checked against `slangc`'s reflection in a test).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct CameraUniform {
@@ -802,6 +803,106 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, contact), 1552);
         assert_eq!(offset_of!(CameraUniform, outline_palette), 1568);
         assert_eq!(size_of::<CameraUniform>(), 1696);
+    }
+
+    /// ADR-0020 §4c's layout check: the Slang mirror of the frame constants
+    /// (`slang/lib/frame_constants.slang`, set 0, binding 0 of the toolchain smoke module)
+    /// has exactly `CameraUniform`'s fields, in order, at the same offsets and sizes, as
+    /// `slangc -reflection-json` reports them.
+    #[test]
+    fn slang_frame_constants_match_camera_uniform() {
+        macro_rules! rust_fields {
+            ($($field:ident),* $(,)?) => {{
+                let zeroed: CameraUniform = bytemuck::Zeroable::zeroed();
+                vec![$((
+                    stringify!($field),
+                    offset_of!(CameraUniform, $field),
+                    core::mem::size_of_val(&zeroed.$field),
+                )),*]
+            }};
+        }
+        let rust = rust_fields!(
+            view_proj,
+            camera_pos,
+            light_direction,
+            ambient,
+            terrain,
+            vision_circles,
+            vision_count,
+            vision_walls,
+            wall_count,
+            light_view_proj,
+            sun_color,
+            shadow_params,
+            shadow_extra,
+            ibl_params,
+            style,
+            rim_color,
+            specular_tint,
+            ambient_ground,
+            sh,
+            fog_rect,
+            fog_color,
+            fog_params,
+            haze_color,
+            haze_params,
+            sky_zenith,
+            sky_horizon,
+            post_params,
+            post_clamp,
+            inv_view_proj,
+            viewport,
+            light_grid,
+            light_info,
+            occlusion,
+            baked_ao,
+            contact,
+            outline_palette,
+        );
+        // The list above covers the whole struct: no field missing, no padding.
+        assert_eq!(
+            rust.iter().map(|&(_, _, size)| size).sum::<usize>(),
+            size_of::<CameraUniform>()
+        );
+
+        let reflection: serde_json::Value =
+            serde_json::from_str(moba_shaders::TOOLCHAIN_SMOKE_REFLECTION_JSON)
+                .expect("slangc reflection JSON");
+        let camera = reflection["parameters"]
+            .as_array()
+            .expect("reflection parameters")
+            .iter()
+            .find(|parameter| parameter["name"] == "camera")
+            .expect("the smoke module reflects `camera`");
+        // Set 0 (`space` is omitted when 0), binding 0: the GLSL camera block's slot.
+        assert_eq!(camera["binding"]["kind"], "descriptorTableSlot");
+        assert_eq!(camera["binding"]["index"], 0);
+        assert_eq!(camera["binding"]["space"].as_u64().unwrap_or(0), 0);
+        assert_eq!(camera["type"]["kind"], "constantBuffer");
+        let element = &camera["type"]["elementType"];
+        assert_eq!(element["name"], "FrameConstants");
+        let size = camera["type"]["elementVarLayout"]["binding"]["size"].as_u64();
+        assert_eq!(size, Some(size_of::<CameraUniform>() as u64));
+
+        let slang: Vec<(String, u64, u64)> = element["fields"]
+            .as_array()
+            .expect("FrameConstants fields")
+            .iter()
+            .map(|field| {
+                let binding = &field["binding"];
+                assert_eq!(binding["kind"], "uniform", "{field}");
+                (
+                    field["name"].as_str().expect("field name").to_owned(),
+                    binding["offset"].as_u64().expect("field offset"),
+                    binding["size"].as_u64().expect("field size"),
+                )
+            })
+            .collect();
+        let rust: Vec<(String, u64, u64)> = rust
+            .into_iter()
+            .map(|(name, offset, size)| (name.to_owned(), offset as u64, size as u64))
+            .collect();
+        assert_eq!(slang, rust, "Slang FrameConstants vs Rust CameraUniform");
     }
 
     #[test]

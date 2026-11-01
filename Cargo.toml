@@ -67,6 +67,9 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11
 # Dev-only.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 loom = "0.7"
+# The Slang reflection layout test (ADR-0020 §4c) reads `slangc -reflection-json` output.
+# Already in the lock file through criterion.
+serde_json = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

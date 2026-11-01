@@ -31,6 +31,7 @@ moba-shaders.workspace = true
 # The VAT validation tests load the shipped sample model.
 moba-assets = { workspace = true, features = ["bc-decode", "glb"] }
 criterion.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "light_binning"

@@ -26,9 +26,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install MoltenVK
         run: |
-          brew install molten-vk vulkan-loader glslang
+          brew install molten-vk vulkan-loader glslang spirv-tools
           PREFIX=$(brew --prefix molten-vk)
           LOADER=$(brew --prefix vulkan-loader)
           ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)

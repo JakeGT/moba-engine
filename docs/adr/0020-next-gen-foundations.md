@@ -4,7 +4,8 @@
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-01)). Proposed 2026-10-31. This is phase N0 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§5.1, §8 and §12 step 2),
-and it is written before the code.
+and it is written before the code. **Amended** 2026-11-01 by the N0 Slang toolchain step
+([amendment](#amendment-n0-slang-toolchain-2026-11-01)).
 - **Builds on:** [ADR-0002](0002-vulkan-baseline.md), which stays in force: Vulkan 1.3 is
   still the minimum. The maintainer allowed raising the **tiered path** to Vulkan 1.4 if it
   helps (see the answers below). Compat stays on 1.3 in any case.
@@ -939,6 +940,52 @@ helps. The rule is:
   capability gate (§2), so a device that fails it falls back to Compat with a logged reason.
   ADR-0002 is amended only for the tiered path.
 
+## Amendment (N0 Slang toolchain, 2026-11-01)
+
+These are the departures and clarifications from implementing §4. The toolchain is
+documented in [docs/dev/slang.md](../dev/slang.md).
+
+- **Pin.** The pin is v2026.20, as proposed. The release exists, and no newer release is
+  listed. The SHA-256 values in `crates/shaders/slang-version.txt` were taken from the
+  downloaded archives and match the release API's `digest` for all five hosts. The Windows
+  archive is the `.zip`; the other four hosts use the `.tar.gz`.
+- **Flags.** There is no "Vulkan 1.3 profile" in `slangc`. `-profile spirv_1_6` is the
+  equivalent, since SPIR-V 1.6 is Vulkan 1.3's core version, and `spirv-val --target-env
+  vulkan1.3` checks the result. Two flags are added:
+  - `-fvk-use-entrypoint-name`, so that one file may hold several entry points;
+  - `-warnings-as-errors all`.
+- **Explicit bindings.** `slangc` has no flag that rejects implicit bindings, so a
+  `moba-shaders` unit test checks the sources: every global resource follows a
+  `[[vk::binding]]` line.
+- **Compiler lookup.** The `target/tools` step walks up from `OUT_DIR`, so a relocated target
+  directory (`CARGO_TARGET_DIR`, `build.target-dir`) works. The fetch scripts honour
+  `CARGO_TARGET_DIR`.
+- **Layout check: frame constants only, for now.** The test compares `slangc
+  -reflection-json` for `FrameConstants` (`shaders/slang/lib/frame_constants.slang`) with
+  `CameraUniform`. The instance record and the material record get Slang mirrors, and join the
+  test, when the first Slang pass that reads them lands (N1). Writing those mirrors now would
+  mean porting a pass, which N0 does not do (§4d).
+- **N0 module.** This step adds one module, `toolchain_smoke.slang`, which the renderer does
+  not create. `bindless_smoke` and `rt_smoke` follow with bindless and the capability gate.
+- **CI.**
+  - The fetch and its cache (keyed on `slang-version.txt`) are one composite action,
+    `.github/actions/setup-slang`.
+  - The action is used in every job that builds the shaders crate. Jobs that never build it
+    don't use it: `release.yml`'s `package` job, `deny`, `miri`, `loom.yml`, `fuzz.yml` and
+    `docs.yml`.
+  - `nightly-perf.yml`'s self-hosted runner must provide `spirv-val` itself.
+  - The Linux and macOS jobs now install `spirv-tools`, so CI also validates the GLSL modules,
+    where before it skipped them.
+- **RTXDI spike: pass for DI, ReGIR and GI; fail for PT.** RTXDI v3.1.0's unmodified
+  library headers for ReSTIR DI, ReGIR, presampling and ReSTIR GI compile with `slangc`
+  2026.20 to SPIR-V that passes `spirv-val`. The ReSTIR PT headers do not compile, because
+  they use C++ templates and legacy loop scoping. DXC is therefore **not** needed for the
+  `rtxdi` feature's DI and GI, only for PT if PT is ever adopted. The record is
+  [docs/dev/rtxdi-slang-spike.md](../dev/rtxdi-slang-spike.md).
+- **Publishing.** The workspace stays `publish = false`. `cargo package --list` is unaffected,
+  since `slang-version.txt` and `shaders/slang/` are inside the crate. A docs.rs-style build
+  without shader tools fails at `build.rs`, which is already true for `glslc` today.
+
 ## Corrections to the roadmap
 
 These were re-checked on 2026-10-31. This PR only adds a link to this ADR from roadmap §12;
@@ -973,8 +1020,9 @@ may fold the corrections in when this ADR is accepted.
 - **§6.3 SHaRC.** SHaRC 1.8.3 is in the standalone `NVIDIA-RTX/SHARC` repository, as the
   untagged commit `4e21b585c33c` ("v1.8.3"). The repository's latest *tag* is older, v1.6.5.0.
   RTXGI v2.8.0 pulls it in as a submodule. Pin that commit (§6b).
-- **§6.2 RTXDI.** Upstream compiles its HLSL with DXC. Compiling it through Slang is
-  unverified (§4d).
+- **§6.2 RTXDI.** Upstream compiles its HLSL with DXC. Compiling it through Slang was
+  unverified (§4d). The N0 spike has since verified it for DI and GI, but not for PT (see the
+  [N0 Slang amendment](#amendment-n0-slang-toolchain-2026-11-01)).
 - **§6.3 NRC.** "Windows plus CUDA only" is correct. It *does* have a Vulkan DLL
   (`NRC_Vulkan.dll`), with no Linux binaries.
 - **§5.1 Slang.** The licence and Khronos hosting are correct. The repository lives in the

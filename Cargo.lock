@@ -1432,6 +1432,7 @@ dependencies = [
  "moba-platform",
  "moba-shaders",
  "raw-window-handle",
+ "serde_json",
 ]
 
 [[package]]

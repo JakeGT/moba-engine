@@ -1,7 +1,10 @@
-//! GLSL shader sources, compiled to SPIR-V at build time.
+//! GLSL and Slang shader sources, compiled to SPIR-V at build time.
 //!
-//! The build script uses `glslc` (or `glslangValidator`) and validates every module with
-//! `spirv-val` when it is installed. The renderer consumes the byte slices below and never
+//! The build script compiles GLSL with `glslc` (or `glslangValidator`) and validates every
+//! module with `spirv-val` when it is installed. New tiered passes are written in **Slang**
+//! (ADR-0020 §4): `shaders/slang/*.slang`, compiled by the `slangc` pinned in
+//! `slang-version.txt` (fetch it once with `scripts/fetch-slang.sh`, or `.ps1` on Windows) and
+//! always validated by `spirv-val`. The renderer consumes the byte slices below and never
 //! ships source code to the driver.
 //!
 //! Sources share declarations through `#include` files in `shaders/include/` (camera block,
@@ -151,6 +154,20 @@ pub const TERRAIN_NODECALS_FRAG: &[u8] =
 /// Water with screen-space refraction and contact foam (`water.frag` + `WATER_REFRACTION`).
 pub const WATER_REFRACTION_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/water_refraction.frag.spv"));
+
+/// Slang toolchain smoke module (`slang/toolchain_smoke.slang`, ADR-0020 §4c): a compute
+/// entry point `main` that copies the frame's vision circles (set 0, binding 0) into a
+/// storage buffer (set 0, binding 1). It proves the Slang build end to end; the renderer does
+/// not create it.
+pub const TOOLCHAIN_SMOKE_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.spv"));
+
+/// `slangc -reflection-json` output for [`TOOLCHAIN_SMOKE_SLANG`], whose set 0, binding 0 is
+/// the Slang mirror of the frame constants (`slang/lib/frame_constants.slang`). The renderer's
+/// layout test compares its offsets and sizes with the Rust `#[repr(C)]` struct.
+#[doc(hidden)]
+pub const TOOLCHAIN_SMOKE_REFLECTION_JSON: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.json"));
 
 /// A named SPIR-V module, for tooling and validation.
 #[derive(Clone, Copy, Debug)]
@@ -371,6 +388,10 @@ pub const MODULES: &[ShaderModule] = &[
         name: "vfx_distort.frag",
         spirv: VFX_DISTORT_FRAG,
     },
+    ShaderModule {
+        name: "toolchain_smoke.slang",
+        spirv: TOOLCHAIN_SMOKE_SLANG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -425,6 +446,68 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), MODULES.len(), "module names are unique");
+    }
+
+    /// Every Slang module is SPIR-V 1.6 (the Vulkan 1.3 profile, ADR-0020 §4c).
+    #[test]
+    fn slang_modules_target_spirv_1_6() {
+        for module in MODULES.iter().filter(|module| {
+            module
+                .name
+                .rsplit_once('.')
+                .is_some_and(|(_, kind)| kind == "slang")
+        }) {
+            let version = u32::from_le_bytes(module.spirv[4..8].try_into().unwrap());
+            assert_eq!(version, 0x0001_0600, "{} is not SPIR-V 1.6", module.name);
+        }
+        assert!(module("toolchain_smoke.slang").is_some());
+    }
+
+    /// ADR-0020 §4c: Slang resources declare explicit `[[vk::binding(binding, set)]]`
+    /// layouts. `slangc` has no flag that rejects implicit bindings, so this checks the
+    /// sources: every global resource declaration (a line at column 0 opening a resource
+    /// type) follows a `[[vk::binding(...)]]` attribute line.
+    #[test]
+    fn slang_resources_declare_explicit_bindings() {
+        const RESOURCE_TYPES: &[&str] = &[
+            "ConstantBuffer<",
+            "ParameterBlock<",
+            "StructuredBuffer<",
+            "RWStructuredBuffer<",
+            "ByteAddressBuffer",
+            "RWByteAddressBuffer",
+            "Texture",
+            "RWTexture",
+            "Sampler",
+            "RaytracingAccelerationStructure",
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders/slang");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("shaders/slang") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("slang") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("slang source");
+            let mut previous = "";
+            for line in source.lines() {
+                if RESOURCE_TYPES.iter().any(|kind| line.starts_with(kind)) {
+                    assert!(
+                        previous.trim_start().starts_with("[[vk::binding("),
+                        "{}: `{line}` needs an explicit [[vk::binding(binding, set)]]",
+                        path.display()
+                    );
+                    checked += 1;
+                }
+                if !line.trim().is_empty() {
+                    previous = line;
+                }
+            }
+        }
+        assert!(
+            checked >= 2,
+            "found no Slang resource declarations to check"
+        );
     }
 
     /// The depth prepass (R6, ADR-0015) draws with the scene's own vertex shaders and the
