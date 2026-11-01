@@ -7,7 +7,8 @@
 and it is written before the code.
 - **Builds on:** [ADR-0002](0002-vulkan-baseline.md), which stays in force: Vulkan 1.3 is
   still the minimum. The maintainer allowed raising the **tiered path** to Vulkan 1.4 if it
-  helps (see the answers below). Compat stays on 1.3 in any case.
+  helps (see the answers below). Compat stays on 1.3 in any case. [Amendment 1](#amendment-1-2026-11-01-n01-the-tiered-path-stays-on-vulkan-13)
+  checked it: the tiered path stays on 1.3 too.
 - **Amends, for the tiered renderer only:**
   - [ADR-0009](0009-descriptor-model.md): the tiered renderer goes bindless, and plain sets
     stay for Compat;
@@ -938,6 +939,49 @@ helps. The rule is:
   result here as an amendment. Every 1.4 feature the tiered path relies on is added to the
   capability gate (§2), so a device that fails it falls back to Compat with a logged reason.
   ADR-0002 is amended only for the tiered path.
+
+### Amendment 1 (2026-11-01, N0.1): the tiered path stays on Vulkan 1.3
+
+This applies the Vulkan 1.4 rule from the maintainer's answers. The check was made in the
+bindings PR (`feat/n0-ash-pin`).
+
+**Support: met.** Each tier-floor GPU exposes 1.4 on a released driver:
+
+| Tier-floor GPU and driver | First driver exposing Vulkan 1.4 | Primary source |
+|---|---|---|
+| RTX 2060, NVIDIA (Windows and Linux) | 553.45 and 550.40.81 (developer betas, 2024-12-02, "Fully conformant Vulkan 1.4"). Turing is listed. The first general-release numbers (likely R570) are not verified | <https://developer.nvidia.com/vulkan-driver>; Khronos conformance submissions list the RTX 2060 on both systems |
+| RX 6600, RADV | Mesa 25.0.0 (2025-02-19): "Vulkan 1.4 on radv/gfx8+". RDNA 2 is GFX10.3 | <https://docs.mesa3d.org/relnotes/25.0.0.html> |
+| RX 6600, AMD Adrenalin (Windows) | 25.5.1 (driver 25.10.01.09, 2025-05-07): "Vulkan 1.4 Support". The RX 6600 series is listed | AMD's Vulkan release notes for 25.5.1; Khronos conformance submissions list the RX 6600 |
+
+The two local devices report 1.4 as well: the RTX 5070 Ti (615.78.08, 1.4.351) and the
+Radeon 610M (RADV 26.2.5, 1.4.354). Each reports every 1.4 feature named below.
+
+**Benefit: not met.** Requiring 1.4 would remove no code or fallback the tiered path carries:
+- **Dynamic rendering local read** helps only in-pass ("subpass") deferred shading. N2's
+  deferred lighting is a *compute* pass (§2c), which loads the G-buffer as images. Depth and
+  multisampled local reads stay optional even under 1.4.
+- **Scalar block layout** is already in the tiered required set (§1e, core 1.2).
+- **Push descriptors, `maintenance5` and `maintenance6`** are API conveniences. Each one is
+  also available as a KHR extension on 1.3, on the same floor drivers. The bindless set (§3)
+  and buffer device address already cover most bindings.
+- **8-bit indices** are unused: meshes are u16 or u32.
+- **The raised 1.4 limits** (8 colour attachments, 256-byte push constants, and the
+  descriptor limits) are met by the floor GPUs already. One exception is unverified: AMD on
+  Windows has historically reported 128-byte push constants, and the RX 6600 dump settles it.
+
+**Decision:**
+- **The tiered minimum stays Vulkan 1.3.** ADR-0002 is unchanged.
+- **The probe records the 1.4-promoted features as optional capabilities:**
+  - `pushDescriptor`;
+  - `maintenance5` and `maintenance6`;
+  - `dynamicRenderingLocalRead`;
+  - `indexTypeUint8`;
+  - `hostImageCopy`.
+- **A tiered pass that adopts one of them** makes it a *required* item in the gate (§1e) in
+  the same PR: the 1.4 feature, or the KHR extension on a 1.3 device.
+- **Revisit** if N2 moves to in-pass deferred, or if a feature appears that only 1.4 offers.
+- **If 1.4 is ever required,** the gate checks the reported `apiVersion ≥ 1.4`, not driver
+  numbers. The driver floors above go in the log as the reason.
 
 ## Corrections to the roadmap
 
