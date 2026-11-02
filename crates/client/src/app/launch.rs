@@ -263,11 +263,15 @@ pub(crate) fn resolve_quality(
             ),
         }
     }
-    let (tier, detected) = settings.resolve_quality(target.default_tier, automated);
+    let (tier, detected) = settings.resolve_quality(
+        target.default_tier,
+        target.path == moba_render::RenderPath::Compat,
+        automated,
+    );
     if detected {
         let save = path.exists() || std::env::var_os("MOBA_SAVE_SETTINGS").is_some();
         eprintln!(
-            "[render] quality {tier} detected for {:?} on the {} path{}",
+            "[render] quality {tier} recorded for {:?} on the {} path{}",
             target.device,
             target.path.name(),
             if save { " (saved)" } else { "" }
@@ -344,9 +348,10 @@ fn lighting_config_from(
 /// `MOBA_SCREEN_EFFECTS=off`. With `capture` (`MOBA_CAPTURE`), auto exposure and dynamic
 /// resolution are pinned off unless set explicitly, so captures stay byte-identical.
 ///
-/// On the tiered path, `tiered` (from [`tiered_scale`]) turns dynamic resolution on with the
-/// tier's GPU budget as its target and the tier's scale range (ADR-0020 §5c); the settings'
-/// scale can lower the ceiling, not raise it.
+/// On the tiered path, `tiered` (from [`tiered_scale`]) gives dynamic resolution the tier's
+/// GPU budget as its target and the tier's scale range (ADR-0020 §5c); the settings' scale
+/// can lower the ceiling, not raise it. Until N1 it stays off unless `MOBA_DYNRES` turns it on
+/// (ADR-0020 amendment 2).
 pub(crate) fn post_config(
     tier: moba_render::QualityTier,
     render_scale: f32,
@@ -399,8 +404,9 @@ fn post_config_from(
 ) -> moba_render::PostConfig {
     let mut config = moba_render::PostConfig::for_tier(tier).with_render_scale(render_scale);
     if let Some(tiered) = tiered {
+        // Off by default until N1: at full scale the upscale pass would cost a full-screen
+        // resample every frame for nothing. `MOBA_DYNRES=on` runs it against the budget.
         config = config
-            .with_dynamic_resolution(true)
             .with_dynamic_target_ms(tiered.target_ms)
             .with_render_scale(render_scale.min(tiered.ceiling))
             .with_min_render_scale(tiered.floor);
@@ -1645,8 +1651,8 @@ mod tests {
                     .map(|(_, value)| (*value).to_owned())
             }
         };
-        // The tiered path: dynamic resolution on, the tier's budget, the settings' scale
-        // capped at the preset's ceiling; captures still pin it off.
+        // The tiered path: the tier's budget and floor, the settings' scale capped at the
+        // preset's ceiling; dynamic resolution off until N1 unless `MOBA_DYNRES` asks.
         let tiered = tiered_scale(moba_render::RenderPath::Tiered, QualityTier::Ultra, 1440);
         assert_eq!(
             tiered,
@@ -1657,7 +1663,16 @@ mod tests {
             })
         );
         let ultra = post_config_from(QualityTier::Ultra, 1.0, false, tiered, env(&[]));
-        assert!(ultra.dynamic_resolution);
+        assert!(!ultra.dynamic_resolution && !ultra.scaled());
+        let on = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[("MOBA_DYNRES", "on")]),
+        );
+        assert!(on.dynamic_resolution);
+        assert_eq!(on.dynamic_target_ms, 9.0);
         assert_eq!((ultra.render_scale, ultra.min_render_scale), (1.0, 0.5));
         assert_eq!(ultra.dynamic_target_ms, 9.0);
         // The settings' scale is kept; the ceiling only lowers it.

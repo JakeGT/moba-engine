@@ -395,17 +395,23 @@ impl Settings {
     /// The tier to run (ADR-0020 §2b, §5a), from the setting and the detected `default` tier.
     /// A player's run detects once: `auto`, or a file from before the tiered path, takes
     /// `default` and records it, and `true` is returned when the settings changed and should
-    /// be saved. An `automated` run (captures, smoke runs) never detects, so evidence does not
+    /// be saved. On Compat (`compat`) a pre-N0 file keeps its tier and is only marked
+    /// detected: N0 changes nothing for a Compat player. An `automated` run (captures, smoke runs) never detects, so evidence does not
     /// depend on the machine: `auto` is today's default, High.
     pub(crate) fn resolve_quality(
         &mut self,
         default: moba_render::QualityTier,
+        compat: bool,
         automated: bool,
     ) -> (moba_render::QualityTier, bool) {
         match (self.quality_tier(), automated) {
             (Some(tier), true) => (tier, false),
             (None, true) => (moba_render::QualityTier::default(), false),
             (Some(tier), false) if self.quality_detected => (tier, false),
+            (Some(tier), false) if compat => {
+                self.quality_detected = true;
+                (tier, true)
+            }
             (_, false) => {
                 self.quality = String::from(default.name());
                 self.quality_detected = true;
@@ -638,27 +644,40 @@ mod tests {
 
     #[test]
     fn quality_is_detected_once_and_never_in_automated_runs() {
-        use moba_render::QualityTier::{High, Low, Ultra};
+        use moba_render::QualityTier::{High, Low, Medium, Ultra};
         // A new player's `auto` takes the detected tier and asks to be saved.
         let mut fresh = Settings::default();
-        assert_eq!(fresh.resolve_quality(Ultra, false), (Ultra, true));
+        assert_eq!(fresh.resolve_quality(Ultra, false, false), (Ultra, true));
         assert_eq!(
             (fresh.quality.as_str(), fresh.quality_detected),
             ("ultra", true)
         );
         // Then the saved tier sticks, whatever the device later detects.
-        assert_eq!(fresh.resolve_quality(Low, false), (Ultra, false));
+        assert_eq!(fresh.resolve_quality(Low, false, false), (Ultra, false));
         // A file from before the tiered path ("ultra", no flag) is re-detected once.
         let mut old: Settings =
             toml::from_str("quality = \"ultra\"").expect("a pre-N0 settings file");
         assert!(!old.quality_detected);
-        assert_eq!(old.resolve_quality(Low, false), (Low, true));
+        assert_eq!(old.resolve_quality(Low, false, false), (Low, true));
         // Automated runs never detect: `auto` is High, a set tier is kept, nothing is saved.
         let mut automated = Settings::default();
-        assert_eq!(automated.resolve_quality(Ultra, true), (High, false));
+        assert_eq!(automated.resolve_quality(Ultra, false, true), (High, false));
         assert_eq!(automated.quality, "auto");
         let mut set: Settings = toml::from_str("quality = \"low\"").expect("settings");
-        assert_eq!(set.resolve_quality(Ultra, true), (Low, false));
+        assert_eq!(set.resolve_quality(Ultra, false, true), (Low, false));
+        // On Compat a pre-N0 file keeps its tier: only the flag is recorded and saved.
+        let mut compat: Settings = toml::from_str("quality = \"low\"").expect("settings");
+        assert_eq!(compat.resolve_quality(Medium, true, false), (Low, true));
+        assert_eq!(
+            (compat.quality.as_str(), compat.quality_detected),
+            ("low", true)
+        );
+        // A new Compat player's `auto` is still detected.
+        let mut fresh_compat = Settings::default();
+        assert_eq!(
+            fresh_compat.resolve_quality(Medium, true, false),
+            (Medium, true)
+        );
     }
 
     #[test]

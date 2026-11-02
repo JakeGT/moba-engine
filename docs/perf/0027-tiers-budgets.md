@@ -20,7 +20,10 @@ off, twice per tier:
 1. dynamic resolution off, at the preset's ceiling (full scale; [Amendment 2](../adr/0020-next-gen-foundations.md#amendment-2-2026-11-01-n03-dynamic-resolution-before-the-upscalers)): the natural GPU p95;
 2. dynamic resolution forced to 0.75 × that p95 (`MOBA_DYNRES=<ms>`).
 
-It passes when the scale stepped down, changed at most twice over the second half of the
+Until N1, dynamic resolution on the tiered path runs only when `MOBA_DYNRES` asks for it
+(see [After the perf review](#after-the-perf-review)), so run 1 is also what a player gets.
+
+It passes when the final scale is below full scale, changed at most twice over the second half of the
 frames, and the GPU p95 is at or under the target. The new frame-log columns
 `scale_first`, `scale_final`, `scale_min` and `scale_changes_late` carry the scale; the first
 column is the first frame after the frame log's 60-frame warm-up, by which point the
@@ -73,3 +76,42 @@ p50 is equal on every tier. Ultra's p95 is bimodal on this GPU for both builds: 
 gave 0.673, 0.722 and 0.672 ms on N0.2, and 0.713, 0.678 and 0.701 ms on the branch (perf/0026
 saw the same 0.68/0.72 split), so the medians' 0.03 ms gap is noise. VRAM and the counters
 are identical. The Compat frame log now also names `config_tier`, which equals the tier.
+
+## Goldens (lavapipe)
+
+The 15 golden-workflow scenes, captured on lavapipe with validation required, one N0.2 capture
+against two branch captures, full PPMs compared with `cmp`:
+
+- **Compat (the default path on lavapipe): all 15 are byte-identical** to N0.2, and the two
+  branch captures equal each other.
+- **`MOBA_RENDER_PATH=tiered`: the images change exactly as §5e's preset mapping says.** Each
+  branch scene is identical across both captures. Tiered Low now renders today's High, and
+  tiered High renders today's Ultra:
+  - the `ultra` scene is unchanged;
+  - `default`, `network` and `low-scaled` differ from N0.2;
+  - the tiered `vat` scene (High) is byte-identical to the `ultra` scene's image
+    (`4b8beb4c337b`), which is the mapping at work.
+
+TIERED_EXTRA
+
+Captures pin dynamic resolution off, so the post-review change to its default does not touch
+them.
+
+## After the perf review
+
+The perf review found nothing blocking. Three changes followed (ADR-0020 amendment 2):
+
+- **Dynamic resolution is off by default on the tiered path until N1.** With a full-scale
+  ceiling, every scaled frame runs the upscale pass, a full-screen 9-tap resample that at
+  scale 1.0 costs time for nothing and was never in the dynres check's "natural" run. A model
+  of the controller also showed it reacting to frame-time noise above about 10%, which would
+  show as resolution pumping. `MOBA_DYNRES=on` (the tier's budget) or `MOBA_DYNRES=<ms>` turns
+  it on; gate 4's check above forces it.
+- **A Compat player keeps their tier.** Re-detecting a pre-N0 settings file would have moved
+  every Compat device to Medium.
+- **The dynres check compares the final scale with full scale**, not with the first logged
+  scale, which comes after the controller's first step. Every row above still passes.
+
+Not measured here: a Medium row in the Compat A/B, and the client's CPU columns. Compat's
+per-frame code path is unchanged (the review traced it), and the tier lookups run only when
+the configuration is built.

@@ -298,7 +298,7 @@ impl PostConfig {
 
     /// The config with every number clamped to its range (non-finite values take the
     /// defaults): render scales into `0.5..=1` with the floor at most the ceiling, slices
-    /// `2..=4`, a radius `0.25..=8` m and a target `1..=100` ms.
+    /// `2..=4`, a radius `0.25..=8` m and a target `0.1..=100` ms.
     #[must_use]
     pub fn sanitized(mut self) -> Self {
         let finite = |value: f32, default: f32| if value.is_finite() { value } else { default };

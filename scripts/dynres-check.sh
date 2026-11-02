@@ -56,7 +56,9 @@ echo "dynres-check: path=$ran tier=$tier natural_p95=$natural ms target=$target 
   "forced_p95=$p95 ms scale $first -> $final (min $low) late_changes=$late"
 fail=0
 [ "$ran" = "$path" ] || { echo "ran on path=$ran, not $path"; fail=1; }
-awk -v a="$final" -v b="$first" 'BEGIN { exit !(a < b) }' \
+# scale_first is logged after the frame log's warm-up, when the controller may already have
+# stepped, so the check is against full scale.
+awk -v a="$final" 'BEGIN { exit !(a < 1.0) }' \
   || { echo "the scale did not step down ($first -> $final)"; fail=1; }
 [ "$late" -le "$max_late" ] \
   || { echo "the scale changed $late times in the second half (limit $max_late)"; fail=1; }

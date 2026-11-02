@@ -1028,16 +1028,30 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
   allocates one (bindless, §3a) turns the allocator flag on, so N0.2 changes no allocation.
 ### Amendment 3 (2026-11-01, N0.3): dynamic resolution before the upscalers
 
-Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Four departures from §5, each
-until the phase named:
+Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Six departures from §5 and §5a,
+each until the phase named:
 
 - **The scale ceiling stays at full scale until N1.** §5c sets the ceiling to the preset's
   upscaler mode (0.67 at 1080p and 1440p, 0.5 for Ultra at 4K and Overdrive). Until N1 there
   is no upscaler to fill that gap: today's bilinear or bicubic stretch would make the tiered
   path, which `auto` picks on every RT-capable GPU, render visibly softer than Compat. N0
-  keeps the tier budget as the target and dynamic resolution on for every tier, from full
-  scale down to the floor. `GpuBudget::scale_range_at` still carries the §5c ranges, and N1
-  switches the ceiling on with the upscalers.
+  keeps the tier budget as the target, from full scale down to the floor.
+  `GpuBudget::scale_range_at` still carries the §5c ranges, and N1 switches the ceiling on
+  with the upscalers.
+- **Dynamic resolution is off by default on the tiered path until N1.** `MOBA_DYNRES=on`
+  runs it against the tier's budget and `MOBA_DYNRES=<ms>` against a forced target, which is
+  how gate 4 is checked. The perf review found two reasons not to ship it on by default before
+  N1:
+  - with a full-scale ceiling, a scaled frame always runs the upscale pass, a full-screen
+    9-tap resample that at scale 1.0 costs time for nothing;
+  - the controller (an EMA with a 15-frame hold) reacts to frame-time noise above about 10%,
+    which would show as resolution pumping.
+
+  N1 needs the upscale pass anyway, and N1 tunes the controller against the reference GPUs.
+- **Compat players keep their tier.** §5a re-detects a settings file from before N0. On
+  Compat that would change a player's tier (Medium for every Compat device) and so their
+  pixels, against "N0 changes no Compat pixel". There the file keeps its tier and is only
+  marked detected. The tiered path re-detects as §5a says.
 - **The floor stays at 0.5 until N1.** The 0.33 (Ultra Performance) floors of Ultra at 4K
   and Overdrive go below today's `MIN_RENDER_SCALE`; they arrive with the upscalers.
 - **The dynamic-resolution target may go down to 0.1 ms** (it was clamped to 1 ms). The RTX

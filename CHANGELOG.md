@@ -163,9 +163,11 @@ the semver check):
     tiered Low runs today's High, tiered Medium and up today's Ultra with MSAA 4×).
   - Tiered VRAM budgets (4/6/6/12/12 GiB) and `moba_assets::GPU_BUDGETS` (12/6/7.5/9/15 ms with
     the dynamic-resolution scale ranges), unit-tested to be ordered and to match the roadmap.
-  - On the tiered path dynamic resolution is on for every tier, aimed at the tier's budget,
-    from full scale down to a 0.5 floor; the preset's upscaler-mode ceiling (0.67 or 0.5)
-    applies from N1, when an upscaler fills the gap. The
+  - On the tiered path dynamic resolution aims at the tier's budget, from full scale down to
+    a 0.5 floor. Until N1 it is off unless `MOBA_DYNRES` turns it on, and the preset's
+    upscaler-mode ceiling (0.67 or 0.5) applies from N1, when an upscaler fills the gap.
+  - A settings file from before N0 keeps its quality tier on Compat; only the tiered path
+    re-detects it. The
     frame log gains `config_tier=` and `scale_first/final/min/max` and `scale_changes_late`;
     `scripts/dynres-check.sh` checks that a forced target holds. `PostConfig`'s dynamic
     target may now go down to 0.1 ms (was 1 ms), so a forced target bites on a fast GPU.
