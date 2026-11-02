@@ -47,6 +47,10 @@ jobs:
               - '.github/workflows/render-golden.yml'
               - 'scripts/outline-probe.sh'
               - 'scripts/cull-probe.sh'
+              # ADR-0020 gate 3: the tiered smoke binaries.
+              - 'crates/tools/src/tiered_smoke.rs'
+              - 'crates/tools/src/bin/bindless-smoke.rs'
+              - 'crates/tools/src/bin/rt-smoke.rs'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
@@ -68,6 +72,17 @@ jobs:
       - name: Build client and tools
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
+      # ADR-0020 gate 3 (N0.5): the tiered path's bindless and ray-query smokes, each one fixed
+      # 64x64 frame read back and checked exactly, failing on any validation message. lavapipe
+      # is a CPU device, so `auto` would run Compat: MOBA_RENDER_PATH=tiered admits it.
+      - name: Tiered bindless and ray-query smokes with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          ./target/release/vulkan-probe --path tiered
+          ./target/release/bindless-smoke
+          ./target/release/rt-smoke
+        env:
+          MOBA_RENDER_PATH: tiered
       # ADR-0020 §4c: a driver consumes slangc's SPIR-V (one dispatch of the toolchain smoke
       # module, output checked on the CPU) before any tiered pass depends on it.
       - name: Slang toolchain smoke with validation + sync validation

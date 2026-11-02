@@ -392,7 +392,10 @@ pub(crate) fn choose_exposure_format(device: &DeviceContext) -> vk::Format {
 
 /// `VkFormatProperties3::optimalTilingFeatures` (Vulkan 1.3 core), which also reports depth
 /// comparison support.
-fn optimal_features_2(device: &DeviceContext, format: vk::Format) -> vk::FormatFeatureFlags2 {
+pub(crate) fn optimal_features_2(
+    device: &DeviceContext,
+    format: vk::Format,
+) -> vk::FormatFeatureFlags2 {
     let mut properties_3 = vk::FormatProperties3::default();
     let mut properties = vk::FormatProperties2::default().push(&mut properties_3);
     // SAFETY: the physical device belongs to the instance the device context was made from,
