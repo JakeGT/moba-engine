@@ -408,6 +408,8 @@ fn vendor_requests_whose_dependencies_are_not_enabled_are_dropped() {
     assert!(without.names.is_empty(), "{:?}", without.names);
 }
 
+/// Meaningful only in a build with a back end that requests device extensions (`dlss`, as the
+/// vendor-sdks CI job builds it): in the open build `device_extensions` is always empty.
 #[test]
 fn nothing_is_requested_before_a_compat_device_is_created() {
     // SAFETY: the loader returns null for every name, so ash fills each entry point with a

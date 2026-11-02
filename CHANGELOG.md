@@ -162,9 +162,10 @@ the semver check):
     disconnected), NGX links statically, and FSR 4 and XeSS load with `libloading` from
     beside the executable only (on Windows with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`) and stay loaded for the life of the process.
-  - NGX and XeSS declare their Vulkan extensions before the instance and the device are
-    created (ADR-0020 §1e); the instance and the tiered device enable what is advertised,
-    and each probe rejects its back end when something it needs is not enabled. DLSS and
+  - NGX declares its Vulkan extensions before the instance and the device are created
+    (ADR-0020 §1e); the instance and the tiered device enable what is advertised, and the
+    DLSS probe rejects when something it needs is not enabled. XeSS requests nothing until
+    N1 merges its device features; its probe always rejects in N0. DLSS and
     Streamline need NVIDIA's own driver (not NVK), FSR 4 AMD's (not RADV). Streamline is only
     looked for in N0: it must be initialised before the instance, which comes with N9. NGX's
     data directory is a private per-user cache directory (owned by the effective user; a

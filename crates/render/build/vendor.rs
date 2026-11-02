@@ -415,7 +415,8 @@ fn nrd(context: &Context) {
 
 /// Copies the tree at `from` into `to`, leaving out the top-level entries named in `skip`.
 /// A file whose bytes are already there is not rewritten, so the incremental `cmake` build sees
-/// unchanged timestamps on a re-run.
+/// unchanged timestamps on a re-run. Symbolic links are skipped: today's NRD archive has none,
+/// and a future SDK that relies on one fails at the CMake step, not here.
 #[cfg(feature = "nrd")]
 fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
     fs::create_dir_all(to)?;

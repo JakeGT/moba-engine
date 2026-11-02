@@ -92,6 +92,22 @@ Khronos layer from `.tools/validation`), twice:
    N0 creates no DLSS feature, so this checks admission and extension setup only; creating and
    evaluating the feature is N1.
 
+### RTX re-run after the second review round (`8a61eda`)
+
+The same two runs at `8a61eda` (the second round's fixes, including the vendor
+device-extension checks and the create retry), with the same command, lock, driver and layer:
+
+1. **As shipped:** exit 0, **0 validation messages**, no create-retry line. The `[vendor]`
+   lines match run 1 above: DLSS, FSR 4, XeSS and Streamline fall back, and the summary is
+   `upscaler=builtin … direct_lighting=rtxdi radiance_cache=sharc … latency=reflex`.
+2. **With the DLSS feature binary beside the executable** (removed afterwards): exit 0,
+   **0 validation messages**, no create-retry line, and `upscaler=dlss` with
+   `dlss=[DLSS SDK 310.9.16]`, as in run 2 above.
+
+The re-check edits after this round change XeSS's probe (it no longer requests or checks
+extensions) and comments only; XeSS's library is absent on Linux, so neither run reaches that
+code.
+
 ## Lavapipe run after the review fixes
 
 `cargo build -p moba-client --features dlss,rtxdi,sharc,fsr4,xess,streamline`, then
@@ -140,7 +156,8 @@ Tiered: the same `dlss`, `fsr4`, `xess` and `streamline` lines, then
 frame_generation=off latency=none …`. No vendor device extension was requested on lavapipe
 (NGX is not asked off NVIDIA's driver, and the XeSS library is absent), so the create retry
 did not run. The default build (`cargo build -p moba-client`) on the tiered path logged no
-`[vendor]` line. Not re-run on the RTX: the GPU was not used for this round.
+`[vendor]` line. The RTX runs for this round are under "RTX re-run after the second review
+round" above.
 
 ## Open build frame log
 

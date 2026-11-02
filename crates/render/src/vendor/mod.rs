@@ -161,10 +161,8 @@ pub(crate) fn instance_extensions() -> Vec<CString> {
     if let Ok(requested) = ngx::instance_extensions() {
         names.extend(requested);
     }
-    #[cfg(feature = "xess")]
-    if let Ok(requested) = xess::instance_extensions() {
-        names.extend(requested);
-    }
+    // XeSS asks for nothing in N0: its probe never selects it (its device features are merged
+    // in N1), so its extensions would only widen the instance (vendor::xess).
     to_c_strings(names)
 }
 
@@ -184,10 +182,7 @@ pub(crate) fn device_extensions(query: &DeviceQuery<'_>) -> Vec<CString> {
     {
         names.extend(requested);
     }
-    #[cfg(feature = "xess")]
-    if let Ok(requested) = xess::device_extensions(query.instance, query.physical) {
-        names.extend(requested);
-    }
+    // XeSS asks for nothing in N0, as for the instance.
     to_c_strings(names)
 }
 
@@ -205,6 +200,10 @@ fn to_c_strings(mut names: Vec<String>) -> Vec<CString> {
 /// `VK_EXT_buffer_device_address` is never enabled beside core `bufferDeviceAddress`
 /// (`VUID-VkDeviceCreateInfo-pNext-04748`); the tiered path enables that feature, which
 /// stands in for it.
+#[cfg_attr(
+    not(all(feature = "dlss", not(target_vendor = "apple"))),
+    allow(dead_code, reason = "only NGX checks its requests in N0")
+)]
 fn satisfied(name: &str, enabled: &[String], path: RenderPath) -> bool {
     enabled.iter().any(|enabled| enabled == name)
         || (name == "VK_EXT_buffer_device_address" && path == RenderPath::Tiered)
@@ -213,8 +212,8 @@ fn satisfied(name: &str, enabled: &[String], path: RenderPath) -> bool {
 /// `Ok` when every `requested` extension is satisfied by `enabled`, else one sentence naming
 /// the missing ones (`what` is `instance` or `device`).
 #[cfg_attr(
-    not(any(all(feature = "dlss", not(target_vendor = "apple")), feature = "xess")),
-    allow(dead_code, reason = "only NGX and XeSS have requirement queries")
+    not(all(feature = "dlss", not(target_vendor = "apple"))),
+    allow(dead_code, reason = "only NGX checks its requests in N0")
 )]
 pub(crate) fn require_enabled(
     sdk: &str,

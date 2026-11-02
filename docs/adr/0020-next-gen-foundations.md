@@ -1112,11 +1112,13 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
   process). A data path that is not UTF-8 is refused rather than converted lossily.
 - **§1e's extension declaration, as built.** `vendor::instance_extensions` runs before
   `vkCreateInstance` and `vendor::device_extensions` before `vkCreateDevice`. NGX
-  (`GetFeatureInstanceExtensionRequirements` and `GetFeatureDeviceExtensionRequirements`) and
-  XeSS (`xessVKGetRequiredInstanceExtensions` and `xessVKGetRequiredDeviceExtensions`) feed
-  them; each name the loader or device advertises is enabled, and nothing missing fails
-  creation. Each probe repeats its queries against the enabled sets and rejects its back end
-  with its one line when something is missing. Four limits:
+  (`GetFeatureInstanceExtensionRequirements` and `GetFeatureDeviceExtensionRequirements`)
+  feeds them; each name the loader or device advertises is enabled, and nothing missing fails
+  creation. The DLSS probe repeats its queries against the enabled sets and rejects with its
+  one line when something is missing. XeSS (`xessVKGetRequiredInstanceExtensions` and
+  `xessVKGetRequiredDeviceExtensions`) requests nothing in N0, because its probe never
+  selects it (last limit below); N1 requests its extensions together with its device
+  features. Four limits:
   - **Device extensions are requested on the tiered path only.** Compat changes only where
     shared code moves (§2c), so the vendor upscalers (DLSS, FSR 4 and XeSS) are tiered-only
     and reject on Compat. `VK_EXT_buffer_device_address` is never enabled (it conflicts with
@@ -1138,8 +1140,9 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
     build (it needs no driver), and creates NGX's data directory.
   - **XeSS's required device features** (`xessVKGetRequiredDeviceFeatures`) can only be enabled
     at `vkCreateDevice`, and N0 does not enable them, so **the N0 XeSS probe never selects
-    XeSS**: after its extension checks and `xessGetVersion` it rejects with one line ("needs
-    its required device features …, which are merged into the device in N1"). N1 merges them
+    XeSS**: after its requirement queries and `xessGetVersion` it rejects with one line ("needs
+    its required device features … and N instance and M device extensions, which are enabled
+    in N1"). N1 merges them
     before `vkCreateDevice`, through a `vendor::device_features` hook beside
     `device_extensions`, and only then lets the probe select XeSS. XeSS fills standalone
     feature structures; N1 folds their bits into the renderer's

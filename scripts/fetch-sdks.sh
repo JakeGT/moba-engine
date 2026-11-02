@@ -26,7 +26,8 @@ MANIFEST="$ROOT/vendor-sdks.toml"
 SDK_DIR="${MOBA_SDK_DIR:-$ROOT/target/vendor-sdks}"
 # A relative MOBA_SDK_DIR means the same directory as in moba-render's build script: relative
 # to the workspace root, not to wherever this script is run from.
-case "$SDK_DIR" in /*) ;; *) SDK_DIR="$ROOT/$SDK_DIR" ;; esac
+# Absolute: `/...`, or a drive path under Git Bash (`C:/...`, `C:\...`).
+case "$SDK_DIR" in /* | [A-Za-z]:[\\/]*) ;; *) SDK_DIR="$ROOT/$SDK_DIR" ;; esac
 STAMP=.moba-sdk-sha256
 
 die() { echo "fetch-sdks: error: $*" >&2; exit 1; }

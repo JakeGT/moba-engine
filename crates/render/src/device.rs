@@ -443,6 +443,8 @@ impl DeviceContext {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+                // No unit seam reaches this branch (it needs a driver that rejects the first
+                // call); checked by reading: the list is the base names alone.
                 names = names_with(&vendor.names[..0]);
                 let extension_names: Vec<*const c_char> =
                     names.iter().map(|name| name.as_ptr()).collect();

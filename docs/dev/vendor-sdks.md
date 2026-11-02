@@ -105,11 +105,12 @@ and NGX's initialisation wait for NVIDIA's own driver.
 
 ADR-0020 §1e: a back end's Vulkan extensions are declared before the instance and the device
 exist. Before `vkCreateInstance`, NGX
-(`NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements`) and XeSS
-(`xessVKGetRequiredInstanceExtensions`) name their instance extensions; before
-`vkCreateDevice`, `NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements` (on NVIDIA's own
-driver only, since it loads the driver's NGX core) and `xessVKGetRequiredDeviceExtensions` name
-their device extensions. The instance and the device enable each one the loader or the device
+(`NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements`) names its instance extensions;
+before `vkCreateDevice`, `NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements` (on NVIDIA's
+own driver only, since it loads the driver's NGX core) names its device extensions. XeSS's
+`xessVKGetRequiredInstanceExtensions` and `xessVKGetRequiredDeviceExtensions` are queried by
+its probe but not requested in N0: the probe never selects XeSS until N1 also merges its
+device features, so enabling them would only widen every tiered device. The instance and the device enable each one the loader or the device
 advertises; a missing one never fails creation. Device extensions are asked for on the tiered
 path only (Compat changes only where shared code moves, ADR-0020 §2c), so DLSS, FSR 4 and
 XeSS reject on Compat. A requested device extension is also dropped when enabling it would

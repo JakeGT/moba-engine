@@ -7,7 +7,10 @@
 //! `vkCreateInstance`, and stays loaded for the rest of the process.
 //!
 //! - **Before creation** (ADR-0020 §1e): `xessVKGetRequiredInstanceExtensions` and
-//!   `xessVKGetRequiredDeviceExtensions` feed the instance and device extension lists.
+//!   `xessVKGetRequiredDeviceExtensions` give the instance and device extensions XeSS needs.
+//!   N0 does not request them: the probe never selects XeSS (next item), so enabling them
+//!   would only widen every tiered device's extension set. N1 feeds them into the lists
+//!   together with the device features.
 //! - **Device features** (`xessVKGetRequiredDeviceFeatures`) can only be enabled at
 //!   `vkCreateDevice`. N0 does not merge them, so the probe never selects XeSS: after its
 //!   checks it rejects the back end with one line. N1 merges them before `vkCreateDevice`,
@@ -16,8 +19,9 @@
 //!   and `VkPhysicalDeviceVulkan13Features` rather than chaining them beside those
 //!   (`VUID-VkDeviceCreateInfo-pNext-02830`), and only then selects XeSS (ADR-0020
 //!   amendment 6).
-//! - **The probe** repeats both extension queries against what was enabled (and the API
-//!   version XeSS asks for) and calls `xessGetVersion`, then rejects as above.
+//! - **The probe** checks the API version XeSS asks for, runs both extension queries (so a
+//!   library that cannot answer them is reported), calls `xessGetVersion`, then rejects as
+//!   above, naming how many extensions N1 will request.
 //!
 //! Licence: Intel Simplified Software License: redistribute the binaries unmodified, with the
 //! notice; no reverse engineering, including at run time (`THIRD_PARTY.md`).
@@ -27,7 +31,7 @@ use std::ptr;
 
 use ash::vk::{self, Handle as _};
 
-use super::{Backend, Loaded, ProbeContext, Unavailable, load_beside_executable, require_enabled};
+use super::{Backend, Loaded, ProbeContext, Unavailable, load_beside_executable};
 use crate::caps::RenderPath;
 
 #[allow(
@@ -129,6 +133,10 @@ fn instance_requirements() -> Result<(Vec<String>, u32), Unavailable> {
 }
 
 /// The instance extensions XeSS asks for (ADR-0020 §1e).
+#[allow(
+    dead_code,
+    reason = "N1 requests these before vkCreateInstance, with the device features"
+)]
 pub(crate) fn instance_extensions() -> Result<Vec<String>, Unavailable> {
     instance_requirements().map(|(names, _)| names)
 }
@@ -154,9 +162,9 @@ pub(crate) fn device_extensions(
     names(result, count, list, "xessVKGetRequiredDeviceExtensions")
 }
 
-/// Opens the XeSS library, checks its extension requirements against what was enabled and
-/// asks it for its version. It then rejects XeSS, whose required device features N0 does not
-/// enable (see the module documentation); N1 adds the back end once it merges them.
+/// Opens the XeSS library, runs its requirement queries and asks it for its version. It then
+/// rejects XeSS, whose required device features and extensions N0 does not enable (see the
+/// module documentation); N1 adds the back end once it merges them.
 pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unavailable> {
     let api = api()?;
     if context.path != RenderPath::Tiered {
@@ -172,20 +180,7 @@ pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
             vk::api_version_minor(min_api)
         ));
     }
-    require_enabled(
-        "XeSS",
-        "instance",
-        &instance,
-        context.instance_extensions,
-        context.path,
-    )?;
-    require_enabled(
-        "XeSS",
-        "device",
-        &device_extensions(context.instance, context.physical)?,
-        context.device_extensions,
-        context.path,
-    )?;
+    let device = device_extensions(context.instance, context.physical)?;
     let mut version = sys::xess_version_t {
         major: 0,
         minor: 0,
@@ -199,9 +194,13 @@ pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
         return Err(format!("xessGetVersion failed (xess_result_t {result})"));
     }
     Err(format!(
-        "XeSS {}.{}.{} needs its required device features (xessVKGetRequiredDeviceFeatures), \
-         which are merged into the device in N1",
-        version.major, version.minor, version.patch
+        "XeSS {}.{}.{} needs its required device features (xessVKGetRequiredDeviceFeatures) \
+         and {} instance and {} device extensions, which are enabled in N1",
+        version.major,
+        version.minor,
+        version.patch,
+        instance.len(),
+        device.len()
     ))
 }
 
