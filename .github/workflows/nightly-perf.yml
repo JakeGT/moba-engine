@@ -49,6 +49,7 @@ jobs:
           for tier in low medium high ultra; do
             for cull in cpu off; do
               MOBA_VULKAN_VALIDATION=required MOBA_QUALITY=$tier MOBA_GPU_CULL=$cull \
+                MOBA_RENDER_PATH=compat \
                 MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 \
                 MOBA_SMOKE_FRAMES=300 MOBA_VSYNC=0 \
                 timeout 300 ./target/release/moba-client > "validation-$tier-$cull.log" 2>&1 \

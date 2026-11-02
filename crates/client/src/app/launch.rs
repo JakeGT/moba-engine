@@ -950,6 +950,11 @@ impl Drop for ClientApp {
             .renderer
             .as_ref()
             .map_or_else(|| String::from("?"), quality_summary);
+        // ADR-0020 §2b: evidence always names the path it ran on.
+        let admission = self.renderer.as_ref().map_or_else(
+            || String::from("path=? max_tier=? missing=? admission=?"),
+            |renderer| renderer.admission().log_fields(),
+        );
         // R8: memory, mid-match uploads and the main view's culling in the last frame.
         let memory = self.renderer.as_ref().map_or_else(String::new, |renderer| {
             let cull = renderer.cull_stats();
@@ -988,7 +993,7 @@ impl Drop for ClientApp {
             "frames={} frames_dropped={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
-             {gpu_columns}{stress}{memory}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
+             {gpu_columns}{stress}{memory}quality={quality} {admission} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             self.frames_dropped,
             percentile(0.50),

@@ -25,7 +25,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol (v42): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing, compute GPU-particle VFX bound to presentation events) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, MSDF text, 3D hero portraits and a baked minimap rendered to texture, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 859 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 875 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -63,7 +63,11 @@ and `MOBA_TEAM_PALETTE` overrides it. `quality` (`low`/`medium`/`high`/`ultra`, 
 `high`) is the rendering quality tier; `MOBA_QUALITY` overrides it. Today it picks the HDR
 target format (Low uses the packed 32-bit format) and the hero-portrait rate (static on Low,
 re-rendered only when the heroes change; `MOBA_PORTRAITS=off|static|animated|<hz>` and `MOBA_MINIMAP_BAKE=off|once` switch
-the portraits and the baked minimap). `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
+the portraits and the baked minimap). `render_path` (`auto`/`tiered`/`compat`, default `auto`)
+picks the renderer ([ADR-0020](docs/adr/0020-next-gen-foundations.md) §2): `auto` runs the
+tiered path on a GPU with hardware ray tracing and the bindless limits, and Compat elsewhere
+(macOS, CPU devices, older GPUs); `MOBA_RENDER_PATH` overrides it. The `[render]` start-up
+line and the frame log name the path (`path=`, `max_tier=`, `missing=`). `audio_volume` (0–1), `audio_mute`, `camera_sensitivity` (0.25–3.0), `camera_zoom`
 (70–420), `attack_button` (`left`/`right`) and spectator camera keys are also configurable.
 `MOBA_SAVE_SETTINGS=1` writes defaults; `MOBA_RESET_SETTINGS=1` resets the file.
 `MOBA_FRAME_LOG=/tmp/frames.log MOBA_VSYNC=0` records raw frame intervals and writes
