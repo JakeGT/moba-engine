@@ -123,7 +123,8 @@ the semver check):
     The 1.4-promoted features are optional capabilities, read through their KHR/EXT structures
     (ADR-0020 amendment 1).
   - The `render_path` setting (`auto`/`tiered`/`compat`, default `auto`) and
-    `MOBA_RENDER_PATH` pick the path. `tiered` admits CPU devices such as lavapipe and fails
+    `MOBA_RENDER_PATH` pick the path. `MOBA_RENDER_PATH=tiered` (not the settings entry)
+    also admits CPU devices such as lavapipe. `tiered` fails
     with a per-device list of what is missing when nothing qualifies.
   - The `[render]` start-up line and the frame log name the path (`path=`, `max_tier=`,
     `missing=`, `admission=`).

@@ -105,6 +105,7 @@ impl DeviceContext {
         surface: vk::SurfaceKHR,
         pipeline_stats: bool,
         choice: PathChoice,
+        allow_cpu: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
         let surface_loader = ash::khr::surface::Instance::load(&context.entry, instance);
@@ -194,7 +195,10 @@ impl DeviceContext {
 
             // ADR-0020 §2b: probe, admit, then rank by device type, path and queue sharing.
             let capabilities = caps::probe(instance, physical)?;
-            let admission = caps::admit(&capabilities, Overrides::new(choice));
+            let admission = caps::admit(
+                &capabilities,
+                Overrides::new(choice).with_cpu_devices(allow_cpu),
+            );
             if choice == PathChoice::Tiered && admission.path != RenderPath::Tiered {
                 let _ = writeln!(
                     reasons,
@@ -301,6 +305,10 @@ impl DeviceContext {
             .task_shader(true);
         let mut shading_rate = vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default()
             .pipeline_fragment_shading_rate(true);
+        let mut reorder = vk::PhysicalDeviceRayTracingInvocationReorderFeaturesEXT::default()
+            .ray_tracing_invocation_reorder(true);
+        let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+        let mut anti_lag = vk::PhysicalDeviceAntiLagFeaturesAMD::default().anti_lag(true);
         // Portability drivers (MoltenVK) may not support comparison samplers; query and
         // enable `mutableComparisonSamplers`, which the shadow map's hardware PCF needs.
         let portability = candidate.extensions.contains(&PORTABILITY_SUBSET);
@@ -358,6 +366,15 @@ impl DeviceContext {
         }
         if enabled.has("VK_KHR_fragment_shading_rate") {
             features_2 = features_2.push(&mut shading_rate);
+        }
+        if enabled.has("VK_EXT_ray_tracing_invocation_reorder") {
+            features_2 = features_2.push(&mut reorder);
+        }
+        if enabled.has("VK_KHR_present_id") {
+            features_2 = features_2.push(&mut present_id);
+        }
+        if enabled.has("VK_AMD_anti_lag") {
+            features_2 = features_2.push(&mut anti_lag);
         }
 
         let priorities = [1.0f32];
@@ -422,6 +439,9 @@ impl DeviceContext {
             device: device.clone(),
             physical_device: physical,
             debug_settings,
+            // Tiered enables `bufferDeviceAddress`, but nothing allocates a device-address
+            // buffer yet. The first tiered pass that does (bindless, ADR-0020 §3a) turns this on,
+            // so N0.2 changes no allocation.
             buffer_device_address: false,
             allocation_sizes: gpu_allocator::AllocationSizes::default(),
         })?;

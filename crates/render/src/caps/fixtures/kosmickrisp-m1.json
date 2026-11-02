@@ -247,6 +247,7 @@
     "hostQueryReset": true,
     "maintenance4": true,
     "pipelineFragmentShadingRate": true,
+    "presentId": true,
     "primitiveFragmentShadingRate": true,
     "runtimeDescriptorArray": true,
     "scalarBlockLayout": true,

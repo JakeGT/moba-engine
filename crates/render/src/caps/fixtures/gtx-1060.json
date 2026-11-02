@@ -253,6 +253,7 @@
     "maintenance5": true,
     "maintenance6": true,
     "pipelineFragmentShadingRate": true,
+    "presentId": true,
     "primitiveFragmentShadingRate": true,
     "pushDescriptor": true,
     "runtimeDescriptorArray": true,

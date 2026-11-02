@@ -6,10 +6,14 @@
 //! ```
 //!
 //! Prints the instance line, then one line per physical device with its admission
-//! (`path=`, `max_tier=`, `missing=`), then the device the renderer would choose. `--json`
+//! (`path=`, `max_tier=`, `missing=`), then the highest-ranked device. The renderer also drops
+//! devices below Vulkan 1.3 or without a graphics queue, swapchain or dynamic rendering, and
+//! adds +10 for a shared graphics and present family (it has a surface), so with such a device
+//! present its choice can differ. `--json`
 //! prints every device's capabilities as a JSON array instead: the format of the recorded
 //! fixtures in `crates/render/src/caps/fixtures/`. `--path` (default: `MOBA_RENDER_PATH`, else
-//! `auto`) is the choice the admission is evaluated under. Exits non-zero when no device is
+//! `auto`) is the choice the admission is evaluated under; like `MOBA_RENDER_PATH=tiered`,
+//! `tiered` here admits CPU devices such as lavapipe. Exits non-zero when no device is
 //! enumerated, or when `--path tiered` admits none.
 #![allow(clippy::print_stdout)] // The report is the tool's output.
 
@@ -20,7 +24,13 @@ fn parse_args() -> (bool, PathChoice) {
     let mut json = false;
     let mut choice = std::env::var("MOBA_RENDER_PATH")
         .ok()
-        .and_then(|value| PathChoice::parse(&value))
+        .and_then(|value| {
+            let parsed = PathChoice::parse(&value);
+            if parsed.is_none() {
+                eprintln!("MOBA_RENDER_PATH={value:?} is not auto/tiered/compat; using auto");
+            }
+            parsed
+        })
         .unwrap_or_default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -53,7 +63,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let devices = match moba_render::probe_devices(choice) {
+    let devices = match moba_render::probe_devices(choice, true) {
         Ok(devices) => devices,
         Err(error) => {
             eprintln!("vulkan device probe failed: {error}");

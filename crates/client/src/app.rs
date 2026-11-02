@@ -660,6 +660,14 @@ impl App for ClientApp {
             .with_ui_scale(self.ui_scale)
             .with_quality_tier(self.quality)
             .with_render_path(self.render_path)
+            // Only `MOBA_RENDER_PATH=tiered`, never the settings entry, may run on a CPU device
+            // such as lavapipe (ADR-0020 amendment 2).
+            .with_tiered_cpu_devices(
+                std::env::var("MOBA_RENDER_PATH")
+                    .ok()
+                    .and_then(|name| moba_render::PathChoice::parse(&name))
+                    == Some(moba_render::PathChoice::Tiered),
+            )
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())

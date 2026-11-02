@@ -93,7 +93,9 @@ path per device: `tiered` or `compat`. The bundled lavapipe (Mesa, LLVM 23) has 
 tiered required set, ray query included, but it is a CPU device, so `auto` admits it as
 `compat` (`admission=cpu-device`, the line still says `missing=none`). Set
 `MOBA_RENDER_PATH=tiered` to run the tiered path on it; the tiered smoke tests (N0.5) run that way, and the default
-goldens stay on `compat`. The client's `[render]` start-up line and every
+goldens stay on `compat`. Only the environment variable admits a CPU device: `render_path =
+"tiered"` in the settings file does not, so a player's setting never runs the game on a
+software rasteriser. The client's `[render]` start-up line and every
 frame-log line carry `path=`, `max_tier=` and `missing=`.
 
 ## `vulkan-probe` and the macOS MoltenVK probe
@@ -101,7 +103,9 @@ frame-log line carry `path=`, `max_tier=` and `missing=`.
 `cargo run --release -p moba-tools --bin vulkan-probe` creates an instance (without a surface)
 and enumerates physical devices. It prints whether `VK_KHR_portability_enumeration` was
 available, then one line per device with its admission (`path=`, `max_tier=`, `missing=`)
-and the device the renderer would choose. `--path auto|tiered|compat` evaluates another choice
+and the highest-ranked device. The renderer also drops devices below Vulkan 1.3 or without a
+graphics queue, swapchain or dynamic rendering, and favours a shared graphics and present
+family, so its choice can differ when such a device is present. `--path auto|tiered|compat` evaluates another choice
 (default `MOBA_RENDER_PATH`); `--path tiered` exits 1 when no device is admitted. `--json`
 prints each device's capabilities instead: the format of the recorded fixtures in
 `crates/render/src/caps/fixtures/`, which the admission unit tests read. To record a new

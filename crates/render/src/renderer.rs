@@ -181,6 +181,10 @@ pub struct RenderConfig {
     /// Which render path to use (`MOBA_RENDER_PATH`, ADR-0020 §2b). Default
     /// [`PathChoice::Auto`]: rank the devices, then the chosen one's own admission.
     pub render_path: PathChoice,
+    /// [`PathChoice::Tiered`] may admit CPU devices such as lavapipe
+    /// ([`Overrides::allow_cpu`](crate::Overrides::allow_cpu)): set only for the
+    /// `MOBA_RENDER_PATH=tiered` override. Default `false`.
+    pub tiered_cpu_devices: bool,
 }
 
 impl Default for RenderConfig {
@@ -212,6 +216,7 @@ impl Default for RenderConfig {
             mesh_lod: None,
             environment: None,
             render_path: PathChoice::Auto,
+            tiered_cpu_devices: false,
         }
     }
 }
@@ -312,6 +317,13 @@ impl RenderConfig {
     #[must_use]
     pub fn with_render_path(mut self, choice: PathChoice) -> Self {
         self.render_path = choice;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::tiered_cpu_devices`] set.
+    #[must_use]
+    pub fn with_tiered_cpu_devices(mut self, allow: bool) -> Self {
+        self.tiered_cpu_devices = allow;
         self
     }
 
@@ -611,6 +623,7 @@ impl Renderer {
             surface_handle,
             config.pipeline_stats,
             config.render_path,
+            config.tiered_cpu_devices,
         )?;
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;

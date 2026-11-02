@@ -255,6 +255,7 @@
     "maintenance6": true,
     "meshShader": true,
     "pipelineFragmentShadingRate": true,
+    "presentId": true,
     "primitiveFragmentShadingRate": true,
     "pushDescriptor": true,
     "runtimeDescriptorArray": true,

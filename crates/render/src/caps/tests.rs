@@ -35,6 +35,7 @@ fn on(choice: PathChoice) -> Overrides {
     Overrides {
         choice,
         host_macos: false,
+        allow_cpu: false,
     }
 }
 
@@ -50,10 +51,12 @@ fn fixtures_are_labelled_sorted_and_plain() {
         assert!(caps.has_extension("VK_KHR_swapchain"), "{name}");
     }
     for name in SYNTHETIC {
-        assert_eq!(
-            fixture(name).source,
-            "synthetic",
-            "{name}: labelled synthetic"
+        let caps = fixture(name);
+        assert_eq!(caps.source, "synthetic", "{name}: labelled synthetic");
+        // `has_extension` binary-searches, so a hand-edited fixture must stay sorted.
+        assert!(
+            caps.extensions.windows(2).all(|w| w[0] < w[1]),
+            "{name}: sorted, no dups"
         );
     }
 }
@@ -91,7 +94,12 @@ fn lavapipe_is_compat_unless_tiered_is_asked_for() {
     let auto = admit(&caps, on(PathChoice::Auto));
     assert_eq!(auto.path, RenderPath::Compat);
     assert_eq!(auto.max_tier, None);
-    let tiered = admit(&caps, on(PathChoice::Tiered));
+    // The settings entry's `tiered` never admits a CPU device (no silent software render).
+    let settings = admit(&caps, on(PathChoice::Tiered));
+    assert_eq!(settings.path, RenderPath::Compat);
+    assert_eq!(settings.reason, AdmissionReason::CpuDevice);
+    // `MOBA_RENDER_PATH=tiered` does.
+    let tiered = admit(&caps, on(PathChoice::Tiered).with_cpu_devices(true));
     if auto.missing.is_empty() {
         // The bundled lavapipe has the whole required set: CI's RT goldens run on it.
         assert_eq!(auto.reason, AdmissionReason::CpuDevice);
@@ -123,6 +131,7 @@ fn apple_stacks_are_always_compat() {
     let host_macos = Overrides {
         choice: PathChoice::Tiered,
         host_macos: true,
+        allow_cpu: true,
     };
     let rtx = admit(&fixture("rtx-5070-ti"), host_macos);
     assert_eq!(rtx.path, RenderPath::Compat);

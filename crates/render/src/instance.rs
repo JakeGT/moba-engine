@@ -60,20 +60,27 @@ pub struct ProbedDevice {
 }
 
 /// Creates an instance without a surface, then probes and admits every physical device under
-/// `choice`, in enumeration order. The renderer would pick the highest `score` (ties keep the
+/// `choice` (with `allow_cpu`, [`Overrides::allow_cpu`](crate::Overrides::allow_cpu)), in
+/// enumeration order. The renderer would pick the highest `score` (ties keep the
 /// earlier device); with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only devices
 /// whose admission is Tiered are candidates.
 ///
 /// # Errors
 /// Returns the same instance and enumeration errors as [`probe_vulkan`].
-pub fn probe_devices(choice: crate::caps::PathChoice) -> RenderResult<Vec<ProbedDevice>> {
+pub fn probe_devices(
+    choice: crate::caps::PathChoice,
+    allow_cpu: bool,
+) -> RenderResult<Vec<ProbedDevice>> {
     let context = InstanceContext::new(&[], ValidationMode::Off)?;
     // SAFETY: the instance is live and the entry point belongs to it.
     let devices = unsafe { context.instance.enumerate_physical_devices() }?;
     let mut probed = Vec::with_capacity(devices.len());
     for physical in devices {
         let capabilities = crate::caps::probe(&context.instance, physical)?;
-        let admission = crate::caps::admit(&capabilities, crate::caps::Overrides::new(choice));
+        let admission = crate::caps::admit(
+            &capabilities,
+            crate::caps::Overrides::new(choice).with_cpu_devices(allow_cpu),
+        );
         let score = crate::caps::rank(capabilities.kind, &admission, false);
         probed.push(ProbedDevice {
             capabilities,

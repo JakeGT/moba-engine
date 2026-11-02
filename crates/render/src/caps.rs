@@ -79,7 +79,8 @@ pub enum PathChoice {
     /// Rank devices, then use the chosen device's own admission. CPU devices run Compat.
     #[default]
     Auto,
-    /// Only devices admitted to Tiered are candidates, CPU devices included; none is an error.
+    /// Only devices admitted to Tiered are candidates; none is an error. CPU devices qualify
+    /// only with [`Overrides::allow_cpu`].
     Tiered,
     /// Same ranking as `Auto`; the chosen device runs Compat.
     Compat,
@@ -105,6 +106,11 @@ pub struct Overrides {
     pub choice: PathChoice,
     /// The process runs on macOS (`cfg!(target_os = "macos")`), which is always Compat.
     pub host_macos: bool,
+    /// [`PathChoice::Tiered`] may admit CPU devices such as lavapipe. Only the
+    /// `MOBA_RENDER_PATH=tiered` override and `vulkan-probe --path tiered` set it (CI's RT
+    /// goldens); the settings entry never does, so a player's `tiered` never silently runs
+    /// on a software rasteriser.
+    pub allow_cpu: bool,
 }
 
 impl Overrides {
@@ -114,7 +120,15 @@ impl Overrides {
         Self {
             choice,
             host_macos: cfg!(target_os = "macos"),
+            allow_cpu: false,
         }
+    }
+
+    /// Returns these overrides with [`Self::allow_cpu`] set.
+    #[must_use]
+    pub const fn with_cpu_devices(mut self, allow: bool) -> Self {
+        self.allow_cpu = allow;
+        self
     }
 }
 
@@ -277,10 +291,11 @@ pub const EXTENSIONS: &[ExtensionSpec] = &[
         Requirement::ForTier(Tier::Overdrive),
         &["rayTracingPositionFetch"],
     ),
+    // SER reorders ray-tracing-pipeline invocations, so it also needs that pipeline.
     spec(
         "VK_EXT_ray_tracing_invocation_reorder",
         Requirement::Optional,
-        &[],
+        &["rayTracingInvocationReorder", "rayTracingPipeline"],
     ),
     spec(
         "VK_EXT_mesh_shader",
@@ -293,8 +308,8 @@ pub const EXTENSIONS: &[ExtensionSpec] = &[
         &["pipelineFragmentShadingRate"],
     ),
     spec("VK_NV_low_latency2", Requirement::Optional, &[]),
-    spec("VK_KHR_present_id", Requirement::Optional, &[]),
-    spec("VK_AMD_anti_lag", Requirement::Optional, &[]),
+    spec("VK_KHR_present_id", Requirement::Optional, &["presentId"]),
+    spec("VK_AMD_anti_lag", Requirement::Optional, &["antiLag"]),
 ];
 
 const fn spec(
@@ -525,6 +540,9 @@ pub fn admit(caps: &DeviceCapabilities, overrides: Overrides) -> Admission {
     match overrides.choice {
         PathChoice::Compat => compat(AdmissionReason::CompatRequested),
         PathChoice::Auto if caps.kind == DeviceKind::Cpu => compat(AdmissionReason::CpuDevice),
+        PathChoice::Tiered if caps.kind == DeviceKind::Cpu && !overrides.allow_cpu => {
+            compat(AdmissionReason::CpuDevice)
+        }
         PathChoice::Auto | PathChoice::Tiered => Admission {
             path: RenderPath::Tiered,
             max_tier: Some(max_tier(caps)),
@@ -562,10 +580,16 @@ pub(crate) fn probe(
     let extensions = probe_extensions(instance, physical)?;
     // SAFETY: `physical` was enumerated from this live instance.
     let base = unsafe { instance.get_physical_device_properties(physical) };
-    let features = probe_features(instance, physical, &extensions);
+    // A core structure may be chained only up to min(instance API 1.3, device API).
+    let api_12 = base.api_version >= vk::API_VERSION_1_2;
+    let features = probe_features(instance, physical, &extensions, base.api_version);
     let mut properties_12 = vk::PhysicalDeviceVulkan12Properties::default();
-    let mut properties = vk::PhysicalDeviceProperties2::default().push(&mut properties_12);
-    // SAFETY: as above; the chain holds one core 1.2 structure, live for the call.
+    let mut properties = vk::PhysicalDeviceProperties2::default();
+    if api_12 {
+        properties = properties.push(&mut properties_12);
+    }
+    // SAFETY: as above; the chain holds at most one core 1.2 structure, chained only when the
+    // device reports 1.2 or later (the instance asks for 1.3), live for the call.
     unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
     let limits = record_limits(&properties.properties.limits, &properties_12);
     let text = |name: Result<&CStr, core::ffi::FromBytesUntilNulError>| {
@@ -623,6 +647,7 @@ fn probe_features(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     extensions: &[String],
+    api_version: u32,
 ) -> BTreeMap<String, bool> {
     let has = |name: &str| {
         extensions
@@ -644,9 +669,18 @@ fn probe_features(
     let mut local_read = vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR::default();
     let mut index_type_u8 = vk::PhysicalDeviceIndexTypeUint8FeaturesKHR::default();
     let mut host_image_copy = vk::PhysicalDeviceHostImageCopyFeaturesEXT::default();
-    let mut query = vk::PhysicalDeviceFeatures2::default()
-        .push(&mut features_12)
-        .push(&mut features_13);
+    let mut reorder = vk::PhysicalDeviceRayTracingInvocationReorderFeaturesEXT::default();
+    let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+    let mut anti_lag = vk::PhysicalDeviceAntiLagFeaturesAMD::default();
+    let mut query = vk::PhysicalDeviceFeatures2::default();
+    // Core structures only up to the device's version (the instance asks for 1.3). A device
+    // below 1.2 or 1.3 records those bits as off, which admission reads as missing.
+    if api_version >= vk::API_VERSION_1_2 {
+        query = query.push(&mut features_12);
+    }
+    if api_version >= vk::API_VERSION_1_3 {
+        query = query.push(&mut features_13);
+    }
     if has("VK_KHR_acceleration_structure") {
         query = query.push(&mut acceleration);
     }
@@ -684,9 +718,18 @@ fn probe_features(
     if has("VK_EXT_host_image_copy") {
         query = query.push(&mut host_image_copy);
     }
-    // SAFETY: the device belongs to this instance; the chain holds only core 1.2/1.3
-    // structures (the instance asks for 1.3) and structures of advertised extensions, each
-    // in the chain once and live for the call.
+    if has("VK_EXT_ray_tracing_invocation_reorder") {
+        query = query.push(&mut reorder);
+    }
+    if has("VK_KHR_present_id") {
+        query = query.push(&mut present_id);
+    }
+    if has("VK_AMD_anti_lag") {
+        query = query.push(&mut anti_lag);
+    }
+    // SAFETY: the device belongs to this instance; the chain holds core 1.2/1.3 structures
+    // only where the device reports that version (the instance asks for 1.3), and
+    // structures of advertised extensions, each in the chain once and live for the call.
     unsafe { instance.get_physical_device_features2(physical, &mut query) };
     let base = query.features;
     let f12 = &features_12;
@@ -752,6 +795,18 @@ fn probe_features(
         has("VK_KHR_ray_tracing_pipeline"),
         &[("rayTracingPipeline", ray_pipeline.ray_tracing_pipeline)],
     );
+    optional(
+        has("VK_EXT_ray_tracing_invocation_reorder"),
+        &[(
+            "rayTracingInvocationReorder",
+            reorder.ray_tracing_invocation_reorder,
+        )],
+    );
+    optional(
+        has("VK_KHR_present_id"),
+        &[("presentId", present_id.present_id)],
+    );
+    optional(has("VK_AMD_anti_lag"), &[("antiLag", anti_lag.anti_lag)]);
     optional(
         has("VK_KHR_ray_tracing_maintenance1"),
         &[(
