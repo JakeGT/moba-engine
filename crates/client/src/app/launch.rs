@@ -196,9 +196,10 @@ pub(crate) fn compressed_textures() -> bool {
 pub(crate) struct RenderTarget {
     /// The path the chosen device is admitted to.
     pub(crate) path: moba_render::RenderPath,
-    /// The choice passed to the renderer: `Tiered` when the probe admitted the device to it,
-    /// so the renderer cannot pick a device whose path differs from the configuration;
-    /// otherwise the player's choice.
+    /// The player's choice, passed on to the renderer unchanged. The probe skips the devices
+    /// the renderer would skip without a surface, so both pick the same device unless that
+    /// device cannot present to the window; the renderer then falls back to another device
+    /// (with a warning if its path differs) rather than failing to start.
     pub(crate) choice: moba_render::PathChoice,
     /// `Tiered` may admit CPU devices: only `MOBA_RENDER_PATH=tiered` sets it (ADR-0020
     /// amendment 2), and the renderer gets the same flag.
@@ -234,11 +235,7 @@ impl RenderTarget {
         let path = device.admission.path;
         Self {
             path,
-            choice: if path == moba_render::RenderPath::Tiered {
-                moba_render::PathChoice::Tiered
-            } else {
-                choice
-            },
+            choice,
             allow_cpu,
             default_tier: moba_render::default_tier(&device.capabilities, &device.admission),
             device: device.capabilities.name.clone(),
