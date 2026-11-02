@@ -48,6 +48,8 @@ hmac = "0.13"
 sha2 = "0.11"
 ed25519-dalek = "3"
 serde = { version = "1", features = ["derive"] }
+# Device-capability dumps (`vulkan-probe --json`) and their test fixtures (ADR-0020 §2b).
+serde_json = "1"
 toml = "1"
 glam = "0.34"
 # Binary glTF (.glb) parsing for the asset loader (ADR-0007). Exact pin; no import/image/base64.

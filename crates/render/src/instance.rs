@@ -48,6 +48,49 @@ pub fn probe_vulkan() -> RenderResult<VulkanProbe> {
     })
 }
 
+/// One physical device as `vulkan-probe` reports it (ADR-0020 §2b).
+#[derive(Clone, Debug)]
+pub struct ProbedDevice {
+    /// The probed capabilities (`vulkan-probe --json` writes these).
+    pub capabilities: crate::caps::DeviceCapabilities,
+    /// The device's own admission under the given choice.
+    pub admission: crate::caps::Admission,
+    /// The device-selection score, without the queue-sharing bonus a surface would decide.
+    pub score: u32,
+}
+
+/// Creates an instance without a surface, then probes and admits every physical device under
+/// `choice` (with `allow_cpu`, [`Overrides::allow_cpu`](crate::Overrides::allow_cpu)), in
+/// enumeration order. The renderer would pick the highest `score` (ties keep the
+/// earlier device); with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only devices
+/// whose admission is Tiered are candidates.
+///
+/// # Errors
+/// Returns the same instance and enumeration errors as [`probe_vulkan`].
+pub fn probe_devices(
+    choice: crate::caps::PathChoice,
+    allow_cpu: bool,
+) -> RenderResult<Vec<ProbedDevice>> {
+    let context = InstanceContext::new(&[], ValidationMode::Off)?;
+    // SAFETY: the instance is live and the entry point belongs to it.
+    let devices = unsafe { context.instance.enumerate_physical_devices() }?;
+    let mut probed = Vec::with_capacity(devices.len());
+    for physical in devices {
+        let capabilities = crate::caps::probe(&context.instance, physical)?;
+        let admission = crate::caps::admit(
+            &capabilities,
+            crate::caps::Overrides::new(choice).with_cpu_devices(allow_cpu),
+        );
+        let score = crate::caps::rank(capabilities.kind, &admission, false);
+        probed.push(ProbedDevice {
+            capabilities,
+            admission,
+            score,
+        });
+    }
+    Ok(probed)
+}
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const PORTABILITY_ENUMERATION: &CStr = c"VK_KHR_portability_enumeration";
 static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);

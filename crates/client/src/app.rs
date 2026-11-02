@@ -219,6 +219,8 @@ struct ClientApp {
     fps: f32,
     ui_scale: f32,
     quality: moba_render::QualityTier,
+    /// `MOBA_RENDER_PATH`, else the settings entry (ADR-0020 §2b).
+    render_path: moba_render::PathChoice,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
     /// `MOBA_PREVIEW_CAMERA`: a fixed local-preview orbit `[yaw, pitch, distance, x, z]`.
@@ -323,6 +325,21 @@ impl ClientApp {
                 })
             },
         );
+        // An empty value is unset, as for `MOBA_QUALITY`.
+        let render_path = std::env::var("MOBA_RENDER_PATH")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .map_or_else(
+                || settings.render_path(),
+                |name| {
+                    moba_render::PathChoice::parse(&name).unwrap_or_else(|| {
+                        eprintln!(
+                            "MOBA_RENDER_PATH={name:?} is not auto/tiered/compat; using settings"
+                        );
+                        settings.render_path()
+                    })
+                },
+            );
         let team_palette = std::env::var("MOBA_TEAM_PALETTE").ok().map_or_else(
             || settings.team_palette(),
             |name| {
@@ -419,6 +436,7 @@ impl ClientApp {
                 .unwrap_or(settings.ui_scale)
                 .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
             quality,
+            render_path,
             bindings,
             camera_sensitivity,
             preview_camera: launch::parse_preview_camera(
@@ -645,6 +663,15 @@ impl App for ClientApp {
             .with_vsync(std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"))
             .with_ui_scale(self.ui_scale)
             .with_quality_tier(self.quality)
+            .with_render_path(self.render_path)
+            // Only `MOBA_RENDER_PATH=tiered`, never the settings entry, may run on a CPU device
+            // such as lavapipe (ADR-0020 amendment 2).
+            .with_tiered_cpu_devices(
+                std::env::var("MOBA_RENDER_PATH")
+                    .ok()
+                    .and_then(|name| moba_render::PathChoice::parse(&name))
+                    == Some(moba_render::PathChoice::Tiered),
+            )
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
@@ -684,7 +711,7 @@ impl App for ClientApp {
                 let pipelines = renderer.pipeline_stats();
                 eprintln!(
                     "[render] {} pipelines built in {:.1} ms (pipeline cache {}), renderer ready in \
-                     {:.1} ms; BC textures {}",
+                     {:.1} ms; BC textures {}; {}",
                     pipelines.pipelines,
                     pipelines.build_ms,
                     pipelines.cache,
@@ -693,7 +720,8 @@ impl App for ClientApp {
                         "native"
                     } else {
                         "CPU-decoded"
-                    }
+                    },
+                    renderer.admission().log_fields()
                 );
                 // `on_start` may run again after a resume with a fresh mesh table.
                 self.models.renderer_recreated();

@@ -11,6 +11,7 @@ use ash::vk::TaggedStructure as _;
 use ash::{Instance, vk};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
+use crate::caps::{self, Admission, DeviceCapabilities, Overrides, PathChoice, RenderPath};
 use crate::error::{RenderError, RenderResult};
 use crate::instance::InstanceContext;
 use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
@@ -80,6 +81,10 @@ pub(crate) struct DeviceContext {
     pipeline_cache: vk::PipelineCache,
     /// Pipelines built so far and the time spent in `vkCreateGraphicsPipelines`.
     pipeline_builds: Cell<(u32, Duration)>,
+    /// The render-path gate's decision for this device (ADR-0020 §2).
+    pub(crate) admission: Admission,
+    /// The probed capabilities the decision was made from.
+    pub(crate) capabilities: DeviceCapabilities,
 }
 
 struct Candidate {
@@ -89,6 +94,8 @@ struct Candidate {
     present_family: u32,
     score: u32,
     extensions: Vec<&'static CStr>,
+    capabilities: DeviceCapabilities,
+    admission: Admission,
 }
 
 impl DeviceContext {
@@ -97,6 +104,8 @@ impl DeviceContext {
         context: &InstanceContext,
         surface: vk::SurfaceKHR,
         pipeline_stats: bool,
+        choice: PathChoice,
+        allow_cpu: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
         let surface_loader = ash::khr::surface::Instance::load(&context.entry, instance);
@@ -184,16 +193,30 @@ impl DeviceContext {
                 extensions.push(PIPELINE_EXECUTABLE_PROPERTIES);
             }
 
-            let mut score = match properties.device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU => 1000,
-                vk::PhysicalDeviceType::INTEGRATED_GPU => 500,
-                vk::PhysicalDeviceType::VIRTUAL_GPU => 200,
-                vk::PhysicalDeviceType::CPU => 100,
-                _ => 10,
-            };
-            if graphics_family == present_family {
-                score += 10;
+            // ADR-0020 §2b: probe, admit, then rank by device type, path and queue sharing.
+            let capabilities = caps::probe(instance, physical)?;
+            let admission = caps::admit(
+                &capabilities,
+                Overrides::new(choice).with_cpu_devices(allow_cpu),
+            );
+            if choice == PathChoice::Tiered && admission.path != RenderPath::Tiered {
+                let _ = writeln!(
+                    reasons,
+                    "{name}: not admitted to the tiered path (reason: {}; lacks {}); ",
+                    admission.reason.name(),
+                    if admission.missing.is_empty() {
+                        String::from("nothing")
+                    } else {
+                        admission.missing.join(", ")
+                    }
+                );
+                continue;
             }
+            let score = caps::rank(
+                capabilities.kind,
+                &admission,
+                graphics_family == present_family,
+            );
 
             let candidate = Candidate {
                 physical,
@@ -202,6 +225,8 @@ impl DeviceContext {
                 present_family,
                 score,
                 extensions,
+                capabilities,
+                admission,
             };
             if best
                 .as_ref()
@@ -233,13 +258,57 @@ impl DeviceContext {
         let texture_compression_bc = supported.texture_compression_bc == vk::TRUE;
         let sampler_anisotropy = supported.sampler_anisotropy == vk::TRUE;
         let depth_clamp = supported.depth_clamp == vk::TRUE;
+        let tiered = candidate.admission.path == RenderPath::Tiered;
+        let present = |name: &str| candidate.capabilities.feature(name);
         let base_features = vk::PhysicalDeviceFeatures::default()
             .texture_compression_bc(texture_compression_bc)
             .sampler_anisotropy(sampler_anisotropy)
-            .depth_clamp(depth_clamp);
+            .depth_clamp(depth_clamp)
+            // ADR-0020 §3a: bindless storage images (checked at admission on Tiered).
+            .shader_storage_image_write_without_format(
+                tiered && present("shaderStorageImageWriteWithoutFormat"),
+            );
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
-            .synchronization2(true);
+            .synchronization2(true)
+            .maintenance4(tiered);
+        // The tiered required set (ADR-0020 §1e, §3b). Admission checked every bit, so on a
+        // tiered device each one is supported; Compat enables none of them, as before.
+        let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(tiered)
+            .descriptor_indexing(tiered)
+            .runtime_descriptor_array(tiered)
+            .scalar_block_layout(tiered)
+            .timeline_semaphore(tiered)
+            .draw_indirect_count(tiered)
+            .host_query_reset(tiered)
+            .shader_sampled_image_array_non_uniform_indexing(tiered)
+            .shader_storage_image_array_non_uniform_indexing(tiered)
+            .descriptor_binding_sampled_image_update_after_bind(tiered)
+            .descriptor_binding_storage_image_update_after_bind(tiered)
+            .descriptor_binding_partially_bound(tiered)
+            .descriptor_binding_variable_descriptor_count(tiered)
+            .descriptor_binding_update_unused_while_pending(tiered);
+        // Extension features, each enabled only when its extension is enabled below.
+        let enabled = TieredExtensions::of(candidate);
+        let mut acceleration = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
+        let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut ray_pipeline =
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
+        let mut ray_maintenance = vk::PhysicalDeviceRayTracingMaintenance1FeaturesKHR::default()
+            .ray_tracing_maintenance1(true);
+        let mut position_fetch = vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default()
+            .ray_tracing_position_fetch(true);
+        let mut mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+            .mesh_shader(true)
+            .task_shader(true);
+        let mut shading_rate = vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default()
+            .pipeline_fragment_shading_rate(true);
+        let mut reorder = vk::PhysicalDeviceRayTracingInvocationReorderFeaturesEXT::default()
+            .ray_tracing_invocation_reorder(true);
+        let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+        let mut anti_lag = vk::PhysicalDeviceAntiLagFeaturesAMD::default().anti_lag(true);
         // Portability drivers (MoltenVK) may not support comparison samplers; query and
         // enable `mutableComparisonSamplers`, which the shadow map's hardware PCF needs.
         let portability = candidate.extensions.contains(&PORTABILITY_SUBSET);
@@ -274,6 +343,39 @@ impl DeviceContext {
         if pipeline_stats {
             features_2 = features_2.push(&mut executable_features);
         }
+        if tiered {
+            features_2 = features_2.push(&mut features_12);
+        }
+        if enabled.has("VK_KHR_acceleration_structure") {
+            features_2 = features_2.push(&mut acceleration);
+        }
+        if enabled.has("VK_KHR_ray_query") {
+            features_2 = features_2.push(&mut ray_query);
+        }
+        if enabled.has("VK_KHR_ray_tracing_pipeline") {
+            features_2 = features_2.push(&mut ray_pipeline);
+        }
+        if enabled.has("VK_KHR_ray_tracing_maintenance1") {
+            features_2 = features_2.push(&mut ray_maintenance);
+        }
+        if enabled.has("VK_KHR_ray_tracing_position_fetch") {
+            features_2 = features_2.push(&mut position_fetch);
+        }
+        if enabled.has("VK_EXT_mesh_shader") {
+            features_2 = features_2.push(&mut mesh);
+        }
+        if enabled.has("VK_KHR_fragment_shading_rate") {
+            features_2 = features_2.push(&mut shading_rate);
+        }
+        if enabled.has("VK_EXT_ray_tracing_invocation_reorder") {
+            features_2 = features_2.push(&mut reorder);
+        }
+        if enabled.has("VK_KHR_present_id") {
+            features_2 = features_2.push(&mut present_id);
+        }
+        if enabled.has("VK_AMD_anti_lag") {
+            features_2 = features_2.push(&mut anti_lag);
+        }
 
         let priorities = [1.0f32];
         let mut queue_infos = vec![
@@ -289,12 +391,20 @@ impl DeviceContext {
             );
         }
 
-        let extension_names: Vec<*const c_char> = candidate
+        let mut extension_names: Vec<*const c_char> = candidate
             .extensions
             .iter()
             .filter(|name| pipeline_stats || **name != PIPELINE_EXECUTABLE_PROPERTIES)
             .map(|name| name.as_ptr())
             .collect();
+        // `enabled.names` outlives `create_device` below.
+        extension_names.extend(
+            enabled
+                .names
+                .iter()
+                .filter(|name| !candidate.extensions.contains(&name.as_c_str()))
+                .map(|name| name.as_ptr()),
+        );
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extension_names);
@@ -332,6 +442,9 @@ impl DeviceContext {
             device: device.clone(),
             physical_device: physical,
             debug_settings,
+            // Tiered enables `bufferDeviceAddress`, but nothing allocates a device-address
+            // buffer yet. The first tiered pass that does (bindless, ADR-0020 §3a) turns this on,
+            // so N0.2 changes no allocation.
             buffer_device_address: false,
             allocation_sizes: gpu_allocator::AllocationSizes::default(),
         })?;
@@ -389,6 +502,8 @@ impl DeviceContext {
             cache_identity: CacheIdentity::of(&candidate.properties),
             pipeline_cache: vk::PipelineCache::null(),
             pipeline_builds: Cell::new((0, Duration::ZERO)),
+            admission: candidate.admission.clone(),
+            capabilities: candidate.capabilities.clone(),
         })
     }
 
@@ -655,6 +770,36 @@ impl Drop for DeviceContext {
         }
         // SAFETY: every child object has been destroyed and the device is destroyed once.
         unsafe { self.device.destroy_device(None) };
+    }
+}
+
+/// The tiered extensions a candidate enables: on a tiered device, every required one plus each
+/// optional or tier-gated one that is present with its features (ADR-0020 §1e). Empty on
+/// Compat.
+struct TieredExtensions {
+    names: Vec<std::ffi::CString>,
+}
+
+impl TieredExtensions {
+    fn of(candidate: &Candidate) -> Self {
+        let names = if candidate.admission.path == RenderPath::Tiered {
+            caps::EXTENSIONS
+                .iter()
+                .filter(|extension| caps::extension_present(&candidate.capabilities, extension))
+                .map(|extension| {
+                    std::ffi::CString::new(extension.name).expect("extension names have no NUL")
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self { names }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.names
+            .iter()
+            .any(|enabled| enabled.as_bytes() == name.as_bytes())
     }
 }
 

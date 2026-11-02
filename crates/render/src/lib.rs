@@ -14,6 +14,7 @@
 
 #[doc(hidden)]
 pub mod bench_support;
+mod caps;
 mod cull;
 mod descriptor_budget;
 mod device;
@@ -51,6 +52,12 @@ mod vat;
 mod vfx;
 mod world;
 
+pub use caps::{
+    Admission, AdmissionReason, BINDLESS_SAMPLED_IMAGES, BINDLESS_SAMPLERS,
+    BINDLESS_STORAGE_IMAGES, DeviceCapabilities, DeviceKind, EXTENSIONS, ExtensionSpec, Overrides,
+    PathChoice, REQUIRED_FEATURES, REQUIRED_LIMITS, RenderPath, Requirement, Tier,
+    VULKAN14_OPTIONAL, admit, max_tier, missing_items,
+};
 pub use cull::{CullMode, CullStats, LodConfig};
 pub use environment::{
     Decal, DecalRole, DecalShape, DecalStyle, EnvironmentConfig, EnvironmentFrame, FoliageData,
@@ -59,7 +66,7 @@ pub use environment::{
     WaterVertexData, glow_reference, telegraph_mark,
 };
 pub use error::{RenderError, RenderResult};
-pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
+pub use instance::{ProbedDevice, ValidationMode, VulkanProbe, probe_devices, probe_vulkan};
 pub use lighting::{
     BakedAo, LightingConfig, MAX_CONTACT_SHADOW_STEPS, MAX_SHADOW_RESOLUTION,
     MIN_SHADOW_RESOLUTION, OutlineMode, SceneLighting, ShadowFilter,
