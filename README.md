@@ -275,6 +275,8 @@ moba-engine = { version = "0.2", default-features = false, features = ["sim", "n
 ```
 
 or take individual crates (`moba-sim`, `moba-net`, …) for a narrower dependency graph.
+To embed the renderer, copy the workspace's `[patch.crates-io]` `ash` pin into your own root
+`Cargo.toml` ([details](docs/building-on-moba.md#the-renderer-and-the-ash-pin)).
 Runnable examples live in `crates/engine/examples`:
 
 ```bash

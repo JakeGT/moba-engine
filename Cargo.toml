@@ -62,7 +62,8 @@ png = "0.18"
 # meshoptimizer bindings (MIT OR Apache-2.0; bundles meshoptimizer, MIT) for the offline mesh
 # LOD baker (moba-tools only, R8, ADR-0018). Exact pin; the client never links it.
 meshopt = { version = "=0.7.0", default-features = false }
-# ADR-0020 §1: the ash-next branch, which builds against ash master; released 0.28.0 does not.
+# ADR-0020 §1: the ash-next branch; released 0.28.0 does not build against ash master. Its own
+# [patch] (a Traverse ash fork) is ignored here, so re-check that it builds on each ash re-pin.
 gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", rev = "6a68a5b4c233361c07dfa8865043a16ade7512db", default-features = false, features = ["vulkan", "std"] }
 raw-window-handle = "0.6"
 cpal = "0.18"
