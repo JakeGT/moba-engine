@@ -34,6 +34,7 @@ mod lights;
 mod material;
 mod memory;
 mod mesh;
+mod motion;
 mod passes;
 mod pipeline;
 mod pipeline_cache;
@@ -49,9 +50,11 @@ mod slang_smoke;
 mod smoke;
 mod swapchain;
 mod targets;
+mod temporal;
 mod terrain;
 mod texture;
 mod ui;
+mod upscale;
 mod vat;
 mod vendor;
 mod vfx;
@@ -88,8 +91,8 @@ pub use passes::overlay::ui_vertices_truncated;
 pub use passes::scene::{bones_truncated, skinned_instances_dropped};
 pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use post::{
-    AntiAliasing, MAX_RENDER_SCALE, MIN_RENDER_SCALE, PostConfig, PostLook, ScreenEffects,
-    UpscaleFilter,
+    AntiAliasing, DEFAULT_SHARPNESS, MAX_RENDER_SCALE, MIN_RENDER_SCALE, MIN_TEMPORAL_RENDER_SCALE,
+    PostConfig, PostLook, ScreenEffects, UpscaleFilter, UpscaleMode, UpscalerKind,
 };
 pub use preset::{
     FeatureState, Phase, PresetFeature, TierPreset, config_tier, total_memory_budget,

@@ -23,7 +23,7 @@ impl TargetExtents {
     /// The size of a slot of `size`.
     pub(crate) fn of(self, size: ImageSize) -> vk::Extent2D {
         match size {
-            ImageSize::Swapchain => self.swapchain,
+            ImageSize::Output { shift } => shifted(self.swapchain, shift),
             ImageSize::Render { shift } => shifted(self.render, shift),
             ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
         }
@@ -70,7 +70,7 @@ impl TransientPool {
         let mut fresh = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
             fresh.push(match slot.desc.size {
-                ImageSize::Swapchain | ImageSize::Render { .. } => {
+                ImageSize::Output { .. } | ImageSize::Render { .. } => {
                     Some(create_slot(device, index, slot, extents)?)
                 }
                 ImageSize::Fixed { .. } => None,

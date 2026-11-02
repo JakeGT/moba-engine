@@ -27,6 +27,14 @@ pub struct Camera {
     pub light_intensity: f32,
     /// Hemispheric sky ambient, used without an environment, and the distance-fog colour.
     pub ambient: Vec3,
+    /// Vertical field of view in radians, as built ([`Self::perspective`], [`Self::orbit`]);
+    /// 0 for orthographic views, which never upscale. The temporal upscalers read it
+    /// (ADR-0021 §4a).
+    pub fov_y: f32,
+    /// Near plane distance, as built; 0 for orthographic views.
+    pub near: f32,
+    /// Far plane distance, as built; 0 for orthographic views.
+    pub far: f32,
 }
 
 impl Camera {
@@ -49,6 +57,9 @@ impl Camera {
             light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
             light_intensity: 1.15,
             ambient: Vec3::new(0.32, 0.35, 0.42),
+            fov_y: fov_y_radians,
+            near,
+            far,
         }
     }
 
@@ -82,6 +93,9 @@ impl Camera {
             light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
             light_intensity: 1.15,
             ambient: Vec3::new(0.32, 0.35, 0.42),
+            fov_y: 0.0,
+            near: 0.0,
+            far: 0.0,
         }
     }
 
@@ -170,6 +184,13 @@ pub struct UnitInstance {
     pub outline: u8,
     /// The frame of a vertex-animation-texture mesh to show (R4b; ignored by other meshes).
     pub vat: VatPose,
+    /// Presentation identity for motion vectors (ADR-0021 §2c): the renderer keeps what this
+    /// key drew on the previous presented frame. `0` (the default) is static: no history,
+    /// camera-only motion (map instances). The client uses `net_id << 8 | part`.
+    pub motion_key: u32,
+    /// This frame starts a new history for [`Self::motion_key`] (the unit's first drawn
+    /// frame, a respawn or recall teleport): its motion is camera-only.
+    pub motion_reset: bool,
 }
 
 impl UnitInstance {
@@ -183,7 +204,18 @@ impl UnitInstance {
             bones: BoneRange::NONE,
             outline: 0,
             vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
+            motion_key: 0,
+            motion_reset: false,
         }
+    }
+
+    /// Returns this instance with motion key `key` (`0`: static, no history) and whether this
+    /// frame resets its history (ADR-0021 §2c).
+    #[must_use]
+    pub const fn with_motion(mut self, key: u32, reset: bool) -> Self {
+        self.motion_key = key;
+        self.motion_reset = reset;
+        self
     }
 
     /// Returns this instance outlined with palette slot `slot` (`0` = none).
@@ -230,6 +262,8 @@ impl UnitInstance {
             bones: BoneRange::NONE,
             outline: 0,
             vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
+            motion_key: 0,
+            motion_reset: false,
         }
     }
 }
@@ -333,6 +367,11 @@ pub struct Scene<'a> {
     pub decals: &'a [Decal],
     /// This frame's environment animation time and foliage displacers (R3b).
     pub environment: EnvironmentFrame<'a>,
+    /// Clears the motion history and every temporal history this frame (ADR-0021 §2c):
+    /// spectator switches, minimap camera jumps, map loads and resizes. The renderer also
+    /// resets on its own when the eye moves more than 8 m or the view turns more than 15° in
+    /// one frame. Ignored without temporal anti-aliasing.
+    pub history_reset: bool,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -492,6 +531,7 @@ impl<'a> Scene<'a> {
                 time: 0.0,
                 displacers: &[],
             },
+            history_reset: false,
         }
     }
 
@@ -520,6 +560,7 @@ impl<'a> Scene<'a> {
                 time: 0.0,
                 displacers: &[],
             },
+            history_reset: false,
         }
     }
 
@@ -597,6 +638,13 @@ impl<'a> Scene<'a> {
     #[must_use]
     pub const fn with_environment(mut self, environment: EnvironmentFrame<'a>) -> Self {
         self.environment = environment;
+        self
+    }
+
+    /// Sets [`Self::history_reset`].
+    #[must_use]
+    pub const fn with_history_reset(mut self, reset: bool) -> Self {
+        self.history_reset = reset;
         self
     }
 
