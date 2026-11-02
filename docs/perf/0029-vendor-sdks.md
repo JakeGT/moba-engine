@@ -58,10 +58,39 @@ one per unavailable back end, then the summary:
   is on the tiered path with ray queries, so they are selected rather than logged.
 - **Latency:** `VK_NV_low_latency2` is exposed, so `latency=reflex` with no feature.
 - The same run's `[vram]` line: `locked_uploads=0 locked_pipelines=0`.
-- **Validation:** this run did not record whether the Khronos validation layer was on.
-  RTX re-run with MOBA_VULKAN_VALIDATION=required: TODO(maintainer-run). The lines above
-  predate the GPU-safety review fixes (extensions declared before creation, the driver checks,
-  the per-user NGX directory); the re-run records the current wording.
+- **Validation:** this run did not record whether the Khronos validation layer was on, and its
+  lines predate the GPU-safety review fixes (extensions declared before creation, the driver
+  checks, the per-user NGX directory). The re-run below has both.
+
+### RTX re-run with validation required (after the review fixes)
+
+The same build at `20c550d`, then `MOBA_VULKAN_VALIDATION=required MOBA_SERVER=local
+MOBA_SMOKE_FRAMES=240 target/debug/moba-client` under the RTX lock (driver 615.78.08, the
+Khronos layer from `.tools/validation`), twice:
+
+1. **As shipped** (no DLSS binary beside the executable): exit 0, **0 validation messages**.
+
+   ```text
+   [vendor] dlss unavailable: NGX found no DLSS 310.9.16 feature binary (libnvidia-ngx-dlss.so.310.9.16) beside the executable or in the driver (NVSDK_NGX_Result_FAIL_FeatureNotFound); upscaler falls back to builtin
+   [vendor] fsr4 unavailable: needs an AMD GPU on AMD's driver (FSR 4 runs on RDNA 2 or newer), and the device is NVIDIA GeForce RTX 5070 Ti (vendor 0x10de, driver NVIDIA); upscaler falls back to builtin
+   [vendor] xess unavailable: …/target/debug/libxess.so not found (XeSS 3.0.2 ships Windows binaries only); upscaler falls back to builtin
+   [vendor] streamline unavailable: …/target/debug/libsl.interposer.so not found (Streamline 2.14.16 ships Windows binaries only); frame_generation falls back to off
+   [vendor] selected: upscaler=builtin denoiser=builtin direct_lighting=rtxdi radiance_cache=sharc frame_generation=off latency=reflex compiled=dlss,fsr4,xess,rtxdi,sharc,streamline rtxdi=[RTXDI 3.1.0, ReSTIR DI parameters 272 bytes, reservoir block 16] sharc=[SHaRC 1.8.3]
+   ```
+
+2. **With the SDK's `lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.16` copied beside the
+   executable** (removed afterwards): NGX found the feature, the probe's re-run of NGX's
+   instance and device extension requirements found them all enabled, and DLSS was selected.
+   Exit 0, **0 validation messages**. DLSS winning ends the upscaler search, so FSR 4 and XeSS
+   are not probed and log nothing:
+
+   ```text
+   [vendor] streamline unavailable: …/target/debug/libsl.interposer.so not found (Streamline 2.14.16 ships Windows binaries only); frame_generation falls back to off
+   [vendor] selected: upscaler=dlss denoiser=builtin direct_lighting=rtxdi radiance_cache=sharc frame_generation=off latency=reflex compiled=dlss,fsr4,xess,rtxdi,sharc,streamline dlss=[DLSS SDK 310.9.16] rtxdi=[RTXDI 3.1.0, ReSTIR DI parameters 272 bytes, reservoir block 16] sharc=[SHaRC 1.8.3]
+   ```
+
+   N0 creates no DLSS feature, so this checks admission and extension setup only; creating and
+   evaluating the feature is N1.
 
 ## Lavapipe run after the review fixes
 
