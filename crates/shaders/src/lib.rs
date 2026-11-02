@@ -478,8 +478,9 @@ mod tests {
     enum Slot {
         /// One descriptor binding, with its reflected type: `constantBuffer`,
         /// `<baseShape>:<access>` for a resource (`structuredBuffer:readWrite`,
-        /// `texture2D:read`, `texture2D:read:combined` for a combined image sampler, ...), `samplerState`, and `[N]<element>` for an array, so a type
-        /// or array-size change that the Rust set layout would not match fails here too.
+        /// `texture2D:read`, `texture2D:read:combined` for a combined image sampler, ...),
+        /// `samplerState`, and `[N]<element>` for an array, so a type or array-size change
+        /// that the Rust set layout would not match fails here too.
         Descriptor {
             set: u64,
             binding: u64,
