@@ -325,17 +325,21 @@ impl ClientApp {
                 })
             },
         );
-        let render_path = std::env::var("MOBA_RENDER_PATH").ok().map_or_else(
-            || settings.render_path(),
-            |name| {
-                moba_render::PathChoice::parse(&name).unwrap_or_else(|| {
-                    eprintln!(
-                        "MOBA_RENDER_PATH={name:?} is not auto/tiered/compat; using settings"
-                    );
-                    settings.render_path()
-                })
-            },
-        );
+        // An empty value is unset, as for `MOBA_QUALITY`.
+        let render_path = std::env::var("MOBA_RENDER_PATH")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .map_or_else(
+                || settings.render_path(),
+                |name| {
+                    moba_render::PathChoice::parse(&name).unwrap_or_else(|| {
+                        eprintln!(
+                            "MOBA_RENDER_PATH={name:?} is not auto/tiered/compat; using settings"
+                        );
+                        settings.render_path()
+                    })
+                },
+            );
         let team_palette = std::env::var("MOBA_TEAM_PALETTE").ok().map_or_else(
             || settings.team_palette(),
             |name| {

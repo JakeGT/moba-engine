@@ -26,7 +26,7 @@ IDs, API version) and loses what public facts say its class lacks:
 
 | File | Stands for | Removed from the RTX dump |
 |---|---|---|
-| `moltenvk-m1.json` | Apple M1 through MoltenVK (driver ID 14), 1.3 | RT and NVIDIA-only extensions, mesh shaders, fragment shading rate, the 1.4-promoted features. Adds `VK_KHR_portability_subset`. Sets 16 per-stage samplers |
+| `moltenvk-m1.json` | Apple M1 through MoltenVK (driver ID 14), 1.3 | RT and NVIDIA-only extensions, mesh shaders, fragment shading rate, the 1.4-promoted extensions and their features. Adds `VK_KHR_portability_subset`. Sets 16 per-stage samplers |
 | `kosmickrisp-m1.json` | Apple M1 through Mesa KosmicKrisp (driver ID 28), 1.3 | As MoltenVK, without the portability subset, because KosmicKrisp is conformant |
 | `nvk-rtx-2060.json` | RTX 2060 on NVK (driver ID 24) | RT and NVIDIA-only extensions. Mesh shaders and fragment shading rate stay |
 | `gtx-1060.json` | GTX 1060 (Pascal), NVIDIA proprietary | RT, mesh shaders, fragment shading rate, and NVIDIA-only extensions except `VK_NV_low_latency2` |
@@ -43,5 +43,7 @@ IDs, API version) and loses what public facts say its class lacks:
 - invocation reorder;
 - opacity micromap.
 
-When the RTX dump is re-recorded, re-derive the synthetic files the same way, then check the
-diff.
+Removing an extension also removes the feature bits the probe would only record with it.
+
+When the RTX dump is re-recorded, re-derive the synthetic files with
+`scripts/make-synthetic-fixtures.py crates/render/src/caps/fixtures`, then check the diff.

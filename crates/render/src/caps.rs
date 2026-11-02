@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Which renderer a device runs (ADR-0020 §2a).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum RenderPath {
     /// The next-gen renderer N1–N11 build. In N0 it still runs today's frame.
     Tiered,
@@ -37,6 +38,7 @@ impl RenderPath {
 /// The five tiers of the tiered path (roadmap §3), lowest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Tier {
     /// RTX 2060 / RX 6600 class.
     Low,
@@ -82,7 +84,7 @@ pub enum PathChoice {
     /// Only devices admitted to Tiered are candidates; none is an error. CPU devices qualify
     /// only with [`Overrides::allow_cpu`].
     Tiered,
-    /// Same ranking as `Auto`; the chosen device runs Compat.
+    /// Same ranking as `Auto` (see `rank`); the chosen device runs Compat.
     Compat,
 }
 
@@ -101,15 +103,16 @@ impl PathChoice {
 
 /// What the gate sees besides the device: the choice and the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Overrides {
     /// `MOBA_RENDER_PATH` or the settings entry.
     pub choice: PathChoice,
     /// The process runs on macOS (`cfg!(target_os = "macos")`), which is always Compat.
     pub host_macos: bool,
     /// [`PathChoice::Tiered`] may admit CPU devices such as lavapipe. Only the
-    /// `MOBA_RENDER_PATH=tiered` override and `vulkan-probe --path tiered` set it (CI's RT
-    /// goldens); the settings entry never does, so a player's `tiered` never silently runs
-    /// on a software rasteriser.
+    /// `MOBA_RENDER_PATH=tiered` override and `vulkan-probe` (for every `--path`) set it, for
+    /// CI's RT goldens; the settings entry never does, so a player's `tiered` never silently
+    /// runs on a software rasteriser.
     pub allow_cpu: bool,
 }
 
@@ -135,6 +138,7 @@ impl Overrides {
 /// `VkPhysicalDeviceType`, as plain data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum DeviceKind {
     /// A discrete GPU.
     Discrete,
@@ -242,6 +246,7 @@ impl DeviceCapabilities {
 
 /// How an extension in [`EXTENSIONS`] is treated on the tiered path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Requirement {
     /// A device without it is Compat.
     Required,
@@ -307,7 +312,8 @@ pub const EXTENSIONS: &[ExtensionSpec] = &[
         Requirement::Optional,
         &["pipelineFragmentShadingRate"],
     ),
-    spec("VK_NV_low_latency2", Requirement::Optional, &[]),
+    // Depends on `VK_KHR_present_id`, so it needs that feature too.
+    spec("VK_NV_low_latency2", Requirement::Optional, &["presentId"]),
     spec("VK_KHR_present_id", Requirement::Optional, &["presentId"]),
     spec("VK_AMD_anti_lag", Requirement::Optional, &["antiLag"]),
 ];
@@ -392,14 +398,13 @@ pub const VULKAN14_OPTIONAL: &[&str] = &[
     "hostImageCopy",
 ];
 
-/// `VkDriverId::MOLTENVK`.
-const DRIVER_MOLTENVK: u32 = 14;
-/// `VkDriverId::MESA_KOSMICKRISP`.
-const DRIVER_KOSMICKRISP: u32 = 28;
+const DRIVER_MOLTENVK: u32 = vk::DriverId::MOLTENVK.as_raw().cast_unsigned();
+const DRIVER_KOSMICKRISP: u32 = vk::DriverId::MESA_KOSMICKRISP.as_raw().cast_unsigned();
 const PORTABILITY_SUBSET: &str = "VK_KHR_portability_subset";
 
 /// Why the gate chose a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdmissionReason {
     /// Every required item is present.
     Admitted,
@@ -429,6 +434,7 @@ impl AdmissionReason {
 
 /// The gate's decision for one device.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Admission {
     /// The path the device runs.
     pub path: RenderPath,
@@ -553,11 +559,14 @@ pub fn admit(caps: &DeviceCapabilities, overrides: Overrides) -> Admission {
     }
 }
 
-/// The device-selection score (ADR-0020 §2b): device type first, then Tiered over Compat
-/// within a type, then +10 for a shared graphics and present family.
+/// The device-selection score (ADR-0020 §2b): device type first, then a GPU that qualifies
+/// for Tiered over one that does not, then +10 for a shared graphics and present family.
+///
+/// It reads `qualifies`, not the chosen path, so `compat` ranks exactly like `auto` and a
+/// Compat-against-Tiered A/B stays on the same GPU.
 #[must_use]
 pub(crate) fn rank(kind: DeviceKind, admission: &Admission, shared_family: bool) -> u32 {
-    let tiered = if admission.path == RenderPath::Tiered {
+    let tiered = if admission.qualifies && kind != DeviceKind::Cpu {
         20
     } else {
         0

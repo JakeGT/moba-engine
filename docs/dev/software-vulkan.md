@@ -114,6 +114,6 @@ device, commit its dump there with `"source": "recorded"`.
 The `macos vulkan probe` workflow installs MoltenVK via Homebrew and runs the probe on
 `macos-latest`; trigger manually or label a PR `macos-vulkan`. It fails unless the chosen
 device reports `path=compat` and `--path tiered` admits nothing (macOS is Compat only), and it
-uploads the JSON dump as the `moltenvk-capabilities` artifact. It also runs in the nightly
-workflow. Latest green dispatch before the gate:
+uploads the JSON dump as the `moltenvk-capabilities` artifact. The nightly workflow runs the
+plain probe on MoltenVK too, without these assertions. Latest green dispatch before the gate:
 `vulkan probe: api=1.3.0 devices=1 portability=true` (run 39153270394).

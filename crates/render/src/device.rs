@@ -202,7 +202,7 @@ impl DeviceContext {
             if choice == PathChoice::Tiered && admission.path != RenderPath::Tiered {
                 let _ = writeln!(
                     reasons,
-                    "{name}: not admitted to the tiered path ({}; missing {}); ",
+                    "{name}: not admitted to the tiered path (reason: {}; lacks {}); ",
                     admission.reason.name(),
                     if admission.missing.is_empty() {
                         String::from("nothing")

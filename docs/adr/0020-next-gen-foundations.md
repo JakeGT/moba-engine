@@ -998,8 +998,8 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
 
 - **Only the override admits a CPU device.** §2b lets `tiered` admit CPU devices for CI's RT
   goldens. That is now `Overrides::allow_cpu`, which only `MOBA_RENDER_PATH=tiered` and
-  `vulkan-probe --path tiered` set. A settings file with `render_path = "tiered"` treats a CPU
-  device like `auto` does. Otherwise a player with a non-RT GPU and Mesa's lavapipe installed
+  `vulkan-probe` set. With a settings file's `render_path = "tiered"`, a CPU device is not a
+  candidate, and start-up fails with §2b's error if no GPU qualifies. Otherwise a player with a non-RT GPU and Mesa's lavapipe installed
   (the default on several Linux distributions) would silently run on the software
   rasteriser instead of getting §2b's error.
 - **Core structures follow the device's version.** The probe chains
@@ -1009,8 +1009,15 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
 - **Every enabled extension has its feature bits.** SER, `VK_KHR_present_id` and
   `VK_AMD_anti_lag` gain `rayTracingInvocationReorder`, `presentId` and `antiLag`. These are
   probed, recorded in the fixtures and enabled with the extension. SER also requires
-  `rayTracingPipeline`, its dependency. `VK_NV_low_latency2` and `VK_KHR_push_descriptor`
-  have no feature structure, so advertising them counts as support.
+  `rayTracingPipeline`, its dependency. `VK_NV_low_latency2` has no feature structure, so it
+  needs its dependency's `presentId`. `VK_KHR_push_descriptor` has none either, so
+  advertising it counts as support.
+- **`compat` ranks like `auto`.** §2b's "Tiered over Compat within a type" reads whether a
+  GPU qualifies for Tiered, not the path chosen, so `MOBA_RENDER_PATH=compat` picks the same
+  GPU as `auto`.
+- **The goldens and the perf gate pin Compat.** `render-golden.yml`, `perf-replay.sh` and the
+  nightly validation loop set `MOBA_RENDER_PATH=compat`, as §2c says, rather than relying on
+  the runner's device.
 - **The properties chain is narrower than §1e for now.** N0.2 records the core limits,
   `Vulkan12Properties` and the §3b descriptor limits. The acceleration-structure,
   RT-pipeline, mesh-shader and fragment-shading-rate property structures join the chain, and

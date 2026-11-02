@@ -8,6 +8,7 @@ on:
       - 'crates/shaders/**'
       - 'crates/platform/**'
       - 'crates/client/**'
+      - 'crates/tools/**'
       - '.github/workflows/macos-vulkan.yml'
 
 permissions:

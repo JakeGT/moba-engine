@@ -234,7 +234,6 @@
     "VK_KHR_zero_initialize_workgroup_memory"
   ],
   "features": {
-    "attachmentFragmentShadingRate": true,
     "bufferDeviceAddress": true,
     "descriptorBindingPartiallyBound": true,
     "descriptorBindingSampledImageUpdateAfterBind": true,
@@ -251,9 +250,7 @@
     "maintenance4": true,
     "maintenance5": true,
     "maintenance6": true,
-    "pipelineFragmentShadingRate": true,
     "presentId": true,
-    "primitiveFragmentShadingRate": true,
     "pushDescriptor": true,
     "runtimeDescriptorArray": true,
     "scalarBlockLayout": true,

@@ -145,6 +145,9 @@ the semver check):
     (RTX 5070 Ti, Radeon 610M, lavapipe) and six synthetic ones drive the admission tests.
   - The macOS MoltenVK workflow asserts that the device runs `path=compat` and uploads its
     capability dump.
+  - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
+    `auto`, so an A/B between the paths stays on one GPU. The caps types are
+    `#[non_exhaustive]`.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).

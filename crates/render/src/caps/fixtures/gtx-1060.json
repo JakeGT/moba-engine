@@ -235,7 +235,6 @@
     "VK_NV_low_latency2"
   ],
   "features": {
-    "attachmentFragmentShadingRate": true,
     "bufferDeviceAddress": true,
     "descriptorBindingPartiallyBound": true,
     "descriptorBindingSampledImageUpdateAfterBind": true,
@@ -252,9 +251,7 @@
     "maintenance4": true,
     "maintenance5": true,
     "maintenance6": true,
-    "pipelineFragmentShadingRate": true,
     "presentId": true,
-    "primitiveFragmentShadingRate": true,
     "pushDescriptor": true,
     "runtimeDescriptorArray": true,
     "scalarBlockLayout": true,

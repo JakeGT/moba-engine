@@ -61,6 +61,132 @@ fn fixtures_are_labelled_sorted_and_plain() {
     }
 }
 
+/// A fixture's name and its admission: path, `max_tier`, `missing` and reason.
+type Expected = (
+    &'static str,
+    RenderPath,
+    Option<Tier>,
+    &'static [&'static str],
+    AdmissionReason,
+);
+
+/// Every fixture's exact admission under `auto` (ADR-0020 gate 2).
+#[test]
+fn every_fixture_admits_exactly_as_expected() {
+    const NO_RT: &[&str] = &[
+        "VK_KHR_acceleration_structure",
+        "VK_KHR_deferred_host_operations",
+        "VK_KHR_ray_query",
+    ];
+    let table: [Expected; 9] = [
+        (
+            "rtx-5070-ti",
+            RenderPath::Tiered,
+            Some(Tier::Overdrive),
+            &[],
+            AdmissionReason::Admitted,
+        ),
+        (
+            "radeon-610m",
+            RenderPath::Tiered,
+            Some(Tier::Overdrive),
+            &[],
+            AdmissionReason::Admitted,
+        ),
+        (
+            "rt-no-mesh",
+            RenderPath::Tiered,
+            Some(Tier::Overdrive),
+            &[],
+            AdmissionReason::Admitted,
+        ),
+        (
+            "lavapipe",
+            RenderPath::Compat,
+            None,
+            &[],
+            AdmissionReason::CpuDevice,
+        ),
+        (
+            "nvk-rtx-2060",
+            RenderPath::Compat,
+            None,
+            NO_RT,
+            AdmissionReason::Missing,
+        ),
+        (
+            "gtx-1060",
+            RenderPath::Compat,
+            None,
+            NO_RT,
+            AdmissionReason::Missing,
+        ),
+        (
+            "uhd-620",
+            RenderPath::Compat,
+            None,
+            NO_RT,
+            AdmissionReason::Missing,
+        ),
+        (
+            "moltenvk-m1",
+            RenderPath::Compat,
+            None,
+            NO_RT,
+            AdmissionReason::MacOs,
+        ),
+        (
+            "kosmickrisp-m1",
+            RenderPath::Compat,
+            None,
+            NO_RT,
+            AdmissionReason::MacOs,
+        ),
+    ];
+    for (name, path, tier, missing, reason) in table {
+        let admission = admit(&fixture(name), on(PathChoice::Auto));
+        assert_eq!(
+            (
+                admission.path,
+                admission.max_tier,
+                admission.missing.as_slice(),
+                admission.reason
+            ),
+            (path, tier, missing, reason),
+            "{name}"
+        );
+    }
+    // CI's RT goldens need the bundled lavapipe to have the whole required set.
+    let lavapipe = admit(
+        &fixture("lavapipe"),
+        on(PathChoice::Tiered).with_cpu_devices(true),
+    );
+    assert_eq!(lavapipe.path, RenderPath::Tiered);
+    assert_eq!(lavapipe.max_tier, Some(Tier::Overdrive));
+}
+
+#[test]
+fn an_extension_with_its_feature_off_is_missing() {
+    let mut caps = fixture("rtx-5070-ti");
+    caps.features
+        .insert(String::from("accelerationStructure"), false);
+    let admission = admit(&caps, on(PathChoice::Auto));
+    assert_eq!(admission.path, RenderPath::Compat);
+    assert_eq!(admission.missing, ["VK_KHR_acceleration_structure"]);
+}
+
+#[test]
+fn low_latency_needs_present_id() {
+    let low_latency = EXTENSIONS
+        .iter()
+        .find(|spec| spec.name == "VK_NV_low_latency2")
+        .expect("spec");
+    let mut caps = fixture("rtx-5070-ti");
+    assert!(extension_present(&caps, low_latency));
+    caps.features.insert(String::from("presentId"), false);
+    assert!(!extension_present(&caps, low_latency));
+}
+
 #[test]
 fn the_rtx_5070_ti_is_tiered_up_to_overdrive() {
     let admission = admit(&fixture("rtx-5070-ti"), on(PathChoice::Auto));
@@ -225,6 +351,17 @@ fn ranking_is_device_type_first_then_path() {
     let tiered = admit(&fixture("rt-no-mesh"), on(PathChoice::Auto));
     let compat = admit(&fixture("gtx-1060"), on(PathChoice::Auto));
     assert!(rank(DeviceKind::Discrete, &tiered, false) > rank(DeviceKind::Discrete, &compat, true));
+    // `compat` ranks exactly like `auto`, so a Compat/Tiered A/B stays on one GPU.
+    for name in RECORDED.into_iter().chain(SYNTHETIC) {
+        let caps = fixture(name);
+        for shared in [false, true] {
+            assert_eq!(
+                rank(caps.kind, &admit(&caps, on(PathChoice::Compat)), shared),
+                rank(caps.kind, &admit(&caps, on(PathChoice::Auto)), shared),
+                "{name}"
+            );
+        }
+    }
 }
 
 #[test]
