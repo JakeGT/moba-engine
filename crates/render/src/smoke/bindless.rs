@@ -67,8 +67,10 @@ const FLAT_NORMAL: [u8; 4] = [128, 128, 255, 255];
 const TEXTURE_SIDE: u32 = 2;
 /// Where every pixel samples (mirrors `SMOKE_UV`). With 2×2 textures, `u` lies in the texel
 /// left of the image (wrap picks the right column, clamp the left one) and `v` inside the
-/// bottom row, a quarter texel from the centre line, so point and linear differ too. All four
-/// weights involved are multiples of 1/4, exact in every filtering implementation.
+/// bottom row, a quarter texel from the centre line, so point and linear differ too. The
+/// bilinear weights are multiples of 1/16, so with `subTexelPrecisionBits` ≥ 4 and the texel
+/// offsets multiples of 16 the results are whole numbers; the spec only says UNORM
+/// conversion *should* round to nearest, which lavapipe, RADV and NVIDIA do.
 pub(crate) const UV: [f64; 2] = [-0.125, 0.625];
 /// Per-channel offsets of a texture's texels from its base colour, in row-major order
 /// (x0y0, x1y0, x0y1, x1y1). Multiples of 16, so every 1/4-weighted sum is an integer.
@@ -551,7 +553,11 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         }
         // SAFETY: the layout's push range covers these 32 bytes for both stages.
         unsafe { d.cmd_push_constants(command, layout.handle(), push_range.stage_flags, 0, &push) };
-        // SAFETY: a fullscreen triangle with no vertex input, inside the rendering.
+        // SAFETY: a fullscreen triangle with no vertex input, inside the rendering. The handle
+        // list holds live handles, the fallbacks, the two free slots in `RELEASED` (left
+        // unwritten while the frame is pending: the late registration takes the lower,
+        // recycled slot, as asserted there) and the depth handle, read only through the
+        // comparison macro.
         unsafe { d.cmd_draw(command, 3, 1, 0, 0) };
         device.cmd_end_rendering(command);
         // SAFETY: the compute pipeline is live.
@@ -576,7 +582,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         // SAFETY: as above.
         unsafe { d.cmd_push_constants(command, layout.handle(), push_range.stage_flags, 0, &push) };
         // SAFETY: the storage image is in `GENERAL` and the dispatch covers exactly the 64×64
-        // image in 8×8 groups.
+        // image in 8×8 groups. It indexes the same handle list as the draw.
         unsafe { d.cmd_dispatch(command, SIZE / 8, SIZE / 8, 1) };
         let to_copy = [
             color_barrier(
@@ -625,6 +631,9 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     // SAFETY: frame 1 has retired (it recorded no GPU work), and every release so far kept
     // the contract; frame 2 indexes no recycled slot.
     unsafe { table.retire(RELEASE_FRAME) };
+    // Frame 2 also indexes the free slots in `RELEASED`; the late texture must land in the
+    // slot just recycled, which is lower (allocation takes the lowest free slot).
+    debug_assert_eq!(table.next_texture_slot(), Some(unlisted.index()));
     let late_handle = table.register_texture(late_image.view())?;
     let spare_handle = table.register_storage_image(spare_storage.view())?;
     // SAFETY: no frame indexes the spare storage image (frame 2 writes only `storage_handle`).
@@ -805,8 +814,8 @@ mod tests {
 
     /// The result depends on the sampler: for every texture, the four address/filter
     /// combinations read four different colours (so a swapped or missing palette entry
-    /// fails), anisotropic equals linear, and every value is exact (an integer before
-    /// rounding, so no driver rounds it differently). The comparison entries also give four
+    /// fails), anisotropic equals linear, and every value is a whole number before conversion
+    /// (exact given round-to-nearest UNORM conversion; see [`UV`]). The comparison entries also give four
     /// distinct, exact values.
     #[test]
     fn every_sampler_reads_a_different_exact_value() {

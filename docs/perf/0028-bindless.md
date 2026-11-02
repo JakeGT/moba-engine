@@ -24,14 +24,17 @@ with its CPU expectation; any validation message fails it. lavapipe ran with
 | Device | `bindless-smoke` | `rt-smoke` | Validation errors / warnings |
 |---|---|---|---|
 | lavapipe | PASS, 8,198 values, 0 mismatches | PASS, 4,096 values, 0 mismatches | 0 / 0 |
-| RADV (Radeon 610M) | PASS, 8,197, 0 (first version) | PASS, 4,097, 0 (first version) | 0 / 0 |
-| RTX 5070 Ti | PASS, 8,197, 0 (first version) | PASS, 4,097, 0 (first version) | 0 / 0 |
+| RADV (Radeon 610M) | PASS, 8,198, 0 | PASS, 4,096, 0 | 0 / 0 |
+| RTX 5070 Ti | PASS, 8,198, 0 | PASS, 4,096, 0 | 0 / 0 |
 
-Every device was admitted `path=tiered max_tier=overdrive missing=none`. The lavapipe row is
+Every device was admitted `path=tiered max_tier=overdrive missing=none`. All three rows are
 the smokes after the correctness review ([below](#correctness-review)): 2×2 textures that
 check the sampler palette, the comparison samplers and descriptor writes while the frame is
-pending. The RADV and RTX rows are the first version (1×1 textures, one tautological check
-each). Re-run on the review build: TODO(maintainer-run).
+pending. RADV and the RTX ran the review build's release binaries (`8382714`) with
+`MOBA_VULKAN_VALIDATION=required` and the Khronos layer from `.tools/validation`, selected
+with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/{radeon,nvidia}_icd.json`. Neither showed an
+off-by-one in the filtered or compared values. (The first version, with 1×1 textures, gave
+8,197 and 4,097 values on all three devices.)
 
 - **`bindless-smoke`** (review build, lavapipe): 223 registrations before the frame (212
   2×2 textures and a 2×2 depth texture, then 10 reusing the lowest of 12 slots released in
@@ -150,9 +153,23 @@ range is their spread.
   branch does not touch; the branch records no new per-frame work, so this is not a gain.
 - Ultra's p95 is bimodal on this GPU (as in [perf/0027](0027-tiers-budgets.md)): the branch's
   rounds gave 0.730, 0.689 and 0.724 ms, N0.3's 0.698, 0.692 and 0.693 ms. The p50 is equal.
-  Because every tiered block now carries `DEVICE_ADDRESS`, three rounds cannot rule out a
-  real p95 cost (0.724 against 0.693 ms); it needs more rounds. Extra Ultra rounds:
-  TODO(maintainer-run).
+  Because every tiered block now carries `DEVICE_ADDRESS`, three rounds could not rule out a
+  real p95 cost, so three more interleaved rounds per tier were run on the review build
+  against main (`6f82f72`, N0.3 as merged, where tiered dynamic resolution is off):
+
+  | Tier | Build | GPU total p50, ms (range) | p95 per round, ms |
+  |---|---|---|---|
+  | Low | main | 0.501 (0.499–0.504) | 0.516, 0.513, 0.516 |
+  | Low | branch | 0.498 (0.495–0.499) | 0.509, 0.512, 0.510 |
+  | High | main | 0.658 (0.657–0.661) | 0.699, 0.669, 0.719 |
+  | High | branch | 0.655 (0.655–0.656) | 0.702, 0.668, 0.698 |
+  | Ultra | main | 0.659 (0.657–0.660) | 0.668, 0.712, 0.677 |
+  | Ultra | branch | 0.656 (0.656–0.656) | 0.712, 0.675, 0.701 |
+
+  Main's own Ultra p95 now spans 0.668–0.712 ms, the same two modes as the branch's
+  0.675–0.712 ms, and the p50 is equal or 0.003 ms lower on every tier. The p95 gap is the
+  bimodality, not `DEVICE_ADDRESS`. (The totals are lower than the first table's because
+  main's tiered path no longer runs dynamic resolution's upscale pass by default.)
 - The VRAM peak column cannot show the table's cost: `crate::memory` counts each resource's
   `requirements.size` only, so neither the descriptor pool's memory nor any cost of
   `DEVICE_ADDRESS` allocations appears in it. Estimates: the table's images are 1×1 (bytes),

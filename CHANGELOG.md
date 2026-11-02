@@ -167,8 +167,8 @@ the semver check):
     pass, every comparison sampler on a depth texture) reads a different exact value, and
     writes descriptors into the bound set while its frame is pending (update after bind); the
     second traces a BLAS/TLAS with `GL_EXT_ray_query`. Both pass with validation and
-    synchronization validation on lavapipe (RADV and an RTX 5070 Ti passed their first
-    version), and run in the `renderer-gate` job on lavapipe; a run without validation fails unless
+    synchronization validation on lavapipe, RADV and an RTX 5070 Ti, and run in the
+    `renderer-gate` job on lavapipe; a run without validation fails unless
     `MOBA_VULKAN_VALIDATION=off` was given. `bindless.glsl` holds the shader declarations and
     the `BINDLESS_SAMPLER2D_NONUNIFORM` and `BINDLESS_SAMPLER2DSHADOW_NONUNIFORM` macros.
 - **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;

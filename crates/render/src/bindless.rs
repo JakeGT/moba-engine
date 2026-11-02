@@ -310,6 +310,11 @@ impl SlotAllocator {
         }
     }
 
+    /// The slot the next [`Self::allocate`] returns.
+    pub(crate) fn next_free(&self) -> Option<u32> {
+        self.free.peek().map(|&Reverse(slot)| slot)
+    }
+
     /// The lowest free slot, or `None` when every slot is live or waiting to retire.
     pub(crate) fn allocate(&mut self) -> Option<u32> {
         let Reverse(slot) = self.free.pop()?;
@@ -321,16 +326,20 @@ impl SlotAllocator {
     /// Releases a live slot during `frame`; it is reused only after [`Self::retire`] reports
     /// that frame retired. Returns `false` (and changes nothing) for a reserved, free or
     /// already released slot.
+    ///
+    /// Releases may name frames out of order (a handle last used by an older frame can be
+    /// released after one used by a newer frame). The pending queue stays sorted by holding
+    /// such a slot until the newest pending frame retires: later than needed, never earlier.
     pub(crate) fn release(&mut self, slot: u32, frame: u64) -> bool {
         if slot < self.reserved || !self.live.get(slot as usize).copied().unwrap_or(false) {
             return false;
         }
         self.live[slot as usize] = false;
         self.live_count -= 1;
-        debug_assert!(
-            self.pending.back().is_none_or(|&(last, _)| last <= frame),
-            "frames are released in order"
-        );
+        let frame = self
+            .pending
+            .back()
+            .map_or(frame, |&(last, _)| frame.max(last));
         self.pending.push_back((frame, slot));
         true
     }
@@ -544,6 +553,11 @@ impl BindlessTable {
         self.set
     }
 
+    /// The texture slot the next [`Self::register_texture`] takes (the lowest free one).
+    pub(crate) fn next_texture_slot(&self) -> Option<u32> {
+        self.textures.next_free()
+    }
+
     /// Descriptors written since creation, creation included.
     pub(crate) fn writes(&self) -> u64 {
         self.writes
@@ -594,7 +608,7 @@ impl BindlessTable {
     /// # Safety
     /// `frame` is the last frame, submitted or being recorded, that may index `handle`, and no
     /// frame recorded after this call indexes it: recording a handle after its release is a
-    /// caller bug, not a read of the fallback. [`Self::retire`] and the slot's next
+    /// caller bug, not a read of the fallback. Releases need not name frames in order. [`Self::retire`] and the slot's next
     /// registration write its descriptor once `frame` is reported retired, so a frame that
     /// indexes it later and is still pending then would see a descriptor update it uses
     /// (VUID-vkUpdateDescriptorSets-None-03047, undefined behaviour). The view stays alive
@@ -1118,6 +1132,25 @@ mod tests {
         assert!(!flags[0].contains(variable) && !flags[1].contains(variable));
         assert!(flags[2].contains(variable));
         assert_eq!(bindings[2].descriptor_count, TEXTURE_SLOTS);
+    }
+
+    /// A release naming an older frame than an earlier release (allowed by the release
+    /// contract) waits for the newest pending frame instead of tripping an assertion.
+    #[test]
+    fn out_of_order_releases_recycle_no_earlier_than_their_frames() {
+        let mut slots = SlotAllocator::new(8, 1);
+        let a = slots.allocate().unwrap();
+        let b = slots.allocate().unwrap();
+        assert!(slots.release(a, 5));
+        assert!(slots.release(b, 3));
+        let mut recycled = Vec::new();
+        slots.retire(4, &mut recycled);
+        assert!(
+            recycled.is_empty(),
+            "frame 5 has not retired, and b waits behind it"
+        );
+        slots.retire(5, &mut recycled);
+        assert_eq!(recycled, [a, b]);
     }
 
     #[test]
