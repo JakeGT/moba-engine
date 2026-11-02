@@ -1126,6 +1126,72 @@ documented in [docs/dev/slang.md](../dev/slang.md).
   since `slang-version.txt` and `shaders/slang/` are inside the crate. A docs.rs-style build
   without shader tools fails at `build.rs`, which is already true for `glslc` today.
 
+### Amendment 5 (2026-11-02, N0.5): the bindless table as built
+
+Recorded in the bindless PR (`feat/n0-bindless`), numbered after N0.3's amendment 3 and
+N0.4's amendment 4. §3's model, bindings, capacities, flags and
+limits are implemented as written ([perf/0028](../perf/0028-bindless.md)). Five details §3
+leaves open or states loosely are settled here:
+
+- **Every slot holds a written descriptor, not only slot 0.** Creation writes the fallback
+  into all 17,440 slots (once, about 17k descriptor writes), and a released slot gets the
+  fallback back when it retires. That makes §3a's "a stale or zero index never reads an
+  unwritten descriptor" true for *every* index below the capacity, not just 0, but only for
+  **2D float reads**: every fallback is a 2D `R8G8B8A8_UNORM` image, so a zero or bad index is
+  valid through `texture2D` with a non-comparison sampler and through a float `image2D`, and
+  invalid through a `texture3D`/`textureCube` alias, a `uimage2D` (the RT smoke declares one
+  on binding 1) or a comparison sampler on a colour fallback. Typed fallbacks (3D, cube,
+  depth, unsigned storage) arrive with their first N1 consumers. The fallbacks are a safety
+  net for a bad index, not a promise for stale handles (next item).
+- **The release contract is stated, and it is `unsafe`.** §3a says freed slots are recycled
+  "after the frames in flight have retired". `release(handle, frame)` takes the **last frame,
+  submitted or being recorded, that may index the handle**; no frame recorded after the
+  release may index it. `retire(completed)` takes a frame whose fence has signalled. Only then
+  are the fallback rewrite and the reuse writes to descriptors no pending command buffer
+  uses, which is all `UPDATE_UNUSED_WHILE_PENDING` allows
+  (VUID-vkUpdateDescriptorSets-None-03047). A wrong `frame` or `completed` makes such a write
+  undefined behaviour, so `release_texture`, `release_storage_image` and `retire` are
+  `unsafe fn`s with that contract as their `# Safety` section (as `GpuBuffer::device_address`
+  is). **Recording a handle after its release is a caller bug**: it does not read the
+  fallback, because the slot may be reused and rewritten while that frame is pending. Shaders
+  index only live handles and the reserved fallbacks.
+- **Three texture fallbacks, three reserved handles.** §3a lists "a 1×1 magenta, white or
+  flat-normal image". They are texture slots 0, 1 and 2 (`MISSING`, `WHITE`, `FLAT_NORMAL`);
+  handles start at 3. The storage fallback (slot 0) is a 1×1 `R8G8B8A8_UNORM` image cleared to
+  zero.
+- **The sampler palette has 12 entries.** Wrap/clamp × linear/point/aniso × compare gives 12;
+  the other 20 of the 32 slots hold slot 0's linear/wrap sampler. Aniso is plain linear on a
+  device without `samplerAnisotropy`. Comparison entries hold slot 0 on a device without
+  mutable comparison samplers; Tiered admits none today.
+- **`maxPerStageUpdateAfterBindResources` counts 17,408, not 17,440.** The spec's resource
+  count excludes plain samplers, so the table needs 17,408 per stage. §3b's admission minimum
+  (17,440) is kept, as it is conservative. `descriptor_budget::check_tiered` checks tiered
+  layouts against the device's update-after-bind limits, per stage (every stage a binding is
+  visible to; `ALL` means every stage, mesh and ray tracing included) and per layout, for
+  samplers, sampled images, storage images and resources. Update-after-bind buffer and
+  acceleration-structure limits, and the colour attachments the fragment stage also counts,
+  are added by the first tiered pass that binds them (N1).
+
+Consequences of §3a that the code also takes, and what the smokes check:
+- **Tiered memory carries `DEVICE_ADDRESS`.** On the tiered path the allocator allocates every
+  block with `VkMemoryAllocateFlags::DEVICE_ADDRESS`, so any buffer can be passed by address.
+  Compat allocates as before.
+- **The smokes are `moba-tools` binaries** (`bindless-smoke`, `rt-smoke`) over
+  `moba_render::{bindless_smoke, rt_smoke}`, run headless (no surface) and in the
+  `renderer-gate` job. They are GLSL: they were written before Slang (§4) landed, and N0 ports no shaders (§4d). A run
+  passes only with validation on, or with `MOBA_VULKAN_VALIDATION=off` given explicitly.
+- **What `bindless_smoke` checks on the GPU.** The sampler palette: 2×2 textures sampled at
+  a coordinate where wrap/clamp and point/linear give four different exact values, so a
+  missing, swapped or ignored palette entry fails (anisotropic entries read as linear there:
+  their anisotropy is checked only by their create info). The comparison entries: a 2×2 depth
+  texture through each of them, in the compute pass only, because lavapipe (Mesa 26.2.5)
+  crashes when a fragment shader takes a second sample after a `nonuniformEXT` one; the
+  fragment pass checks the six non-comparison entries. Update after bind: while the smoke
+  frame is pending, four descriptor writes go into the bound set (a release, retirement and
+  reuse of a texture slot, and a storage image registered, released and retired), to slots
+  the frame does not index; without `UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING` the
+  validation layer reports VUID-vkUpdateDescriptorSets-None-03047 and the run fails.
+
 ## Corrections to the roadmap
 
 These were re-checked on 2026-10-31. This PR only adds a link to this ADR from roadmap §12;
