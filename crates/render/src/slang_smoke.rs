@@ -79,7 +79,7 @@ impl Drop for OwnedDevice {
 /// [`ValidationMode::Required`] and the layer is missing, or when a Vulkan call fails.
 pub fn slang_smoke(validation: ValidationMode) -> RenderResult<SlangSmoke> {
     let errors_before = InstanceContext::validation_error_count();
-    let context = InstanceContext::new(&[], validation)?;
+    let context = InstanceContext::new(&[], &[], validation)?;
     // Every device object is destroyed when `run` returns, so validation errors raised by
     // their destruction are counted too.
     let (device, mismatch) = run(&context)?;

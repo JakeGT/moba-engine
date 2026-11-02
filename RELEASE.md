@@ -40,7 +40,16 @@ is opt-in until crate names/ownership are settled.
 7. **Artifacts** — push a `vX.Y.Z` tag. `.github/workflows/release.yml` runs release tests,
    inspects package file lists, builds Linux/Windows/macOS server/client/tools archives and
    attaches them to the GitHub release.
-8. **crates.io later** — publish in dependency order after the policy above is approved:
+8. **Vendor SDK features** (ADR-0020 §6; [docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md)) —
+   public releases ship the open build (default features) only. Before any build with a
+   vendor feature is distributed:
+   - **notify NVIDIA before any commercial release** (DLSS `LICENSE.txt`, supplement §4), and
+     get NVIDIA's prior approval for the use of its marks (supplement §7.2(c));
+   - add the notices for every feature compiled in to `THIRD_PARTY.md` and to the in-game
+     credits, with the NVIDIA marks where the DLSS supplement §7.1(b) asks for them;
+   - keep `fsr4` out (development-only until ADR-0020 Q6 is settled) and re-read every
+     licence pinned in `vendor-sdks.toml`.
+9. **crates.io later** — publish in dependency order after the policy above is approved:
    foundation crates, then game/sim/net, then the umbrella crate. Run `cargo package` and
    `scripts/semver-check.sh <previous tag>` first.
 

@@ -3,6 +3,7 @@
 use ash::vk::TaggedStructure as _;
 use ash::{Entry, Instance, vk};
 use core::ffi::{CStr, c_char};
+use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{RenderError, RenderResult};
@@ -38,7 +39,7 @@ pub struct VulkanProbe {
 /// # Errors
 /// Returns the same instance/extension errors as the renderer initialisation path.
 pub fn probe_vulkan() -> RenderResult<VulkanProbe> {
-    let context = InstanceContext::new(&[], ValidationMode::Off)?;
+    let context = InstanceContext::new(&[], &[], ValidationMode::Off)?;
     // SAFETY: the instance is live and the entry point belongs to it.
     let devices = unsafe { context.instance.enumerate_physical_devices() }?;
     Ok(VulkanProbe {
@@ -72,7 +73,7 @@ pub fn probe_devices(
     choice: crate::caps::PathChoice,
     allow_cpu: bool,
 ) -> RenderResult<Vec<ProbedDevice>> {
-    let context = InstanceContext::new(&[], ValidationMode::Off)?;
+    let context = InstanceContext::new(&[], &[], ValidationMode::Off)?;
     // SAFETY: the instance is live and the entry point belongs to it.
     let devices = unsafe { context.instance.enumerate_physical_devices() }?;
     let mut probed = Vec::with_capacity(devices.len());
@@ -126,15 +127,21 @@ pub(crate) struct InstanceContext {
     pub(crate) instance: Instance,
     pub(crate) entry: Entry,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    /// Every instance extension enabled at `vkCreateInstance` (the vendor probes read this).
+    pub(crate) enabled_extensions: Vec<String>,
     validation_enabled: bool,
     portability: bool,
     instance_version: u32,
 }
 
 impl InstanceContext {
+    /// Creates the instance with `required_extensions` (missing ones fail) and each of
+    /// `optional_extensions` the loader advertises (the vendor back ends' requests, ADR-0020
+    /// §1e; missing ones are skipped and reported by the back end's probe).
     #[allow(clippy::too_many_lines)] // Instance setup is one explicit ordered sequence.
     pub(crate) fn new(
         required_extensions: &[&CStr],
+        optional_extensions: &[CString],
         validation: ValidationMode,
     ) -> RenderResult<Self> {
         // SAFETY: loading the platform Vulkan loader is the entry point of the process's
@@ -161,16 +168,13 @@ impl InstanceContext {
 
         // SAFETY: the loader is initialised; passing null asks for global extensions.
         let available_extensions = unsafe { entry.enumerate_instance_extension_properties(None) }?;
-        let mut extensions: Vec<*const c_char> = required_extensions
-            .iter()
-            .map(|name| name.as_ptr())
-            .collect();
+        let mut names: Vec<&CStr> = required_extensions.to_vec();
         let mut create_flags = vk::InstanceCreateFlags::empty();
         let portability = extension_supported(&available_extensions, PORTABILITY_ENUMERATION);
         if portability {
             create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
             if !required_extensions.contains(&PORTABILITY_ENUMERATION) {
-                extensions.push(PORTABILITY_ENUMERATION.as_ptr());
+                names.push(PORTABILITY_ENUMERATION);
             }
         }
         for name in required_extensions {
@@ -180,6 +184,13 @@ impl InstanceContext {
                 ));
             }
         }
+        // `optional_extensions` outlives `create_instance` below.
+        for name in optional_extensions {
+            if !names.contains(&name.as_c_str()) && extension_supported(&available_extensions, name)
+            {
+                names.push(name);
+            }
+        }
         let debug_utils = c"VK_EXT_debug_utils";
         if validation_enabled {
             if !extension_supported(&available_extensions, debug_utils) {
@@ -187,9 +198,12 @@ impl InstanceContext {
                     "VK_EXT_debug_utils",
                 )));
             }
-            extensions.push(debug_utils.as_ptr());
+            if !names.contains(&debug_utils) {
+                names.push(debug_utils);
+            }
         }
 
+        let extensions: Vec<*const c_char> = names.iter().map(|name| name.as_ptr()).collect();
         let mut layers: Vec<*const c_char> = Vec::new();
         if validation_enabled {
             layers.push(VALIDATION_LAYER.as_ptr());
@@ -227,6 +241,10 @@ impl InstanceContext {
             create_info = create_info.push(&mut synchronization_validation);
         }
 
+        let enabled_extensions: Vec<String> = names
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
         // SAFETY: `create_info` points at live arrays for the duration of the call, and
         // every extension/layer was checked against the loader's list.
         let instance = unsafe { entry.create_instance(&create_info, None) }?;
@@ -255,6 +273,7 @@ impl InstanceContext {
             instance,
             entry,
             debug_messenger,
+            enabled_extensions,
             validation_enabled,
             portability,
             instance_version,
