@@ -764,6 +764,8 @@ exception: they stay all-rights-reserved and are listed as such.
    [ADR-0020](../adr/0020-next-gen-foundations.md) (accepted 2026-11-01), with the vendor
    claims re-checked and its corrections to this plan listed there.
 3. **ADR-0021 (N1):** the temporal foundation, the upscaler interface and the overlay layer.
+   Drafted as [ADR-0021](../adr/0021-temporal-upscaling-overlay.md) (proposed 2026-10-31, accepted 2026-11-02),
+   with the vendor claims re-checked and its corrections to this plan listed there.
 4. **A0:** the licence and provenance gate in `content-check`, and the MikkTSpace tangent fix.
 5. Set up the local AI workstation (ComfyUI + TRELLIS.2, Z-Image, StableMaterials, Kimodo) and
    produce a first test hero through the full §9.4 pipeline. That measures where the human
@@ -772,7 +774,7 @@ exception: they stay all-rights-reserved and are listed as such.
    one AMD card.
 7. **ADR-0023 (N2):** the thin G-buffer, compute deferred lighting, LTC area lights, forward
    transparents, G-buffer decals, the multi-layer material model and team rims. Drafted as
-   [ADR-0023](../adr/0023-frame-architecture-materials.md) (proposed, 2026-11-02), with the
+   [ADR-0023](../adr/0023-frame-architecture-materials.md) (accepted 2026-11-02), with the
    vendor claims re-checked and its corrections to this plan listed there.
 
 ## 13. Open questions for the maintainer

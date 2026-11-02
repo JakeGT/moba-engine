@@ -1,6 +1,8 @@
 # ADR-0023: Frame architecture and materials: thin G-buffer, compute deferred lighting, LTC area lights and the multi-layer material model (N2)
 
-**Status:** proposed 2026-11-02. This is phase N2 of the
+**Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
+[Open questions](#open-questions-for-the-maintainer) taken (see
+[Maintainer answers](#maintainer-answers-2026-11-02)). Proposed 2026-11-02. This is phase N2 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
 - **Builds on:**
@@ -8,11 +10,10 @@ and §12), written before the code.
     settles the `Tiered`/`Compat` paths (§2), the bindless set and buffer device address (§3),
     Slang (§4), the tier budgets (§5) and the vendor-SDK features (§6). This ADR uses them and
     does not re-decide them.
-  - ADR-0021 (N1, **proposed** on PR #350 as `docs/adr/0021-temporal-upscaling-overlay.md`,
-    not yet on `main`, so it is not linked here). N2 takes over
+  - [ADR-0021](0021-temporal-upscaling-overlay.md) (N1, accepted 2026-11-02). N2 takes over
     N1's render-resolution `prepass` and its `motion` attachment, writes N1's reactive and
     `tc_mask` targets from the new forward passes, and leaves N1's post-upscale overlay layer
-    as it is. If ADR-0021 changes in review, this ADR follows it.
+    as it is. If ADR-0021 is amended in its implementation, this ADR follows it.
 - **Amends, for the Tiered path only:**
   - [ADR-0011](0011-art-style-lighting.md) §1, §2 and §6 rule 1: shading moves from the forward
     `shade()` to a compute pass; the stylisation layer (wrap, ramp, painted specular, map rim)
@@ -955,6 +956,24 @@ These follow roadmap §10 and the gates of ADR-0020 and ADR-0021, applied to N2.
 12. **Drop the stylisation layer (wrap, ramp, painted specular, map rim) from Tiered in N2?**
     *Recommendation:* yes, in N2e together with the team rims, so the map rim's readability role
     is never left empty.
+
+### Maintainer answers (2026-11-02)
+
+The maintainer accepted this ADR with **every recommendation above taken**, Q1 to Q12:
+- Low's shadowed local lights wait for ray-query shadow rays in N4; no shadow-map atlas in N2;
+- allied highlight defaults to `rim+outline` until art bible decision 11 is taken and CON-2
+  passes, then the bible's `rim`;
+- `team_tint` on Tiered defaults to `honour` until the rims pass CON-2, then option (a),
+  `zero` on Tiered, with ADR-0011 rule 1 amended in that PR;
+- reversed-Z on Tiered lands in N2a;
+- transmissive glass writes depth;
+- Void silk is sheen only in gameplay, with anisotropy at the showcase camera in N10;
+- analytic Charlie sheen now, LTC sheen only if its tables get a licence or we fit our own;
+- N1's GLSL vertex stages stay under the Slang G-buffer fragments until N7;
+- the BSD-licensed LTC fitting code is ported, with its notice in `THIRD_PARTY.md`;
+- the tiered path requires `maxColorAttachments ≥ 8`;
+- the emissive mask goes in `metallic_roughness.b` on both paths, with its Compat fallback;
+- the stylisation layer leaves Tiered in N2e, together with the team rims.
 
 ## Corrections to the roadmap
 

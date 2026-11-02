@@ -27,8 +27,9 @@
 - [ADRs](adr/) — architecture decisions, including
   [open-source distribution](adr/0004-open-source-distribution.md),
   [server-authoritative netcode](adr/0001-server-authoritative-netcode.md), the accepted
-  [next-gen foundations (N0)](adr/0020-next-gen-foundations.md) and the proposed
-  [frame architecture and materials (N2)](adr/0023-frame-architecture-materials.md).
+  [next-gen foundations (N0)](adr/0020-next-gen-foundations.md),
+  [temporal foundation, upscaling and overlay layer (N1)](adr/0021-temporal-upscaling-overlay.md)
+  and [frame architecture and materials (N2)](adr/0023-frame-architecture-materials.md).
 - [Development notes](dev/) — software Vulkan setup and local workflow.
 - [Agent instructions](../AGENTS.md), [agentic coding runbook](agents.md) and
   [local agent environment](../agents.local.example.md).
