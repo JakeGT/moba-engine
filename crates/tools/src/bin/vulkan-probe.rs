@@ -117,6 +117,8 @@ fn main() {
         .position(|candidate| std::ptr::eq(candidate, device))
         .unwrap_or_default();
     let line = format!(
+        // `default_tier` is §2b's table; on Compat the client keeps running `auto` as High in
+        // N0 (ADR-0020 amendment 3).
         "chosen: device {index} \"{}\" {} default_tier={}",
         device.capabilities.name,
         device.admission.log_fields(),

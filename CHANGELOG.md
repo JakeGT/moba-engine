@@ -171,8 +171,7 @@ the semver check):
   - On the tiered path dynamic resolution aims at the tier's budget, from full scale down to
     a 0.5 floor. Until N1 it is off unless `MOBA_DYNRES` turns it on, and the preset's
     upscaler-mode ceiling (0.67 or 0.5) applies from N1, when an upscaler fills the gap.
-  - The
-    frame log gains `config_tier=` and `scale_first/final/min/max` and `scale_changes_late`;
+  - The frame log gains `config_tier=` and `scale_first/final/min/max` and `scale_changes_late`;
     `scripts/dynres-check.sh` checks that a forced target holds. `PostConfig`'s dynamic
     target may now go down to 0.1 ms (was 1 ms), so a forced target bites on a fast GPU.
   - `perf-gate` reads `path=`: tiered logs are checked against `GPU_BUDGETS` and
