@@ -70,10 +70,15 @@ cargo build -p moba-client --features dlss,rtxdi,sharc
   `LD_LIBRARY_PATH` for `libdxcompiler.so`). NRD's configure step writes
   `Shaders/NRDConfig.hlsli` into its source tree, so `build.rs` runs CMake on a copy of NRD;
   the fetched SDK is never written to. NRD is built once per pin, target, profile and
-  toolchain (`CMAKE`, `VULKAN_SDK`, `CC`, `CXX`, `CFLAGS`, `CXXFLAGS`) in
-  `<target-dir>/<profile>/vendor-build/nrd`, not in `OUT_DIR`, so every feature set and clippy
-  reuse it; a stamp written last records what it was built from, and anything else is
-  rebuilt from scratch.
+  toolchain in `<build-dir>/<profile>/vendor-build/nrd` (cargo's build dir: the target dir
+  unless `CARGO_BUILD_BUILD_DIR` moves it), not in `OUT_DIR`, so every feature set and clippy
+  reuse it. A stamp written last records what it was built from: the SDK pins, the
+  `cmake --version` and `dxc --version` lines, every CMake definition, and the environment
+  the `cmake` and `cc` crates read (`CMAKE`, `VULKAN_SDK`, `CMAKE_GENERATOR`,
+  `CMAKE_TOOLCHAIN_FILE`, `CMAKE_PREFIX_PATH`, and `CC`, `CXX`, `CFLAGS`, `CXXFLAGS`, `AR`
+  in their plain, per-target and `TARGET_` forms). Anything else is rebuilt from scratch, and
+  only the libraries and the stamp are kept. The C++ compiler's own version is not in the
+  stamp: after a compiler upgrade, delete `vendor-build/nrd`.
 - Linking: NGX's static library (`libnvsdk_ngx.a` plus `stdc++`/`dl` on Linux,
   `nvsdk_ngx_d.lib` on Windows); NRD statically with ShaderMake's `ShaderMakeBlob`, which a
   static NRD needs for its shader lookup (plus `stdc++`, or `c++` on Apple targets);
@@ -194,13 +199,16 @@ The RTX 5070 Ti run with every Linux-buildable back end is in
   (`--all-features` would need the SDKs), then clippy with each fetched feature alone and with
   all of them, the selection tests and an engine check. `nrd` is skipped unless `cmake
   --version` and `dxc --version` both run.
-- The `vendor-sdks` CI job (Linux and Windows) installs libclang and CMake and takes `dxc`
-  (and `glslc` on Windows) from the Vulkan SDK: on Linux from LunarG's tarball, checked
-  against LunarG's published SHA-256 before unpacking; on Windows from Chocolatey's
-  `vulkan-sdk` package at a pinned version. Only that subset is cached, keyed on the pin. It
-  restores the archive cache keyed on `vendor-sdks.toml` (one entry for both OSes) and the
-  NRD build cache, fetches and verifies `vendor-sdks,dlss-fg`, then builds and links
-  `moba-client --features vendor-sdks,dlss-fg`, runs
+- The `vendor-sdks` CI job (Linux and Windows) sets up the pinned `slangc` (as every job that
+  builds the shaders crate does), installs libclang and CMake, and takes `dxc` (and, on
+  Windows, `glslc` and `spirv-val`) from the Vulkan SDK: on Linux from LunarG's tarball,
+  checked against LunarG's published SHA-256 before unpacking, with `spirv-val` from
+  `spirv-tools`; on Windows from Chocolatey's `vulkan-sdk` package at a pinned version. Only
+  that subset is cached, keyed on the pin and the subset's version. It restores the archive
+  cache keyed on `vendor-sdks.toml` (one entry for both OSes) and the NRD build cache (keyed
+  on the runner image, the pins and `build/vendor.rs`; the stamp still decides reuse), each
+  saved straight after the step that fills it, fetches and verifies `vendor-sdks,dlss-fg`,
+  then builds and links `moba-client --features vendor-sdks,dlss-fg`, runs
   clippy and the selection tests (under `bash`, so each command's failure counts), runs clippy
   with each vendor feature alone (Linux), and checks that, with the vendor features on across
   the workspace, no server crate reaches `moba-render`, `bindgen`, `libloading` or `cmake`.

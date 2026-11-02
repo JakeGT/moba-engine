@@ -347,35 +347,60 @@ fn nrd(context: &Context) {
     // NRD is built once per pin, target, profile and toolchain, not once per build script
     // run: OUT_DIR differs for every feature set and for clippy, and each NRD build compiles
     // its SPIR-V permutations with dxc. The build lives beside cargo's own `build` directory
-    // (`<target-dir>/<profile>/vendor-build/nrd`), and a stamp written last records what it
-    // was built from, so an interrupted or outdated build is redone from scratch. Cargo holds
+    // (`<build-dir>/<profile>/vendor-build/nrd`; the build dir is the target dir unless
+    // `CARGO_BUILD_BUILD_DIR` moves it), and a stamp written last records what it
+    // was built from (the pins, the CMake and dxc versions, the recipe and the toolchain
+    // environment), so an interrupted or outdated build is redone from scratch. Cargo holds
     // the target directory's lock while build scripts run, so two never share it at once.
     let build = shared_build_dir(context, "nrd");
+    let lib_dir = build.join("lib");
+    let defines = nrd_defines(&shadermake, &mathlib, &lib_dir, &build.join("shaders"));
+    let (cmake_version, dxc_version) = nrd_tools(context);
     let mut key = format!(
-        "nrd {} shadermake {} mathlib {}",
+        "nrd {} shadermake {} mathlib {}\ncmake {cmake_version}\ndxc {dxc_version}",
         sdk.sha256, shadermake.sha256, mathlib.sha256
     );
-    for var in [
-        "TARGET",
-        "PROFILE",
-        "OPT_LEVEL",
-        "DEBUG",
+    for (name, value) in &defines {
+        let _ = write!(key, "\n-D{name}={value}");
+    }
+    // What cargo sets for this build, then what the `cmake` and `cc` crates read to pick the
+    // generator and the C++ compiler and its flags (plain, per target and `TARGET_` forms).
+    let target = env_var("TARGET");
+    let mut vars: Vec<String> = ["TARGET", "PROFILE", "OPT_LEVEL", "DEBUG"]
+        .map(String::from)
+        .to_vec();
+    let tracked = [
         "CMAKE",
         "VULKAN_SDK",
+        "CMAKE_GENERATOR",
+        "CMAKE_TOOLCHAIN_FILE",
+        "CMAKE_PREFIX_PATH",
         "CC",
         "CXX",
         "CFLAGS",
         "CXXFLAGS",
-    ] {
-        if !matches!(var, "TARGET" | "PROFILE" | "OPT_LEVEL" | "DEBUG") {
+        "AR",
+    ];
+    for var in tracked {
+        vars.push(var.to_owned());
+        if !var.starts_with("CMAKE") && var != "VULKAN_SDK" {
+            vars.push(format!("{var}_{target}"));
+            vars.push(format!("{var}_{}", target.replace('-', "_")));
+            vars.push(format!("TARGET_{var}"));
+        }
+    }
+    for var in &vars {
+        if !matches!(var.as_str(), "TARGET" | "PROFILE" | "OPT_LEVEL" | "DEBUG") {
             println!("cargo:rerun-if-env-changed={var}");
         }
         let _ = write!(key, "\n{var}={}", env::var(var).unwrap_or_default());
     }
     let done = build.join(".moba-nrd-built");
-    let lib_dir = build.join("lib");
+    // A missing stamp (the directory deleted, or wiped by another feature set's rebuild)
+    // reruns this script, so no OUT_DIR is left linking against libraries that are gone.
+    println!("cargo:rerun-if-changed={}", done.display());
     if fs::read_to_string(&done).ok().as_deref() != Some(key.as_str()) {
-        build_nrd(context, &build, [&sdk, &shadermake, &mathlib], &lib_dir);
+        build_nrd(&build, &sdk, &defines);
         fs::write(&done, &key)
             .unwrap_or_else(|error| fail(format!("writing {}: {error}", done.display())));
     }
@@ -396,8 +421,8 @@ fn nrd(context: &Context) {
     }
 }
 
-/// `<target-dir>/<profile>/vendor-build/<name>`, found from `OUT_DIR`
-/// (`<target-dir>/<profile>/build/<package>-<hash>/out`); `OUT_DIR` itself when the layout is
+/// `<build-dir>/<profile>/vendor-build/<name>`, found from `OUT_DIR`
+/// (`<build-dir>/<profile>/build/<package>-<hash>/out`); `OUT_DIR` itself when the layout is
 /// not that one.
 #[cfg(feature = "nrd")]
 fn shared_build_dir(context: &Context, name: &str) -> PathBuf {
@@ -411,24 +436,33 @@ fn shared_build_dir(context: &Context, name: &str) -> PathBuf {
     profile.join("vendor-build").join(name)
 }
 
-/// Builds NRD from scratch in `build` (removing what is there), its libraries into `lib_dir`.
+/// The `CMake` and `dxc` versions NRD is built with (their `--version` output), failing with
+/// a plain message when either is missing: `CMake` 3.30+ (NRD's minimum) and the Vulkan SDK's
+/// `dxc` (`SHADERMAKE_FIND_DXC_VK`) are build requirements of this feature only.
 #[cfg(feature = "nrd")]
-fn build_nrd(
-    context: &Context,
-    build: &Path,
-    [sdk, shadermake, mathlib]: [&Sdk; 3],
-    lib_dir: &Path,
-) {
-    // CMake 3.30+ (NRD's minimum) and the Vulkan SDK's DXC (SHADERMAKE_FIND_DXC_VK) are build
-    // requirements of this feature only. Say so plainly instead of failing inside CMake.
-    let cmake = env::var("CMAKE").unwrap_or_else(|_| String::from("cmake"));
-    match Command::new(&cmake).arg("--version").output() {
-        Ok(output) if output.status.success() => {}
-        _ => fail(
+fn nrd_tools(context: &Context) -> (String, String) {
+    let version = |program: &Path| {
+        Command::new(program)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            })
+    };
+    let cmake = env::var_os("CMAKE").map_or_else(|| PathBuf::from("cmake"), PathBuf::from);
+    let cmake = version(&cmake).unwrap_or_else(|| {
+        fail(
             "moba-render feature `nrd` builds NRD with CMake 3.30 or newer, which was not found \
              (set CMAKE to its path)",
-        ),
-    }
+        )
+    });
     let dxc = if context.target_os == "windows" {
         env::var_os("VULKAN_SDK").map(|sdk| PathBuf::from(sdk).join("Bin").join("dxc.exe"))
     } else {
@@ -436,20 +470,57 @@ fn build_nrd(
     };
     // It must run, not merely exist: on Linux the SDK's dxc needs its libdxcompiler.so on
     // the library path.
-    let dxc_ok = dxc.as_ref().is_some_and(|dxc| {
-        Command::new(dxc)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-    });
-    if !dxc_ok {
+    let dxc = dxc.as_deref().and_then(version).unwrap_or_else(|| {
         fail(
             "moba-render feature `nrd` compiles NRD's shaders with the Vulkan SDK's dxc \
              (SHADERMAKE_FIND_DXC_VK), which was not found: on Windows install the Vulkan SDK \
              (VULKAN_SDK), elsewhere put dxc on PATH",
-        );
-    }
+        )
+    });
+    (cmake, dxc)
+}
 
+/// The `CMake` definitions NRD is configured with (ADR-0020 §6b, amendment 6).
+#[cfg(feature = "nrd")]
+fn nrd_defines(
+    shadermake: &Sdk,
+    mathlib: &Sdk,
+    lib_dir: &Path,
+    shaders: &Path,
+) -> Vec<(&'static str, String)> {
+    let path = |path: &Path| path.display().to_string();
+    let on = |name: &'static str, on: bool| (name, String::from(if on { "ON" } else { "OFF" }));
+    vec![
+        // No downloads at configure time: the fetch script unpacked both dependencies.
+        on("FETCHCONTENT_FULLY_DISCONNECTED", true),
+        ("FETCHCONTENT_SOURCE_DIR_SHADERMAKE", path(&shadermake.dir)),
+        ("FETCHCONTENT_SOURCE_DIR_MATHLIB", path(&mathlib.dir)),
+        on("NRD_NRI", false),
+        // ShaderMake's own compiler downloads stay off; its Vulkan-SDK DXC lookup stays on.
+        on("SHADERMAKE_FIND_DXC", false),
+        on("SHADERMAKE_FIND_FXC", false),
+        on("SHADERMAKE_FIND_DXC_VK", true),
+        // SPIR-V embeds only; the DXIL and DXBC embeds would need DXIL and FXC.
+        on("NRD_EMBEDS_SPIRV_SHADERS", true),
+        on("NRD_EMBEDS_DXIL_SHADERS", false),
+        on("NRD_EMBEDS_DXBC_SHADERS", false),
+        // Linked into moba-render, so nothing extra ships next to the executable.
+        on("NRD_STATIC_LIBRARY", true),
+        // Outputs stay out of NRD's source tree (_Bin, _Shaders). NRD's own archive goes to
+        // the runtime directory (its ARCHIVE_OUTPUT_DIRECTORY); the archive directory
+        // collects the static libraries it depends on (ShaderMakeBlob).
+        ("CMAKE_RUNTIME_OUTPUT_DIRECTORY", path(lib_dir)),
+        ("CMAKE_LIBRARY_OUTPUT_DIRECTORY", path(lib_dir)),
+        ("CMAKE_ARCHIVE_OUTPUT_DIRECTORY", path(lib_dir)),
+        ("NRD_SHADERS_PATH", path(shaders)),
+    ]
+}
+
+/// Builds NRD from scratch in `build` (removing what is there) with `defines`, then removes
+/// everything but the libraries: the source copy, `CMake`'s tree and the generated shaders are
+/// not read again (the shaders are embedded in the library).
+#[cfg(feature = "nrd")]
+fn build_nrd(build: &Path, sdk: &Sdk, defines: &[(&'static str, String)]) {
     if build.exists() {
         fs::remove_dir_all(build)
             .unwrap_or_else(|error| fail(format!("removing {}: {error}", build.display())));
@@ -460,34 +531,23 @@ fn build_nrd(
     let source = build.join("src");
     copy_tree(&sdk.dir, &source, &["_deps"])
         .unwrap_or_else(|error| fail(format!("copying NRD into {}: {error}", source.display())));
-    let shaders = build.join("shaders");
-    cmake::Config::new(&source)
+    let mut config = cmake::Config::new(&source);
+    config
         .out_dir(build.join("cmake"))
         .profile("Release")
-        .build_target("NRD")
-        // No downloads at configure time: the fetch script unpacked both dependencies.
-        .define("FETCHCONTENT_FULLY_DISCONNECTED", "ON")
-        .define("FETCHCONTENT_SOURCE_DIR_SHADERMAKE", &shadermake.dir)
-        .define("FETCHCONTENT_SOURCE_DIR_MATHLIB", &mathlib.dir)
-        .define("NRD_NRI", "OFF")
-        // ShaderMake's own compiler downloads stay off; its Vulkan-SDK DXC lookup stays on.
-        .define("SHADERMAKE_FIND_DXC", "OFF")
-        .define("SHADERMAKE_FIND_FXC", "OFF")
-        .define("SHADERMAKE_FIND_DXC_VK", "ON")
-        // SPIR-V embeds only; the DXIL and DXBC embeds would need DXIL and FXC.
-        .define("NRD_EMBEDS_SPIRV_SHADERS", "ON")
-        .define("NRD_EMBEDS_DXIL_SHADERS", "OFF")
-        .define("NRD_EMBEDS_DXBC_SHADERS", "OFF")
-        // Linked into moba-render, so nothing extra ships next to the executable.
-        .define("NRD_STATIC_LIBRARY", "ON")
-        // Keep outputs in OUT_DIR instead of NRD's source tree (_Bin, _Shaders). NRD's own
-        // archive goes to the runtime directory (its ARCHIVE_OUTPUT_DIRECTORY); the archive
-        // directory collects the static libraries it depends on (ShaderMakeBlob).
-        .define("CMAKE_RUNTIME_OUTPUT_DIRECTORY", lib_dir)
-        .define("CMAKE_LIBRARY_OUTPUT_DIRECTORY", lib_dir)
-        .define("CMAKE_ARCHIVE_OUTPUT_DIRECTORY", lib_dir)
-        .define("NRD_SHADERS_PATH", &shaders)
-        .build();
+        .build_target("NRD");
+    for (name, value) in defines {
+        config.define(name, value);
+    }
+    // Panics (failing the build script, before the stamp is written) if CMake fails.
+    config.build();
+    for scratch in ["src", "cmake", "shaders"] {
+        let dir = build.join(scratch);
+        if dir.exists() {
+            fs::remove_dir_all(&dir)
+                .unwrap_or_else(|error| fail(format!("removing {}: {error}", dir.display())));
+        }
+    }
 }
 
 /// Copies the tree at `from` into `to`, leaving out the top-level entries named in `skip`.

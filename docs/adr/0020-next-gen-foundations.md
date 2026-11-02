@@ -1213,7 +1213,7 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
 - **NRD is built as a static library** (`NRD_STATIC_LIBRARY=ON`, beyond §6b's flag list), so
   nothing extra ships beside the executable, and its outputs stay out of NRD's source tree:
   it is built once per pin, target, profile and toolchain in
-  `<target-dir>/<profile>/vendor-build/nrd`, which every feature set and clippy reuse, rather
+  `<build-dir>/<profile>/vendor-build/nrd`, which every feature set and clippy reuse, rather
   than in each build script's `OUT_DIR`. A static NRD does not absorb the ShaderMake blob
   reader it links `PRIVATE` (its shader lookup, `ShaderMake::FindPermutationInBlob`), so
   `build.rs` collects the static archives in one directory (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`)

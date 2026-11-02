@@ -186,7 +186,7 @@ impl Headless {
         // The smokes take their choice from `MOBA_RENDER_PATH`, so `tiered` admits a CPU device
         // as that variable does (ADR-0020 amendment 2).
         let allow_cpu = choice == PathChoice::Tiered;
-        let device = DeviceContext::new(&instance, None, false, choice, allow_cpu)?;
+        let device = DeviceContext::new(&instance, None, false, choice, allow_cpu, false)?;
         if device.admission.path != RenderPath::Tiered {
             return Err(RenderError::NoSuitableDevice(format!(
                 "{} runs {}; the tiered smoke tests need the tiered path \

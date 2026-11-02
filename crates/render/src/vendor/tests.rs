@@ -135,11 +135,10 @@ fn fixture(name: &str) -> DeviceCapabilities {
 /// The device extensions `caps` is created with besides swapchain: the tiered set of its own
 /// admission (what `DeviceContext` enables in the open build).
 fn enabled_on(caps: &DeviceCapabilities) -> (RenderPath, Vec<String>) {
-    let path = crate::caps::admit(
-        caps,
-        crate::caps::Overrides::new(crate::caps::PathChoice::Auto),
-    )
-    .path;
+    // The fixtures are judged as on Linux or Windows: on a macOS host every device is Compat.
+    let mut overrides = crate::caps::Overrides::new(crate::caps::PathChoice::Auto);
+    overrides.host_macos = false;
+    let path = crate::caps::admit(caps, overrides).path;
     let names = crate::device::TieredExtensions::of(caps, path)
         .names
         .iter()

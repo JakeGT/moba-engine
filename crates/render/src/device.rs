@@ -110,7 +110,10 @@ impl DeviceContext {
     /// Picks and creates the device. With `surface`, a device needs a queue family that can
     /// present to it; without one (the headless tiered smoke tests, ADR-0020 gate 3) the
     /// graphics family stands in for the present family. The instance must enable
-    /// `VK_KHR_surface` either way, because the device enables `VK_KHR_swapchain`.
+    /// `VK_KHR_surface` either way, because the device enables `VK_KHR_swapchain`. With
+    /// `request_vendor`, the compiled-in vendor back ends' device extensions are requested (the
+    /// renderer's device, whose instance was created with their instance extensions); the
+    /// headless smokes pass `false` and get the open build's device in every build.
     #[allow(clippy::too_many_lines)] // Device selection is one auditable decision table.
     pub(crate) fn new(
         context: &InstanceContext,
@@ -118,6 +121,7 @@ impl DeviceContext {
         pipeline_stats: bool,
         choice: PathChoice,
         allow_cpu: bool,
+        request_vendor: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
         let surface_loader = ash::khr::surface::Instance::load(&context.entry, instance);
@@ -220,7 +224,7 @@ impl DeviceContext {
         let Some(candidate) = best else {
             return Err(RenderError::NoSuitableDevice(reasons));
         };
-        Self::create(context, surface_loader, &candidate)
+        Self::create(context, surface_loader, &candidate, request_vendor)
     }
 
     #[allow(clippy::too_many_lines)] // Queues, features, allocator and limits, in order.
@@ -228,6 +232,7 @@ impl DeviceContext {
         context: &InstanceContext,
         surface: ash::khr::surface::Instance,
         candidate: &Candidate,
+        request_vendor: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
         let physical = candidate.physical;
@@ -282,13 +287,18 @@ impl DeviceContext {
             .copied()
             .chain(enabled.names.iter().map(std::ffi::CString::as_c_str))
             .collect();
-        let vendor = vendor_extensions(
+        let requested = if request_vendor {
             crate::vendor::device_extensions(&crate::vendor::DeviceQuery {
                 instance,
                 physical,
                 capabilities: &candidate.capabilities,
                 path: candidate.admission.path,
-            }),
+            })
+        } else {
+            Vec::new()
+        };
+        let vendor = vendor_extensions(
+            requested,
             &candidate.capabilities,
             &base,
             if tiered {

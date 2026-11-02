@@ -178,7 +178,9 @@ the semver check):
   - NGX declares its Vulkan extensions before the instance and the device are created
     (ADR-0020 §1e); the instance and the tiered device enable what is advertised, and the
     DLSS probe rejects when something it needs is not enabled. XeSS requests nothing until
-    N1 merges its device features; its probe always rejects in N0. DLSS and
+    N1 merges its device features; its probe always rejects in N0. Only the renderer's device
+    requests vendor extensions; the headless smokes' devices are the open build's in every
+    build. DLSS and
     Streamline need NVIDIA's own driver (not NVK), FSR 4 AMD's (not RADV). Streamline is only
     looked for in N0: it must be initialised before the instance, which comes with N9. NGX's
     data directory is a private per-user cache directory (owned by the effective user; a
@@ -191,7 +193,7 @@ the semver check):
     `vkCreateDevice` in N1, so its probe rejects with one line.
   - NRD links ShaderMake's `ShaderMakeBlob` beside its static library, and CMake configures a
     copy of NRD (its configure step writes into the source tree). NRD is built once per pin,
-    target, profile and toolchain in `<target-dir>/<profile>/vendor-build/nrd` and reused by
+    target, profile and toolchain in `<build-dir>/<profile>/vendor-build/nrd` and reused by
     every feature set and by clippy; CI caches it, the SDK archives (one entry for both OSes)
     and the Vulkan SDK's `dxc`, and pins Chocolatey's `vulkan-sdk`. A relative
     `MOBA_SDK_DIR` is relative to the workspace root in `build.rs` and the fetch scripts; the

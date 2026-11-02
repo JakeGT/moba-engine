@@ -641,6 +641,7 @@ impl Renderer {
             config.pipeline_stats,
             config.render_path,
             config.tiered_cpu_devices,
+            true,
         )?;
         // ADR-0020 §5e: the requested tier runs the configuration of its Compat tier on this
         // path (tiered Low is today's High, tiered Medium and up today's Ultra), with the
