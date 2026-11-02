@@ -130,6 +130,12 @@ if [ ! -d "$root/bin" ]; then
 fi
 [ -f "$root/bin/$exe" ] || die "$archive has no bin/$exe"
 chmod +x "$root/bin/$exe"
+# Drop what slangc's SPIR-V path never loads, so the install (and CI's cache of it) is about
+# 70 MB instead of 250: the LLVM back end (CPU/CUDA targets), gfx, the runtime library,
+# headers and docs. The licence files stay.
+rm -rf "$root"/lib/*slang-llvm* "$root"/bin/*slang-llvm* "$root"/lib/*gfx* "$root"/bin/gfx.* \
+  "$root"/lib/*slang-rt* "$root"/bin/slang-rt* "$root/lib/cmake" "$root/lib/pkgconfig" \
+  "$root/include" "$root/share/doc"
 printf '%s\n' "$expected" > "$root/.archive-sha256"
 rm -rf "$dest"
 mv "$root" "$dest"

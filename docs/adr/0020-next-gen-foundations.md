@@ -1098,7 +1098,7 @@ documented in [docs/dev/slang.md](../dev/slang.md).
 - **Layout check: frame constants only, for now.** The test compares `slangc
   -reflection-json` for `FrameConstants` (`shaders/slang/lib/frame_constants.slang`) with
   `CameraUniform`: each field's name, order, scalar type, shape, offset and size. The JSON
-  comes from `moba_shaders::reflection`, behind a non-default `reflection` feature. The
+  comes from `moba_shaders::reflection`, which nothing at run time calls. The
   instance record and the material record get Slang mirrors, and join the test, when the first Slang pass that reads them lands (N1). Writing those mirrors now would
   mean porting a pass, which N0 does not do (§4d).
 - **N0 module.** This step adds one module, `toolchain_smoke.slang`, which the renderer does

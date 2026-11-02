@@ -163,14 +163,13 @@ pub const WATER_REFRACTION_FRAG: &[u8] =
 pub const TOOLCHAIN_SMOKE_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.spv"));
 
-#[cfg(any(test, feature = "reflection"))]
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
 /// The `slangc -reflection-json` output of the Slang module `name` (for example
 /// `"toolchain_smoke.slang"`), if it exists: for layout tests that compare a Slang structure
-/// with its Rust `#[repr(C)]` mirror (ADR-0020 §4c). Behind the non-default `reflection`
-/// feature, since nothing at run time needs it and the JSON is large.
-#[cfg(feature = "reflection")]
+/// with its Rust `#[repr(C)]` mirror (ADR-0020 §4c). Nothing at run time calls it, so the
+/// linker drops the JSON from shipped binaries. (Not a cargo feature: a dev-dependency
+/// feature would build this crate, and run its build script, twice.)
 #[must_use]
 pub fn reflection(name: &str) -> Option<&'static str> {
     SLANG_REFLECTION
@@ -416,6 +415,7 @@ pub fn module(name: &str) -> Option<&'static [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
 
     const SPIRV_MAGIC: u32 = 0x0723_0203;
 
@@ -474,10 +474,17 @@ mod tests {
     }
 
     /// Where a reflected Slang parameter lives.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     enum Slot {
-        /// One descriptor binding.
-        Descriptor { set: u64, binding: u64 },
+        /// One descriptor binding, with its reflected type: `constantBuffer`,
+        /// `<baseShape>:<access>` for a resource (`structuredBuffer:readWrite`,
+        /// `texture2D:read`, ...), `samplerState`, and `[N]<element>` for an array, so a type
+        /// or array-size change that the Rust set layout would not match fails here too.
+        Descriptor {
+            set: u64,
+            binding: u64,
+            ty: Cow<'static, str>,
+        },
         /// A `ParameterBlock` taking the whole set (its interior is laid out in field order:
         /// an implicit uniform buffer at binding 0 when the block has ordinary data, then
         /// one binding per resource field).
@@ -493,8 +500,22 @@ mod tests {
     const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[(
         "toolchain_smoke.slang",
         &[
-            ("camera", Slot::Descriptor { set: 0, binding: 0 }),
-            ("circles", Slot::Descriptor { set: 0, binding: 1 }),
+            (
+                "camera",
+                Slot::Descriptor {
+                    set: 0,
+                    binding: 0,
+                    ty: Cow::Borrowed("constantBuffer"),
+                },
+            ),
+            (
+                "circles",
+                Slot::Descriptor {
+                    set: 0,
+                    binding: 1,
+                    ty: Cow::Borrowed("structuredBuffer:readWrite"),
+                },
+            ),
         ],
     )];
 
@@ -512,6 +533,7 @@ mod tests {
             (Some("descriptorTableSlot"), Some(index)) => Ok(Slot::Descriptor {
                 set: binding["space"].as_u64().unwrap_or(0),
                 binding: index,
+                ty: Cow::Owned(descriptor_type(&parameter["type"])),
             }),
             (Some("subElementRegisterSpace" | "registerSpace"), Some(set)) => {
                 Ok(Slot::Block { set })
@@ -521,7 +543,69 @@ mod tests {
                 "a loose `uniform` global lands in an implicit globals uniform buffer; \
                  declare it inside a ConstantBuffer with [[vk::binding(binding, set)]]",
             )),
+            (Some("specializationConstant"), _) => Err(String::from(
+                "specialization constants ([vk::constant_id]) are not in the table yet; add \
+                 a Slot for them with the first module that needs one",
+            )),
             _ => Err(format!("unexpected binding {binding}")),
+        }
+    }
+
+    /// The reflected type of a descriptor binding, as [`Slot::Descriptor`] spells it.
+    fn descriptor_type(ty: &serde_json::Value) -> String {
+        match ty["kind"].as_str().unwrap_or("?") {
+            "resource" => format!(
+                "{}:{}",
+                ty["baseShape"].as_str().unwrap_or("?"),
+                ty["access"].as_str().unwrap_or("read"),
+            ),
+            "array" => format!(
+                "[{}]{}",
+                ty["elementCount"].as_u64().unwrap_or(0),
+                descriptor_type(&ty["elementType"]),
+            ),
+            kind => kind.to_owned(),
+        }
+    }
+
+    /// Whether an entry-point parameter takes a uniform binding. Varying inputs and outputs
+    /// (`POSITION`, `TEXCOORD0`, a fragment shader's `VOut` struct) reflect a
+    /// `varyingInput`/`varyingOutput` binding and are fine; system values reflect none.
+    fn entry_point_uniform(parameter: &serde_json::Value) -> bool {
+        let varying = |binding: &serde_json::Value| {
+            matches!(
+                binding["kind"].as_str(),
+                Some("varyingInput" | "varyingOutput")
+            )
+        };
+        let single = parameter
+            .get("binding")
+            .is_some_and(|binding| !varying(binding));
+        let several = parameter["bindings"]
+            .as_array()
+            .is_some_and(|bindings| bindings.iter().any(|binding| !varying(binding)));
+        single || several
+    }
+
+    /// Varying entry-point parameters pass; uniform ones (any other binding kind) do not.
+    #[test]
+    fn entry_point_varyings_are_not_uniforms() {
+        let parse = |json: &str| serde_json::from_str::<serde_json::Value>(json).unwrap();
+        for varying in [
+            r#"{"name":"thread","semanticName":"SV_DISPATCHTHREADID"}"#,
+            r#"{"name":"p","binding":{"kind":"varyingInput","index":0}}"#,
+            r#"{"name":"v","bindings":[{"kind":"varyingInput","index":0,"count":2},
+                {"kind":"varyingOutput","index":0}]}"#,
+        ] {
+            assert!(!entry_point_uniform(&parse(varying)), "{varying}");
+        }
+        for uniform in [
+            r#"{"name":"tint","binding":{"kind":"uniform","offset":0,"size":16}}"#,
+            r#"{"name":"tex","binding":{"kind":"descriptorTableSlot","index":0}}"#,
+            r#"{"name":"mixed","bindings":[{"kind":"varyingInput","index":0},
+                {"kind":"descriptorTableSlot","index":1}]}"#,
+        ] {
+            assert!(entry_point_uniform(&parse(uniform)), "{uniform}");
         }
     }
 
@@ -552,8 +636,7 @@ mod tests {
             }
             for entry in reflection["entryPoints"].as_array().into_iter().flatten() {
                 for parameter in entry["parameters"].as_array().into_iter().flatten() {
-                    // Varying inputs (`SV_DispatchThreadID`, ...) have no binding.
-                    if parameter.get("binding").is_some() || parameter.get("bindings").is_some() {
+                    if entry_point_uniform(parameter) {
                         problems.push(format!(
                             "entry point `{}` parameter `{}`: uniform entry-point parameters \
                              get implicit bindings; declare a global with \
@@ -577,7 +660,7 @@ mod tests {
                 .unwrap_or_default();
             let mut expected: Vec<(String, Slot)> = expected
                 .iter()
-                .map(|(name, slot)| ((*name).to_owned(), *slot))
+                .map(|(name, slot)| ((*name).to_owned(), slot.clone()))
                 .collect();
             actual.sort();
             expected.sort();

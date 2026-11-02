@@ -43,8 +43,10 @@ a missing validator fails the build. For GLSL modules it stays optional.
 1. `SLANGC=/path/to/slangc`.
 2. `tools/slang-<version>/bin/slangc` in the Cargo target directory, which is where the fetch
    script puts it. `build.rs` walks up from its `OUT_DIR` and stops at the target directory:
-   the first ancestor with a `CACHEDIR.TAG` (written by Cargo and the fetch scripts), and
-   never more than five levels up. A `build.target-dir` therefore works on the build side.
+   the outermost ancestor with a `CACHEDIR.TAG` (written by Cargo and the fetch scripts) at
+   most five levels up, so `cargo build --target <triple>` finds it too. A `build.target-dir`
+   therefore works on the build side. With Cargo's `build.build-dir`, `OUT_DIR` is not under
+   the target directory: set `SLANGC`.
 3. `slangc` on `PATH`, for example from the Vulkan SDK (which has shipped Slang since
    1.3.296.0).
 
@@ -93,8 +95,8 @@ a missing validator fails the build. For GLSL modules it stays optional.
   field's name, order, scalar type, shape (rows × columns, array length), offset and size.
   For example, `moba-render`'s `slang_frame_constants_match_camera_uniform` test checks
   `FrameConstants` against `CameraUniform`. The JSON comes from
-  `moba_shaders::reflection(name)`, behind the non-default `reflection` feature that
-  `moba-render`'s dev-dependency enables.
+  `moba_shaders::reflection(name)`. Nothing at run time calls it, so the linker drops the
+  JSON from shipped binaries.
 - **Matrices: column-major, `mul(M, v)`.** With `-matrix-layout-column-major`, a Slang
   `float4x4` has the same memory layout as a GLSL `mat4` and glam's `to_cols_array`. `M[r][c]`
   is row `r`, column `c` of the mathematical matrix, so `mul(M, v)` in Slang is `M * v` in

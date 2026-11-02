@@ -40,6 +40,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 /// One extra build of a shader source with preprocessor defines.
 struct Permutation {
@@ -232,23 +234,50 @@ fn main() {
         (slangc, validator)
     });
 
+    // Each compile and validation is its own process, so run them in parallel. A failing
+    // job panics in its thread and `thread::scope` re-raises the panic.
+    let mut work: Vec<Box<dyn Fn() + Sync + '_>> = Vec::new();
     for job in &glsl_jobs {
-        compile(&compiler, job, &include_dir);
-        if let Some(validator) = &validator {
-            validate(validator, &job.output);
-        }
+        let (compiler, include_dir, validator) = (&compiler, &include_dir, &validator);
+        work.push(Box::new(move || {
+            compile(compiler, job, include_dir);
+            if let Some(validator) = validator {
+                validate(validator, &job.output);
+            }
+        }));
     }
     if let Some((slangc, validator)) = &slang {
         for job in &slang_jobs {
-            compile_slang(slangc, job, &slang_lib_dir);
-            validate(validator, &job.output);
+            let lib_dir = &slang_lib_dir;
+            work.push(Box::new(move || {
+                compile_slang(slangc, job, lib_dir);
+                validate(validator, &job.output);
+            }));
         }
     }
+    run_parallel(&work);
     write_reflection_table(&slang_jobs, &out_dir);
 }
 
+/// Runs every item of `work` on up to `available_parallelism` threads.
+fn run_parallel(work: &[Box<dyn Fn() + Sync + '_>]) {
+    let next = AtomicUsize::new(0);
+    let threads = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(work.len());
+    thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                while let Some(item) = work.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    item();
+                }
+            });
+        }
+    });
+}
+
 /// `slang_reflection.rs`: `(module name, reflection JSON)` for every Slang module, for
-/// `moba_shaders::reflection` (the `reflection` feature) and the crate's own binding test.
+/// `moba_shaders::reflection` and the crate's own binding test.
 fn write_reflection_table(jobs: &[Job], out_dir: &Path) {
     let mut table = String::from(
         "/// `(module name, slangc -reflection-json)` for every Slang module (generated).\n\
@@ -312,9 +341,10 @@ const MAX_TARGET_DEPTH: usize = 5;
 /// `PATH`. Never downloads.
 ///
 /// The target directory is found by walking up from `OUT_DIR`, so `CARGO_TARGET_DIR` and
-/// `build.target-dir` both work. The walk stops at the target directory: the first ancestor
-/// with a `CACHEDIR.TAG` (Cargo and the fetch scripts write one), and never more than
-/// [`MAX_TARGET_DEPTH`] levels up.
+/// `build.target-dir` both work. The walk looks at most [`MAX_TARGET_DEPTH`] levels up and
+/// stops at the outermost ancestor in that range with a `CACHEDIR.TAG` (Cargo and the fetch
+/// scripts write one). The outermost, because `cargo build --target <triple>` also tags
+/// `<target>/<triple>/`.
 fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
     if let Some(override_path) = env::var_os("SLANGC") {
         let path = PathBuf::from(override_path);
@@ -327,13 +357,15 @@ fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
         .join(format!("slang-{version}"))
         .join("bin")
         .join(format!("slangc{}", env::consts::EXE_SUFFIX));
-    for dir in out_dir.ancestors().take(MAX_TARGET_DEPTH + 1) {
+    let ancestors: Vec<&Path> = out_dir.ancestors().take(MAX_TARGET_DEPTH + 1).collect();
+    let target = ancestors
+        .iter()
+        .rposition(|dir| dir.join("CACHEDIR.TAG").is_file())
+        .unwrap_or(ancestors.len() - 1);
+    for dir in &ancestors[..=target] {
         let candidate = dir.join(&fetched);
         if candidate.is_file() {
             return candidate;
-        }
-        if dir.join("CACHEDIR.TAG").is_file() {
-            break;
         }
     }
     if let Some(path) = find_program("slangc") {

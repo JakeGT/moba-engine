@@ -12,7 +12,8 @@ runs:
       uses: actions/cache@v6
       with:
         path: target/tools/slang-*
-        key: slang-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/shaders/slang-version.txt') }}
+        # `-pruned`: the fetch scripts now drop the unused LLVM back end (ADR-0020 §4c).
+        key: slang-pruned-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/shaders/slang-version.txt') }}
     - name: Fetch slangc (Linux, macOS)
       if: runner.os != 'Windows'
       shell: bash

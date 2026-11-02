@@ -16,12 +16,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-# `moba_shaders::reflection(name)`: the `slangc -reflection-json` output of each Slang module,
-# for layout tests against the Rust `#[repr(C)]` mirrors (ADR-0020 §4c). Off by default:
-# nothing at run time needs it.
-reflection = []
-
 [dependencies]
 
 [dev-dependencies]

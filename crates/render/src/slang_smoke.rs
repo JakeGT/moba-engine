@@ -190,9 +190,9 @@ fn run(context: &InstanceContext) -> RenderResult<(String, Option<String>)> {
         "slang smoke output",
         (entries * core::mem::size_of::<[f32; 4]>()) as u64,
         vk::BufferUsageFlags::STORAGE_BUFFER,
-        // Mapped buffers must be coherent (`GpuBuffer` rejects others); CpuToGpu is, on
-        // every desktop driver. Reading 272 bytes back from it is fine.
-        MemoryLocation::CpuToGpu,
+        // Read back by the host: GpuToCpu prefers cached, coherent memory (as the
+        // renderer's timestamp readback does), not write-combined BAR memory.
+        MemoryLocation::GpuToCpu,
     )?;
     output
         .mapped_slice_mut::<[f32; 4]>(entries)
@@ -270,6 +270,8 @@ fn run(context: &InstanceContext) -> RenderResult<(String, Option<String>)> {
         )
     }
     .map_err(|(_, error)| RenderError::Vulkan(error))?;
+    // `GraphicsPipeline` only owns a `vk::Pipeline` and destroys it; a compute pipeline is
+    // destroyed the same way.
     let pipeline = GraphicsPipeline::from_raw(raw.clone(), pipeline[0]);
 
     let commands = CommandPool::new(raw.clone(), family)?;
