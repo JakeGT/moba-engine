@@ -772,6 +772,10 @@ exception: they stay all-rights-reserved and are listed as such.
    effort actually goes.
 6. Set up the Windows passthrough VM (§10), and source used Low and Medium reference cards plus
    one AMD card.
+7. **ADR-0023 (N2):** the thin G-buffer, compute deferred lighting, LTC area lights, forward
+   transparents, G-buffer decals, the multi-layer material model and team rims. Drafted as
+   [ADR-0023](../adr/0023-frame-architecture-materials.md) (accepted 2026-11-02), with the
+   vendor claims re-checked and its corrections to this plan listed there.
 
 ## 13. Open questions for the maintainer
 
