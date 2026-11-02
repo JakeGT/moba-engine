@@ -4,7 +4,7 @@
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
 - **Builds on:**
-  - [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01, with Amendments 1–5). It
+  - [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01, with Amendments 1–6). It
     settles the `Tiered`/`Compat` paths (§2), the bindless set and buffer device address (§3),
     Slang (§4), the tier budgets (§5) and the vendor-SDK features (§6). This ADR uses them and
     does not re-decide them.
