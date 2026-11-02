@@ -13,6 +13,9 @@ dual-licensed under MIT OR Apache-2.0, matching the project.
   if `just`/`cargo-nextest` are unavailable.
 - A Vulkan **1.3+** driver for the client; `glslc` (Vulkan SDK) or `glslangValidator` to
   compile shaders. The dedicated server and tests need no GPU.
+- The pinned Slang compiler: run `scripts/fetch-slang.sh` (Windows: `scripts/fetch-slang.ps1`)
+  once, and install `spirv-val` (`spirv-tools`), which the Slang modules require
+  ([docs/dev/slang.md](docs/dev/slang.md)).
 - Optional: `just` and `cargo-nextest`, which the `justfile` prefers. All gates also work
   with plain `cargo`.
 - Linux window build deps (when not using the headless tests): X11 or Wayland development

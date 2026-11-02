@@ -27,16 +27,19 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install MoltenVK
         run: |
-          brew install molten-vk vulkan-loader glslang
+          brew install molten-vk vulkan-loader glslang spirv-tools vulkan-validationlayers
           PREFIX=$(brew --prefix molten-vk)
           LOADER=$(brew --prefix vulkan-loader)
           ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
           test -n "$ICD" || { echo "MoltenVK ICD json not found"; find "$PREFIX" -name '*icd*.json'; exit 1; }
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LAYERS=$(brew --prefix vulkan-validationlayers)
+          echo "VK_LAYER_PATH=$LAYERS/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib:$LAYERS/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           ls "$LOADER/lib"
           echo "Using $ICD"
       - name: Build probe
@@ -58,6 +61,18 @@ jobs:
           grep -q 'no device is admitted to the tiered path' tiered.txt
           ./target/release/vulkan-probe --json > capabilities.json
           python3 -c 'import json, sys; d = json.load(open("capabilities.json")); sys.exit(0 if any(x["driver_id"] == 14 for x in d) else "no MoltenVK device (driver ID 14) in the dump")'
+      # ADR-0020 §4c: MoltenVK consumes slangc's SPIR-V (one dispatch of the toolchain smoke
+      # module, output checked on the CPU) with validation required.
+      - name: Slang toolchain smoke with validation
+        env:
+          MOBA_VULKAN_VALIDATION: required
+        run: |
+          set -o pipefail
+          ./target/release/vulkan-probe --slang-smoke 2>&1 | tee slang-smoke.log
+          if grep -E '^\[vulkan' slang-smoke.log; then
+            echo "validation messages from the Slang smoke"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:

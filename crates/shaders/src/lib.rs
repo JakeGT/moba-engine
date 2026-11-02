@@ -1,7 +1,10 @@
-//! GLSL shader sources, compiled to SPIR-V at build time.
+//! GLSL and Slang shader sources, compiled to SPIR-V at build time.
 //!
-//! The build script uses `glslc` (or `glslangValidator`) and validates every module with
-//! `spirv-val` when it is installed. The renderer consumes the byte slices below and never
+//! The build script compiles GLSL with `glslc` (or `glslangValidator`) and validates every
+//! module with `spirv-val` when it is installed. New tiered passes are written in **Slang**
+//! (ADR-0020 §4): `shaders/slang/*.slang`, compiled by the `slangc` pinned in
+//! `slang-version.txt` (fetch it once with `scripts/fetch-slang.sh`, or `.ps1` on Windows) and
+//! always validated by `spirv-val`. The renderer consumes the byte slices below and never
 //! ships source code to the driver.
 //!
 //! Sources share declarations through `#include` files in `shaders/include/` (camera block,
@@ -151,6 +154,29 @@ pub const TERRAIN_NODECALS_FRAG: &[u8] =
 /// Water with screen-space refraction and contact foam (`water.frag` + `WATER_REFRACTION`).
 pub const WATER_REFRACTION_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/water_refraction.frag.spv"));
+
+/// Slang toolchain smoke module (`slang/toolchain_smoke.slang`, ADR-0020 §4c): a compute
+/// entry point `main` (16 threads) that copies the frame's vision circles (set 0, binding 0)
+/// into a storage buffer (set 0, binding 1) and writes `mul(view_proj, camera_pos)` after
+/// them. The renderer does not create it; `moba_render::slang_smoke` (the `vulkan-probe
+/// --slang-smoke` CI step) dispatches it once and checks the output.
+pub const TOOLCHAIN_SMOKE_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.spv"));
+
+include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
+
+/// The `slangc -reflection-json` output of the Slang module `name` (for example
+/// `"toolchain_smoke.slang"`), if it exists: for layout tests that compare a Slang structure
+/// with its Rust `#[repr(C)]` mirror (ADR-0020 §4c). Nothing at run time calls it, so the
+/// linker drops the JSON from shipped binaries. (Not a cargo feature: a dev-dependency
+/// feature would build this crate, and run its build script, twice.)
+#[must_use]
+pub fn reflection(name: &str) -> Option<&'static str> {
+    SLANG_REFLECTION
+        .iter()
+        .find(|(module, _)| *module == name)
+        .map(|(_, json)| *json)
+}
 
 /// A named SPIR-V module, for tooling and validation.
 #[derive(Clone, Copy, Debug)]
@@ -371,6 +397,10 @@ pub const MODULES: &[ShaderModule] = &[
         name: "vfx_distort.frag",
         spirv: VFX_DISTORT_FRAG,
     },
+    ShaderModule {
+        name: "toolchain_smoke.slang",
+        spirv: TOOLCHAIN_SMOKE_SLANG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -385,6 +415,7 @@ pub fn module(name: &str) -> Option<&'static [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
 
     const SPIRV_MAGIC: u32 = 0x0723_0203;
 
@@ -425,6 +456,292 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), MODULES.len(), "module names are unique");
+    }
+
+    /// Every Slang module is SPIR-V 1.6 (the Vulkan 1.3 profile, ADR-0020 §4c).
+    #[test]
+    fn slang_modules_target_spirv_1_6() {
+        for module in MODULES.iter().filter(|module| {
+            module
+                .name
+                .rsplit_once('.')
+                .is_some_and(|(_, kind)| kind == "slang")
+        }) {
+            let version = u32::from_le_bytes(module.spirv[4..8].try_into().unwrap());
+            assert_eq!(version, 0x0001_0600, "{} is not SPIR-V 1.6", module.name);
+        }
+        assert!(module("toolchain_smoke.slang").is_some());
+    }
+
+    /// Where a reflected Slang parameter lives.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum Slot {
+        /// One descriptor binding, with its reflected type: `constantBuffer`,
+        /// `<baseShape>:<access>` for a resource (`structuredBuffer:readWrite`,
+        /// `texture2D:read`, `texture2D:read:combined` for a combined image sampler, ...),
+        /// `samplerState`, and `[N]<element>` for an array, so a type or array-size change
+        /// that the Rust set layout would not match fails here too.
+        Descriptor {
+            set: u64,
+            binding: u64,
+            ty: Cow<'static, str>,
+        },
+        /// A `ParameterBlock` taking the whole set (its interior is laid out in field order:
+        /// an implicit uniform buffer at binding 0 when the block has ordinary data, then
+        /// one binding per resource field).
+        Block { set: u64 },
+        /// Push constants.
+        PushConstants,
+    }
+
+    /// Every parameter of every Slang module, with its set and binding. ADR-0020 §4c wants
+    /// explicit layouts; `slangc` has no flag that rejects implicit bindings, so the
+    /// reflected layout must match this table exactly. A new module, resource or binding
+    /// change is a deliberate edit here (and in the Rust descriptor layout that mirrors it).
+    const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[(
+        "toolchain_smoke.slang",
+        &[
+            (
+                "camera",
+                Slot::Descriptor {
+                    set: 0,
+                    binding: 0,
+                    ty: Cow::Borrowed("constantBuffer"),
+                },
+            ),
+            (
+                "circles",
+                Slot::Descriptor {
+                    set: 0,
+                    binding: 1,
+                    ty: Cow::Borrowed("structuredBuffer:readWrite"),
+                },
+            ),
+        ],
+    )];
+
+    /// The slot of one reflected parameter, or why it is not allowed.
+    fn slot(parameter: &serde_json::Value) -> Result<Slot, String> {
+        if parameter.get("bindings").is_some() {
+            return Err(String::from(
+                "it spans several binding kinds (a global struct holding resources?); \
+                 use a ConstantBuffer or a ParameterBlock",
+            ));
+        }
+        let binding = &parameter["binding"];
+        let index = binding["index"].as_u64();
+        match (binding["kind"].as_str(), index) {
+            (Some("descriptorTableSlot"), Some(index)) => Ok(Slot::Descriptor {
+                set: binding["space"].as_u64().unwrap_or(0),
+                binding: index,
+                ty: Cow::Owned(descriptor_type(&parameter["type"])),
+            }),
+            (Some("subElementRegisterSpace" | "registerSpace"), Some(set)) => {
+                Ok(Slot::Block { set })
+            }
+            (Some("pushConstantBuffer"), _) => Ok(Slot::PushConstants),
+            (Some("uniform"), _) => Err(String::from(
+                "a loose `uniform` global lands in an implicit globals uniform buffer; \
+                 declare it inside a ConstantBuffer with [[vk::binding(binding, set)]]",
+            )),
+            (Some("specializationConstant"), _) => Err(String::from(
+                "specialization constants ([vk::constant_id]) are not in the table yet; add \
+                 a Slot for them with the first module that needs one",
+            )),
+            _ => Err(format!("unexpected binding {binding}")),
+        }
+    }
+
+    /// The reflected type of a descriptor binding, as [`Slot::Descriptor`] spells it.
+    fn descriptor_type(ty: &serde_json::Value) -> String {
+        match ty["kind"].as_str().unwrap_or("?") {
+            // `Sampler2D` (a combined image sampler) reflects as `texture2D` plus
+            // `"combined": true`; it is a different Vulkan descriptor type.
+            "resource" => format!(
+                "{}:{}{}",
+                ty["baseShape"].as_str().unwrap_or("?"),
+                ty["access"].as_str().unwrap_or("read"),
+                if ty["combined"].as_bool() == Some(true) {
+                    ":combined"
+                } else {
+                    ""
+                },
+            ),
+            "array" => format!(
+                "[{}]{}",
+                ty["elementCount"].as_u64().unwrap_or(0),
+                descriptor_type(&ty["elementType"]),
+            ),
+            kind => kind.to_owned(),
+        }
+    }
+
+    /// Whether an entry-point parameter takes a uniform binding. Varying inputs and outputs
+    /// (`POSITION`, `TEXCOORD0`, a fragment shader's `VOut` struct) reflect a
+    /// `varyingInput`/`varyingOutput` binding and are fine; system values reflect none.
+    fn entry_point_uniform(parameter: &serde_json::Value) -> bool {
+        let varying = |binding: &serde_json::Value| {
+            matches!(
+                binding["kind"].as_str(),
+                Some("varyingInput" | "varyingOutput")
+            )
+        };
+        let single = parameter
+            .get("binding")
+            .is_some_and(|binding| !varying(binding));
+        let several = parameter["bindings"]
+            .as_array()
+            .is_some_and(|bindings| bindings.iter().any(|binding| !varying(binding)));
+        single || several
+    }
+
+    /// Varying entry-point parameters pass; uniform ones (any other binding kind) do not.
+    #[test]
+    fn entry_point_varyings_are_not_uniforms() {
+        let parse = |json: &str| serde_json::from_str::<serde_json::Value>(json).unwrap();
+        for varying in [
+            r#"{"name":"thread","semanticName":"SV_DISPATCHTHREADID"}"#,
+            r#"{"name":"p","binding":{"kind":"varyingInput","index":0}}"#,
+            r#"{"name":"v","bindings":[{"kind":"varyingInput","index":0,"count":2},
+                {"kind":"varyingOutput","index":0}]}"#,
+        ] {
+            assert!(!entry_point_uniform(&parse(varying)), "{varying}");
+        }
+        for uniform in [
+            r#"{"name":"tint","binding":{"kind":"uniform","offset":0,"size":16}}"#,
+            r#"{"name":"tex","binding":{"kind":"descriptorTableSlot","index":0}}"#,
+            r#"{"name":"mixed","bindings":[{"kind":"varyingInput","index":0},
+                {"kind":"descriptorTableSlot","index":1}]}"#,
+        ] {
+            assert!(entry_point_uniform(&parse(uniform)), "{uniform}");
+        }
+    }
+
+    /// ADR-0020 §4c: the reflected descriptor layout of every Slang module (globals, `lib/`
+    /// imports and entry-point parameters alike) is exactly [`SLANG_BINDINGS`].
+    #[test]
+    fn slang_descriptor_bindings_match_the_table() {
+        let mut built: Vec<&str> = SLANG_REFLECTION.iter().map(|(name, _)| *name).collect();
+        let mut listed: Vec<&str> = SLANG_BINDINGS.iter().map(|(name, _)| *name).collect();
+        built.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(
+            built, listed,
+            "every Slang module needs a SLANG_BINDINGS entry"
+        );
+
+        for (module, json) in SLANG_REFLECTION {
+            let reflection: serde_json::Value =
+                serde_json::from_str(json).expect("slangc reflection JSON");
+            let mut problems = Vec::new();
+            let mut actual = Vec::new();
+            for parameter in reflection["parameters"].as_array().into_iter().flatten() {
+                let name = parameter["name"].as_str().unwrap_or("?").to_owned();
+                match slot(parameter) {
+                    Ok(slot) => actual.push((name, slot)),
+                    Err(why) => problems.push(format!("`{name}`: {why}")),
+                }
+            }
+            for entry in reflection["entryPoints"].as_array().into_iter().flatten() {
+                for parameter in entry["parameters"].as_array().into_iter().flatten() {
+                    if entry_point_uniform(parameter) {
+                        problems.push(format!(
+                            "entry point `{}` parameter `{}`: uniform entry-point parameters \
+                             get implicit bindings; declare a global with \
+                             [[vk::binding(binding, set)]]",
+                            entry["name"].as_str().unwrap_or("?"),
+                            parameter["name"].as_str().unwrap_or("?"),
+                        ));
+                    }
+                }
+            }
+            assert!(
+                problems.is_empty(),
+                "{module}:\n  {}",
+                problems.join("\n  ")
+            );
+
+            let expected = SLANG_BINDINGS
+                .iter()
+                .find(|(name, _)| name == module)
+                .map(|(_, bindings)| *bindings)
+                .unwrap_or_default();
+            let mut expected: Vec<(String, Slot)> = expected
+                .iter()
+                .map(|(name, slot)| ((*name).to_owned(), slot.clone()))
+                .collect();
+            actual.sort();
+            expected.sort();
+            assert_eq!(
+                actual, expected,
+                "{module}: reflected bindings vs SLANG_BINDINGS"
+            );
+        }
+    }
+
+    /// Matrix convention (docs/dev/slang.md): Slang treats a `float4x4` as four HLSL rows
+    /// and emits it as the transposed SPIR-V matrix, so `-matrix-layout-column-major` shows
+    /// up as `RowMajor` on that type. The memory layout is then GLSL's `ColMajor` `mat4`
+    /// (glam's `to_cols_array`), and `mul(M, v)` is the Rust `M * v`. This checks every
+    /// matrix member of every Slang module carries `RowMajor` (and not `ColMajor`) with a
+    /// row stride of 16 bytes, or 8 for two-column rows under std430, so the flag cannot be
+    /// flipped silently; `moba_render::slang_smoke` checks the product on a
+    /// GPU.
+    #[test]
+    fn slang_matrices_are_column_major() {
+        const OP_MEMBER_DECORATE: u32 = 72;
+        const ROW_MAJOR: u32 = 4;
+        const COL_MAJOR: u32 = 5;
+        const MATRIX_STRIDE: u32 = 7;
+        for module in MODULES.iter().filter(|module| {
+            module
+                .name
+                .rsplit_once('.')
+                .is_some_and(|(_, kind)| kind == "slang")
+        }) {
+            let words: Vec<u32> = module
+                .spirv
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
+                .collect();
+            // (struct, member) -> (matrix stride, row major, column major).
+            let mut matrices = std::collections::BTreeMap::new();
+            let mut at = 5; // after the header
+            while at < words.len() {
+                let count = (words[at] >> 16) as usize;
+                assert!(count > 0, "{}: malformed SPIR-V", module.name);
+                if words[at] & 0xffff == OP_MEMBER_DECORATE && count >= 4 {
+                    let key = (words[at + 1], words[at + 2]);
+                    let entry = matrices.entry(key).or_insert((None, false, false));
+                    match words[at + 3] {
+                        MATRIX_STRIDE => entry.0 = Some(words[at + 4]),
+                        ROW_MAJOR => entry.1 = true,
+                        COL_MAJOR => entry.2 = true,
+                        _ => {}
+                    }
+                }
+                at += count;
+            }
+            let matrices: Vec<_> = matrices
+                .into_iter()
+                .filter(|(_, (stride, row, column))| stride.is_some() || *row || *column)
+                .collect();
+            assert!(
+                module.name != "toolchain_smoke.slang" || !matrices.is_empty(),
+                "the smoke module's frame constants hold matrices"
+            );
+            for ((structure, member), (stride, row, column)) in matrices {
+                assert!(
+                    row && !column && matches!(stride, Some(8 | 16)),
+                    "{}: struct %{structure} member {member} is not a column-major \
+                     (SPIR-V RowMajor) matrix with an 8- or 16-byte stride: stride {stride:?}, \
+                     RowMajor {row}, ColMajor {column}",
+                    module.name
+                );
+            }
+        }
     }
 
     /// The depth prepass (R6, ADR-0015) draws with the scene's own vertex shaders and the

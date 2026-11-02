@@ -44,6 +44,7 @@ mod renderer;
 mod resources;
 mod scene;
 mod shaders;
+mod slang_smoke;
 mod swapchain;
 mod targets;
 mod terrain;
@@ -101,6 +102,7 @@ pub use scene::{
     OFFSCREEN_MAX_INSTANCES, OUTLINE_SLOTS, OffscreenRender, OutlinePalette, Scene, UnitInstance,
     VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
+pub use slang_smoke::{SlangSmoke, slang_smoke};
 
 /// Environment descriptor (SH-L2 diffuse, intensity) accepted by [`Renderer::set_environment`].
 pub use moba_assets::EnvironmentDesc;
