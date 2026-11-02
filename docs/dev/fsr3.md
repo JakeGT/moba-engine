@@ -149,7 +149,7 @@ Each phase's mean and largest error must stay under its bound, every output fram
 run on a fresh context must be bit-identical to the first, and any validation or
 synchronization-validation message fails it. It runs in CI (render-golden) on lavapipe.
 Flipping the jitter sign fails it (the moving and Ultra Performance phases exceed their bounds).
-Results on lavapipe and an RTX 5070 Ti: [docs/perf/0030](../perf/0030-fsr3-port.md).
+Results on lavapipe, an RTX 5070 Ti and a Radeon 610M: [docs/perf/0030](../perf/0030-fsr3-port.md).
 
 ## Updating the SDK
 

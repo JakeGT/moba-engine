@@ -7,16 +7,16 @@ This is stage 1 only: the port runs standalone in `fsr3-smoke`. It is not yet be
 (gates 3, 4 and 6 are stage 2).
 
 - GPUs: lavapipe (`llvmpipe (LLVM 23.1.3, 256 bits)`, the software-Vulkan set in
-  `agents.local.md`) and NVIDIA GeForce RTX 5070 Ti, driver 615.78.08; both on the tiered path,
-  `max_tier=overdrive`
+  `agents.local.md`), NVIDIA GeForce RTX 5070 Ti (driver 615.78.08) and the AMD Radeon 610M
+  iGPU (RADV `RAPHAEL_MENDOCINO`); all on the tiered path, `max_tier=overdrive`
 - CPU: AMD Ryzen 7 9800X3D; OS: Linux 7.3.0-5-cachyos
 - Toolchain: rustc 1.99.1 stable, `slangc` v2026.20 (pinned), `spirv-val` from the pinned set
 - Build: release, branch `feat/n1b-fsr3`
 - Command: `MOBA_RENDER_PATH=tiered MOBA_VULKAN_VALIDATION=required target/release/fsr3-smoke`
   (validation and synchronization validation on), two processes per device; the RTX runs under
   the workstation's RTX lock
-- Evidence: `~/.cache/moba-evidence/n1b-fsr3/` (`lavapipe-{1,2}.stdout`, `rtx-{1,2}.stdout`,
-  empty `.stderr` files)
+- Evidence: `~/.cache/moba-evidence/n1b-fsr3/` (`{lavapipe,rtx,radv}-{1,2}.stdout`, empty
+  `.stderr` files)
 
 ## What the smoke does
 
@@ -30,29 +30,29 @@ contexts and compares every output frame bit for bit.
 
 ## Results
 
-| Phase | lavapipe mean / max | RTX 5070 Ti mean / max | Bounds (mean, max) |
-|---|---|---|---|
-| flat | 0.00014 / 0.00039 | 0.00006 / 0.00039 | 0.002, 0.004 |
-| static (Quality, 128×72) | 0.00560 / 0.02682 | 0.00564 / 0.02731 | 0.012, 0.060 |
-| moving | 0.00426 / 0.02982 | 0.00426 / 0.03006 | 0.012, 0.070 |
-| sharpened (RCAS) | 0.00655 / 0.03171 | 0.00659 / 0.03219 | 0.015, 0.070 |
-| sizes: Balanced 112×63 | 0.00737 / 0.02731 | 0.00744 / 0.02780 | 0.025, 0.100 |
-| sizes: Performance 96×54 | 0.00899 / 0.03024 | 0.00911 / 0.03268 | 0.025, 0.100 |
-| sizes: Ultra Performance 64×36 | 0.01093 / 0.03410 | 0.01104 / 0.03610 | 0.025, 0.100 |
-| sizes: odd 77×43 | 0.01180 / 0.05155 | 0.01187 / 0.05130 | 0.025, 0.100 |
-| sizes: back to Quality 128×72 | 0.01165 / 0.04422 | 0.01169 / 0.04373 | 0.025, 0.100 |
-| fine: first frame after reset | 0.03885 / 0.12155 | 0.03885 / 0.12155 | — |
-| fine: converged | 0.03068 / 0.10397 | 0.03067 / 0.10349 | ≤ 0.9× first frame |
+| Phase | lavapipe mean / max | RTX 5070 Ti mean / max | Radeon 610M mean / max | Bounds (mean, max) |
+|---|---|---|---|---|
+| flat | 0.00014 / 0.00039 | 0.00006 / 0.00039 | 0.00011 / 0.00039 | 0.002, 0.004 |
+| static (Quality, 128×72) | 0.00560 / 0.02682 | 0.00564 / 0.02731 | 0.00575 / 0.02682 | 0.012, 0.060 |
+| moving | 0.00426 / 0.02982 | 0.00426 / 0.03006 | 0.00457 / 0.03654 | 0.012, 0.070 |
+| sharpened (RCAS) | 0.00655 / 0.03171 | 0.00659 / 0.03219 | 0.00670 / 0.03171 | 0.015, 0.070 |
+| sizes: Balanced 112×63 | 0.00737 / 0.02731 | 0.00744 / 0.02780 | 0.00770 / 0.02829 | 0.025, 0.100 |
+| sizes: Performance 96×54 | 0.00899 / 0.03024 | 0.00911 / 0.03268 | 0.00961 / 0.03268 | 0.025, 0.100 |
+| sizes: Ultra Performance 64×36 | 0.01093 / 0.03410 | 0.01104 / 0.03610 | 0.01187 / 0.03946 | 0.025, 0.100 |
+| sizes: odd 77×43 | 0.01180 / 0.05155 | 0.01187 / 0.05130 | 0.01279 / 0.05081 | 0.025, 0.100 |
+| sizes: back to Quality 128×72 | 0.01165 / 0.04422 | 0.01169 / 0.04373 | 0.01240 / 0.04373 | 0.025, 0.100 |
+| fine: first frame after reset | 0.03885 / 0.12155 | 0.03885 / 0.12155 | 0.03885 / 0.12155 | — |
+| fine: converged | 0.03068 / 0.10397 | 0.03067 / 0.10349 | 0.03069 / 0.10397 | ≤ 0.9× first frame |
 
-| | lavapipe | RTX 5070 Ti |
-|---|---|---|
-| Result | PASS, checked=36, mismatches=0 | PASS, checked=36, mismatches=0 |
-| Validation / sync validation messages | 0 errors, 0 warnings | 0 errors, 0 warnings |
-| Output digest (310 frames) | `2f896f88d99212e2` | `fed947ce861f272e` |
-| Identical across the two in-process runs | yes | yes |
-| Identical across the two processes | yes | yes |
-| Fine detail, converged ÷ first frame | 0.79× | 0.79× |
-| `vram_bytes` (128×72 → 192×108 context) | 743 104 | 1 111 168 |
+| | lavapipe | RTX 5070 Ti | Radeon 610M |
+|---|---|---|---|
+| Result | PASS, checked=36, mismatches=0 | PASS, checked=36, mismatches=0 | PASS, checked=36, mismatches=0 |
+| Validation / sync validation messages | 0 errors, 0 warnings | 0 errors, 0 warnings | 0 errors, 0 warnings |
+| Output digest (310 frames) | `2f896f88d99212e2` | `fed947ce861f272e` | `49a4fff07a4a2eed` |
+| Identical across the two in-process runs | yes | yes | yes |
+| Identical across the two processes | yes | yes | yes |
+| Fine detail, converged ÷ first frame | 0.79× | 0.79× | 0.79× |
+| `vram_bytes` (128×72 → 192×108 context) | 743 104 | 1 111 168 | 939 456 |
 
 The digests differ between devices, as expected for floating-point compute on different
 hardware; each device is deterministic run to run. `vram_bytes` is the sum of the context's
@@ -62,6 +62,15 @@ allocations, which each driver rounds differently.
 odd 77×43, from frame to frame without a reset, and each step converged inside its bound with
 no validation message. A size one pixel over the maximum is refused (`accepts` returned false
 for 129×72 and true for 77×43).
+
+## Compat goldens
+
+The branch's release `moba-client` against a release build of `origin/main` (`34bc098`, in its
+own detached worktree), on lavapipe with validation required, for the default, network, ember,
+VAT, Ultra, Low-scaled and decals captures (the render-golden environments): every capture is
+byte-identical between main and two branch runs, and the branch runs logged no validation
+message. Evidence: `~/.cache/moba-evidence/n1b-fsr3/golden/summary.txt`. The port is not wired
+into the renderer yet, so no tiered golden changes either.
 
 ## Not measured here
 
