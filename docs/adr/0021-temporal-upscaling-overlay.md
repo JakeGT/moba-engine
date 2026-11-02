@@ -1,6 +1,8 @@
 # ADR-0021: Temporal foundation, upscaling, the gameplay overlay layer and latency (N1)
 
-**Status:** proposed 2026-10-31. This is phase N1 of the
+**Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
+[Open questions](#open-questions-for-the-maintainer) taken (see
+[Maintainer answers](#maintainer-answers-2026-11-02)). Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
 - **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
@@ -887,6 +889,21 @@ These follow roadmap §10 and ADR-0020's gates, applied to N1.
    it in every recorded fixture as the dumps arrive.
 8. **Should vendor back ends be in goldens?** *Recommendation:* no. Goldens cover TAAU and
    FSR 3.1, and the vendor back ends are covered by verification gate 5.
+
+### Maintainer answers (2026-11-02)
+
+The maintainer accepted this ADR with **every recommendation above taken**, Q1 to Q8:
+- in-house TAAU is `auto`'s open-build fallback, with FSR 3.1 taking the slot once its port
+  passes the same readability tests within 0.2 ms of TAAU on the 5070 Ti, both selectable;
+- the overlay prepass on every tier, gated at ≤ 0.4 ms on Low (gate 6), with Low alone falling
+  back to upsampled depth if it misses;
+- dominant particle fragments write motion vectors;
+- telegraphs lose bloom, the grade and the screen effects;
+- Reflex and Anti-Lag on by default, boost off, replacing the platform's frame limiter while
+  active;
+- the motion history is keyed in the renderer from `motion_key`;
+- `independentBlend` is required on the tiered path, checked in every recorded fixture;
+- vendor back ends stay out of the goldens (gate 5 covers them).
 
 ## Sources
 
