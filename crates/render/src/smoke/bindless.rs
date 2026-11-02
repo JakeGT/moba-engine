@@ -73,7 +73,7 @@ const TEXTURE_SIDE: u32 = 2;
 /// conversion *should* round to nearest, which lavapipe, RADV and NVIDIA do.
 pub(crate) const UV: [f64; 2] = [-0.125, 0.625];
 /// Per-channel offsets of a texture's texels from its base colour, in row-major order
-/// (x0y0, x1y0, x0y1, x1y1). Multiples of 16, so every 1/4-weighted sum is an integer.
+/// (x0y0, x1y0, x0y1, x1y1). Multiples of 16, so every 1/16-weighted sum is an integer.
 const TEXEL_OFFSETS: [u8; 4] = [0, 64, 32, 96];
 /// The depth texture's texels, row-major, and the comparison reference (`LESS_OR_EQUAL`):
 /// only x0y1 passes, so point/wrap, point/clamp, linear/wrap and linear/clamp give 0, 1, 3/16
@@ -633,7 +633,12 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     unsafe { table.retire(RELEASE_FRAME) };
     // Frame 2 also indexes the free slots in `RELEASED`; the late texture must land in the
     // slot just recycled, which is lower (allocation takes the lowest free slot).
-    debug_assert_eq!(table.next_texture_slot(), Some(unlisted.index()));
+    // Checked in every build (the smokes run in release) and before the write.
+    if table.next_texture_slot() != Some(unlisted.index()) {
+        return Err(RenderError::Shader(
+            "bindless smoke: the late texture would not take the recycled slot",
+        ));
+    }
     let late_handle = table.register_texture(late_image.view())?;
     let spare_handle = table.register_storage_image(spare_storage.view())?;
     // SAFETY: no frame indexes the spare storage image (frame 2 writes only `storage_handle`).

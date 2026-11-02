@@ -1125,6 +1125,7 @@ documented in [docs/dev/slang.md](../dev/slang.md).
 - **Publishing.** The workspace stays `publish = false`. `cargo package --list` is unaffected,
   since `slang-version.txt` and `shaders/slang/` are inside the crate. A docs.rs-style build
   without shader tools fails at `build.rs`, which is already true for `glslc` today.
+
 ### Amendment 5 (2026-11-02, N0.5): the bindless table as built
 
 Recorded in the bindless PR (`feat/n0-bindless`), numbered after N0.3's amendment 3 and
