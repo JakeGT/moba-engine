@@ -1,1 +1,3 @@
 too-many-arguments-threshold = 8
+# Vendor SDK names in docs (ADR-0020 §6); ".." keeps clippy's defaults.
+doc-valid-idents = ["SHaRC", "FidelityFX", "XeSS", "ReSTIR", "DLSS-G", ".."]

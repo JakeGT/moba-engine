@@ -53,6 +53,7 @@ mod terrain;
 mod texture;
 mod ui;
 mod vat;
+mod vendor;
 mod vfx;
 mod world;
 
@@ -127,6 +128,7 @@ pub use ui::{
     build_atlas, pack_rgba8,
 };
 pub use vat::MAX_VAT_MESHES;
+pub use vendor::{LatencyMode, VendorBackends};
 pub use vfx::{
     ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, VFX_MESH_SLOTS, VfxBudget, VfxFrame,
     VfxStats,

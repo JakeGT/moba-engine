@@ -161,6 +161,50 @@ the semver check):
   - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
     `auto`, so an A/B between the paths stays on one GPU. The caps types are
     `#[non_exhaustive]`.
+- **Vendor SDK cargo features (ADR-0020 §6 and amendment 6, N0.6;
+  [perf/0029](docs/perf/0029-vendor-sdks.md), [dev/vendor-sdks.md](docs/dev/vendor-sdks.md)):**
+  - New `moba-render` features, forwarded by `moba-client` and `moba-engine`: `dlss`,
+    `streamline`, `nrd`, `rtxdi`, `sharc`, `fsr4` and `xess` (off), the aggregates `nvidia`,
+    `vendor-sdks` and `dlss-fg`, and `fsr3` (on by default; it vendors nothing until N1). The
+    default build needs no proprietary SDK and is unchanged.
+  - `vendor-sdks.toml` pins each SDK archive (and RTXDI's library, NRD's ShaderMake and
+    MathLib) by SHA-256, with the SHA-256 of its licence file. `scripts/fetch-sdks.sh`
+    (`.ps1` on Windows) downloads into `target/vendor-sdks/`, verifies both hashes and fails
+    on a changed licence; `build.rs` reads `MOBA_SDK_DIR`, never downloads, and generates the
+    FFI declarations with `bindgen` into `OUT_DIR`. NRD is built with CMake (fully
+    disconnected), NGX links statically, and FSR 4 and XeSS load with `libloading` from
+    beside the executable only (on Windows with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`) and stay loaded for the life of the process.
+  - NGX declares its Vulkan extensions before the instance and the device are created
+    (ADR-0020 §1e); the instance and the tiered device enable what is advertised, and the
+    DLSS probe rejects when something it needs is not enabled. XeSS requests nothing until
+    N1 merges its device features; its probe always rejects in N0. Only the renderer's device
+    requests vendor extensions; the headless smokes' devices are the open build's in every
+    build. DLSS and
+    Streamline need NVIDIA's own driver (not NVK), FSR 4 AMD's (not RADV). Streamline is only
+    looked for in N0: it must be initialised before the instance, which comes with N9. NGX's
+    data directory is a private per-user cache directory (owned by the effective user; a
+    non-UTF-8 path is refused), not the shared temporary one.
+  - A vendor device extension is enabled only when `vkCreateDevice` stays valid: a name
+    promoted to Vulkan 1.2 gets its feature bit (or is dropped when unsupported), a name whose
+    known dependencies are not enabled is dropped, and a failed `vkCreateDevice` with vendor
+    names is retried once without them (one `[vendor]` line). FSR 4 is tiered-only like DLSS
+    and XeSS. XeSS is never selected in N0: its required device features are merged before
+    `vkCreateDevice` in N1, so its probe rejects with one line.
+  - NRD links ShaderMake's `ShaderMakeBlob` beside its static library, and CMake configures a
+    copy of NRD (its configure step writes into the source tree). NRD is built once per pin,
+    target, profile and toolchain in `<build-dir>/<profile>/vendor-build/nrd` and reused by
+    every feature set and by clippy; CI caches it, the SDK archives (one entry for both OSes)
+    and the Vulkan SDK's `dxc`, and pins Chocolatey's `vulkan-sdk`. A relative
+    `MOBA_SDK_DIR` is relative to the workspace root in `build.rs` and the fetch scripts; the
+    fetch scripts reject unknown `--only`/`-Only` names, and unpack zips with `unzip` or
+    `bsdtar` (Windows: `%SystemRoot%\System32\tar.exe`).
+  - At start-up each slot (upscaler, denoiser, direct lighting, radiance cache, frame
+    generation) takes the first compiled-in back end the device supports; each unavailable one
+    logs one `[vendor] … falls back to …` line, then a `[vendor] selected:` summary. The open
+    build logs nothing. New `Renderer::vendor_backends()`, `VendorBackends` and `LatencyMode`
+    (Reflex or Anti-Lag from the extensions the device was created with). Nothing reaches the
+    frame in N0.
 - **Bindless table and tiered smokes (ADR-0020 §3, amendment 5, N0.5;
   [perf/0028](docs/perf/0028-bindless.md), [dev/bindless.md](docs/dev/bindless.md)):**
   - `BindlessTable` (`moba-render`, tiered path only): one update-after-bind set with 32
@@ -1175,6 +1219,15 @@ the semver check):
   no behaviour, API or state-hash change.
 
 ### CI
+- New `vendor-sdks` job (Linux and Windows): fetches and verifies the pinned SDKs, then builds
+  and links `moba-client --features vendor-sdks` and runs clippy and the selection tests with
+  `vendor-sdks,dlss-fg` (N0.6). `scripts/agent-verify.sh --full`, `just features` and AGENTS.md
+  check `moba-engine --features sim,net,render,fsr3` instead of `--all-features`; `--full`
+  also checks every vendor feature whose SDK is fetched, alone and together. The job runs its
+  multi-command steps under `bash`, clippy with each vendor feature alone (Linux), the
+  server-crate check with the vendor features on, and verifies the LunarG Vulkan SDK against
+  LunarG's published SHA-256. `scripts/semver-check.sh` checks `moba-render` and
+  `moba-engine` with default features (plus `render`), so the vendor features stay off.
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
 
 ## [0.4.1] — 2026-10-27

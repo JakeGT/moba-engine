@@ -203,4 +203,29 @@ The texture loader's CPU fallback and the baker's quality check decode BC blocks
 `bcdec_rs` (MIT), a Rust port of `bcdec`; the baker reads and writes PNG with `png`
 (MIT OR Apache-2.0). See [ADR-0010](docs/adr/0010-texture-pipeline.md).
 
+## Vendor SDKs (optional cargo features, off by default)
+
+Nothing in this section is in the repository or in the open build (default features). Each
+SDK is fetched by `scripts/fetch-sdks.sh` into `target/vendor-sdks/` and pinned with its
+licence file's SHA-256 in `vendor-sdks.toml`; FFI declarations are generated into `OUT_DIR` at
+build time. A build that enables a feature carries that SDK's obligations, summarised here
+from the pinned licence (the licence file itself is authoritative; [ADR-0020](docs/adr/0020-next-gen-foundations.md)
+§6 and [docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md)). Public releases ship the open
+build only ([RELEASE.md](RELEASE.md) step 8).
+
+| Feature | SDK (pinned) | Licence file in the archive | Obligations when compiled in |
+|---|---|---|---|
+| `fsr3` (default) | none yet: FSR 3.1's MIT shaders arrive in N1 under `third_party/fidelityfx/` | — | none in N0 (ADR-0020 amendment 6) |
+| `dlss` | NVIDIA DLSS SDK 310.9.16 | `LICENSE.txt` (NVIDIA RTX SDKs License) | object code only; NVIDIA GPUs only; **notify NVIDIA before any commercial release**; attribution and NVIDIA marks in the credits, splash screen and about box (supplement §7.1(b)), with NVIDIA's prior approval of the marks (§7.2(c)); NVIDIA may update or disable the feature over the air |
+| `streamline` (`dlss-fg`) | NVIDIA Streamline 2.14.16 | `license.txt` (MIT) | MIT notice; `sl_nvperf` files fall under the Nsight Perf SDK License and are not shipped; the DLSS-G binaries it loads fall under the RTX SDKs License as for `dlss` |
+| `nrd` | NVIDIA NRD 4.18.0 (with ShaderMake and MathLib, MIT) | `LICENSE.txt` (NVIDIA RTX SDKs License) | attribution in the credits (supplement §7.1(c)); stay interoperable with NVIDIA hardware; MIT notices for ShaderMake and MathLib |
+| `rtxdi` | NVIDIA RTXDI 3.1.0 (RTXDI-Library) | `LICENSE.txt` (NVIDIA RTX SDKs License) | as for `nrd` |
+| `sharc` | NVIDIA SHaRC 1.8.3 | `License.md` (NVIDIA RTX SDKs License) | as for `nrd` |
+| `fsr4` | AMD FidelityFX SDK 2.4.0 (FSR 4) | `Kits/FidelityFX/docs/license.md` | **development-only**: binary-only redistribution without reverse engineering by default, though the signed DLLs are also listed under MIT; no distributed build enables it until ADR-0020 Q6 is settled |
+| `xess` | Intel XeSS SDK 3.0.2 | `LICENSE.txt` (Intel Simplified Software License) | redistribute the binaries unmodified, with the notice; no reverse engineering, including at run time; the headers are under the same Intel licence (not MIT as ADR-0020 §6a says; amendment 6) |
+
+The in-game credits do not exist yet; when a credits screen is added, it must show the notices
+and marks above for every feature compiled in (tracked as a follow-up in
+[docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md#notices-and-credits)).
+
 The full repository license is dual MIT/Apache-2.0; see `LICENSE-MIT` and `LICENSE-APACHE`.

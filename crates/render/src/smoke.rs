@@ -182,11 +182,11 @@ pub(crate) struct Headless {
 impl Headless {
     fn new(choice: PathChoice, validation: ValidationMode) -> RenderResult<Self> {
         // The device enables `VK_KHR_swapchain`, which needs `VK_KHR_surface` on the instance.
-        let instance = InstanceContext::new(&[c"VK_KHR_surface"], validation)?;
+        let instance = InstanceContext::new(&[c"VK_KHR_surface"], &[], validation)?;
         // The smokes take their choice from `MOBA_RENDER_PATH`, so `tiered` admits a CPU device
         // as that variable does (ADR-0020 amendment 2).
         let allow_cpu = choice == PathChoice::Tiered;
-        let device = DeviceContext::new(&instance, None, false, choice, allow_cpu)?;
+        let device = DeviceContext::new(&instance, None, false, choice, allow_cpu, false)?;
         if device.admission.path != RenderPath::Tiered {
             return Err(RenderError::NoSuitableDevice(format!(
                 "{} runs {}; the tiered smoke tests need the tiered path \
