@@ -17,7 +17,7 @@ Captured 2026-11-01 on the development workstation, not a CI runner, for
 `scripts/dynres-check.sh` plays the teamfight replay (`tests/replays/teamfight-5v5.mbr`,
 warm-up 330 ticks, 3,000 frames, the frame log covering the last 2,940) at 1920×1080, vsync
 off, twice per tier:
-1. dynamic resolution off, at the preset's ceiling (full scale; [Amendment 2](../adr/0020-next-gen-foundations.md#amendment-2-2026-11-01-n03-dynamic-resolution-before-the-upscalers)): the natural GPU p95;
+1. dynamic resolution off, at the preset's ceiling (full scale; [Amendment 3](../adr/0020-next-gen-foundations.md#amendment-3-2026-11-01-n03-dynamic-resolution-before-the-upscalers)): the natural GPU p95;
 2. dynamic resolution forced to 0.75 × that p95 (`MOBA_DYNRES=<ms>`).
 
 Until N1, dynamic resolution on the tiered path runs only when `MOBA_DYNRES` asks for it
@@ -42,7 +42,7 @@ Every forced run had `locked_uploads=0` and `locked_pipelines=0`.
 
 - **The first attempt failed, and found a real limit.** `PostConfig::sanitized` clamped the
   target to at least 1 ms, and this GPU renders the replay in 0.5–0.7 ms, so no forced target
-  could take effect: the scale never moved. The clamp is now 0.1 ms (Amendment 2).
+  could take effect: the scale never moved. The clamp is now 0.1 ms (Amendment 3).
 - **Tiered Low runs today's High configuration** (§5e), which is why its natural cost is
   above Compat Low's 0.22 ms ([perf/0025](0025-n0-ash-pin.md)). Medium and up run today's
   Ultra.
@@ -92,14 +92,17 @@ against two branch captures, full PPMs compared with `cmp`:
   - the tiered `vat` scene (High) is byte-identical to the `ultra` scene's image
     (`4b8beb4c337b`), which is the mapping at work.
 
-TIERED_EXTRA
+Of the eight extra scenes on the tiered path, `overview`, `horizon` and `river` were
+captured against N0.2 before its worktree went away with its merge. All three differ (they
+render at High, so the mapping moves them to Ultra), and each is identical across the two
+branch captures. The other five are Compat-only evidence above.
 
 Captures pin dynamic resolution off, so the post-review change to its default does not touch
 them.
 
 ## After the perf review
 
-The perf review found nothing blocking. Three changes followed (ADR-0020 amendment 2):
+The perf review found nothing blocking. Three changes followed (ADR-0020 amendment 3):
 
 - **Dynamic resolution is off by default on the tiered path until N1.** With a full-scale
   ceiling, every scaled frame runs the upscale pass, a full-screen 9-tap resample that at

@@ -351,7 +351,7 @@ fn lighting_config_from(
 /// On the tiered path, `tiered` (from [`tiered_scale`]) gives dynamic resolution the tier's
 /// GPU budget as its target and the tier's scale range (ADR-0020 §5c); the settings' scale
 /// can lower the ceiling, not raise it. Until N1 it stays off unless `MOBA_DYNRES` turns it on
-/// (ADR-0020 amendment 2).
+/// (ADR-0020 amendment 3).
 pub(crate) fn post_config(
     tier: moba_render::QualityTier,
     render_scale: f32,

@@ -1026,6 +1026,7 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
 - **`gpu-allocator` keeps buffer device address off.** Tiered enables the
   `bufferDeviceAddress` feature, but no buffer uses an address yet. The first pass that
   allocates one (bindless, §3a) turns the allocator flag on, so N0.2 changes no allocation.
+
 ### Amendment 3 (2026-11-01, N0.3): dynamic resolution before the upscalers
 
 Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Six departures from §5 and §5a,

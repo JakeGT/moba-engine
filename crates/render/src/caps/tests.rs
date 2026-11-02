@@ -419,7 +419,14 @@ fn default_tiers_come_from_the_reference_table() {
     assert_eq!(tier("gtx-1060", PathChoice::Auto), QualityTier::Medium);
     assert_eq!(tier("lavapipe", PathChoice::Auto), QualityTier::Medium);
     assert_eq!(tier("rtx-5070-ti", PathChoice::Compat), QualityTier::Medium);
-    assert_eq!(tier("lavapipe", PathChoice::Tiered), QualityTier::Low);
+    // Settings' `tiered` leaves lavapipe on Compat; `MOBA_RENDER_PATH=tiered` admits it.
+    assert_eq!(tier("lavapipe", PathChoice::Tiered), QualityTier::Medium);
+    let lavapipe = fixture("lavapipe");
+    let allowed = on(PathChoice::Tiered).with_cpu_devices(true);
+    assert_eq!(
+        default_tier(&lavapipe, &admit(&lavapipe, allowed)),
+        QualityTier::Low
+    );
     // A table tier is capped by what the device admits: an Overdrive card without the RT
     // pipeline starts on Ultra.
     let mut caps = fixture("rtx-5070-ti");
