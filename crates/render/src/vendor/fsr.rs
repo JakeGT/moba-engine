@@ -6,9 +6,10 @@
 //!   render-scale filter.
 //! - **FSR 4** (feature `fsr4`, development-only, ADR-0020 Q6): the signed
 //!   `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from FidelityFX SDK
-//!   2.4.0, opened at run time from beside the executable with `libloading`. Windows only;
-//!   RDNA 2 or newer. The N0 probe opens the loader and resolves the FidelityFX API entry
-//!   points; N1 creates the upscaling context.
+//!   2.4.0, opened at run time from beside the executable with `libloading` and kept loaded
+//!   for the rest of the process. Windows only; AMD's own driver; RDNA 2 or newer, which the
+//!   FidelityFX API checks when N1 creates the upscaling context. The N0 probe opens the
+//!   loader and resolves the FidelityFX API entry points.
 //!
 //! Licence (FSR 4): the SDK's `license.md` makes binary-only redistribution without reverse
 //! engineering the default and also lists the signed DLLs under MIT; until a legal reading
@@ -20,7 +21,8 @@ pub(crate) use fsr4::probe as probe_fsr4;
 #[cfg(feature = "fsr4")]
 mod fsr4 {
     use super::super::{
-        Backend, ProbeContext, Unavailable, device_label, load_beside_executable, pci,
+        Backend, Loaded, ProbeContext, Unavailable, amd_driver, beside_executable,
+        load_beside_executable,
     };
 
     #[allow(
@@ -55,9 +57,9 @@ mod fsr4 {
         "libamd_fidelityfx_upscaler_vk.so"
     };
 
-    /// The FSR 4 back end: the opened FidelityFX API loader.
+    /// The FSR 4 back end: the process-lifetime FidelityFX API loader.
     struct Fsr4 {
-        _api: sys::FfxApi,
+        _api: &'static sys::FfxApi,
     }
 
     impl Backend for Fsr4 {
@@ -70,36 +72,38 @@ mod fsr4 {
         }
     }
 
-    /// Needs an AMD GPU (checked first, so no AMD library is loaded on other vendors), then
-    /// the loader and the upscaler beside the executable.
+    /// Needs an AMD GPU on AMD's driver (checked first, so no AMD library is loaded
+    /// elsewhere), then the loader and the upscaler beside the executable. The FidelityFX API
+    /// has no Vulkan extension-requirement query, so FSR 4 asks for nothing before creation.
     pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unavailable> {
-        if context.capabilities.vendor_id != pci::AMD {
-            return Err(format!(
-                "needs an AMD RDNA 2 or newer GPU, and the device is {}",
-                device_label(context.capabilities)
-            ));
-        }
-        let windows_only = |reason: String| {
-            if cfg!(windows) {
-                reason
-            } else {
-                format!("{reason} (FidelityFX SDK {SDK_VERSION} ships Windows binaries only)")
+        amd_driver(context.capabilities)?;
+        api().map(|api| Box::new(Fsr4 { _api: api }) as Box<dyn Backend>)
+    }
+
+    /// The loader, opened on first use and never unloaded (see [`super::super::Loaded`]).
+    fn api() -> Result<&'static sys::FfxApi, Unavailable> {
+        static API: Loaded<sys::FfxApi> = Loaded::new();
+        API.get_or_init(|| {
+            let windows_only = |reason: String| {
+                if cfg!(windows) {
+                    reason
+                } else {
+                    format!("{reason} (FidelityFX SDK {SDK_VERSION} ships Windows binaries only)")
+                }
+            };
+            if !beside_executable(UPSCALER)?.is_file() {
+                return Err(windows_only(format!(
+                    "{UPSCALER} not found beside the executable"
+                )));
             }
-        };
-        let upscaler = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join(UPSCALER)));
-        if !upscaler.as_ref().is_some_and(|path| path.is_file()) {
-            return Err(windows_only(format!(
-                "{UPSCALER} not found beside the executable"
-            )));
-        }
-        let library = load_beside_executable(LOADER).map_err(windows_only)?;
-        // SAFETY: the library is the FidelityFX API loader; `from_library` resolves every
-        // declared entry point by name and fails if one is missing, so each stored pointer
-        // has the declared signature.
-        let api = unsafe { sys::FfxApi::from_library(library) }
-            .map_err(|error| format!("{LOADER} lacks a FidelityFX API entry point: {error}"))?;
-        Ok(Box::new(Fsr4 { _api: api }))
+            let library = load_beside_executable(LOADER).map_err(windows_only)?;
+            // SAFETY: the library is the FidelityFX API loader; `from_library` resolves every
+            // declared entry point by name and fails if one is missing, so each stored pointer
+            // has the declared signature.
+            unsafe { sys::FfxApi::from_library(library) }
+                .map_err(|error| format!("{LOADER} lacks a FidelityFX API entry point: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
     }
 }

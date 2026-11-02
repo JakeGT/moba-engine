@@ -159,13 +159,21 @@ the semver check):
     (`.ps1` on Windows) downloads into `target/vendor-sdks/`, verifies both hashes and fails
     on a changed licence; `build.rs` reads `MOBA_SDK_DIR`, never downloads, and generates the
     FFI declarations with `bindgen` into `OUT_DIR`. NRD is built with CMake (fully
-    disconnected), NGX links statically, and FSR 4, XeSS and Streamline load with
-    `libloading` from beside the executable only.
+    disconnected), NGX links statically, and FSR 4 and XeSS load with `libloading` from
+    beside the executable only (on Windows with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`) and stay loaded for the life of the process.
+  - NGX and XeSS declare their Vulkan extensions before the instance and the device are
+    created (ADR-0020 §1e); the instance and the tiered device enable what is advertised,
+    and each probe rejects its back end when something it needs is not enabled. DLSS and
+    Streamline need NVIDIA's own driver (not NVK), FSR 4 AMD's (not RADV). Streamline is only
+    looked for in N0: it must be initialised before the instance, which comes with N9. NGX's
+    data directory is a private per-user cache directory, not the shared temporary one.
   - At start-up each slot (upscaler, denoiser, direct lighting, radiance cache, frame
     generation) takes the first compiled-in back end the device supports; each unavailable one
     logs one `[vendor] … falls back to …` line, then a `[vendor] selected:` summary. The open
     build logs nothing. New `Renderer::vendor_backends()`, `VendorBackends` and `LatencyMode`
-    (Reflex or Anti-Lag from the device's extensions). Nothing reaches the frame in N0.
+    (Reflex or Anti-Lag from the extensions the device was created with). Nothing reaches the
+    frame in N0.
 - **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;
   [perf/0027](docs/perf/0027-tiers-budgets.md)):**
   - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it

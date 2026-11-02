@@ -120,16 +120,156 @@ fn a_lower_priority_candidate_takes_over_and_later_ones_are_not_probed() {
     assert_eq!(selection.backend(Slot::Denoiser), "nrd");
 }
 
+fn fixture(name: &str) -> DeviceCapabilities {
+    let text = match name {
+        "rtx-5070-ti" => include_str!("../caps/fixtures/rtx-5070-ti.json"),
+        "gtx-1060" => include_str!("../caps/fixtures/gtx-1060.json"),
+        "nvk-rtx-2060" => include_str!("../caps/fixtures/nvk-rtx-2060.json"),
+        "radeon-610m" => include_str!("../caps/fixtures/radeon-610m.json"),
+        "lavapipe" => include_str!("../caps/fixtures/lavapipe.json"),
+        _ => panic!("no fixture {name}"),
+    };
+    serde_json::from_str(text).expect("fixture")
+}
+
+/// The device extensions `caps` is created with besides swapchain: the tiered set of its own
+/// admission (what `DeviceContext` enables in the open build).
+fn enabled_on(caps: &DeviceCapabilities) -> (RenderPath, Vec<String>) {
+    let path = crate::caps::admit(
+        caps,
+        crate::caps::Overrides::new(crate::caps::PathChoice::Auto),
+    )
+    .path;
+    let names = crate::device::TieredExtensions::of(caps, path)
+        .names
+        .iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    (path, names)
+}
+
 #[test]
-fn latency_comes_from_extensions_reflex_first() {
-    let mut caps: DeviceCapabilities =
-        serde_json::from_str(include_str!("../caps/fixtures/rtx-5070-ti.json")).expect("fixture");
-    assert_eq!(latency::detect(&caps), LatencyMode::Reflex);
-    caps.extensions.retain(|name| name != "VK_NV_low_latency2");
-    assert_eq!(latency::detect(&caps), LatencyMode::None);
-    caps.extensions.push(String::from("VK_AMD_anti_lag"));
-    caps.extensions.sort();
-    assert_eq!(latency::detect(&caps), LatencyMode::AntiLag);
+fn latency_comes_from_enabled_extensions_reflex_first() {
+    let enabled = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| String::from(*name))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        latency::detect(&enabled(&["VK_NV_low_latency2", "VK_AMD_anti_lag"])),
+        LatencyMode::Reflex
+    );
+    assert_eq!(
+        latency::detect(&enabled(&["VK_AMD_anti_lag"])),
+        LatencyMode::AntiLag
+    );
+    assert_eq!(
+        latency::detect(&enabled(&["VK_KHR_present_id"])),
+        LatencyMode::None
+    );
+    assert_eq!(latency::detect(&[]), LatencyMode::None);
+}
+
+#[test]
+fn latency_follows_what_the_device_enables_not_what_it_advertises() {
+    // The RTX 5070 Ti is tiered with presentId: VK_NV_low_latency2 is enabled.
+    let caps = fixture("rtx-5070-ti");
+    let (path, enabled) = enabled_on(&caps);
+    assert_eq!(path, RenderPath::Tiered);
+    assert_eq!(latency::detect(&enabled), LatencyMode::Reflex);
+    // The GTX 1060 advertises VK_NV_low_latency2 but runs Compat, which enables neither
+    // latency extension.
+    let caps = fixture("gtx-1060");
+    assert!(caps.has_extension("VK_NV_low_latency2"));
+    let (path, enabled) = enabled_on(&caps);
+    assert_eq!(path, RenderPath::Compat);
+    assert_eq!(latency::detect(&enabled), LatencyMode::None);
+}
+
+#[test]
+fn nvidia_probes_need_nvidias_driver_not_just_its_vendor_id() {
+    assert!(nvidia_driver(&fixture("rtx-5070-ti"), "DLSS").is_ok());
+    // NVK reports NVIDIA's PCI vendor ID on Mesa's driver: NGX must not run there.
+    let nvk = fixture("nvk-rtx-2060");
+    assert_eq!(nvk.vendor_id, pci::NVIDIA);
+    let reason = nvidia_driver(&nvk, "DLSS").expect_err("NVK is not NVIDIA's driver");
+    assert!(
+        reason.starts_with("DLSS needs an NVIDIA RTX GPU on NVIDIA's driver, and the device is "),
+        "{reason}"
+    );
+    assert!(reason.ends_with("(vendor 0x10de, driver NVK)"), "{reason}");
+    assert!(nvidia_driver(&fixture("radeon-610m"), "DLSS").is_err());
+    assert!(nvidia_driver(&fixture("lavapipe"), "DLSS").is_err());
+}
+
+#[test]
+fn fsr4_needs_amds_own_driver() {
+    // RADV is Mesa's driver for AMD GPUs; the signed FSR 4 binaries need AMD's.
+    let radv = fixture("radeon-610m");
+    assert_eq!(radv.vendor_id, pci::AMD);
+    let reason = amd_driver(&radv).expect_err("RADV is not AMD's driver");
+    assert!(
+        reason.starts_with("needs an AMD GPU on AMD's driver"),
+        "{reason}"
+    );
+    let mut proprietary = radv;
+    proprietary.driver_id = driver::AMD_PROPRIETARY;
+    assert!(amd_driver(&proprietary).is_ok());
+    assert!(amd_driver(&fixture("rtx-5070-ti")).is_err());
+}
+
+#[test]
+fn requirements_are_checked_against_the_enabled_sets() {
+    let names = |list: &[&str]| {
+        list.iter()
+            .map(|name| String::from(*name))
+            .collect::<Vec<_>>()
+    };
+    let requested = names(&["VK_NVX_binary_import", "VK_NVX_image_view_handle"]);
+    assert_eq!(
+        require_enabled(
+            "DLSS",
+            "device",
+            &requested,
+            &names(&["VK_KHR_swapchain", "VK_NVX_binary_import"]),
+            RenderPath::Tiered
+        ),
+        Err(String::from(
+            "DLSS needs device extension VK_NVX_image_view_handle, which the device does not enable"
+        ))
+    );
+    assert_eq!(
+        require_enabled("DLSS", "device", &requested, &requested, RenderPath::Tiered),
+        Ok(())
+    );
+    // The tiered path's core bufferDeviceAddress stands in for the EXT extension, which is
+    // never enabled beside it.
+    let bda = names(&["VK_EXT_buffer_device_address"]);
+    assert_eq!(
+        require_enabled("DLSS", "device", &bda, &[], RenderPath::Tiered),
+        Ok(())
+    );
+    assert!(require_enabled("DLSS", "device", &bda, &[], RenderPath::Compat).is_err());
+    assert_eq!(
+        require_enabled(
+            "XeSS",
+            "instance",
+            &names(&["VK_A", "VK_B"]),
+            &[],
+            RenderPath::Tiered
+        ),
+        Err(String::from(
+            "XeSS needs instance extensions VK_A, VK_B, which the instance does not enable"
+        ))
+    );
+}
+
+#[test]
+fn the_open_build_asks_for_no_extensions() {
+    if candidates().is_empty() {
+        assert_eq!(instance_extensions(), Vec::<CString>::new());
+    }
 }
 
 #[test]

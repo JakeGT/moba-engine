@@ -612,7 +612,10 @@ impl Renderer {
             })
             .collect();
 
-        let instance = InstanceContext::new(&required, config.validation)?;
+        // ADR-0020 §1e: the compiled-in vendor back ends declare their instance extensions
+        // before creation (none in the open build).
+        let vendor_instance = crate::vendor::instance_extensions();
+        let instance = InstanceContext::new(&required, &vendor_instance, config.validation)?;
         let loader = khr::surface::Instance::load(&instance.entry, &instance.instance);
         let factory =
             ash_window::SurfaceFactory::new(&instance.entry, &instance.instance, display_handle)?;
@@ -645,11 +648,14 @@ impl Renderer {
         // ADR-0020 §6c: probe the compiled-in vendor back ends against this device; each one
         // that is unavailable logs one line naming its fallback (nothing in the open build).
         let vendor = crate::vendor::select(&crate::vendor::ProbeContext {
+            entry: &instance.entry,
             instance: &instance.instance,
             physical: device.physical,
             device: &device.device,
             capabilities: &device.capabilities,
             path,
+            instance_extensions: &instance.enabled_extensions,
+            device_extensions: &device.enabled_extensions,
         });
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;

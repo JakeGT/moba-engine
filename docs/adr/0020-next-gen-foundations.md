@@ -1095,7 +1095,41 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
   source tree.
 - **Run-time libraries load only from the executable's directory**, by full path, never
   through the system search path, so a planted DLL elsewhere on the path is never picked up.
-  NGX finds the DLSS feature binary itself (beside the executable or from the driver).
+  On Windows their own imports are resolved from that directory and the system directories
+  only (`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`), never from
+  `PATH` or the working directory. Nothing checks a hash or signature at run time: the install
+  directory is trusted. A library, once opened, stays loaded for the life of the process
+  (vendor DLLs often do not survive being unloaded); NGX's session still shuts down before
+  `vkDestroyDevice`. NGX finds the DLSS feature binary itself (beside the executable or from
+  the driver), and keeps its data in a per-user cache directory (`moba-engine/ngx`, beside the
+  client's pipeline cache), which on Linux must be a private directory of the current user.
+- **§1e's extension declaration, as built.** `vendor::instance_extensions` runs before
+  `vkCreateInstance` and `vendor::device_extensions` before `vkCreateDevice`. NGX
+  (`GetFeatureInstanceExtensionRequirements` and `GetFeatureDeviceExtensionRequirements`) and
+  XeSS (`xessVKGetRequiredInstanceExtensions` and `xessVKGetRequiredDeviceExtensions`) feed
+  them; each name the loader or device advertises is enabled, and nothing missing fails
+  creation. Each probe repeats its queries against the enabled sets and rejects its back end
+  with its one line when something is missing. Three limits:
+  - **Device extensions are requested on the tiered path only.** Compat changes only where
+    shared code moves (§2c), so DLSS and XeSS are tiered-only and reject on Compat.
+    `VK_EXT_buffer_device_address` is never enabled (it conflicts with the tiered path's core
+    `bufferDeviceAddress`, which stands in for it).
+  - **NGX's device query loads the driver's NGX core,** so it runs only on NVIDIA's own driver.
+  - **XeSS's required device features** (`xessVKGetRequiredDeviceFeatures`) are not merged into
+    the feature chain in N0. N1 merges them when it creates the XeSS context, before XeSS is
+    used in a frame.
+- **Streamline is deferred to N9 entirely.** It must be loaded, and `slInit` called, before
+  `vkCreateInstance`, because it interposes on the loader. N0 does neither, so the
+  `streamline` probe only reports whether `sl.interposer.dll` is installed, never loads it,
+  and never selects frame generation (it always logs one line; `frame_generation=off`).
+- **The vendor checks read the driver, not only the PCI vendor.** DLSS and Streamline need
+  NVIDIA's proprietary driver (`VK_DRIVER_ID_NVIDIA_PROPRIETARY`; NVK also reports `0x10de`),
+  and FSR 4 AMD's (`VK_DRIVER_ID_AMD_PROPRIETARY`). FSR 4's RDNA 2 minimum has no reliable
+  device field, so the FidelityFX API checks it when N1 creates the context.
+- **The latency mode reads the enabled extensions,** not the advertised ones: Compat enables
+  neither latency extension, so a Compat device reports `latency=none`.
+- **`dlss` on Apple targets** builds without the SDK and always reports DLSS unavailable (NGX
+  has no Apple library). The other vendor features are untested on macOS.
 - **One summary line follows the fallback lines.** Each unavailable back end logs exactly one
   line (`[vendor] <name> unavailable: <reason>; <slot> falls back to <fallback>`). When any
   vendor feature is compiled in, one `[vendor] selected: …` line then names each slot's back

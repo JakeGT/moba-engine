@@ -2,9 +2,7 @@
 //! Vulkan face of Reflex) and `VK_AMD_anti_lag`. No SDK code is used, so there is no feature:
 //! every build detects them. N1 drives them from the frame loop.
 
-use crate::caps::DeviceCapabilities;
-
-/// The latency-reduction extension a device offers.
+/// The latency-reduction extension enabled on the device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LatencyMode {
@@ -12,7 +10,7 @@ pub enum LatencyMode {
     Reflex,
     /// `VK_AMD_anti_lag`.
     AntiLag,
-    /// Neither extension is advertised.
+    /// Neither extension is enabled on the device.
     None,
 }
 
@@ -28,11 +26,14 @@ impl LatencyMode {
     }
 }
 
-/// The extension `capabilities` advertises, Reflex first.
-pub(crate) fn detect(capabilities: &DeviceCapabilities) -> LatencyMode {
-    if capabilities.has_extension("VK_NV_low_latency2") {
+/// The extension the device was created with, Reflex first. This reads the enabled set, not
+/// what the device advertises: the tiered path enables `VK_NV_low_latency2` only with
+/// `presentId`, and the compat path enables neither extension (ADR-0020 §1e).
+pub(crate) fn detect(enabled: &[String]) -> LatencyMode {
+    let has = |name: &str| enabled.iter().any(|enabled| enabled == name);
+    if has("VK_NV_low_latency2") {
         LatencyMode::Reflex
-    } else if capabilities.has_extension("VK_AMD_anti_lag") {
+    } else if has("VK_AMD_anti_lag") {
         LatencyMode::AntiLag
     } else {
         LatencyMode::None

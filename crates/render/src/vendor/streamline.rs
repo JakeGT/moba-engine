@@ -1,16 +1,19 @@
 //! Streamline, the Windows path for DLSS frame generation (feature `streamline`, implied by
 //! `dlss-fg`; ADR-0020 §6 and Q8).
 //!
-//! The interposer (`sl.interposer.dll`) and its plug-ins are opened at run time from beside
-//! the executable. Streamline 2.14.16 ships Windows binaries only. The N0 probe opens the
-//! interposer and resolves `slInit` without calling it (initialising Streamline hooks Vulkan,
-//! which belongs to N9).
+//! Streamline 2.14.16 ships Windows binaries only. Its interposer (`sl.interposer.dll`) must be
+//! loaded, and `slInit` called, **before `vkCreateInstance`**: it interposes on the Vulkan
+//! loader and hooks instance and device creation. N0 creates the instance without it, so the
+//! N0 probe only reports whether the interposer is installed beside the executable; it never
+//! loads it (loading it after the instance exists is exactly what Streamline forbids) and
+//! never selects frame generation. The interposer and `slInit` come with frame generation in
+//! N9 (ADR-0020 amendment 6).
 //!
 //! Licence: Streamline is MIT; `sl_nvperf.h` and `sl.nvperf.dll` are under the Nsight Perf
 //! SDK License and are not shipped; the DLSS-G binaries it loads fall under the NVIDIA RTX
 //! SDKs License (`THIRD_PARTY.md`).
 
-use super::{Backend, ProbeContext, Unavailable, device_label, load_beside_executable, pci};
+use super::{Backend, ProbeContext, Unavailable, beside_executable, nvidia_driver};
 
 #[allow(
     non_camel_case_types,
@@ -27,57 +30,37 @@ mod sys {
     include!(concat!(env!("OUT_DIR"), "/streamline.rs"));
 }
 
-/// The interposer the probe opens.
+/// The interposer the probe looks for.
 const INTERPOSER: &str = if cfg!(windows) {
     "sl.interposer.dll"
 } else {
     "libsl.interposer.so"
 };
 
-/// The Streamline back end: the opened interposer.
-struct Streamline {
-    _library: libloading::Library,
-}
-
-impl Backend for Streamline {
-    fn name(&self) -> &'static str {
-        "streamline"
-    }
-
-    fn detail(&self) -> String {
-        format!(
-            "Streamline SDK {}.{}.{}",
-            sys::SL_VERSION_MAJOR,
-            sys::SL_VERSION_MINOR,
-            sys::SL_VERSION_PATCH
-        )
-    }
-}
-
-/// Needs an NVIDIA GPU (DLSS-G), then the interposer beside the executable.
+/// Needs an NVIDIA GPU on NVIDIA's driver (DLSS-G), then reports whether the interposer is
+/// installed. Always unavailable in N0: Streamline is initialised before the instance from N9.
 pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unavailable> {
-    if context.capabilities.vendor_id != pci::NVIDIA {
-        return Err(format!(
-            "DLSS frame generation needs an NVIDIA RTX GPU, and the device is {}",
-            device_label(context.capabilities)
-        ));
-    }
-    let library = load_beside_executable(INTERPOSER).map_err(|reason| {
-        if cfg!(windows) {
-            reason
+    nvidia_driver(context.capabilities, "DLSS frame generation")?;
+    let version = format!(
+        "{}.{}.{}",
+        sys::SL_VERSION_MAJOR,
+        sys::SL_VERSION_MINOR,
+        sys::SL_VERSION_PATCH
+    );
+    let path = beside_executable(INTERPOSER)?;
+    if !path.is_file() {
+        return Err(if cfg!(windows) {
+            format!("{} not found", path.display())
         } else {
             format!(
-                "{reason} (Streamline {}.{}.{} ships Windows binaries only)",
-                sys::SL_VERSION_MAJOR,
-                sys::SL_VERSION_MINOR,
-                sys::SL_VERSION_PATCH
+                "{} not found (Streamline {version} ships Windows binaries only)",
+                path.display()
             )
-        }
-    })?;
-    // SAFETY: only the symbol's presence is checked; the pointer is never called or kept.
-    let found = unsafe { library.get::<unsafe extern "C" fn()>(b"slInit\0") }.is_ok();
-    if !found {
-        return Err(format!("{INTERPOSER} does not export slInit"));
+        });
     }
-    Ok(Box::new(Streamline { _library: library }))
+    Err(format!(
+        "{} found, but Streamline {version} must be initialised before the Vulkan instance, \
+         which comes with frame generation in N9",
+        path.display()
+    ))
 }

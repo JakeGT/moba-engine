@@ -47,6 +47,8 @@ struct Context {
     target_os: String,
     #[cfg_attr(not(any(feature = "dlss", feature = "nrd")), allow(dead_code))]
     target_arch: String,
+    #[cfg_attr(not(any(feature = "dlss", feature = "nrd")), allow(dead_code))]
+    target_vendor: String,
 }
 
 struct Sdk {
@@ -77,6 +79,7 @@ impl Context {
             out: PathBuf::from(env_var("OUT_DIR")),
             target_os: env_var("CARGO_CFG_TARGET_OS"),
             target_arch: env_var("CARGO_CFG_TARGET_ARCH"),
+            target_vendor: env_var("CARGO_CFG_TARGET_VENDOR"),
         }
     }
 
@@ -186,11 +189,14 @@ fn bindings(name: &str, wrapper: &str, include: &Path) -> bindgen::Builder {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
 }
 
-/// The handful of Vulkan declarations NGX's headers expect to be in scope (`nvsdk_ngx_vk.h`
-/// includes no Vulkan header). Written from the Vulkan specification's ABI for 64-bit targets,
-/// where every handle is pointer-sized; no system Vulkan headers are needed.
-#[cfg(feature = "dlss")]
+/// The handful of Vulkan declarations NGX's and XeSS's headers need (`nvsdk_ngx_vk.h`
+/// includes no Vulkan header; `xess_vk.h` includes `<vulkan/vulkan.h>`, which `xess` points
+/// at a copy of this). Written from the Vulkan specification's ABI for 64-bit targets, where
+/// every handle is pointer-sized; no system Vulkan headers are needed.
+#[cfg(any(feature = "dlss", feature = "xess"))]
 const VULKAN_DECLARATIONS: &str = "\
+#ifndef MOBA_VULKAN_DECLARATIONS
+#define MOBA_VULKAN_DECLARATIONS
 #include <stdint.h>
 typedef uint32_t VkFlags;
 typedef VkFlags VkImageAspectFlags;
@@ -203,6 +209,8 @@ typedef struct VkCommandBuffer_T *VkCommandBuffer;
 typedef struct VkImage_T *VkImage;
 typedef struct VkImageView_T *VkImageView;
 typedef struct VkBuffer_T *VkBuffer;
+typedef struct VkDeviceMemory_T *VkDeviceMemory;
+typedef struct VkPipelineCache_T *VkPipelineCache;
 typedef int32_t VkFormat;
 typedef struct VkImageSubresourceRange {
     VkImageAspectFlags aspectMask;
@@ -218,23 +226,29 @@ typedef struct VkExtensionProperties {
 typedef void (*PFN_vkVoidFunction)(void);
 typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddr)(VkInstance, const char *);
 typedef PFN_vkVoidFunction (*PFN_vkGetDeviceProcAddr)(VkDevice, const char *);
+#endif
 ";
 
-/// DLSS through NGX: bindings for the Vulkan init, capability query and shutdown, and the
-/// static NGX library (ADR-0020 §6b).
+/// DLSS through NGX: bindings for the extension-requirement queries, the Vulkan init,
+/// capability query and shutdown, and the static NGX library (ADR-0020 §6b). NGX has no Apple
+/// library, so on Apple targets the feature needs nothing here and compiles to a probe that
+/// always reports DLSS unavailable.
 #[cfg(feature = "dlss")]
 fn dlss(context: &Context) {
+    if context.target_vendor == "apple" {
+        return;
+    }
     let sdk = context.require("dlss", "dlss");
     let wrapper = format!("{VULKAN_DECLARATIONS}#include \"nvsdk_ngx_vk.h\"\n");
     let builder = bindings("ngx", &wrapper, &sdk.dir.join("include"))
         .clang_args(["-x", "c", "-std=c11"])
         .allowlist_function(
-            "NVSDK_NGX_VULKAN_(Init_with_ProjectID|Shutdown1|GetCapabilityParameters|DestroyParameters)",
+            "NVSDK_NGX_VULKAN_(Init_with_ProjectID|Shutdown1|GetCapabilityParameters|DestroyParameters|GetFeatureInstanceExtensionRequirements|GetFeatureDeviceExtensionRequirements)",
         )
         .allowlist_function("NVSDK_NGX_Parameter_GetI")
         .allowlist_var("NVSDK_NGX_Parameter_SuperSampling_(Available|NeedsUpdatedDriver|FeatureInitResult|MinDriverVersionMajor|MinDriverVersionMinor)")
         // Enum constants come with their (allowlisted) enum types.
-        .allowlist_type("NVSDK_NGX_(Result|EngineType|Version)");
+        .allowlist_type("NVSDK_NGX_(Result|EngineType|Version|Feature|Application_Identifier_Type)");
     context.write(builder, "ngx.rs");
 
     let lib = sdk.dir.join("lib");
@@ -345,7 +359,11 @@ fn nrd(context: &Context) {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     println!("cargo:rustc-link-lib=static=NRD");
-    if context.target_os != "windows" {
+    // NRD is C++: libstdc++ on Linux and the other GNU-style targets, libc++ on Apple's
+    // (MSVC links its C++ runtime itself).
+    if context.target_vendor == "apple" {
+        println!("cargo:rustc-link-lib=dylib=c++");
+    } else if context.target_os != "windows" {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
     let _ = &context.target_arch;
@@ -412,17 +430,26 @@ fn fsr4(context: &Context) {
     context.write(builder, "ffx.rs");
 }
 
-/// XeSS: bindings for `xessGetVersion`, loaded at run time with libloading (no link line).
+/// XeSS: bindings for `xessGetVersion` and the Vulkan extension-requirement queries, loaded
+/// at run time with libloading (no link line). `xess_vk.h` includes `<vulkan/vulkan.h>`; a
+/// minimal one is written into `OUT_DIR`, so no Vulkan SDK headers are needed.
 #[cfg(feature = "xess")]
 fn xess(context: &Context) {
     let sdk = context.require("xess", "xess");
+    let shim = context.out.join("xess-vulkan");
+    fs::create_dir_all(shim.join("vulkan"))
+        .and_then(|()| fs::write(shim.join("vulkan").join("vulkan.h"), VULKAN_DECLARATIONS))
+        .unwrap_or_else(|error| fail(format!("writing the Vulkan shim for xess: {error}")));
     let builder = bindings(
         "xess",
-        "#include <stdbool.h>\n#include \"xess/xess.h\"\n",
+        "#include <stdbool.h>\n#include \"xess/xess.h\"\n#include \"xess/xess_vk.h\"\n",
         &sdk.dir.join("inc"),
     )
     .clang_args(["-x", "c", "-std=c11"])
-    .allowlist_function("xessGetVersion")
+    .clang_arg(format!("-I{}", shim.display()))
+    .allowlist_function(
+        "xess(GetVersion|VKGetRequiredInstanceExtensions|VKGetRequiredDeviceExtensions)",
+    )
     .allowlist_type("_?xess_version_t")
     .allowlist_type("_?xess_result_t")
     .dynamic_library_name("XessApi")

@@ -15,7 +15,15 @@
 //! N0 proves the plumbing only (each probe makes one minimal call, such as an NGX capability
 //! query or a library open plus a symbol lookup). No back end is wired into the frame yet:
 //! the upscalers arrive in N1, the denoiser and lighting libraries later.
+//!
+//! **Extensions are declared before creation** (ADR-0020 §1e). [`instance_extensions`] runs
+//! before `vkCreateInstance` and [`device_extensions`] before `vkCreateDevice`; each
+//! compiled-in back end that has a requirement query (NGX, XeSS) feeds them, and the instance
+//! and device enable what the loader and the device advertise. Neither can fail creation.
+//! Each probe then repeats its query against the enabled sets ([`ProbeContext`]) and rejects
+//! its back end, with its one line, when anything is missing.
 
+use std::ffi::CString;
 use std::fmt::Write as _;
 
 use ash::vk;
@@ -25,7 +33,9 @@ use crate::caps::{DeviceCapabilities, RenderPath};
 #[cfg(any(feature = "fsr3", feature = "fsr4"))]
 mod fsr;
 mod latency;
-#[cfg(feature = "dlss")]
+// NGX ships Linux and Windows libraries only; on Apple targets `dlss` is a probe that always
+// says so (see `ngx_unavailable`).
+#[cfg(all(feature = "dlss", not(target_vendor = "apple")))]
 mod ngx;
 #[cfg(feature = "nrd")]
 mod nrd;
@@ -99,7 +109,7 @@ pub(crate) trait Backend: Send {
 /// Why a probe rejected its back end: one human-readable sentence, without a trailing period.
 pub(crate) type Unavailable = String;
 
-/// What a probe sees: the device, as created, and its admission.
+/// What a probe sees: the device, as created, its admission and what was enabled.
 #[derive(Clone, Copy)]
 #[cfg_attr(
     not(any(
@@ -114,11 +124,172 @@ pub(crate) type Unavailable = String;
     allow(dead_code) // The open build has no probes.
 )]
 pub(crate) struct ProbeContext<'a> {
+    /// The loader the instance came from (NGX resolves Vulkan through its
+    /// `vkGetInstanceProcAddr`).
+    pub(crate) entry: &'a ash::Entry,
     pub(crate) instance: &'a ash::Instance,
     pub(crate) physical: vk::PhysicalDevice,
     pub(crate) device: &'a ash::Device,
     pub(crate) capabilities: &'a DeviceCapabilities,
     pub(crate) path: RenderPath,
+    /// The instance extensions enabled at `vkCreateInstance`.
+    pub(crate) instance_extensions: &'a [String],
+    /// The device extensions enabled at `vkCreateDevice`.
+    pub(crate) device_extensions: &'a [String],
+}
+
+/// What [`device_extensions`] sees: a physical device about to be created, and its admission.
+#[cfg_attr(
+    not(any(feature = "dlss", feature = "xess")),
+    allow(dead_code) // Only NGX and XeSS have device-extension queries.
+)]
+pub(crate) struct DeviceQuery<'a> {
+    pub(crate) instance: &'a ash::Instance,
+    pub(crate) physical: vk::PhysicalDevice,
+    pub(crate) capabilities: &'a DeviceCapabilities,
+    pub(crate) path: RenderPath,
+}
+
+/// The instance extensions the compiled-in back ends ask for, called before
+/// `vkCreateInstance` (ADR-0020 §1e). The instance enables those the loader advertises and
+/// ignores the rest; the back end's probe then reports what is missing. Empty in the open
+/// build. A back end whose query fails asks for nothing here, and its probe says why.
+pub(crate) fn instance_extensions() -> Vec<CString> {
+    #[allow(unused_mut)] // Empty in the open build.
+    let mut names: Vec<String> = Vec::new();
+    #[cfg(all(feature = "dlss", not(target_vendor = "apple")))]
+    if let Ok(requested) = ngx::instance_extensions() {
+        names.extend(requested);
+    }
+    #[cfg(feature = "xess")]
+    if let Ok(requested) = xess::instance_extensions() {
+        names.extend(requested);
+    }
+    to_c_strings(names)
+}
+
+/// The device extensions the compiled-in back ends ask for on `query`'s device, called before
+/// `vkCreateDevice` (ADR-0020 §1e). The device enables those it advertises. Nothing is asked
+/// for on the compat path: Compat changes only where shared code moves (ADR-0020 §2c), so the
+/// back ends that need extensions are tiered-only. NGX is asked only on NVIDIA's own driver.
+pub(crate) fn device_extensions(query: &DeviceQuery<'_>) -> Vec<CString> {
+    #[allow(unused_mut)] // Empty in the open build.
+    let mut names: Vec<String> = Vec::new();
+    if query.path != RenderPath::Tiered {
+        return Vec::new();
+    }
+    #[cfg(all(feature = "dlss", not(target_vendor = "apple")))]
+    if nvidia_driver(query.capabilities, "DLSS").is_ok()
+        && let Ok(requested) = ngx::device_extensions(query.instance, query.physical)
+    {
+        names.extend(requested);
+    }
+    #[cfg(feature = "xess")]
+    if let Ok(requested) = xess::device_extensions(query.instance, query.physical) {
+        names.extend(requested);
+    }
+    to_c_strings(names)
+}
+
+/// Sorted, de-duplicated C strings (names with a NUL are dropped: no extension has one).
+fn to_c_strings(mut names: Vec<String>) -> Vec<CString> {
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter_map(|name| CString::new(name).ok())
+        .collect()
+}
+
+/// Whether `name` is satisfied by the `enabled` extensions on `path`.
+/// `VK_EXT_buffer_device_address` is never enabled beside core `bufferDeviceAddress`
+/// (`VUID-VkDeviceCreateInfo-pNext-04748`); the tiered path enables that feature, which
+/// stands in for it.
+fn satisfied(name: &str, enabled: &[String], path: RenderPath) -> bool {
+    enabled.iter().any(|enabled| enabled == name)
+        || (name == "VK_EXT_buffer_device_address" && path == RenderPath::Tiered)
+}
+
+/// `Ok` when every `requested` extension is satisfied by `enabled`, else one sentence naming
+/// the missing ones (`what` is `instance` or `device`).
+#[cfg_attr(
+    not(any(feature = "dlss", feature = "xess")),
+    allow(dead_code) // Only NGX and XeSS have requirement queries.
+)]
+pub(crate) fn require_enabled(
+    sdk: &str,
+    what: &str,
+    requested: &[String],
+    enabled: &[String],
+    path: RenderPath,
+) -> Result<(), Unavailable> {
+    let missing: Vec<&str> = requested
+        .iter()
+        .filter(|name| !satisfied(name, enabled, path))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{sdk} needs {what} extension{} {}, which the {what} does not enable",
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join(", ")
+        ))
+    }
+}
+
+/// `VkDriverId` values the probes check (`VK_DRIVER_ID_*`).
+#[cfg_attr(
+    not(any(feature = "dlss", feature = "fsr4", feature = "streamline")),
+    allow(dead_code) // Only the NVIDIA and AMD probes check the driver.
+)]
+pub(crate) mod driver {
+    use ash::vk;
+
+    pub(crate) const AMD_PROPRIETARY: u32 = vk::DriverId::AMD_PROPRIETARY.as_raw().cast_unsigned();
+    pub(crate) const NVIDIA_PROPRIETARY: u32 =
+        vk::DriverId::NVIDIA_PROPRIETARY.as_raw().cast_unsigned();
+}
+
+/// `Ok` on an NVIDIA GPU on NVIDIA's own driver, which NGX and DLSS-G need. Mesa's NVK also
+/// reports NVIDIA's PCI vendor ID, so the vendor alone is not enough.
+#[cfg_attr(
+    not(any(feature = "dlss", feature = "streamline")),
+    allow(dead_code) // Only the NVIDIA probes check it.
+)]
+pub(crate) fn nvidia_driver(
+    capabilities: &DeviceCapabilities,
+    what: &str,
+) -> Result<(), Unavailable> {
+    if capabilities.vendor_id == pci::NVIDIA && capabilities.driver_id == driver::NVIDIA_PROPRIETARY
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what} needs an NVIDIA RTX GPU on NVIDIA's driver, and the device is {}",
+            device_label(capabilities)
+        ))
+    }
+}
+
+/// `Ok` on an AMD GPU on AMD's own driver, which the signed FSR 4 binaries need (RADV and
+/// AMDVLK do not count). FSR 4 also needs RDNA 2 or newer: there is no reliable architecture
+/// field to check here, so the FidelityFX API checks that when N1 creates its context.
+#[cfg_attr(
+    not(feature = "fsr4"),
+    allow(dead_code) // Only the FSR 4 probe checks it.
+)]
+pub(crate) fn amd_driver(capabilities: &DeviceCapabilities) -> Result<(), Unavailable> {
+    if capabilities.vendor_id == pci::AMD && capabilities.driver_id == driver::AMD_PROPRIETARY {
+        Ok(())
+    } else {
+        Err(format!(
+            "needs an AMD GPU on AMD's driver (FSR 4 runs on RDNA 2 or newer), and the device \
+             is {}",
+            device_label(capabilities)
+        ))
+    }
 }
 
 /// A probe: the back end, initialised, or why it cannot run on this device.
@@ -254,11 +425,17 @@ pub(crate) fn resolve<C: ?Sized, P: Fn(&C) -> Result<Box<dyn Backend>, Unavailab
 fn candidates() -> Vec<Candidate<Probe>> {
     #[allow(unused_mut)] // Empty in the open build.
     let mut list: Vec<Candidate<Probe>> = Vec::new();
-    #[cfg(feature = "dlss")]
+    #[cfg(all(feature = "dlss", not(target_vendor = "apple")))]
     list.push(Candidate {
         name: "dlss",
         slot: Slot::Upscaler,
         probe: ngx::probe as Probe,
+    });
+    #[cfg(all(feature = "dlss", target_vendor = "apple"))]
+    list.push(Candidate {
+        name: "dlss",
+        slot: Slot::Upscaler,
+        probe: ngx_unavailable as Probe,
     });
     #[cfg(feature = "fsr4")]
     list.push(Candidate {
@@ -302,7 +479,7 @@ fn candidates() -> Vec<Candidate<Probe>> {
 /// Selects the vendor back ends for a created device and logs the result (one line per
 /// fallback, then a summary; nothing in the open build).
 pub(crate) fn select(context: &ProbeContext<'_>) -> Selection {
-    let latency = latency::detect(context.capabilities);
+    let latency = latency::detect(context.device_extensions);
     let selection = resolve(&candidates(), context, latency);
     for line in selection.lines() {
         eprintln!("{line}");
@@ -310,40 +487,90 @@ pub(crate) fn select(context: &ProbeContext<'_>) -> Selection {
     selection
 }
 
-/// `"NVIDIA GeForce RTX 5070 Ti (vendor 0x10de)"`, for probe messages.
-#[cfg(any(feature = "dlss", feature = "fsr4", feature = "streamline"))]
+/// `dlss` on an Apple target: NGX has no macOS library, so the feature compiles to this.
+#[cfg(all(feature = "dlss", target_vendor = "apple"))]
+fn ngx_unavailable(_context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unavailable> {
+    Err(String::from(
+        "the DLSS SDK ships NGX for Linux and Windows only, not for Apple platforms",
+    ))
+}
+
+/// `"NVIDIA GeForce RTX 5070 Ti (vendor 0x10de, driver NVIDIA)"`, for probe messages.
+#[cfg_attr(
+    not(any(feature = "dlss", feature = "fsr4", feature = "streamline")),
+    allow(dead_code) // Only the vendor- and driver-gated probes name the device.
+)]
 pub(crate) fn device_label(capabilities: &DeviceCapabilities) -> String {
     format!(
-        "{} (vendor {:#06x})",
-        capabilities.name, capabilities.vendor_id
+        "{} (vendor {:#06x}, driver {})",
+        capabilities.name, capabilities.vendor_id, capabilities.driver_name
     )
 }
 
-/// Opens `file` from the executable's directory only, never through the system search path
-/// (no DLL search-order hijacking), and says where it looked when it cannot.
-#[cfg(any(feature = "fsr4", feature = "xess", feature = "streamline"))]
+/// Opens `file` from the executable's directory only, by full path, and keeps it loaded for
+/// the rest of the process (see [`Loaded`]). Says where it looked when it cannot.
+///
+/// On Windows the library's own imports are resolved from its directory and the system
+/// directories only (`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`),
+/// never from `PATH` or the working directory, so a planted DLL there is not picked up.
+#[cfg(any(feature = "fsr4", feature = "xess"))]
 pub(crate) fn load_beside_executable(file: &str) -> Result<libloading::Library, Unavailable> {
+    let path = beside_executable(file)?;
+    if !path.is_file() {
+        return Err(format!("{} not found", path.display()));
+    }
+    open_library(&path).map_err(|error| format!("{} failed to load: {error}", path.display()))
+}
+
+/// The path `file` would have beside the executable.
+#[cfg(any(feature = "fsr4", feature = "xess", feature = "streamline"))]
+pub(crate) fn beside_executable(file: &str) -> Result<std::path::PathBuf, Unavailable> {
     let exe = std::env::current_exe()
         .map_err(|error| format!("cannot locate the executable to find {file}: {error}"))?;
     let dir = exe
         .parent()
         .ok_or_else(|| format!("the executable has no directory to find {file} in"))?;
-    let path = dir.join(file);
-    if !path.is_file() {
-        return Err(format!("{} not found", path.display()));
-    }
-    // SAFETY: loading runs the library's initialisers. The file is a vendor SDK binary that
-    // the packaging step copied next to the executable from the pinned, hash-checked archive
-    // (vendor-sdks.toml); it is loaded by full path, so no other file can stand in for it.
-    unsafe { libloading::Library::new(&path) }
-        .map_err(|error| format!("{} failed to load: {error}", path.display()))
+    Ok(dir.join(file))
 }
 
+#[cfg(all(any(feature = "fsr4", feature = "xess"), windows))]
+fn open_library(path: &std::path::Path) -> Result<libloading::Library, libloading::Error> {
+    use libloading::os::windows::{
+        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, Library,
+    };
+    // SAFETY: loading runs the library's initialisers. Nothing checks a hash or a signature
+    // here at run time: the invariant is that we trust the executable's install directory,
+    // where the packaging step put the vendor binary. The full path (no search for the file
+    // itself) and the search flags (its imports come from its own directory and the system
+    // directories, never PATH or the working directory) keep any other directory out.
+    unsafe {
+        Library::load_with_flags(
+            path,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+    }
+    .map(libloading::Library::from)
+}
+
+#[cfg(all(any(feature = "fsr4", feature = "xess"), not(windows)))]
+fn open_library(path: &std::path::Path) -> Result<libloading::Library, libloading::Error> {
+    // SAFETY: loading runs the library's initialisers. Nothing checks a hash or a signature
+    // here at run time: the invariant is that we trust the executable's install directory,
+    // where the packaging step put the vendor binary. It is opened by full path (a path with
+    // a slash, so dlopen does not search for it).
+    unsafe { libloading::Library::new(path) }
+}
+
+/// A vendor library, opened once and kept for the rest of the process. Vendor DLLs often
+/// start threads or register callbacks that do not survive `FreeLibrary`/`dlclose`, so the
+/// library is never unloaded: a [`Backend`] holds a `'static` reference, and dropping the
+/// selection (before the device, for NGX's shutdown order) leaves the library mapped.
+#[cfg(any(feature = "fsr4", feature = "xess"))]
+pub(crate) type Loaded<T> = std::sync::OnceLock<Result<T, Unavailable>>;
+
 /// PCI vendor IDs the probes check.
-#[cfg(any(feature = "dlss", feature = "fsr4", feature = "streamline"))]
 pub(crate) mod pci {
     pub(crate) const NVIDIA: u32 = 0x10de;
-    #[cfg(feature = "fsr4")]
     pub(crate) const AMD: u32 = 0x1002;
 }
 

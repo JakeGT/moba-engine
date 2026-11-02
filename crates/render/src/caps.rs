@@ -229,7 +229,8 @@ pub struct ExtensionSpec {
     pub features: &'static [&'static str],
 }
 
-/// The tiered path's extensions (ADR-0020 §1e). Vendor-SDK requests are added by N0.6.
+/// The tiered path's extensions (ADR-0020 §1e). The vendor back ends' requests are added at
+/// device creation (`vendor::device_extensions`), not here.
 pub const EXTENSIONS: &[ExtensionSpec] = &[
     spec("VK_KHR_swapchain", Requirement::Required, &[]),
     spec(

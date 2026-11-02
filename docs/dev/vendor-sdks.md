@@ -20,7 +20,7 @@ The features live on `moba-render` and are forwarded with the same names by `mob
 | `nrd` | denoiser | NRD 4.18.0 (built from source with CMake) | Linux, Windows | none (static library) |
 | `rtxdi` | direct lighting | RTXDI 3.1.0 | all | none (shader library) |
 | `sharc` | radiance cache | SHaRC 1.8.3 | all | none (shader headers) |
-| `streamline` | frame generation | Streamline 2.14.16 | Linux, Windows (headers) | `sl.interposer.dll`, Windows only |
+| `streamline` | frame generation | Streamline 2.14.16 | Linux, Windows (headers) | `sl.interposer.dll`, Windows only; N0 only looks for it (see below) |
 
 Aggregates: `nvidia = dlss, nrd, rtxdi, sharc`; `vendor-sdks = nvidia, fsr4, xess`;
 `dlss-fg = dlss, streamline`. `fsr4` is development-only (ADR-0020 Q6).
@@ -62,15 +62,55 @@ cargo build -p moba-client --features dlss,rtxdi,sharc
   entries, `NRD_NRI=OFF`, `SHADERMAKE_FIND_DXC=OFF`, `SHADERMAKE_FIND_FXC=OFF`,
   `SHADERMAKE_FIND_DXC_VK=ON`, SPIR-V embeds only, static library.
 - Linking: NGX's static library (`libnvsdk_ngx.a` plus `stdc++`/`dl` on Linux,
-  `nvsdk_ngx_d.lib` on Windows); NRD statically; FSR 4, XeSS and Streamline are opened at run
-  time with `libloading`, so a feature build still starts without them.
+  `nvsdk_ngx_d.lib` on Windows); NRD statically (plus `stdc++`, or `c++` on Apple targets);
+  FSR 4 and XeSS are opened at run time with `libloading`, so a feature build still starts
+  without them. Streamline's interposer is not opened in N0.
+- **macOS:** NGX has no Apple library, so on Apple targets `dlss` needs no SDK and compiles to
+  a probe that always reports DLSS unavailable. The other vendor features are untested on
+  macOS (`nrd` would need CMake and `dxc` there too); no macOS CI job builds them.
 
 ## Packaging the run-time binaries
 
 Copy the binaries a feature loads **next to the executable**; the engine never searches the
-system library path for them (a planted library elsewhere is ignored). NGX itself looks for the
-DLSS feature binary beside the executable and in the driver. Do not ship any of them in a public
-release.
+system library path for them (a planted library elsewhere is ignored). On Windows they are
+loaded with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`, so their own
+imports also come only from that directory and the system directories, never from `PATH` or
+the working directory. Nothing checks a hash or signature at run time: the install directory
+is trusted. Once opened, a vendor library stays loaded until the process exits (vendor DLLs
+often do not survive being unloaded). NGX itself looks for the DLSS feature binary beside the
+executable and in the driver. Do not ship any of them in a public release.
+
+NGX keeps its logs and data in a per-user directory: `$XDG_CACHE_HOME/moba-engine/ngx` (or
+`~/.cache/moba-engine/ngx`) on Linux, `%LOCALAPPDATA%\moba-engine\ngx` on Windows, beside the
+client's pipeline cache. On Linux it is created with mode 0700 and refused (DLSS falls back)
+if it is a symbolic link, not a directory, owned by another user or writable by others.
+
+## Extensions before creation
+
+ADR-0020 §1e: a back end's Vulkan extensions are declared before the instance and the device
+exist. Before `vkCreateInstance`, NGX
+(`NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements`) and XeSS
+(`xessVKGetRequiredInstanceExtensions`) name their instance extensions; before
+`vkCreateDevice`, `NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements` (on NVIDIA's own
+driver only, since it loads the driver's NGX core) and `xessVKGetRequiredDeviceExtensions` name
+their device extensions. The instance and the device enable each one the loader or the device
+advertises; a missing one never fails creation. Device extensions are asked for on the tiered
+path only (Compat changes only where shared code moves, ADR-0020 §2c). Each probe repeats its
+queries and, when something is not enabled, rejects its back end with its one line:
+
+```text
+[vendor] dlss unavailable: DLSS needs device extension VK_NVX_image_view_handle, which the device does not enable; upscaler falls back to builtin
+```
+
+In a `dlss` build NGX's instance list (before its core is loaded) is
+`VK_KHR_get_physical_device_properties2`, which the instance then enables. XeSS's required
+device *features* (`xessVKGetRequiredDeviceFeatures`) are merged into the device's feature
+chain with the XeSS context in N1. FSR 4's API has no requirement query.
+
+**Streamline** must be loaded, and `slInit` called, before `vkCreateInstance`; it interposes
+on the loader. N0 creates the instance without it, so the `streamline` probe only reports
+whether `sl.interposer.dll` is installed, never loads it, and never selects frame generation;
+that comes with N9.
 
 ## Selection and fallback
 
@@ -84,9 +124,14 @@ that is compiled in but unavailable logs **exactly one line**, then a summary fo
 ```
 
 The fallbacks are `builtin` (upscaler, denoiser, direct lighting), `none` (radiance cache) and
-`off` (frame generation). The open build logs no `[vendor]` line. Reflex
+`off` (frame generation). The vendor checks read the driver as well as the PCI vendor: DLSS and
+Streamline need NVIDIA's own driver (Mesa's NVK also reports vendor `0x10de` and is refused),
+and FSR 4 needs AMD's own driver (RADV and AMDVLK are refused). FSR 4's RDNA 2 minimum has no
+reliable device field, so the FidelityFX API checks it when N1 creates the context. The open build logs no `[vendor]` line. Reflex
 (`VK_NV_low_latency2`) and Anti-Lag (`VK_AMD_anti_lag`) need no feature; `latency=` reports
-which the device offers. `Renderer::vendor_backends()` returns the same choice as data. The
+which extension the device was **created with** (the tiered path enables
+`VK_NV_low_latency2` only with `presentId`; Compat enables neither, whatever the device
+advertises). `Renderer::vendor_backends()` returns the same choice as data. The
 selection is a trait object chosen inside `crates/render/src/vendor/`; no call site outside it
 uses `cfg`.
 

@@ -85,6 +85,9 @@ pub(crate) struct DeviceContext {
     pub(crate) admission: Admission,
     /// The probed capabilities the decision was made from.
     pub(crate) capabilities: DeviceCapabilities,
+    /// Every device extension enabled at `vkCreateDevice` (the vendor probes and the latency
+    /// mode read this, not what the device advertises).
+    pub(crate) enabled_extensions: Vec<String>,
 }
 
 struct Candidate {
@@ -256,7 +259,7 @@ impl DeviceContext {
             .descriptor_binding_variable_descriptor_count(tiered)
             .descriptor_binding_update_unused_while_pending(tiered);
         // Extension features, each enabled only when its extension is enabled below.
-        let enabled = TieredExtensions::of(candidate);
+        let enabled = TieredExtensions::of(&candidate.capabilities, candidate.admission.path);
         let mut acceleration = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
             .acceleration_structure(true);
         let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
@@ -357,20 +360,35 @@ impl DeviceContext {
             );
         }
 
-        let mut extension_names: Vec<*const c_char> = candidate
+        // ADR-0020 §1e: what the compiled-in vendor back ends ask for, before creation (none
+        // in the open build, and none on Compat). Each one the device advertises is enabled;
+        // a back end whose needs are not met is disabled by its probe, never the device.
+        let vendor = vendor_extensions(
+            crate::vendor::device_extensions(&crate::vendor::DeviceQuery {
+                instance,
+                physical,
+                capabilities: &candidate.capabilities,
+                path: candidate.admission.path,
+            }),
+            &candidate.capabilities,
+        );
+        let mut names: Vec<&CStr> = candidate
             .extensions
             .iter()
-            .filter(|name| pipeline_stats || **name != PIPELINE_EXECUTABLE_PROPERTIES)
-            .map(|name| name.as_ptr())
+            .copied()
+            .filter(|name| pipeline_stats || *name != PIPELINE_EXECUTABLE_PROPERTIES)
             .collect();
-        // `enabled.names` outlives `create_device` below.
-        extension_names.extend(
-            enabled
-                .names
-                .iter()
-                .filter(|name| !candidate.extensions.contains(&name.as_c_str()))
-                .map(|name| name.as_ptr()),
-        );
+        // `enabled.names` and `vendor` outlive `create_device` below.
+        for name in enabled.names.iter().chain(&vendor) {
+            if !names.contains(&name.as_c_str()) {
+                names.push(name);
+            }
+        }
+        let extension_names: Vec<*const c_char> = names.iter().map(|name| name.as_ptr()).collect();
+        let enabled_extensions: Vec<String> = names
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extension_names);
@@ -470,6 +488,7 @@ impl DeviceContext {
             pipeline_builds: Cell::new((0, Duration::ZERO)),
             admission: candidate.admission.clone(),
             capabilities: candidate.capabilities.clone(),
+            enabled_extensions,
         })
     }
 
@@ -739,19 +758,19 @@ impl Drop for DeviceContext {
     }
 }
 
-/// The tiered extensions a candidate enables: on a tiered device, every required one plus each
+/// The tiered extensions a device enables: on a tiered device, every required one plus each
 /// optional or tier-gated one that is present with its features (ADR-0020 §1e). Empty on
 /// Compat.
-struct TieredExtensions {
-    names: Vec<std::ffi::CString>,
+pub(crate) struct TieredExtensions {
+    pub(crate) names: Vec<std::ffi::CString>,
 }
 
 impl TieredExtensions {
-    fn of(candidate: &Candidate) -> Self {
-        let names = if candidate.admission.path == RenderPath::Tiered {
+    pub(crate) fn of(capabilities: &DeviceCapabilities, path: RenderPath) -> Self {
+        let names = if path == RenderPath::Tiered {
             caps::EXTENSIONS
                 .iter()
-                .filter(|extension| caps::extension_present(&candidate.capabilities, extension))
+                .filter(|extension| caps::extension_present(capabilities, extension))
                 .map(|extension| {
                     std::ffi::CString::new(extension.name).expect("extension names have no NUL")
                 })
@@ -767,6 +786,23 @@ impl TieredExtensions {
             .iter()
             .any(|enabled| enabled.as_bytes() == name.as_bytes())
     }
+}
+
+/// The vendor back ends' requests (ADR-0020 §1e) the device can take: those it advertises.
+/// `VK_EXT_buffer_device_address` is dropped: requests come only on the tiered path, which
+/// enables core `bufferDeviceAddress`, and the two must not be enabled together
+/// (`VUID-VkDeviceCreateInfo-pNext-04748`); the probes count the core feature in its place.
+fn vendor_extensions(
+    requested: Vec<std::ffi::CString>,
+    capabilities: &DeviceCapabilities,
+) -> Vec<std::ffi::CString> {
+    requested
+        .into_iter()
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name != "VK_EXT_buffer_device_address" && capabilities.has_extension(&name)
+        })
+        .collect()
 }
 
 fn device_name(properties: &vk::PhysicalDeviceProperties) -> String {

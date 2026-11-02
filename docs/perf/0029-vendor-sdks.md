@@ -58,6 +58,31 @@ one per unavailable back end, then the summary:
   is on the tiered path with ray queries, so they are selected rather than logged.
 - **Latency:** `VK_NV_low_latency2` is exposed, so `latency=reflex` with no feature.
 - The same run's `[vram]` line: `locked_uploads=0 locked_pipelines=0`.
+- **Validation:** this run did not record whether the Khronos validation layer was on.
+  RTX re-run with MOBA_VULKAN_VALIDATION=required: TODO(maintainer-run). The lines above
+  predate the GPU-safety review fixes (extensions declared before creation, the driver checks,
+  the per-user NGX directory); the re-run records the current wording.
+
+## Lavapipe run after the review fixes
+
+`cargo build -p moba-client --features dlss,rtxdi,sharc,fsr4,xess,streamline`, then
+`MOBA_VULKAN_VALIDATION=required MOBA_SERVER=local MOBA_SMOKE_FRAMES=60 target/debug/moba-client`
+on Mesa lavapipe (LLVM 23.1.3, the bundled `.tools` ICD and validation layer), with the default
+path (Compat, CPU device) and with `MOBA_RENDER_PATH=tiered`. Both exited 0 after 60 frames with
+no validation message. The tiered run's lines:
+
+```text
+[vendor] dlss unavailable: DLSS needs an NVIDIA RTX GPU on NVIDIA's driver, and the device is llvmpipe (LLVM 23.1.3, 256 bits) (vendor 0x10005, driver llvmpipe); upscaler falls back to builtin
+[vendor] fsr4 unavailable: needs an AMD GPU on AMD's driver (FSR 4 runs on RDNA 2 or newer), and the device is llvmpipe (LLVM 23.1.3, 256 bits) (vendor 0x10005, driver llvmpipe); upscaler falls back to builtin
+[vendor] xess unavailable: …/target/debug/libxess.so not found (XeSS 3.0.2 ships Windows binaries only); upscaler falls back to builtin
+[vendor] streamline unavailable: DLSS frame generation needs an NVIDIA RTX GPU on NVIDIA's driver, and the device is llvmpipe (LLVM 23.1.3, 256 bits) (vendor 0x10005, driver llvmpipe); frame_generation falls back to off
+[vendor] selected: upscaler=builtin denoiser=builtin direct_lighting=rtxdi radiance_cache=sharc frame_generation=off latency=none compiled=dlss,fsr4,xess,rtxdi,sharc,streamline rtxdi=[RTXDI 3.1.0, ReSTIR DI parameters 272 bytes, reservoir block 16] sharc=[SHaRC 1.8.3]
+```
+
+On Compat, RTXDI and SHaRC log "the device runs the compat path, which has no ray-traced
+lighting" instead, and the summary has `direct_lighting=builtin radiance_cache=none`. The
+`dlss` build's instance also enabled NGX's one instance request,
+`VK_KHR_get_physical_device_properties2`; no device extension was requested on lavapipe.
 
 ## Open build frame log
 

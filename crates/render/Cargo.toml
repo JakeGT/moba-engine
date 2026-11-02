@@ -27,8 +27,9 @@ default = ["fsr3"]
 fsr3 = []
 # DLSS super resolution through NGX (static library), NVIDIA RTX only. Linux and Windows.
 dlss = ["dep:bindgen", "dep:toml"]
-# Streamline (DLSS frame generation's Windows path), loaded at run time.
-streamline = ["dep:bindgen", "dep:toml", "dep:libloading"]
+# Streamline (DLSS frame generation's Windows path). N0 only looks for its interposer; it is
+# loaded before the Vulkan instance from N9.
+streamline = ["dep:bindgen", "dep:toml"]
 # NVIDIA Real-time Denoisers, built from source with CMake (needs CMake 3.30+ and dxc).
 nrd = ["dep:bindgen", "dep:toml", "dep:cmake"]
 # RTXDI (ReSTIR direct lighting) shader library and its host-side parameter structures.
@@ -56,8 +57,8 @@ moba-platform.workspace = true
 moba-shaders.workspace = true
 # Plain-data device capabilities (ADR-0020 §1e), dumped by `vulkan-probe --json`.
 serde.workspace = true
-# Run-time loading of the FSR 4, XeSS and Streamline libraries (ISC; already in the graph
-# through ash's `loaded` feature).
+# Run-time loading of the FSR 4 and XeSS libraries (ISC; already in the graph through ash's
+# `loaded` feature).
 libloading = { workspace = true, optional = true }
 
 [build-dependencies]
