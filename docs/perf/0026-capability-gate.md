@@ -3,8 +3,9 @@
 Captured 2026-11-01 on the development workstation, not a CI runner, for
 [ADR-0020](../adr/0020-next-gen-foundations.md) §2 and verification gate 2.
 
-- **Branch and baseline:** branch `feat/n0-capability-gate` against N0.1
-  (`feat/n0-ash-pin`, `5c0d245`).
+- **Branch and baseline:** branch `feat/n0-capability-gate` at `4307b8b` against N0.1
+  (`feat/n0-ash-pin`, `5c0d245`). The review fixes that followed (`96d7487`) touch only the
+  probe and Tiered device creation; [what they change](#after-the-review-fixes) is below.
 - **Hardware and software:**
   - GPU: NVIDIA GeForce RTX 5070 Ti (16 GB), driver 615.78.08.
   - Software Vulkan: lavapipe from `/home/jaket/Projects/MOBA/.tools`, with the bundled
@@ -30,7 +31,7 @@ target. The macOS MoltenVK workflow asserts `path=compat` on the real runner.
 
 ## Goldens: byte-identical on both paths (lavapipe)
 
-The golden workflow's scenes were captured once on N0.1 and twice on the branch. Every
+All fifteen of the golden workflow's scenes were captured once on N0.1 and twice on the branch. Every
 capture ran at 1280×720 on lavapipe with `MOBA_VULKAN_VALIDATION=required`, which includes
 synchronization validation. The full PPMs were compared with `cmp`. Every run exited cleanly
 with no validation message. The branch ran twice: once on its default path (`auto`, Compat on
@@ -45,6 +46,14 @@ lavapipe) and once with `MOBA_RENDER_PATH=tiered`.
 | Low at render scale 0.75 (frame 90) | identical | identical | `25aa95a501ac7ad1` |
 | Ember map, camera 24 (tick 120) | identical | identical | `342a3fa53facf1df` |
 | teamfight decals (replay, frame 30) | identical | identical | `8a07fb957cb153b2` |
+| overview camera, skinned heroes (tick 120) | identical | identical | `b0c819a49b7f3843` |
+| horizon (frame 90) | identical | identical | `79f126b8576a82bc` |
+| river (frame 90) | identical | identical | `b34379f7ad633a4d` |
+| river, Low (frame 90) | identical | identical | `6d4feae28f6f3160` |
+| river, Ultra (frame 90) | identical | identical | `217e397eef618b00` |
+| heat haze, cinder zone, Ultra (frame 90) | identical | identical | `cedc451ffedcc6f3` |
+| heat haze, bloom off | identical | identical | `ba6f715199a7c375` |
+| heat haze, bloom off, distortion no-draw | identical | identical | `a3846daa3f69e8cf` |
 
 The hashes equal N0.1's ([perf/0025](0025-n0-ash-pin.md)), so they equal `main`'s too.
 
@@ -67,5 +76,73 @@ Clocks cannot be locked without root.
 | Ultra | branch (`path=tiered`) | 0.661 (0.661–0.663) | 0.720 | 0.252 | 292.9 MB | 0 / 0 |
 
 The branch is within 0.001 ms of N0.1 at p50 on every tier, inside the rounds' spread. Ultra's
-p95 is 0.01 ms higher; the p95 values are medians of the rounds and their spread is not
-tabulated. VRAM and the upload and pipeline counters are identical.
+GPU p95 is bimodal on this GPU for both builds (rounds 0.719/0.678/0.710 ms on N0.1,
+0.720/0.720/0.704 ms on the branch), so its 0.01 ms gap is noise. VRAM and the upload and
+pipeline counters are identical.
+
+Enabling features mostly changes CPU-side driver work, which GPU time cannot show, so the same
+runs' CPU columns (medians of the three rounds, ms):
+
+| Tier | Build | Frame p50 | Frame p95 | CPU before the render call, p95 | Inside the render call, p95 |
+|---|---|---|---|---|---|
+| Low | N0.1 | 4.181 | 4.688 | 0.036 | 0.140 |
+| Low | branch | 4.182 | 4.759 | 0.034 | 0.137 |
+| High | N0.1 | 4.181 | 4.689 | 0.034 | 0.193 |
+| High | branch | 4.182 | 4.674 | 0.034 | 0.191 |
+| Ultra | N0.1 | 4.181 | 4.647 | 0.034 | 0.201 |
+| Ultra | branch | 4.181 | 4.694 | 0.033 | 0.188 |
+
+The frame time is the compositor's pacing (vsync off, 1920×1080 on Wayland), not the
+renderer's cost. The render call (fence wait, acquire, recording, submit, present) is no
+slower on the tiered device.
+
+## After the review fixes
+
+`96d7487` (ADR-0020 amendment 2) changes:
+- which bits the probe records: `rayTracingInvocationReorder`, `presentId` and `antiLag`;
+- which feature structures Tiered device creation chains with those extensions;
+- that only `MOBA_RENDER_PATH=tiered` admits a CPU device.
+
+Compat device creation is unchanged. On lavapipe the re-recorded fixture is identical (it has
+none of the three extensions), so lavapipe's tiered device is created exactly as in the golden
+runs above. The RTX gains `presentId` and SER and the Radeon 610M gains `presentId`.
+
+Re-checked on the RTX with a debug build at the fix commit, with `MOBA_VULKAN_VALIDATION=required`:
+- `MOBA_RENDER_PATH=tiered`: 90 frames, exit 0, no validation message,
+  `path=tiered max_tier=overdrive missing=none admission=admitted`;
+- lavapipe with `MOBA_RENDER_PATH=tiered`: 30 frames, clean;
+- lavapipe with only `render_path = "tiered"` in the settings file: start-up fails with
+  `llvmpipe …: not admitted to the tiered path (cpu-device; missing nothing)`, as intended.
+
+
+## Radeon 610M (RADV): CPU cost of the tiered features
+
+The perf review asked whether enabling the tiered features (buffer device address,
+descriptor indexing, ray query, acceleration structures) makes RADV's submit path slower,
+since RADV tracks buffer objects per submission. Same replay and settings as the RTX A/B,
+N0.1 (`main`) against the branch (`path=tiered`), three interleaved rounds per tier; each
+cell is the median.
+
+| Tier | Build | Frame p50, ms | Render call p95, ms | CPU p95, ms | GPU total p95, ms |
+|---|---|---|---|---|---|
+| Low | N0.1 | 8.023 | 9.185 | 0.059 | 8.204 |
+| Low | branch | 8.023 | 9.235 | 0.057 | 8.201 |
+| High | N0.1 | 20.288 | 22.111 | 0.082 | 20.594 |
+| High | branch | 20.274 | 22.003 | 0.080 | 20.594 |
+
+Within noise on every column. These runs shared the CPU with lavapipe golden jobs, so the
+absolute frame times are pessimistic; both builds ran under the same load, interleaved.
+
+## Pipeline cache: an N0.1 cache stays warm
+
+The tiered device enables more features, which a driver may fold into its pipeline cache
+key. On the RTX, a cache written by N0.1 (`MOBA_PIPELINE_CACHE`, 30 frames, validation off):
+
+| Run | Pipelines built in | Cache |
+|---|---|---|
+| N0.1, first run (writes) | 69.3 ms | cold |
+| N0.1, second run | 3.7 ms | warm |
+| branch, `path=tiered` | 3.3 ms | warm |
+| branch, again | 3.4 ms | warm |
+
+The upgrade does not cost players a cold pipeline build.
