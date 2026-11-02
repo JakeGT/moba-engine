@@ -351,13 +351,21 @@ fn nrd(context: &Context) {
     // `CARGO_BUILD_BUILD_DIR` moves it), and a stamp written last records what it
     // was built from (the pins, the CMake and dxc versions, the recipe and the toolchain
     // environment), so an interrupted or outdated build is redone from scratch. Cargo holds
-    // the target directory's lock while build scripts run, so two never share it at once.
+    // the build directory's lock while build scripts run, so two never share it at once.
     let build = shared_build_dir(context, "nrd");
     let lib_dir = build.join("lib");
-    let defines = nrd_defines(&shadermake, &mathlib, &lib_dir, &build.join("shaders"));
+    let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
+    let defines = nrd_defines(
+        &shadermake,
+        &mathlib,
+        &lib_dir,
+        &build.join("shaders"),
+        msvc,
+    );
     let (cmake_version, dxc_version) = nrd_tools(context);
     let mut key = format!(
-        "nrd {} shadermake {} mathlib {}\ncmake {cmake_version}\ndxc {dxc_version}",
+        "nrd {} shadermake {} mathlib {}\ncmake {cmake_version}\ndxc {dxc_version}\n\
+         recipe: {NRD_RECIPE}",
         sdk.sha256, shadermake.sha256, mathlib.sha256
     );
     for (name, value) in &defines {
@@ -403,6 +411,19 @@ fn nrd(context: &Context) {
         build_nrd(&build, &sdk, &defines);
         fs::write(&done, &key)
             .unwrap_or_else(|error| fail(format!("writing {}: {error}", done.display())));
+        // Dated no later than this run's start (the build script's own modification time),
+        // as cargo dates the script's output to its start: a newer stamp would make the
+        // `rerun-if-changed` above rerun the script once more. Failing to set it only costs
+        // that one rerun.
+        if let Ok(built) = env::current_exe()
+            .and_then(fs::metadata)
+            .and_then(|metadata| metadata.modified())
+        {
+            let _ = fs::File::options()
+                .write(true)
+                .open(&done)
+                .and_then(|file| file.set_modified(built));
+        }
     }
     // Multi-config generators (Visual Studio) add a per-configuration directory.
     for dir in [lib_dir.clone(), lib_dir.join("Release")] {
@@ -480,6 +501,11 @@ fn nrd_tools(context: &Context) -> (String, String) {
     (cmake, dxc)
 }
 
+/// What `build_nrd` does besides the definitions, recorded in the stamp so a change to it
+/// rebuilds NRD.
+#[cfg(feature = "nrd")]
+const NRD_RECIPE: &str = "profile=Release build_target=NRD source_skip=_deps keep=lib";
+
 /// The `CMake` definitions NRD is configured with (ADR-0020 §6b, amendment 6).
 #[cfg(feature = "nrd")]
 fn nrd_defines(
@@ -487,10 +513,27 @@ fn nrd_defines(
     mathlib: &Sdk,
     lib_dir: &Path,
     shaders: &Path,
+    msvc: bool,
 ) -> Vec<(&'static str, String)> {
     let path = |path: &Path| path.display().to_string();
     let on = |name: &'static str, on: bool| (name, String::from(if on { "ON" } else { "OFF" }));
-    vec![
+    let mut defines = Vec::new();
+    if msvc {
+        // The `cmake` crate sets the MSVC flag variables to `cc`'s flags, which replaces
+        // CMake's defaults: without `/EHsc`, ShaderMake's and NRD's `/W4 /WX` turn C4530 into
+        // an error, and without `/O2 /DNDEBUG` NRD would be an unoptimised build with
+        // asserts. It leaves a variable alone once it is defined, so these restore CMake's
+        // MSVC defaults, with `/MD` for Rust's MSVC C runtime.
+        let flags = "/DWIN32 /D_WINDOWS";
+        let release = "/MD /O2 /Ob2 /DNDEBUG";
+        defines.extend([
+            ("CMAKE_C_FLAGS", String::from(flags)),
+            ("CMAKE_CXX_FLAGS", format!("{flags} /EHsc /GR")),
+            ("CMAKE_C_FLAGS_RELEASE", String::from(release)),
+            ("CMAKE_CXX_FLAGS_RELEASE", String::from(release)),
+        ]);
+    }
+    defines.extend([
         // No downloads at configure time: the fetch script unpacked both dependencies.
         on("FETCHCONTENT_FULLY_DISCONNECTED", true),
         ("FETCHCONTENT_SOURCE_DIR_SHADERMAKE", path(&shadermake.dir)),
@@ -513,7 +556,8 @@ fn nrd_defines(
         ("CMAKE_LIBRARY_OUTPUT_DIRECTORY", path(lib_dir)),
         ("CMAKE_ARCHIVE_OUTPUT_DIRECTORY", path(lib_dir)),
         ("NRD_SHADERS_PATH", path(shaders)),
-    ]
+    ]);
+    defines
 }
 
 /// Builds NRD from scratch in `build` (removing what is there) with `defines`, then removes
