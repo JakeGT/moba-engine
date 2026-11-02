@@ -26,6 +26,8 @@ gpu-allocator.workspace = true
 raw-window-handle.workspace = true
 moba-platform.workspace = true
 moba-shaders.workspace = true
+# Plain-data device capabilities (ADR-0020 §1e), dumped by `vulkan-probe --json`.
+serde.workspace = true
 
 [dev-dependencies]
 # The VAT validation tests load the shipped sample model.
@@ -33,6 +35,7 @@ moba-assets = { workspace = true, features = ["bc-decode", "glb"] }
 criterion.workspace = true
 # The Slang reflection layout test (ADR-0020 §4c).
 moba-shaders = { workspace = true, features = ["reflection"] }
+# Reads the capability fixtures (ADR-0020 §2b) and the Slang reflection JSON (§4c).
 serde_json.workspace = true
 
 [[bench]]

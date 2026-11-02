@@ -1425,6 +1425,7 @@ dependencies = [
  "moba-platform",
  "moba-shaders",
  "raw-window-handle",
+ "serde",
  "serde_json",
 ]
 
@@ -1476,6 +1477,7 @@ dependencies = [
  "moba-render",
  "moba-sim",
  "png",
+ "serde_json",
 ]
 
 [[package]]

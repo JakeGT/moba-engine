@@ -140,6 +140,27 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Capability gate and render paths (ADR-0020 §2, N0.2;
+  [perf/0026](docs/perf/0026-capability-gate.md)):**
+  - `moba_render::caps` probes each device's extensions, features and limits
+    (`DeviceCapabilities`, serialisable) and `caps::admit` decides its `RenderPath`: `Tiered`
+    needs hardware ray tracing (ray query and acceleration structures), the bindless limits and
+    the 1.3 feature set; everything else, and every CPU device, runs `Compat`, today's renderer.
+    The 1.4-promoted features are optional capabilities, read through their KHR/EXT structures
+    (ADR-0020 amendment 1).
+  - The `render_path` setting (`auto`/`tiered`/`compat`, default `auto`) and
+    `MOBA_RENDER_PATH` pick the path. `MOBA_RENDER_PATH=tiered` (not the settings entry)
+    also admits CPU devices such as lavapipe. `tiered` fails
+    with a per-device list of what is missing when nothing qualifies.
+  - The `[render]` start-up line and the frame log name the path (`path=`, `max_tier=`,
+    `missing=`, `admission=`).
+  - `vulkan-probe --json` dumps the capabilities and `--path` checks a path; recorded fixtures
+    (RTX 5070 Ti, Radeon 610M, lavapipe) and six synthetic ones drive the admission tests.
+  - The macOS MoltenVK workflow asserts that the device runs `path=compat` and uploads its
+    capability dump.
+  - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
+    `auto`, so an A/B between the paths stays on one GPU. The caps types are
+    `#[non_exhaustive]`.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).

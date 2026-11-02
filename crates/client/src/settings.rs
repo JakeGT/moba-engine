@@ -157,6 +157,8 @@ pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
     /// Rendering quality tier: `low`, `medium`, `high` or `ultra` (`MOBA_QUALITY` overrides).
     pub(crate) quality: String,
+    /// Render path: `auto`, `tiered` or `compat` (`MOBA_RENDER_PATH` overrides; ADR-0020 §2b).
+    pub(crate) render_path: String,
     pub(crate) audio_volume: f32,
     pub(crate) audio_mute: bool,
     pub(crate) camera_sensitivity: f32,
@@ -185,6 +187,7 @@ impl Default for Settings {
         Self {
             ui_scale: 1.0,
             quality: String::from(moba_render::QualityTier::default().name()),
+            render_path: String::from("auto"),
             audio_volume: 0.7,
             audio_mute: false,
             camera_sensitivity: 1.0,
@@ -379,6 +382,12 @@ impl Settings {
         moba_render::QualityTier::from_name(&self.quality).unwrap_or_default()
     }
 
+    /// The configured render path (validated by [`Self::sanitize`]).
+    #[must_use]
+    pub(crate) fn render_path(&self) -> moba_render::PathChoice {
+        moba_render::PathChoice::parse(&self.render_path).unwrap_or_default()
+    }
+
     /// The configured team palette (validated by [`Self::sanitize`]).
     #[must_use]
     pub(crate) fn team_palette(&self) -> crate::hud::theme::TeamPalette {
@@ -401,6 +410,13 @@ impl Settings {
                 self.quality
             ));
             self.quality = String::from(moba_render::QualityTier::default().name());
+        }
+        if moba_render::PathChoice::parse(&self.render_path).is_none() {
+            warnings.push(format!(
+                "settings: unknown render_path {:?} (auto/tiered/compat); using auto",
+                self.render_path
+            ));
+            self.render_path = String::from("auto");
         }
         if !self.ui_scale.is_finite() {
             self.ui_scale = 1.0;

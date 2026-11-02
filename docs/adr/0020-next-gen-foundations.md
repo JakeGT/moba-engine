@@ -5,7 +5,7 @@
 [Maintainer answers](#maintainer-answers-2026-11-01)). Proposed 2026-10-31. This is phase N0 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§5.1, §8 and §12 step 2),
 and it is written before the code. **Amended** 2026-11-01 by the N0 Slang toolchain step
-([Amendment 2](#amendment-2-2026-11-01-n0-slang-toolchain)).
+([Amendment 4](#amendment-4-2026-11-01-n0-slang-toolchain)).
 - **Builds on:** [ADR-0002](0002-vulkan-baseline.md), which stays in force: Vulkan 1.3 is
   still the minimum. The maintainer allowed raising the **tiered path** to Vulkan 1.4 if it
   helps (see the answers below). Compat stays on 1.3 in any case. [Amendment 1](#amendment-1-2026-11-01-n01-the-tiered-path-stays-on-vulkan-13)
@@ -993,7 +993,42 @@ Radeon 610M (RADV 26.2.5, 1.4.354). Each reports every 1.4 feature named below.
 - **If 1.4 is ever required,** the gate checks the reported `apiVersion ≥ 1.4`, not driver
   numbers. The driver floors above go in the log as the reason.
 
-### Amendment 2 (2026-11-01, N0 Slang toolchain)
+### Amendment 2 (2026-11-01, N0.2): the capability gate as built
+
+Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its reviews:
+
+- **Only the override admits a CPU device.** §2b lets `tiered` admit CPU devices for CI's RT
+  goldens. That is now `Overrides::allow_cpu`, which only `MOBA_RENDER_PATH=tiered` and
+  `vulkan-probe` set. With a settings file's `render_path = "tiered"`, a CPU device is not a
+  candidate, and start-up fails with §2b's error if no GPU qualifies. Otherwise a player with a non-RT GPU and Mesa's lavapipe installed
+  (the default on several Linux distributions) would silently run on the software
+  rasteriser instead of getting §2b's error.
+- **Core structures follow the device's version.** The probe chains
+  `Vulkan12Properties`/`Vulkan12Features` only on a device that reports 1.2, and
+  `Vulkan13Features` only on 1.3. Bits it cannot query are recorded as off, so such a device
+  is Compat with them in `missing`.
+- **Every enabled extension has its feature bits.** SER, `VK_KHR_present_id` and
+  `VK_AMD_anti_lag` gain `rayTracingInvocationReorder`, `presentId` and `antiLag`. These are
+  probed, recorded in the fixtures and enabled with the extension. SER also requires
+  `rayTracingPipeline`, its dependency. `VK_NV_low_latency2` has no feature structure, so it
+  needs its dependency's `presentId`. `VK_KHR_push_descriptor` has none either, so
+  advertising it counts as support.
+- **`compat` ranks like `auto`.** §2b's "Tiered over Compat within a type" reads whether a
+  GPU qualifies for Tiered, not the path chosen, so `MOBA_RENDER_PATH=compat` picks the same
+  GPU as `auto`.
+- **The goldens and the perf gate pin Compat.** `render-golden.yml`, `perf-replay.sh` and the
+  nightly validation loop set `MOBA_RENDER_PATH=compat`, as §2c says, rather than relying on
+  the runner's device.
+- **The properties chain is narrower than §1e for now.** N0.2 records the core limits,
+  `Vulkan12Properties` and the §3b descriptor limits. The acceleration-structure,
+  RT-pipeline, mesh-shader and fragment-shading-rate property structures join the chain, and
+  the fixtures, in the phase that first sizes anything against them: N4, N7 and the VRS work
+  respectively. Admission needs none of them.
+- **`gpu-allocator` keeps buffer device address off.** Tiered enables the
+  `bufferDeviceAddress` feature, but no buffer uses an address yet. The first pass that
+  allocates one (bindless, §3a) turns the allocator flag on, so N0.2 changes no allocation.
+
+### Amendment 4 (2026-11-01, N0 Slang toolchain)
 
 These are the departures and clarifications from implementing §4. The toolchain is
 documented in [docs/dev/slang.md](../dev/slang.md).
@@ -1082,7 +1117,7 @@ may fold the corrections in when this ADR is accepted.
   RTXGI v2.8.0 pulls it in as a submodule. Pin that commit (§6b).
 - **§6.2 RTXDI.** Upstream compiles its HLSL with DXC. Compiling it through Slang was
   unverified (§4d). The N0 spike has since verified it for DI and GI, but not for PT (see the
-  [Amendment 2](#amendment-2-2026-11-01-n0-slang-toolchain)).
+  [Amendment 4](#amendment-4-2026-11-01-n0-slang-toolchain)).
 - **§6.3 NRC.** "Windows plus CUDA only" is correct. It *does* have a Vulkan DLL
   (`NRC_Vulkan.dll`), with no Linux binaries.
 - **§5.1 Slang.** The licence and Khronos hosting are correct. The repository lives in the

@@ -13,6 +13,8 @@ env:
   RUSTFLAGS: -D warnings
   MOBA_VULKAN_VALIDATION: required
   LIBGL_ALWAYS_SOFTWARE: "1"
+  # The goldens are Compat captures (ADR-0020 §2c), whatever device the runner has.
+  MOBA_RENDER_PATH: compat
 
 jobs:
   renderer-gate:
