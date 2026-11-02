@@ -675,8 +675,9 @@ mod tests {
     /// and emits it as the transposed SPIR-V matrix, so `-matrix-layout-column-major` shows
     /// up as `RowMajor` on that type. The memory layout is then GLSL's `ColMajor` `mat4`
     /// (glam's `to_cols_array`), and `mul(M, v)` is the Rust `M * v`. This checks every
-    /// matrix member of every Slang module carries `RowMajor` with a 16-byte stride, so the
-    /// flag cannot be flipped silently; `moba_render::slang_smoke` checks the product on a
+    /// matrix member of every Slang module carries `RowMajor` (and not `ColMajor`) with a
+    /// row stride of 16 bytes, or 8 for two-column rows under std430, so the flag cannot be
+    /// flipped silently; `moba_render::slang_smoke` checks the product on a
     /// GPU.
     #[test]
     fn slang_matrices_are_column_major() {
@@ -723,12 +724,12 @@ mod tests {
                 module.name != "toolchain_smoke.slang" || !matrices.is_empty(),
                 "the smoke module's frame constants hold matrices"
             );
-            for ((structure, member), decorations) in matrices {
-                assert_eq!(
-                    decorations,
-                    (Some(16), true, false),
+            for ((structure, member), (stride, row, column)) in matrices {
+                assert!(
+                    row && !column && matches!(stride, Some(8 | 16)),
                     "{}: struct %{structure} member {member} is not a column-major \
-                     (SPIR-V RowMajor) matrix with a 16-byte stride",
+                     (SPIR-V RowMajor) matrix with an 8- or 16-byte stride: stride {stride:?}, \
+                     RowMajor {row}, ColMajor {column}",
                     module.name
                 );
             }

@@ -17,7 +17,8 @@
 //!   accepts any version with a warning (for distribution packagers).
 //! - **Flags:** `-target spirv -profile spirv_1_6` (SPIR-V 1.6, the Vulkan 1.3 core version),
 //!   column-major matrices, `-O2`, warnings as errors. Resources declare explicit
-//!   `[[vk::binding(binding, set)]]` (a unit test checks the sources).
+//!   `[[vk::binding(binding, set)]]`; a unit test checks every module's reflected bindings
+//!   against a table, which catches drift (`slangc` has no flag that rejects implicit ones).
 //! - **Validation:** `spirv-val --target-env vulkan1.3` is **mandatory** for Slang modules: a
 //!   missing validator is a build error.
 //! - **Reflection:** `slangc -reflection-json` is written next to each module as
@@ -347,11 +348,20 @@ const MAX_TARGET_DEPTH: usize = 5;
 /// `<target>/<triple>/`.
 fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
     if let Some(override_path) = env::var_os("SLANGC") {
-        let path = PathBuf::from(override_path);
+        let path = PathBuf::from(&override_path);
         if path.is_file() {
             return path;
         }
-        panic!("SLANGC points at a missing file: {}", path.display());
+        // A bare name (`SLANGC=slangc`) is looked up on `PATH`.
+        if path.components().count() == 1
+            && let Some(found) = override_path.to_str().and_then(find_program)
+        {
+            return found;
+        }
+        panic!(
+            "SLANGC points at a missing file (or a name not on PATH): {}",
+            path.display()
+        );
     }
     let fetched = Path::new("tools")
         .join(format!("slang-{version}"))

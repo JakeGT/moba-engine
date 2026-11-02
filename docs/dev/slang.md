@@ -9,9 +9,12 @@ renderer (client, tools, `cargo test --workspace`) needs it. A server-only build
 ## One-time setup
 
 ```bash
-scripts/fetch-slang.sh        # Linux, macOS (and Git Bash on Windows)
-scripts/fetch-slang.ps1       # Windows PowerShell / pwsh
+scripts/fetch-slang.sh        # Linux, macOS
+scripts/fetch-slang.ps1       # Windows (PowerShell / pwsh)
 ```
+
+On Windows use the `.ps1`: the Windows archive is a `.zip`, which Git Bash's GNU `tar` cannot
+read, so `fetch-slang.sh` there needs `unzip` on `PATH`.
 
 The script reads `crates/shaders/slang-version.txt`, downloads the host's archive from the
 official [shader-slang release](https://github.com/shader-slang/slang/releases), checks its
