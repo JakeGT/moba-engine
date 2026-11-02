@@ -8,10 +8,16 @@
 //!
 //! - **Before creation** (ADR-0020 §1e): `xessVKGetRequiredInstanceExtensions` and
 //!   `xessVKGetRequiredDeviceExtensions` feed the instance and device extension lists.
-//!   `xessVKGetRequiredDeviceFeatures` is not merged into the device's feature chain in N0;
-//!   N1, which creates the XeSS context, does that (ADR-0020 amendment 6).
-//! - **The probe** repeats both queries against what was enabled (and the API version XeSS
-//!   asks for), then calls `xessGetVersion`.
+//! - **Device features** (`xessVKGetRequiredDeviceFeatures`) can only be enabled at
+//!   `vkCreateDevice`. N0 does not merge them, so the probe never selects XeSS: after its
+//!   checks it rejects the back end with one line. N1 merges them before `vkCreateDevice`,
+//!   through a `vendor::device_features` hook beside [`super::device_extensions`], folding
+//!   XeSS's standalone feature structures into the renderer's `VkPhysicalDeviceVulkan12Features`
+//!   and `VkPhysicalDeviceVulkan13Features` rather than chaining them beside those
+//!   (`VUID-VkDeviceCreateInfo-pNext-02830`), and only then selects XeSS (ADR-0020
+//!   amendment 6).
+//! - **The probe** repeats both extension queries against what was enabled (and the API
+//!   version XeSS asks for) and calls `xessGetVersion`, then rejects as above.
 //!
 //! Licence: Intel Simplified Software License: redistribute the binaries unmodified, with the
 //! notice; no reverse engineering, including at run time (`THIRD_PARTY.md`).
@@ -53,22 +59,6 @@ const LIBRARY: &str = if cfg!(windows) {
 
 /// The API version the instance is created with (`InstanceContext`).
 const INSTANCE_API: u32 = vk::API_VERSION_1_3;
-
-/// The XeSS back end: the process-lifetime library and the version it reported.
-struct Xess {
-    _api: &'static sys::XessApi,
-    version: String,
-}
-
-impl Backend for Xess {
-    fn name(&self) -> &'static str {
-        "xess"
-    }
-
-    fn detail(&self) -> String {
-        format!("XeSS SDK {SDK_VERSION}, library {}", self.version)
-    }
-}
 
 /// The XeSS library, opened on first use and never unloaded (see [`super::Loaded`]).
 fn api() -> Result<&'static sys::XessApi, Unavailable> {
@@ -165,7 +155,8 @@ pub(crate) fn device_extensions(
 }
 
 /// Opens the XeSS library, checks its extension requirements against what was enabled and
-/// asks it for its version.
+/// asks it for its version. It then rejects XeSS, whose required device features N0 does not
+/// enable (see the module documentation); N1 adds the back end once it merges them.
 pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unavailable> {
     let api = api()?;
     if context.path != RenderPath::Tiered {
@@ -207,10 +198,11 @@ pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
     if result != sys::XESS_RESULT_SUCCESS {
         return Err(format!("xessGetVersion failed (xess_result_t {result})"));
     }
-    Ok(Box::new(Xess {
-        _api: api,
-        version: format!("{}.{}.{}", version.major, version.minor, version.patch),
-    }))
+    Err(format!(
+        "XeSS {}.{}.{} needs its required device features (xessVKGetRequiredDeviceFeatures), \
+         which are merged into the device in N1",
+        version.major, version.minor, version.patch
+    ))
 }
 
 /// XeSS's handle types are the same size as ash's, so the conversions above preserve them.

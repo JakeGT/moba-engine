@@ -113,6 +113,35 @@ lighting" instead, and the summary has `direct_lighting=builtin radiance_cache=n
 `dlss` build's instance also enabled NGX's one instance request,
 `VK_KHR_get_physical_device_properties2`; no device extension was requested on lavapipe.
 
+## Lavapipe run after the second review round
+
+The fixes for the second review round (NRD's `ShaderMakeBlob` link and source copy, the
+per-feature clippy fixes, XeSS rejecting until N1 merges its device features, FSR 4 tiered-only,
+the vendor device-extension checks with the create retry, and NGX's data directory checked
+against the effective user). Same build and environment as above:
+`cargo build -p moba-client --features dlss,rtxdi,sharc,fsr4,xess,streamline`, then
+`MOBA_VULKAN_VALIDATION=required MOBA_SERVER=local MOBA_SMOKE_FRAMES=60 target/debug/moba-client`
+on lavapipe, once on the default path (Compat) and once with `MOBA_RENDER_PATH=tiered`. Both
+exited 0 after 60 frames with **0 validation messages** and `locked_uploads=0
+locked_pipelines=0`, one `[vendor]` line per probed back end, then the summary. Compat:
+
+```text
+[vendor] dlss unavailable: DLSS needs an NVIDIA RTX GPU on NVIDIA's driver, and the device is llvmpipe (LLVM 23.1.3, 256 bits) (vendor 0x10005, driver llvmpipe); upscaler falls back to builtin
+[vendor] fsr4 unavailable: needs an AMD GPU on AMD's driver (FSR 4 runs on RDNA 2 or newer), and the device is llvmpipe (LLVM 23.1.3, 256 bits) (vendor 0x10005, driver llvmpipe); upscaler falls back to builtin
+[vendor] xess unavailable: …/target/debug/libxess.so not found (XeSS 3.0.2 ships Windows binaries only); upscaler falls back to builtin
+[vendor] rtxdi unavailable: the device runs the compat path, which has no ray-traced lighting; direct_lighting falls back to builtin
+[vendor] sharc unavailable: the device runs the compat path, which has no ray-traced lighting; radiance_cache falls back to none
+[vendor] streamline unavailable: DLSS frame generation needs an NVIDIA RTX GPU on NVIDIA's driver, and the device is llvmpipe (LLVM 23.1.3, 256 bits) (vendor 0x10005, driver llvmpipe); frame_generation falls back to off
+[vendor] selected: upscaler=builtin denoiser=builtin direct_lighting=builtin radiance_cache=none frame_generation=off latency=none compiled=dlss,fsr4,xess,rtxdi,sharc,streamline
+```
+
+Tiered: the same `dlss`, `fsr4`, `xess` and `streamline` lines, then
+`[vendor] selected: upscaler=builtin denoiser=builtin direct_lighting=rtxdi radiance_cache=sharc
+frame_generation=off latency=none …`. No vendor device extension was requested on lavapipe
+(NGX is not asked off NVIDIA's driver, and the XeSS library is absent), so the create retry
+did not run. The default build (`cargo build -p moba-client`) on the tiered path logged no
+`[vendor]` line. Not re-run on the RTX: the GPU was not used for this round.
+
 ## Open build frame log
 
 `env -u MOBA_SDK_DIR cargo build -p moba-client` (default features), then
@@ -127,5 +156,9 @@ lighting" instead, and the summary has `direct_lighting=builtin radiance_cache=n
 
 - **Windows run-time check** (`windows-vm`): blocked; the VM is set up by the maintainer.
 - **NRD** build and link: CI only (see above).
-- **DLSS available:** not tested; it needs the DLSS feature binary beside the executable, which
-  belongs to N1.
+- **DLSS feature creation and evaluation:** N1. DLSS *availability* was tested (re-run 2 above:
+  with the SDK's feature binary beside the executable, NGX reported DLSS available and the
+  probe selected it), but N0 creates no DLSS feature.
+- **XeSS, FSR 4 and Streamline at run time:** their libraries are Windows-only, so on Linux each
+  probe stops at the missing library. XeSS would reject even with its library until N1 merges
+  its device features.

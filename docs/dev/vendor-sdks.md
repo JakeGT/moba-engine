@@ -16,7 +16,7 @@ The features live on `moba-render` and are forwarded with the same names by `mob
 | `fsr3` (default) | upscaler | none in N0 (FSR 3.1 shaders arrive in N1) | all | — |
 | `dlss` | upscaler (1st) | DLSS 310.9.16 | Linux, Windows | NGX loads `libnvidia-ngx-dlss.so.310.9.16` / `nvngx_dlss.dll` |
 | `fsr4` | upscaler (2nd) | FidelityFX SDK 2.4.0 | Linux, Windows (headers) | `amd_fidelityfx_{loader,upscaler}_vk.dll`, Windows only |
-| `xess` | upscaler (3rd) | XeSS 3.0.2 | Linux, Windows (headers) | `libxess.dll`, Windows only |
+| `xess` | upscaler (3rd) | XeSS 3.0.2 | Linux, Windows (headers) | `libxess.dll`, Windows only; never selected in N0 (see below) |
 | `nrd` | denoiser | NRD 4.18.0 (built from source with CMake) | Linux, Windows | none (static library) |
 | `rtxdi` | direct lighting | RTXDI 3.1.0 | all | none (shader library) |
 | `sharc` | radiance cache | SHaRC 1.8.3 | all | none (shader headers) |
@@ -41,6 +41,11 @@ On Windows: `scripts\fetch-sdks.ps1 -Only dlss,rtxdi` (or Git Bash with the `.sh
   build expects them.
 - SDKs land in `${MOBA_SDK_DIR:-target/vendor-sdks}/<name>-<tag>/`; archives are cached in
   `downloads/` and re-verified on reuse. A `.moba-sdk-sha256` stamp marks a verified unpack.
+  A relative `MOBA_SDK_DIR` is relative to the workspace root, in the scripts and in
+  `build.rs` alike.
+- `--only` takes entry names, feature names and the aggregates; any other name is an error.
+  Zip archives need `unzip` or `bsdtar` (GNU tar cannot read them); the PowerShell script
+  uses Windows' own `%SystemRoot%\System32\tar.exe`.
 - **A changed licence fails the fetch.** The new text is kept as `changed-licence-*` beside
   the SDK; read it, and the PR that updates `licence_sha256` records the re-read.
 - The script only downloads and unpacks. Nothing inside an archive is ever run by it.
@@ -60,9 +65,14 @@ cargo build -p moba-client --features dlss,rtxdi,sharc
   (on `PATH`, or `%VULKAN_SDK%\Bin\dxc.exe` on Windows). The configure step is fully
   disconnected: `FETCHCONTENT_FULLY_DISCONNECTED=ON`, ShaderMake and MathLib from the fetched
   entries, `NRD_NRI=OFF`, `SHADERMAKE_FIND_DXC=OFF`, `SHADERMAKE_FIND_FXC=OFF`,
-  `SHADERMAKE_FIND_DXC_VK=ON`, SPIR-V embeds only, static library.
+  `SHADERMAKE_FIND_DXC_VK=ON`, SPIR-V embeds only, static library. `dxc --version` must
+  succeed, not just be found (on Linux the Vulkan SDK's `dxc` needs its `lib` directory on
+  `LD_LIBRARY_PATH` for `libdxcompiler.so`). NRD's configure step writes
+  `Shaders/NRDConfig.hlsli` into its source tree, so `build.rs` runs CMake on a copy of NRD in
+  `OUT_DIR`; the fetched SDK is never written to.
 - Linking: NGX's static library (`libnvsdk_ngx.a` plus `stdc++`/`dl` on Linux,
-  `nvsdk_ngx_d.lib` on Windows); NRD statically (plus `stdc++`, or `c++` on Apple targets);
+  `nvsdk_ngx_d.lib` on Windows); NRD statically with ShaderMake's `ShaderMakeBlob`, which a
+  static NRD needs for its shader lookup (plus `stdc++`, or `c++` on Apple targets);
   FSR 4 and XeSS are opened at run time with `libloading`, so a feature build still starts
   without them. Streamline's interposer is not opened in N0.
 - **macOS:** NGX has no Apple library, so on Apple targets `dlss` needs no SDK and compiles to
@@ -83,7 +93,13 @@ executable and in the driver. Do not ship any of them in a public release.
 NGX keeps its logs and data in a per-user directory: `$XDG_CACHE_HOME/moba-engine/ngx` (or
 `~/.cache/moba-engine/ngx`) on Linux, `%LOCALAPPDATA%\moba-engine\ngx` on Windows, beside the
 client's pipeline cache. On Linux it is created with mode 0700 and refused (DLSS falls back)
-if it is a symbolic link, not a directory, owned by another user or writable by others.
+if it is a symbolic link, not a directory, not owned by the process's effective user or
+writable by others, or if its path is not UTF-8 (NGX takes it as a wide string).
+
+**In a `dlss` build this happens on every machine**, AMD and Intel included: NGX's instance
+query runs before `vkCreateInstance`, when the GPU is not known yet, so the directory is
+created and NGX's (driver-free) instance query runs at every start-up. Only the device query
+and NGX's initialisation wait for NVIDIA's own driver.
 
 ## Extensions before creation
 
@@ -95,17 +111,46 @@ exist. Before `vkCreateInstance`, NGX
 driver only, since it loads the driver's NGX core) and `xessVKGetRequiredDeviceExtensions` name
 their device extensions. The instance and the device enable each one the loader or the device
 advertises; a missing one never fails creation. Device extensions are asked for on the tiered
-path only (Compat changes only where shared code moves, ADR-0020 §2c). Each probe repeats its
-queries and, when something is not enabled, rejects its back end with its one line:
+path only (Compat changes only where shared code moves, ADR-0020 §2c), so DLSS, FSR 4 and
+XeSS reject on Compat. A requested device extension is also dropped when enabling it would
+make `vkCreateDevice` invalid:
+
+- `VK_EXT_buffer_device_address` (the tiered path's core `bufferDeviceAddress` stands in);
+- a name promoted to Vulkan 1.2 whose feature bit the device does not support
+  (`VK_KHR_sampler_mirror_clamp_to_edge`, `VK_EXT_sampler_filter_minmax`,
+  `VK_EXT_shader_viewport_index_layer`); when supported, the bit is set beside the name;
+- a name whose device dependencies are not enabled, for the names in the dependency table in
+  `device.rs` (`VENDOR_DEPENDENCIES`; others are taken to have none).
+
+If `vkCreateDevice` still fails with vendor names in the list, the renderer logs one line and
+retries once without them:
+
+```text
+[vendor] vkCreateDevice failed with the vendor extensions (…): <error>; retrying without them
+```
+
+Each probe repeats its queries and, when something is not enabled, rejects its back end with
+its one line:
 
 ```text
 [vendor] dlss unavailable: DLSS needs device extension VK_NVX_image_view_handle, which the device does not enable; upscaler falls back to builtin
 ```
 
 In a `dlss` build NGX's instance list (before its core is loaded) is
-`VK_KHR_get_physical_device_properties2`, which the instance then enables. XeSS's required
-device *features* (`xessVKGetRequiredDeviceFeatures`) are merged into the device's feature
-chain with the XeSS context in N1. FSR 4's API has no requirement query.
+`VK_KHR_get_physical_device_properties2`, which the instance then enables. FSR 4's API has no
+requirement query.
+
+**XeSS is never selected in N0.** Its required device *features*
+(`xessVKGetRequiredDeviceFeatures`) can only be enabled at `vkCreateDevice`, and N0 does not
+enable them. N1 merges them before `vkCreateDevice`, through a `vendor::device_features` hook
+beside `vendor::device_extensions`, folding XeSS's standalone feature structures into the
+renderer's `VkPhysicalDeviceVulkan12Features`/`VkPhysicalDeviceVulkan13Features` (chaining
+them beside those is invalid, `VUID-VkDeviceCreateInfo-pNext-02830`). Until then, a probe that
+finds the library and all its extensions still rejects it:
+
+```text
+[vendor] xess unavailable: XeSS 3.0.2 needs its required device features (xessVKGetRequiredDeviceFeatures), which are merged into the device in N1; upscaler falls back to builtin
+```
 
 **Streamline** must be loaded, and `slInit` called, before `vkCreateInstance`; it interposes
 on the loader. N0 creates the instance without it, so the `streamline` probe only reports
@@ -141,12 +186,19 @@ The RTX 5070 Ti run with every Linux-buildable back end is in
 ## Verification and CI
 
 - `scripts/agent-verify.sh --full` checks `moba-engine --features sim,net,render,fsr3`
-  (`--all-features` would need the SDKs), then clippy, the selection tests and an engine check
-  with every feature whose SDK is fetched. `nrd` is skipped without CMake and `dxc`.
-- The `vendor-sdks` CI job (Linux and Windows) installs libclang, CMake and the Vulkan SDK,
+  (`--all-features` would need the SDKs), then clippy with each fetched feature alone and with
+  all of them, the selection tests and an engine check. `nrd` is skipped unless `cmake
+  --version` and `dxc --version` both run.
+- The `vendor-sdks` CI job (Linux and Windows) installs libclang, CMake and the Vulkan SDK
+  (on Linux LunarG's tarball, checked against LunarG's published SHA-256 before unpacking),
   restores the archive cache keyed on `vendor-sdks.toml`, fetches and verifies
   `vendor-sdks,dlss-fg`, then builds and links `moba-client --features vendor-sdks`, runs
-  clippy and the selection tests, and re-checks that no server crate reaches the vendor crates.
+  clippy and the selection tests (under `bash`, so each command's failure counts), runs clippy
+  with each vendor feature alone (Linux), and checks that, with the vendor features on across
+  the workspace, no server crate reaches `moba-render`, `bindgen`, `libloading` or `cmake`.
+- `scripts/semver-check.sh` checks `moba-render` and `moba-engine` with their default
+  features (plus `render` for the engine): `cargo-semver-checks` would otherwise turn the
+  vendor features on and fail on the missing SDKs.
 - `deny.toml` checks the `all-features` graph, which includes `bindgen`, `clang-sys`,
   `libloading`, `cmake` and their dependencies.
 
@@ -170,9 +222,12 @@ the notices and marks for every vendor feature compiled in (from `VendorBackends
 
 ## Open items
 
-- NRD has not been built locally on the development machine (no CMake or `dxc` installed); the
-  CI job is its first build.
+- NRD has not been built or linked locally on the development machine (no CMake or `dxc`
+  installed); the CI job is its first build, including the `ShaderMakeBlob` link and the
+  source copy.
 - The Windows run-time check (`windows-vm`) is blocked until the maintainer sets up the VM.
 - Licence questions for the maintainer: XeSS's headers are under the Intel licence, not MIT
-  as ADR-0020 §6a says; FSR 4's ambiguity (Q6) stands; the DLSS marks need NVIDIA's prior
-  approval (supplement §7.2(c)).
+  as ADR-0020 §6a says (amendment 6); FSR 4's ambiguity (Q6) stands; the DLSS marks need
+  NVIDIA's prior approval (supplement §7.2(c)).
+- No packaging script copies the run-time binaries yet, and the client has no credits screen
+  (ADR-0020 amendment 6); both come before any build with a vendor feature is distributed.

@@ -167,7 +167,19 @@ the semver check):
     and each probe rejects its back end when something it needs is not enabled. DLSS and
     Streamline need NVIDIA's own driver (not NVK), FSR 4 AMD's (not RADV). Streamline is only
     looked for in N0: it must be initialised before the instance, which comes with N9. NGX's
-    data directory is a private per-user cache directory, not the shared temporary one.
+    data directory is a private per-user cache directory (owned by the effective user; a
+    non-UTF-8 path is refused), not the shared temporary one.
+  - A vendor device extension is enabled only when `vkCreateDevice` stays valid: a name
+    promoted to Vulkan 1.2 gets its feature bit (or is dropped when unsupported), a name whose
+    known dependencies are not enabled is dropped, and a failed `vkCreateDevice` with vendor
+    names is retried once without them (one `[vendor]` line). FSR 4 is tiered-only like DLSS
+    and XeSS. XeSS is never selected in N0: its required device features are merged before
+    `vkCreateDevice` in N1, so its probe rejects with one line.
+  - NRD links ShaderMake's `ShaderMakeBlob` beside its static library, and CMake configures a
+    copy of NRD in `OUT_DIR` (its configure step writes into the source tree). A relative
+    `MOBA_SDK_DIR` is relative to the workspace root in `build.rs` and the fetch scripts; the
+    fetch scripts reject unknown `--only`/`-Only` names, and unpack zips with `unzip` or
+    `bsdtar` (Windows: `%SystemRoot%\System32\tar.exe`).
   - At start-up each slot (upscaler, denoiser, direct lighting, radiance cache, frame
     generation) takes the first compiled-in back end the device supports; each unavailable one
     logs one `[vendor] … falls back to …` line, then a `[vendor] selected:` summary. The open
@@ -1169,7 +1181,11 @@ the semver check):
   and links `moba-client --features vendor-sdks` and runs clippy and the selection tests with
   `vendor-sdks,dlss-fg` (N0.6). `scripts/agent-verify.sh --full`, `just features` and AGENTS.md
   check `moba-engine --features sim,net,render,fsr3` instead of `--all-features`; `--full`
-  also checks every vendor feature whose SDK is fetched.
+  also checks every vendor feature whose SDK is fetched, alone and together. The job runs its
+  multi-command steps under `bash`, clippy with each vendor feature alone (Linux), the
+  server-crate check with the vendor features on, and verifies the LunarG Vulkan SDK against
+  LunarG's published SHA-256. `scripts/semver-check.sh` checks `moba-render` and
+  `moba-engine` with default features (plus `render`), so the vendor features stay off.
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
 
 ## [0.4.1] — 2026-10-27

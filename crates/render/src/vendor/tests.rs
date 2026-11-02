@@ -294,3 +294,159 @@ fn compiled_candidates_follow_the_feature_set() {
     }
     assert_eq!(names, expected);
 }
+
+/// C strings for the extension-planning tests.
+fn c_names(list: &[&str]) -> Vec<CString> {
+    list.iter()
+        .map(|name| CString::new(*name).expect("no NUL"))
+        .collect()
+}
+
+fn plain(names: &[CString]) -> Vec<String> {
+    names
+        .iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn vendor_requests_drop_the_ext_device_address_and_what_the_device_lacks() {
+    use crate::device::{Promoted12, vendor_extensions};
+    // The RTX 5070 Ti advertises all three; lavapipe has neither NVX extension.
+    let requested = c_names(&[
+        "VK_EXT_buffer_device_address",
+        "VK_NVX_binary_import",
+        "VK_NVX_image_view_handle",
+    ]);
+    let rtx = vendor_extensions(
+        requested.clone(),
+        &fixture("rtx-5070-ti"),
+        &[c"VK_KHR_swapchain"],
+        Promoted12::default(),
+    );
+    // The tiered path's core bufferDeviceAddress stands in for the EXT extension, which must
+    // not be enabled beside it (VUID-VkDeviceCreateInfo-pNext-04748).
+    assert_eq!(
+        plain(&rtx.names),
+        ["VK_NVX_binary_import", "VK_NVX_image_view_handle"]
+    );
+    assert_eq!(rtx.features, Promoted12::default());
+    let lavapipe = vendor_extensions(
+        requested,
+        &fixture("lavapipe"),
+        &[c"VK_KHR_swapchain"],
+        Promoted12::default(),
+    );
+    assert!(lavapipe.names.is_empty(), "{:?}", lavapipe.names);
+}
+
+#[test]
+fn core_promoted_vendor_requests_set_their_vulkan_12_bits_or_are_dropped() {
+    use crate::device::{Promoted12, vendor_extensions};
+    let requested = c_names(&[
+        "VK_EXT_sampler_filter_minmax",
+        "VK_EXT_shader_viewport_index_layer",
+        "VK_KHR_sampler_mirror_clamp_to_edge",
+    ]);
+    let all = Promoted12 {
+        sampler_mirror_clamp_to_edge: true,
+        sampler_filter_minmax: true,
+        shader_output_viewport_index: true,
+        shader_output_layer: true,
+    };
+    let supported = vendor_extensions(requested.clone(), &fixture("rtx-5070-ti"), &[], all);
+    assert_eq!(plain(&supported.names), plain(&requested));
+    assert_eq!(supported.features, all);
+    // Unsupported bits: the name is dropped rather than enabled with its bit off
+    // (VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02832, -02834, -02835).
+    let partial = Promoted12 {
+        sampler_filter_minmax: true,
+        shader_output_viewport_index: true,
+        ..Promoted12::default()
+    };
+    let some = vendor_extensions(requested, &fixture("rtx-5070-ti"), &[], partial);
+    assert_eq!(plain(&some.names), ["VK_EXT_sampler_filter_minmax"]);
+    assert_eq!(
+        some.features,
+        Promoted12 {
+            sampler_filter_minmax: true,
+            ..Promoted12::default()
+        }
+    );
+}
+
+#[test]
+fn vendor_requests_whose_dependencies_are_not_enabled_are_dropped() {
+    use crate::device::{Promoted12, vendor_extensions};
+    let caps = fixture("rtx-5070-ti");
+    // Ray query needs the acceleration structure extension, which needs deferred host
+    // operations: with neither in the base set, both requests that depend on them go.
+    let requested = c_names(&["VK_KHR_acceleration_structure", "VK_KHR_ray_query"]);
+    let none = vendor_extensions(requested.clone(), &caps, &[], Promoted12::default());
+    assert!(none.names.is_empty(), "{:?}", none.names);
+    // With deferred host operations already enabled, both stay.
+    let both = vendor_extensions(
+        requested,
+        &caps,
+        &[c"VK_KHR_deferred_host_operations"],
+        Promoted12::default(),
+    );
+    assert_eq!(
+        plain(&both.names),
+        ["VK_KHR_acceleration_structure", "VK_KHR_ray_query"]
+    );
+    // A dependency the device enables anyway (swapchain) counts.
+    let present_wait = c_names(&["VK_KHR_present_id", "VK_KHR_present_wait"]);
+    let with_swapchain = vendor_extensions(
+        present_wait.clone(),
+        &caps,
+        &[c"VK_KHR_swapchain"],
+        Promoted12::default(),
+    );
+    assert_eq!(plain(&with_swapchain.names), plain(&present_wait));
+    let without = vendor_extensions(present_wait, &caps, &[], Promoted12::default());
+    assert!(without.names.is_empty(), "{:?}", without.names);
+}
+
+#[test]
+fn nothing_is_requested_before_a_compat_device_is_created() {
+    // SAFETY: the loader returns null for every name, so ash fills each entry point with a
+    // stub that panics if called. Nothing is called: on Compat `device_extensions` returns
+    // before any back end's query.
+    let instance = unsafe { ash::Instance::load_with(|_| std::ptr::null(), vk::Instance::null()) };
+    for name in ["rtx-5070-ti", "gtx-1060", "lavapipe"] {
+        let caps = fixture(name);
+        let query = DeviceQuery {
+            instance: &instance,
+            physical: vk::PhysicalDevice::null(),
+            capabilities: &caps,
+            path: RenderPath::Compat,
+        };
+        assert_eq!(device_extensions(&query), Vec::<CString>::new(), "{name}");
+    }
+}
+
+#[test]
+fn ray_traced_lighting_needs_the_tiered_path_and_ray_queries() {
+    // Lavapipe has ray queries: available on the tiered path, not on Compat (its default).
+    let lavapipe = fixture("lavapipe");
+    let (path, _) = enabled_on(&lavapipe);
+    assert_eq!(path, RenderPath::Compat);
+    assert_eq!(
+        ray_traced_lighting_on(path, &lavapipe),
+        Err(String::from(
+            "the device runs the compat path, which has no ray-traced lighting"
+        ))
+    );
+    assert_eq!(
+        ray_traced_lighting_on(RenderPath::Tiered, &lavapipe),
+        Ok(())
+    );
+    // The GTX 1060 has no ray queries, whatever the path.
+    let gtx = fixture("gtx-1060");
+    assert!(ray_traced_lighting_on(RenderPath::Compat, &gtx).is_err());
+    assert_eq!(
+        ray_traced_lighting_on(RenderPath::Tiered, &gtx),
+        Err(String::from("the device has no rayQuery"))
+    );
+}

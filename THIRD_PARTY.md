@@ -222,7 +222,7 @@ build only ([RELEASE.md](RELEASE.md) step 8).
 | `rtxdi` | NVIDIA RTXDI 3.1.0 (RTXDI-Library) | `LICENSE.txt` (NVIDIA RTX SDKs License) | as for `nrd` |
 | `sharc` | NVIDIA SHaRC 1.8.3 | `License.md` (NVIDIA RTX SDKs License) | as for `nrd` |
 | `fsr4` | AMD FidelityFX SDK 2.4.0 (FSR 4) | `Kits/FidelityFX/docs/license.md` | **development-only**: binary-only redistribution without reverse engineering by default, though the signed DLLs are also listed under MIT; no distributed build enables it until ADR-0020 Q6 is settled |
-| `xess` | Intel XeSS SDK 3.0.2 | `LICENSE.txt` (Intel Simplified Software License) | redistribute the binaries unmodified, with the notice; no reverse engineering, including at run time; the headers are under the same Intel licence (not MIT as ADR-0020 §6a says) |
+| `xess` | Intel XeSS SDK 3.0.2 | `LICENSE.txt` (Intel Simplified Software License) | redistribute the binaries unmodified, with the notice; no reverse engineering, including at run time; the headers are under the same Intel licence (not MIT as ADR-0020 §6a says; amendment 6) |
 
 The in-game credits do not exist yet; when a credits screen is added, it must show the notices
 and marks above for every feature compiled in (tracked as a follow-up in

@@ -19,7 +19,9 @@
 //! **Extensions are declared before creation** (ADR-0020 §1e). [`instance_extensions`] runs
 //! before `vkCreateInstance` and [`device_extensions`] before `vkCreateDevice`; each
 //! compiled-in back end that has a requirement query (NGX, XeSS) feeds them, and the instance
-//! and device enable what the loader and the device advertise. Neither can fail creation.
+//! and device enable what the loader and the device advertise (the device also drops what
+//! would make `vkCreateDevice` invalid, `crate::device::vendor_extensions`, and retries once
+//! without the vendor names if creation still fails). Neither can fail creation.
 //! Each probe then repeats its query against the enabled sets ([`ProbeContext`]) and rejects
 //! its back end, with its one line, when anything is missing.
 
@@ -112,16 +114,11 @@ pub(crate) type Unavailable = String;
 /// What a probe sees: the device, as created, its admission and what was enabled.
 #[derive(Clone, Copy)]
 #[cfg_attr(
-    not(any(
-        feature = "dlss",
-        feature = "streamline",
-        feature = "nrd",
-        feature = "rtxdi",
-        feature = "sharc",
-        feature = "fsr4",
-        feature = "xess"
-    )),
-    allow(dead_code) // The open build has no probes.
+    not(all(feature = "dlss", not(target_vendor = "apple"))),
+    allow(
+        dead_code,
+        reason = "only the NGX probe reads every field; the open build has no probes"
+    )
 )]
 pub(crate) struct ProbeContext<'a> {
     /// The loader the instance came from (NGX resolves Vulkan through its
@@ -140,8 +137,11 @@ pub(crate) struct ProbeContext<'a> {
 
 /// What [`device_extensions`] sees: a physical device about to be created, and its admission.
 #[cfg_attr(
-    not(any(feature = "dlss", feature = "xess")),
-    allow(dead_code) // Only NGX and XeSS have device-extension queries.
+    not(all(feature = "dlss", not(target_vendor = "apple"))),
+    allow(
+        dead_code,
+        reason = "only NGX reads every field (XeSS needs no capabilities)"
+    )
 )]
 pub(crate) struct DeviceQuery<'a> {
     pub(crate) instance: &'a ash::Instance,
@@ -213,8 +213,8 @@ fn satisfied(name: &str, enabled: &[String], path: RenderPath) -> bool {
 /// `Ok` when every `requested` extension is satisfied by `enabled`, else one sentence naming
 /// the missing ones (`what` is `instance` or `device`).
 #[cfg_attr(
-    not(any(feature = "dlss", feature = "xess")),
-    allow(dead_code) // Only NGX and XeSS have requirement queries.
+    not(any(all(feature = "dlss", not(target_vendor = "apple")), feature = "xess")),
+    allow(dead_code, reason = "only NGX and XeSS have requirement queries")
 )]
 pub(crate) fn require_enabled(
     sdk: &str,
@@ -241,8 +241,12 @@ pub(crate) fn require_enabled(
 
 /// `VkDriverId` values the probes check (`VK_DRIVER_ID_*`).
 #[cfg_attr(
-    not(any(feature = "dlss", feature = "fsr4", feature = "streamline")),
-    allow(dead_code) // Only the NVIDIA and AMD probes check the driver.
+    not(any(
+        all(feature = "dlss", not(target_vendor = "apple")),
+        feature = "fsr4",
+        feature = "streamline"
+    )),
+    allow(dead_code, reason = "only the NVIDIA and AMD probes check the driver")
 )]
 pub(crate) mod driver {
     use ash::vk;
@@ -255,8 +259,11 @@ pub(crate) mod driver {
 /// `Ok` on an NVIDIA GPU on NVIDIA's own driver, which NGX and DLSS-G need. Mesa's NVK also
 /// reports NVIDIA's PCI vendor ID, so the vendor alone is not enough.
 #[cfg_attr(
-    not(any(feature = "dlss", feature = "streamline")),
-    allow(dead_code) // Only the NVIDIA probes check it.
+    not(any(
+        all(feature = "dlss", not(target_vendor = "apple")),
+        feature = "streamline"
+    )),
+    allow(dead_code, reason = "only the NVIDIA probes check it")
 )]
 pub(crate) fn nvidia_driver(
     capabilities: &DeviceCapabilities,
@@ -278,7 +285,7 @@ pub(crate) fn nvidia_driver(
 /// field to check here, so the FidelityFX API checks that when N1 creates its context.
 #[cfg_attr(
     not(feature = "fsr4"),
-    allow(dead_code) // Only the FSR 4 probe checks it.
+    allow(dead_code, reason = "only the FSR 4 probe checks it")
 )]
 pub(crate) fn amd_driver(capabilities: &DeviceCapabilities) -> Result<(), Unavailable> {
     if capabilities.vendor_id == pci::AMD && capabilities.driver_id == driver::AMD_PROPRIETARY {
@@ -497,8 +504,15 @@ fn ngx_unavailable(_context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
 
 /// `"NVIDIA GeForce RTX 5070 Ti (vendor 0x10de, driver NVIDIA)"`, for probe messages.
 #[cfg_attr(
-    not(any(feature = "dlss", feature = "fsr4", feature = "streamline")),
-    allow(dead_code) // Only the vendor- and driver-gated probes name the device.
+    not(any(
+        all(feature = "dlss", not(target_vendor = "apple")),
+        feature = "fsr4",
+        feature = "streamline"
+    )),
+    allow(
+        dead_code,
+        reason = "only the vendor- and driver-gated probes name the device"
+    )
 )]
 pub(crate) fn device_label(capabilities: &DeviceCapabilities) -> String {
     format!(
@@ -578,12 +592,27 @@ pub(crate) mod pci {
 /// inputs): the tiered path with ray queries.
 #[cfg(any(feature = "nrd", feature = "rtxdi", feature = "sharc"))]
 pub(crate) fn ray_traced_lighting(context: &ProbeContext<'_>) -> Result<(), Unavailable> {
-    if context.path != RenderPath::Tiered {
+    ray_traced_lighting_on(context.path, context.capabilities)
+}
+
+/// [`ray_traced_lighting`] on plain data (tested against the capability fixtures).
+#[cfg_attr(
+    not(any(feature = "nrd", feature = "rtxdi", feature = "sharc")),
+    allow(
+        dead_code,
+        reason = "only the ray-traced lighting probes call it outside tests"
+    )
+)]
+fn ray_traced_lighting_on(
+    path: RenderPath,
+    capabilities: &DeviceCapabilities,
+) -> Result<(), Unavailable> {
+    if path != RenderPath::Tiered {
         return Err(String::from(
             "the device runs the compat path, which has no ray-traced lighting",
         ));
     }
-    if !context.capabilities.feature("rayQuery") {
+    if !capabilities.feature("rayQuery") {
         return Err(String::from("the device has no rayQuery"));
     }
     Ok(())

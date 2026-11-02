@@ -72,6 +72,8 @@ raw-window-handle = "0.6"
 bindgen = { version = "0.73", default-features = false, features = ["runtime"] }
 cmake = "0.1"
 libloading = "0.8"
+# The NGX data directory's owner check (`geteuid`, `dlss` on Unix). Already in the graph.
+libc = "0.2"
 cpal = "0.18"
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 

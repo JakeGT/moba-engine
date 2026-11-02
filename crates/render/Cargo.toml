@@ -26,7 +26,7 @@ default = ["fsr3"]
 # its shaders into third_party/fidelityfx/ lands with N1 (ADR-0020 amendment 6).
 fsr3 = []
 # DLSS super resolution through NGX (static library), NVIDIA RTX only. Linux and Windows.
-dlss = ["dep:bindgen", "dep:toml"]
+dlss = ["dep:bindgen", "dep:toml", "dep:libc"]
 # Streamline (DLSS frame generation's Windows path). N0 only looks for its interposer; it is
 # loaded before the Vulkan instance from N9.
 streamline = ["dep:bindgen", "dep:toml"]
@@ -60,6 +60,10 @@ serde.workspace = true
 # Run-time loading of the FSR 4 and XeSS libraries (ISC; already in the graph through ash's
 # `loaded` feature).
 libloading = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# `geteuid` for NGX's data directory check (`dlss`; MIT OR Apache-2.0, already in the graph).
+libc = { workspace = true, optional = true }
 
 [build-dependencies]
 # Vendor features only (ADR-0020 §6b): FFI declarations generated from the fetched headers

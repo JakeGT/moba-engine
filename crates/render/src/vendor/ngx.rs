@@ -139,7 +139,17 @@ fn data_dir() -> Result<&'static DataDir, Unavailable> {
         let path = cache_base()?.join("moba-engine").join("ngx");
         create_private_dir(&path)
             .map_err(|reason| format!("NGX's data directory {}: {reason}", path.display()))?;
+        #[cfg(windows)]
         let wide = wide_path(&path);
+        // NGX takes the path as a `wchar_t` string; a lossy conversion would point it at a
+        // different directory, so a path that is not UTF-8 is refused instead.
+        #[cfg(not(windows))]
+        let wide = wide_path(&path).ok_or_else(|| {
+            format!(
+                "NGX's data directory {} is not valid UTF-8, which NGX's wide-character path needs",
+                path.display()
+            )
+        })?;
         Ok(DataDir { path, wide })
     })
     .as_ref()
@@ -188,10 +198,11 @@ fn create_private_dir(path: &Path) -> Result<(), String> {
     if !metadata.is_dir() {
         return Err(String::from("it is not a directory"));
     }
-    // `/proc/self` belongs to the process's effective user (Linux; NGX has no other Unix).
-    let user = std::fs::metadata("/proc/self")
-        .map_err(|error| format!("cannot determine the current user ({error})"))?
-        .uid();
+    // The effective user, which owns what this process creates (Linux uses the filesystem
+    // uid, equal to the effective one since nothing here calls setfsuid). Not the owner of
+    // `/proc/self`, which is root for a non-dumpable process (setuid, file capabilities).
+    // SAFETY: geteuid has no preconditions, cannot fail and only reads process state.
+    let user = unsafe { libc::geteuid() };
     if metadata.uid() != user {
         return Err(format!(
             "it is owned by uid {}, not the current user (uid {user})",
@@ -229,14 +240,17 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .collect()
 }
 
-/// The application data path NGX logs into, as the platform's `wchar_t` string (UTF-32).
+/// The application data path NGX logs into, as the platform's `wchar_t` string (UTF-32);
+/// `None` when the path is not UTF-8.
 #[cfg(not(windows))]
-fn wide_path(path: &Path) -> Vec<u32> {
-    path.to_string_lossy()
-        .chars()
-        .map(u32::from)
-        .chain(std::iter::once(0))
-        .collect()
+fn wide_path(path: &Path) -> Option<Vec<u32>> {
+    Some(
+        path.to_str()?
+            .chars()
+            .map(u32::from)
+            .chain(std::iter::once(0))
+            .collect(),
+    )
 }
 
 /// What NGX's requirement queries are asked about: DLSS super resolution for this project.
@@ -512,7 +526,7 @@ const _: () = {
 mod tests {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
-    use super::create_private_dir;
+    use super::{create_private_dir, wide_path};
 
     #[test]
     fn the_data_directory_must_be_a_private_directory_of_this_user() {
@@ -558,5 +572,25 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_data_path_is_utf32_and_a_non_utf8_path_is_refused() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+        assert_eq!(
+            wide_path(std::path::Path::new("/tmp/é")),
+            Some(vec![
+                u32::from('/'),
+                u32::from('t'),
+                u32::from('m'),
+                u32::from('p'),
+                u32::from('/'),
+                u32::from('é'),
+                0
+            ])
+        );
+        let invalid = std::path::Path::new(OsStr::from_bytes(b"/tmp/\xff"));
+        assert_eq!(wide_path(invalid), None);
     }
 }

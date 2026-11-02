@@ -109,6 +109,10 @@ jobs:
     env:
       # The DXC that NRD's ShaderMake uses (SHADERMAKE_FIND_DXC_VK) comes from the Vulkan SDK.
       VULKAN_SDK_VERSION: 1.4.321.1
+      # LunarG's published SHA-256 of vulkansdk-linux-x86_64-1.4.321.1.tar.xz, from
+      # https://sdk.lunarg.com/sdk/sha/1.4.321.1/linux/vulkansdk-linux-x86_64-1.4.321.1.tar.xz.txt
+      # (fetched 2026-11-02). Update both together.
+      VULKAN_SDK_SHA256: f22a3625bd4d7a32e7a0d926ace16d5278c149e938dac63cecc00537626cbf73
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -129,12 +133,17 @@ jobs:
           cmake --version
           curl -fsSLo vulkansdk.tar.xz \
             "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
-          sha256sum vulkansdk.tar.xz
+          # Verified before anything is unpacked: a mismatch fails the job.
+          echo "$VULKAN_SDK_SHA256  vulkansdk.tar.xz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/vulkansdk"
           tar -xJf vulkansdk.tar.xz -C "$RUNNER_TEMP/vulkansdk" --strip-components=1
           rm vulkansdk.tar.xz
-          echo "VULKAN_SDK=$RUNNER_TEMP/vulkansdk/x86_64" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/vulkansdk/x86_64/bin" >> "$GITHUB_PATH"
+          sdk="$RUNNER_TEMP/vulkansdk/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          # dxc loads libdxcompiler.so from the SDK's lib directory.
+          echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$sdk/lib" "$sdk/bin/dxc" --version
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -166,20 +175,43 @@ jobs:
         run: scripts/fetch-sdks.ps1 -Only vendor-sdks,dlss-fg
       - name: Build and link --features vendor-sdks
         run: cargo build -p moba-client --features vendor-sdks --locked
+      # bash on every OS, with -e: under pwsh only the last command's exit code would count.
       - name: Clippy and selection tests (vendor-sdks + dlss-fg)
+        shell: bash
         run: |
+          set -euo pipefail
           cargo clippy -p moba-render --all-targets --features vendor-sdks,dlss-fg --locked -- -D warnings
           cargo test -p moba-render --lib --features vendor-sdks,dlss-fg --locked vendor
           cargo check -p moba-engine --features render,vendor-sdks,dlss-fg --locked
+      # Each feature on its own: their cfg-gated code must also be warning-free alone. Linux
+      # only, clippy only (the full set is built and tested above on both OSes).
+      - name: Clippy, one vendor feature at a time (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for feature in dlss streamline nrd rtxdi sharc fsr4 xess; do
+            echo "::group::clippy --features $feature"
+            cargo clippy -p moba-render --all-targets --features "$feature" --locked -- -D warnings
+            echo "::endgroup::"
+          done
+      # With the vendor features on across the workspace (the layering check in the gates job
+      # runs with default features): no server crate may reach moba-render or the vendor build
+      # and loading crates. Each inverted tree lists everything that depends on the crate.
       - name: Server crates stay free of the vendor features
         shell: bash
         run: |
-          for krate in moba-server moba-sim moba-game moba-nav moba-net; do
-            if cargo tree -p "$krate" -e normal,build --prefix none --locked |
-              grep -E '^(moba-render|bindgen|libloading|cmake) '; then
-              echo "layering violation: $krate" >&2
-              exit 1
-            fi
+          set -euo pipefail
+          features=moba-render/vendor-sdks,moba-render/dlss-fg
+          for dep in moba-render bindgen libloading cmake; do
+            dependents=$(cargo tree --workspace --features "$features" -e normal,build \
+              -i "$dep" --prefix none --locked | awk '{ print $1 }' | sort -u)
+            for krate in moba-server moba-sim moba-game moba-nav moba-net; do
+              if grep -qx "$krate" <<<"$dependents"; then
+                echo "layering violation: $krate reaches $dep with the vendor features on" >&2
+                exit 1
+              fi
+            done
           done
 
   deny:

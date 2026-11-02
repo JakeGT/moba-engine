@@ -1092,7 +1092,12 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
   and their shaders arrive with N7/N8.
 - **NRD is built as a static library** (`NRD_STATIC_LIBRARY=ON`, beyond §6b's flag list), so
   nothing extra ships beside the executable, and its outputs go to `OUT_DIR` rather than NRD's
-  source tree.
+  source tree. A static NRD does not absorb the ShaderMake blob reader it links `PRIVATE`
+  (its shader lookup, `ShaderMake::FindPermutationInBlob`), so `build.rs` collects the static
+  archives in one directory (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`) and links `ShaderMakeBlob`
+  beside `NRD`. NRD's configure step also writes `Shaders/NRDConfig.hlsli` into its source
+  tree, so CMake runs on a copy of the fetched source in `OUT_DIR` (ShaderMake and MathLib are
+  only read, in place); the fetched SDK stays as verified.
 - **Run-time libraries load only from the executable's directory**, by full path, never
   through the system search path, so a planted DLL elsewhere on the path is never picked up.
   On Windows their own imports are resolved from that directory and the system directories
@@ -1102,22 +1107,44 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
   (vendor DLLs often do not survive being unloaded); NGX's session still shuts down before
   `vkDestroyDevice`. NGX finds the DLSS feature binary itself (beside the executable or from
   the driver), and keeps its data in a per-user cache directory (`moba-engine/ngx`, beside the
-  client's pipeline cache), which on Linux must be a private directory of the current user.
+  client's pipeline cache), which on Linux must be a private directory of the process's
+  effective user (`geteuid`, not the owner of `/proc/self`, which is root for a non-dumpable
+  process). A data path that is not UTF-8 is refused rather than converted lossily.
 - **§1e's extension declaration, as built.** `vendor::instance_extensions` runs before
   `vkCreateInstance` and `vendor::device_extensions` before `vkCreateDevice`. NGX
   (`GetFeatureInstanceExtensionRequirements` and `GetFeatureDeviceExtensionRequirements`) and
   XeSS (`xessVKGetRequiredInstanceExtensions` and `xessVKGetRequiredDeviceExtensions`) feed
   them; each name the loader or device advertises is enabled, and nothing missing fails
   creation. Each probe repeats its queries against the enabled sets and rejects its back end
-  with its one line when something is missing. Three limits:
+  with its one line when something is missing. Four limits:
   - **Device extensions are requested on the tiered path only.** Compat changes only where
-    shared code moves (§2c), so DLSS and XeSS are tiered-only and reject on Compat.
-    `VK_EXT_buffer_device_address` is never enabled (it conflicts with the tiered path's core
-    `bufferDeviceAddress`, which stands in for it).
+    shared code moves (§2c), so the vendor upscalers (DLSS, FSR 4 and XeSS) are tiered-only
+    and reject on Compat. `VK_EXT_buffer_device_address` is never enabled (it conflicts with
+    the tiered path's core `bufferDeviceAddress`, which stands in for it).
+  - **A vendor request must not make `vkCreateDevice` invalid.** A name promoted to Vulkan 1.2
+    is enabled beside `VkPhysicalDeviceVulkan12Features` only with its feature bit set
+    (`samplerMirrorClampToEdge`, `samplerFilterMinmax`, `shaderOutputViewportIndex` and
+    `shaderOutputLayer`: `VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02832`, `-02834` and
+    `-02835`; the tiered path already sets `drawIndirectCount` and `descriptorIndexing`), and
+    is dropped when the device does not support the bit. A name whose device dependencies are
+    not enabled is dropped (`VUID-vkCreateDevice-ppEnabledExtensionNames-01387`). Dependencies
+    come from a table of the extensions a vendor may ask for whose dependencies core 1.3 does
+    not already satisfy (ray tracing, present id and wait, and a few more); a name outside it
+    is taken to have none. As a last guard, if `vkCreateDevice` fails with vendor names in the
+    list, the renderer logs one `[vendor]` line and retries once without them. A dropped name
+    is reported by its back end's probe.
   - **NGX's device query loads the driver's NGX core,** so it runs only on NVIDIA's own driver.
-  - **XeSS's required device features** (`xessVKGetRequiredDeviceFeatures`) are not merged into
-    the feature chain in N0. N1 merges them when it creates the XeSS context, before XeSS is
-    used in a frame.
+    Its instance query, by contrast, runs before the instance on every machine of a `dlss`
+    build (it needs no driver), and creates NGX's data directory.
+  - **XeSS's required device features** (`xessVKGetRequiredDeviceFeatures`) can only be enabled
+    at `vkCreateDevice`, and N0 does not enable them, so **the N0 XeSS probe never selects
+    XeSS**: after its extension checks and `xessGetVersion` it rejects with one line ("needs
+    its required device features …, which are merged into the device in N1"). N1 merges them
+    before `vkCreateDevice`, through a `vendor::device_features` hook beside
+    `device_extensions`, and only then lets the probe select XeSS. XeSS fills standalone
+    feature structures; N1 folds their bits into the renderer's
+    `VkPhysicalDeviceVulkan12Features` and `VkPhysicalDeviceVulkan13Features` instead of
+    chaining them beside those, which is invalid (`VUID-VkDeviceCreateInfo-pNext-02830`).
 - **Streamline is deferred to N9 entirely.** It must be loaded, and `slInit` called, before
   `vkCreateInstance`, because it interposes on the loader. N0 does neither, so the
   `streamline` probe only reports whether `sl.interposer.dll` is installed, never loads it,
@@ -1130,6 +1157,17 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
   neither latency extension, so a Compat device reports `latency=none`.
 - **`dlss` on Apple targets** builds without the SDK and always reports DLSS unavailable (NGX
   has no Apple library). The other vendor features are untested on macOS.
+- **The XeSS headers are not MIT.** §6a's licence column says "headers MIT", but `xess.h` and
+  the other XeSS 3.0.2 headers carry Intel's proprietary notice and fall under the same Intel
+  Simplified Software License as the binaries (`LICENSE.txt`). Nothing derived from them is
+  committed (§6b: `bindgen` runs at build time); `THIRD_PARTY.md` records the correction, and
+  the reading goes to the maintainer with the other licence questions (Q6).
+- **§6b's packaging-script copy and the in-game credits are deferred.** There is no packaging
+  script and no credits or about screen yet. Until there are, `docs/dev/vendor-sdks.md` says
+  which binaries a developer copies beside the executable, and its credits follow-up says the
+  screen must show the notices and marks of every compiled-in feature (from
+  `VendorBackends::compiled`). Public releases ship the open build only, so no released build
+  lacks them.
 - **One summary line follows the fallback lines.** Each unavailable back end logs exactly one
   line (`[vendor] <name> unavailable: <reason>; <slot> falls back to <fallback>`). When any
   vendor feature is compiled in, one `[vendor] selected: …` line then names each slot's back

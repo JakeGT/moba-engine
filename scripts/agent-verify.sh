@@ -80,8 +80,9 @@ if [[ "$FULL" == "1" ]]; then
 
   section "vendor SDK features (only those fetched into \${MOBA_SDK_DIR:-target/vendor-sdks})"
   present=$("$ROOT/scripts/fetch-sdks.sh" --present-features)
-  if [[ "$present" == *nrd* ]] && ! { command -v "${CMAKE:-cmake}" >/dev/null 2>&1 \
-    && command -v dxc >/dev/null 2>&1; }; then
+  # Both must run, not merely exist (the SDK's dxc needs its libdxcompiler.so).
+  if [[ "$present" == *nrd* ]] && ! { "${CMAKE:-cmake}" --version >/dev/null 2>&1 \
+    && dxc --version >/dev/null 2>&1; }; then
     echo "skipping nrd: it needs cmake and the Vulkan SDK's dxc to build"
     present=$(tr ',' '\n' <<<"$present" | grep -vx nrd | paste -sd, - || true)
   fi
@@ -89,6 +90,11 @@ if [[ "$FULL" == "1" ]]; then
     echo "skipped: no SDK fetched (scripts/fetch-sdks.sh --only vendor-sdks)"
   else
     echo "features: $present"
+    # Each feature alone, then all together: cfg-gated code must be warning-free either way.
+    for feature in ${present//,/ }; do
+      echo "clippy --features $feature"
+      cargo clippy -p moba-render --all-targets --features "$feature" --locked -- -D warnings
+    done
     cargo clippy -p moba-render --all-targets --features "$present" --locked -- -D warnings
     cargo test -p moba-render --lib --features "$present" --locked vendor
     cargo check -p moba-engine --features "render,$present" --locked

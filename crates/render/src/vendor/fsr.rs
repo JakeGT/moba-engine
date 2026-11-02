@@ -24,6 +24,7 @@ mod fsr4 {
         Backend, Loaded, ProbeContext, Unavailable, amd_driver, beside_executable,
         load_beside_executable,
     };
+    use crate::caps::RenderPath;
 
     #[allow(
         non_camel_case_types,
@@ -73,10 +74,17 @@ mod fsr4 {
     }
 
     /// Needs an AMD GPU on AMD's driver (checked first, so no AMD library is loaded
-    /// elsewhere), then the loader and the upscaler beside the executable. The FidelityFX API
-    /// has no Vulkan extension-requirement query, so FSR 4 asks for nothing before creation.
+    /// elsewhere) and the tiered path, as DLSS and XeSS do (Compat changes only where shared
+    /// code moves, ADR-0020 §2c), then the loader and the upscaler beside the executable. The
+    /// FidelityFX API has no Vulkan extension-requirement query, so FSR 4 asks for nothing
+    /// before creation.
     pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unavailable> {
         amd_driver(context.capabilities)?;
+        if context.path != RenderPath::Tiered {
+            return Err(String::from(
+                "the device runs the compat path, and the vendor upscalers are tiered-only",
+            ));
+        }
         api().map(|api| Box::new(Fsr4 { _api: api }) as Box<dyn Backend>)
     }
 

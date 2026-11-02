@@ -25,6 +25,8 @@ Set-StrictMode -Version Latest
 $Root = Split-Path -Parent $PSScriptRoot
 $Manifest = Join-Path $Root 'vendor-sdks.toml'
 $SdkDir = if ($env:MOBA_SDK_DIR) { $env:MOBA_SDK_DIR } else { Join-Path (Join-Path $Root 'target') 'vendor-sdks' }
+# A relative MOBA_SDK_DIR is relative to the workspace root, as in moba-render's build script.
+if (-not [IO.Path]::IsPathRooted($SdkDir)) { $SdkDir = Join-Path $Root $SdkDir }
 $StampName = '.moba-sdk-sha256'
 
 function Fail([string]$Message) {
@@ -71,13 +73,21 @@ foreach ($e in $entries) {
     $featuresOf[$e.name] = if ($parent) { $featuresOf[$parent] } else { @(Field $e 'features') }
 }
 
+# Every -Only name must be an entry, a feature or an aggregate: a typo is an error, not a
+# silently smaller fetch.
+$knownFeatures = @($featuresOf.Values | ForEach-Object { $_ } | Where-Object { $_ })
 $wanted = @()
 foreach ($item in ($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) {
     switch ($item) {
         'nvidia' { $wanted += 'dlss', 'nrd', 'rtxdi', 'sharc' }
         'vendor-sdks' { $wanted += 'dlss', 'nrd', 'rtxdi', 'sharc', 'fsr4', 'xess' }
         'dlss-fg' { $wanted += 'dlss', 'streamline' }
-        default { $wanted += $item }
+        default {
+            if (-not ($featuresOf.ContainsKey($item) -or ($knownFeatures -contains $item))) {
+                Fail "-Only: unknown name '$item' (use entry or feature names from $Manifest, or nvidia, vendor-sdks, dlss-fg)"
+            }
+            $wanted += $item
+        }
     }
 }
 
@@ -118,7 +128,10 @@ function Test-Selected($Entry) {
 
 $downloads = Join-Path $SdkDir 'downloads'
 New-Item -ItemType Directory -Force -Path $downloads | Out-Null
-$tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+# Windows' own bsdtar by full path, never whichever tar.exe comes first on PATH (Git's GNU tar
+# cannot read zip archives).
+$tarPath = Join-Path $env:SystemRoot 'System32\tar.exe'
+$tar = if (Test-Path -LiteralPath $tarPath) { $tarPath } else { $null }
 $fetched = 0
 $skipped = 0
 foreach ($e in $entries) {
@@ -162,7 +175,7 @@ foreach ($e in $entries) {
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     # bsdtar (tar.exe, Windows 10+) unpacks zip archives far faster than Expand-Archive.
-    if ($tar) { & $tar.Source -xf $download -C $staging; if ($LASTEXITCODE -ne 0) { Fail "${name}: unpacking failed" } }
+    if ($tar) { & $tar -xf $download -C $staging; if ($LASTEXITCODE -ne 0) { Fail "${name}: unpacking failed" } }
     else { Expand-Archive -LiteralPath $download -DestinationPath $staging -Force }
     $root = if (Field $e 'strip') { Join-Path $staging $e.strip } else { $staging }
     if (-not (Test-Path -LiteralPath $root)) { Fail "${name}: the archive has no top-level directory $($e.strip)" }

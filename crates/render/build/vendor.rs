@@ -43,11 +43,33 @@ fn fail(message: impl Display) -> ! {
 struct Context {
     sdk_dir: PathBuf,
     manifest: toml::Table,
+    /// Read by every feature that writes bindings (all but `sharc`).
+    #[cfg_attr(
+        not(any(
+            feature = "dlss",
+            feature = "streamline",
+            feature = "nrd",
+            feature = "rtxdi",
+            feature = "fsr4",
+            feature = "xess"
+        )),
+        allow(dead_code, reason = "only `sharc` writes no bindings")
+    )]
     out: PathBuf,
+    #[cfg_attr(
+        not(any(feature = "dlss", feature = "nrd")),
+        allow(dead_code, reason = "only `dlss` and `nrd` link per target")
+    )]
     target_os: String,
-    #[cfg_attr(not(any(feature = "dlss", feature = "nrd")), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dlss"),
+        allow(dead_code, reason = "only `dlss` picks a library per architecture")
+    )]
     target_arch: String,
-    #[cfg_attr(not(any(feature = "dlss", feature = "nrd")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "dlss", feature = "nrd")),
+        allow(dead_code, reason = "only `dlss` and `nrd` link per target")
+    )]
     target_vendor: String,
 }
 
@@ -71,8 +93,14 @@ impl Context {
         let manifest: toml::Table = text
             .parse()
             .unwrap_or_else(|error| fail(format!("{}: {error}", manifest_path.display())));
+        // A relative MOBA_SDK_DIR is resolved against the workspace root, as the fetch
+        // scripts do (a build script runs in the crate's directory, not the caller's).
         let sdk_dir = env::var_os("MOBA_SDK_DIR")
-            .map_or_else(|| root.join("target").join("vendor-sdks"), PathBuf::from);
+            .filter(|dir| !dir.is_empty())
+            .map_or_else(
+                || root.join("target").join("vendor-sdks"),
+                |dir| root.join(dir),
+            );
         Self {
             sdk_dir,
             manifest,
@@ -287,7 +315,7 @@ fn streamline(context: &Context) {
     context.write(builder, "streamline.rs");
 }
 
-/// NRD: built from source with CMake as a static library, without network access (ADR-0020
+/// NRD: built from source with `cmake` as a static library, without network access (ADR-0020
 /// §6b lists the flags), plus bindings for its library descriptor.
 #[cfg(feature = "nrd")]
 fn nrd(context: &Context) {
@@ -318,9 +346,14 @@ fn nrd(context: &Context) {
     } else {
         Some(PathBuf::from("dxc"))
     };
-    let dxc_ok = dxc
-        .as_ref()
-        .is_some_and(|dxc| Command::new(dxc).arg("--version").output().is_ok());
+    // It must run, not merely exist: on Linux the SDK's dxc needs its libdxcompiler.so on
+    // the library path.
+    let dxc_ok = dxc.as_ref().is_some_and(|dxc| {
+        Command::new(dxc)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    });
     if !dxc_ok {
         fail(
             "moba-render feature `nrd` compiles NRD's shaders with the Vulkan SDK's dxc \
@@ -329,9 +362,15 @@ fn nrd(context: &Context) {
         );
     }
 
+    // NRD's configure step writes `Shaders/NRDConfig.hlsli` into its source tree, so CMake
+    // runs on a copy in OUT_DIR and the fetched SDK stays as verified. ShaderMake and MathLib
+    // are only read, from where the fetch put them.
+    let source = context.out.join("nrd-src");
+    copy_tree(&sdk.dir, &source, &["_deps"])
+        .unwrap_or_else(|error| fail(format!("copying NRD into {}: {error}", source.display())));
     let lib_dir = context.out.join("nrd-lib");
     let shaders = context.out.join("nrd-shaders");
-    cmake::Config::new(&sdk.dir)
+    cmake::Config::new(&source)
         .profile("Release")
         .build_target("NRD")
         // No downloads at configure time: the fetch script unpacked both dependencies.
@@ -349,9 +388,12 @@ fn nrd(context: &Context) {
         .define("NRD_EMBEDS_DXBC_SHADERS", "OFF")
         // Linked into moba-render, so nothing extra ships next to the executable.
         .define("NRD_STATIC_LIBRARY", "ON")
-        // Keep outputs in OUT_DIR instead of NRD's source tree (_Bin, _Shaders).
+        // Keep outputs in OUT_DIR instead of NRD's source tree (_Bin, _Shaders). NRD's own
+        // archive goes to the runtime directory (its ARCHIVE_OUTPUT_DIRECTORY); the archive
+        // directory collects the static libraries it depends on (ShaderMakeBlob).
         .define("CMAKE_RUNTIME_OUTPUT_DIRECTORY", &lib_dir)
         .define("CMAKE_LIBRARY_OUTPUT_DIRECTORY", &lib_dir)
+        .define("CMAKE_ARCHIVE_OUTPUT_DIRECTORY", &lib_dir)
         .define("NRD_SHADERS_PATH", &shaders)
         .build();
     // Multi-config generators (Visual Studio) add a per-configuration directory.
@@ -359,6 +401,9 @@ fn nrd(context: &Context) {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     println!("cargo:rustc-link-lib=static=NRD");
+    // NRD links ShaderMake's blob reader PRIVATE, which a static NRD does not absorb: its
+    // shader lookup (`ShaderMake::FindPermutationInBlob`) comes from this archive.
+    println!("cargo:rustc-link-lib=static=ShaderMakeBlob");
     // NRD is C++: libstdc++ on Linux and the other GNU-style targets, libc++ on Apple's
     // (MSVC links its C++ runtime itself).
     if context.target_vendor == "apple" {
@@ -366,7 +411,34 @@ fn nrd(context: &Context) {
     } else if context.target_os != "windows" {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
-    let _ = &context.target_arch;
+}
+
+/// Copies the tree at `from` into `to`, leaving out the top-level entries named in `skip`.
+/// A file whose bytes are already there is not rewritten, so the incremental `cmake` build sees
+/// unchanged timestamps on a re-run.
+#[cfg(feature = "nrd")]
+fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if skip.iter().any(|skip| name == *skip) {
+            continue;
+        }
+        let target = to.join(&name);
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target, &[])?;
+        } else if kind.is_file() {
+            let bytes = fs::read(entry.path())?;
+            if fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
+                fs::write(&target, bytes)?;
+            }
+        }
+        // Symbolic links are not followed or copied: the fetched archives have none that
+        // NRD's build needs.
+    }
+    Ok(())
 }
 
 /// RTXDI: bindings for the host-side parameter structures its shaders share with C++.

@@ -24,6 +24,9 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 MANIFEST="$ROOT/vendor-sdks.toml"
 SDK_DIR="${MOBA_SDK_DIR:-$ROOT/target/vendor-sdks}"
+# A relative MOBA_SDK_DIR means the same directory as in moba-render's build script: relative
+# to the workspace root, not to wherever this script is run from.
+case "$SDK_DIR" in /*) ;; *) SDK_DIR="$ROOT/$SDK_DIR" ;; esac
 STAMP=.moba-sdk-sha256
 
 die() { echo "fetch-sdks: error: $*" >&2; exit 1; }
@@ -107,6 +110,18 @@ for row in "${ROWS[@]}"; do
   FEATURES_OF[$name]="$features"
 done
 
+# Every --only name must be an entry, a feature or an aggregate: a typo is an error, not a
+# silently smaller fetch.
+for item in ${ONLY//,/ }; do
+  case "$item" in nvidia | vendor-sdks | dlss-fg) continue ;; esac
+  [ -n "${FEATURES_OF[$item]+set}" ] && continue
+  known=0
+  for features in "${FEATURES_OF[@]}"; do
+    [[ ",$features," == *",$item,"* ]] && { known=1; break; }
+  done
+  [ "$known" = 1 ] || die "--only: unknown name '$item' (use entry or feature names from $MANIFEST, or nvidia, vendor-sdks, dlss-fg)"
+done
+
 selected() {
   local name="$1" parent="$2" feature
   [ -z "$ONLY" ] && return 0
@@ -150,10 +165,13 @@ unpack() {
   local archive="$1" into="$2"
   case "$archive" in
     *.zip)
+      # GNU tar cannot read zip archives; bsdtar (libarchive) can.
       if command -v unzip >/dev/null 2>&1; then
         unzip -q "$archive" -d "$into"
+      elif command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -xf "$archive" -C "$into"
       else
-        tar -xf "$archive" -C "$into"
+        die "need unzip or bsdtar to unpack $archive"
       fi
       ;;
     *.tar.gz | *.tgz) tar -xzf "$archive" -C "$into" ;;
