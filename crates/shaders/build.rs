@@ -36,6 +36,7 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -218,6 +219,8 @@ fn main() {
     let slang = (!slang_jobs.is_empty()).then(|| {
         let version = pinned_slang_version(&manifest_dir.join(SLANG_PIN));
         let slangc = find_slangc(&out_dir, &version);
+        // Re-fetching or replacing the compiler in place rebuilds the modules.
+        println!("cargo:rerun-if-changed={}", slangc.display());
         check_slang_version(&slangc, &version);
         let validator = validator.clone().unwrap_or_else(|| {
             panic!(
@@ -241,6 +244,33 @@ fn main() {
             validate(validator, &job.output);
         }
     }
+    write_reflection_table(&slang_jobs, &out_dir);
+}
+
+/// `slang_reflection.rs`: `(module name, reflection JSON)` for every Slang module, for
+/// `moba_shaders::reflection` (the `reflection` feature) and the crate's own binding test.
+fn write_reflection_table(jobs: &[Job], out_dir: &Path) {
+    let mut table = String::from(
+        "/// `(module name, slangc -reflection-json)` for every Slang module (generated).\n\
+         const SLANG_REFLECTION: &[(&str, &str)] = &[\n",
+    );
+    for job in jobs {
+        let module = job.output.file_stem().and_then(|stem| stem.to_str());
+        let json = job.output.with_extension("json");
+        let json = json.file_name().and_then(|name| name.to_str());
+        let (Some(module), Some(json)) = (module, json) else {
+            panic!("non-UTF-8 Slang module name {}", job.output.display());
+        };
+        writeln!(
+            table,
+            "    ({module:?}, include_str!(concat!(env!(\"OUT_DIR\"), \"/{json}\"))),"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    table.push_str("];\n");
+    let path = out_dir.join("slang_reflection.rs");
+    fs::write(&path, table)
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
 }
 
 /// The files directly in `dir` with one of `extensions`, sorted. A missing directory has none.
@@ -274,9 +304,17 @@ fn pinned_slang_version(pin: &Path) -> String {
         .unwrap_or_else(|| panic!("{} has no `version=` line", pin.display()))
 }
 
-/// `SLANGC`, then `tools/slang-<version>/bin/slangc` in the Cargo target directory (found by
-/// walking up from `OUT_DIR`, so `CARGO_TARGET_DIR` and `build.target-dir` both work), then
+/// How far above `OUT_DIR` the target directory can be:
+/// `<target>/[<triple>/]<profile>/build/<package>-<hash>/out`.
+const MAX_TARGET_DEPTH: usize = 5;
+
+/// `SLANGC`, then `tools/slang-<version>/bin/slangc` in the Cargo target directory, then
 /// `PATH`. Never downloads.
+///
+/// The target directory is found by walking up from `OUT_DIR`, so `CARGO_TARGET_DIR` and
+/// `build.target-dir` both work. The walk stops at the target directory: the first ancestor
+/// with a `CACHEDIR.TAG` (Cargo and the fetch scripts write one), and never more than
+/// [`MAX_TARGET_DEPTH`] levels up.
 fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
     if let Some(override_path) = env::var_os("SLANGC") {
         let path = PathBuf::from(override_path);
@@ -289,12 +327,14 @@ fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
         .join(format!("slang-{version}"))
         .join("bin")
         .join(format!("slangc{}", env::consts::EXE_SUFFIX));
-    if let Some(path) = out_dir
-        .ancestors()
-        .map(|dir| dir.join(&fetched))
-        .find(|candidate| candidate.is_file())
-    {
-        return path;
+    for dir in out_dir.ancestors().take(MAX_TARGET_DEPTH + 1) {
+        let candidate = dir.join(&fetched);
+        if candidate.is_file() {
+            return candidate;
+        }
+        if dir.join("CACHEDIR.TAG").is_file() {
+            break;
+        }
     }
     if let Some(path) = find_program("slangc") {
         return path;
@@ -316,6 +356,13 @@ fn check_slang_version(slangc: &Path, version: &str) {
         .unwrap_or_else(|error| panic!("failed to run {}: {error}", slangc.display()));
     let mut text = String::from_utf8_lossy(&result.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&result.stderr));
+    // A compiler that cannot even report its version is broken, whatever the override says.
+    assert!(
+        result.status.success(),
+        "failed to run `{} -version` ({}):\n{text}",
+        slangc.display(),
+        result.status
+    );
     let reported = text
         .lines()
         .map(str::trim)
@@ -323,7 +370,7 @@ fn check_slang_version(slangc: &Path, version: &str) {
         .unwrap_or("")
         .trim_start_matches('v')
         .to_owned();
-    if result.status.success() && reported == version {
+    if reported == version {
         return;
     }
     let message = format!(

@@ -9,7 +9,9 @@
 # The archive is downloaded only from the official release
 # (https://github.com/shader-slang/slang/releases), checked against that SHA-256, and unpacked
 # into $env:CARGO_TARGET_DIR (default target)\tools\slang-<version>\, where
-# crates/shaders/build.rs looks for it. Nothing is installed system-wide.
+# crates/shaders/build.rs looks for it. Nothing is installed system-wide. Only the
+# CARGO_TARGET_DIR variable is read: with a `build.target-dir` in a Cargo config, set
+# CARGO_TARGET_DIR to the same directory for this script (or point SLANGC at the compiler).
 #
 # Idempotent and offline-friendly: an unpacked toolchain whose recorded checksum matches the
 # pin is reused without network access, and a previously downloaded archive in
@@ -62,6 +64,19 @@ $marker = Join-Path $dest '.archive-sha256'
 if ($Print) {
     Write-Output $slangc
     exit 0
+}
+
+New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+# Mark the target directory as Cargo does (Cargo only writes the tag when it creates the
+# directory itself, and this script may run first). build.rs stops its search for slangc at
+# the first directory with this tag.
+$cacheTag = Join-Path $targetDir 'CACHEDIR.TAG'
+if (-not (Test-Path -LiteralPath $cacheTag)) {
+    Set-Content -LiteralPath $cacheTag -Value @(
+        'Signature: 8a477f597d28d172789f06886806bc55',
+        '# This file is a cache directory tag created by scripts/fetch-slang.ps1.',
+        '# For information about cache directory tags see https://bford.info/cachedir/'
+    )
 }
 
 # Already unpacked from an archive with the pinned checksum: nothing to do, no network.

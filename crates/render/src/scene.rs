@@ -655,6 +655,20 @@ pub(crate) struct CameraUniform {
 }
 
 impl CameraUniform {
+    /// A block holding only what the Slang toolchain smoke reads (`crate::slang_smoke`):
+    /// `view_proj`, `camera_pos` and the first `circles` (at most [`VISION_CIRCLES`]).
+    pub(crate) fn for_slang_smoke(view_proj: Mat4, camera_pos: Vec4, circles: &[Vec4]) -> Self {
+        let mut uniform: Self = Zeroable::zeroed();
+        uniform.view_proj = view_proj.to_cols_array_2d();
+        uniform.camera_pos = camera_pos.to_array();
+        for (destination, source) in uniform.vision_circles.iter_mut().zip(circles) {
+            *destination = source.to_array();
+        }
+        let count = circles.len().min(VISION_CIRCLES);
+        uniform.vision_count = [u32::try_from(count).unwrap_or(u32::MAX), 0, 0, 0];
+        uniform
+    }
+
     /// The camera block of a view `extent` pixels large, with this frame's `lighting`
     /// (shadows, IBL, lights, occlusion) and `outlines`.
     pub(crate) fn new(
@@ -805,69 +819,117 @@ mod tests {
         assert_eq!(size_of::<CameraUniform>(), 1696);
     }
 
+    /// The Slang name of a field's shape, from its Rust type (compile-checked by the
+    /// helpers below: a `float4x4` must be `[[f32; 4]; 4]`, and so on).
+    fn float4x4(_: &[[f32; 4]; 4]) -> String {
+        String::from("float32 4x4")
+    }
+    fn float4(_: &[f32; 4]) -> String {
+        String::from("float32 1x4")
+    }
+    fn uint4(_: &[u32; 4]) -> String {
+        String::from("uint32 1x4")
+    }
+    fn float4_array<const N: usize>(_: &[[f32; 4]; N]) -> String {
+        format!("float32 1x4 [{N}]")
+    }
+
+    /// The same shape string from a reflected Slang type: scalar type, rows x columns
+    /// (vectors are one row), then the array length if any.
+    fn slang_shape(kind: &serde_json::Value) -> String {
+        let scalar = |element: &serde_json::Value| {
+            element["scalarType"]
+                .as_str()
+                .expect("scalar type")
+                .to_owned()
+        };
+        match kind["kind"].as_str() {
+            Some("matrix") => format!(
+                "{} {}x{}",
+                scalar(&kind["elementType"]),
+                kind["rowCount"],
+                kind["columnCount"]
+            ),
+            Some("vector") => format!(
+                "{} 1x{}",
+                scalar(&kind["elementType"]),
+                kind["elementCount"]
+            ),
+            Some("array") => format!(
+                "{} [{}]",
+                slang_shape(&kind["elementType"]),
+                kind["elementCount"]
+            ),
+            other => panic!("unexpected Slang field type {other:?}"),
+        }
+    }
+
     /// ADR-0020 §4c's layout check: the Slang mirror of the frame constants
     /// (`slang/lib/frame_constants.slang`, set 0, binding 0 of the toolchain smoke module)
-    /// has exactly `CameraUniform`'s fields, in order, at the same offsets and sizes, as
-    /// `slangc -reflection-json` reports them.
+    /// has exactly `CameraUniform`'s fields, in order, with the same scalar type, shape
+    /// (rows x columns, array length), offset and size, as `slangc -reflection-json`
+    /// reports them. Matrix *orientation* is not in the reflection: `moba-shaders` checks
+    /// the SPIR-V decorations and `slang_smoke` checks `mul(M, v)` on a GPU.
     #[test]
     fn slang_frame_constants_match_camera_uniform() {
         macro_rules! rust_fields {
-            ($($field:ident),* $(,)?) => {{
+            ($($field:ident: $shape:ident),* $(,)?) => {{
                 let zeroed: CameraUniform = bytemuck::Zeroable::zeroed();
                 vec![$((
-                    stringify!($field),
-                    offset_of!(CameraUniform, $field),
-                    core::mem::size_of_val(&zeroed.$field),
+                    stringify!($field).to_owned(),
+                    $shape(&zeroed.$field),
+                    offset_of!(CameraUniform, $field) as u64,
+                    core::mem::size_of_val(&zeroed.$field) as u64,
                 )),*]
             }};
         }
         let rust = rust_fields!(
-            view_proj,
-            camera_pos,
-            light_direction,
-            ambient,
-            terrain,
-            vision_circles,
-            vision_count,
-            vision_walls,
-            wall_count,
-            light_view_proj,
-            sun_color,
-            shadow_params,
-            shadow_extra,
-            ibl_params,
-            style,
-            rim_color,
-            specular_tint,
-            ambient_ground,
-            sh,
-            fog_rect,
-            fog_color,
-            fog_params,
-            haze_color,
-            haze_params,
-            sky_zenith,
-            sky_horizon,
-            post_params,
-            post_clamp,
-            inv_view_proj,
-            viewport,
-            light_grid,
-            light_info,
-            occlusion,
-            baked_ao,
-            contact,
-            outline_palette,
+            view_proj: float4x4,
+            camera_pos: float4,
+            light_direction: float4,
+            ambient: float4,
+            terrain: float4,
+            vision_circles: float4_array,
+            vision_count: uint4,
+            vision_walls: float4_array,
+            wall_count: uint4,
+            light_view_proj: float4x4,
+            sun_color: float4,
+            shadow_params: float4,
+            shadow_extra: float4,
+            ibl_params: float4,
+            style: float4,
+            rim_color: float4,
+            specular_tint: float4,
+            ambient_ground: float4,
+            sh: float4_array,
+            fog_rect: float4,
+            fog_color: float4,
+            fog_params: float4,
+            haze_color: float4,
+            haze_params: float4,
+            sky_zenith: float4,
+            sky_horizon: float4,
+            post_params: float4,
+            post_clamp: float4,
+            inv_view_proj: float4x4,
+            viewport: float4,
+            light_grid: float4,
+            light_info: uint4,
+            occlusion: float4,
+            baked_ao: float4,
+            contact: float4,
+            outline_palette: float4_array,
         );
         // The list above covers the whole struct: no field missing, no padding.
         assert_eq!(
-            rust.iter().map(|&(_, _, size)| size).sum::<usize>(),
-            size_of::<CameraUniform>()
+            rust.iter().map(|(_, _, _, size)| size).sum::<u64>(),
+            size_of::<CameraUniform>() as u64
         );
 
+        let json = moba_shaders::reflection("toolchain_smoke.slang").expect("smoke reflection");
         let reflection: serde_json::Value =
-            serde_json::from_str(moba_shaders::TOOLCHAIN_SMOKE_REFLECTION_JSON)
-                .expect("slangc reflection JSON");
+            serde_json::from_str(json).expect("slangc reflection JSON");
         let camera = reflection["parameters"]
             .as_array()
             .expect("reflection parameters")
@@ -884,7 +946,7 @@ mod tests {
         let size = camera["type"]["elementVarLayout"]["binding"]["size"].as_u64();
         assert_eq!(size, Some(size_of::<CameraUniform>() as u64));
 
-        let slang: Vec<(String, u64, u64)> = element["fields"]
+        let slang: Vec<(String, String, u64, u64)> = element["fields"]
             .as_array()
             .expect("FrameConstants fields")
             .iter()
@@ -893,14 +955,11 @@ mod tests {
                 assert_eq!(binding["kind"], "uniform", "{field}");
                 (
                     field["name"].as_str().expect("field name").to_owned(),
+                    slang_shape(&field["type"]),
                     binding["offset"].as_u64().expect("field offset"),
                     binding["size"].as_u64().expect("field size"),
                 )
             })
-            .collect();
-        let rust: Vec<(String, u64, u64)> = rust
-            .into_iter()
-            .map(|(name, offset, size)| (name.to_owned(), offset as u64, size as u64))
             .collect();
         assert_eq!(slang, rust, "Slang FrameConstants vs Rust CameraUniform");
     }

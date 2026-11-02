@@ -66,6 +66,17 @@ jobs:
       - name: Build client and tools
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
+      # ADR-0020 §4c: a driver consumes slangc's SPIR-V (one dispatch of the toolchain smoke
+      # module, output checked on the CPU) before any tiered pass depends on it.
+      - name: Slang toolchain smoke with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set -o pipefail
+          timeout 60 ./target/release/vulkan-probe --slang-smoke 2>&1 | tee slang-smoke.log
+          if grep -E '^\[vulkan' slang-smoke.log; then
+            echo "validation messages from the Slang smoke"
+            exit 1
+          fi
       - name: Capture with validation + sync validation
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |

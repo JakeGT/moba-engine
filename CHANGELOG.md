@@ -93,8 +93,11 @@ the semver check):
   `crates/shaders/slang-version.txt`), with an exact version check (`MOBA_SLANG_ANY_VERSION=1`
   relaxes it) and a mandatory `spirv-val`. Fetch it once with `scripts/fetch-slang.sh` or
   `.ps1` ([docs/dev/slang.md](docs/dev/slang.md)). The first module is
-  `toolchain_smoke.slang`, which the renderer does not create. A test compares the Slang
-  frame-constants layout from `slangc -reflection-json` with `CameraUniform`. CI fetches and
+  `toolchain_smoke.slang`, which the renderer does not create. `vulkan-probe --slang-smoke`
+  dispatches it once and checks the output, including the matrix convention. CI runs it on
+  lavapipe and on MoltenVK, with validation required. Tests compare the Slang
+  frame-constants layout from `slangc -reflection-json` with `CameraUniform` (name, type,
+  shape, offset, size) and every module's reflected bindings with an explicit table. CI fetches and
   caches the compiler through `.github/actions/setup-slang`, and installs `spirv-tools`. The
   RTXDI-through-`slangc` spike passes for DI and GI and fails for PT
   ([docs/dev/rtxdi-slang-spike.md](docs/dev/rtxdi-slang-spike.md)).

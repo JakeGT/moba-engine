@@ -31,6 +31,8 @@ moba-shaders.workspace = true
 # The VAT validation tests load the shipped sample model.
 moba-assets = { workspace = true, features = ["bc-decode", "glb"] }
 criterion.workspace = true
+# The Slang reflection layout test (ADR-0020 §4c).
+moba-shaders = { workspace = true, features = ["reflection"] }
 serde_json.workspace = true
 
 [[bench]]

@@ -954,19 +954,26 @@ documented in [docs/dev/slang.md](../dev/slang.md).
   vulkan1.3` checks the result. Two flags are added:
   - `-fvk-use-entrypoint-name`, so that one file may hold several entry points;
   - `-warnings-as-errors all`.
-- **Explicit bindings.** `slangc` has no flag that rejects implicit bindings, so a
-  `moba-shaders` unit test checks the sources: every global resource follows a
-  `[[vk::binding]]` line.
-- **Compiler lookup.** The `target/tools` step walks up from `OUT_DIR`, so a relocated target
-  directory (`CARGO_TARGET_DIR`, `build.target-dir`) works. The fetch scripts honour
-  `CARGO_TARGET_DIR`.
+- **Explicit bindings.** `slangc` has no flag that rejects implicit bindings. A
+  `moba-shaders` unit test therefore compares every module's reflected parameters with an
+  exact `(name, set, binding)` table: globals, `lib/` imports and entry-point parameters. It
+  rejects loose `uniform` globals and uniform entry-point parameters.
+- **Compiler lookup.** The `target/tools` step walks up from `OUT_DIR` and stops at the
+  first `CACHEDIR.TAG`, at most five levels up. A relocated target directory therefore works
+  for the build. The fetch scripts read only `CARGO_TARGET_DIR`, and they write the tag when
+  they create the target directory themselves.
 - **Layout check: frame constants only, for now.** The test compares `slangc
   -reflection-json` for `FrameConstants` (`shaders/slang/lib/frame_constants.slang`) with
-  `CameraUniform`. The instance record and the material record get Slang mirrors, and join the
+  `CameraUniform`: each field's name, order, scalar type, shape, offset and size. The JSON
+  comes from `moba_shaders::reflection`, behind a non-default `reflection` feature. The instance record and the material record get Slang mirrors, and join the
   test, when the first Slang pass that reads them lands (N1). Writing those mirrors now would
   mean porting a pass, which N0 does not do (§4d).
 - **N0 module.** This step adds one module, `toolchain_smoke.slang`, which the renderer does
-  not create. `bindless_smoke` and `rt_smoke` follow with bindless and the capability gate.
+  not create. `vulkan-probe --slang-smoke` dispatches it once on a compute-only device and
+  checks the output, including `mul(view_proj, v)` against glam. That fixes the matrix
+  convention: column-major, `mul(M, v)`. CI runs it on lavapipe (render-golden) and on
+  MoltenVK (the macOS probe), with validation required. `bindless_smoke` and `rt_smoke`
+  follow with bindless and the capability gate.
 - **CI.**
   - The fetch and its cache (keyed on `slang-version.txt`) are one composite action,
     `.github/actions/setup-slang`.
