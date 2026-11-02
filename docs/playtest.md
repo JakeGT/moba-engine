@@ -165,7 +165,7 @@ $env:MOBA_FRAME_LOG="frames-<name>.log"; .\moba-client.exe
 | `MOBA_FRAME_LOG=<path>` | Writes frame-time percentiles **when the client exits cleanly**. |
 | `MOBA_VSYNC=0` | Uncapped present mode, so the frame log measures the frame cost rather than the display refresh. |
 | `MOBA_SETTINGS=<path>` | Settings file (default `moba-settings.toml`): key bindings, UI scale and rendering `quality`. |
-| `MOBA_QUALITY=low\|medium\|high\|ultra\|overdrive` | Rendering quality tier for this run (overrides the `quality` setting, whose default `auto` is detected from the GPU on the first run). `overdrive` runs as `ultra` on the Compat path. |
+| `MOBA_QUALITY=low\|medium\|high\|ultra\|overdrive` | Rendering quality tier for this run (overrides the `quality` setting, whose default `auto` is detected from the GPU on each interactive start on the tiered path, and is High on Compat). `overdrive` runs as `ultra` on the Compat path; a tier above the device's `max_tier` is capped. |
 | `MOBA_RENDER_PATH=auto\|tiered\|compat` | Render path for this run (overrides the `render_path` setting; ADR-0020 §2). `tiered` here (not in the settings file) also admits CPU devices such as lavapipe. It fails with a per-device list of what is missing when no device qualifies. |
 | `MOBA_PIPELINE_CACHE=<file>\|off` | Where the GPU pipeline cache is kept (default: a per-user cache directory). A stale or corrupt file is ignored and rewritten. |
 

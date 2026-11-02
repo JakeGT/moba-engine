@@ -60,10 +60,13 @@ Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_sc
 stays sharp at any scale. `team_palette` (`standard` or `colorblind`, default `standard`) picks
 the health-bar and minimap team colours; `colorblind` uses Okabe-Ito yellow/sky-blue/orange,
 and `MOBA_TEAM_PALETTE` overrides it. `quality` (`auto`/`low`/`medium`/`high`/`ultra`/`overdrive`,
-default `auto`) is the rendering quality tier; `MOBA_QUALITY` overrides it. `auto` is resolved
-once, on the first interactive run, from the GPU (ADR-0020 §2c: the tiered path's reference
-table, Medium on Compat) and saved to the file; automated runs (smoke frames, captures) never
-detect and use High. `overdrive` is the tiered path's top tier and runs as `ultra` on Compat.
+default `auto`) is the rendering quality tier; `MOBA_QUALITY` overrides it. On the tiered
+path `auto` is detected on every interactive start from the GPU's reference table (ADR-0020
+§2b), and nothing is written to the file; on Compat it is High, as before. Automated runs
+(smoke frames, captures) never detect and use High. A tier the device cannot run is capped at
+its `max_tier`. A file without `settings_version = 1` was written before the tiered path, so
+its tier is re-detected on the tiered path and kept on Compat. `overdrive` is the tiered
+path's top tier and runs as `ultra` on Compat.
 On the tiered path dynamic resolution aims at the tier's GPU budget (§5c); until N1 ships the
 upscalers it is off unless `MOBA_DYNRES=on` (or a target in ms) turns it on. Today it picks the HDR
 target format (Low uses the packed 32-bit format) and the hero-portrait rate (static on Low,

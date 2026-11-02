@@ -153,11 +153,16 @@ the semver check):
   - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it
     configures the frame like Ultra; on Compat it runs as Ultra (`QualityTier::compat`).
     `QualityTier::ALL` has five tiers and `QualityTier::COMPAT` today's four.
-  - `moba_render::default_tier` picks a tier from the PCI reference table
-    (`caps::DEFAULT_TIERS`, from pci.ids 2026.10.01), capped at the device's `max_tier`;
-    Compat devices get Medium. The `quality` setting defaults to `auto`, resolved once on the
-    first interactive run and saved; automated runs keep High. `vulkan-probe` prints
+  - `moba_render::default_tier` picks a tier from a PCI reference table (pci.ids
+    2026.10.01), capped at the device's `max_tier`; Compat devices get Medium. The `quality`
+    setting defaults to `auto`. On the tiered path the client detects it on every interactive
+    start (nothing is saved); on Compat `auto` stays today's High. Automated runs keep High,
+    and an explicit tier is capped at the device's `max_tier`. `vulkan-probe` prints
     `default_tier=`.
+  - New `settings_version` key (1). A file without it predates the tiered path: its tier is
+    re-detected on the tiered path and kept on Compat. `Renderer::quality_tier()` is the
+    requested tier and the new `Renderer::config_tier()` the one configured;
+    `moba_render::choose_device` picks from `probe_devices` like the renderer.
   - `moba_render::preset`: the `TierPreset` feature matrix (built, `Planned(phase)`, or not
     offered) and `config_tier`, the configuration a tier runs until its phases land (§5e:
     tiered Low runs today's High, tiered Medium and up today's Ultra with MSAA 4×).
@@ -166,8 +171,7 @@ the semver check):
   - On the tiered path dynamic resolution aims at the tier's budget, from full scale down to
     a 0.5 floor. Until N1 it is off unless `MOBA_DYNRES` turns it on, and the preset's
     upscaler-mode ceiling (0.67 or 0.5) applies from N1, when an upscaler fills the gap.
-  - A settings file from before N0 keeps its quality tier on Compat; only the tiered path
-    re-detects it. The
+  - The
     frame log gains `config_tier=` and `scale_first/final/min/max` and `scale_changes_late`;
     `scripts/dynres-check.sh` checks that a forced target holds. `PostConfig`'s dynamic
     target may now go down to 0.1 ms (was 1 ms), so a forced target bites on a fast GPU.

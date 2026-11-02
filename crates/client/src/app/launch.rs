@@ -206,6 +206,8 @@ pub(crate) struct RenderTarget {
     pub(crate) allow_cpu: bool,
     /// The chosen device's default tier ([`moba_render::default_tier`]).
     pub(crate) default_tier: moba_render::QualityTier,
+    /// The highest tier the chosen device admits (`None` on Compat or without a probe).
+    pub(crate) max_tier: Option<moba_render::QualityTier>,
     /// The chosen device's name, for the detection log.
     pub(crate) device: String,
 }
@@ -220,6 +222,7 @@ impl RenderTarget {
             choice,
             allow_cpu,
             default_tier: moba_render::QualityTier::Medium,
+            max_tier: None,
             device: String::from("?"),
         };
         let devices = match moba_render::probe_devices(choice, allow_cpu) {
@@ -238,23 +241,23 @@ impl RenderTarget {
             choice,
             allow_cpu,
             default_tier: moba_render::default_tier(&device.capabilities, &device.admission),
+            max_tier: device.admission.max_tier,
             device: device.capabilities.name.clone(),
         }
     }
 }
 
-/// The tier to run: `MOBA_QUALITY`, else the settings, detecting the device's default once
-/// for a player (ADR-0020 §2b; [`crate::settings::Settings::resolve_quality`]). A detection
-/// is saved when a settings file exists or `MOBA_SAVE_SETTINGS` is set.
+/// The tier to run: `MOBA_QUALITY`, else the settings, detecting the device's default for a
+/// player ([`crate::settings::Settings::resolve_quality`]), capped at the device's
+/// `max_tier` on the tiered path. Nothing is saved.
 pub(crate) fn resolve_quality(
-    settings: &mut crate::settings::Settings,
-    path: &std::path::Path,
+    settings: &crate::settings::Settings,
     target: &RenderTarget,
     automated: bool,
 ) -> moba_render::QualityTier {
     if let Ok(name) = std::env::var("MOBA_QUALITY") {
         match moba_render::QualityTier::from_name(&name) {
-            Some(tier) => return tier,
+            Some(tier) => return cap_tier(tier, target),
             None => eprintln!(
                 "MOBA_QUALITY={name:?} is not low/medium/high/ultra/overdrive; using settings"
             ),
@@ -266,18 +269,28 @@ pub(crate) fn resolve_quality(
         automated,
     );
     if detected {
-        let save = path.exists() || std::env::var_os("MOBA_SAVE_SETTINGS").is_some();
         eprintln!(
-            "[render] quality {tier} recorded for {:?} on the {} path{}",
+            "[render] quality {tier} detected for {:?} on the {} path",
             target.device,
-            target.path.name(),
-            if save { " (saved)" } else { "" }
+            target.path.name()
         );
-        if save && let Err(error) = settings.save(path) {
-            eprintln!("settings: save failed: {error}");
-        }
     }
-    tier
+    cap_tier(tier, target)
+}
+
+/// `tier` capped at what the device admits (ADR-0020 §2b: a device without the RT pipeline
+/// tops out at Ultra). Compat runs Overdrive as Ultra already (`config_tier`).
+fn cap_tier(tier: moba_render::QualityTier, target: &RenderTarget) -> moba_render::QualityTier {
+    match target.max_tier {
+        Some(max) if target.path == moba_render::RenderPath::Tiered && tier > max => {
+            eprintln!(
+                "[render] quality {tier} needs more than {:?} admits; running {max}",
+                target.device
+            );
+            max
+        }
+        _ => tier,
+    }
 }
 
 pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {

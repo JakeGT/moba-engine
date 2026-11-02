@@ -269,7 +269,7 @@ impl ClientApp {
         if std::env::var_os("MOBA_RESET_SETTINGS").is_some() {
             let _ = crate::settings::Settings::default().save(&settings_path);
         }
-        let (mut settings, warnings) = crate::settings::Settings::load(&settings_path);
+        let (settings, warnings) = crate::settings::Settings::load(&settings_path);
         let camera_zoom = settings.camera_zoom;
         let vfx_setting = settings.vfx;
         let ally_vfx_opacity = std::env::var("MOBA_VFX_ALLY_OPACITY")
@@ -346,8 +346,7 @@ impl ClientApp {
         let render_target = launch::RenderTarget::probe(render_path, allow_cpu);
         let automated =
             quit_after_frames != u64::MAX || capture_path.is_some() || map_capture.is_some();
-        let quality =
-            launch::resolve_quality(&mut settings, &settings_path, &render_target, automated);
+        let quality = launch::resolve_quality(&settings, &render_target, automated);
         // The tier whose switches this path runs; every client system below keys off it.
         let config_quality = moba_render::config_tier(render_target.path, quality);
         let team_palette = std::env::var("MOBA_TEAM_PALETTE").ok().map_or_else(

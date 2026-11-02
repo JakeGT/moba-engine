@@ -27,7 +27,8 @@ mkdir -p "$out"
 play() { # play NAME MOBA_DYNRES
   local log="$out/$1.log"
   # shellcheck disable=SC2086 # RUN is a command prefix.
-  env MOBA_QUALITY="$tier" MOBA_RENDER_PATH="$path" MOBA_DYNRES="$2" \
+  # No settings file: a developer's render_scale must not make the scale "step down".
+  env MOBA_SETTINGS=/dev/null MOBA_QUALITY="$tier" MOBA_RENDER_PATH="$path" MOBA_DYNRES="$2" \
     MOBA_REPLAY="$replay" MOBA_REPLAY_EXIT=1 MOBA_WARMUP_TICKS="${WARMUP_TICKS:-330}" \
     MOBA_VULKAN_VALIDATION="${MOBA_VULKAN_VALIDATION:-off}" MOBA_VSYNC=0 \
     MOBA_WINDOW_SIZE="${WINDOW:-1920x1080}" MOBA_SMOKE_FRAMES="${FRAMES:-3000}" \
@@ -36,8 +37,8 @@ play() { # play NAME MOBA_DYNRES
     || { tail -20 "$log.stderr"; exit 1; }
   test -s "$log"
 }
-field() { # field LOG KEY
-  grep -o "[[:space:]]$2=[^ ]*" "$1" | head -1 | cut -d= -f2
+field() { # field LOG KEY: empty when the key is missing
+  grep -o "[[:space:]]$2=[^ ]*" "$1" | head -1 | cut -d= -f2 || true
 }
 
 play natural off
@@ -52,6 +53,9 @@ final=$(field "$log" scale_final)
 low=$(field "$log" scale_min)
 late=$(field "$log" scale_changes_late)
 ran=$(field "$log" path)
+for value in "$first" "$final" "$low" "$late" "$ran" "$p95"; do
+  [ -n "$value" ] || { echo "dynres-check: the frame log lacks a scale, path or p95 field"; exit 1; }
+done
 echo "dynres-check: path=$ran tier=$tier natural_p95=$natural ms target=$target ms" \
   "forced_p95=$p95 ms scale $first -> $final (min $low) late_changes=$late"
 fail=0

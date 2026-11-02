@@ -1029,7 +1029,7 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
 
 ### Amendment 3 (2026-11-01, N0.3): dynamic resolution before the upscalers
 
-Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Six departures from §5 and §5a,
+Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Six departures from §2b, §5 and §5a,
 each until the phase named:
 
 - **The scale ceiling stays at full scale until N1.** §5c sets the ceiling to the preset's
@@ -1049,10 +1049,20 @@ each until the phase named:
     which would show as resolution pumping.
 
   N1 needs the upscale pass anyway, and N1 tunes the controller against the reference GPUs.
-- **Compat players keep their tier.** §5a re-detects a settings file from before N0. On
-  Compat that would change a player's tier (Medium for every Compat device) and so their
-  pixels, against "N0 changes no Compat pixel". There the file keeps its tier and is only
-  marked detected. The tiered path re-detects as §5a says.
+- **Compat players keep today's tier, and detection saves nothing.** §5a re-detects a
+  settings file from before N0, and §2b starts a Compat device on Medium. Either would change
+  a Compat player's pixels, against "N0 changes no Compat pixel". So in N0:
+  - on Compat, `auto` is today's High and a pre-N0 file keeps its tier;
+  - on the tiered path, `auto` and a pre-N0 file take the detected tier;
+  - detection runs on every interactive start and never writes the settings file. Writing
+    it on detection could overwrite a file that failed to parse, lose its comments, and fix a
+    transient probe failure for good;
+  - a file is pre-N0 when it lacks `settings_version = 1`. Saving keeps a file's version, so
+    a pre-N0 file saved on Compat is still re-detected on a later tiered run;
+  - an explicit tier above the device's `max_tier` is capped at it (§2b).
+
+  `caps::default_tier` keeps §2b's Compat Medium. The maintainer decides whether Compat moves
+  to it once the tiered path is the default.
 - **The floor stays at 0.5 until N1.** The 0.33 (Ultra Performance) floors of Ultra at 4K
   and Overdrive go below today's `MIN_RENDER_SCALE`; they arrive with the upscalers.
 - **The dynamic-resolution target may go down to 0.1 ms** (it was clamped to 1 ms). The RTX
