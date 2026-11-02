@@ -101,6 +101,19 @@ the semver check):
   caches the compiler through `.github/actions/setup-slang`, and installs `spirv-tools`. The
   RTXDI-through-`slangc` spike passes for DI and GI and fails for PT
   ([docs/dev/rtxdi-slang-spike.md](docs/dev/rtxdi-slang-spike.md)).
+- **Vulkan bindings on a pinned `ash` revision (ADR-0020 §1, N0.1;
+  [perf/0025](docs/perf/0025-n0-ash-pin.md)).**
+  - `ash` and `ash-window` come from `ash-rs/ash` master at `8844f6b` (Vulkan 1.4.352
+    headers) through a workspace `[patch.crates-io]` entry, and `ash` enables `provisional`.
+    `gpu-allocator` moves to upstream's `ash-next` revision `6a68a5b4`, with only the
+    `vulkan` and `std` features. `deny.toml` allows exactly those two git sources.
+  - Nothing changes in behaviour: the goldens are byte-identical and the RTX timings are
+    within noise. The tiered path stays on Vulkan 1.3 (ADR-0020 amendment 1).
+  - **Embedders of `moba-render`** (or `moba-engine` with `render`) outside this workspace
+    must copy the two `[patch.crates-io]` lines into their own workspace root. Cargo applies
+    patches only at the root. See
+    [building-on-moba](docs/building-on-moba.md#the-renderer-and-the-ash-pin). Headless
+    embedders are unaffected. Publishing to crates.io (#21) waits for `ash` 0.39.
 - Removed unused internal dependency edges (`sim`/`server`/`client` → `moba-jobs`; `server` → `moba-core`/`moba-ecs`; `client`/`game` → `moba-ecs`; `jobs` → `moba-core`). `moba-test-support` (a counting allocator) is now a dev-dependency only of `moba-net`. `cpal` and `loom` moved to workspace dependencies.
 
 ### Documentation

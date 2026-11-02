@@ -37,6 +37,7 @@
 //! copies `args` to this frame's readback buffer.
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use bytemuck::{Pod, Zeroable, bytes_of};
 use gpu_allocator::MemoryLocation;
 use moba_core::math::{Mat4, Vec3, Vec4};
@@ -1877,7 +1878,7 @@ fn particle_pipeline(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(spec.layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     let handle = device.create_graphics_pipeline(&create_info)?;
     Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))

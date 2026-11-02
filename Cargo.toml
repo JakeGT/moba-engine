@@ -33,7 +33,8 @@ moba-netsim = { path = "crates/netsim", version = "0.4.0" }
 
 # Third-party. Versions are resolved once here so every crate agrees.
 arrayvec = "0.7"
-ash = "0.38"
+# `provisional` exposes VK_KHR_portability_subset (MoltenVK), which ash master gates behind it.
+ash = { version = "0.38", features = ["provisional"] }
 ash-window = "0.13"
 bytemuck = { version = "1", features = ["derive"] }
 crossbeam-deque = "0.8"
@@ -59,7 +60,9 @@ png = "0.18"
 # meshoptimizer bindings (MIT OR Apache-2.0; bundles meshoptimizer, MIT) for the offline mesh
 # LOD baker (moba-tools only, R8, ADR-0018). Exact pin; the client never links it.
 meshopt = { version = "=0.7.0", default-features = false }
-gpu-allocator = "0.28"
+# ADR-0020 §1: the ash-next branch; released 0.28.0 does not build against ash master. Its own
+# [patch] (a Traverse ash fork) is ignored here, so re-check that it builds on each ash re-pin.
+gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", rev = "6a68a5b4c233361c07dfa8865043a16ade7512db", default-features = false, features = ["vulkan", "std"] }
 raw-window-handle = "0.6"
 cpal = "0.18"
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
@@ -110,3 +113,10 @@ panic = "abort"
 inherits = "release"
 debug = "line-tables-only"
 strip = false
+
+[patch.crates-io]
+# ADR-0020 §1: Vulkan 1.4.352 headers; no ash release after 0.38.0 (2024-04-01). The patch keeps
+# exactly one `ash` in the graph. Return to crates.io once ash 0.39+ and a matching
+# gpu-allocator release exist.
+ash = { git = "https://github.com/ash-rs/ash", rev = "8844f6b4eefb16d08cd73c8f3d340e1ac12deb16" }
+ash-window = { git = "https://github.com/ash-rs/ash", rev = "8844f6b4eefb16d08cd73c8f3d340e1ac12deb16" }

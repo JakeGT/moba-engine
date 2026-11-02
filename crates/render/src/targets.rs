@@ -1,6 +1,7 @@
 //! Physical images behind the render graph's transient slots, and target format choice.
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
@@ -393,7 +394,7 @@ pub(crate) fn choose_exposure_format(device: &DeviceContext) -> vk::Format {
 /// comparison support.
 fn optimal_features_2(device: &DeviceContext, format: vk::Format) -> vk::FormatFeatureFlags2 {
     let mut properties_3 = vk::FormatProperties3::default();
-    let mut properties = vk::FormatProperties2::default().push_next(&mut properties_3);
+    let mut properties = vk::FormatProperties2::default().push(&mut properties_3);
     // SAFETY: the physical device belongs to the instance the device context was made from,
     // and the output chain is valid for the call.
     unsafe {
