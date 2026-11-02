@@ -4,6 +4,7 @@
 //! persistent pipeline cache, and is built when the renderer is created.
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 
 use crate::device::DeviceContext;
 use crate::error::RenderResult;
@@ -228,7 +229,7 @@ pub(crate) fn create_blended(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(spec.layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Statistics for the perf check of the terrain shader's registers (ADR-0017 §1).
     let create_info = if device.pipeline_stats {
         create_info.flags(vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR)
@@ -331,7 +332,7 @@ pub(crate) fn create_depth_only(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shader.
     device.create_graphics_pipeline(&create_info)
 }
@@ -426,7 +427,7 @@ pub(crate) fn create_prepass(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
@@ -544,7 +545,7 @@ pub(crate) fn create_ui(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
@@ -657,7 +658,7 @@ pub(crate) fn create_fullscreen(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }
@@ -764,7 +765,7 @@ pub(crate) fn create_vertexless(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     device.create_graphics_pipeline(&create_info)
 }

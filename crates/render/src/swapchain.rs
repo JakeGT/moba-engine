@@ -104,7 +104,7 @@ impl Swapchain {
         }
 
         let loader =
-            khr::swapchain::Device::new(&instance_context.instance, &device_context.device);
+            khr::swapchain::Device::load(&instance_context.instance, &device_context.device);
         // SAFETY: the surface is live, the device supports the swapchain extension, and all
         // create-info pointers are valid for the call.
         let handle = unsafe { loader.create_swapchain(&create_info, None) }?;
