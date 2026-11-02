@@ -118,6 +118,7 @@ pub fn choose_device(
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const PORTABILITY_ENUMERATION: &CStr = c"VK_KHR_portability_enumeration";
 static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);
+static VALIDATION_WARNINGS: AtomicU64 = AtomicU64::new(0);
 
 /// Owns the Vulkan entry point and instance.
 pub(crate) struct InstanceContext {
@@ -267,6 +268,12 @@ impl InstanceContext {
     pub(crate) fn validation_error_count() -> u64 {
         VALIDATION_ERRORS.load(Ordering::Relaxed)
     }
+
+    /// Validation warnings reported so far (the tiered smoke tests fail on any, ADR-0020
+    /// gate 3; the renderer itself only counts errors).
+    pub(crate) fn validation_warning_count() -> u64 {
+        VALIDATION_WARNINGS.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for InstanceContext {
@@ -316,6 +323,8 @@ unsafe extern "system" fn debug_callback(
     };
     if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
+    } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
+        VALIDATION_WARNINGS.fetch_add(1, Ordering::Relaxed);
     }
     eprintln!("[vulkan {severity:?} {message_type:?}] {message}");
     vk::FALSE

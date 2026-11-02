@@ -137,6 +137,19 @@ pub const VFX_DISTORT_VERT: &[u8] =
 pub const VFX_DISTORT_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_distort.frag.spv"));
 
+/// Tiered-path smoke test (ADR-0020 gate 3), graphics half: samples bindless textures through
+/// divergent handles (`nonuniformEXT`). Created only on a device admitted to the tiered path,
+/// which enables the descriptor-indexing and buffer-device-address features it declares.
+pub const BINDLESS_SMOKE_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/bindless_smoke.frag.spv"));
+/// Tiered-path smoke test, compute half: the same sampling written through a bindless storage
+/// image without a format. Tiered devices only.
+pub const BINDLESS_SMOKE_COMP: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/bindless_smoke.comp.spv"));
+/// Tiered-path ray-query smoke test (ADR-0020 gate 3): closest hits against a TLAS written as
+/// integers. Tiered devices only (`VK_KHR_ray_query` is in the tiered required set).
+pub const RT_SMOKE_COMP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rt_smoke.comp.spv"));
+
 /// Foliage vertex shader (R3b): procedural, wind-animated blades from the instance buffer.
 pub const FOLIAGE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/foliage.vert.spv"));
 /// Foliage fragment shader (R3b).
@@ -370,6 +383,18 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "vfx_distort.frag",
         spirv: VFX_DISTORT_FRAG,
+    },
+    ShaderModule {
+        name: "bindless_smoke.frag",
+        spirv: BINDLESS_SMOKE_FRAG,
+    },
+    ShaderModule {
+        name: "bindless_smoke.comp",
+        spirv: BINDLESS_SMOKE_COMP,
+    },
+    ShaderModule {
+        name: "rt_smoke.comp",
+        spirv: RT_SMOKE_COMP,
     },
 ];
 

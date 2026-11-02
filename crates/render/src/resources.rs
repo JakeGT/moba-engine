@@ -6,6 +6,7 @@
 use core::ptr::NonNull;
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use bytemuck::Pod;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
@@ -25,6 +26,8 @@ pub(crate) struct GpuBuffer {
     mapped: Option<NonNull<u8>>,
     /// Bytes counted in `crate::memory` (the allocation's size), released on drop.
     tracked: u64,
+    /// The usage it was created with ([`Self::device_address`] checks it).
+    usage: vk::BufferUsageFlags,
 }
 
 impl GpuBuffer {
@@ -100,6 +103,7 @@ impl GpuBuffer {
             size,
             mapped,
             tracked: requirements.size,
+            usage,
         })
     }
 
@@ -129,6 +133,42 @@ impl GpuBuffer {
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
         }
+    }
+
+    /// The buffer's device address (ADR-0020 §3a). The buffer must have been created with
+    /// `SHADER_DEVICE_ADDRESS` on a tiered device, whose allocator allocates every block with
+    /// `DEVICE_ADDRESS` and enables `bufferDeviceAddress`.
+    pub(crate) fn device_address(&self) -> vk::DeviceAddress {
+        debug_assert!(
+            self.usage
+                .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS),
+            "device_address on a buffer without SHADER_DEVICE_ADDRESS"
+        );
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        // SAFETY: the buffer is live and bound to memory of this device; the caller's contract
+        // above covers the usage flag, the feature and the allocation flag.
+        unsafe { self.device.get_buffer_device_address(&info) }
+    }
+
+    /// Copies `out.len()` bytes from `offset` of a mapped buffer (readbacks), or returns
+    /// `false` when the buffer is not host visible or the range is out of bounds. The caller
+    /// has made the device's writes visible to the host first.
+    pub(crate) fn read_bytes(&self, offset: usize, out: &mut [u8]) -> bool {
+        let Some(mapped) = self.mapped else {
+            return false;
+        };
+        if offset
+            .checked_add(out.len())
+            .is_none_or(|end| end > self.size as usize)
+        {
+            return false;
+        }
+        // SAFETY: the range was bounds-checked against the mapping just above.
+        let source = unsafe { mapped.as_ptr().add(offset) };
+        // SAFETY: `source..source + out.len()` lies inside the coherent mapping, `out` is a
+        // distinct, writable slice of that length, and no GPU work writes the buffer now.
+        unsafe { core::ptr::copy_nonoverlapping(source, out.as_mut_ptr(), out.len()) };
+        true
     }
 
     /// Returns the mapped memory as a typed slice.
@@ -583,9 +623,50 @@ impl DescriptorSetLayout {
         let handle = unsafe { device.create_descriptor_set_layout(&create_info, None) }?;
         Ok(Self { device, handle })
     }
+
+    /// A layout with create `flags` and one `binding_flags` entry per binding (descriptor
+    /// indexing: the tiered bindless set, ADR-0020 §3a).
+    pub(crate) fn with_binding_flags(
+        device: ash::Device,
+        bindings: &[vk::DescriptorSetLayoutBinding<'_>],
+        flags: vk::DescriptorSetLayoutCreateFlags,
+        binding_flags: &[vk::DescriptorBindingFlags],
+    ) -> RenderResult<Self> {
+        assert_eq!(
+            bindings.len(),
+            binding_flags.len(),
+            "one flag set per binding"
+        );
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(binding_flags);
+        let create_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .flags(flags)
+            .bindings(bindings)
+            .push(&mut flags_info);
+        // SAFETY: the device is live, the binding and flag arrays are valid for the call, and
+        // the caller enabled the descriptor-indexing features the flags need.
+        let handle = unsafe { device.create_descriptor_set_layout(&create_info, None) }?;
+        Ok(Self { device, handle })
+    }
 }
 
 impl DescriptorPool {
+    /// A pool with create `flags` (`UPDATE_AFTER_BIND` for the bindless set, ADR-0020 §3a).
+    pub(crate) fn with_flags(
+        device: ash::Device,
+        pool_sizes: &[vk::DescriptorPoolSize],
+        max_sets: u32,
+        flags: vk::DescriptorPoolCreateFlags,
+    ) -> RenderResult<Self> {
+        let create_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(flags)
+            .pool_sizes(pool_sizes)
+            .max_sets(max_sets);
+        // SAFETY: the device is live and the pool-size array is valid for the call.
+        let handle = unsafe { device.create_descriptor_pool(&create_info, None) }?;
+        Ok(Self { device, handle })
+    }
+
     pub(crate) fn new(
         device: ash::Device,
         pool_sizes: &[vk::DescriptorPoolSize],

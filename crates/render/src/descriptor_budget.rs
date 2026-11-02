@@ -12,6 +12,16 @@
 //! R3b (ADR-0017) also counts storage buffers per stage
 //! (`maxPerStageDescriptorStorageBuffers`, 4 on the minimum): the decal buffer is a set-3
 //! storage buffer, and the foliage layout adds its instance buffer to the vertex stage.
+//!
+//! Tiered layouts (ADR-0020 §3b) put the update-after-bind bindless set at index 0. A pipeline
+//! layout with any update-after-bind set is bounded by the update-after-bind limits, counted
+//! over every set in it, *and* its ordinary sets still count against the ordinary limits.
+//! [`check_tiered`] checks the first for the images, samplers and resources the bindless set
+//! uses; the N0 tiered layouts' only other set is the smoke's acceleration structure, which
+//! neither limit family's image counts include. Buffer, input-attachment and
+//! acceleration-structure limits (and the colour attachments `maxPerStageUpdateAfterBindResources`
+//! also counts in the fragment stage) are left to the first tiered pass that binds them (N1).
+//! The 16-sampler ceiling above applies to Compat layouts only.
 
 use ash::vk;
 
@@ -94,9 +104,155 @@ pub(crate) fn check(
     Ok(())
 }
 
+/// A tiered device's update-after-bind descriptor limits (`VkPhysicalDeviceVulkan12Properties`,
+/// ADR-0020 §3b). Per stage, they bound every descriptor of a pipeline layout that contains an
+/// update-after-bind set; per set, the sum over all of its sets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UpdateAfterBindLimits {
+    /// `maxPerStageDescriptorUpdateAfterBindSamplers`.
+    pub(crate) per_stage_samplers: u32,
+    /// `maxPerStageDescriptorUpdateAfterBindSampledImages`.
+    pub(crate) per_stage_sampled_images: u32,
+    /// `maxPerStageDescriptorUpdateAfterBindStorageImages`.
+    pub(crate) per_stage_storage_images: u32,
+    /// `maxPerStageUpdateAfterBindResources`.
+    pub(crate) per_stage_resources: u32,
+    /// `maxDescriptorSetUpdateAfterBindSamplers`.
+    pub(crate) set_samplers: u32,
+    /// `maxDescriptorSetUpdateAfterBindSampledImages`.
+    pub(crate) set_sampled_images: u32,
+    /// `maxDescriptorSetUpdateAfterBindStorageImages`.
+    pub(crate) set_storage_images: u32,
+}
+
+/// What a tiered layout needs from [`UpdateAfterBindLimits`] for one stage (or, with every
+/// stage, for the whole layout).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TieredTotals {
+    pub(crate) samplers: u32,
+    pub(crate) sampled_images: u32,
+    pub(crate) storage_images: u32,
+    /// Descriptors that count as resources (`maxPerStageResources`): every image, texel
+    /// buffer, buffer and input attachment; samplers and acceleration structures do not.
+    pub(crate) resources: u32,
+}
+
+/// [`TieredTotals`] over every binding of `sets` visible to `stage`.
+pub(crate) fn tiered_totals(
+    sets: &[&[vk::DescriptorSetLayoutBinding<'_>]],
+    stage: vk::ShaderStageFlags,
+) -> TieredTotals {
+    let mut totals = TieredTotals::default();
+    for binding in sets.iter().flat_map(|set| set.iter()) {
+        if !binding.stage_flags.intersects(stage) {
+            continue;
+        }
+        let count = binding.descriptor_count;
+        match binding.descriptor_type {
+            vk::DescriptorType::SAMPLER => totals.samplers += count,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER => {
+                totals.samplers += count;
+                totals.sampled_images += count;
+                totals.resources += count;
+            }
+            vk::DescriptorType::SAMPLED_IMAGE | vk::DescriptorType::UNIFORM_TEXEL_BUFFER => {
+                totals.sampled_images += count;
+                totals.resources += count;
+            }
+            vk::DescriptorType::STORAGE_IMAGE | vk::DescriptorType::STORAGE_TEXEL_BUFFER => {
+                totals.storage_images += count;
+                totals.resources += count;
+            }
+            vk::DescriptorType::UNIFORM_BUFFER
+            | vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+            | vk::DescriptorType::STORAGE_BUFFER
+            | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+            | vk::DescriptorType::INPUT_ATTACHMENT => totals.resources += count,
+            _ => {}
+        }
+    }
+    totals
+}
+
+/// Fails when a tiered pipeline layout made of `sets` (the bindless set first) needs more than
+/// the device's update-after-bind limits allow, per stage or across all sets. `layout` names
+/// it in the error.
+pub(crate) fn check_tiered(
+    layout: &'static str,
+    sets: &[&[vk::DescriptorSetLayoutBinding<'_>]],
+    limits: UpdateAfterBindLimits,
+) -> RenderResult<()> {
+    let fail = |stage: &'static str, kind: &'static str, needed: u32, limit: u32| {
+        if needed > limit {
+            Err(RenderError::DescriptorLimit {
+                layout,
+                stage,
+                kind,
+                needed,
+                limit,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    for (stage, name) in [
+        (vk::ShaderStageFlags::VERTEX, "vertex"),
+        (vk::ShaderStageFlags::FRAGMENT, "fragment"),
+        (vk::ShaderStageFlags::COMPUTE, "compute"),
+    ] {
+        let totals = tiered_totals(sets, stage);
+        fail(
+            name,
+            "update-after-bind samplers",
+            totals.samplers,
+            limits.per_stage_samplers,
+        )?;
+        fail(
+            name,
+            "update-after-bind sampled images",
+            totals.sampled_images,
+            limits.per_stage_sampled_images,
+        )?;
+        fail(
+            name,
+            "update-after-bind storage images",
+            totals.storage_images,
+            limits.per_stage_storage_images,
+        )?;
+        fail(
+            name,
+            "update-after-bind resources",
+            totals.resources,
+            limits.per_stage_resources,
+        )?;
+    }
+    let all = tiered_totals(sets, vk::ShaderStageFlags::ALL);
+    fail(
+        "all",
+        "update-after-bind samplers per layout",
+        all.samplers,
+        limits.set_samplers,
+    )?;
+    fail(
+        "all",
+        "update-after-bind sampled images per layout",
+        all.sampled_images,
+        limits.set_sampled_images,
+    )?;
+    fail(
+        "all",
+        "update-after-bind storage images per layout",
+        all.storage_images,
+        limits.set_storage_images,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{StageTotals, check, stage_totals};
+    use super::{
+        StageTotals, TieredTotals, UpdateAfterBindLimits, check, check_tiered, stage_totals,
+        tiered_totals,
+    };
     use crate::error::RenderError;
     use ash::vk;
 
@@ -244,5 +400,75 @@ mod tests {
             stage_totals(&distortion_sets, vk::ShaderStageFlags::VERTEX).storage_buffers,
             2
         );
+    }
+
+    /// The ADR-0020 §3b minimums the admission gate checks, as limits: a device admitted to
+    /// Tiered has at least these.
+    fn admission_minimums() -> UpdateAfterBindLimits {
+        let limit = |name: &str| {
+            let value = crate::caps::REQUIRED_LIMITS
+                .iter()
+                .find(|(limit, _)| *limit == name)
+                .map(|(_, value)| *value)
+                .expect("limit is checked at admission");
+            u32::try_from(value).expect("fits u32")
+        };
+        UpdateAfterBindLimits {
+            per_stage_samplers: limit("maxPerStageDescriptorUpdateAfterBindSamplers"),
+            per_stage_sampled_images: limit("maxPerStageDescriptorUpdateAfterBindSampledImages"),
+            per_stage_storage_images: limit("maxPerStageDescriptorUpdateAfterBindStorageImages"),
+            per_stage_resources: limit("maxPerStageUpdateAfterBindResources"),
+            // Not checked at admission: the spec minimum when the features are supported is
+            // 500,000 (ADR-0020 [S11]), far above the table.
+            set_samplers: 500_000,
+            set_sampled_images: limit("maxDescriptorSetUpdateAfterBindSampledImages"),
+            set_storage_images: 500_000,
+        }
+    }
+
+    /// The bindless set alone, and with the ray-query smoke's acceleration-structure set, fits
+    /// every device the gate admits to Tiered (ADR-0020 §3b).
+    #[test]
+    fn the_bindless_layout_fits_the_admission_minimums() {
+        let bindless = crate::bindless::set_layout_bindings();
+        let sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 1] = [&bindless];
+        assert!(check_tiered("bindless", &sets, admission_minimums()).is_ok());
+        let compute = tiered_totals(&sets, vk::ShaderStageFlags::COMPUTE);
+        assert_eq!(
+            compute,
+            TieredTotals {
+                samplers: 32,
+                sampled_images: 16_384,
+                storage_images: 1_024,
+                resources: 17_408,
+            }
+        );
+        let rt = crate::smoke::rt::scene_set_bindings();
+        let rt_sets: [&[vk::DescriptorSetLayoutBinding<'_>]; 2] = [&bindless, &rt];
+        assert!(check_tiered("rt_smoke", &rt_sets, admission_minimums()).is_ok());
+        // One texture too many for the gate's minimum fails with a named error.
+        let mut tight = admission_minimums();
+        tight.per_stage_sampled_images = 16_383;
+        assert!(matches!(
+            check_tiered("bindless", &sets, tight),
+            Err(RenderError::DescriptorLimit {
+                layout: "bindless",
+                stage: "vertex",
+                kind: "update-after-bind sampled images",
+                needed: 16_384,
+                limit: 16_383,
+            })
+        ));
+        let mut set_tight = admission_minimums();
+        set_tight.set_storage_images = 1_000;
+        assert!(matches!(
+            check_tiered("bindless", &sets, set_tight),
+            Err(RenderError::DescriptorLimit {
+                stage: "all",
+                needed: 1_024,
+                limit: 1_000,
+                ..
+            })
+        ));
     }
 }

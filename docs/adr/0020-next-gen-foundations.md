@@ -1072,6 +1072,47 @@ each until the phase named:
   written, and the budget test exempts Ultra by name. The maintainer decides whether to lower
   it before N1 makes the tiered gate binding.
 
+### Amendment 5 (2026-11-02, N0.5): the bindless table as built
+
+Recorded in the bindless PR (`feat/n0-bindless`), numbered after N0.3's amendment 3 and
+N0.4's amendment 4. §3's model, bindings, capacities, flags and
+limits are implemented as written ([perf/0028](../perf/0028-bindless.md)). Five details §3
+leaves open or states loosely are settled here:
+
+- **Every slot holds a valid descriptor, not only slot 0.** Creation writes the fallback into
+  all 17,440 slots (once, about 17k descriptor writes), and a released slot gets the fallback
+  back when it retires. That is what makes §3a's "a stale or zero index never reads an
+  unwritten descriptor" true for *every* index below the capacity, not just 0.
+- **The release contract is stated.** §3a says freed slots are recycled "after the frames in
+  flight have retired". `release(handle, frame)` takes the **last** submitted frame that can
+  index the handle; no frame recorded later may index it. Only then are the fallback rewrite
+  and the reuse writes to descriptors no pending command buffer uses, which is all that
+  `UPDATE_UNUSED_WHILE_PENDING` allows. A stale handle recorded *after* the retirement reads
+  the fallback, or the slot's next texture once it is reused.
+- **Three texture fallbacks, three reserved handles.** §3a lists "a 1×1 magenta, white or
+  flat-normal image". They are texture slots 0, 1 and 2 (`MISSING`, `WHITE`, `FLAT_NORMAL`);
+  handles start at 3. The storage fallback (slot 0) is a 1×1 `R8G8B8A8_UNORM` image cleared to
+  zero.
+- **The sampler palette has 12 entries.** Wrap/clamp × linear/point/aniso × compare gives 12;
+  the other 20 of the 32 slots hold slot 0's linear/wrap sampler. Aniso is plain linear on a
+  device without `samplerAnisotropy`. Comparison entries hold slot 0 on a device without
+  mutable comparison samplers; Tiered admits none today.
+- **`maxPerStageUpdateAfterBindResources` counts 17,408, not 17,440.** The spec's resource
+  count excludes plain samplers, so the table needs 17,408 per stage. §3b's admission minimum
+  (17,440) is kept, as it is conservative. `descriptor_budget::check_tiered` checks tiered
+  layouts against the device's update-after-bind limits, per stage and per layout, for
+  samplers, sampled images, storage images and resources. Update-after-bind buffer and
+  acceleration-structure limits, and the colour attachments the fragment stage also counts,
+  are added by the first tiered pass that binds them (N1).
+
+Two consequences of §3a that the code also takes:
+- **Tiered memory carries `DEVICE_ADDRESS`.** On the tiered path the allocator allocates every
+  block with `VkMemoryAllocateFlags::DEVICE_ADDRESS`, so any buffer can be passed by address.
+  Compat allocates as before.
+- **The smokes are `moba-tools` binaries** (`bindless-smoke`, `rt-smoke`) over
+  `moba_render::{bindless_smoke, rt_smoke}`, run headless (no surface) and in the
+  `renderer-gate` job. They are GLSL, because Slang (§4) is not on this branch yet.
+
 ## Corrections to the roadmap
 
 These were re-checked on 2026-10-31. This PR only adds a link to this ADR from roadmap §12;

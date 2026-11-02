@@ -1,0 +1,23 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+// bindless_smoke (ADR-0020 gate 3), compute half: the same per-pixel choice as the fragment
+// shader, written through a bindless storage image declared without a format
+// (`shaderStorageImageWriteWithoutFormat`, §3a).
+
+#include "bindless_smoke.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 1) uniform writeonly image2D bindless_storage_images[];
+
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= push.size || pixel.y >= push.size) {
+        return;
+    }
+    uint texture_handle = push.list.handles[smoke_slot(pixel)];
+    uint sampler_handle = smoke_sampler(pixel);
+    vec4 color = textureLod(BINDLESS_SAMPLER2D_NONUNIFORM(texture_handle, sampler_handle), vec2(0.5), 0.0);
+    imageStore(bindless_storage_images[push.storage_image], ivec2(pixel), color);
+}

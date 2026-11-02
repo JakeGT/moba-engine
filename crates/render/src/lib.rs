@@ -14,6 +14,7 @@
 
 #[doc(hidden)]
 pub mod bench_support;
+mod bindless;
 mod caps;
 mod cull;
 mod descriptor_budget;
@@ -44,6 +45,7 @@ mod renderer;
 mod resources;
 mod scene;
 mod shaders;
+mod smoke;
 mod swapchain;
 mod targets;
 mod terrain;
@@ -101,6 +103,7 @@ pub use scene::{
     OFFSCREEN_MAX_INSTANCES, OUTLINE_SLOTS, OffscreenRender, OutlinePalette, Scene, UnitInstance,
     VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
+pub use smoke::{SmokeReport, bindless_smoke, rt_smoke};
 
 /// Environment descriptor (SH-L2 diffuse, intensity) accepted by [`Renderer::set_environment`].
 pub use moba_assets::EnvironmentDesc;
