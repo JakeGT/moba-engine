@@ -421,6 +421,8 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "rt_smoke.comp",
         spirv: RT_SMOKE_COMP,
+    },
+    ShaderModule {
         name: "toolchain_smoke.slang",
         spirv: TOOLCHAIN_SMOKE_SLANG,
     },
