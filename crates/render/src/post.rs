@@ -130,7 +130,8 @@ pub struct PostConfig {
     pub dynamic_resolution: bool,
     /// Dynamic resolution's floor, `0.5..=render_scale`.
     pub min_render_scale: f32,
-    /// Dynamic resolution's GPU-time target per frame, milliseconds.
+    /// Dynamic resolution's GPU-time target per frame, milliseconds, `0.1..=100` (low enough
+    /// for a forced target to bite on a fast GPU, ADR-0020 gate 4).
     pub dynamic_target_ms: f32,
     /// The upscale filter when the image is scaled (`MOBA_UPSCALE`).
     pub upscale: UpscaleFilter,
@@ -168,7 +169,7 @@ impl PostConfig {
                     false,
                     UpscaleFilter::Bicubic,
                 ),
-                QualityTier::Ultra => (
+                QualityTier::Ultra | QualityTier::Overdrive => (
                     true,
                     AntiAliasing::Msaa4,
                     true,
@@ -297,7 +298,7 @@ impl PostConfig {
 
     /// The config with every number clamped to its range (non-finite values take the
     /// defaults): render scales into `0.5..=1` with the floor at most the ceiling, slices
-    /// `2..=4`, a radius `0.25..=8` m and a target `1..=100` ms.
+    /// `2..=4`, a radius `0.25..=8` m and a target `0.1..=100` ms.
     #[must_use]
     pub fn sanitized(mut self) -> Self {
         let finite = |value: f32, default: f32| if value.is_finite() { value } else { default };
@@ -308,7 +309,7 @@ impl PostConfig {
             .min(self.render_scale);
         self.ao_slices = self.ao_slices.clamp(2, 4);
         self.ao_radius = finite(self.ao_radius, 1.5).clamp(0.25, 8.0);
-        self.dynamic_target_ms = finite(self.dynamic_target_ms, 14.0).clamp(1.0, 100.0);
+        self.dynamic_target_ms = finite(self.dynamic_target_ms, 14.0).clamp(0.1, 100.0);
         self
     }
 
@@ -652,7 +653,7 @@ mod tests {
             .sanitized();
         assert_eq!(config.render_scale, 1.0);
         assert_eq!(config.min_render_scale, MIN_RENDER_SCALE);
-        assert_eq!(config.dynamic_target_ms, 1.0);
+        assert_eq!(config.dynamic_target_ms, 0.1);
         let scaled = PostConfig::default()
             .with_render_scale(0.7)
             .with_min_render_scale(0.9)

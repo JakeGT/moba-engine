@@ -17,7 +17,7 @@
 //! enumerated, or when `--path tiered` admits none.
 #![allow(clippy::print_stdout)] // The report is the tool's output.
 
-use moba_render::{PathChoice, RenderPath};
+use moba_render::PathChoice;
 
 /// `(json, choice)` from the command line; exits 2 on a bad argument.
 fn parse_args() -> (bool, PathChoice) {
@@ -106,27 +106,23 @@ fn main() {
         eprintln!("no Vulkan physical devices enumerated");
         std::process::exit(1);
     }
-    // The renderer's choice: the highest score, the earlier device on a tie; with
-    // `--path tiered` only tiered admissions are candidates.
-    let chosen = devices
-        .iter()
-        .enumerate()
-        .filter(|(_, device)| {
-            choice != PathChoice::Tiered || device.admission.path == RenderPath::Tiered
-        })
-        .fold(None::<(usize, u32)>, |best, (index, device)| match best {
-            Some((_, score)) if score >= device.score => best,
-            _ => Some((index, device.score)),
-        });
-    let Some((index, _)) = chosen else {
+    // The renderer's choice (`moba_render::choose_device`): the highest score, the earlier
+    // device on a tie; with `--path tiered` only tiered admissions are candidates.
+    let Some(device) = moba_render::choose_device(&devices, choice) else {
         eprintln!("no device is admitted to the tiered path");
         std::process::exit(1);
     };
-    let device = &devices[index];
+    let index = devices
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, device))
+        .unwrap_or_default();
     let line = format!(
-        "chosen: device {index} \"{}\" {}",
+        // `default_tier` is §2b's table; on Compat the client keeps running `auto` as High in
+        // N0 (ADR-0020 amendment 3).
+        "chosen: device {index} \"{}\" {} default_tier={}",
         device.capabilities.name,
-        device.admission.log_fields()
+        device.admission.log_fields(),
+        moba_render::default_tier(&device.capabilities, &device.admission)
     );
     if json {
         eprintln!("{line}");

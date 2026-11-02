@@ -149,14 +149,26 @@ impl Bindings {
     }
 }
 
+/// The `quality` value that asks for the detected default tier.
+pub(crate) const QUALITY_AUTO: &str = "auto";
+/// The current settings format (`settings_version`): 1 since the tiered path (N0.3).
+pub(crate) const SETTINGS_VERSION: u32 = 1;
+
 /// User settings persisted as TOML.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Independent player preferences.
 pub(crate) struct Settings {
     pub(crate) ui_scale: f32,
-    /// Rendering quality tier: `low`, `medium`, `high` or `ultra` (`MOBA_QUALITY` overrides).
+    /// Rendering quality tier: `auto`, `low`, `medium`, `high`, `ultra` or `overdrive`
+    /// (`MOBA_QUALITY` overrides). `auto` detects the device's default tier (ADR-0020 §2b).
     pub(crate) quality: String,
+    /// The settings format: [`SETTINGS_VERSION`] for a file written for N0 or later, 0 when
+    /// the key is missing (a file from before the tiered path). On the tiered path a version-0
+    /// file's tier is not trusted, since its old "ultra" is not the new scale's Ultra
+    /// (ADR-0020 §5a): the run uses the detected tier instead.
+    #[serde(default, rename = "settings_version")]
+    pub(crate) version: u32,
     /// Render path: `auto`, `tiered` or `compat` (`MOBA_RENDER_PATH` overrides; ADR-0020 §2b).
     pub(crate) render_path: String,
     pub(crate) audio_volume: f32,
@@ -186,7 +198,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ui_scale: 1.0,
-            quality: String::from(moba_render::QualityTier::default().name()),
+            quality: String::from(QUALITY_AUTO),
+            version: SETTINGS_VERSION,
             render_path: String::from("auto"),
             audio_volume: 0.7,
             audio_mute: false,
@@ -376,10 +389,33 @@ impl Settings {
         Some(key)
     }
 
-    /// The configured rendering quality tier (validated by [`Self::sanitize`]).
+    /// The configured rendering quality tier (validated by [`Self::sanitize`]); `None` for
+    /// `auto`.
     #[must_use]
-    pub(crate) fn quality_tier(&self) -> moba_render::QualityTier {
-        moba_render::QualityTier::from_name(&self.quality).unwrap_or_default()
+    pub(crate) fn quality_tier(&self) -> Option<moba_render::QualityTier> {
+        moba_render::QualityTier::from_name(&self.quality)
+    }
+
+    /// The tier to run (ADR-0020 §2b, §5a) and whether it came from the device detection.
+    /// Nothing is saved: detection runs on every interactive start.
+    /// - A set tier is kept, except that on the tiered path a file from before N0
+    ///   (`settings_version` 0) takes the detected `default` instead.
+    /// - `auto` takes `default` on the tiered path. On Compat (`compat`) it is today's default,
+    ///   High, so N0 changes no Compat image (ADR-0020 amendment 3).
+    /// - An `automated` run (captures, smoke runs) never detects, so evidence does not depend
+    ///   on the machine: `auto` is High there.
+    pub(crate) fn resolve_quality(
+        &self,
+        default: moba_render::QualityTier,
+        compat: bool,
+        automated: bool,
+    ) -> (moba_render::QualityTier, bool) {
+        let today = moba_render::QualityTier::default();
+        match self.quality_tier() {
+            Some(tier) if automated || compat || self.version >= SETTINGS_VERSION => (tier, false),
+            None if automated || compat => (today, false),
+            _ => (default, true),
+        }
     }
 
     /// The configured render path (validated by [`Self::sanitize`]).
@@ -404,12 +440,14 @@ impl Settings {
             ));
             self.team_palette = String::from(crate::hud::theme::TeamPalette::default().name());
         }
-        if moba_render::QualityTier::from_name(&self.quality).is_none() {
+        if !self.quality.trim().eq_ignore_ascii_case(QUALITY_AUTO)
+            && moba_render::QualityTier::from_name(&self.quality).is_none()
+        {
             warnings.push(format!(
-                "settings: unknown quality {:?} (low/medium/high/ultra); using high",
+                "settings: unknown quality {:?} (auto/low/medium/high/ultra/overdrive); using auto",
                 self.quality
             ));
-            self.quality = String::from(moba_render::QualityTier::default().name());
+            self.quality = String::from(QUALITY_AUTO);
         }
         if moba_render::PathChoice::parse(&self.render_path).is_none() {
             warnings.push(format!(
@@ -581,15 +619,52 @@ mod tests {
         assert_eq!(warnings.len(), 3);
         assert_eq!(settings.camera_sensitivity, SENSITIVITY_MAX);
         assert_eq!(settings.camera_zoom, CAMERA_ZOOM_MIN);
-        assert_eq!(settings.quality_tier(), moba_render::QualityTier::High);
+        assert_eq!(
+            settings.quality_tier(),
+            None,
+            "an unknown tier becomes auto"
+        );
         settings.quality = String::from("Low");
         assert_eq!(settings.sanitize(), Vec::<String>::new());
-        assert_eq!(settings.quality_tier(), moba_render::QualityTier::Low);
+        assert_eq!(settings.quality_tier(), Some(moba_render::QualityTier::Low));
+        settings.quality = String::from("overdrive");
+        assert_eq!(settings.sanitize(), Vec::<String>::new());
+        assert_eq!(
+            settings.quality_tier(),
+            Some(moba_render::QualityTier::Overdrive)
+        );
 
         settings.controls.attack_button = String::from("right");
         let (bindings, warnings) = settings.bindings();
         assert_eq!(warnings.len(), 0);
         assert_eq!(bindings.attack_button, MouseBinding::Right);
+    }
+
+    #[test]
+    fn quality_detection_never_saves_and_spares_compat() {
+        use moba_render::QualityTier::{High, Low, Ultra};
+        // `auto` on the tiered path takes the detected tier; on Compat it is today's High.
+        let fresh = Settings::default();
+        assert_eq!(fresh.version, SETTINGS_VERSION);
+        assert_eq!(fresh.resolve_quality(Ultra, false, false), (Ultra, true));
+        assert_eq!(fresh.resolve_quality(Ultra, true, false), (High, false));
+        // A set tier in a current file is kept on both paths.
+        let set: Settings =
+            toml::from_str("settings_version = 1\nquality = \"low\"").expect("settings");
+        assert_eq!(set.resolve_quality(Ultra, false, false), (Low, false));
+        assert_eq!(set.resolve_quality(Ultra, true, false), (Low, false));
+        // A file from before the tiered path: re-detected on Tiered, kept on Compat.
+        let old: Settings = toml::from_str("quality = \"ultra\"").expect("a pre-N0 file");
+        assert_eq!(old.version, 0);
+        assert_eq!(old.resolve_quality(Low, false, false), (Low, true));
+        assert_eq!(old.resolve_quality(Low, true, false), (Ultra, false));
+        // Automated runs never detect: `auto` is High, a set tier is kept.
+        assert_eq!(fresh.resolve_quality(Ultra, false, true), (High, false));
+        assert_eq!(old.resolve_quality(Low, false, true), (Ultra, false));
+        // Saving a pre-N0 file keeps it pre-N0, so a later Tiered run still re-detects it.
+        let text = toml::to_string_pretty(&old).expect("serialise");
+        let again: Settings = toml::from_str(&text).expect("round trip");
+        assert_eq!(again.version, 0);
     }
 
     #[test]

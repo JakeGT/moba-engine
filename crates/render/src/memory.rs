@@ -225,7 +225,7 @@ impl MemoryStats {
 }
 
 /// The counters now, against `budget`, with the allocator's `reserved_bytes`.
-pub(crate) fn stats(budget: &moba_assets::TierBudget, reserved_bytes: u64) -> MemoryStats {
+pub(crate) fn stats(texture_budget: u64, total_budget: u64, reserved_bytes: u64) -> MemoryStats {
     MemoryStats {
         texture_bytes: TEXTURE_BYTES.load(Ordering::Relaxed),
         target_bytes: TARGET_BYTES.load(Ordering::Relaxed),
@@ -233,8 +233,8 @@ pub(crate) fn stats(budget: &moba_assets::TierBudget, reserved_bytes: u64) -> Me
         swapchain_bytes: SWAPCHAIN_BYTES.load(Ordering::Relaxed),
         reserved_bytes,
         peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
-        texture_budget: budget.texture_bytes,
-        total_budget: budget.total_bytes,
+        texture_budget,
+        total_budget,
         degraded_textures: DEGRADED_TEXTURES.load(Ordering::Relaxed),
         refused_textures: REFUSED_TEXTURES.load(Ordering::Relaxed),
         uploads: UPLOADS.load(Ordering::Relaxed),

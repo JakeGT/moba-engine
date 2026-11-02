@@ -159,7 +159,7 @@ impl WorldConfig {
             QualityTier::Low => (128, 4, false, false, 128, false),
             QualityTier::Medium => (192, 8, true, false, 256, true),
             QualityTier::High => (256, 8, true, true, 256, true),
-            QualityTier::Ultra => (384, 8, true, true, 512, true),
+            QualityTier::Ultra | QualityTier::Overdrive => (384, 8, true, true, 512, true),
         };
         Self {
             terrain: TerrainShading::Splat,
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(low.clamped_layers(), 4);
         assert!(ultra.terrain_triplanar && ultra.terrain_grid > low.terrain_grid);
         assert!(ultra.clamped_fog_resolution() > low.clamped_fog_resolution());
-        for (index, &tier) in QualityTier::ALL.iter().enumerate() {
+        for (index, &tier) in QualityTier::COMPAT.iter().enumerate() {
             let config = WorldConfig::for_tier(tier);
             assert_eq!(config.fog_of_war, FogOfWarMode::Texture);
             assert!(config.height_fog && config.sky);

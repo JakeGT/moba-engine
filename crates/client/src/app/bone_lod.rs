@@ -45,7 +45,7 @@ impl BoneLod {
         let bands = match tier {
             QualityTier::Low => (40.0, 80.0),
             QualityTier::Medium => (60.0, 110.0),
-            QualityTier::Ultra => (110.0, 180.0),
+            QualityTier::Ultra | QualityTier::Overdrive => (110.0, 180.0),
             _ => (80.0, 140.0),
         };
         Self { bands: Some(bands) }

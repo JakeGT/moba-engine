@@ -25,7 +25,7 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol (v42): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing, compute GPU-particle VFX bound to presentation events) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, MSDF text, 3D hero portraits and a baked minimap rendered to texture, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 875 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 885 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
@@ -59,8 +59,16 @@ Arrows/F1–F5/1–8`; invalid or duplicate values fall back to defaults. `ui_sc
 `MOBA_UI_SCALE` overrides it for one run; HUD text is a signed-distance-field font, so it
 stays sharp at any scale. `team_palette` (`standard` or `colorblind`, default `standard`) picks
 the health-bar and minimap team colours; `colorblind` uses Okabe-Ito yellow/sky-blue/orange,
-and `MOBA_TEAM_PALETTE` overrides it. `quality` (`low`/`medium`/`high`/`ultra`, default
-`high`) is the rendering quality tier; `MOBA_QUALITY` overrides it. Today it picks the HDR
+and `MOBA_TEAM_PALETTE` overrides it. `quality` (`auto`/`low`/`medium`/`high`/`ultra`/`overdrive`,
+default `auto`) is the rendering quality tier; `MOBA_QUALITY` overrides it. On the tiered
+path `auto` is detected on every interactive start from the GPU's reference table (ADR-0020
+§2b), and nothing is written to the file; on Compat it is High, as before. Automated runs
+(smoke frames, captures) never detect and use High. A tier the device cannot run is capped at
+its `max_tier`. A file without `settings_version = 1` was written before the tiered path, so
+its tier is re-detected on the tiered path and kept on Compat. `overdrive` is the tiered
+path's top tier and runs as `ultra` on Compat.
+On the tiered path dynamic resolution aims at the tier's GPU budget (§5c); until N1 ships the
+upscalers it is off unless `MOBA_DYNRES=on` (or a target in ms) turns it on. Today it picks the HDR
 target format (Low uses the packed 32-bit format) and the hero-portrait rate (static on Low,
 re-rendered only when the heroes change; `MOBA_PORTRAITS=off|static|animated|<hz>` and `MOBA_MINIMAP_BAKE=off|once` switch
 the portraits and the baked minimap). `render_path` (`auto`/`tiered`/`compat`, default `auto`)
