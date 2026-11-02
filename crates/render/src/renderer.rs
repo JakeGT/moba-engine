@@ -574,7 +574,12 @@ pub struct Renderer {
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
+    /// Its `quality_tier` is the configuration tier ([`crate::config_tier`]).
     config: RenderConfig,
+    /// The tier asked for in [`RenderConfig::quality_tier`].
+    requested_tier: QualityTier,
+    /// Device memory budget of the requested tier on this path.
+    memory_budget: u64,
     // Declared last so the window outlives the surface/instance during drop.
     window: Window,
 }
@@ -626,6 +631,14 @@ impl Renderer {
             config.render_path,
             config.tiered_cpu_devices,
         )?;
+        // ADR-0020 §5e: the requested tier runs the configuration of its Compat tier on this
+        // path (tiered Low is today's High, tiered Medium and up today's Ultra), with the
+        // path's memory budget.
+        let requested_tier = config.quality_tier;
+        let path = device.admission.path;
+        config.quality_tier = crate::preset::config_tier(path, requested_tier);
+        let memory_budget = crate::preset::total_memory_budget(path, requested_tier);
+        crate::memory::begin_renderer(memory_budget);
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
         let shaders = ShaderSource::new(config.shader_dir.clone());
@@ -1034,6 +1047,8 @@ impl Renderer {
             surface,
             instance,
             config,
+            requested_tier,
+            memory_budget,
         };
         renderer.bind_transients();
         Ok(renderer)
@@ -1451,9 +1466,17 @@ impl Renderer {
         InstanceContext::validation_error_count()
     }
 
-    /// The configured quality tier.
+    /// The quality tier asked for in [`RenderConfig::quality_tier`]. On the Compat path
+    /// `Overdrive` runs as Ultra; [`Self::config_tier`] is the configuration actually used.
     #[must_use]
     pub fn quality_tier(&self) -> QualityTier {
+        self.requested_tier
+    }
+
+    /// The Compat tier whose configuration the frame runs ([`crate::config_tier`] of the
+    /// requested tier on this path, ADR-0020 §5e).
+    #[must_use]
+    pub fn config_tier(&self) -> QualityTier {
         self.config.quality_tier
     }
 
@@ -1720,7 +1743,11 @@ impl Renderer {
             .allocator()
             .lock()
             .map_or(0, |allocator| allocator.capacity());
-        crate::memory::stats(self.config.quality_tier.budget(), reserved)
+        crate::memory::stats(
+            self.config.quality_tier.budget().texture_bytes,
+            self.memory_budget,
+            reserved,
+        )
     }
 
     /// Whether uploads are locked now (cheap: no allocator query, unlike

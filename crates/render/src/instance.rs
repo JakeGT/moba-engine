@@ -61,7 +61,8 @@ pub struct ProbedDevice {
 
 /// Creates an instance without a surface, then probes and admits every physical device under
 /// `choice` (with `allow_cpu`, [`Overrides::allow_cpu`](crate::Overrides::allow_cpu)), in
-/// enumeration order. The renderer would pick the highest `score` (ties keep the
+/// enumeration order. Devices the renderer would reject whatever the surface (Vulkan below
+/// 1.3, no graphics queue, no swapchain) are left out, as device selection leaves them out. The renderer would pick the highest `score` (ties keep the
 /// earlier device); with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only devices
 /// whose admission is Tiered are candidates.
 ///
@@ -76,6 +77,9 @@ pub fn probe_devices(
     let devices = unsafe { context.instance.enumerate_physical_devices() }?;
     let mut probed = Vec::with_capacity(devices.len());
     for physical in devices {
+        if crate::device::unsuitable(&context.instance, physical)?.is_some() {
+            continue;
+        }
         let capabilities = crate::caps::probe(&context.instance, physical)?;
         let admission = crate::caps::admit(
             &capabilities,
@@ -89,6 +93,26 @@ pub fn probe_devices(
         });
     }
     Ok(probed)
+}
+
+/// The device the renderer would pick from `devices` under `choice`: the highest score, the
+/// earlier device on a tie; with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only
+/// devices admitted to Tiered are candidates. `None` when nothing qualifies.
+#[must_use]
+pub fn choose_device(
+    devices: &[ProbedDevice],
+    choice: crate::caps::PathChoice,
+) -> Option<&ProbedDevice> {
+    devices
+        .iter()
+        .filter(|device| {
+            choice != crate::caps::PathChoice::Tiered
+                || device.admission.path == crate::caps::RenderPath::Tiered
+        })
+        .fold(None::<&ProbedDevice>, |best, device| match best {
+            Some(best) if best.score >= device.score => Some(best),
+            _ => Some(device),
+        })
 }
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";

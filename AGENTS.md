@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **879 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **889 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -166,6 +166,7 @@ cargo run -p moba-tools --bin vulkan-probe
 scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)
 scripts/cull-probe.sh                                 # culling on == off, byte for byte (R8)
 scripts/perf-replay.sh                                # 10-minute replay per tier + perf-gate (R8, real GPU)
+scripts/dynres-check.sh                               # forced dynres target holds on the teamfight replay (ADR-0020 §5c, real GPU)
 ```
 
 Fuzz and model checking:

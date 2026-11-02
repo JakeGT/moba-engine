@@ -161,6 +161,35 @@ the semver check):
   - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
     `auto`, so an A/B between the paths stays on one GPU. The caps types are
     `#[non_exhaustive]`.
+- **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;
+  [perf/0027](docs/perf/0027-tiers-budgets.md)):**
+  - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it
+    configures the frame like Ultra; on Compat it runs as Ultra (`QualityTier::compat`).
+    `QualityTier::ALL` has five tiers and `QualityTier::COMPAT` today's four.
+  - `moba_render::default_tier` picks a tier from a PCI reference table (pci.ids
+    2026.10.01), capped at the device's `max_tier`; Compat devices get Medium. The `quality`
+    setting defaults to `auto`. On the tiered path the client detects it on every interactive
+    start (nothing is saved); on Compat `auto` stays today's High. Automated runs keep High,
+    and an explicit tier is capped at the device's `max_tier`. `vulkan-probe` prints
+    `default_tier=`.
+  - New `settings_version` key (1). A file without it predates the tiered path: its tier is
+    re-detected on the tiered path and kept on Compat. `Renderer::quality_tier()` is the
+    requested tier and the new `Renderer::config_tier()` the one configured;
+    `moba_render::choose_device` picks from `probe_devices` like the renderer.
+  - `moba_render::preset`: the `TierPreset` feature matrix (built, `Planned(phase)`, or not
+    offered) and `config_tier`, the configuration a tier runs until its phases land (§5e:
+    tiered Low runs today's High, tiered Medium and up today's Ultra with MSAA 4×).
+  - Tiered VRAM budgets (4/6/6/12/12 GiB) and `moba_assets::GPU_BUDGETS` (12/6/7.5/9/15 ms with
+    the dynamic-resolution scale ranges), unit-tested to be ordered and to match the roadmap.
+  - On the tiered path dynamic resolution aims at the tier's budget, from full scale down to
+    a 0.5 floor. Until N1 it is off unless `MOBA_DYNRES` turns it on, and the preset's
+    upscaler-mode ceiling (0.67 or 0.5) applies from N1, when an upscaler fills the gap.
+  - The frame log gains `config_tier=` and `scale_first/final/min/max` and `scale_changes_late`;
+    `scripts/dynres-check.sh` checks that a forced target holds. `PostConfig`'s dynamic
+    target may now go down to 0.1 ms (was 1 ms), so a forced target bites on a fast GPU.
+  - `perf-gate` reads `path=`: tiered logs are checked against `GPU_BUDGETS` and
+    `[tiered.<tier>]` baseline tables but only report until N1; Compat is gated as before.
+    `perf-replay.sh` and the nightly validation runs pin `RENDER_PATH=compat`.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).

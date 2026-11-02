@@ -13,6 +13,8 @@ use ash::vk;
 use ash::vk::TaggedStructure as _;
 use serde::{Deserialize, Serialize};
 
+use crate::quality::QualityTier;
+
 /// Which renderer a device runs (ADR-0020 §2a).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,46 +33,6 @@ impl RenderPath {
         match self {
             Self::Tiered => "tiered",
             Self::Compat => "compat",
-        }
-    }
-}
-
-/// The five tiers of the tiered path (roadmap §3), lowest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum Tier {
-    /// RTX 2060 / RX 6600 class.
-    Low,
-    /// The old Ultra, roughly.
-    Medium,
-    /// Hybrid RT.
-    High,
-    /// RT GI and many lights.
-    Ultra,
-    /// Path traced; needs the ray-tracing pipeline.
-    Overdrive,
-}
-
-impl Tier {
-    /// Every tier, lowest first.
-    pub const ALL: [Self; 5] = [
-        Self::Low,
-        Self::Medium,
-        Self::High,
-        Self::Ultra,
-        Self::Overdrive,
-    ];
-
-    /// The lower-case name used in logs and `MOBA_QUALITY`.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Ultra => "ultra",
-            Self::Overdrive => "overdrive",
         }
     }
 }
@@ -253,7 +215,7 @@ pub enum Requirement {
     /// Enabled when present; each user has a fallback.
     Optional,
     /// Needed only from this tier up; without it the device tops out one tier lower.
-    ForTier(Tier),
+    ForTier(QualityTier),
 }
 
 /// One extension of the tiered set and the feature bits it brings (ADR-0020 §1e).
@@ -283,17 +245,17 @@ pub const EXTENSIONS: &[ExtensionSpec] = &[
     spec("VK_KHR_ray_query", Requirement::Required, &["rayQuery"]),
     spec(
         "VK_KHR_ray_tracing_pipeline",
-        Requirement::ForTier(Tier::Overdrive),
+        Requirement::ForTier(QualityTier::Overdrive),
         &["rayTracingPipeline"],
     ),
     spec(
         "VK_KHR_ray_tracing_maintenance1",
-        Requirement::ForTier(Tier::Overdrive),
+        Requirement::ForTier(QualityTier::Overdrive),
         &["rayTracingMaintenance1"],
     ),
     spec(
         "VK_KHR_ray_tracing_position_fetch",
-        Requirement::ForTier(Tier::Overdrive),
+        Requirement::ForTier(QualityTier::Overdrive),
         &["rayTracingPositionFetch"],
     ),
     // SER reorders ray-tracing-pipeline invocations, so it also needs that pipeline.
@@ -439,7 +401,7 @@ pub struct Admission {
     /// The path the device runs.
     pub path: RenderPath,
     /// The highest tiered tier the device may select; `None` on Compat.
-    pub max_tier: Option<Tier>,
+    pub max_tier: Option<QualityTier>,
     /// Required items the device lacks (empty when it qualifies for Tiered).
     pub missing: Vec<&'static str>,
     /// Why [`Self::path`] was chosen.
@@ -460,7 +422,7 @@ impl Admission {
         format!(
             "path={} max_tier={} missing={missing} admission={}",
             self.path.name(),
-            self.max_tier.map_or("none", Tier::name),
+            self.max_tier.map_or("none", QualityTier::name),
             self.reason.name()
         )
     }
@@ -512,15 +474,15 @@ fn apple_stack(caps: &DeviceCapabilities, overrides: Overrides) -> bool {
 /// The highest tier a qualifying device may select: Overdrive needs every
 /// [`Requirement::ForTier`] extension, otherwise Ultra.
 #[must_use]
-pub fn max_tier(caps: &DeviceCapabilities) -> Tier {
+pub fn max_tier(caps: &DeviceCapabilities) -> QualityTier {
     let overdrive = EXTENSIONS
         .iter()
-        .filter(|extension| extension.requirement == Requirement::ForTier(Tier::Overdrive))
+        .filter(|extension| extension.requirement == Requirement::ForTier(QualityTier::Overdrive))
         .all(|extension| extension_present(caps, extension));
     if overdrive {
-        Tier::Overdrive
+        QualityTier::Overdrive
     } else {
-        Tier::Ultra
+        QualityTier::Ultra
     }
 }
 
@@ -557,6 +519,78 @@ pub fn admit(caps: &DeviceCapabilities, overrides: Overrides) -> Admission {
             qualifies,
         },
     }
+}
+
+/// PCI vendor IDs of the default-tier table.
+const NVIDIA: u32 = 0x10DE;
+const AMD: u32 = 0x1002;
+
+/// The reference GPUs' default tiers (ADR-0020 §2b, roadmap §3), keyed by PCI vendor and
+/// device ID from the PCI ID database (hwdata `pci.ids` 2026.10.01). Desktop parts only;
+/// an AMD ID covers its whole family (the RX 6600 ID is also the 6600 XT). Cards with less
+/// memory than a tier's VRAM budget assumes (§5e) stay a tier lower: the 12 GB RTX 4070 Ti
+/// and 4070 SUPER are High, not Ultra.
+const DEFAULT_TIERS: &[(u32, u32, QualityTier)] = &[
+    // RTX 2060 family (TU106/TU104): Low.
+    (NVIDIA, 0x1E89, QualityTier::Low),
+    (NVIDIA, 0x1F03, QualityTier::Low),
+    (NVIDIA, 0x1F06, QualityTier::Low),
+    (NVIDIA, 0x1F08, QualityTier::Low),
+    (NVIDIA, 0x1F42, QualityTier::Low),
+    (NVIDIA, 0x1F47, QualityTier::Low),
+    // RTX 3060 (GA106/GA104): Medium.
+    (NVIDIA, 0x2487, QualityTier::Medium),
+    (NVIDIA, 0x24C7, QualityTier::Medium),
+    (NVIDIA, 0x2501, QualityTier::Medium),
+    (NVIDIA, 0x2503, QualityTier::Medium),
+    (NVIDIA, 0x2504, QualityTier::Medium),
+    (NVIDIA, 0x2509, QualityTier::Medium),
+    (NVIDIA, 0x2544, QualityTier::Medium),
+    // RTX 4060 Ti, 4070, 4070 SUPER, 4070 Ti (AD106/AD104/AD103): High.
+    (NVIDIA, 0x2803, QualityTier::High),
+    (NVIDIA, 0x2805, QualityTier::High),
+    (NVIDIA, 0x2788, QualityTier::High),
+    (NVIDIA, 0x2786, QualityTier::High),
+    (NVIDIA, 0x2709, QualityTier::High),
+    (NVIDIA, 0x2783, QualityTier::High),
+    (NVIDIA, 0x2782, QualityTier::High),
+    // RTX 4070 Ti SUPER and 5070 Ti (16 GB): Ultra.
+    (NVIDIA, 0x2705, QualityTier::Ultra),
+    (NVIDIA, 0x2689, QualityTier::Ultra),
+    (NVIDIA, 0x2C05, QualityTier::Ultra),
+    // RTX 4080, 4080 SUPER, 4090, 5080, 5090 and their D variants: Overdrive.
+    (NVIDIA, 0x2704, QualityTier::Overdrive),
+    (NVIDIA, 0x2702, QualityTier::Overdrive),
+    (NVIDIA, 0x2703, QualityTier::Overdrive),
+    (NVIDIA, 0x2684, QualityTier::Overdrive),
+    (NVIDIA, 0x2685, QualityTier::Overdrive),
+    (NVIDIA, 0x2C02, QualityTier::Overdrive),
+    (NVIDIA, 0x2B85, QualityTier::Overdrive),
+    (NVIDIA, 0x2B87, QualityTier::Overdrive),
+    (NVIDIA, 0x2B8C, QualityTier::Overdrive),
+    // RX 6600 / 6600 XT (Navi 23): Low. RX 6700 / 6700 XT / 6750 XT (Navi 22): Medium.
+    (AMD, 0x73FF, QualityTier::Low),
+    (AMD, 0x73DF, QualityTier::Medium),
+    // RX 7700 XT / 7800 XT (Navi 32): High. RX 9070 / 9070 XT / 9070 GRE (Navi 48): Ultra.
+    (AMD, 0x747E, QualityTier::High),
+    (AMD, 0x7550, QualityTier::Ultra),
+];
+
+/// The tier a device starts on before the player picks one (ADR-0020 §2b): a reference GPU
+/// gets its table tier (capped at its `max_tier`), any other device admitted to Tiered gets
+/// Low, and a Compat device gets Compat Medium.
+#[must_use]
+pub fn default_tier(caps: &DeviceCapabilities, admission: &Admission) -> QualityTier {
+    let Some(max_tier) = admission
+        .max_tier
+        .filter(|_| admission.path == RenderPath::Tiered)
+    else {
+        return QualityTier::Medium;
+    };
+    DEFAULT_TIERS
+        .iter()
+        .find(|(vendor, device, _)| *vendor == caps.vendor_id && *device == caps.device_id)
+        .map_or(QualityTier::Low, |&(_, _, tier)| tier.min(max_tier))
 }
 
 /// The device-selection score (ADR-0020 §2b): device type first, then a GPU that qualifies

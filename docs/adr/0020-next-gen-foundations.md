@@ -1028,6 +1028,51 @@ Recorded in the capability-gate PR (`feat/n0-capability-gate`), after its review
   `bufferDeviceAddress` feature, but no buffer uses an address yet. The first pass that
   allocates one (bindless, §3a) turns the allocator flag on, so N0.2 changes no allocation.
 
+### Amendment 3 (2026-11-01, N0.3): dynamic resolution before the upscalers
+
+Recorded in the tier-presets PR (`feat/n0-tiers-budgets`). Six departures from §2b, §5 and §5a,
+each until the phase named:
+
+- **The scale ceiling stays at full scale until N1.** §5c sets the ceiling to the preset's
+  upscaler mode (0.67 at 1080p and 1440p, 0.5 for Ultra at 4K and Overdrive). Until N1 there
+  is no upscaler to fill that gap: today's bilinear or bicubic stretch would make the tiered
+  path, which `auto` picks on every RT-capable GPU, render visibly softer than Compat. N0
+  keeps the tier budget as the target, from full scale down to the floor.
+  `GpuBudget::scale_range_at` still carries the §5c ranges, and N1 switches the ceiling on
+  with the upscalers.
+- **Dynamic resolution is off by default on the tiered path until N1.** `MOBA_DYNRES=on`
+  runs it against the tier's budget and `MOBA_DYNRES=<ms>` against a forced target, which is
+  how gate 4 is checked. The perf review found two reasons not to ship it on by default before
+  N1:
+  - with a full-scale ceiling, a scaled frame always runs the upscale pass, a full-screen
+    9-tap resample that at scale 1.0 costs time for nothing;
+  - the controller (an EMA with a 15-frame hold) reacts to frame-time noise above about 10%,
+    which would show as resolution pumping.
+
+  N1 needs the upscale pass anyway, and N1 tunes the controller against the reference GPUs.
+- **Compat players keep today's tier, and detection saves nothing.** §5a re-detects a
+  settings file from before N0, and §2b starts a Compat device on Medium. Either would change
+  a Compat player's pixels, against "N0 changes no Compat pixel". So in N0:
+  - on Compat, `auto` is today's High and a pre-N0 file keeps its tier;
+  - on the tiered path, `auto` and a pre-N0 file take the detected tier;
+  - detection runs on every interactive start and never writes the settings file. Writing
+    it on detection could overwrite a file that failed to parse, lose its comments, and fix a
+    transient probe failure for good;
+  - a file is pre-N0 when it lacks `settings_version = 1`. Saving keeps a file's version, so
+    a pre-N0 file saved on Compat is still re-detected on a later tiered run;
+  - an explicit tier above the device's `max_tier` is capped at it (§2b).
+
+  `caps::default_tier` keeps §2b's Compat Medium. The maintainer decides whether Compat moves
+  to it once the tiered path is the default.
+- **The floor stays at 0.5 until N1.** The 0.33 (Ultra Performance) floors of Ultra at 4K
+  and Overdrive go below today's `MIN_RENDER_SCALE`; they arrive with the upscalers.
+- **The dynamic-resolution target may go down to 0.1 ms** (it was clamped to 1 ms). The RTX
+  5070 Ti runs the 1080p teamfight replay in about 0.5–0.7 ms of GPU time, so gate 4's forced
+  target could not bite under the old clamp. `scripts/dynres-check.sh` is that gate's test.
+- **Ultra's budget (9 ms) exceeds its 120 fps frame (8.33 ms).** §5b's table is kept as
+  written, and the budget test exempts Ultra by name. The maintainer decides whether to lower
+  it before N1 makes the tiered gate binding.
+
 ### Amendment 4 (2026-11-01, N0 Slang toolchain)
 
 These are the departures and clarifications from implementing §4. The toolchain is
