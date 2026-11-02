@@ -87,8 +87,8 @@ pub use baked_ao::{
     MAX_BAKED_AO_TEXELS, PropMeshShape, ao_fingerprint, baked_ao_paths,
 };
 pub use budget::{
-    ModelBudgetReport, TIER_BUDGETS, TierBudget, TierFit, finest_level_within, model_report,
-    tier_budget,
+    COMPAT_GPU_BUDGETS, GPU_BUDGETS, GpuBudget, ModelBudgetReport, TIER_BUDGETS, TierBudget,
+    TierFit, compat_gpu_budget_ms, finest_level_within, gpu_budget, model_report, tier_budget,
 };
 pub use environment::{
     ENVIRONMENTS_DIR, EnvironmentDesc, EnvironmentError, MAX_ENVIRONMENT_BYTES, MAX_SPECULAR_MIPS,

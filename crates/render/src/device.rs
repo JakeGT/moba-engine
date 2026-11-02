@@ -123,35 +123,14 @@ impl DeviceContext {
             // SAFETY: `physical` came from this instance.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
             let name = device_name(&properties);
-            if properties.api_version < vk::API_VERSION_1_3 {
-                let version = properties.api_version;
-                let _ = writeln!(
-                    reasons,
-                    "{name}: Vulkan {}.{} < 1.3; ",
-                    vk::api_version_major(version),
-                    vk::api_version_minor(version)
-                );
+            if let Some(reason) = unsuitable(instance, physical)? {
+                let _ = writeln!(reasons, "{name}: {reason}; ");
                 continue;
             }
             // SAFETY: `physical` came from this instance.
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
-            // Prefer a graphics family that also runs compute (the VFX simulation records on
-            // the graphics queue); Vulkan guarantees one exists on some device.
-            let both = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
-            let Some(graphics_family) = families
-                .iter()
-                .position(|family| family.queue_flags.contains(both))
-                .or_else(|| {
-                    families
-                        .iter()
-                        .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-                })
-            else {
-                let _ = writeln!(reasons, "{name}: no graphics queue; ");
-                continue;
-            };
-            let graphics_family = u32::try_from(graphics_family).expect("queue family fits u32");
+            let graphics_family = graphics_family(&families).expect("checked by `unsuitable`");
             let present_family = families.iter().enumerate().find_map(|(index, _)| {
                 // SAFETY: the surface and physical device belong to this instance.
                 match unsafe {
@@ -172,19 +151,6 @@ impl DeviceContext {
 
             // SAFETY: `physical` came from this instance.
             let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;
-            if !extension_supported(&available, SWAPCHAIN) {
-                let _ = writeln!(reasons, "{name}: no swapchain extension; ");
-                continue;
-            }
-
-            // Both features are mandatory in Vulkan 1.3; they are still checked because
-            // portability drivers (MoltenVK) are not fully conformant.
-            let features_13 = query_vulkan13(instance, physical);
-            if features_13.dynamic_rendering != vk::TRUE || features_13.synchronization2 != vk::TRUE
-            {
-                let _ = writeln!(reasons, "{name}: no dynamic rendering/synchronization2; ");
-                continue;
-            }
             let mut extensions = vec![SWAPCHAIN];
             if extension_supported(&available, PORTABILITY_SUBSET) {
                 extensions.push(PORTABILITY_SUBSET);
@@ -808,6 +774,61 @@ fn device_name(properties: &vk::PhysicalDeviceProperties) -> String {
     unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Why `physical` cannot run the renderer whatever the surface, or `None` when it can: Vulkan
+/// 1.3, a graphics queue, `VK_KHR_swapchain`, dynamic rendering and synchronization2. Device
+/// selection and the client's surface-free probe ([`crate::probe_devices`]) share it, so the
+/// probe skips the same devices; only present support needs the window.
+///
+/// # Errors
+/// Fails only if extension enumeration fails.
+pub(crate) fn unsuitable(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+) -> RenderResult<Option<String>> {
+    // SAFETY: `physical` came from this instance.
+    let properties = unsafe { instance.get_physical_device_properties(physical) };
+    if properties.api_version < vk::API_VERSION_1_3 {
+        let version = properties.api_version;
+        return Ok(Some(format!(
+            "Vulkan {}.{} < 1.3",
+            vk::api_version_major(version),
+            vk::api_version_minor(version)
+        )));
+    }
+    // SAFETY: `physical` came from this instance.
+    let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+    if graphics_family(&families).is_none() {
+        return Ok(Some(String::from("no graphics queue")));
+    }
+    // SAFETY: `physical` came from this instance.
+    let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;
+    if !extension_supported(&available, SWAPCHAIN) {
+        return Ok(Some(String::from("no swapchain extension")));
+    }
+    // Both features are mandatory in Vulkan 1.3; they are still checked because portability
+    // drivers (MoltenVK) are not fully conformant.
+    let features_13 = query_vulkan13(instance, physical);
+    if features_13.dynamic_rendering != vk::TRUE || features_13.synchronization2 != vk::TRUE {
+        return Ok(Some(String::from("no dynamic rendering/synchronization2")));
+    }
+    Ok(None)
+}
+
+/// The graphics family to use: one that also runs compute when there is one (the VFX
+/// simulation records on the graphics queue; Vulkan guarantees one exists on some device).
+fn graphics_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
+    let both = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
+    families
+        .iter()
+        .position(|family| family.queue_flags.contains(both))
+        .or_else(|| {
+            families
+                .iter()
+                .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        })
+        .map(|index| u32::try_from(index).expect("queue family fits u32"))
 }
 
 fn extension_supported(available: &[vk::ExtensionProperties], name: &CStr) -> bool {
