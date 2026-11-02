@@ -303,13 +303,11 @@ fn dlss(context: &Context) {
         ("windows", "x86_64") => {
             // The build matching Rust's C runtime: static (/MT, `_s`) with `crt-static`, else
             // dynamic (/MD, `_d`), as NRD's flags are chosen.
-            let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
-                .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"));
             let dir = lib.join("Windows_x86_64").join("x64");
             println!("cargo:rustc-link-search=native={}", dir.display());
             println!(
                 "cargo:rustc-link-lib=static={}",
-                if crt_static {
+                if crt_static() {
                     "nvsdk_ngx_s"
                 } else {
                     "nvsdk_ngx_d"
@@ -367,11 +365,7 @@ fn nrd(context: &Context) {
     // On MSVC, the C runtime NRD links must match Rust's: `/MT` with `crt-static`, else `/MD`.
     let msvc_runtime = env::var("CARGO_CFG_TARGET_ENV")
         .is_ok_and(|env| env == "msvc")
-        .then(|| {
-            let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
-                .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"));
-            if crt_static { "/MT" } else { "/MD" }
-        });
+        .then(|| if crt_static() { "/MT" } else { "/MD" });
     let defines = nrd_defines(
         &shadermake,
         &mathlib,
@@ -457,6 +451,14 @@ fn nrd(context: &Context) {
     } else if context.target_os != "windows" {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
+}
+
+/// Whether Rust links the static C runtime (`crt-static`), which picks the MSVC runtime
+/// (`/MT` against `/MD`) that NGX's library and NRD's build must match.
+#[cfg(any(feature = "dlss", feature = "nrd"))]
+fn crt_static() -> bool {
+    env::var("CARGO_CFG_TARGET_FEATURE")
+        .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"))
 }
 
 /// `<build-dir>/<profile>/vendor-build/<name>`, found from `OUT_DIR`
