@@ -202,7 +202,20 @@ clean on `--features nrd` and on every vendor feature together, and the stand-in
 configured and built once, then reused by `cargo check`, by clippy and by a second feature
 set; changing `CXX` rebuilt it from scratch. The real CMake and `dxc` build is still CI's.
 
-The `vendor-sdks` job's wall time is recorded after its first run, in the PR.
+### The `vendor-sdks` CI job
+
+Wall time per run on GitHub's hosted runners (the job's first runs, PR #357):
+
+| Commit | Linux | Windows | Caches |
+|---|---|---|---|
+| `a173038` | 8 min 36 s, pass | failed (NRD's MSVC flags) | all cold: archives fetched (122 s Linux, 114 s Windows), `dxc` subset, NRD built |
+| `522f0b2` | **2 min 21 s**, pass | failed (NGX result type) | Linux warm: dependencies, archives and `dxc` restored; NRD rebuilt (its key changed with `build/vendor.rs`) in a 43 s build step |
+| `14b4ddd` | 3 min 42 s, pass | **9 min 45 s, pass** | Windows: archives from Linux's cross-OS entry, `dxc` restored, dependencies cold (no earlier green run had saved them); NRD built on both |
+
+On Linux the warm run is about 2½ minutes, including one NRD build; the per-feature clippy
+loop costs about 3.6 s per feature once NRD is cached. The warm Windows time (dependencies
+restored) is recorded in the PR after its next run. The SDK archive entry (1.3 GB) is the only
+large cache and is shared by both OSes; the NRD entry (libraries and stamp) is about 1.3 MB.
 
 ## Not covered here
 

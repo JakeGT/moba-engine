@@ -301,10 +301,20 @@ fn dlss(context: &Context) {
             println!("cargo:rustc-link-lib=dylib=dl");
         }
         ("windows", "x86_64") => {
-            // The dynamic-CRT (/MD) build, matching Rust's MSVC targets.
+            // The build matching Rust's C runtime: static (/MT, `_s`) with `crt-static`, else
+            // dynamic (/MD, `_d`), as NRD's flags are chosen.
+            let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
+                .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"));
             let dir = lib.join("Windows_x86_64").join("x64");
             println!("cargo:rustc-link-search=native={}", dir.display());
-            println!("cargo:rustc-link-lib=static=nvsdk_ngx_d");
+            println!(
+                "cargo:rustc-link-lib=static={}",
+                if crt_static {
+                    "nvsdk_ngx_s"
+                } else {
+                    "nvsdk_ngx_d"
+                }
+            );
         }
         (os, arch) => fail(format!(
             "moba-render feature `dlss`: DLSS SDK has no NGX library for {os}-{arch}"
