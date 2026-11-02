@@ -12,6 +12,7 @@ use ash::{Instance, vk};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
 use crate::caps::{self, Admission, DeviceCapabilities, Overrides, PathChoice, RenderPath};
+use crate::descriptor_budget::UpdateAfterBindLimits;
 use crate::error::{RenderError, RenderResult};
 use crate::instance::InstanceContext;
 use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
@@ -85,6 +86,10 @@ pub(crate) struct DeviceContext {
     pub(crate) admission: Admission,
     /// The probed capabilities the decision was made from.
     pub(crate) capabilities: DeviceCapabilities,
+    /// The update-after-bind descriptor limits that bound tiered pipeline layouts (ADR-0020
+    /// §3b, [`crate::descriptor_budget::check_tiered`]); all zero on Compat, which never
+    /// creates an update-after-bind layout.
+    pub(crate) update_after_bind: UpdateAfterBindLimits,
 }
 
 struct Candidate {
@@ -99,10 +104,14 @@ struct Candidate {
 }
 
 impl DeviceContext {
+    /// Picks and creates the device. With `surface`, a device needs a queue family that can
+    /// present to it; without one (the headless tiered smoke tests, ADR-0020 gate 3) the
+    /// graphics family stands in for the present family. The instance must enable
+    /// `VK_KHR_surface` either way, because the device enables `VK_KHR_swapchain`.
     #[allow(clippy::too_many_lines)] // Device selection is one auditable decision table.
     pub(crate) fn new(
         context: &InstanceContext,
-        surface: vk::SurfaceKHR,
+        surface: Option<vk::SurfaceKHR>,
         pipeline_stats: bool,
         choice: PathChoice,
         allow_cpu: bool,
@@ -131,19 +140,22 @@ impl DeviceContext {
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
             let graphics_family = graphics_family(&families).expect("checked by `unsuitable`");
-            let present_family = families.iter().enumerate().find_map(|(index, _)| {
-                // SAFETY: the surface and physical device belong to this instance.
-                match unsafe {
-                    surface_loader.get_physical_device_surface_support(
-                        physical,
-                        u32::try_from(index).expect("queue family fits u32"),
-                        surface,
-                    )
-                } {
-                    Ok(true) => Some(u32::try_from(index).expect("queue family fits u32")),
-                    _ => None,
-                }
-            });
+            let present_family = match surface {
+                None => Some(graphics_family),
+                Some(surface) => families.iter().enumerate().find_map(|(index, _)| {
+                    // SAFETY: the surface and physical device belong to this instance.
+                    match unsafe {
+                        surface_loader.get_physical_device_surface_support(
+                            physical,
+                            u32::try_from(index).expect("queue family fits u32"),
+                            surface,
+                        )
+                    } {
+                        Ok(true) => Some(u32::try_from(index).expect("queue family fits u32")),
+                        _ => None,
+                    }
+                }),
+            };
             let Some(present_family) = present_family else {
                 let _ = writeln!(reasons, "{name}: no present queue; ");
                 continue;
@@ -403,17 +415,21 @@ impl DeviceContext {
         // `AllocatorDebugSettings` is `#[non_exhaustive]` since gpu-allocator 0.28.
         let mut debug_settings = gpu_allocator::AllocatorDebugSettings::default();
         debug_settings.log_leaks_on_shutdown = false;
+        // ADR-0020 §3a: tiered buffers are passed by device address, so tiered memory blocks
+        // are allocated with `DEVICE_ADDRESS` (the feature is enabled above). Compat as before.
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
             physical_device: physical,
             debug_settings,
-            // Tiered enables `bufferDeviceAddress`, but nothing allocates a device-address
-            // buffer yet. The first tiered pass that does (bindless, ADR-0020 §3a) turns this on,
-            // so N0.2 changes no allocation.
-            buffer_device_address: false,
+            buffer_device_address: tiered,
             allocation_sizes: gpu_allocator::AllocationSizes::default(),
         })?;
+        let update_after_bind = if tiered {
+            query_update_after_bind(instance, physical)
+        } else {
+            UpdateAfterBindLimits::default()
+        };
 
         Ok(Self {
             device,
@@ -470,6 +486,7 @@ impl DeviceContext {
             pipeline_builds: Cell::new((0, Duration::ZERO)),
             admission: candidate.admission.clone(),
             capabilities: candidate.capabilities.clone(),
+            update_after_bind,
         })
     }
 
@@ -837,6 +854,30 @@ fn extension_supported(available: &[vk::ExtensionProperties], name: &CStr) -> bo
         let extension_name = unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) };
         extension_name == name
     })
+}
+
+/// The update-after-bind descriptor limits (core Vulkan 1.2 properties).
+fn query_update_after_bind(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+) -> UpdateAfterBindLimits {
+    let mut properties_12 = vk::PhysicalDeviceVulkan12Properties::default();
+    {
+        let mut properties = vk::PhysicalDeviceProperties2::default().push(&mut properties_12);
+        // SAFETY: the physical device belongs to this instance, which is Vulkan 1.3, and the
+        // chain is valid for the duration of the call.
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    }
+    let p = &properties_12;
+    UpdateAfterBindLimits {
+        per_stage_samplers: p.max_per_stage_descriptor_update_after_bind_samplers,
+        per_stage_sampled_images: p.max_per_stage_descriptor_update_after_bind_sampled_images,
+        per_stage_storage_images: p.max_per_stage_descriptor_update_after_bind_storage_images,
+        per_stage_resources: p.max_per_stage_update_after_bind_resources,
+        set_samplers: p.max_descriptor_set_update_after_bind_samplers,
+        set_sampled_images: p.max_descriptor_set_update_after_bind_sampled_images,
+        set_storage_images: p.max_descriptor_set_update_after_bind_storage_images,
+    }
 }
 
 fn query_vulkan13(

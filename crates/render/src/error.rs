@@ -106,6 +106,10 @@ pub enum RenderError {
         /// The device's limit.
         limit: u32,
     },
+    /// Every slot of one bindless array (`"textures"` or `"storage images"`) is live or
+    /// waiting for its frame to retire (ADR-0020 §3a). The capacity is a constant, raised in
+    /// one place (`caps::BINDLESS_*`).
+    BindlessFull(&'static str),
 }
 
 impl fmt::Display for RenderError {
@@ -155,6 +159,7 @@ impl fmt::Display for RenderError {
                 "the {layout} pipeline layout needs {needed} {kind} in the {stage} stage; the \
                  device allows {limit}"
             ),
+            Self::BindlessFull(kind) => write!(f, "the bindless table has no free {kind} slot"),
             Self::InvalidTexture => f.write_str("invalid texture dimensions"),
             Self::TooManyMeshes => write!(
                 f,
