@@ -88,6 +88,19 @@ the semver check):
 - `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
 
 ### Build
+- **Slang toolchain (N0, ADR-0020 §4).** `crates/shaders/build.rs` now also compiles
+  `shaders/slang/*.slang` with a pinned, checksummed `slangc` (v2026.20, in
+  `crates/shaders/slang-version.txt`), with an exact version check (`MOBA_SLANG_ANY_VERSION=1`
+  relaxes it) and a mandatory `spirv-val`. Fetch it once with `scripts/fetch-slang.sh` or
+  `.ps1` ([docs/dev/slang.md](docs/dev/slang.md)). The first module is
+  `toolchain_smoke.slang`, which the renderer does not create. `vulkan-probe --slang-smoke`
+  dispatches it once and checks the output, including the matrix convention. CI runs it on
+  lavapipe and on MoltenVK, with validation required. Tests compare the Slang
+  frame-constants layout from `slangc -reflection-json` with `CameraUniform` (name, type,
+  shape, offset, size) and every module's reflected bindings with an explicit table. CI fetches and
+  caches the compiler through `.github/actions/setup-slang`, and installs `spirv-tools`. The
+  RTXDI-through-`slangc` spike passes for DI and GI and fails for PT
+  ([docs/dev/rtxdi-slang-spike.md](docs/dev/rtxdi-slang-spike.md)).
 - **Vulkan bindings on a pinned `ash` revision (ADR-0020 §1, N0.1;
   [perf/0025](docs/perf/0025-n0-ash-pin.md)).**
   - `ash` and `ash-window` come from `ash-rs/ash` master at `8844f6b` (Vulkan 1.4.352
@@ -190,6 +203,29 @@ the semver check):
     build logs nothing. New `Renderer::vendor_backends()`, `VendorBackends` and `LatencyMode`
     (Reflex or Anti-Lag from the extensions the device was created with). Nothing reaches the
     frame in N0.
+- **Bindless table and tiered smokes (ADR-0020 §3, amendment 5, N0.5;
+  [perf/0028](docs/perf/0028-bindless.md), [dev/bindless.md](docs/dev/bindless.md)):**
+  - `BindlessTable` (`moba-render`, tiered path only): one update-after-bind set with 32
+    samplers (a fixed 12-entry palette), 1,024 storage images and 16,384 sampled images
+    (variable count), all partially bound. Typed `u32` handles come from free lists; every slot
+    starts on a fallback (magenta, white, flat normal; a zero storage image; valid for 2D
+    float reads); released slots return after their last frame retires, under an `unsafe`
+    release/retire contract (recording a released handle is a caller bug). Writes happen at
+    load time only, never per frame.
+    Descriptor-indexing features, `bufferDeviceAddress` memory and the update-after-bind limit
+    check (`descriptor_budget::check_tiered`) are enabled only on the tiered path. No
+    production pass uses the table yet, and Compat is unchanged (goldens byte-identical).
+  - `bindless-smoke` and `rt-smoke` (`moba-tools`): one 64×64 headless frame each, read back
+    and compared exactly with a CPU expectation. The first samples divergent `nonuniformEXT`
+    handles from a device-address buffer in a fragment and a compute pass, including reused
+    and recycled slots, at a coordinate where every palette sampler (and, in the compute
+    pass, every comparison sampler on a depth texture) reads a different exact value, and
+    writes descriptors into the bound set while its frame is pending (update after bind); the
+    second traces a BLAS/TLAS with `GL_EXT_ray_query`. Both pass with validation and
+    synchronization validation on lavapipe, RADV and an RTX 5070 Ti, and run in the
+    `renderer-gate` job on lavapipe; a run without validation fails unless
+    `MOBA_VULKAN_VALIDATION=off` was given. `bindless.glsl` holds the shader declarations and
+    the `BINDLESS_SAMPLER2D_NONUNIFORM` and `BINDLESS_SAMPLER2DSHADOW_NONUNIFORM` macros.
 - **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;
   [perf/0027](docs/perf/0027-tiers-budgets.md)):**
   - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it

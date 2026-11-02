@@ -4,7 +4,8 @@
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-01)). Proposed 2026-10-31. This is phase N0 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§5.1, §8 and §12 step 2),
-and it is written before the code.
+and it is written before the code. **Amended** 2026-11-01 by the N0 Slang toolchain step
+([Amendment 4](#amendment-4-2026-11-01-n0-slang-toolchain)).
 - **Builds on:** [ADR-0002](0002-vulkan-baseline.md), which stays in force: Vulkan 1.3 is
   still the minimum. The maintainer allowed raising the **tiered path** to Vulkan 1.4 if it
   helps (see the answers below). Compat stays on 1.3 in any case. [Amendment 1](#amendment-1-2026-11-01-n01-the-tiered-path-stays-on-vulkan-13)
@@ -1072,6 +1073,125 @@ each until the phase named:
   written, and the budget test exempts Ultra by name. The maintainer decides whether to lower
   it before N1 makes the tiered gate binding.
 
+### Amendment 4 (2026-11-01, N0 Slang toolchain)
+
+These are the departures and clarifications from implementing §4. The toolchain is
+documented in [docs/dev/slang.md](../dev/slang.md).
+
+- **Pin.** The pin is v2026.20, as proposed. The release exists, and no newer release is
+  listed. The SHA-256 values in `crates/shaders/slang-version.txt` were taken from the
+  downloaded archives and match the release API's `digest` for all five hosts. The Windows
+  archive is the `.zip`; the other four hosts use the `.tar.gz`.
+- **Flags.** There is no "Vulkan 1.3 profile" in `slangc`. `-profile spirv_1_6` is the
+  equivalent, since SPIR-V 1.6 is Vulkan 1.3's core version, and `spirv-val --target-env
+  vulkan1.3` checks the result. Two flags are added:
+  - `-fvk-use-entrypoint-name`, so that one file may hold several entry points;
+  - `-warnings-as-errors all`.
+- **Explicit bindings.** `slangc` has no flag that rejects implicit bindings. A
+  `moba-shaders` unit test therefore compares every module's reflected parameters with an
+  exact `(name, set, binding)` table: globals, `lib/` imports and entry-point parameters. It
+  rejects loose `uniform` globals and uniform entry-point parameters.
+- **Compiler lookup.** The `target/tools` step walks up from `OUT_DIR` and stops at the
+  first `CACHEDIR.TAG`, at most five levels up. A relocated target directory therefore works
+  for the build. The fetch scripts read only `CARGO_TARGET_DIR`, and they write the tag when
+  they create the target directory themselves.
+- **Layout check: frame constants only, for now.** The test compares `slangc
+  -reflection-json` for `FrameConstants` (`shaders/slang/lib/frame_constants.slang`) with
+  `CameraUniform`: each field's name, order, scalar type, shape, offset and size. The JSON
+  comes from `moba_shaders::reflection`, which nothing at run time calls. The
+  instance record and the material record get Slang mirrors, and join the test, when the first Slang pass that reads them lands (N1). Writing those mirrors now would
+  mean porting a pass, which N0 does not do (§4d).
+- **N0 module.** This step adds one module, `toolchain_smoke.slang`, which the renderer does
+  not create. `vulkan-probe --slang-smoke` dispatches it once on a compute-only device and
+  checks the output, including `mul(view_proj, v)` against glam. That fixes the matrix
+  convention: column-major, `mul(M, v)`. CI runs it on lavapipe (render-golden) and on
+  MoltenVK (the macOS probe), with validation required. `bindless_smoke` and `rt_smoke`
+  follow with bindless and the capability gate.
+- **CI.**
+  - The fetch and its cache (keyed on `slang-version.txt`) are one composite action,
+    `.github/actions/setup-slang`.
+  - The action is used in every job that builds the shaders crate. Jobs that never build it
+    don't use it: `release.yml`'s `package` job, `deny`, `miri`, `loom.yml`, `fuzz.yml` and
+    `docs.yml`.
+  - `nightly-perf.yml`'s self-hosted runner must provide `spirv-val` itself.
+  - The Linux and macOS jobs now install `spirv-tools`, so CI also validates the GLSL modules,
+    where before it skipped them.
+- **RTXDI spike: pass for DI, ReGIR and GI; fail for PT.** RTXDI v3.1.0's unmodified
+  library headers for ReSTIR DI, ReGIR, presampling and ReSTIR GI compile with `slangc`
+  2026.20 to SPIR-V that passes `spirv-val`. The ReSTIR PT headers do not compile, because
+  they use C++ templates and legacy loop scoping. DXC is therefore **not** needed for the
+  `rtxdi` feature's DI and GI, only for PT if PT is ever adopted. The record is
+  [docs/dev/rtxdi-slang-spike.md](../dev/rtxdi-slang-spike.md).
+- **Publishing.** The workspace stays `publish = false`. `cargo package --list` is unaffected,
+  since `slang-version.txt` and `shaders/slang/` are inside the crate. A docs.rs-style build
+  without shader tools fails at `build.rs`, which is already true for `glslc` today.
+
+### Amendment 5 (2026-11-02, N0.5): the bindless table as built
+
+Recorded in the bindless PR (`feat/n0-bindless`), numbered after N0.3's amendment 3 and
+N0.4's amendment 4. §3's model, bindings, capacities, flags and
+limits are implemented as written ([perf/0028](../perf/0028-bindless.md)). Five details §3
+leaves open or states loosely are settled here:
+
+- **Every slot holds a written descriptor, not only slot 0.** Creation writes the fallback
+  into all 17,440 slots (once, about 17k descriptor writes), and a released slot gets the
+  fallback back when it retires. That makes §3a's "a stale or zero index never reads an
+  unwritten descriptor" true for *every* index below the capacity, not just 0, but only for
+  **2D float reads**: every fallback is a 2D `R8G8B8A8_UNORM` image, so a zero or bad index is
+  valid through `texture2D` with a non-comparison sampler and through a float `image2D`, and
+  invalid through a `texture3D`/`textureCube` alias, a `uimage2D` (the RT smoke declares one
+  on binding 1) or a comparison sampler on a colour fallback. Typed fallbacks (3D, cube,
+  depth, unsigned storage) arrive with their first N1 consumers. The fallbacks are a safety
+  net for a bad index, not a promise for stale handles (next item).
+- **The release contract is stated, and it is `unsafe`.** §3a says freed slots are recycled
+  "after the frames in flight have retired". `release(handle, frame)` takes the **last frame,
+  submitted or being recorded, that may index the handle**; no frame recorded after the
+  release may index it. `retire(completed)` takes a frame whose fence has signalled. Only then
+  are the fallback rewrite and the reuse writes to descriptors no pending command buffer
+  uses, which is all `UPDATE_UNUSED_WHILE_PENDING` allows
+  (VUID-vkUpdateDescriptorSets-None-03047). A wrong `frame` or `completed` makes such a write
+  undefined behaviour, so `release_texture`, `release_storage_image` and `retire` are
+  `unsafe fn`s with that contract as their `# Safety` section (as `GpuBuffer::device_address`
+  is). **Recording a handle after its release is a caller bug**: it does not read the
+  fallback, because the slot may be reused and rewritten while that frame is pending. Shaders
+  index only live handles and the reserved fallbacks.
+- **Three texture fallbacks, three reserved handles.** §3a lists "a 1×1 magenta, white or
+  flat-normal image". They are texture slots 0, 1 and 2 (`MISSING`, `WHITE`, `FLAT_NORMAL`);
+  handles start at 3. The storage fallback (slot 0) is a 1×1 `R8G8B8A8_UNORM` image cleared to
+  zero.
+- **The sampler palette has 12 entries.** Wrap/clamp × linear/point/aniso × compare gives 12;
+  the other 20 of the 32 slots hold slot 0's linear/wrap sampler. Aniso is plain linear on a
+  device without `samplerAnisotropy`. Comparison entries hold slot 0 on a device without
+  mutable comparison samplers; Tiered admits none today.
+- **`maxPerStageUpdateAfterBindResources` counts 17,408, not 17,440.** The spec's resource
+  count excludes plain samplers, so the table needs 17,408 per stage. §3b's admission minimum
+  (17,440) is kept, as it is conservative. `descriptor_budget::check_tiered` checks tiered
+  layouts against the device's update-after-bind limits, per stage (every stage a binding is
+  visible to; `ALL` means every stage, mesh and ray tracing included) and per layout, for
+  samplers, sampled images, storage images and resources. Update-after-bind buffer and
+  acceleration-structure limits, and the colour attachments the fragment stage also counts,
+  are added by the first tiered pass that binds them (N1).
+
+Consequences of §3a that the code also takes, and what the smokes check:
+- **Tiered memory carries `DEVICE_ADDRESS`.** On the tiered path the allocator allocates every
+  block with `VkMemoryAllocateFlags::DEVICE_ADDRESS`, so any buffer can be passed by address.
+  Compat allocates as before.
+- **The smokes are `moba-tools` binaries** (`bindless-smoke`, `rt-smoke`) over
+  `moba_render::{bindless_smoke, rt_smoke}`, run headless (no surface) and in the
+  `renderer-gate` job. They are GLSL: they were written before Slang (§4) landed, and N0 ports no shaders (§4d). A run
+  passes only with validation on, or with `MOBA_VULKAN_VALIDATION=off` given explicitly.
+- **What `bindless_smoke` checks on the GPU.** The sampler palette: 2×2 textures sampled at
+  a coordinate where wrap/clamp and point/linear give four different exact values, so a
+  missing, swapped or ignored palette entry fails (anisotropic entries read as linear there:
+  their anisotropy is checked only by their create info). The comparison entries: a 2×2 depth
+  texture through each of them, in the compute pass only, because lavapipe (Mesa 26.2.5)
+  crashes when a fragment shader takes a second sample after a `nonuniformEXT` one; the
+  fragment pass checks the six non-comparison entries. Update after bind: while the smoke
+  frame is pending, four descriptor writes go into the bound set (a release, retirement and
+  reuse of a texture slot, and a storage image registered, released and retired), to slots
+  the frame does not index; without `UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING` the
+  validation layer reports VUID-vkUpdateDescriptorSets-None-03047 and the run fails.
+
 ### Amendment 6 (2026-11-02, N0.6): vendor SDK features in N0
 
 Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the first until N1:
@@ -1091,13 +1211,15 @@ Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the 
   run-time binary: both are available when the device is on the tiered path with ray queries,
   and their shaders arrive with N7/N8.
 - **NRD is built as a static library** (`NRD_STATIC_LIBRARY=ON`, beyond §6b's flag list), so
-  nothing extra ships beside the executable, and its outputs go to `OUT_DIR` rather than NRD's
-  source tree. A static NRD does not absorb the ShaderMake blob reader it links `PRIVATE`
-  (its shader lookup, `ShaderMake::FindPermutationInBlob`), so `build.rs` collects the static
-  archives in one directory (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`) and links `ShaderMakeBlob`
-  beside `NRD`. NRD's configure step also writes `Shaders/NRDConfig.hlsli` into its source
-  tree, so CMake runs on a copy of the fetched source in `OUT_DIR` (ShaderMake and MathLib are
-  only read, in place); the fetched SDK stays as verified.
+  nothing extra ships beside the executable, and its outputs stay out of NRD's source tree:
+  it is built once per pin, target, profile and toolchain in
+  `<target-dir>/<profile>/vendor-build/nrd`, which every feature set and clippy reuse, rather
+  than in each build script's `OUT_DIR`. A static NRD does not absorb the ShaderMake blob
+  reader it links `PRIVATE` (its shader lookup, `ShaderMake::FindPermutationInBlob`), so
+  `build.rs` collects the static archives in one directory (`CMAKE_ARCHIVE_OUTPUT_DIRECTORY`)
+  and links `ShaderMakeBlob` beside `NRD`. NRD's configure step also writes `Shaders/NRDConfig.hlsli` into its source
+  tree, so CMake runs on a copy of the fetched source in that directory (ShaderMake and
+  MathLib are only read, in place); the fetched SDK stays as verified.
 - **Run-time libraries load only from the executable's directory**, by full path, never
   through the system search path, so a planted DLL elsewhere on the path is never picked up.
   On Windows their own imports are resolved from that directory and the system directories
@@ -1210,8 +1332,9 @@ may fold the corrections in when this ADR is accepted.
 - **§6.3 SHaRC.** SHaRC 1.8.3 is in the standalone `NVIDIA-RTX/SHARC` repository, as the
   untagged commit `4e21b585c33c` ("v1.8.3"). The repository's latest *tag* is older, v1.6.5.0.
   RTXGI v2.8.0 pulls it in as a submodule. Pin that commit (§6b).
-- **§6.2 RTXDI.** Upstream compiles its HLSL with DXC. Compiling it through Slang is
-  unverified (§4d).
+- **§6.2 RTXDI.** Upstream compiles its HLSL with DXC. Compiling it through Slang was
+  unverified (§4d). The N0 spike has since verified it for DI and GI, but not for PT (see the
+  [Amendment 4](#amendment-4-2026-11-01-n0-slang-toolchain)).
 - **§6.3 NRC.** "Windows plus CUDA only" is correct. It *does* have a Vulkan DLL
   (`NRC_Vulkan.dll`), with no Linux binaries.
 - **§5.1 Slang.** The licence and Khronos hosting are correct. The repository lives in the

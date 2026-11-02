@@ -76,7 +76,7 @@ cmake = { workspace = true, optional = true }
 # The VAT validation tests load the shipped sample model.
 moba-assets = { workspace = true, features = ["bc-decode", "glb"] }
 criterion.workspace = true
-# Reads the recorded and synthetic capability fixtures (ADR-0020 §2b).
+# Reads the capability fixtures (ADR-0020 §2b) and the Slang reflection JSON (§4c).
 serde_json.workspace = true
 
 [[bench]]

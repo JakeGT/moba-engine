@@ -95,7 +95,15 @@ tiered required set, ray query included, but it is a CPU device, so `auto` admit
 `MOBA_RENDER_PATH=tiered` to run the tiered path on it; the tiered smoke tests (N0.5) run that way, and the default
 goldens stay on `compat`. Only the environment variable admits a CPU device: `render_path =
 "tiered"` in the settings file does not, so a player's setting never runs the game on a
-software rasteriser. The client's `[render]` start-up line and every
+software rasteriser. With the environment above:
+
+```bash
+MOBA_RENDER_PATH=tiered cargo run --release -p moba-tools --bin bindless-smoke
+MOBA_RENDER_PATH=tiered cargo run --release -p moba-tools --bin rt-smoke
+```
+
+Each prints `PASS` or `FAIL` with the values checked and the validation messages counted;
+see [bindless.md](bindless.md). The client's `[render]` start-up line and every
 frame-log line carry `path=`, `max_tier=` and `missing=`.
 
 ## `vulkan-probe` and the macOS MoltenVK probe

@@ -1,0 +1,49 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+
+// rt_smoke (ADR-0020 gate 3): one ray per pixel straight down (-Z) through a TLAS of three
+// instances of a three-triangle BLAS, with `GL_EXT_ray_query`. Each pixel stores the closest
+// hit as integers, compared exactly with the CPU expectation in `smoke::rt` (moba-render):
+//   x = 1 + instance index (0 = miss), y = instance custom index, z = primitive index,
+//   w = round(4 t).
+// The geometry keeps every ray at least a margin away from every edge (a unit test checks it),
+// so no result depends on the driver's watertightness rules.
+
+#include "bindless.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 1) uniform writeonly uimage2D bindless_storage_images[];
+// ADR-0020 §3a: acceleration structures live in a small set at index 1.
+layout(set = 1, binding = 0) uniform accelerationStructureEXT scene;
+
+layout(push_constant) uniform Push {
+    uint storage_image;
+    uint size;
+    // Rays start at this height and point down.
+    float origin_z;
+    float max_t;
+} push;
+
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= push.size || pixel.y >= push.size) {
+        return;
+    }
+    vec2 xy = (vec2(pixel) + 0.5) / float(push.size) * 2.0 - 1.0;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, scene, gl_RayFlagsOpaqueEXT, 0xFFu, vec3(xy, push.origin_z), 0.0,
+                          vec3(0.0, 0.0, -1.0), push.max_t);
+    while (rayQueryProceedEXT(query)) {
+    }
+    uvec4 result = uvec4(0u);
+    if (rayQueryGetIntersectionTypeEXT(query, true) ==
+        gl_RayQueryCommittedIntersectionTriangleEXT) {
+        result = uvec4(1u + uint(rayQueryGetIntersectionInstanceIdEXT(query, true)),
+                       uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)),
+                       uint(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
+                       uint(round(rayQueryGetIntersectionTEXT(query, true) * 4.0)));
+    }
+    imageStore(bindless_storage_images[push.storage_image], ivec2(pixel), result);
+}

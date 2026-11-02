@@ -28,6 +28,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Exclude workspace from Windows Defender
         if: runner.os == 'Windows'
         shell: pwsh
@@ -39,10 +40,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - name: Install shader compiler (macOS)
         if: runner.os == 'macOS'
-        run: brew install glslang
+        run: brew install glslang spirv-tools
       - name: Install shader compiler (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -54,6 +55,8 @@ jobs:
             Select-Object -First 1
           if (-not $glslc) { throw "glslc.exe not found under $roots" }
           "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # The SDK's Bin also holds spirv-val.exe, mandatory for the Slang modules.
+          $glslc.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append
           Write-Host "Using $($glslc.FullName)"
       # Server/sim tests need no GPU; renderer tests use lavapipe in a later stage.
       - run: just ci-core
@@ -65,11 +68,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - uses: taiki-e/install-action@v2
         with:
           tool: just
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev
       - run: just ci-tools
 
   release-tests:
@@ -79,8 +83,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev
       - run: cargo test --workspace --release --locked
       - run: cargo test --workspace --doc --locked
 
@@ -91,8 +96,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev
       - run: cargo check --workspace --locked
 
   # ADR-0020 §6 gate 5: fetch the pinned proprietary SDKs (both hashes verified by the fetch
@@ -285,11 +291,12 @@ jobs:
           fetch-depth: 0 # the baseline is a release tag
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - name: cargo semver-checks against the latest release tag
         id: check
         continue-on-error: true

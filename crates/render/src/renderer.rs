@@ -22,7 +22,8 @@ use gpu_allocator::MemoryLocation;
 use moba_platform::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-use crate::caps::{Admission, DeviceCapabilities, PathChoice};
+use crate::bindless::BindlessTable;
+use crate::caps::{Admission, DeviceCapabilities, PathChoice, RenderPath};
 use crate::cull::{CullMode, CullStats, LodConfig};
 use crate::device::DeviceContext;
 use crate::dynres::{self, DynamicResolution};
@@ -574,6 +575,10 @@ pub struct Renderer {
     /// The vendor SDK back ends chosen for this device (ADR-0020 §6c). Declared before
     /// `device`: a back end such as DLSS shuts its SDK session down on the live device.
     vendor: crate::vendor::Selection,
+    /// The tiered path's bindless table (ADR-0020 §3); `None` on Compat, which keeps plain
+    /// descriptor sets. N0 creates it and no pass reads it yet. Dropped before the device.
+    #[allow(dead_code)] // Held for its lifetime until the N1+ tiered passes bind it.
+    bindless: Option<BindlessTable>,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -632,7 +637,7 @@ impl Renderer {
 
         let mut device = DeviceContext::new(
             &instance,
-            surface_handle,
+            Some(surface_handle),
             config.pipeline_stats,
             config.render_path,
             config.tiered_cpu_devices,
@@ -659,6 +664,20 @@ impl Renderer {
         });
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
+        let bindless = if path == RenderPath::Tiered {
+            let table = BindlessTable::new(&device)?;
+            eprintln!(
+                "[render] bindless table: {} samplers, {} storage images, {} textures; {} \
+                 descriptors written at creation",
+                crate::bindless::SAMPLER_SLOTS,
+                crate::bindless::STORAGE_IMAGE_SLOTS,
+                crate::bindless::TEXTURE_SLOTS,
+                table.writes()
+            );
+            Some(table)
+        } else {
+            None
+        };
         let shaders = ShaderSource::new(config.shader_dir.clone());
         let size = window.size();
         if size[0] == 0 || size[1] == 0 {
@@ -1062,6 +1081,7 @@ impl Renderer {
             decal_upload: DecalUpload::boxed(),
             decals_dropped: 0,
             vendor,
+            bindless,
             device,
             surface,
             instance,
