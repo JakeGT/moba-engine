@@ -55,13 +55,15 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+      - uses: ./.github/actions/setup-slang
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - name: Install software Vulkan
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             mesa-vulkan-drivers vulkan-validationlayers libvulkan1 \
-            glslang-tools libasound2-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
+            glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
           ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
           test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
@@ -81,6 +83,17 @@ jobs:
           ./target/release/rt-smoke
         env:
           MOBA_RENDER_PATH: tiered
+      # ADR-0020 §4c: a driver consumes slangc's SPIR-V (one dispatch of the toolchain smoke
+      # module, output checked on the CPU) before any tiered pass depends on it.
+      - name: Slang toolchain smoke with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          set -o pipefail
+          timeout 60 ./target/release/vulkan-probe --slang-smoke 2>&1 | tee slang-smoke.log
+          if grep -E '^\[vulkan' slang-smoke.log; then
+            echo "validation messages from the Slang smoke"
+            exit 1
+          fi
       - name: Capture with validation + sync validation
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |

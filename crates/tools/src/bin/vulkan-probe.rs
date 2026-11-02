@@ -2,7 +2,7 @@
 //! (ADR-0020 §2b).
 //!
 //! ```text
-//! vulkan-probe [--json] [--path auto|tiered|compat]
+//! vulkan-probe [--json] [--path auto|tiered|compat] [--slang-smoke]
 //! ```
 //!
 //! Prints the instance line, then one line per physical device with its admission
@@ -15,13 +15,19 @@
 //! `auto`) is the choice the admission is evaluated under; like `MOBA_RENDER_PATH=tiered`,
 //! `tiered` here admits CPU devices such as lavapipe. Exits non-zero when no device is
 //! enumerated, or when `--path tiered` admits none.
+//!
+//! `--slang-smoke` also runs the Slang toolchain smoke module once on the first Vulkan 1.3
+//! compute device and checks its output (ADR-0020 §4c). Validation follows
+//! `MOBA_VULKAN_VALIDATION=required|off` (default: when the layer is installed); any
+//! validation error or output mismatch fails the run.
 #![allow(clippy::print_stdout)] // The report is the tool's output.
 
-use moba_render::PathChoice;
+use moba_render::{PathChoice, ValidationMode};
 
-/// `(json, choice)` from the command line; exits 2 on a bad argument.
-fn parse_args() -> (bool, PathChoice) {
+/// `(json, choice, slang_smoke)` from the command line; exits 2 on a bad argument.
+fn parse_args() -> (bool, PathChoice, bool) {
     let mut json = false;
+    let mut slang_smoke = false;
     let mut choice = std::env::var("MOBA_RENDER_PATH")
         .ok()
         .and_then(|value| {
@@ -36,6 +42,7 @@ fn parse_args() -> (bool, PathChoice) {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--slang-smoke" => slang_smoke = true,
             "--path" => {
                 let Some(parsed) = args.next().as_deref().and_then(PathChoice::parse) else {
                     eprintln!("--path takes auto, tiered or compat");
@@ -45,17 +52,17 @@ fn parse_args() -> (bool, PathChoice) {
             }
             other => {
                 eprintln!(
-                    "unknown argument {other:?}; usage: vulkan-probe [--json] [--path auto|tiered|compat]"
+                    "unknown argument {other:?}; usage: vulkan-probe [--json] [--path auto|tiered|compat] [--slang-smoke]"
                 );
                 std::process::exit(2);
             }
         }
     }
-    (json, choice)
+    (json, choice, slang_smoke)
 }
 
 fn main() {
-    let (json, choice) = parse_args();
+    let (json, choice, slang_smoke) = parse_args();
     let probe = match moba_render::probe_vulkan() {
         Ok(probe) => probe,
         Err(error) => {
@@ -128,5 +135,34 @@ fn main() {
         eprintln!("{line}");
     } else {
         println!("{line}");
+    }
+    if slang_smoke {
+        run_slang_smoke();
+    }
+}
+
+fn run_slang_smoke() {
+    let validation = match std::env::var("MOBA_VULKAN_VALIDATION").as_deref() {
+        Ok("required") => ValidationMode::Required,
+        Ok("off") => ValidationMode::Off,
+        _ => ValidationMode::IfAvailable,
+    };
+    match moba_render::slang_smoke(validation) {
+        Ok(smoke) => {
+            println!(
+                "slang smoke: device={:?} validation={} validation_errors={} output={}",
+                smoke.device,
+                smoke.validation,
+                smoke.validation_errors,
+                smoke.mismatch.as_deref().unwrap_or("ok")
+            );
+            if !smoke.passed() {
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
+            eprintln!("slang smoke failed: {error}");
+            std::process::exit(1);
+        }
     }
 }

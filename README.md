@@ -25,12 +25,14 @@ spectator camera, status effects and runtime-content examples.
 | Networking | Custom UDP protocol (v42): handshake, intent input, fragmentation, server-authoritative delta snapshots, visibility filtering, prediction/interpolation, reconnect, spectators, between-match catalogue updates and content attestation |
 | Client | Vulkan 1.3 renderer (render graph, HDR target, AgX tonemap, quality tiers, per-pass GPU timing, compute GPU-particle VFX bound to presentation events) with instanced units/animated hero rig, map themes, wall LOS/fog, textured HUD/icons, MSDF text, 3D hero portraits and a baked minimap rendered to texture, settings/remapping/UI scale, procedural audio, paginated shop, scoreboard and free-pan spectator camera |
 | Server | Headless authoritative runner; bots fill empty slots; bandwidth and tick statistics |
-| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 900 tests, golden-image CI and a 5-minute 10-client soak |
+| Quality | Fixed-point determinism tests, ECS/job benchmarks, Miri/Loom, cargo-fuzz, layered architecture, 905 tests, golden-image CI and a 5-minute 10-client soak |
 
 ## Quick start
 
-Requirements: Rust 1.88+, a Vulkan 1.3 driver, and `glslc` (Vulkan SDK or
-`glslang-tools`) to build shaders. Linux, Windows and macOS (MoltenVK) are supported.
+Requirements: Rust 1.88+, a Vulkan 1.3 driver, `glslc` (Vulkan SDK or `glslang-tools`) and
+`spirv-val` (`spirv-tools`) to build shaders, plus the pinned Slang compiler, fetched once with
+`scripts/fetch-slang.sh` (Windows: `scripts/fetch-slang.ps1`; see
+[docs/dev/slang.md](docs/dev/slang.md)). Linux, Windows and macOS (MoltenVK) are supported.
 
 ```bash
 # 1. Headless match (no GPU required)

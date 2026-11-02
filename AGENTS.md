@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **900 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **905 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -202,6 +202,11 @@ cargo run -p moba-engine --example custom_content
 ## Fresh checkout / GPU
 
 - Rust **1.88+** (workspace MSRV) and a `glslc`/`glslangValidator` for shader builds.
+- The pinned `slangc` for the Slang modules (ADR-0020 §4): run `scripts/fetch-slang.sh`
+  (Windows: `scripts/fetch-slang.ps1`) once. It downloads and checksums the version in
+  `crates/shaders/slang-version.txt` into `target/tools/`; re-run it after `cargo clean`.
+  `spirv-val` (SPIRV-Tools) must be on `PATH`: it is mandatory for Slang modules. See
+  [`docs/dev/slang.md`](docs/dev/slang.md).
 - Vulkan 1.3+ driver on Linux and Windows; macOS uses MoltenVK through the windowing stack.
 - CI goldens use lavapipe; local software Vulkan setup is in
   [`docs/dev/software-vulkan.md`](docs/dev/software-vulkan.md).

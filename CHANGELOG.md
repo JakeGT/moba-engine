@@ -88,6 +88,19 @@ the semver check):
 - `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
 
 ### Build
+- **Slang toolchain (N0, ADR-0020 §4).** `crates/shaders/build.rs` now also compiles
+  `shaders/slang/*.slang` with a pinned, checksummed `slangc` (v2026.20, in
+  `crates/shaders/slang-version.txt`), with an exact version check (`MOBA_SLANG_ANY_VERSION=1`
+  relaxes it) and a mandatory `spirv-val`. Fetch it once with `scripts/fetch-slang.sh` or
+  `.ps1` ([docs/dev/slang.md](docs/dev/slang.md)). The first module is
+  `toolchain_smoke.slang`, which the renderer does not create. `vulkan-probe --slang-smoke`
+  dispatches it once and checks the output, including the matrix convention. CI runs it on
+  lavapipe and on MoltenVK, with validation required. Tests compare the Slang
+  frame-constants layout from `slangc -reflection-json` with `CameraUniform` (name, type,
+  shape, offset, size) and every module's reflected bindings with an explicit table. CI fetches and
+  caches the compiler through `.github/actions/setup-slang`, and installs `spirv-tools`. The
+  RTXDI-through-`slangc` spike passes for DI and GI and fails for PT
+  ([docs/dev/rtxdi-slang-spike.md](docs/dev/rtxdi-slang-spike.md)).
 - **Vulkan bindings on a pinned `ash` revision (ADR-0020 §1, N0.1;
   [perf/0025](docs/perf/0025-n0-ash-pin.md)).**
   - `ash` and `ash-window` come from `ash-rs/ash` master at `8844f6b` (Vulkan 1.4.352

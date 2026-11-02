@@ -1444,6 +1444,9 @@ dependencies = [
 [[package]]
 name = "moba-shaders"
 version = "0.4.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "moba-sim"
