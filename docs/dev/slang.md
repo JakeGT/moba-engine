@@ -124,5 +124,7 @@ a missing validator fails the build. For GLSL modules it stays optional.
 3. Re-run `scripts/fetch-slang.sh`, then `scripts/agent-verify.sh --full`. CI's cache is keyed
    on the version file, so CI fetches the new compiler automatically.
 
-Vendor HLSL (RTXDI) also goes through `slangc`; see the
-[RTXDI spike](rtxdi-slang-spike.md) for what compiles and what flags it needs.
+Vendor HLSL also goes through `slangc`: see the [RTXDI spike](rtxdi-slang-spike.md) for
+RTXDI, and [fsr3.md](fsr3.md) for the FSR 3.1.6 passes, which `crates/shaders/build.rs`
+compiles with `-lang slang` (the HLSL front end's legacy `for` scoping rejects two of them),
+the quad-subgroup capability, register shifts for explicit bindings, and two warnings off.

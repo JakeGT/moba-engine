@@ -905,6 +905,57 @@ The maintainer accepted this ADR with **every recommendation above taken**, Q1 t
 - `independentBlend` is required on the tiered path, checked in every recorded fixture;
 - vendor back ends stay out of the goldens (gate 5 covers them).
 
+### Amendment 1 (2026-11-02, N1b): the FSR 3.1.6 port as built
+
+Recorded in the FSR 3.1 PR (`feat/n1b-fsr3`). Stage 1 builds and proves the port on its own;
+wiring it behind N1a's `TemporalUpscaler` follows N1a. How it is built is in
+[docs/dev/fsr3.md](../dev/fsr3.md).
+
+- **§4c is settled: one FSR 3.1 context accepts any render size from 1×1 up to its maximum,
+  changing from frame to frame without a reset.** Every pass reads the frame's size (and the
+  previous frame's, for reprojection) from its constants and clamps its samples to that
+  rectangle; only the allocations use the maximum. `fsr3-smoke` checks it on lavapipe and on
+  the RTX 5070 Ti: inside one Quality context (192×108 output, 128×72 maximum), the render
+  size steps through Balanced, Performance, Ultra Performance, an odd 77×43 and back without a
+  reset, with sentinel values outside each frame's rectangle in every input, and every step
+  converges within its error bound with validation and sync validation silent. The controller
+  of ADR-0020 §5c can therefore drive FSR 3.1 as it drives TAAU. `render_size_range` reports
+  Ultra Performance's size up to the mode's, as the SDK computes them (truncated), clamped to
+  the context maximum, and a size above the maximum is refused.
+- **Language and compiler.** The vendored HLSL is compiled, unmodified, by the pinned `slangc`
+  (ADR-0020 §4c), not DXC. It needs `-lang slang`: Slang's HLSL front end keeps a `for` loop's
+  variable in scope after the loop, and two FSR headers reuse one in consecutive loops, which
+  DXC accepts. Beyond our modules' flags it also takes the quad-subgroup capability (the SPD
+  passes), DXC-style register shifts that give every binding an explicit number in set 0, and
+  two warnings disabled (an undefined macro in `#if`; unreachable code in `ffx_spd.h`). Every
+  module passes `spirv-val`, and tests hold the reflected and decorated bindings to a table.
+- **What is vendored.** `third_party/fidelityfx/` holds the upscaler's eight pass files and
+  their headers, the SPD and FSR 1 headers they include, and the FidelityFX core GPU headers
+  (`api/internal/gpu/`), which §6a's "the MIT shaders" did not name. All are on the SDK
+  licence's MIT list, checked file by file. The host side (`ffx_fsr3upscaler.cpp` and the
+  parts of the Vulkan back end it drives) is ported to Rust, since the SDK's own build is
+  Windows-only.
+- **One 32-bit permutation.** The SDK picks 16-bit math where the device supports it, and a
+  Lanczos lookup table with wave64 on 32/64-wide AMD GPUs. The port builds a single
+  permutation, `FFX_HALF=0` with the reference Lanczos kernel, on every device. It is simpler
+  and identical everywhere; it may cost time against the SDK on the GPUs that would take the
+  16-bit path. Gate 6 and Q1's 0.2 ms comparison with TAAU measure this build; a 16-bit
+  permutation is the first follow-up if FSR 3.1 misses the margin by less than it would save.
+- **The jitter sequence length is §1's count.** FSR's shaders take the jitter phase count as a
+  constant. The port passes §1's `ceil(8 r²)` (rounded ratio), the sequence the renderer
+  actually runs, rather than the SDK's truncated count, so 24 instead of 23 at 1.7×. The SDK's
+  one-step-per-frame smoothing of that constant is kept.
+- **Device requirements and fallback.** FSR 3.1 runs only on the tiered path, with quad
+  subgroup operations in compute and the storage-format features its images need
+  (`STORAGE_WRITE_WITHOUT_FORMAT` on every float storage format, `STORAGE_READ_WITHOUT_FORMAT`
+  on the three it reads back, atomics on `R32_UINT`). Without them, creating the context fails
+  and the caller falls back to TAAU with one log line (§4b).
+- **Interface.** `Fsr3` has §4a's methods. Until it implements N1a's trait, `kind` returns the
+  name `"fsr3"` and the inputs and output are local mirrors of `UpscaleInputs` and
+  `UpscaleOutput`. `has_sharpening` is true: RCAS runs inside FSR when the sharpness is above
+  0. One record precondition beyond §4a: at most two frames in flight, because the descriptor
+  sets and constants are kept per history parity (the renderer runs two).
+
 ## Sources
 
 All accessed 2026-10-31.
