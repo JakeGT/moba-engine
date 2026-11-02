@@ -129,6 +129,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: vendor-sdks
+          # Keep the dependency build when a later step fails: the Windows job compiles for
+          # about five minutes before it reaches the vendor code.
+          cache-on-failure: true
       # slangc for the shaders crate's Slang modules (ADR-0020 §4c); spirv-val comes from
       # spirv-tools (Linux) or the cached SDK subset (Windows) below.
       - uses: ./.github/actions/setup-slang

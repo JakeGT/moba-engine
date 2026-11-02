@@ -93,9 +93,16 @@ fn handle<T>(raw: u64) -> *mut T {
     ptr::with_exposed_provenance_mut(raw as usize)
 }
 
+/// An `NVSDK_NGX_Result`'s bits. The C enum has values above `INT_MAX`, so it is `unsigned
+/// int` for GCC and Clang but `int` for MSVC, and bindgen follows the target: comparisons go
+/// through the bits so they read the same on both.
+fn bits(result: sys::NVSDK_NGX_Result) -> u32 {
+    u32::from_ne_bytes(result.to_ne_bytes())
+}
+
 /// `NVSDK_NGX_SUCCEED`.
 fn succeeded(result: sys::NVSDK_NGX_Result) -> bool {
-    (result & 0xFFF0_0000) != sys::NVSDK_NGX_Result_Fail
+    (bits(result) & 0xFFF0_0000) != bits(sys::NVSDK_NGX_Result_Fail)
 }
 
 /// A readable name for an NGX result code.
@@ -488,7 +495,7 @@ pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
         ));
     }
     // FeatureInitResult holds an NVSDK_NGX_Result; reinterpret the int's bits.
-    let init = init_result.map(c_int::cast_unsigned);
+    let init = init_result.map(|code| sys::NVSDK_NGX_Result::from_ne_bytes(code.to_ne_bytes()));
     Err(match init {
         Some(sys::NVSDK_NGX_Result_FAIL_FeatureNotFound) => format!(
             "NGX found no DLSS {SDK_VERSION} feature binary ({}) beside the executable or in the \

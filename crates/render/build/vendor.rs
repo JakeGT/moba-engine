@@ -354,13 +354,20 @@ fn nrd(context: &Context) {
     // the build directory's lock while build scripts run, so two never share it at once.
     let build = shared_build_dir(context, "nrd");
     let lib_dir = build.join("lib");
-    let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
+    // On MSVC, the C runtime NRD links must match Rust's: `/MT` with `crt-static`, else `/MD`.
+    let msvc_runtime = env::var("CARGO_CFG_TARGET_ENV")
+        .is_ok_and(|env| env == "msvc")
+        .then(|| {
+            let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
+                .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"));
+            if crt_static { "/MT" } else { "/MD" }
+        });
     let defines = nrd_defines(
         &shadermake,
         &mathlib,
         &lib_dir,
         &build.join("shaders"),
-        msvc,
+        msvc_runtime,
     );
     let (cmake_version, dxc_version) = nrd_tools(context);
     let mut key = format!(
@@ -513,24 +520,24 @@ fn nrd_defines(
     mathlib: &Sdk,
     lib_dir: &Path,
     shaders: &Path,
-    msvc: bool,
+    msvc_runtime: Option<&str>,
 ) -> Vec<(&'static str, String)> {
     let path = |path: &Path| path.display().to_string();
     let on = |name: &'static str, on: bool| (name, String::from(if on { "ON" } else { "OFF" }));
     let mut defines = Vec::new();
-    if msvc {
+    if let Some(runtime) = msvc_runtime {
         // The `cmake` crate sets the MSVC flag variables to `cc`'s flags, which replaces
         // CMake's defaults: without `/EHsc`, ShaderMake's and NRD's `/W4 /WX` turn C4530 into
         // an error, and without `/O2 /DNDEBUG` NRD would be an unoptimised build with
         // asserts. It leaves a variable alone once it is defined, so these restore CMake's
-        // MSVC defaults, with `/MD` for Rust's MSVC C runtime.
+        // MSVC defaults, with Rust's C runtime (`runtime`).
         let flags = "/DWIN32 /D_WINDOWS";
-        let release = "/MD /O2 /Ob2 /DNDEBUG";
+        let release = format!("{runtime} /O2 /Ob2 /DNDEBUG");
         defines.extend([
             ("CMAKE_C_FLAGS", String::from(flags)),
             ("CMAKE_CXX_FLAGS", format!("{flags} /EHsc /GR")),
-            ("CMAKE_C_FLAGS_RELEASE", String::from(release)),
-            ("CMAKE_CXX_FLAGS_RELEASE", String::from(release)),
+            ("CMAKE_C_FLAGS_RELEASE", release.clone()),
+            ("CMAKE_CXX_FLAGS_RELEASE", release),
         ]);
     }
     defines.extend([

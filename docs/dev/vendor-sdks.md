@@ -212,6 +212,16 @@ The RTX 5070 Ti run with every Linux-buildable back end is in
   clippy and the selection tests (under `bash`, so each command's failure counts), runs clippy
   with each vendor feature alone (Linux), and checks that, with the vendor features on across
   the workspace, no server crate reaches `moba-render`, `bindgen`, `libloading` or `cmake`.
+- **Type-checking the Windows code from Linux** (no MSVC needed; `cargo clippy` does not link):
+  `rustup target add x86_64-pc-windows-msvc`, then `cargo clippy -p moba-render --lib --target
+  x86_64-pc-windows-msvc --features dlss,rtxdi,sharc,fsr4,xess,nrd -- -D warnings` with
+  `SLANGC` set to the fetched `slangc`, `BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc` set
+  to `-ffreestanding -isystem <dir>` where `<dir>` holds stand-in `wchar.h`, `stdlib.h`,
+  `string.h`, `cstdint`, `cstddef` and `cstring` that include `<stddef.h>`/`<stdint.h>`, and,
+  for `nrd`, stand-in `cmake` and `VULKAN_SDK/Bin/dxc.exe` scripts with
+  `CMAKE_GENERATOR=Ninja`. It catches what differs by target, such as C enums with values
+  above `INT_MAX` (`NVSDK_NGX_Result`) being `int` under MSVC. `streamline` needs the real
+  C++ standard library headers and is left out.
 - `scripts/semver-check.sh` checks `moba-render` and `moba-engine` with their default
   features (plus `render` for the engine): `cargo-semver-checks` would otherwise turn the
   vendor features on and fail on the missing SDKs.
