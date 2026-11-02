@@ -135,11 +135,20 @@ Feature/layering checks:
 ```bash
 cargo check -p moba-engine --no-default-features --locked
 cargo check -p moba-engine --no-default-features --features render --locked
-cargo check -p moba-engine --all-features --locked
+cargo check -p moba-engine --features sim,net,render,fsr3 --locked   # not --all-features: vendor SDKs (ADR-0020 §6)
 for k in moba-server moba-sim moba-game moba-nav moba-net; do
   cargo tree -p "$k" -e normal --prefix none --locked |
     grep -E '^(moba-render|moba-platform|ash|winit|gpu-allocator) ' && exit 1
 done
+```
+
+Vendor SDK features (ADR-0020 §6; off by default, never in public releases; see
+[docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md)). The SDKs are fetched, never committed;
+build scripts never download:
+
+```bash
+scripts/fetch-sdks.sh --only dlss,rtxdi        # or --only vendor-sdks; scripts\fetch-sdks.ps1 -Only … on Windows
+cargo build -p moba-client --features dlss,rtxdi   # MOBA_SDK_DIR overrides target/vendor-sdks
 ```
 
 Tools (release recommended for soak/fuzz):

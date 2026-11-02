@@ -16,6 +16,34 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# Vendor SDK back ends (ADR-0020 §6). Every feature but `fsr3` needs its SDK fetched by
+# `scripts/fetch-sdks.sh` into `MOBA_SDK_DIR` (default `target/vendor-sdks`); `build.rs` never
+# downloads. `moba-client` and `moba-engine` forward the same names. See
+# docs/dev/vendor-sdks.md.
+[features]
+default = ["fsr3"]
+# The MIT FSR 3.1 upscaler, the open build's upscaler. N0 vendors nothing yet: the port of
+# its shaders into third_party/fidelityfx/ lands with N1 (ADR-0020 amendment 6).
+fsr3 = []
+# DLSS super resolution through NGX (static library), NVIDIA RTX only. Linux and Windows.
+dlss = ["dep:bindgen", "dep:toml"]
+# Streamline (DLSS frame generation's Windows path), loaded at run time.
+streamline = ["dep:bindgen", "dep:toml", "dep:libloading"]
+# NVIDIA Real-time Denoisers, built from source with CMake (needs CMake 3.30+ and dxc).
+nrd = ["dep:bindgen", "dep:toml", "dep:cmake"]
+# RTXDI (ReSTIR direct lighting) shader library and its host-side parameter structures.
+rtxdi = ["dep:bindgen", "dep:toml"]
+# SHaRC (spatial hash radiance cache) shader headers.
+sharc = ["dep:toml"]
+# FSR 4 (ML upscaler, signed DLLs) loaded at run time. Development-only (ADR-0020 Q6).
+fsr4 = ["dep:bindgen", "dep:toml", "dep:libloading"]
+# Intel XeSS super resolution loaded at run time.
+xess = ["dep:bindgen", "dep:toml", "dep:libloading"]
+# Aggregates (ADR-0020 §6a).
+nvidia = ["dlss", "nrd", "rtxdi", "sharc"]
+vendor-sdks = ["nvidia", "fsr4", "xess"]
+dlss-fg = ["dlss", "streamline"]
+
 [dependencies]
 moba-core.workspace = true
 moba-assets = { workspace = true, features = ["bc-decode"] }
@@ -28,6 +56,16 @@ moba-platform.workspace = true
 moba-shaders.workspace = true
 # Plain-data device capabilities (ADR-0020 §1e), dumped by `vulkan-probe --json`.
 serde.workspace = true
+# Run-time loading of the FSR 4, XeSS and Streamline libraries (ISC; already in the graph
+# through ash's `loaded` feature).
+libloading = { workspace = true, optional = true }
+
+[build-dependencies]
+# Vendor features only (ADR-0020 §6b): FFI declarations generated from the fetched headers
+# into OUT_DIR (BSD-3-Clause; needs libclang), the pinned manifest, and NRD's CMake build.
+bindgen = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+cmake = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The VAT validation tests load the shipped sample model.

@@ -571,6 +571,9 @@ pub struct Renderer {
     decal_upload: Box<DecalUpload>,
     /// Usable decals the latest frame could not bind.
     decals_dropped: u32,
+    /// The vendor SDK back ends chosen for this device (ADR-0020 §6c). Declared before
+    /// `device`: a back end such as DLSS shuts its SDK session down on the live device.
+    vendor: crate::vendor::Selection,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
@@ -639,6 +642,15 @@ impl Renderer {
         config.quality_tier = crate::preset::config_tier(path, requested_tier);
         let memory_budget = crate::preset::total_memory_budget(path, requested_tier);
         crate::memory::begin_renderer(memory_budget);
+        // ADR-0020 §6c: probe the compiled-in vendor back ends against this device; each one
+        // that is unavailable logs one line naming its fallback (nothing in the open build).
+        let vendor = crate::vendor::select(&crate::vendor::ProbeContext {
+            instance: &instance.instance,
+            physical: device.physical,
+            device: &device.device,
+            capabilities: &device.capabilities,
+            path,
+        });
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
         let shaders = ShaderSource::new(config.shader_dir.clone());
@@ -1043,6 +1055,7 @@ impl Renderer {
             world_config,
             decal_upload: DecalUpload::boxed(),
             decals_dropped: 0,
+            vendor,
             device,
             surface,
             instance,
@@ -1446,6 +1459,13 @@ impl Renderer {
     #[must_use]
     pub fn admission(&self) -> &Admission {
         &self.device.admission
+    }
+
+    /// The vendor SDK back ends selected for this device (ADR-0020 §6c): `builtin` (or `none`,
+    /// `off`) in every slot of the open build. N0 selects them only; none is in the frame yet.
+    #[must_use]
+    pub fn vendor_backends(&self) -> crate::VendorBackends {
+        self.vendor.backends()
     }
 
     /// The selected GPU's probed capabilities (ADR-0020 §1e).

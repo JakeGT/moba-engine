@@ -148,6 +148,24 @@ the semver check):
   - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
     `auto`, so an A/B between the paths stays on one GPU. The caps types are
     `#[non_exhaustive]`.
+- **Vendor SDK cargo features (ADR-0020 §6 and amendment 6, N0.6;
+  [perf/0029](docs/perf/0029-vendor-sdks.md), [dev/vendor-sdks.md](docs/dev/vendor-sdks.md)):**
+  - New `moba-render` features, forwarded by `moba-client` and `moba-engine`: `dlss`,
+    `streamline`, `nrd`, `rtxdi`, `sharc`, `fsr4` and `xess` (off), the aggregates `nvidia`,
+    `vendor-sdks` and `dlss-fg`, and `fsr3` (on by default; it vendors nothing until N1). The
+    default build needs no proprietary SDK and is unchanged.
+  - `vendor-sdks.toml` pins each SDK archive (and RTXDI's library, NRD's ShaderMake and
+    MathLib) by SHA-256, with the SHA-256 of its licence file. `scripts/fetch-sdks.sh`
+    (`.ps1` on Windows) downloads into `target/vendor-sdks/`, verifies both hashes and fails
+    on a changed licence; `build.rs` reads `MOBA_SDK_DIR`, never downloads, and generates the
+    FFI declarations with `bindgen` into `OUT_DIR`. NRD is built with CMake (fully
+    disconnected), NGX links statically, and FSR 4, XeSS and Streamline load with
+    `libloading` from beside the executable only.
+  - At start-up each slot (upscaler, denoiser, direct lighting, radiance cache, frame
+    generation) takes the first compiled-in back end the device supports; each unavailable one
+    logs one `[vendor] … falls back to …` line, then a `[vendor] selected:` summary. The open
+    build logs nothing. New `Renderer::vendor_backends()`, `VendorBackends` and `LatencyMode`
+    (Reflex or Anti-Lag from the device's extensions). Nothing reaches the frame in N0.
 - **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;
   [perf/0027](docs/perf/0027-tiers-budgets.md)):**
   - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it
@@ -1139,6 +1157,11 @@ the semver check):
   no behaviour, API or state-hash change.
 
 ### CI
+- New `vendor-sdks` job (Linux and Windows): fetches and verifies the pinned SDKs, then builds
+  and links `moba-client --features vendor-sdks` and runs clippy and the selection tests with
+  `vendor-sdks,dlss-fg` (N0.6). `scripts/agent-verify.sh --full`, `just features` and AGENTS.md
+  check `moba-engine --features sim,net,render,fsr3` instead of `--all-features`; `--full`
+  also checks every vendor feature whose SDK is fetched.
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
 
 ## [0.4.1] — 2026-10-27

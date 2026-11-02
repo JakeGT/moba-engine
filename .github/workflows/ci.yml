@@ -95,6 +95,93 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
       - run: cargo check --workspace --locked
 
+  # ADR-0020 §6 gate 5: fetch the pinned proprietary SDKs (both hashes verified by the fetch
+  # script), then build and link every vendor feature. The SDKs are never committed; only the
+  # downloaded archives are cached, keyed on the manifest, and re-verified on every run. GPU
+  # run-time evidence comes from the self-hosted runner and the Windows VM, not from here.
+  vendor-sdks:
+    name: vendor-sdks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # The DXC that NRD's ShaderMake uses (SHADERMAKE_FIND_DXC_VK) comes from the Vulkan SDK.
+      VULKAN_SDK_VERSION: 1.4.321.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vendor-sdks
+      - name: Exclude workspace from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev libclang-dev
+          cmake --version
+          curl -fsSLo vulkansdk.tar.xz \
+            "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+          sha256sum vulkansdk.tar.xz
+          mkdir -p "$RUNNER_TEMP/vulkansdk"
+          tar -xJf vulkansdk.tar.xz -C "$RUNNER_TEMP/vulkansdk" --strip-components=1
+          rm vulkansdk.tar.xz
+          echo "VULKAN_SDK=$RUNNER_TEMP/vulkansdk/x86_64" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/vulkansdk/x86_64/bin" >> "$GITHUB_PATH"
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $roots = @($env:VULKAN_SDK, 'C:\VulkanSDK', "$env:ProgramFiles\VulkanSDK") |
+            Where-Object { $_ -and (Test-Path $_) }
+          $glslc = Get-ChildItem $roots -Recurse -Filter glslc.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $glslc) { throw "glslc.exe not found under $roots" }
+          $sdk = $glslc.Directory.Parent.FullName
+          if (-not (Test-Path "$sdk\Bin\dxc.exe")) { throw "dxc.exe not found in $sdk\Bin" }
+          "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # bindgen's libclang: the runner image ships LLVM.
+          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          cmake --version
+      - name: Cache SDK archives
+        uses: actions/cache@v4
+        with:
+          path: target/vendor-sdks/downloads
+          key: vendor-sdks-${{ hashFiles('vendor-sdks.toml') }}
+      - name: Fetch and verify SDKs (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/fetch-sdks.sh --only vendor-sdks,dlss-fg
+      - name: Fetch and verify SDKs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/fetch-sdks.ps1 -Only vendor-sdks,dlss-fg
+      - name: Build and link --features vendor-sdks
+        run: cargo build -p moba-client --features vendor-sdks --locked
+      - name: Clippy and selection tests (vendor-sdks + dlss-fg)
+        run: |
+          cargo clippy -p moba-render --all-targets --features vendor-sdks,dlss-fg --locked -- -D warnings
+          cargo test -p moba-render --lib --features vendor-sdks,dlss-fg --locked vendor
+          cargo check -p moba-engine --features render,vendor-sdks,dlss-fg --locked
+      - name: Server crates stay free of the vendor features
+        shell: bash
+        run: |
+          for krate in moba-server moba-sim moba-game moba-nav moba-net; do
+            if cargo tree -p "$krate" -e normal,build --prefix none --locked |
+              grep -E '^(moba-render|bindgen|libloading|cmake) '; then
+              echo "layering violation: $krate" >&2
+              exit 1
+            fi
+          done
+
   deny:
     runs-on: ubuntu-latest
     steps:

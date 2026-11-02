@@ -1072,6 +1072,35 @@ each until the phase named:
   written, and the budget test exempts Ultra by name. The maintainer decides whether to lower
   it before N1 makes the tiered gate binding.
 
+### Amendment 6 (2026-11-02, N0.6): vendor SDK features in N0
+
+Recorded in the vendor-SDK PR (`feat/n0-vendor-sdks`). Departures from §6, the first until N1:
+
+- **`fsr3` exists and is on by default, but vendors nothing in N0.** §6a puts the FSR 3.1 MIT
+  shaders under `third_party/fidelityfx/`. They come with their Vulkan port in N1 (Q9), so in
+  N0 the feature only reserves the name and the default, registers no back end, and the
+  upscaler stays on the built-in render-scale filter. `moba-engine`'s `render` feature turns
+  it on (the workspace depends on `moba-render` with `default-features = false`).
+- **The Windows-only SDKs' headers are needed on every platform.** `streamline`, `fsr4` and
+  `xess` generate their declarations from the fetched headers, so they also build on Linux.
+  There they look for a platform library beside the executable that the SDK does not ship, and
+  fall back with "ships Windows binaries only". Linux builds of these features, including the
+  Linux `vendor-sdks` CI job, therefore fetch the FidelityFX, XeSS and Streamline archives too.
+- **SHaRC has no host API, so it gets no `bindgen` step.** Its build code checks that the
+  pinned headers are present. RTXDI binds only its host parameter structures. Neither has a
+  run-time binary: both are available when the device is on the tiered path with ray queries,
+  and their shaders arrive with N7/N8.
+- **NRD is built as a static library** (`NRD_STATIC_LIBRARY=ON`, beyond §6b's flag list), so
+  nothing extra ships beside the executable, and its outputs go to `OUT_DIR` rather than NRD's
+  source tree.
+- **Run-time libraries load only from the executable's directory**, by full path, never
+  through the system search path, so a planted DLL elsewhere on the path is never picked up.
+  NGX finds the DLSS feature binary itself (beside the executable or from the driver).
+- **One summary line follows the fallback lines.** Each unavailable back end logs exactly one
+  line (`[vendor] <name> unavailable: <reason>; <slot> falls back to <fallback>`). When any
+  vendor feature is compiled in, one `[vendor] selected: …` line then names each slot's back
+  end. The open build logs neither.
+
 ## Corrections to the roadmap
 
 These were re-checked on 2026-10-31. This PR only adds a link to this ADR from roadmap §12;
