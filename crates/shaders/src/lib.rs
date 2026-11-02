@@ -478,7 +478,7 @@ mod tests {
     enum Slot {
         /// One descriptor binding, with its reflected type: `constantBuffer`,
         /// `<baseShape>:<access>` for a resource (`structuredBuffer:readWrite`,
-        /// `texture2D:read`, ...), `samplerState`, and `[N]<element>` for an array, so a type
+        /// `texture2D:read`, `texture2D:read:combined` for a combined image sampler, ...), `samplerState`, and `[N]<element>` for an array, so a type
         /// or array-size change that the Rust set layout would not match fails here too.
         Descriptor {
             set: u64,
@@ -554,10 +554,17 @@ mod tests {
     /// The reflected type of a descriptor binding, as [`Slot::Descriptor`] spells it.
     fn descriptor_type(ty: &serde_json::Value) -> String {
         match ty["kind"].as_str().unwrap_or("?") {
+            // `Sampler2D` (a combined image sampler) reflects as `texture2D` plus
+            // `"combined": true`; it is a different Vulkan descriptor type.
             "resource" => format!(
-                "{}:{}",
+                "{}:{}{}",
                 ty["baseShape"].as_str().unwrap_or("?"),
                 ty["access"].as_str().unwrap_or("read"),
+                if ty["combined"].as_bool() == Some(true) {
+                    ":combined"
+                } else {
+                    ""
+                },
             ),
             "array" => format!(
                 "[{}]{}",

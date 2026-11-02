@@ -148,10 +148,12 @@ if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $unpacked 'bin') $exe))) 
 # Drop what slangc's SPIR-V path never loads (as fetch-slang.sh does): the LLVM back end,
 # gfx, the runtime library, headers and docs. The licence files stay.
 foreach ($pattern in @('bin\*slang-llvm*', 'lib\*slang-llvm*', 'bin\gfx.*', 'lib\*gfx*',
-        'bin\slang-rt*', 'lib\*slang-rt*', 'lib\cmake', 'lib\pkgconfig', 'include',
-        'share\doc')) {
-    Get-ChildItem -Path (Join-Path $unpacked $pattern) -ErrorAction SilentlyContinue |
+        'bin\slang-rt*', 'lib\*slang-rt*')) {
+    Get-ChildItem -Path (Join-Path $unpacked $pattern) -Force -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force
+}
+foreach ($dir in @('lib\cmake', 'lib\pkgconfig', 'include', 'share\doc')) {
+    Remove-Item -LiteralPath (Join-Path $unpacked $dir) -Recurse -Force -ErrorAction SilentlyContinue
 }
 Set-Content -LiteralPath (Join-Path $unpacked '.archive-sha256') -Value $expected -NoNewline
 Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue

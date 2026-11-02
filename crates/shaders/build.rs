@@ -260,12 +260,14 @@ fn main() {
     write_reflection_table(&slang_jobs, &out_dir);
 }
 
-/// Runs every item of `work` on up to `available_parallelism` threads.
+/// Runs every item of `work` on up to Cargo's `NUM_JOBS` threads (`-j`).
 fn run_parallel(work: &[Box<dyn Fn() + Sync + '_>]) {
     let next = AtomicUsize::new(0);
-    let threads = thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(work.len());
+    let threads = env::var("NUM_JOBS")
+        .ok()
+        .and_then(|jobs| jobs.parse::<usize>().ok())
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, usize::from))
+        .clamp(1, work.len().max(1));
     thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
@@ -356,6 +358,7 @@ fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
         if path.components().count() == 1
             && let Some(found) = override_path.to_str().and_then(find_program)
         {
+            println!("cargo:rerun-if-env-changed=PATH");
             return found;
         }
         panic!(
@@ -379,6 +382,8 @@ fn find_slangc(out_dir: &Path, version: &str) -> PathBuf {
         }
     }
     if let Some(path) = find_program("slangc") {
+        // Pointing PATH at another slangc rebuilds the modules.
+        println!("cargo:rerun-if-env-changed=PATH");
         return path;
     }
     panic!(
