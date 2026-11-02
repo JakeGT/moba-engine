@@ -1469,6 +1469,8 @@ impl Renderer {
 
     /// The vendor SDK back ends selected for this device (ADR-0020 §6c): `builtin` (or `none`,
     /// `off`) in every slot of the open build. N0 selects them only; none is in the frame yet.
+    /// It copies the `compiled` list, so read it once (start-up, a settings screen), not per
+    /// frame.
     #[must_use]
     pub fn vendor_backends(&self) -> crate::VendorBackends {
         self.vendor.backends()

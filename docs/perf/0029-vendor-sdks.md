@@ -159,7 +159,29 @@ did not run. The default build (`cargo build -p moba-client`) on the tiered path
 `[vendor]` line. The RTX runs for this round are under "RTX re-run after the second review
 round" above.
 
-## Open build frame log
+## Start-up cost on the RTX
+
+Debug builds of the same tree (`dcc6839` plus the perf-review fixes, none of which change
+run-time code), each run with `MOBA_SERVER=local MOBA_SMOKE_FRAMES=30` on the RTX 5070 Ti
+(driver 615.78.08, no validation layer), alternating, three times: the default build, and
+`--features dlss,rtxdi,sharc,fsr4,xess,streamline` with DLSS's feature binary beside the
+executable (the slowest case: NGX loads its core, initialises on the device, reads its
+capability parameters and shuts down). `renderer ready` from the `[render]` line, logs in
+`~/.cache/moba-evidence/n0-6-rtx/startup/`:
+
+| Build | run 1 (cold pipeline cache) | run 2 | run 3 |
+|---|---|---|---|
+| default | 351.5 ms | 201.0 ms | 192.2 ms |
+| vendor features, DLSS selected | 448.6 ms | 372.6 ms | 375.5 ms |
+
+The vendor build costs about **175 ms once at start-up** when NGX finds DLSS, nearly all of
+it NGX. The open build is unchanged: it compiles no vendor code and logs no `[vendor]` line.
+
+## Open build frame log (smoke run)
+
+This is a smoke run, not a comparison: one debug run without an A/B against main, and its
+commit was not recorded. Its p95 is compositor pacing (it matches perf/0026's 4.67–4.76 ms),
+so it could not show a regression either way; the open build has no frame-path change.
 
 `env -u MOBA_SDK_DIR cargo build -p moba-client` (default features), then
 `MOBA_SERVER=local MOBA_SMOKE_FRAMES=600 MOBA_VSYNC=0 MOBA_FRAME_LOG=default-frames.csv`. No
@@ -168,6 +190,19 @@ round" above.
 | Frames | mean | p50 | p95 | p99 | GPU total p95 | locked_uploads | locked_pipelines |
 |---|---|---|---|---|---|---|---|
 | 540 | 4.248 ms | 4.190 ms | 4.605 ms | 5.276 ms | 0.370 ms | **0** | **0** |
+
+## NRD's first compile, and CI time
+
+`scripts/agent-verify.sh` skips `nrd` without CMake and `dxc`, so its Rust half had never
+compiled on the development machine. Running clippy with stand-in `cmake` and `dxc` scripts
+(which log each call and build nothing; clippy does not link) found two errors that CI would
+have hit: NRD's enum classes each declare `MAX_NUM`, so the bindings now prefix enum names;
+and bindgen names the descriptor function `nrd_GetLibraryDesc`. With those fixed, clippy is
+clean on `--features nrd` and on every vendor feature together, and the stand-ins showed NRD
+configured and built once, then reused by `cargo check`, by clippy and by a second feature
+set; changing `CXX` rebuilt it from scratch. The real CMake and `dxc` build is still CI's.
+
+The `vendor-sdks` job's wall time is recorded after its first run, in the PR.
 
 ## Not covered here
 

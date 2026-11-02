@@ -113,6 +113,8 @@ jobs:
       # https://sdk.lunarg.com/sdk/sha/1.4.321.1/linux/vulkansdk-linux-x86_64-1.4.321.1.tar.xz.txt
       # (fetched 2026-11-02). Update both together.
       VULKAN_SDK_SHA256: f22a3625bd4d7a32e7a0d926ace16d5278c149e938dac63cecc00537626cbf73
+      # Chocolatey's vulkan-sdk package on Windows, pinned (its latest on 2026-11-02).
+      VULKAN_SDK_CHOCO_VERSION: 1.4.363
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -125,47 +127,91 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+      # Only dxc (and its libdxcompiler) is used from the Vulkan SDK; that subset is cached,
+      # keyed on the archive's hash, so the SDK is downloaded only when the pin changes.
+      - name: Cache the Vulkan SDK's dxc (Linux)
+        if: runner.os == 'Linux'
+        id: dxc-linux
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vulkansdk
+          key: vulkan-sdk-dxc-linux-${{ env.VULKAN_SDK_SHA256 }}
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
+        env:
+          DXC_CACHED: ${{ steps.dxc-linux.outputs.cache-hit }}
         run: |
           sudo apt-get update
           sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev libclang-dev
           cmake --version
-          curl -fsSLo vulkansdk.tar.xz \
-            "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
-          # Verified before anything is unpacked: a mismatch fails the job.
-          echo "$VULKAN_SDK_SHA256  vulkansdk.tar.xz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/vulkansdk"
-          tar -xJf vulkansdk.tar.xz -C "$RUNNER_TEMP/vulkansdk" --strip-components=1
-          rm vulkansdk.tar.xz
+          if [ "$DXC_CACHED" != "true" ]; then
+            curl -fsSLo vulkansdk.tar.xz \
+              "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+            # Verified before anything is unpacked: a mismatch fails the job.
+            echo "$VULKAN_SDK_SHA256  vulkansdk.tar.xz" | sha256sum -c -
+            mkdir -p "$RUNNER_TEMP/vulkansdk"
+            tar -xJf vulkansdk.tar.xz -C "$RUNNER_TEMP/vulkansdk" --strip-components=1 \
+              --wildcards '*/x86_64/bin/dxc*' '*/x86_64/lib/libdxcompiler*'
+            rm vulkansdk.tar.xz
+          fi
           sdk="$RUNNER_TEMP/vulkansdk/x86_64"
           echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
           echo "$sdk/bin" >> "$GITHUB_PATH"
           # dxc loads libdxcompiler.so from the SDK's lib directory.
           echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           LD_LIBRARY_PATH="$sdk/lib" "$sdk/bin/dxc" --version
+      # The same subset on Windows (dxc, its DLLs and glslc), cached on the pinned package.
+      - name: Cache the Vulkan SDK's dxc (Windows)
+        if: runner.os == 'Windows'
+        id: dxc-windows
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vulkansdk
+          key: vulkan-sdk-dxc-windows-${{ env.VULKAN_SDK_CHOCO_VERSION }}
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          DXC_CACHED: ${{ steps.dxc-windows.outputs.cache-hit }}
         run: |
-          choco install vulkan-sdk -y --no-progress
-          $roots = @($env:VULKAN_SDK, 'C:\VulkanSDK', "$env:ProgramFiles\VulkanSDK") |
-            Where-Object { $_ -and (Test-Path $_) }
-          $glslc = Get-ChildItem $roots -Recurse -Filter glslc.exe -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $glslc) { throw "glslc.exe not found under $roots" }
-          $sdk = $glslc.Directory.Parent.FullName
+          $ErrorActionPreference = 'Stop'
+          $sdk = Join-Path $env:RUNNER_TEMP 'vulkansdk'
+          if ($env:DXC_CACHED -ne 'true') {
+            choco install vulkan-sdk --version=$env:VULKAN_SDK_CHOCO_VERSION -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install vulkan-sdk failed ($LASTEXITCODE)" }
+            $roots = @($env:VULKAN_SDK, 'C:\VulkanSDK', "$env:ProgramFiles\VulkanSDK") |
+              Where-Object { $_ -and (Test-Path $_) }
+            $glslc = Get-ChildItem $roots -Recurse -Filter glslc.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $glslc) { throw "glslc.exe not found under $roots" }
+            $bin = $glslc.Directory.FullName
+            New-Item -ItemType Directory -Force -Path "$sdk\Bin" | Out-Null
+            foreach ($file in 'glslc.exe', 'dxc.exe', 'dxcompiler.dll', 'dxil.dll') {
+              if (Test-Path "$bin\$file") { Copy-Item "$bin\$file" "$sdk\Bin" }
+            }
+          }
           if (-not (Test-Path "$sdk\Bin\dxc.exe")) { throw "dxc.exe not found in $sdk\Bin" }
-          "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & "$sdk\Bin\dxc.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "dxc.exe does not run" }
+          "GLSLC=$sdk\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
           # bindgen's libclang: the runner image ships LLVM.
           "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           cmake --version
+      # The archives are the same bytes on both OSes: one cache entry serves both.
       - name: Cache SDK archives
         uses: actions/cache@v4
         with:
           path: target/vendor-sdks/downloads
           key: vendor-sdks-${{ hashFiles('vendor-sdks.toml') }}
+          enableCrossOsArchive: true
+      # NRD's CMake build (build/vendor.rs builds it once per pin and toolchain, beside cargo's
+      # build directory). rust-cache does not keep it, so it is cached on its own.
+      - name: Cache the NRD build
+        uses: actions/cache@v4
+        with:
+          path: target/debug/vendor-build
+          key: vendor-nrd-${{ runner.os }}-${{ hashFiles('vendor-sdks.toml', 'crates/render/build/vendor.rs') }}
       - name: Fetch and verify SDKs (Linux)
         if: runner.os == 'Linux'
         run: scripts/fetch-sdks.sh --only vendor-sdks,dlss-fg
@@ -173,8 +219,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/fetch-sdks.ps1 -Only vendor-sdks,dlss-fg
-      - name: Build and link --features vendor-sdks
-        run: cargo build -p moba-client --features vendor-sdks --locked
+      # The same feature set as the steps below, so they reuse this build's artifacts.
+      - name: Build and link --features vendor-sdks,dlss-fg
+        run: cargo build -p moba-client --features vendor-sdks,dlss-fg --locked
       # bash on every OS, with -e: under pwsh only the last command's exit code would count.
       - name: Clippy and selection tests (vendor-sdks + dlss-fg)
         shell: bash

@@ -177,7 +177,10 @@ the semver check):
     and XeSS. XeSS is never selected in N0: its required device features are merged before
     `vkCreateDevice` in N1, so its probe rejects with one line.
   - NRD links ShaderMake's `ShaderMakeBlob` beside its static library, and CMake configures a
-    copy of NRD in `OUT_DIR` (its configure step writes into the source tree). A relative
+    copy of NRD (its configure step writes into the source tree). NRD is built once per pin,
+    target, profile and toolchain in `<target-dir>/<profile>/vendor-build/nrd` and reused by
+    every feature set and by clippy; CI caches it, the SDK archives (one entry for both OSes)
+    and the Vulkan SDK's `dxc`, and pins Chocolatey's `vulkan-sdk`. A relative
     `MOBA_SDK_DIR` is relative to the workspace root in `build.rs` and the fetch scripts; the
     fetch scripts reject unknown `--only`/`-Only` names, and unpack zips with `unzip` or
     `bsdtar` (Windows: `%SystemRoot%\System32\tar.exe`).

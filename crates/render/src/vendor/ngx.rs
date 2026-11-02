@@ -382,6 +382,9 @@ pub(crate) fn probe(context: &ProbeContext<'_>) -> Result<Box<dyn Backend>, Unav
         ));
     }
     let data = data_dir()?;
+    // The requirements are asked again rather than carried from before creation: two driver
+    // queries, once at start-up, and the check stays independent of how creation merged the
+    // back ends' requests.
     require_enabled(
         "DLSS",
         "instance",

@@ -8,6 +8,8 @@
 
 use std::env;
 use std::fmt::Display;
+#[cfg(feature = "nrd")]
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "nrd")]
@@ -75,6 +77,12 @@ struct Context {
 
 struct Sdk {
     dir: PathBuf,
+    /// The pinned archive's SHA-256 (the stamp that was checked).
+    #[cfg_attr(
+        not(feature = "nrd"),
+        allow(dead_code, reason = "only `nrd` keys a build on the pins")
+    )]
+    sha256: String,
 }
 
 impl Context {
@@ -162,7 +170,10 @@ impl Context {
             entry.to_ascii_uppercase().replace('-', "_"),
             field("version")
         );
-        Sdk { dir }
+        Sdk {
+            dir,
+            sha256: field("sha256").to_owned(),
+        }
     }
 
     /// Writes `builder`'s bindings to `OUT_DIR/<file>`.
@@ -326,11 +337,88 @@ fn nrd(context: &Context) {
 
     let builder = bindings("nrd", "#include \"NRD.h\"\n", &include)
         .clang_args(["-x", "c++", "-std=c++17"])
+        // NRD's enum classes each have a `MAX_NUM`: keep their names apart.
+        .prepend_enum_name(true)
         .allowlist_function("(nrd::)?GetLibraryDesc")
         .allowlist_type("(nrd::)?LibraryDesc")
         .allowlist_var("NRD_VERSION_(MAJOR|MINOR|BUILD)");
     context.write(builder, "nrd.rs");
 
+    // NRD is built once per pin, target, profile and toolchain, not once per build script
+    // run: OUT_DIR differs for every feature set and for clippy, and each NRD build compiles
+    // its SPIR-V permutations with dxc. The build lives beside cargo's own `build` directory
+    // (`<target-dir>/<profile>/vendor-build/nrd`), and a stamp written last records what it
+    // was built from, so an interrupted or outdated build is redone from scratch. Cargo holds
+    // the target directory's lock while build scripts run, so two never share it at once.
+    let build = shared_build_dir(context, "nrd");
+    let mut key = format!(
+        "nrd {} shadermake {} mathlib {}",
+        sdk.sha256, shadermake.sha256, mathlib.sha256
+    );
+    for var in [
+        "TARGET",
+        "PROFILE",
+        "OPT_LEVEL",
+        "DEBUG",
+        "CMAKE",
+        "VULKAN_SDK",
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+    ] {
+        if !matches!(var, "TARGET" | "PROFILE" | "OPT_LEVEL" | "DEBUG") {
+            println!("cargo:rerun-if-env-changed={var}");
+        }
+        let _ = write!(key, "\n{var}={}", env::var(var).unwrap_or_default());
+    }
+    let done = build.join(".moba-nrd-built");
+    let lib_dir = build.join("lib");
+    if fs::read_to_string(&done).ok().as_deref() != Some(key.as_str()) {
+        build_nrd(context, &build, [&sdk, &shadermake, &mathlib], &lib_dir);
+        fs::write(&done, &key)
+            .unwrap_or_else(|error| fail(format!("writing {}: {error}", done.display())));
+    }
+    // Multi-config generators (Visual Studio) add a per-configuration directory.
+    for dir in [lib_dir.clone(), lib_dir.join("Release")] {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    }
+    println!("cargo:rustc-link-lib=static=NRD");
+    // NRD links ShaderMake's blob reader PRIVATE, which a static NRD does not absorb: its
+    // shader lookup (`ShaderMake::FindPermutationInBlob`) comes from this archive.
+    println!("cargo:rustc-link-lib=static=ShaderMakeBlob");
+    // NRD is C++: libstdc++ on Linux and the other GNU-style targets, libc++ on Apple's
+    // (MSVC links its C++ runtime itself).
+    if context.target_vendor == "apple" {
+        println!("cargo:rustc-link-lib=dylib=c++");
+    } else if context.target_os != "windows" {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    }
+}
+
+/// `<target-dir>/<profile>/vendor-build/<name>`, found from `OUT_DIR`
+/// (`<target-dir>/<profile>/build/<package>-<hash>/out`); `OUT_DIR` itself when the layout is
+/// not that one.
+#[cfg(feature = "nrd")]
+fn shared_build_dir(context: &Context, name: &str) -> PathBuf {
+    let mut up = context.out.ancestors();
+    let profile = match (up.nth(2), up.next()) {
+        (Some(build), Some(profile)) if build.file_name().is_some_and(|n| n == "build") => {
+            profile.to_path_buf()
+        }
+        _ => return context.out.join(name),
+    };
+    profile.join("vendor-build").join(name)
+}
+
+/// Builds NRD from scratch in `build` (removing what is there), its libraries into `lib_dir`.
+#[cfg(feature = "nrd")]
+fn build_nrd(
+    context: &Context,
+    build: &Path,
+    [sdk, shadermake, mathlib]: [&Sdk; 3],
+    lib_dir: &Path,
+) {
     // CMake 3.30+ (NRD's minimum) and the Vulkan SDK's DXC (SHADERMAKE_FIND_DXC_VK) are build
     // requirements of this feature only. Say so plainly instead of failing inside CMake.
     let cmake = env::var("CMAKE").unwrap_or_else(|_| String::from("cmake"));
@@ -362,15 +450,19 @@ fn nrd(context: &Context) {
         );
     }
 
+    if build.exists() {
+        fs::remove_dir_all(build)
+            .unwrap_or_else(|error| fail(format!("removing {}: {error}", build.display())));
+    }
     // NRD's configure step writes `Shaders/NRDConfig.hlsli` into its source tree, so CMake
-    // runs on a copy in OUT_DIR and the fetched SDK stays as verified. ShaderMake and MathLib
-    // are only read, from where the fetch put them.
-    let source = context.out.join("nrd-src");
+    // runs on a copy and the fetched SDK stays as verified. ShaderMake and MathLib are only
+    // read, from where the fetch put them.
+    let source = build.join("src");
     copy_tree(&sdk.dir, &source, &["_deps"])
         .unwrap_or_else(|error| fail(format!("copying NRD into {}: {error}", source.display())));
-    let lib_dir = context.out.join("nrd-lib");
-    let shaders = context.out.join("nrd-shaders");
+    let shaders = build.join("shaders");
     cmake::Config::new(&source)
+        .out_dir(build.join("cmake"))
         .profile("Release")
         .build_target("NRD")
         // No downloads at configure time: the fetch script unpacked both dependencies.
@@ -391,32 +483,16 @@ fn nrd(context: &Context) {
         // Keep outputs in OUT_DIR instead of NRD's source tree (_Bin, _Shaders). NRD's own
         // archive goes to the runtime directory (its ARCHIVE_OUTPUT_DIRECTORY); the archive
         // directory collects the static libraries it depends on (ShaderMakeBlob).
-        .define("CMAKE_RUNTIME_OUTPUT_DIRECTORY", &lib_dir)
-        .define("CMAKE_LIBRARY_OUTPUT_DIRECTORY", &lib_dir)
-        .define("CMAKE_ARCHIVE_OUTPUT_DIRECTORY", &lib_dir)
+        .define("CMAKE_RUNTIME_OUTPUT_DIRECTORY", lib_dir)
+        .define("CMAKE_LIBRARY_OUTPUT_DIRECTORY", lib_dir)
+        .define("CMAKE_ARCHIVE_OUTPUT_DIRECTORY", lib_dir)
         .define("NRD_SHADERS_PATH", &shaders)
         .build();
-    // Multi-config generators (Visual Studio) add a per-configuration directory.
-    for dir in [lib_dir.clone(), lib_dir.join("Release")] {
-        println!("cargo:rustc-link-search=native={}", dir.display());
-    }
-    println!("cargo:rustc-link-lib=static=NRD");
-    // NRD links ShaderMake's blob reader PRIVATE, which a static NRD does not absorb: its
-    // shader lookup (`ShaderMake::FindPermutationInBlob`) comes from this archive.
-    println!("cargo:rustc-link-lib=static=ShaderMakeBlob");
-    // NRD is C++: libstdc++ on Linux and the other GNU-style targets, libc++ on Apple's
-    // (MSVC links its C++ runtime itself).
-    if context.target_vendor == "apple" {
-        println!("cargo:rustc-link-lib=dylib=c++");
-    } else if context.target_os != "windows" {
-        println!("cargo:rustc-link-lib=dylib=stdc++");
-    }
 }
 
 /// Copies the tree at `from` into `to`, leaving out the top-level entries named in `skip`.
-/// A file whose bytes are already there is not rewritten, so the incremental `cmake` build sees
-/// unchanged timestamps on a re-run. Symbolic links are skipped: today's NRD archive has none,
-/// and a future SDK that relies on one fails at the CMake step, not here.
+/// Symbolic links are skipped: today's NRD archive has none,
+/// and a future SDK that relies on one fails at the `CMake` step, not here.
 #[cfg(feature = "nrd")]
 fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
@@ -431,10 +507,7 @@ fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
         if kind.is_dir() {
             copy_tree(&entry.path(), &target, &[])?;
         } else if kind.is_file() {
-            let bytes = fs::read(entry.path())?;
-            if fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
-                fs::write(&target, bytes)?;
-            }
+            fs::copy(entry.path(), &target)?;
         }
         // Symbolic links are not followed or copied: the fetched archives have none that
         // NRD's build needs.

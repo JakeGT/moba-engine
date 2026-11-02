@@ -22,7 +22,8 @@ moba-sim.workspace = true
 moba-game.workspace = true
 moba-net.workspace = true
 moba-netsim.workspace = true
-moba-render.workspace = true
+# `fsr3` as moba-client has it, so the two share one moba-render build.
+moba-render = { workspace = true, features = ["fsr3"] }
 moba-assets = { workspace = true, features = ["glb", "bc-decode"] }
 bcdec_rs.workspace = true
 png.workspace = true
