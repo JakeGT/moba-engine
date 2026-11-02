@@ -3,7 +3,8 @@
 #
 # Usage:
 #   scripts/agent-verify.sh          # fast gate: fmt, clippy, tests, docs, layering, hash, packs
-#   scripts/agent-verify.sh --full   # adds release tests, feature matrix, fuzz/loom/bench compile
+#   scripts/agent-verify.sh --full   # adds release tests, feature matrix, fuzz/loom/bench compile,
+#                                    # and the vendor SDK features whose SDKs are fetched
 #
 # The script never pushes, publishes, records, or edits files. Run it from the repository root.
 set -euo pipefail
@@ -73,8 +74,31 @@ if [[ "$FULL" == "1" ]]; then
   section "feature matrix"
   cargo check -p moba-engine --no-default-features --locked
   cargo check -p moba-engine --no-default-features --features render --locked
-  cargo check -p moba-engine --all-features --locked
+  # Every non-vendor feature. `--all-features` would need the proprietary SDKs (ADR-0020 §6c).
+  cargo check -p moba-engine --features sim,net,render,fsr3 --locked
   cargo check --manifest-path crates/tools/font-bake/Cargo.toml --locked
+
+  section "vendor SDK features (only those fetched into \${MOBA_SDK_DIR:-target/vendor-sdks})"
+  present=$("$ROOT/scripts/fetch-sdks.sh" --present-features)
+  # Both must run, not merely exist (the SDK's dxc needs its libdxcompiler.so).
+  if [[ "$present" == *nrd* ]] && ! { "${CMAKE:-cmake}" --version >/dev/null 2>&1 \
+    && dxc --version >/dev/null 2>&1; }; then
+    echo "skipping nrd: it needs cmake and the Vulkan SDK's dxc to build"
+    present=$(tr ',' '\n' <<<"$present" | grep -vx nrd | paste -sd, - || true)
+  fi
+  if [[ -z "$present" ]]; then
+    echo "skipped: no SDK fetched (scripts/fetch-sdks.sh --only vendor-sdks)"
+  else
+    echo "features: $present"
+    # Each feature alone, then all together: cfg-gated code must be warning-free either way.
+    for feature in ${present//,/ }; do
+      echo "clippy --features $feature"
+      cargo clippy -p moba-render --all-targets --features "$feature" --locked -- -D warnings
+    done
+    cargo clippy -p moba-render --all-targets --features "$present" --locked -- -D warnings
+    cargo test -p moba-render --lib --features "$present" --locked vendor
+    cargo check -p moba-engine --features "render,$present" --locked
+  fi
 
   section "mesh LOD baker (optional meshoptimizer)"
   cargo clippy -p moba-tools --features mesh-bake --bin mesh-bake --locked -- -D warnings

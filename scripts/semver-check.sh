@@ -21,10 +21,15 @@ cd "$ROOT"
 
 # Foundation, Engine and Embedding tiers from docs/API-STABILITY.md. `moba-assets` is in the
 # Engine tier because `moba-game` and `moba-render` re-export its types.
+#
+# cargo-semver-checks turns on every feature that does not look unstable by default. That
+# would include moba-render's vendor SDK features (ADR-0020 §6), whose build script fails
+# without the fetched proprietary SDKs, so the two crates that have them are checked with
+# their default features plus the open build's: moba-render's default is `fsr3`, and
+# moba-engine adds `render`. The other crates keep the default heuristic.
 CRATES=(
   moba-core moba-ecs moba-jobs
-  moba-game moba-sim moba-net moba-nav moba-render moba-platform moba-assets
-  moba-engine
+  moba-game moba-sim moba-net moba-nav moba-platform moba-assets
 )
 
 baseline=${1:-}
@@ -43,4 +48,11 @@ for krate in "${CRATES[@]}"; do
   args+=(-p "$krate")
 done
 # Warnings must not fail the baseline build on a newer toolchain; this is an API diff, not a lint.
-RUSTFLAGS="" cargo semver-checks --baseline-rev "$baseline" "${args[@]}"
+# Every run happens, and the script fails if any of them did.
+status=0
+RUSTFLAGS="" cargo semver-checks --baseline-rev "$baseline" "${args[@]}" || status=1
+RUSTFLAGS="" cargo semver-checks --baseline-rev "$baseline" -p moba-render \
+  --default-features || status=1
+RUSTFLAGS="" cargo semver-checks --baseline-rev "$baseline" -p moba-engine \
+  --default-features --features render || status=1
+exit "$status"
