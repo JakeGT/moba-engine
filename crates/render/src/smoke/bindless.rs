@@ -248,7 +248,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     let storage_readback = readback("smoke-storage-readback")?;
 
     let mut push = [0u8; 24];
-    push[..8].copy_from_slice(&list_buffer.device_address().to_le_bytes());
+    push[..8].copy_from_slice(&super::address(&list_buffer).to_le_bytes());
     push[8..12].copy_from_slice(&(LIST_LEN as u32 - 1).to_le_bytes());
     push[12..16].copy_from_slice(&NON_COMPARE_SAMPLERS.to_le_bytes());
     push[16..20].copy_from_slice(&storage_handle.index().to_le_bytes());

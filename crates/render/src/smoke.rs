@@ -142,6 +142,14 @@ fn run(
     Ok(report)
 }
 
+/// `buffer`'s device address, for the smokes only.
+fn address(buffer: &crate::resources::GpuBuffer) -> ash::vk::DeviceAddress {
+    // SAFETY: the smokes create buffers only on a `Headless` device, and `Headless::new`
+    // rejects any device that is not tiered: `bufferDeviceAddress` is enabled and the
+    // allocator allocates with `DEVICE_ADDRESS`.
+    unsafe { buffer.device_address() }
+}
+
 /// A device without a surface, admitted to the tiered path.
 pub(crate) struct Headless {
     // Destroyed before the instance.

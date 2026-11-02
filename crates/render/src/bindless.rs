@@ -15,15 +15,17 @@
 //!   ([`TextureHandle::MISSING`]; slots 1 and 2 are white and a flat normal), a 1×1 storage
 //!   image (cleared to zero), and the linear/wrap sampler. Creation writes the fallback into
 //!   **every** slot, so a zero or never-used handle never reads an unwritten descriptor, and a
-//!   released slot gets the fallback back when it retires, so a stale handle recorded after
-//!   that reads the fallback rather than a destroyed image.
+//!   released slot gets the fallback back when it retires: a stale handle reads the fallback
+//!   rather than a destroyed image until the slot is reused, and another texture after that
+//!   (there is no generation counter yet; N1 may add one).
 //! - **Writes happen at load time only:** creation, [`BindlessTable::register_texture`] /
 //!   [`BindlessTable::register_storage_image`], and [`BindlessTable::retire`] when something was
 //!   released. Nothing is written per frame ([`BindlessTable::writes`] counts every descriptor
 //!   written, for the evidence).
-//! - **Recycling waits for the frames in flight:** a slot released during frame `n` returns to
-//!   its free list only when the caller reports, through [`BindlessTable::retire`], that frame
-//!   `n` has retired (its fence signalled). The contract: `n` is the **last** submitted frame
+//! - **Recycling waits for the frames in flight:** a slot released at frame `n` returns to
+//!   its free list only when the caller reports, through [`BindlessTable::retire`], that every
+//!   frame up to and including `n` has retired (their fences signalled). The contract: `n` is
+//!   the **last** submitted frame
 //!   that can index the handle, and no frame recorded after the release indexes it, so the
 //!   rewrite at retirement and the slot's reuse never touch a descriptor a pending command
 //!   buffer uses (`UPDATE_UNUSED_WHILE_PENDING` allows only that). The caller keeps the image
@@ -367,15 +369,26 @@ impl BindlessTable {
     /// Creates the set, the sampler palette and the fallbacks, and writes the fallback into
     /// every slot. Load time only: it waits for the graphics queue once.
     pub(crate) fn new(device: &DeviceContext) -> RenderResult<Self> {
-        debug_assert_eq!(device.admission.path, crate::caps::RenderPath::Tiered);
+        // The guard for everything below: only a tiered device enables descriptor indexing
+        // and device-address allocation.
+        if device.admission.path != crate::caps::RenderPath::Tiered {
+            return Err(RenderError::NoSuitableDevice(format!(
+                "{}: the bindless table needs the tiered path",
+                device.name
+            )));
+        }
         let bindings = set_layout_bindings();
         crate::descriptor_budget::check_tiered("bindless", &[&bindings], device.update_after_bind)?;
-        let layout = DescriptorSetLayout::with_binding_flags(
-            device.device.clone(),
-            &bindings,
-            vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
-            &binding_flags(),
-        )?;
+        // SAFETY: the device is tiered (checked above), so the descriptor-indexing features
+        // the binding flags need are enabled.
+        let layout = unsafe {
+            DescriptorSetLayout::with_binding_flags(
+                device.device.clone(),
+                &bindings,
+                vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
+                &binding_flags(),
+            )
+        }?;
         let pool = DescriptorPool::with_flags(
             device.device.clone(),
             &[
@@ -752,7 +765,8 @@ fn storage_fallback(device: &DeviceContext) -> RenderResult<GpuImage> {
             command,
             &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_clear)),
         );
-        // A read through a zero or stale storage handle sees zeros, never undefined data.
+        // Cleared, so a read through a zero or stale storage handle sees defined data: zeros
+        // until a shader writes through such a handle (the fallback is a shared sink).
         let range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,

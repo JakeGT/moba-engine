@@ -124,7 +124,7 @@ impl GpuBuffer {
     pub(crate) fn write_bytes(&mut self, offset: usize, bytes: &[u8]) {
         let mapped = self.mapped.expect("buffer was not created host-visible");
         assert!(
-            offset + bytes.len() <= self.size as usize,
+            offset + bytes.len() <= usize::try_from(self.size).unwrap_or(usize::MAX),
             "write out of bounds"
         );
         // SAFETY: the range is bounds-checked and the caller has exclusive access.
@@ -135,18 +135,23 @@ impl GpuBuffer {
         }
     }
 
-    /// The buffer's device address (ADR-0020 §3a). The buffer must have been created with
-    /// `SHADER_DEVICE_ADDRESS` on a tiered device, whose allocator allocates every block with
-    /// `DEVICE_ADDRESS` and enables `bufferDeviceAddress`.
-    pub(crate) fn device_address(&self) -> vk::DeviceAddress {
-        debug_assert!(
+    /// The buffer's device address (ADR-0020 §3a).
+    ///
+    /// # Safety
+    /// The device must be a tiered one: `bufferDeviceAddress` enabled, and its allocator
+    /// allocating every block with `DEVICE_ADDRESS`. Compat devices have neither.
+    ///
+    /// # Panics
+    /// Panics if the buffer was not created with `SHADER_DEVICE_ADDRESS`.
+    pub(crate) unsafe fn device_address(&self) -> vk::DeviceAddress {
+        assert!(
             self.usage
                 .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS),
             "device_address on a buffer without SHADER_DEVICE_ADDRESS"
         );
         let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
-        // SAFETY: the buffer is live and bound to memory of this device; the caller's contract
-        // above covers the usage flag, the feature and the allocation flag.
+        // SAFETY: the buffer is live, bound to memory of this device and has the usage flag
+        // (asserted); the caller guarantees the feature and the allocation flag.
         unsafe { self.device.get_buffer_device_address(&info) }
     }
 
@@ -159,7 +164,7 @@ impl GpuBuffer {
         };
         if offset
             .checked_add(out.len())
-            .is_none_or(|end| end > self.size as usize)
+            .is_none_or(|end| end > usize::try_from(self.size).unwrap_or(usize::MAX))
         {
             return false;
         }
@@ -176,7 +181,7 @@ impl GpuBuffer {
         let mapped = self.mapped?;
         let bytes = core::mem::size_of::<T>()
             .checked_mul(count)
-            .filter(|bytes| *bytes <= self.size as usize)?;
+            .filter(|bytes| *bytes <= usize::try_from(self.size).unwrap_or(usize::MAX))?;
         if bytes == 0 || !(mapped.as_ptr() as usize).is_multiple_of(core::mem::align_of::<T>()) {
             return None;
         }
@@ -626,7 +631,11 @@ impl DescriptorSetLayout {
 
     /// A layout with create `flags` and one `binding_flags` entry per binding (descriptor
     /// indexing: the tiered bindless set, ADR-0020 §3a).
-    pub(crate) fn with_binding_flags(
+    ///
+    /// # Safety
+    /// The device must have the descriptor-indexing features the flags need enabled (a tiered
+    /// device does; a Compat device does not).
+    pub(crate) unsafe fn with_binding_flags(
         device: ash::Device,
         bindings: &[vk::DescriptorSetLayoutBinding<'_>],
         flags: vk::DescriptorSetLayoutCreateFlags,
@@ -644,7 +653,7 @@ impl DescriptorSetLayout {
             .bindings(bindings)
             .push(&mut flags_info);
         // SAFETY: the device is live, the binding and flag arrays are valid for the call, and
-        // the caller enabled the descriptor-indexing features the flags need.
+        // the caller guarantees the descriptor-indexing features (see `# Safety`).
         let handle = unsafe { device.create_descriptor_set_layout(&create_info, None) }?;
         Ok(Self { device, handle })
     }

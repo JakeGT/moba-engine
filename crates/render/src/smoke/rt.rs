@@ -245,7 +245,7 @@ fn scratch(gpu: &Headless, size: u64, alignment: u64) -> RenderResult<(GpuBuffer
         vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
         MemoryLocation::GpuOnly,
     )?;
-    let address = buffer.device_address().next_multiple_of(alignment);
+    let address = super::address(&buffer).next_multiple_of(alignment);
     Ok((buffer, address))
 }
 
@@ -315,7 +315,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
         .vertex_format(vk::Format::R32G32B32_SFLOAT)
         .vertex_data(vk::DeviceOrHostAddressConstKHR {
-            device_address: vertex_buffer.device_address(),
+            device_address: super::address(&vertex_buffer),
         })
         .vertex_stride(12)
         .max_vertex(TRIANGLES.len() as u32 * 3 - 1)
@@ -361,7 +361,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         .flat_map(|instance| instance_bytes(instance, blas.address()))
         .collect();
     let instance_buffer = input_buffer(gpu, "smoke-instances", &instance_data)?;
-    if instance_buffer.device_address() % 16 != 0 {
+    if !super::address(&instance_buffer).is_multiple_of(16) {
         return Err(RenderError::Shader(
             "TLAS instance buffer is not 16-byte aligned",
         ));
@@ -369,7 +369,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     let instances = vk::AccelerationStructureGeometryInstancesDataKHR::default()
         .array_of_pointers(false)
         .data(vk::DeviceOrHostAddressConstKHR {
-            device_address: instance_buffer.device_address(),
+            device_address: super::address(&instance_buffer),
         });
     let tlas_geometry = [vk::AccelerationStructureGeometryKHR::default()
         .geometry_type(vk::GeometryTypeKHR::INSTANCES)
