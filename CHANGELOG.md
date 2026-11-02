@@ -153,18 +153,24 @@ the semver check):
   - `BindlessTable` (`moba-render`, tiered path only): one update-after-bind set with 32
     samplers (a fixed 12-entry palette), 1,024 storage images and 16,384 sampled images
     (variable count), all partially bound. Typed `u32` handles come from free lists; every slot
-    starts on a fallback (magenta, white, flat normal; a zero storage image); released slots
-    return after their last frame retires. Writes happen at load time only, never per frame.
+    starts on a fallback (magenta, white, flat normal; a zero storage image; valid for 2D
+    float reads); released slots return after their last frame retires, under an `unsafe`
+    release/retire contract (recording a released handle is a caller bug). Writes happen at
+    load time only, never per frame.
     Descriptor-indexing features, `bufferDeviceAddress` memory and the update-after-bind limit
     check (`descriptor_budget::check_tiered`) are enabled only on the tiered path. No
     production pass uses the table yet, and Compat is unchanged (goldens byte-identical).
   - `bindless-smoke` and `rt-smoke` (`moba-tools`): one 64×64 headless frame each, read back
     and compared exactly with a CPU expectation. The first samples divergent `nonuniformEXT`
     handles from a device-address buffer in a fragment and a compute pass, including reused
-    and stale slots; the second traces a BLAS/TLAS with `GL_EXT_ray_query`. Both pass with
-    validation and synchronization validation on lavapipe, RADV and an RTX 5070 Ti, and run in
-    the `renderer-gate` job on lavapipe. `bindless.glsl` holds the shader declarations and the
-    `BINDLESS_SAMPLER2D_NONUNIFORM` macro.
+    and recycled slots, at a coordinate where every palette sampler (and, in the compute
+    pass, every comparison sampler on a depth texture) reads a different exact value, and
+    writes descriptors into the bound set while its frame is pending (update after bind); the
+    second traces a BLAS/TLAS with `GL_EXT_ray_query`. Both pass with validation and
+    synchronization validation on lavapipe (RADV and an RTX 5070 Ti passed their first
+    version), and run in the `renderer-gate` job on lavapipe; a run without validation fails unless
+    `MOBA_VULKAN_VALIDATION=off` was given. `bindless.glsl` holds the shader declarations and
+    the `BINDLESS_SAMPLER2D_NONUNIFORM` and `BINDLESS_SAMPLER2DSHADOW_NONUNIFORM` macros.
 - **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;
   [perf/0027](docs/perf/0027-tiers-budgets.md)):**
   - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it

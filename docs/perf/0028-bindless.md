@@ -23,19 +23,32 @@ with its CPU expectation; any validation message fails it. lavapipe ran with
 
 | Device | `bindless-smoke` | `rt-smoke` | Validation errors / warnings |
 |---|---|---|---|
-| lavapipe | PASS, 8,197 values, 0 mismatches | PASS, 4,097 values, 0 mismatches | 0 / 0 |
-| RADV (Radeon 610M) | PASS, 8,197, 0 | PASS, 4,097, 0 | 0 / 0 |
-| RTX 5070 Ti | PASS, 8,197, 0 | PASS, 4,097, 0 | 0 / 0 |
+| lavapipe | PASS, 8,198 values, 0 mismatches | PASS, 4,096 values, 0 mismatches | 0 / 0 |
+| RADV (Radeon 610M) | PASS, 8,197, 0 (first version) | PASS, 4,097, 0 (first version) | 0 / 0 |
+| RTX 5070 Ti | PASS, 8,197, 0 (first version) | PASS, 4,097, 0 (first version) | 0 / 0 |
 
-Every device was admitted `path=tiered max_tier=overdrive missing=none`.
+Every device was admitted `path=tiered max_tier=overdrive missing=none`. The lavapipe row is
+the smokes after the correctness review ([below](#correctness-review)): 2×2 textures that
+check the sampler palette, the comparison samplers and descriptor writes while the frame is
+pending. The RADV and RTX rows are the first version (1×1 textures, one tautological check
+each). Re-run on the review build: TODO(maintainer-run).
 
-- **`bindless-smoke`:** 222 registrations (212, then 10 reusing the lowest of 12 slots
-  released in frame 1 and retired), leaving 210 live textures and 2 stale handles that read
-  magenta. 215 distinct texture handles and 6 samplers are sampled across the 64×64 pixels,
-  once by the fragment pass and once by the compute pass (8,192 texels, plus 5 checks of the table: pending releases before and after retirement, slot reuse, no writes in the frame, the storage handle retired).
-  Descriptor writes: **17,440 at creation** (the fallback in every slot), **235 at load**
-  (registrations and the retirement's rewrites) and **0 in the frame**.
-- **`rt-smoke`:** a BLAS of 3 triangles and a TLAS of 3 instances (one mirrored, with custom
+- **`bindless-smoke`** (review build, lavapipe): 223 registrations before the frame (212
+  2×2 textures and a 2×2 depth texture, then 10 reusing the lowest of 12 slots released in
+  frame 1 and retired), leaving 211 live textures and 2 recycled slots that read magenta. 214
+  distinct texture handles and the 6 non-comparison samplers are sampled across the 64×64
+  pixels at uv (−0.125, 0.625), where wrap/clamp and point/linear give four different exact
+  values; the compute pass also compares the depth texture through the 6 comparison samplers
+  (alpha 0, 240, 45 and 180 for point/wrap, point/clamp, linear/wrap and linear/clamp). That
+  is 8,192 texels, plus 6 CPU-side checks of the table: pending releases before and after
+  retirement, slot reuse order, the slot reused while the frame was pending, the descriptor
+  writes made while it was pending, and the output's release and retirement after it.
+  Descriptor writes: **17,440 at creation** (the fallback in every slot), **236 before the
+  frame** (registrations and the retirement's rewrites) and **4 while it was pending**
+  (a texture slot the frame does not index released, retired and reused; a storage image
+  registered, released and retired), none of them to a slot the frame indexes.
+- **`rt-smoke`:** 4,096 rays (the first version also counted a tautological "no descriptor
+  writes in the frame" check). A BLAS of 3 triangles and a TLAS of 3 instances (one mirrored, with custom
   indices); 2,432 rays miss and the hits per instance and primitive are
   `[[325, 276, 153], [99, 118, 125], [325, 156, 87]]`, identical on all three drivers. No ray
   passes closer than 0.0110 to an edge line, so no result depends on a driver's watertightness.
@@ -43,7 +56,15 @@ Every device was admitted `path=tiered max_tier=overdrive missing=none`.
   2,560 + 2,432 on the RTX), the results do not.
 - **They fail when they should.** A deliberately wrong CPU slot hash failed with
   `mismatches=7810` and exit 1; `auto` or `compat` on lavapipe exits 2 with a message naming
-  `MOBA_RENDER_PATH=tiered`.
+  `MOBA_RENDER_PATH=tiered`. On the review build (lavapipe, each a temporary edit, reverted):
+  - every palette slot holding slot 0's sampler: `mismatches=5986`, exit 1;
+  - wrap and clamp swapped in the sampler create info: `mismatches=7435`, exit 1;
+  - point and linear swapped: `mismatches=5712`, exit 1;
+  - the bindings without `UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING`: 0 mismatches but
+    `validation_errors=1` (VUID-vkUpdateDescriptorSets-None-03047, a write into a set a
+    pending command buffer uses), exit 1.
+  - no validation layer on the layer path, `MOBA_VULKAN_VALIDATION` unset: `rt-smoke` prints
+    `FAIL ... validation=missing` and exits 1; with `MOBA_VULKAN_VALIDATION=off` it passes.
 - **Reviewer finding fixed before these runs:** decorating only the array indices
   `nonuniformEXT` passed validation and these exact checks on all three drivers, but leaves the
   `OpSampledImage` undecorated (VUID-RuntimeSpirv-NonUniform-06274), so a driver may sample one
@@ -86,7 +107,10 @@ different configuration (tiered High runs Ultra), as on N0.3.
 The goldens ran on a branch build from before the free-list change ([below](#perf-review)) (it only changes
 `SlotAllocator`'s containers; Compat never creates one). The final build was rechecked on
 four scenes (default on both paths, decals and distortion on tiered): identical to the earlier
-branch captures, no validation message. The smoke table above is from the final build.
+branch captures, no validation message. The correctness-review build was rechecked on all fifteen scenes on
+the default path (Compat on lavapipe), once each: every SHA-256 above, byte for byte, and no
+validation message. That build changes no Compat code and no production shader (only the
+smoke shaders include `bindless.glsl`). The smoke table above is from the final build.
 
 ## Frame log on the RTX 5070 Ti
 
@@ -104,7 +128,9 @@ are 1×1.
 
 ## Tiered timings: within noise (RTX 5070 Ti)
 
-No pass binds the table, so the tiered frame must cost what N0.3's does. Both builds run
+No pass binds the table, so the tiered frame does no new per-frame work. The branch does
+change one thing every tiered frame touches: every tiered memory block now carries
+`DEVICE_ADDRESS` (amendment 5), so the comparison is not free by construction. Both builds run
 `auto` (tiered on this GPU). Teamfight replay, 1920×1080, vsync off, validation off, no
 pipeline cache, 3,000 frames per run (the log covers the last 2,940); **three rounds,
 interleaved** N0.3 / branch for each tier. Each cell is the median of the three rounds; the
@@ -121,11 +147,19 @@ range is their spread.
 
 - The scene pass is equal on every tier. Low's 0.008 ms lower total held in all three rounds
   and sits almost entirely in the VFX simulation dispatch (p50 0.013 → 0.009 ms), which the
-  branch does not touch; the branch adds no per-frame work, so this is not a gain.
+  branch does not touch; the branch records no new per-frame work, so this is not a gain.
 - Ultra's p95 is bimodal on this GPU (as in [perf/0027](0027-tiers-budgets.md)): the branch's
   rounds gave 0.730, 0.689 and 0.724 ms, N0.3's 0.698, 0.692 and 0.693 ms. The p50 is equal.
-- VRAM peak is identical: the table's images are 1×1 and its pool is under 1 MB. The branch
-  makes 36 uploads to N0.3's 33, the three fallback textures, all at start-up.
+  Because every tiered block now carries `DEVICE_ADDRESS`, three rounds cannot rule out a
+  real p95 cost (0.724 against 0.693 ms); it needs more rounds. Extra Ultra rounds:
+  TODO(maintainer-run).
+- The VRAM peak column cannot show the table's cost: `crate::memory` counts each resource's
+  `requirements.size` only, so neither the descriptor pool's memory nor any cost of
+  `DEVICE_ADDRESS` allocations appears in it. Estimates: the table's images are 1×1 (bytes),
+  and the pool holds 17,440 descriptors, about 16,384 × 32 B ≈ 0.5 MB for the sampled images
+  on RADV (descriptor sizes are driver-specific; not measured). The branch makes 36 uploads
+  to N0.3's 33, the three fallback textures, all at start-up (one submission since the
+  review, together with the storage fallback's clear).
 
 ```bash
 rtx-ab.sh <out> <N0.3 worktree> <branch worktree> "low high ultra"   # the shared A/B script
@@ -143,5 +177,41 @@ flagged what a future per-frame `retire` would pay. Fixed before the final build
   times and checks that no capacity changes.
 - `live()` scanned 16,384 flags; it is now a counter.
 
-Left for N1, when a pass first evicts textures in bulk: `retire` writes one descriptor per
-recycled slot rather than merging runs of slots into one write.
+Left for N1, when a pass first calls `retire` per frame (bulk eviction): it writes one
+descriptor per recycled slot. Then merge adjacent slots into one write per run, and add a
+criterion bench for it; the code comment on `BindlessTable::retire` says the same.
+
+## Correctness review
+
+An independent correctness review found three should-fixes, fixed on the review build:
+- **The stale-handle promise was wrong.** The first version said a stale handle recorded
+  after its retirement reads the fallback, or the slot's next texture. If that frame is still
+  pending when the slot is reused, the reuse writes a descriptor a pending command buffer
+  uses (VUID-vkUpdateDescriptorSets-None-03047): undefined behaviour, reachable from safe
+  functions given a wrong frame number. `release_texture`, `release_storage_image` and
+  `retire` are now `unsafe fn`s whose `# Safety` sections state the contract (`frame` is the
+  last frame, submitted or being recorded, that may index the handle; `completed` has
+  retired), and recording a released handle is documented as a caller bug.
+- **The sampler palette was never checked on the GPU.** With 1×1 textures every sampler
+  returns the texel, so the smoke passed with the sampler ignored. The 2×2 textures and the
+  coordinate above make every address/filter pair, and every comparison entry, read a
+  different exact value (unit-tested on the CPU), and the experiments above fail.
+- **Update after bind was never exercised.** Every write happened before the frame was
+  recorded and the frame was waited for at once, so the smokes passed without the flags, and
+  the "no descriptor writes in the frame" checks were tautological. The frame is now
+  submitted and waited for separately, with four writes in between (above); the tautological
+  checks are gone.
+
+Also from that review: the fallbacks are documented as valid for 2D float reads only,
+`check_tiered` counts every stage a binding reaches (it counted vertex, fragment and compute
+only), `DescriptorSetLayout::with_binding_flags` states its create-info requirements, and a
+smoke run without validation fails unless `MOBA_VULKAN_VALIDATION=off` was given. The perf
+review's start-up nit is fixed too: the fallback textures and the storage fallback's clear
+share one submission (they were two blocking submissions).
+
+**lavapipe limit found on the way:** on Mesa 26.2.5 a fragment shader that takes a second
+texture sample after a `nonuniformEXT` one crashes (SIGSEGV in the JIT'd shader, with or
+without validation, with uniform or divergent indices for the second sample); the same two
+samples in a compute shader work. So the comparison samplers are checked in the compute pass
+only. N1 fragment shaders that sample several bindless textures will hit this on lavapipe;
+re-check on the next Mesa update.

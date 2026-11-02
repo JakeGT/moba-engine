@@ -6,9 +6,11 @@
 //! - `MOBA_VULKAN_VALIDATION=required|off` (default: enabled when installed). `required`
 //!   includes synchronization validation.
 //!
-//! Exits 0 when every value matched and validation reported no error or warning, 1 on a
-//! mismatch or a validation message, and 2 when the test could not run (no tiered device, no
-//! validation layer under `required`, a Vulkan error).
+//! Exits 0 when every value matched and validation ran and reported no error or warning, 1 on
+//! a mismatch, a validation message, or a run without validation that was not asked for
+//! (`MOBA_VULKAN_VALIDATION=off` is the only way to pass without the layer), and 2 when the
+//! test could not run (no tiered device, no validation layer under `required`, a Vulkan
+//! error).
 
 use moba_render::{PathChoice, RenderResult, SmokeReport, ValidationMode};
 
@@ -52,8 +54,10 @@ pub(crate) fn main(test: fn(PathChoice, ValidationMode) -> RenderResult<SmokeRep
         report.mismatches,
         if report.validation_enabled {
             "on"
-        } else {
+        } else if report.validation_waived {
             "off"
+        } else {
+            "missing"
         },
         report.validation_errors,
         report.validation_warnings

@@ -11,25 +11,40 @@
 //! | 2 | `SAMPLED_IMAGE[]` | 16,384, `VARIABLE_DESCRIPTOR_COUNT` (the last binding, as the spec requires) |
 //!
 //! - **Handles** are typed `u32` indices handed out from free lists ([`SlotAllocator`]).
+//!   Shaders index only live handles and the reserved fallback handles.
 //! - **Fallbacks.** Slot 0 of each array is valid: a 1×1 magenta texture
 //!   ([`TextureHandle::MISSING`]; slots 1 and 2 are white and a flat normal), a 1×1 storage
 //!   image (cleared to zero), and the linear/wrap sampler. Creation writes the fallback into
-//!   **every** slot, so a zero or never-used handle never reads an unwritten descriptor, and a
-//!   released slot gets the fallback back when it retires: a stale handle reads the fallback
-//!   rather than a destroyed image until the slot is reused, and another texture after that
-//!   (there is no generation counter yet; N1 may add one).
+//!   **every** slot, so an index that no live handle names (zero, or never registered) reads a
+//!   written descriptor rather than an unwritten one, and a released slot gets the fallback
+//!   back when it retires. That is a safety net for a bad index, not a promise for stale
+//!   handles: recording a handle after its release is a caller bug (see the release contract
+//!   below), and so is indexing a never-registered slot that may be registered while the frame
+//!   is pending.
+//! - **The fallbacks are only valid for 2D float reads.** Every texture fallback is a 2D
+//!   `R8G8B8A8_UNORM` colour image and the storage fallback a 2D `R8G8B8A8_UNORM` image, so a
+//!   zero or bad index is valid only through `texture2D` with a non-comparison sampler and
+//!   through a float `image2D`. Through a `texture3D`/`textureCube` alias, a `uimage2D` (the
+//!   RT smoke declares one on binding 1), or a comparison sampler on a colour fallback, such an
+//!   index reads an invalid descriptor. Typed fallbacks (3D, cube, depth, unsigned storage)
+//!   arrive with their first N1 consumers.
 //! - **Writes happen at load time only:** creation, [`BindlessTable::register_texture`] /
 //!   [`BindlessTable::register_storage_image`], and [`BindlessTable::retire`] when something was
 //!   released. Nothing is written per frame ([`BindlessTable::writes`] counts every descriptor
-//!   written, for the evidence).
-//! - **Recycling waits for the frames in flight:** a slot released at frame `n` returns to
-//!   its free list only when the caller reports, through [`BindlessTable::retire`], that every
-//!   frame up to and including `n` has retired (their fences signalled). The contract: `n` is
-//!   the **last** submitted frame
-//!   that can index the handle, and no frame recorded after the release indexes it, so the
-//!   rewrite at retirement and the slot's reuse never touch a descriptor a pending command
-//!   buffer uses (`UPDATE_UNUSED_WHILE_PENDING` allows only that). The caller keeps the image
-//!   alive until the retirement.
+//!   written, for the evidence). Those writes may happen while a frame that binds the set is
+//!   pending, as long as they touch slots no pending frame indexes (`UPDATE_AFTER_BIND |
+//!   UPDATE_UNUSED_WHILE_PENDING`); `bindless_smoke` does exactly that.
+//! - **Recycling waits for the frames in flight** (the release contract, why
+//!   [`BindlessTable::release_texture`], [`BindlessTable::release_storage_image`] and
+//!   [`BindlessTable::retire`] are `unsafe`): a slot released at frame `n` returns to its free
+//!   list only when the caller reports, through `retire`, that every frame up to and including
+//!   `n` has retired (their fences signalled). `n` is the **last frame, submitted or being
+//!   recorded, that may index the handle**, and no frame recorded after the release indexes
+//!   it. Then the rewrite at retirement and the slot's reuse never touch a descriptor a
+//!   pending command buffer uses, which is all `UPDATE_UNUSED_WHILE_PENDING` allows
+//!   (VUID-vkUpdateDescriptorSets-None-03047). A wrong `n` or `completed` breaks that: the
+//!   reuse would write a descriptor a pending frame reads, which is undefined behaviour. The
+//!   caller keeps the image alive until the retirement.
 //! - **Descriptor heap later** (§3d): this is the only code that creates or writes the set.
 //!
 //! N0 creates the table on the tiered path and the `bindless_smoke`/`rt_smoke` tests exercise
@@ -367,7 +382,8 @@ pub(crate) struct BindlessTable {
 
 impl BindlessTable {
     /// Creates the set, the sampler palette and the fallbacks, and writes the fallback into
-    /// every slot. Load time only: it waits for the graphics queue once.
+    /// every slot. Load time only: it waits for the graphics queue once (one submission for
+    /// every fallback).
     pub(crate) fn new(device: &DeviceContext) -> RenderResult<Self> {
         // The guard for everything below: only a tiered device enables descriptor indexing
         // and device-address allocation.
@@ -380,7 +396,10 @@ impl BindlessTable {
         let bindings = set_layout_bindings();
         crate::descriptor_budget::check_tiered("bindless", &[&bindings], device.update_after_bind)?;
         // SAFETY: the device is tiered (checked above), so the descriptor-indexing features
-        // the binding flags need are enabled.
+        // the binding flags need are enabled (sampled and storage images update-after-bind
+        // among them). The create info is valid: the layout is `UPDATE_AFTER_BIND_POOL`, only
+        // binding 2 (the highest) has a variable count, and no binding is a dynamic buffer
+        // (`the_layout_matches_adr_0020_section_3a` checks the arrays).
         let layout = unsafe {
             DescriptorSetLayout::with_binding_flags(
                 device.device.clone(),
@@ -432,8 +451,13 @@ impl BindlessTable {
                 )
             })
             .collect::<RenderResult<Vec<_>>>()?;
-        let fallback_textures = upload_solid(device, "bindless-fallback", &FALLBACK_TEXELS)?;
+        // The fallback textures and the storage fallback's clear share one submission, so
+        // start-up waits for the queue once.
         let fallback_storage = storage_fallback(device)?;
+        let solids: Vec<TextureData> = FALLBACK_TEXELS.iter().map(TextureData::solid).collect();
+        let fallback_textures = upload_textures(device, "bindless-fallback", &solids, |command| {
+            record_storage_clear(device, command, fallback_storage.image());
+        })?;
 
         let mut table = Self {
             device: device.device.clone(),
@@ -536,7 +560,9 @@ impl BindlessTable {
     }
 
     /// Hands out a texture handle for `view` (in `SHADER_READ_ONLY_OPTIMAL` whenever a shader
-    /// reads it). Load time only. The view must outlive the handle's release and retirement.
+    /// reads it). Load time only, but frames that bind the set may be pending: it writes a free
+    /// slot, which no pending frame indexes. The view must outlive the handle's release and
+    /// retirement.
     pub(crate) fn register_texture(&mut self, view: vk::ImageView) -> RenderResult<TextureHandle> {
         let slot = self
             .textures
@@ -547,7 +573,8 @@ impl BindlessTable {
     }
 
     /// Hands out a storage-image handle for `view` (in `GENERAL` whenever a shader accesses
-    /// it). Load time only. The view must outlive the handle's release and retirement.
+    /// it). Load time only, as [`Self::register_texture`]. The view must outlive the handle's
+    /// release and retirement.
     pub(crate) fn register_storage_image(
         &mut self,
         view: vk::ImageView,
@@ -560,21 +587,50 @@ impl BindlessTable {
         Ok(StorageImageHandle(slot))
     }
 
-    /// Releases `handle` during `frame`: the last submitted frame that may index it; no frame
-    /// recorded later may. Returns `false` for a fallback or a handle that is not live.
-    pub(crate) fn release_texture(&mut self, handle: TextureHandle, frame: u64) -> bool {
+    /// Releases `handle` during `frame`; its slot is reused only after [`Self::retire`] reports
+    /// that frame retired. Returns `false` (and changes nothing) for a fallback or a handle
+    /// that is not live.
+    ///
+    /// # Safety
+    /// `frame` is the last frame, submitted or being recorded, that may index `handle`, and no
+    /// frame recorded after this call indexes it: recording a handle after its release is a
+    /// caller bug, not a read of the fallback. [`Self::retire`] and the slot's next
+    /// registration write its descriptor once `frame` is reported retired, so a frame that
+    /// indexes it later and is still pending then would see a descriptor update it uses
+    /// (VUID-vkUpdateDescriptorSets-None-03047, undefined behaviour). The view stays alive
+    /// until that retirement.
+    pub(crate) unsafe fn release_texture(&mut self, handle: TextureHandle, frame: u64) -> bool {
         self.textures.release(handle.0, frame)
     }
 
-    /// Releases `handle` during `frame`, under the same contract as
-    /// [`Self::release_texture`]. Returns `false` for the fallback or a handle that is not live.
-    pub(crate) fn release_storage_image(&mut self, handle: StorageImageHandle, frame: u64) -> bool {
+    /// Releases `handle` during `frame`. Returns `false` for the fallback or a handle that is
+    /// not live.
+    ///
+    /// # Safety
+    /// As [`Self::release_texture`].
+    pub(crate) unsafe fn release_storage_image(
+        &mut self,
+        handle: StorageImageHandle,
+        frame: u64,
+    ) -> bool {
         self.storage_images.release(handle.0, frame)
     }
 
     /// Frames up to `completed` have retired: their released slots point at the fallback
-    /// again and become free. Writes nothing when nothing was released.
-    pub(crate) fn retire(&mut self, completed: u64) {
+    /// again and become free. Writes and allocates nothing when nothing was released.
+    ///
+    /// It writes one descriptor per recycled slot. That is fine at load time; when a pass
+    /// first calls it per frame (N1, bulk eviction), merge adjacent slots into one write per
+    /// run and add a criterion bench for it.
+    ///
+    /// # Safety
+    /// Every frame up to and including `completed` has retired (its fence signalled), and
+    /// every release so far kept the contract of [`Self::release_texture`]. Then no pending
+    /// command buffer indexes a recycled slot, so rewriting it here, and writing it again when
+    /// it is registered, is a write `UPDATE_UNUSED_WHILE_PENDING` allows even while frames
+    /// that bind the set are pending. A `completed` ahead of the GPU makes those writes
+    /// undefined behaviour (VUID-vkUpdateDescriptorSets-None-03047).
+    pub(crate) unsafe fn retire(&mut self, completed: u64) {
         let mut recycled = core::mem::take(&mut self.recycled);
         self.textures.retire(completed, &mut recycled);
         let magenta = self.fallback_textures[0].view();
@@ -601,10 +657,12 @@ impl BindlessTable {
             .dst_array_element(slot)
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .image_info(&info);
-        // SAFETY: the slot is inside the binding and no pending command buffer uses it: it is
-        // newly allocated, or its release retired and, by the release contract, no frame
-        // recorded since indexes it. `UPDATE_UNUSED_WHILE_PENDING` and `UPDATE_AFTER_BIND`
-        // allow that write even while the set is bound; the view is live.
+        // SAFETY: the slot is inside the binding and no pending command buffer uses it. It is
+        // free (just allocated or just recycled): a recycled slot is indexed by no pending
+        // frame by the `unsafe` contracts of `release_*` and `retire`, and a never-registered
+        // one by none because shaders index only live handles and the reserved fallbacks
+        // (module docs). `UPDATE_AFTER_BIND | UPDATE_UNUSED_WHILE_PENDING` allow that write
+        // even while the set is bound in a pending command buffer; the view is live.
         unsafe {
             self.device
                 .update_descriptor_sets(core::slice::from_ref(&write), &[]);
@@ -631,49 +689,105 @@ impl BindlessTable {
     }
 }
 
-/// Uploads one 1×1 `R8G8B8A8_UNORM` texture per entry of `texels` with a single submission,
-/// left in `SHADER_READ_ONLY_OPTIMAL` and visible to every shader stage (bindless textures
-/// can be read anywhere). Load time only.
-pub(crate) fn upload_solid(
+/// One texture for [`upload_textures`]: a single-level 2D image and its texels, tightly
+/// packed in rows.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextureData<'a> {
+    pub(crate) extent: vk::Extent2D,
+    /// `R8G8B8A8_UNORM` or `D32_SFLOAT` (four bytes per texel).
+    pub(crate) format: vk::Format,
+    pub(crate) bytes: &'a [u8],
+}
+
+impl<'a> TextureData<'a> {
+    /// A 1×1 `R8G8B8A8_UNORM` texture.
+    pub(crate) fn solid(texel: &'a [u8; 4]) -> Self {
+        Self {
+            extent: vk::Extent2D {
+                width: 1,
+                height: 1,
+            },
+            format: FALLBACK_FORMAT,
+            bytes: texel,
+        }
+    }
+
+    fn aspect(&self) -> vk::ImageAspectFlags {
+        match self.format {
+            vk::Format::R8G8B8A8_UNORM => vk::ImageAspectFlags::COLOR,
+            vk::Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
+            other => panic!("upload_textures does not handle {other:?}"),
+        }
+    }
+}
+
+/// Staging offsets are aligned to this: a multiple of both formats' texel size and of the 4
+/// bytes a depth copy needs.
+const STAGING_ALIGN: usize = 16;
+
+/// Uploads `textures` with a single submission, each left in `SHADER_READ_ONLY_OPTIMAL` and
+/// visible to every shader stage (bindless textures can be read anywhere). `also` records more
+/// load-time work into the same command buffer after the uploads (the table's storage clear),
+/// so start-up waits for the queue once. Load time only.
+///
+/// # Panics
+/// Panics if `textures` is empty, or a texture's format is not one [`TextureData`] lists or
+/// its bytes do not match its extent.
+#[allow(clippy::too_many_lines)] // Staging, images, then the barriers and copies in order.
+pub(crate) fn upload_textures(
     device: &DeviceContext,
     name: &str,
-    texels: &[[u8; 4]],
+    textures: &[TextureData<'_>],
+    also: impl FnOnce(vk::CommandBuffer),
 ) -> RenderResult<Vec<GpuImage>> {
-    let bytes: Vec<u8> = texels.iter().flatten().copied().collect();
+    assert!(!textures.is_empty(), "nothing to upload");
+    let mut offsets = Vec::with_capacity(textures.len());
+    let mut size = 0usize;
+    for texture in textures {
+        assert_eq!(
+            texture.bytes.len(),
+            (texture.extent.width * texture.extent.height * 4) as usize,
+            "four bytes per texel, tightly packed"
+        );
+        size = size.next_multiple_of(STAGING_ALIGN);
+        offsets.push(size);
+        size += texture.bytes.len();
+    }
     let mut staging = GpuBuffer::new(
         device.device.clone(),
         device.allocator(),
         "bindless-staging",
-        bytes.len() as u64,
+        size as u64,
         vk::BufferUsageFlags::TRANSFER_SRC,
         MemoryLocation::CpuToGpu,
     )?;
-    staging.write_bytes(0, &bytes);
-    let images = texels
+    for (texture, &offset) in textures.iter().zip(&offsets) {
+        staging.write_bytes(offset, texture.bytes);
+    }
+    let images = textures
         .iter()
-        .map(|_| {
+        .map(|texture| {
             // Counted like every other texture upload (R8).
             crate::memory::count_upload();
             GpuImage::new(
                 device.device.clone(),
                 device.allocator(),
                 name,
-                vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                },
-                FALLBACK_FORMAT,
+                texture.extent,
+                texture.format,
                 vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-                vk::ImageAspectFlags::COLOR,
+                texture.aspect(),
             )
         })
         .collect::<RenderResult<Vec<_>>>()?;
     submit_one_shot(device, |command| {
         let to_transfer: Vec<_> = images
             .iter()
-            .map(|image| {
-                color_barrier(
+            .zip(textures)
+            .map(|(image, texture)| {
+                image_barrier(
                     image.image(),
+                    texture.aspect(),
                     (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
                     (
                         vk::PipelineStageFlags2::COPY,
@@ -688,17 +802,18 @@ pub(crate) fn upload_solid(
             command,
             &vk::DependencyInfo::default().image_memory_barriers(&to_transfer),
         );
-        for (index, image) in images.iter().enumerate() {
+        for ((image, texture), &offset) in images.iter().zip(textures).zip(&offsets) {
             let region = vk::BufferImageCopy::default()
-                .buffer_offset(index as u64 * 4)
-                .image_subresource(color_layers())
+                .buffer_offset(offset as u64)
+                .image_subresource(layers(texture.aspect()))
                 .image_extent(vk::Extent3D {
-                    width: 1,
-                    height: 1,
+                    width: texture.extent.width,
+                    height: texture.extent.height,
                     depth: 1,
                 });
-            // SAFETY: the staging buffer holds four bytes per image at this offset, and the
-            // image was created for transfer and is in `TRANSFER_DST_OPTIMAL`.
+            // SAFETY: the staging buffer holds the texture's tightly packed texels at this
+            // offset (a multiple of 16), and the image was created for transfer with this
+            // extent and aspect and is in `TRANSFER_DST_OPTIMAL`.
             unsafe {
                 device.device.cmd_copy_buffer_to_image(
                     command,
@@ -711,9 +826,11 @@ pub(crate) fn upload_solid(
         }
         let to_shader: Vec<_> = images
             .iter()
-            .map(|image| {
-                color_barrier(
+            .zip(textures)
+            .map(|(image, texture)| {
+                image_barrier(
                     image.image(),
+                    texture.aspect(),
                     (
                         vk::PipelineStageFlags2::COPY,
                         vk::AccessFlags2::TRANSFER_WRITE,
@@ -731,14 +848,16 @@ pub(crate) fn upload_solid(
             command,
             &vk::DependencyInfo::default().image_memory_barriers(&to_shader),
         );
+        also(command);
     })?;
     drop(staging);
     Ok(images)
 }
 
-/// The 1×1 storage fallback, in `GENERAL`.
+/// The 1×1 storage fallback. Its clear (into `GENERAL`) is recorded by
+/// [`record_storage_clear`].
 fn storage_fallback(device: &DeviceContext) -> RenderResult<GpuImage> {
-    let image = GpuImage::new(
+    GpuImage::new(
         device.device.clone(),
         device.allocator(),
         "bindless-fallback-storage",
@@ -749,66 +868,86 @@ fn storage_fallback(device: &DeviceContext) -> RenderResult<GpuImage> {
         FALLBACK_FORMAT,
         vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST,
         vk::ImageAspectFlags::COLOR,
-    )?;
-    submit_one_shot(device, |command| {
-        let to_clear = color_barrier(
-            image.image(),
-            (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
-            (
-                vk::PipelineStageFlags2::CLEAR,
-                vk::AccessFlags2::TRANSFER_WRITE,
-            ),
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::GENERAL,
-        );
-        device.cmd_pipeline_barrier2(
+    )
+}
+
+/// Records the storage fallback's transition to `GENERAL` and its clear to zero.
+fn record_storage_clear(device: &DeviceContext, command: vk::CommandBuffer, image: vk::Image) {
+    let to_clear = color_barrier(
+        image,
+        (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
+        (
+            vk::PipelineStageFlags2::CLEAR,
+            vk::AccessFlags2::TRANSFER_WRITE,
+        ),
+        vk::ImageLayout::UNDEFINED,
+        vk::ImageLayout::GENERAL,
+    );
+    device.cmd_pipeline_barrier2(
+        command,
+        &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_clear)),
+    );
+    // Cleared, so a read through a zero or bad storage index sees defined data: zeros until a
+    // shader writes through such an index (the fallback is a shared sink).
+    let range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    // SAFETY: the image has `TRANSFER_DST` usage and is in `GENERAL`, which clears allow; the
+    // range is its only level and layer.
+    unsafe {
+        device.device.cmd_clear_color_image(
             command,
-            &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_clear)),
-        );
-        // Cleared, so a read through a zero or stale storage handle sees defined data: zeros
-        // until a shader writes through such a handle (the fallback is a shared sink).
-        let range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        };
-        // SAFETY: the image has `TRANSFER_DST` usage and is in `GENERAL`, which clears allow;
-        // the range is its only level and layer.
-        unsafe {
-            device.device.cmd_clear_color_image(
-                command,
-                image.image(),
-                vk::ImageLayout::GENERAL,
-                &vk::ClearColorValue { float32: [0.0; 4] },
-                core::slice::from_ref(&range),
-            );
-        }
-        let to_shader = color_barrier(
-            image.image(),
-            (
-                vk::PipelineStageFlags2::CLEAR,
-                vk::AccessFlags2::TRANSFER_WRITE,
-            ),
-            (
-                vk::PipelineStageFlags2::ALL_COMMANDS,
-                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
-            ),
+            image,
             vk::ImageLayout::GENERAL,
-            vk::ImageLayout::GENERAL,
+            &vk::ClearColorValue { float32: [0.0; 4] },
+            core::slice::from_ref(&range),
         );
-        device.cmd_pipeline_barrier2(
-            command,
-            &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_shader)),
-        );
-    })?;
-    Ok(image)
+    }
+    let to_shader = color_barrier(
+        image,
+        (
+            vk::PipelineStageFlags2::CLEAR,
+            vk::AccessFlags2::TRANSFER_WRITE,
+        ),
+        (
+            vk::PipelineStageFlags2::ALL_COMMANDS,
+            vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        ),
+        vk::ImageLayout::GENERAL,
+        vk::ImageLayout::GENERAL,
+    );
+    device.cmd_pipeline_barrier2(
+        command,
+        &vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_shader)),
+    );
 }
 
 /// A whole-image colour barrier from `(stage, access)` to `(stage, access)`.
 pub(crate) fn color_barrier(
     image: vk::Image,
+    src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+    dst: (vk::PipelineStageFlags2, vk::AccessFlags2),
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> vk::ImageMemoryBarrier2<'static> {
+    image_barrier(
+        image,
+        vk::ImageAspectFlags::COLOR,
+        src,
+        dst,
+        old_layout,
+        new_layout,
+    )
+}
+
+/// A whole-image barrier of a single-level, single-layer image with `aspect`.
+pub(crate) fn image_barrier(
+    image: vk::Image,
+    aspect: vk::ImageAspectFlags,
     src: (vk::PipelineStageFlags2, vk::AccessFlags2),
     dst: (vk::PipelineStageFlags2, vk::AccessFlags2),
     old_layout: vk::ImageLayout,
@@ -825,7 +964,7 @@ pub(crate) fn color_barrier(
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)
         .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
+            aspect_mask: aspect,
             base_mip_level: 0,
             level_count: 1,
             base_array_layer: 0,
@@ -835,8 +974,13 @@ pub(crate) fn color_barrier(
 
 /// Mip 0, layer 0 of a colour image.
 pub(crate) fn color_layers() -> vk::ImageSubresourceLayers {
+    layers(vk::ImageAspectFlags::COLOR)
+}
+
+/// Mip 0, layer 0 of an image with `aspect`.
+fn layers(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers {
-        aspect_mask: vk::ImageAspectFlags::COLOR,
+        aspect_mask: aspect,
         mip_level: 0,
         base_array_layer: 0,
         layer_count: 1,
@@ -850,6 +994,16 @@ pub(crate) fn submit_one_shot(
     device: &DeviceContext,
     record: impl FnOnce(vk::CommandBuffer),
 ) -> RenderResult<()> {
+    submit(device, record)?.wait()
+}
+
+/// Records `record` into a one-time command buffer and submits it on the graphics queue
+/// without waiting: the smokes write descriptors while it is pending. Load time (and the
+/// smoke tests) only.
+pub(crate) fn submit(
+    device: &DeviceContext,
+    record: impl FnOnce(vk::CommandBuffer),
+) -> RenderResult<PendingSubmit<'_>> {
     let pool = CommandPool::new(device.device.clone(), device.graphics_family)?;
     let command = pool.allocate_one()?;
     let begin =
@@ -869,16 +1023,58 @@ pub(crate) fn submit_one_shot(
             .device
             .queue_submit(device.graphics_queue, &[submit], fence.handle())
     }?;
-    let fences = [fence.handle()];
-    // SAFETY: the fence belongs to this device and was submitted just above.
-    let waited = unsafe { device.device.wait_for_fences(&fences, true, u64::MAX) };
-    if let Err(error) = waited {
-        // SAFETY: the device is live; waiting idle has no other preconditions. Its result is
-        // the device's fate either way: idle, or lost (where destroying objects is allowed).
-        let _ = unsafe { device.device.device_wait_idle() };
-        return Err(error.into());
+    Ok(PendingSubmit {
+        device,
+        fence,
+        _pool: pool,
+        waited: false,
+    })
+}
+
+/// A one-time submission from [`submit`] that has not been waited for. Dropping it without
+/// [`Self::wait`] still waits (ignoring errors), so whatever its commands use may be freed
+/// after it in every path.
+#[must_use = "wait for the submission before reading what it wrote"]
+pub(crate) struct PendingSubmit<'a> {
+    device: &'a DeviceContext,
+    // Destroyed after the wait, in this order: the fence, then the pool and its command
+    // buffer.
+    fence: Fence,
+    _pool: CommandPool,
+    waited: bool,
+}
+
+impl PendingSubmit<'_> {
+    /// Waits for the submission's fence. If the wait fails the device is waited idle before
+    /// returning, so the caller may free what the commands used.
+    pub(crate) fn wait(mut self) -> RenderResult<()> {
+        self.waited = true;
+        self.wait_for_fence()
     }
-    Ok(())
+
+    fn wait_for_fence(&self) -> RenderResult<()> {
+        let fences = [self.fence.handle()];
+        // SAFETY: the fence belongs to this device and was submitted with the command buffer.
+        let waited = unsafe { self.device.device.wait_for_fences(&fences, true, u64::MAX) };
+        if let Err(error) = waited {
+            // SAFETY: the device is live; waiting idle has no other preconditions. Its result
+            // is the device's fate either way: idle, or lost (where destroying objects is
+            // allowed).
+            let _ = unsafe { self.device.device.device_wait_idle() };
+            return Err(error.into());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PendingSubmit<'_> {
+    fn drop(&mut self) {
+        if !self.waited {
+            // An early return between submit and wait (a `?`): the fence and command buffer
+            // are destroyed below, and the caller's resources after this, so wait first.
+            let _ = self.wait_for_fence();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -633,8 +633,18 @@ impl DescriptorSetLayout {
     /// indexing: the tiered bindless set, ADR-0020 §3a).
     ///
     /// # Safety
-    /// The device must have the descriptor-indexing features the flags need enabled (a tiered
-    /// device does; a Compat device does not).
+    /// - The device must have the descriptor-indexing features the flags need enabled (a
+    ///   tiered device does; a Compat device does not), including the per-type
+    ///   `descriptorBinding*UpdateAfterBind` feature of every update-after-bind binding's type.
+    /// - The create info must be valid:
+    ///   - `flags` contains `UPDATE_AFTER_BIND_POOL` whenever any binding is
+    ///     `UPDATE_AFTER_BIND` (VUID-VkDescriptorSetLayoutCreateInfo-flags-03000);
+    ///   - only the binding with the highest binding number is `VARIABLE_DESCRIPTOR_COUNT`
+    ///     (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03004);
+    ///   - no `UNIFORM_BUFFER_DYNAMIC` or `STORAGE_BUFFER_DYNAMIC` binding is
+    ///     `UPDATE_AFTER_BIND` (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03015).
+    ///
+    /// Debug builds assert the three create-info rules.
     pub(crate) unsafe fn with_binding_flags(
         device: ash::Device,
         bindings: &[vk::DescriptorSetLayoutBinding<'_>],
@@ -646,6 +656,33 @@ impl DescriptorSetLayout {
             binding_flags.len(),
             "one flag set per binding"
         );
+        debug_assert!(
+            flags.contains(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                || !binding_flags
+                    .iter()
+                    .any(|f| f.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)),
+            "an update-after-bind binding needs UPDATE_AFTER_BIND_POOL"
+        );
+        debug_assert!(
+            bindings.iter().zip(binding_flags).all(|(binding, f)| {
+                !f.contains(vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT)
+                    || bindings
+                        .iter()
+                        .all(|other| other.binding <= binding.binding)
+            }),
+            "only the highest binding may have a variable descriptor count"
+        );
+        debug_assert!(
+            bindings.iter().zip(binding_flags).all(|(binding, f)| {
+                !f.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND)
+                    || !matches!(
+                        binding.descriptor_type,
+                        vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                            | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+                    )
+            }),
+            "dynamic buffers cannot be update-after-bind"
+        );
         let mut flags_info =
             vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(binding_flags);
         let create_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -653,7 +690,8 @@ impl DescriptorSetLayout {
             .bindings(bindings)
             .push(&mut flags_info);
         // SAFETY: the device is live, the binding and flag arrays are valid for the call, and
-        // the caller guarantees the descriptor-indexing features (see `# Safety`).
+        // the caller guarantees the descriptor-indexing features and a valid create info (see
+        // `# Safety`).
         let handle = unsafe { device.create_descriptor_set_layout(&create_info, None) }?;
         Ok(Self { device, handle })
     }

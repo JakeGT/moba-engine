@@ -17,7 +17,8 @@
 //! layout with any update-after-bind set is bounded by the update-after-bind limits, counted
 //! over every set in it, *and* its ordinary sets still count against the ordinary limits.
 //! [`check_tiered`] checks the first for the images, samplers and resources the bindless set
-//! uses; the N0 tiered layouts' only other set is the smoke's acceleration structure, which
+//! uses, in every stage a binding is visible to (`ALL` expands to every stage, mesh and ray
+//! tracing included); the N0 tiered layouts' only other set is the smoke's acceleration structure, which
 //! neither limit family's image counts include. Buffer, input-attachment and
 //! acceleration-structure limits (and the colour attachments `maxPerStageUpdateAfterBindResources`
 //! also counts in the fragment stage) are left to the first tiered pass that binds them (N1).
@@ -174,9 +175,69 @@ pub(crate) fn tiered_totals(
     totals
 }
 
+/// Every single shader stage a tiered device may run, named for errors, in bit order.
+const TIERED_STAGES: [(vk::ShaderStageFlags, &str); 14] = [
+    (vk::ShaderStageFlags::VERTEX, "vertex"),
+    (
+        vk::ShaderStageFlags::TESSELLATION_CONTROL,
+        "tessellation control",
+    ),
+    (
+        vk::ShaderStageFlags::TESSELLATION_EVALUATION,
+        "tessellation evaluation",
+    ),
+    (vk::ShaderStageFlags::GEOMETRY, "geometry"),
+    (vk::ShaderStageFlags::FRAGMENT, "fragment"),
+    (vk::ShaderStageFlags::COMPUTE, "compute"),
+    (vk::ShaderStageFlags::TASK_EXT, "task"),
+    (vk::ShaderStageFlags::MESH_EXT, "mesh"),
+    (vk::ShaderStageFlags::RAYGEN_KHR, "ray generation"),
+    (vk::ShaderStageFlags::ANY_HIT_KHR, "any hit"),
+    (vk::ShaderStageFlags::CLOSEST_HIT_KHR, "closest hit"),
+    (vk::ShaderStageFlags::MISS_KHR, "miss"),
+    (vk::ShaderStageFlags::INTERSECTION_KHR, "intersection"),
+    (vk::ShaderStageFlags::CALLABLE_KHR, "callable"),
+];
+
+/// The single stages any binding of `sets` is visible to, each once, in bit order. `ALL`
+/// (every stage the device supports) expands to every stage in [`TIERED_STAGES`]; a bit that
+/// list does not name (a stage from an extension the engine does not enable) is checked as
+/// `"other"`.
+fn tiered_stages(
+    sets: &[&[vk::DescriptorSetLayoutBinding<'_>]],
+) -> impl Iterator<Item = (vk::ShaderStageFlags, &'static str)> {
+    let union = sets
+        .iter()
+        .flat_map(|set| set.iter())
+        .fold(vk::ShaderStageFlags::empty(), |union, binding| {
+            union | binding.stage_flags
+        });
+    let named = TIERED_STAGES
+        .iter()
+        .fold(vk::ShaderStageFlags::empty(), |all, &(stage, _)| {
+            all | stage
+        });
+    let union = if union.contains(vk::ShaderStageFlags::ALL) {
+        named
+    } else {
+        union
+    };
+    (0..u32::BITS)
+        .map(|bit| vk::ShaderStageFlags::from_raw(1 << bit))
+        .filter(move |&stage| union.contains(stage))
+        .map(|stage| {
+            let name = TIERED_STAGES
+                .iter()
+                .find(|&&(named, _)| named == stage)
+                .map_or("other", |&(_, name)| name);
+            (stage, name)
+        })
+}
+
 /// Fails when a tiered pipeline layout made of `sets` (the bindless set first) needs more than
-/// the device's update-after-bind limits allow, per stage or across all sets. `layout` names
-/// it in the error.
+/// the device's update-after-bind limits allow, per stage or across all sets. Every stage a
+/// binding is visible to is checked ([`tiered_stages`]: `ALL` means every stage, mesh and ray
+/// tracing included). `layout` names it in the error.
 pub(crate) fn check_tiered(
     layout: &'static str,
     sets: &[&[vk::DescriptorSetLayoutBinding<'_>]],
@@ -195,11 +256,7 @@ pub(crate) fn check_tiered(
             Ok(())
         }
     };
-    for (stage, name) in [
-        (vk::ShaderStageFlags::VERTEX, "vertex"),
-        (vk::ShaderStageFlags::FRAGMENT, "fragment"),
-        (vk::ShaderStageFlags::COMPUTE, "compute"),
-    ] {
+    for (stage, name) in tiered_stages(sets) {
         let totals = tiered_totals(sets, stage);
         fail(
             name,
@@ -469,6 +526,91 @@ mod tests {
                 limit: 1_000,
                 ..
             })
+        ));
+    }
+
+    /// Every stage a binding is visible to is checked, not only vertex, fragment and compute:
+    /// `ALL` covers mesh and ray-tracing stages, `ALL_GRAPHICS` covers tessellation and
+    /// geometry but not compute, and a mesh-only binding is checked in the mesh stage.
+    #[test]
+    fn check_tiered_counts_every_stage_a_binding_reaches() {
+        let all_graphics = super::tiered_stages(&[&[binding(
+            vk::DescriptorType::SAMPLED_IMAGE,
+            1,
+            vk::ShaderStageFlags::ALL_GRAPHICS,
+        )]])
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            all_graphics,
+            [
+                "vertex",
+                "tessellation control",
+                "tessellation evaluation",
+                "geometry",
+                "fragment"
+            ]
+        );
+        let all = super::tiered_stages(&[&crate::bindless::set_layout_bindings()]).count();
+        assert_eq!(
+            all,
+            super::TIERED_STAGES.len(),
+            "ALL expands to every named stage"
+        );
+
+        let mut limits = admission_minimums();
+        limits.per_stage_storage_images = 4;
+        let mesh_only = [binding(
+            vk::DescriptorType::STORAGE_IMAGE,
+            5,
+            vk::ShaderStageFlags::MESH_EXT,
+        )];
+        assert!(matches!(
+            check_tiered("mesh", &[&mesh_only], limits),
+            Err(RenderError::DescriptorLimit {
+                stage: "mesh",
+                kind: "update-after-bind storage images",
+                needed: 5,
+                limit: 4,
+                ..
+            })
+        ));
+        // Split across a ray-generation and a compute binding, each stage needs 3 of 4.
+        let split = [
+            binding(
+                vk::DescriptorType::STORAGE_IMAGE,
+                3,
+                vk::ShaderStageFlags::RAYGEN_KHR,
+            ),
+            binding(
+                vk::DescriptorType::STORAGE_IMAGE,
+                3,
+                vk::ShaderStageFlags::COMPUTE,
+            ),
+        ];
+        assert!(check_tiered("split", &[&split], limits).is_ok());
+        // An `ALL` binding over the limit fails in the first stage, vertex.
+        let everywhere = [binding(
+            vk::DescriptorType::STORAGE_IMAGE,
+            5,
+            vk::ShaderStageFlags::ALL,
+        )];
+        assert!(matches!(
+            check_tiered("all", &[&everywhere], limits),
+            Err(RenderError::DescriptorLimit {
+                stage: "vertex",
+                ..
+            })
+        ));
+        // A stage bit no list entry names is still checked.
+        let unnamed = [binding(
+            vk::DescriptorType::STORAGE_IMAGE,
+            5,
+            vk::ShaderStageFlags::from_raw(1 << 30),
+        )];
+        assert!(matches!(
+            check_tiered("unnamed", &[&unnamed], limits),
+            Err(RenderError::DescriptorLimit { stage: "other", .. })
         ));
     }
 }

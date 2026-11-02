@@ -495,7 +495,6 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
     push[4..8].copy_from_slice(&SIZE.to_le_bytes());
     push[8..12].copy_from_slice(&ORIGIN_Z.to_le_bytes());
     push[12..16].copy_from_slice(&MAX_T.to_le_bytes());
-    let writes_before_frame = table.writes();
 
     submit_one_shot(device, |command| {
         let blas_range = [vk::AccelerationStructureBuildRangeInfoKHR::default()
@@ -591,11 +590,6 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         copy_to_buffer(device, command, &output, &readback, extent);
         host_read_barrier(device, command);
     })?;
-    report.check(
-        || String::from("descriptor writes while recording and running the frame"),
-        table.writes() - writes_before_frame,
-        0,
-    );
 
     let mut raw = vec![0u8; bytes];
     if !readback.read_bytes(0, &mut raw) {

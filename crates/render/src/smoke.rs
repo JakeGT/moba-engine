@@ -4,11 +4,13 @@
 //! [`RenderPath::Tiered`], renders one small fixed frame, reads it back and compares every value
 //! **exactly** with an expectation computed on the CPU:
 //!
-//! - [`bindless_smoke`]: a fullscreen triangle and a compute pass sample 215 bindless textures
-//!   (and the fallbacks) through per-pixel, divergent handles (`nonuniformEXT`), read from a
-//!   buffer device address; the compute pass writes through a bindless storage image. It also
-//!   releases, retires and reuses handles, and checks that a stale handle reads the magenta
-//!   fallback.
+//! - [`bindless_smoke`]: a fullscreen triangle and a compute pass sample 211 bindless 2×2
+//!   textures (and the fallbacks) through per-pixel, divergent handles and samplers
+//!   (`nonuniformEXT`), read from a buffer device address, at a coordinate where every palette
+//!   entry gives a different exact value; the compute pass also checks the comparison
+//!   samplers on a depth texture and writes through a bindless storage image. It releases,
+//!   retires and reuses handles (checking that a retired slot holds the magenta fallback
+//!   again), and writes descriptors while the frame is pending (update after bind).
 //! - [`rt_smoke`]: builds a BLAS and a TLAS and traces one ray per pixel with
 //!   `GL_EXT_ray_query`, writing the closest hit's instance, custom index, primitive and `t` as
 //!   integers.
@@ -39,6 +41,9 @@ pub struct SmokeReport {
     pub admission: String,
     /// Whether the Khronos validation layer was enabled.
     pub validation_enabled: bool,
+    /// Validation was turned off explicitly ([`ValidationMode::Off`]); only then may a run
+    /// without the layer pass.
+    pub validation_waived: bool,
     /// Values compared with the CPU expectation.
     pub checked: usize,
     /// Values that differed.
@@ -54,12 +59,18 @@ pub struct SmokeReport {
 }
 
 impl SmokeReport {
-    fn new(name: &'static str, device: &DeviceContext, validation_enabled: bool) -> Self {
+    fn new(
+        name: &'static str,
+        device: &DeviceContext,
+        validation_enabled: bool,
+        validation: ValidationMode,
+    ) -> Self {
         Self {
             name,
             device: device.name.clone(),
             admission: device.admission.log_fields(),
             validation_enabled,
+            validation_waived: validation == ValidationMode::Off,
             checked: 0,
             mismatches: 0,
             first_mismatches: Vec::new(),
@@ -87,10 +98,14 @@ impl SmokeReport {
         }
     }
 
-    /// Every value matched and validation reported nothing.
+    /// Every value matched, validation ran and reported nothing. A run without the
+    /// validation layer passes only when validation was turned off explicitly
+    /// ([`ValidationMode::Off`], `MOBA_VULKAN_VALIDATION=off`), never because the layer was
+    /// missing under [`ValidationMode::IfAvailable`].
     #[must_use]
     pub fn passed(&self) -> bool {
         self.checked > 0
+            && (self.validation_enabled || self.validation_waived)
             && self.mismatches == 0
             && self.validation_errors == 0
             && self.validation_warnings == 0
@@ -99,9 +114,11 @@ impl SmokeReport {
 
 /// Runs `bindless_smoke` on a headless tiered device: a fullscreen triangle and a compute pass
 /// sample bindless textures through divergent `nonuniformEXT` handles read from a buffer device
-/// address (the compute pass writes through a bindless storage image), after handles have been
-/// released, retired and reused; every texel of the 64×64 result is compared exactly with the
-/// CPU expectation, and a stale handle must read the magenta fallback.
+/// address and divergent palette samplers (the compute pass also compares a depth texture and
+/// writes through a bindless storage image), after handles have been released, retired and
+/// reused, and with descriptors written while the frame is pending; every texel of the 64×64
+/// result is compared exactly with the CPU expectation, and a retired slot must read the
+/// magenta fallback.
 ///
 /// # Errors
 /// No device admitted to the tiered path under `choice` (the message names each device and
@@ -132,7 +149,12 @@ fn run(
     let warnings = InstanceContext::validation_warning_count();
     let mut report = {
         let gpu = Headless::new(choice, validation)?;
-        let mut report = SmokeReport::new(name, &gpu.device, gpu.instance.validation_enabled());
+        let mut report = SmokeReport::new(
+            name,
+            &gpu.device,
+            gpu.instance.validation_enabled(),
+            validation,
+        );
         test(&gpu, &mut report)?;
         report
         // The device and instance are destroyed here, so their messages are counted too.
@@ -174,5 +196,38 @@ impl Headless {
             )));
         }
         Ok(Self { device, instance })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SmokeReport;
+
+    fn report(validation_enabled: bool, validation_waived: bool) -> SmokeReport {
+        SmokeReport {
+            name: "test",
+            device: String::new(),
+            admission: String::new(),
+            validation_enabled,
+            validation_waived,
+            checked: 1,
+            mismatches: 0,
+            first_mismatches: Vec::new(),
+            validation_errors: 0,
+            validation_warnings: 0,
+            notes: Vec::new(),
+        }
+    }
+
+    /// A clean run passes only when validation ran, or was turned off explicitly; a missing
+    /// layer under `IfAvailable` is not a pass.
+    #[test]
+    fn a_run_without_validation_passes_only_when_validation_was_waived() {
+        assert!(report(true, false).passed());
+        assert!(report(false, true).passed());
+        assert!(!report(false, false).passed());
+        let mut warned = report(true, false);
+        warned.validation_warnings = 1;
+        assert!(!warned.passed());
     }
 }
