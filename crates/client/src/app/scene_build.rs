@@ -882,6 +882,17 @@ pub(crate) fn team_from_u8(value: u8) -> Option<Team> {
 }
 
 pub(crate) fn network_camera(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
+    let mut camera = network_camera_unpanned(network, aspect, elapsed);
+    // ADR-0021 §7: a two-tick capture pans the camera between its warm-up and its frame.
+    if network.capture_two_tick && network.capture_warmed_up {
+        let pan = crate::app::network_view::TWO_TICK_PAN;
+        camera.view_proj *= moba_core::math::Mat4::from_translation(-pan);
+        camera.position += pan;
+    }
+    camera
+}
+
+fn network_camera_unpanned(network: &NetworkView, aspect: f32, elapsed: f32) -> Camera {
     if network.spectator {
         let idle_yaw = network.spectator_yaw + (elapsed * 0.002).sin() * 0.02;
         // Following a hero (evidence captures) looks down more steeply, over the towers.

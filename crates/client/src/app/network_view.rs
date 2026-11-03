@@ -85,12 +85,22 @@ pub(crate) struct NetworkView {
     /// `MOBA_CAPTURE_TICK`: capture once Playing reaches this snapshot tick, with the render
     /// (interpolation and animation) tick pinned to it.
     pub(crate) capture_tick: Option<u32>,
+    /// `MOBA_CAPTURE_TWO_TICK=1` (ADR-0021 §7, the tiered overlay golden): with
+    /// `MOBA_CAPTURE_TICK=N`, the temporal history warms up at tick `N - 1`, then tick `N` is
+    /// captured with the camera panned by [`TWO_TICK_PAN`], so the frame has motion.
+    pub(crate) capture_two_tick: bool,
+    /// The two-tick capture's warm-up at `N - 1` has run.
+    pub(crate) capture_warmed_up: bool,
     /// `MOBA_SPECTATE_FOLLOW=<team>:<slot>`: the spectator camera follows that hero.
     pub(crate) spectator_follow: Option<(u8, u8)>,
     pub(crate) kill_feed: VecDeque<KillFeedEntry>,
     pub(crate) projectiles: Vec<ProjectileFx>,
     pub(crate) audio: crate::audio::Audio,
 }
+
+/// The camera's scripted pan between a two-tick capture's warm-up and its captured tick
+/// (ADR-0021 §7), world metres.
+pub(crate) const TWO_TICK_PAN: Vec3 = Vec3::new(0.75, 0.0, 0.0);
 
 impl NetworkView {
     #[cfg(test)]
@@ -128,6 +138,8 @@ impl NetworkView {
             follow_distance: 46.0,
             overview_camera: false,
             capture_tick: None,
+            capture_two_tick: false,
+            capture_warmed_up: false,
             spectator_follow: None,
             kill_feed: VecDeque::with_capacity(6),
             projectiles: Vec::with_capacity(32),
@@ -164,10 +176,23 @@ impl NetworkView {
         }
     }
 
-    /// The capture tick once the match is Playing and the latest snapshot has reached it.
+    /// The capture tick once the match is Playing and the latest snapshot has reached it
+    /// (the tick before it during a two-tick capture's warm-up).
     pub(crate) fn pinned_tick(&self) -> Option<u32> {
         self.capture_tick
             .filter(|&tick| self.phase == MatchPhase::Playing && self.last_tick >= tick)
+            .map(|tick| {
+                if self.two_tick_warm_up_due() {
+                    tick.saturating_sub(1)
+                } else {
+                    tick
+                }
+            })
+    }
+
+    /// A two-tick capture still has to warm up (at the tick before the captured one).
+    pub(crate) fn two_tick_warm_up_due(&self) -> bool {
+        self.capture_two_tick && !self.capture_warmed_up
     }
 
     #[allow(clippy::too_many_lines)] // Event-to-HUD/audio mapping is linear.

@@ -2,7 +2,8 @@
 
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
-[Maintainer answers](#maintainer-answers-2026-11-02)). Proposed 2026-10-31. This is phase N1 of the
+[Maintainer answers](#maintainer-answers-2026-11-02)). N1a is built
+([Amendment 1](#amendment-1-2026-11-03-n1a-the-temporal-foundation-as-built)). Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
 - **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
@@ -904,6 +905,94 @@ The maintainer accepted this ADR with **every recommendation above taken**, Q1 t
 - the motion history is keyed in the renderer from `motion_key`;
 - `independentBlend` is required on the tiered path, checked in every recorded fixture;
 - vendor back ends stay out of the goldens (gate 5 covers them).
+
+### Amendment 1 (2026-11-03, N1a): the temporal foundation as built
+
+Recorded in the N1a PR (`feat/n1a-temporal`): jitter, motion vectors and masks, TAAU, the
+`TemporalUpscaler` interface, the overlay layer and MSAA's retirement on the tiered path. The
+§4a trait is built exactly as specified; N1b and N1c port against it. Where the code departs
+from the text above, or the text left a choice open, this is what was done and why.
+
+1. **TAAU owns its history (§3).** The output-resolution history pair and the previous linear
+   depth pair are created and kept by the TAAU back end, in `GENERAL`, with its own barriers
+   (first use from `UNDEFINED`, then a compute-to-compute memory barrier), not imported into
+   the render graph. Every back end owns its state behind the trait (`reset_history`,
+   `vram_bytes`); FSR 3.1 and the vendor SDKs keep theirs inside their contexts, so the graph
+   stays the same whichever back end runs.
+2. **The overlay shaders are GLSL** (`overlay.frag`, the overlay prepass and the overlay
+   particle permutation), not Slang. They reuse `decals.glsl` and the outline dilation that
+   the scene shaders compile, and one copy of the shape code is the point (§5: "the same
+   32×32 ground bins and `decals.glsl` shape code"). They move to Slang with the decal library.
+3. **Telegraph particles reach the overlay by a vertex-stage role filter.** The overlay draw
+   re-draws the particle buffer with a `VFX_OVERLAY` permutation that keeps only enemy-telegraph
+   roles (the scene's VFX draw skips them), instead of compacting them into a second list.
+   Mesh-particle telegraphs stay in the scene pass.
+4. **`overlay_vfx` exposure** is the base exposure times the look's EV, without the adapted EV:
+   the overlay is display-referred and telegraphs must not pump with eye adaptation (Q4).
+5. **The two masks are cleared by a transfer pass** (`mask_clear`) at the start of the frame:
+   `reactive` and `tc_mask` are written with `MAX` blending by several passes.
+6. **Temporal off on Tiered** keeps the scale ceiling at 1.0 with a 0.5 floor and dynamic
+   resolution off, as before N1 (the §7 table's "FXAA + bicubic"); `MOBA_DYNRES=on` runs it.
+7. **Hull outlines on Tiered become screen outlines** (`OutlineMode::Hull` is Compat-only, §5).
+   On Tiered the render-resolution ID target serves only distortion's unit mask; the overlay
+   draws every outline at output resolution.
+8. **No separate `sharpen` pass yet.** TAAU fuses RCAS (§3) and FSR 3.1 has its own, so the
+   pass arrives with the DLSS and XeSS back ends (N1c).
+9. **Capture warm-up.** A capture renders two phase cycles of the same scene; particle spawns
+   are kept only in the first warm-up frame. `Renderer::warm_up_temporal` is the two-tick API:
+   the client's `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=n`) warms up at tick
+   `n − 1`, then captures tick `n` with the camera panned by a fixed 0.75 m.
+10. **Motion keys** are `net_id << 8 | (part + 1)`, so no unit part has key 0 (the static key).
+11. **`independentBlend`** was added to every capability fixture by hand: `vulkan-probe --json`
+    reports it on all three recorded devices, and the synthetic fixtures inherit it from the
+    RTX dump (Q7; `caps/fixtures/README.md`).
+12. **Foliage's vertex stage** now uses four storage buffers (the previous-instance buffer
+    joined), exactly the guaranteed minimum; the descriptor-budget test pins it.
+13. **Readback usage.** On the temporal path the `depth` and `motion` transients carry
+    `TRANSFER_SRC`, for the motion probe's readback. Compat's descriptions are unchanged.
+14. **Per-pass lanes** (gate 6): `temporal`, `tc_mask`, `overlay_prepass` and `overlay` join the
+    frame log (`prepass` was already there). Like the fog-of-war lanes they are left out when
+    they never ran, so Compat logs are unchanged.
+
+**How the gates were made concrete:**
+
+- **Gate 2** is `Renderer::motion_probe` (`MOBA_MOTION_PROBE=1`, `scripts/motion-probe.sh`).
+  Two frames on lavapipe: a camera pan, a keyed static cube translated, a one-joint skinned
+  cube whose joint moves, a VAT cube going from frame 0 to frame 1, foliage, a `motion_reset`
+  cube, a key-0 cube and a key absent from frame A. Frame B's motion and depth are read back;
+  the twin rebuilds each pixel's world position from depth through the jittered matrix and
+  projects it through the unjittered ones, and every classified pixel must match within
+  1/64 render pixel. The foliage is in a steady wind at the same environment time in both
+  frames, so the prepass's second evaluation at the previous time and displacers is
+  exercised; wind *animation* between frames is not twinned. Particle motion is not in the
+  gate's list and is not probed.
+- **Gate 3, ghost energy,** is `Renderer::ghost_probe` (`MOBA_GHOST_PROBE=1`,
+  `scripts/ghost-probe.sh`). A hero-sized box dashes at 10 m per 0.2 s at 120 fps and a small
+  projectile crosses the screen at 1 m per frame. The 24-frame sequence is rendered with
+  history and again with every frame a history reset (the no-history reference), from the
+  same jitter phase. The wake is every pixel either object covered in the previous 12 frames
+  and more than 2 px from where it is now. Antialiasing is left out and counted: pixels on an
+  edge of the still scene (a 3×3 neighbourhood spanning more than 8/255) and pixels where the
+  same sequence without the movers already differs from its reference. **The fixed bound is
+  3 % of the wake on every one of the last 20 frames.** TAAU measured at most 2.39 % at
+  Quality and 1.20 % at native when the bound was set; the residue is the trailing edge of
+  the hero's moving shadow (a shadow has no motion of its own, and a still pixel's clip box
+  is the wider γ 1.25) and faint grid lines re-converging after a disocclusion. FSR 3.1 runs
+  it in N1b and DLSS on the RTX in N1c.
+- **Gate 3, overlay invariance,** is `scripts/overlay-invariance.sh`: captures of the overlay
+  IDs (`MOBA_DEBUG_VIEW=overlay-ids`) are byte-identical under TAAU at Quality, native and
+  Performance, FXAA at scale 1.0 and 0.6, and AA off. FSR 3.1 joins in N1b.
+- **Gate 3, telegraph contrast,** is `glow_display_reference`, the CPU twin of the overlay's
+  display-space telegraphs, and its test. `AgX` maps black to 16× white into the display
+  range, so the test sweeps that whole range (display-linear 0 to 1) in three hues: the rim
+  is at least 1.5× brighter than the ground or the halo at most 1/1.5 of it, everywhere; the
+  rim lifts by at least 1.2× wherever the display has headroom for its hue (it is clamped to
+  the display range); and the halo is there on any ground at luminance 0.5 or more.
+- **Gate 4.** Every Compat golden was captured on `origin/main` and on the branch and compared
+  byte for byte. The tiered goldens (`scripts/tiered-goldens.sh`) are at 640×360 with the HUD
+  at half scale: TAAU at Low (Quality), at High and at native, and the overlay golden, a
+  two-tick network capture. Each must be byte-identical across two lavapipe runs, with
+  validation and sync validation clean, and match its fingerprint in `tests/golden/`.
 
 ## Sources
 

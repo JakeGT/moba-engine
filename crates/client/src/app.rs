@@ -78,6 +78,9 @@
 //! - `MOBA_MINIMAP_BAKE=off|once|<frames>` (network mode): the minimap shows a top-down
 //!   render of the map baked at every map bind (R7b; default `once`; `<frames>` re-bakes
 //!   periodically for GPU-time measurement). `off` keeps the flat minimap.
+//! - `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=<n>`, ADR-0021 §7): the temporal
+//!   history warms up at tick `n - 1`, then tick `n` is captured with the camera panned by
+//!   a fixed 0.75 m, so the tiered overlay golden has motion.
 //! - `MOBA_CAPTURE_MAPS=<prefix>` (network mode, evidence for #287): after every map change
 //!   (connect, content reload, map rotation), capture `<prefix>-<n>.ppm` once
 //!   `MOBA_CAPTURE_FRAME` frames with snapshots have rendered on it, and keep playing.
@@ -534,6 +537,9 @@ impl ClientApp {
                         // Only a capture pins the render tick; otherwise play normally.
                         capture_tick: parse_capture_tick()
                             .filter(|_| std::env::var_os("MOBA_CAPTURE").is_some()),
+                        capture_two_tick: std::env::var_os("MOBA_CAPTURE_TWO_TICK")
+                            .is_some_and(|value| value != "0"),
+                        capture_warmed_up: false,
                         spectator_follow: evidence::spectate_follow_from_env(),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
@@ -1340,8 +1346,21 @@ impl App for ClientApp {
                             offscreen.push(minimap.render());
                         }
                         let mut submitted = false;
+                        // ADR-0021 §7: a two-tick capture warms the history up first.
+                        let warm_up_due = capture_due && network.two_tick_warm_up_due();
+                        let mut warmed_up = false;
                         if let Some(renderer) = renderer.as_mut() {
-                            if capture_due {
+                            if warm_up_due {
+                                match renderer.warm_up_temporal(&scene, Some(ui)) {
+                                    Ok(()) => {
+                                        submitted = true;
+                                        warmed_up = true;
+                                    }
+                                    Err(error) => {
+                                        failure = Some(format!("capture warm-up failed: {error}"));
+                                    }
+                                }
+                            } else if capture_due {
                                 submitted = capture_and_exit(
                                     renderer,
                                     &scene,
@@ -1384,6 +1403,9 @@ impl App for ClientApp {
                         drop(offscreen);
                         portraits.finish(submitted);
                         minimap.finish(submitted);
+                        if warmed_up {
+                            network.capture_warmed_up = true;
+                        }
                     }
                 }
             } else if let Some(simulation) = simulation {
