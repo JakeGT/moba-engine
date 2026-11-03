@@ -228,7 +228,8 @@ also reports `vram_bytes` at real sizes. Results on lavapipe, an RTX 5070 Ti and
 
 In the frame, FSR 3.1 also runs in the readability gates (ADR-0021 gate 3: the ghost probe
 and overlay invariance) and in `scripts/tiered-goldens.sh` (two lavapipe runs byte-identical,
-an exact SHA-256 per capture checked only on CI's lavapipe, fingerprints that catch a broken
+an exact SHA-256 per capture checked only on CI's lavapipe, where a device mismatch fails
+the job, fingerprints that catch a broken
 frame on any lavapipe, and a mid-stream reset every fifth frame under synchronization
 validation), all in CI's `tiered-temporal` job (`UPSCALERS=fsr3`). A change that alters
 FSR 3.1's output on purpose regenerates the hashes from CI's artifact (or `WRITE_HASHES=1` on

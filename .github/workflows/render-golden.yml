@@ -19,11 +19,16 @@ env:
 jobs:
   renderer-gate:
     name: renderer-gate
-    runs-on: ubuntu-latest
+    # Pinned (ubuntu-latest was 26.04 when pinned): the image's Mesa and LLVM key the exact
+    # tiered hashes (tests/golden/render-tiered-hashes.txt), so an image change is a PR that
+    # regenerates them, not a surprise.
+    runs-on: ubuntu-26.04
     # Fifteen lavapipe captures (ADR-0019 added the distortion one and a bloom-off pair),
     # the outline probe, the R8 culling probe's five extra captures and ADR-0021's TAAU
     # probes and goldens run in sequence; the limit is a safety margin above that. FSR 3.1's
     # cases run beside it in `tiered-temporal` (this job's name is a required check).
+    # Budget: about 50 of the 75 minutes with N1b (#364), about 54 with #365's resize smoke.
+    # New probes go in `tiered-temporal`, not here.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
@@ -543,7 +548,8 @@ jobs:
   # (everything in one job ran about 64 minutes once FSR 3.1 joined it).
   tiered-temporal:
     name: tiered-temporal
-    runs-on: ubuntu-latest
+    # Pinned with renderer-gate (the exact tiered hashes are keyed on the image's lavapipe).
+    runs-on: ubuntu-26.04
     # The FSR 3.1 ghost probe (three modes), four overlay cases (with TAAU Quality as the
     # reference) and eight tiered captures plus a reset run.
     timeout-minutes: 75

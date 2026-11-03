@@ -1393,17 +1393,29 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
    Quality at the High preset) are checked by `tiered-goldens.sh` in three ways:
    - the two runs must be byte-identical;
    - **an exact SHA-256 per capture** (`tests/golden/render-tiered-hashes.txt`, TAAU's too),
-     checked only on the lavapipe that generated the file: CI's (LLVM 21.1.8, Vulkan 1.4.335,
-     from `vulkan-probe`). Elsewhere the script logs that it skipped them. llvmpipe's code
-     generation differs between LLVM versions, so a newer one (LLVM 23.1.3 here) renders
-     other bytes for TAAU and FSR 3.1 alike; on CI the hashes were the same across two runs
-     of different code (`c0ff307`, `d9c2d6a`);
+     checked only on the lavapipe that generated the file: CI's, keyed by its device name,
+     Vulkan version and driver info (Mesa and LLVM versions, from `vulkan-probe --json`), on
+     a pinned runner image (`ubuntu-26.04`). llvmpipe's code generation differs between
+     versions, so another one (LLVM 23.1.3 here) renders other bytes for TAAU and FSR 3.1
+     alike; on CI the hashes were the same across runs of different code (`c0ff307`,
+     `d9c2d6a`, `6261189`). On another device the script skips them with a log line, except
+     on CI for FSR 3.1: there a mismatch (or no device from `vulkan-probe`) fails
+     `tiered-temporal` with a message to regenerate the file with `WRITE_HASHES=1` from the
+     run's artifact, because it is FSR 3.1's only regression check. TAAU, in the required
+     `renderer-gate`, warns and keeps its fingerprints, so a runner change cannot make the
+     required gate flaky;
    - the 64×36 fingerprints (`render-tiered-fsr3-*-fingerprint.rgb`, written from CI's
      output). **They do not catch an FSR 3.1 regression:** at mean ≤ 2.0 and max ≤ 24 they
      cannot tell FSR 3.1 from TAAU (mean 0.22–0.38, max 3–6 apart, per the round-2 review),
      and a flipped jitter sign, accumulation at 1 instead of 1/3 and a flipped motion-vector
      sign all pass them. They catch a broken frame on any lavapipe; the exact hashes are the
      regression check, on CI (perf/0033 has the mutations against both).
+
+   What the scenes cover: the low, high and native scenes are nearly static, so motion
+   vectors are covered by the two-tick panned `overlay` capture (the review found that a
+   flipped motion-vector sign changes only 2–3 pixels in high and none in native). FSR 3.1's
+   use of its history is covered: disabling it changes about 218,000 pixels (per the
+   review).
 8. **Q1: `auto` stays TAAU.** Q1 gives FSR 3.1 the open build's `auto` slot when its port
    passes the same readability tests and costs within 0.2 ms of TAAU on the RTX 5070 Ti. Its
    cost is within that (the temporal lane on the RTX 5070 Ti at 1440p, three interleaved
@@ -1493,8 +1505,9 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
     (smoke) replaces the motion of the unit under it with its own. The round-2 review put
     seven static 2.5 m smoke sprites over the probe's hero path (RTX 5070 Ti, Quality): TAAU's
     hero smear was 1.81 % at opacity 0.2 and 1.90 % at 0.4, against 1.44 % and 1.65 % without
-    particle motion and the 1.75 % bound; FSR 3.1 improved (0.27 %). **TAAU can exceed the
-    hero bound under translucent smoke.** The probe does not cover the case yet; #368 tracks
+    particle motion and the 1.75 % bound; FSR 3.1 measured 0.27 % at both opacities
+    (0.09 % and 0.64 % without particle motion). **TAAU can exceed the hero bound under
+    translucent smoke.** The probe does not cover the case yet; #368 tracks
     adding it and choosing a rule (a per-effect flag, a higher threshold for alpha-blended
     particles, or a wider bound).
 14. **The ghost probe is run on a real GPU, not only lavapipe.** Item 13's bug passed CI's

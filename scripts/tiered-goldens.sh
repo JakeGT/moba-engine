@@ -9,11 +9,14 @@
 # renderer-gate and "fsr3" in tiered-temporal. Per back end and scene:
 #   - two captures, which must be byte-identical;
 #   - an exact SHA-256 check against tests/golden/render-tiered-hashes.txt, but only on the
-#     device that file was generated on (CI's lavapipe: its `device` line, from
-#     `vulkan-probe`). Elsewhere it is skipped with a log line: llvmpipe's code generation
-#     differs between LLVM versions, so another lavapipe renders other bytes for every back
-#     end. WRITE_HASHES=1 rewrites the file for the current device; TIERED_HASHES names
-#     another file;
+#     device that file was generated on (CI's lavapipe: its `device` line, the device name,
+#     Vulkan version and driver info (Mesa and LLVM versions) from `vulkan-probe --json`).
+#     llvmpipe's code generation differs between Mesa and LLVM versions, so another lavapipe
+#     renders other bytes for every back end. On another device the check is skipped with a
+#     log line, except on CI (GITHUB_ACTIONS) for FSR 3.1, whose only regression check it
+#     is: there a mismatch fails the run (TAAU, in the required renderer-gate, warns and keeps
+#     its fingerprints). WRITE_HASHES=1 rewrites the file for the current device (from CI's
+#     artifact for CI's lavapipe); TIERED_HASHES names another file;
 #   - the 64x36 fingerprint (tests/golden/render-tiered-[fsr3-]<name>-fingerprint.rgb, WRITE=1
 #     rewrites them). It catches a broken frame, not an upscaler regression: it cannot tell
 #     FSR 3.1 from TAAU (perf/0033), which is why the exact check exists.
@@ -52,8 +55,10 @@ upscalers=${UPSCALERS:-taau fsr3}
 hashes=${TIERED_HASHES:-tests/golden/render-tiered-hashes.txt}
 probe="$(dirname "$client")/vulkan-probe"
 # shellcheck disable=SC2086 # RUN is a command prefix.
-device=$(${RUN:-} "$probe" 2>/dev/null |
-  sed -n 's/^device 0: "\([^"]*\)" kind=[A-Za-z]* api=\([0-9.]*\).*/\1 api=\2/p' || true)
+device=$(${RUN:-} "$probe" --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)[0]
+print("%s api=%s driver=%s" % (d["name"], d["api_version"], d["driver_info"]))' 2>/dev/null || true)
 expected_device=$(sed -n 's/^device //p' "$hashes" 2>/dev/null || true)
 exact=0
 if [ "${WRITE_HASHES:-0}" = 1 ]; then
@@ -63,16 +68,26 @@ if [ "${WRITE_HASHES:-0}" = 1 ]; then
 elif [ -n "$device" ] && [ "$device" = "$expected_device" ]; then
   exact=1
   echo "exact hashes: on $device"
-else
-  echo "exact hashes: skipped, this device is '${device:-unknown}' and $hashes is for" \
-    "'${expected_device:-none}'; the fingerprints alone are checked"
-  # On CI that means the runner's lavapipe changed: warn, so the hashes get regenerated.
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    echo "::warning::tiered-goldens: exact hashes skipped (lavapipe is '${device:-unknown}');" \
-      "regenerate $hashes from this run's captures"
-  fi
 fi
 status=0
+if [ "${WRITE_HASHES:-0}" != 1 ] && [ "$exact" = 0 ]; then
+  echo "exact hashes: skipped, this device is '${device:-unknown}' and $hashes is for" \
+    "'${expected_device:-none}'; the fingerprints alone are checked"
+  # On CI the runner's lavapipe changed (or vulkan-probe failed). FSR 3.1 has no other
+  # regression check, so its job fails (after the captures, which the artifact keeps);
+  # TAAU's, in the required renderer-gate, warns.
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    regenerate="regenerate $hashes with WRITE_HASHES=1 from this run's artifact (the captures" \
+    regenerate="$regenerate are in it) or on this lavapipe"
+    if [[ " $upscalers " == *" fsr3 "* ]]; then
+      echo "::error::tiered-goldens: no exact hashes for FSR 3.1 on '${device:-unknown}'; $regenerate"
+      echo "FAIL: exact hashes do not cover this device; $regenerate"
+      status=1
+    else
+      echo "::warning::tiered-goldens: exact hashes skipped on '${device:-unknown}'; $regenerate"
+    fi
+  fi
+fi
 for upscaler in $upscalers; do
   prefix=; [ "$upscaler" = taau ] || prefix="$upscaler-"
   for entry in "${cases[@]}"; do
