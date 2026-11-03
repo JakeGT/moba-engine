@@ -84,11 +84,11 @@ pub use ghost_probe::{GhostFrame, GhostProbeReport};
 pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PushCheck};
 
 const FRAMES_IN_FLIGHT: usize = 2;
-// ADR-0021: the temporal back end's and `exposure_linear`'s descriptor rings are rewritten one
-// set per record; longer than the frames in flight, a set is never rewritten while pending.
+// ADR-0021 (amendment 2 item 17): the temporal back end and `exposure_linear` keep one
+// descriptor set per frame-in-flight slot, rewritten only after that slot's fence.
 const _: () = assert!(
-    crate::upscale::taau::SET_RING > FRAMES_IN_FLIGHT
-        && crate::upscale::exposure::SET_RING > FRAMES_IN_FLIGHT
+    crate::upscale::taau::SET_RING >= FRAMES_IN_FLIGHT
+        && crate::upscale::exposure::SET_RING >= FRAMES_IN_FLIGHT
 );
 // The fog-of-war ping-pong (image `f` written in frame slot `f`, the other read as history)
 // and the lighting set per frame slot that names image `f` assume exactly this many frames in
@@ -3310,7 +3310,7 @@ impl Renderer {
                         let target = self.transient(temporal.exposure_linear).view();
                         let (exposure, adapted) = self.post.linear_exposure();
                         if let Some(pass) = self.exposure_linear.as_mut() {
-                            pass.record(command_buffer, adapted, target, exposure);
+                            pass.record(command_buffer, frame_index, adapted, target, exposure);
                         }
                     }
                 }
@@ -3350,6 +3350,7 @@ impl Renderer {
                             fov_y: frame.lens[2],
                             reset: frame.reset,
                             sharpness: self.temporal.as_ref().map_or(0.0, |state| state.sharpness),
+                            frame_slot: frame_index,
                         };
                         let output = UpscaleOutput {
                             image: image(resources.hdr_out, frame_graph::HDR_OUT_FORMAT, extent),
@@ -3596,8 +3597,6 @@ impl Renderer {
         // allocation cannot pair the new extent with old-size transients. Fixed-size slots
         // (the shadow map) are kept.
         let extents = target_extents(swapchain.extent, self.post_config.render_scale);
-        // ADR-0021 §2c: a resize re-creates the back end at the new output and forgets every
-        // history. Built before the swap below for the same reason as the transients.
         // ADR-0021 §2c: a resize re-sizes the back end's images (no pipeline is built,
         // amendment 2 item 18) and forgets every history. The device is idle. Done before
         // the swap below so a failed allocation cannot pair the new extent with old images.

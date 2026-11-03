@@ -15,9 +15,8 @@ use crate::resources::{
 };
 use crate::shaders::ShaderSource;
 
-/// Descriptor sets in the ring (as TAAU's: longer than the frames in flight, asserted in the
-/// renderer).
-pub(crate) const SET_RING: usize = 3;
+/// Descriptor sets: one per frame-in-flight slot, as TAAU's (asserted in the renderer).
+pub(crate) const SET_RING: usize = 2;
 
 /// `ExposurePush` in `exposure_linear.slang`.
 #[repr(C)]
@@ -35,7 +34,6 @@ pub(crate) struct ExposureLinearPass {
     _set_layout: DescriptorSetLayout,
     _pool: DescriptorPool,
     sets: [vk::DescriptorSet; SET_RING],
-    next: usize,
     /// Binding 0 without auto exposure.
     placeholder: GpuImage,
     placeholder_ready: bool,
@@ -101,7 +99,6 @@ impl ExposureLinearPass {
             _set_layout: set_layout,
             _pool: pool,
             sets,
-            next: 0,
             placeholder,
             placeholder_ready: false,
         })
@@ -149,17 +146,21 @@ impl ExposureLinearPass {
 
     /// Records the pass: `adapted` is the persistent adapted-EV image's view when auto
     /// exposure is on (the graph moved it to `SHADER_READ_ONLY_OPTIMAL`), `target` the
-    /// `exposure_linear` transient (in `GENERAL`).
+    /// `exposure_linear` transient (in `GENERAL`), `frame_slot` the frame-in-flight slot
+    /// being recorded (its fence was waited on, so its descriptor set is free).
     pub(crate) fn record(
         &mut self,
         cmd: vk::CommandBuffer,
+        frame_slot: usize,
         adapted: Option<vk::ImageView>,
         target: vk::ImageView,
         exposure: f32,
     ) {
         if adapted.is_none() && !self.placeholder_ready {
             let barrier = [vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::NONE)
+                // After `forget` an earlier frame's pass may still be sampling the
+                // placeholder: the transition waits for earlier compute work (WAR).
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .src_access_mask(vk::AccessFlags2::NONE)
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
@@ -183,8 +184,7 @@ impl ExposureLinearPass {
             }
             self.placeholder_ready = true;
         }
-        let set = self.sets[self.next];
-        self.next = (self.next + 1) % SET_RING;
+        let set = self.sets[frame_slot % SET_RING];
         let source = [vk::DescriptorImageInfo::default()
             .image_view(adapted.unwrap_or_else(|| self.placeholder.view()))
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -207,8 +207,8 @@ impl ExposureLinearPass {
             exposure,
             auto_exposure: u32::from(adapted.is_some()),
         };
-        // SAFETY: no submitted frame reads the set (the ring is longer than the frames in
-        // flight) and both views are live in the layouts named.
+        // SAFETY: no submitted frame reads the set (the slot's fence was waited on) and both
+        // views are live in the layouts named.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         // SAFETY: the pipeline is live; recording into `cmd`.
         unsafe {

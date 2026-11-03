@@ -8,7 +8,8 @@
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
-# Captures fail on any validation message. CI runs it under lavapipe with validation and
+# Captures fail on any validation message, and so does a 40-frame run that resets the
+# temporal history every 5th frame with frames in flight. CI runs it under lavapipe with validation and
 # sync validation (render-golden.yml); set RUN="xvfb-run -a" when there is no display.
 set -euo pipefail
 client=${1:-./target/release/moba-client}
@@ -58,4 +59,17 @@ for entry in "${cases[@]}"; do
     status=1
   fi
 done
+# A history reset mid-stream (ADR-0021 amendment 2 item 28): every 5th frame resets the
+# temporal history with the previous frame still in flight, under the same validation.
+reset_log="$out/mid-stream-reset.log"
+# shellcheck disable=SC2086 # RUN is a command prefix.
+if env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \
+  MOBA_SMOKE_FRAMES=40 MOBA_TEMPORAL_RESET_EVERY=5 timeout 300 ${RUN:-} "$client" \
+  > "$reset_log" 2>&1 && ! grep -E '^\[vulkan' "$reset_log"; then
+  echo "ok: tiered mid-stream history reset: no validation messages"
+else
+  tail -20 "$reset_log"
+  echo "FAIL: tiered mid-stream history reset"
+  status=1
+fi
 exit "$status"

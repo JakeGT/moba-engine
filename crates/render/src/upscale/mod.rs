@@ -67,6 +67,10 @@ pub(crate) struct UpscaleInputs {
     pub(crate) reset: bool,
     /// The shared sharpening amount, `0..=1`.
     pub(crate) sharpness: f32,
+    /// The frame-in-flight slot being recorded (`< FRAMES_IN_FLIGHT`). The caller waited on
+    /// this slot's previous submission, so per-slot state (descriptor sets, constants) is
+    /// free to rewrite, also after recorded frames were dropped unsubmitted.
+    pub(crate) frame_slot: usize,
 }
 
 /// The upscaler's output: `hdr_out`, `RGBA16F` storage at output resolution, in `GENERAL`.
@@ -94,14 +98,16 @@ pub(crate) trait TemporalUpscaler {
     /// - `cmd` is a command buffer of the back end's device in the recording state.
     /// - **Every command buffer recorded here is submitted exactly once, in `record` order, on
     ///   one queue.** A back end advances its own state when it records (history parity,
-    ///   first-use layout transitions, descriptor ring slots) and orders each frame only
-    ///   against the previous record's commands earlier on the same queue. A caller that
+    ///   first-use layout transitions) and orders each frame only against earlier commands
+    ///   on the same queue (a history reset's re-initialisation waits for every earlier
+    ///   compute write and read of its images, amendment 2 item 28). A caller that
     ///   drops a recorded command buffer unsubmitted (a failure between recording and
     ///   submission) calls [`Self::reset_history`] before the next `record`, which makes that
     ///   record a first frame again, or treats the failure as fatal and drops the back end.
-    /// - **At most `FRAMES_IN_FLIGHT` (2) records are pending.** When this is called, the
-    ///   command buffer of the call two `record`s back has finished executing; descriptor
-    ///   sets and constants it used may be rewritten.
+    /// - **At most `FRAMES_IN_FLIGHT` (2) records are pending, and `inputs.frame_slot`'s last
+    ///   submission has finished.** Per-frame state (descriptor sets, constants) is keyed by
+    ///   the slot, not by a ring of records, so frames dropped unsubmitted cannot make a
+    ///   rewrite land on a set a pending frame reads.
     /// - Every image and view in `inputs` and `out` stays alive until this command buffer has
     ///   finished executing, in the layouts the module documentation states.
     unsafe fn record(

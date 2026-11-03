@@ -1173,6 +1173,19 @@ pub(crate) fn parse_identity_seed() -> Result<Option<[u8; 32]>, String> {
     hex32_env("MOBA_CLIENT_IDENTITY")
 }
 
+/// `MOBA_TEMPORAL_RESET_EVERY=<n>` (a synchronisation check, ADR-0021 amendment 2 item 28):
+/// the local preview resets every temporal history before every `n`th frame, with earlier
+/// frames still in flight, so sync validation sees the history re-initialised mid-stream.
+pub(crate) fn temporal_reset_every() -> Option<u64> {
+    static EVERY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("MOBA_TEMPORAL_RESET_EVERY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|&every: &u64| every > 0)
+    })
+}
+
 pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
     let secret = parse_secret()?;
     let server_public = parse_server_public()?;

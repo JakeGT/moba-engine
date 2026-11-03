@@ -1692,6 +1692,11 @@ impl App for ClientApp {
                             exit_after_capture = true;
                         } else {
                             render_started = Some(Instant::now());
+                            if let Some(every) = launch::temporal_reset_every()
+                                && *frames % every == every - 1
+                            {
+                                renderer.reset_temporal();
+                            }
                             if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }

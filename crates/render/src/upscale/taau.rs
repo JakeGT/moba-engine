@@ -9,10 +9,11 @@
 //! keeps a clone of the logical device for its descriptor writes, as every SDK back end
 //! does.
 //!
-//! **Descriptors:** a ring of [`SET_RING`] sets, one per recorded frame, rewritten before
-//! use. `record`'s contract allows at most `FRAMES_IN_FLIGHT` (2) pending records, and the
-//! renderer asserts `SET_RING > FRAMES_IN_FLIGHT`, so a set is never rewritten while a
-//! submitted frame reads it.
+//! **Descriptors:** one set per frame-in-flight slot ([`SET_RING`] of them), chosen by
+//! `UpscaleInputs::frame_slot` and rewritten before use. The renderer records a slot only
+//! after waiting on that slot's fence, so a set is never rewritten while a submitted frame
+//! reads it, however many recorded frames were dropped unsubmitted (the renderer asserts
+//! `SET_RING >= FRAMES_IN_FLIGHT`).
 //!
 //! **Resize** keeps the pipeline, layouts, pool and sampler and re-creates only the four
 //! images, so a mid-match window resize builds no pipeline.
@@ -28,9 +29,9 @@ use crate::resources::{
 };
 use crate::shaders::ShaderSource;
 
-/// Descriptor sets in the ring: more than the frames in flight, so a set a submitted frame
-/// may still read is never rewritten (asserted against `FRAMES_IN_FLIGHT` in the renderer).
-pub(crate) const SET_RING: usize = 3;
+/// Descriptor sets: one per frame-in-flight slot (asserted against `FRAMES_IN_FLIGHT` in the
+/// renderer).
+pub(crate) const SET_RING: usize = 2;
 /// The colour history's format.
 pub(crate) const HISTORY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 /// The previous linear depth's format.
@@ -104,7 +105,6 @@ pub(crate) struct Taau {
     _set_layout: DescriptorSetLayout,
     _pool: DescriptorPool,
     sets: [vk::DescriptorSet; SET_RING],
-    next_set: usize,
     sampler: Sampler,
     /// Colour history pair, output resolution.
     history: [GpuImage; 2],
@@ -203,7 +203,6 @@ impl Taau {
             _set_layout: set_layout,
             _pool: pool,
             sets,
-            next_set: 0,
             sampler,
             history,
             prev_depth,
@@ -262,7 +261,7 @@ impl Taau {
             .descriptor_type(vk::DescriptorType::SAMPLER)
             .image_info(&sampler);
         // SAFETY: the set belongs to this pool and layout; no submitted frame reads it (the
-        // ring is longer than the frames in flight); every view is live for this frame.
+        // caller waited on its slot's fence); every view is live for this frame.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
     }
 
@@ -279,11 +278,15 @@ impl Taau {
             .level_count(1)
             .layer_count(1);
         if self.fresh {
-            // First use: UNDEFINED → GENERAL (the reset below ignores the contents).
+            // First use, or a history reset: UNDEFINED → GENERAL (the reset below ignores the
+            // contents). After a mid-stream reset the previous frame's dispatch may still be
+            // reading and writing these images, so the transition waits for every earlier
+            // compute work on the queue and its storage writes (WAR and WAW); at creation
+            // there is none and the dependency is free.
             let barriers = images.map(|image| {
                 vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::NONE)
-                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
                     .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                     .dst_access_mask(
                         vk::AccessFlags2::SHADER_SAMPLED_READ
@@ -371,8 +374,7 @@ impl TemporalUpscaler for Taau {
     ) {
         self.barriers(cmd);
         let reset = self.reset || inputs.reset;
-        let set = self.sets[self.next_set];
-        self.next_set = (self.next_set + 1) % SET_RING;
+        let set = self.sets[inputs.frame_slot % SET_RING];
         self.write_set(set, inputs, out);
         let push = self.push(inputs, out, reset);
         let groups = [
