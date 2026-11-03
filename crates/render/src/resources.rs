@@ -117,6 +117,13 @@ impl GpuBuffer {
         self.size
     }
 
+    /// Device memory this buffer holds: its allocation's size (at least [`Self::size`]).
+    #[inline]
+    #[cfg(feature = "fsr3")]
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        self.tracked
+    }
+
     /// Copies bytes into a mapped buffer.
     ///
     /// # Panics
@@ -490,6 +497,13 @@ impl GpuImage {
     #[inline]
     pub(crate) fn view(&self) -> vk::ImageView {
         self.view
+    }
+
+    /// Device memory this image holds: its allocation's size.
+    #[inline]
+    #[cfg(feature = "fsr3")]
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        self.tracked.1
     }
 }
 

@@ -351,7 +351,7 @@ pub const REQUIRED_LIMITS: &[(&str, u64)] = &[
     ),
     ("maxUpdateAfterBindDescriptorsInAllPools", BINDLESS_TOTAL),
     ("maxPerStageUpdateAfterBindResources", BINDLESS_TOTAL),
-    // ADR-0021 Amendment 1 item 15: OIT with the temporal prepass outputs writes five colour
+    // ADR-0021 Amendment 2 item 15: OIT with the temporal prepass outputs writes five colour
     // attachments at once (Vulkan only guarantees four).
     ("maxColorAttachments", 5),
 ];

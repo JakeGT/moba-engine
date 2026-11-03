@@ -140,7 +140,7 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
-- **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 1;
+- **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;
   [perf/0031](docs/perf/0031-n1a-temporal.md)), Tiered path only; Compat is byte-identical:**
   - **Jitter:** Halton (2, 3) with `ceil(8r²)` phases on the main view's raster matrix only;
     `Scene::camera`, picking and orders never see it. The index survives a scale step, and

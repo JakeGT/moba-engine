@@ -1,7 +1,7 @@
 //! The in-house TAA/TAAU back end (ADR-0021 §3): `temporal_taau.slang`, one compute pass at
 //! output resolution with RCAS fused, on every tiered device and in every golden.
 //!
-//! **Its own resources** (ADR-0021 amendment 1): the colour history (`RGBA16F` at output
+//! **Its own resources** (ADR-0021 amendment 2): the colour history (`RGBA16F` at output
 //! resolution) and the previous linear depth (`R32F` at the maximum render size), each a
 //! ping-pong pair indexed by the parity of the frames it has recorded. They live in `GENERAL`
 //! from their first use and one global memory barrier per frame orders last frame's writes

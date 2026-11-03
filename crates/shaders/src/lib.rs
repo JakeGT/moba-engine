@@ -18,8 +18,14 @@
 //! outlines (ADR-0016). `vat.vert` plays vertex-animation textures for minions (R4b,
 //! ADR-0012). The R6 post-processing chain (ADR-0015) adds fullscreen passes sharing
 //! `include/post.glsl`.
+//!
+//! With the `fsr3` feature, [`fsr3`] also holds the AMD FSR 3.1.6 upscaler passes, built from
+//! the vendored MIT HLSL in `third_party/fidelityfx/` (ADR-0021 §4b).
 
 #![forbid(unsafe_code)]
+
+#[cfg(feature = "fsr3")]
+pub mod fsr3;
 
 /// Instanced unit vertex shader.
 pub const UNIT_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unit.vert.spv"));

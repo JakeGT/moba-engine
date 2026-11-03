@@ -1,7 +1,7 @@
 # Temporal foundation: gates 1–4 and 6 (N1a)
 
 Captured 2026-11-03 for ADR-0021 (N1a) and its
-[Amendment 1](../adr/0021-temporal-upscaling-overlay.md#amendment-1-2026-11-03-n1a-the-temporal-foundation-as-built).
+[Amendment 2](../adr/0021-temporal-upscaling-overlay.md#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built).
 
 - GPU: NVIDIA GeForce RTX 5070 Ti, driver 615.78.08 (tiered path); software: lavapipe
   (Mesa llvmpipe) with the Khronos validation layer, `MOBA_VULKAN_VALIDATION=required`
@@ -61,7 +61,7 @@ than 4/255:
 | Native | 1280×720 | 1.204 % | 3 % |
 
 The residue is the moving box's shadow trailing edge and thin grid lines re-converging; the
-3 % bound is recorded in Amendment 1 with how it was set.
+3 % bound is recorded in Amendment 2 with how it was set.
 
 **Overlay invariance** (`scripts/overlay-invariance.sh`): the overlay-ID debug view on Tiered
 High with the cast-flash preview is byte-identical across TAAU Quality, Native and
@@ -140,5 +140,5 @@ Per-pass lanes on the branch (median p50, ms; identical within 0.001 ms across r
 - **Latency** (gate 7) is N1d's.
 - **Particle motion** is not twinned by the motion probe (not in gate 2's list), and wind
   *animation* between the two probe frames is not twinned (the wind is steady).
-- **`perf-gate` on Tiered** stays report-only until the last N1 part merges (Amendment 1
+- **`perf-gate` on Tiered** stays report-only until the last N1 part merges (Amendment 2
   item 16).
