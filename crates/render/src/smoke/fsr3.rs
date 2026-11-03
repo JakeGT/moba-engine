@@ -1,33 +1,50 @@
 //! `fsr3_smoke` (ADR-0021 §4b and §4c, N1b): the FSR 3.1.6 port on synthetic inputs.
 //!
-//! The scene is a smooth analytic colour field over the output plane, so every frame's
+//! The scene is an analytic colour field over the output plane, so every frame's
 //! render-resolution input and the ideal output are known exactly. Each render pixel `i`
 //! samples the field at `i + 0.5 − jitter` (Halton (2, 3), ADR-0021 §1), scaled to output
 //! pixels; depth is a constant plane, the masks are zero and the exposure is 1. Outside the
 //! frame's render rectangle every input holds a sentinel (colour 1000, motion ±40 px, depth 0,
-//! masks 1), so a pass that read outside the rectangle would show.
+//! masks 1), so a pass that read outside the rectangle would show: besides the interior
+//! bounds, every checkpoint bounds the largest error over the whole output, edges included.
 //!
 //! The run, on one context created for Quality at 192×108 (render 128×72):
 //!
 //! 1. **flat**: a constant colour converges to itself (every output texel within 1 %);
-//! 2. **static**: after a reset, the field converges to the ideal output;
+//! 2. **static**: after a reset, a smooth field converges to the ideal output;
 //! 3. **moving**: the field moves one render pixel a frame with matching motion vectors and
 //!    the output tracks it;
-//! 4. **sharpened**: as 2 with sharpness 0.25 (accumulate-and-sharpen, then RCAS);
+//! 4. **sharpened**: as 2 with sharpness 0.25 (accumulate-and-sharpen, then RCAS): within its
+//!    bound, and with more local contrast than 2's output;
 //! 5. **sizes** (ADR-0021 §4c): without a reset, the render size steps through Balanced,
 //!    Performance, Ultra Performance, an odd 77×43 and back to Quality, all inside the one
-//!    context; each size must converge and stay finite.
+//!    context; the first frame after each change and the converged one are bounded. Then
+//!    9×5, 2×1 and 1×1 (finite and inside the image only) and back to Quality again;
+//! 6. **fine**: a field with detail near the render resolution's limit, still and then moving
+//!    one render pixel a frame: one frame cannot resolve it, so the converged error must be
+//!    at most 0.9× the first frame's (0.95× moving, which holds only when the reprojection is
+//!    right).
+//!
+//! The concurrency a renderer has is reproduced: two frames are in flight (each frame is
+//! submitted without waiting, and its slot's staging and readback buffers are reused two
+//! frames later), and the output alternates between two images every two frames (so each
+//! parity's descriptors see both).
 //!
 //! The whole run happens twice on fresh contexts, and every output frame of the second must
-//! be bit-identical to the first. Any validation or synchronization-validation message fails
-//! it (as every smoke).
+//! be bit-identical to the first. Before the first run's first frame every internal image is
+//! filled with garbage (NaN, all ones) through [`Fsr3::poison`]; the second run starts from
+//! fresh allocations, so the comparison also shows that nothing in an internal image before
+//! the first frame reaches any output. Any validation or synchronization-validation message
+//! fails it (as every smoke). Last, the context's `vram_bytes` is reported at real sizes.
+
+use std::collections::VecDeque;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 
 use super::bindless::host_read_barrier;
 use super::{Headless, SmokeReport};
-use crate::bindless::submit_one_shot;
+use crate::bindless::{PendingSubmit, submit};
 use crate::error::{RenderError, RenderResult};
 use crate::fsr3::{Fsr3, Fsr3Image, Fsr3Inputs, Fsr3Mode, Fsr3Output, jitter_phases};
 use crate::passes::vfx::f16_bits;
@@ -38,30 +55,54 @@ const OUTPUT: vk::Extent2D = vk::Extent2D {
     width: 192,
     height: 108,
 };
-/// Output texels this close to an edge are left out of the error metrics: FSR clamps its
-/// samples there and the moving field enters from off screen.
+/// Output texels this close to an edge are left out of the interior metrics: FSR clamps its
+/// samples there and the moving fields enter from off screen. The full-image bound covers
+/// them.
 const MARGIN: u32 = 6;
 /// The flat colour.
 const FLAT: [f32; 3] = [0.6, 0.3, 0.15];
 /// Depth everywhere inside the render rectangle (0 near, 1 far).
 const DEPTH: f32 = 0.5;
 
-/// Error bounds against the ideal output, as (mean, max) absolute error per channel.
-/// About twice what lavapipe measures (`docs/perf` has the numbers): loose enough for any
-/// conformant device's rounding, tight enough that a wrong resource, parity, constant or
-/// jitter sign fails.
+/// Error bounds against the ideal output, as (mean, max) absolute error per channel over the
+/// interior. About twice what lavapipe measures (`docs/perf/0030` has the numbers): loose
+/// enough for any conformant device's rounding, tight enough that a wrong resource, parity,
+/// constant or jitter sign fails.
 const FLAT_BOUND: (f32, f32) = (0.002, 0.004);
 const STATIC_BOUND: (f32, f32) = (0.012, 0.06);
 const MOVING_BOUND: (f32, f32) = (0.012, 0.07);
 const SHARPENED_BOUND: (f32, f32) = (0.015, 0.07);
 const SIZES_BOUND: (f32, f32) = (0.025, 0.1);
-/// The checkpoints of the fine phase: its first frame after a reset (one jittered sample,
-/// upscaled), and converged.
+/// The first frame after a render-size change, before the history settles at the new size.
+const SIZE_STEP_BOUND: (f32, f32) = (0.025, 0.12);
+/// The fine field's first frame after a reset: one jittered sample, upscaled. Only the mean is
+/// bounded (clean runs: 0.039); a jitter flipped on either axis alone misplaces the detail
+/// (0.056 for y, 0.071 for x).
+const FINE_FIRST_BOUND: (f32, f32) = (0.05, 1.0);
+/// The fine fields converged: only their ratio to the first frame is checked.
+const UNBOUNDED: (f32, f32) = (1.0, 1.0);
+/// The largest error anywhere in the output, edges included (clean runs: at most 0.27, at the
+/// fine field's edges). A sentinel that leaked from outside the render rectangle is 1000, and
+/// a render size in the constants stuck at the maximum gives errors up to 762 here.
+const FULL_BOUND: f32 = 0.5;
+/// The same at 9×5, 2×1 and 1×1, where the output is a few blurred samples of the field.
+const TINY_FULL_BOUND: f32 = 1.5;
+/// Converged, the still fine field's error must be at most this fraction of its first
+/// frame's (clean runs: 0.79): the accumulation recovers detail one frame lacks.
+const CONVERGENCE: f32 = 0.9;
+/// The same for the moving fine field, which keeps detail only if the reprojection is right
+/// (clean runs: 0.84 to 0.88; motion vectors misscaled: 1.0, ignored: 1.7).
+const MOVING_CONVERGENCE: f32 = 0.95;
+/// RCAS at sharpness 0.25 must raise the converged static field's local contrast by at least
+/// this factor over the unsharpened output (clean runs: 1.24; RCAS skipped: 1.0).
+const SHARPENING: f32 = 1.02;
+
+const STATIC: &str = "static";
+const SHARPENED: &str = "sharpened";
 const FINE_FIRST: &str = "fine: first frame after the reset";
 const FINE: &str = "fine: converged";
-/// Converged, the fine field's error must be at most this fraction of its first frame's
-/// (lavapipe: 0.78): the accumulation recovers detail one frame lacks.
-const CONVERGENCE: f32 = 0.9;
+const FINE_MOVING_FIRST: &str = "fine moving: first frame after the reset";
+const FINE_MOVING: &str = "fine moving: converged";
 
 /// The analytic field at output position `(u, v)` (output pixels), linear HDR.
 fn field(u: f32, v: f32) -> [f32; 3] {
@@ -89,10 +130,10 @@ fn fine(u: f32, v: f32) -> [f32; 3] {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Content {
     Flat,
-    /// The field, shifted right by this many output pixels.
+    /// The smooth field, shifted right by this many output pixels.
     Field(f32),
-    /// The fine field, still.
-    Fine,
+    /// The fine field, shifted right by this many output pixels.
+    Fine(f32),
 }
 
 impl Content {
@@ -100,7 +141,16 @@ impl Content {
         match self {
             Self::Flat => FLAT,
             Self::Field(shift) => field(u - shift, v),
-            Self::Fine => fine(u, v),
+            Self::Fine(shift) => fine(u - shift, v),
+        }
+    }
+
+    /// The same content shifted right by `shift` output pixels.
+    fn shifted(self, shift: f32) -> Self {
+        match self {
+            Self::Flat => Self::Flat,
+            Self::Field(_) => Self::Field(shift),
+            Self::Fine(_) => Self::Fine(shift),
         }
     }
 }
@@ -179,34 +229,77 @@ fn f16_value(bits: u16) -> f32 {
     }
 }
 
-/// Mean and largest absolute error of `rgba` (the output's halves) against `content`, over
-/// the interior, and whether every texel is finite.
-fn error(rgba: &[u8], content: Content) -> (f32, f32, bool) {
-    let (mut sum, mut max, mut count, mut finite) = (0.0f64, 0.0f32, 0u32, true);
+/// What one checkpoint measured on the output.
+#[derive(Clone, Copy, Debug)]
+struct Measured {
+    /// Mean and largest absolute error per channel over the interior.
+    mean: f32,
+    max: f32,
+    /// The largest error over the whole image, edges included.
+    full_max: f32,
+    /// Every texel finite.
+    finite: bool,
+    /// Local contrast: the mean absolute 4-neighbour Laplacian of the channel sum over the
+    /// interior.
+    contrast: f32,
+    /// FNV-1a of the output frame.
+    hash: u64,
+}
+
+/// Measures `rgba` (the output's halves) against `content`.
+fn measure(rgba: &[u8], content: Content) -> Measured {
+    let texel = |x: u32, y: u32| -> [f32; 3] {
+        let at = ((y * OUTPUT.width + x) * 8) as usize;
+        core::array::from_fn(|c| {
+            f16_value(u16::from_le_bytes([rgba[at + c * 2], rgba[at + c * 2 + 1]]))
+        })
+    };
+    let (mut sum, mut max, mut full_max, mut count, mut finite) =
+        (0.0f64, 0.0f32, 0.0f32, 0u32, true);
+    let (mut contrast, mut contrast_count) = (0.0f64, 0u32);
     for y in 0..OUTPUT.height {
         for x in 0..OUTPUT.width {
-            let at = ((y * OUTPUT.width + x) * 8) as usize;
-            let value: Vec<f32> = (0..3)
-                .map(|c| f16_value(u16::from_le_bytes([rgba[at + c * 2], rgba[at + c * 2 + 1]])))
-                .collect();
+            let value = texel(x, y);
             finite &= value.iter().all(|v| v.is_finite());
+            let ideal = content.at(x as f32 + 0.5, y as f32 + 0.5);
             let interior = x >= MARGIN
                 && y >= MARGIN
                 && x < OUTPUT.width - MARGIN
                 && y < OUTPUT.height - MARGIN;
-            if !interior {
-                continue;
-            }
-            let ideal = content.at(x as f32 + 0.5, y as f32 + 0.5);
             for c in 0..3 {
+                // NaN fails `finite`; keep it out of the maxima so they stay readable.
                 let e = (value[c] - ideal[c]).abs();
-                sum += f64::from(e);
-                max = max.max(e);
-                count += 1;
+                if e.is_finite() {
+                    full_max = full_max.max(e);
+                }
+                if interior {
+                    sum += f64::from(e);
+                    if e.is_finite() {
+                        max = max.max(e);
+                    }
+                    count += 1;
+                }
+            }
+            if interior {
+                let luma = |[r, g, b]: [f32; 3]| r + g + b;
+                let laplacian = 4.0 * luma(value)
+                    - luma(texel(x - 1, y))
+                    - luma(texel(x + 1, y))
+                    - luma(texel(x, y - 1))
+                    - luma(texel(x, y + 1));
+                contrast += f64::from(laplacian.abs());
+                contrast_count += 1;
             }
         }
     }
-    ((sum / f64::from(count.max(1))) as f32, max, finite)
+    Measured {
+        mean: (sum / f64::from(count.max(1))) as f32,
+        max,
+        full_max,
+        finite,
+        contrast: (contrast / f64::from(contrast_count.max(1))) as f32,
+        hash: fnv(0xcbf2_9ce4_8422_2325, rgba),
+    }
 }
 
 /// FNV-1a over `bytes`, continuing from `hash`.
@@ -232,12 +325,15 @@ struct Frame {
     sharpness: f32,
 }
 
-/// The check made after a phase's last frame.
-#[derive(Clone, Copy, Debug)]
+/// A check made on one frame's output.
+#[derive(Clone, Debug)]
 struct Checkpoint {
-    name: &'static str,
+    name: String,
     content: Content,
+    /// (mean, max) over the interior.
     bound: (f32, f32),
+    /// The largest error anywhere.
+    full: f32,
 }
 
 /// One phase of the run: `frames` frames of `content` at `render`, then a checkpoint.
@@ -247,7 +343,8 @@ struct Phase {
     frames: u32,
     render: vk::Extent2D,
     content: Content,
-    /// Horizontal motion in render pixels (current to previous): the field moves the other way.
+    /// Horizontal motion in render pixels (current to previous): the content moves the other
+    /// way.
     motion: f32,
     /// Reset on the first frame through the flag.
     reset: bool,
@@ -255,14 +352,22 @@ struct Phase {
     reset_history: bool,
     sharpness: f32,
     bound: (f32, f32),
+    full: f32,
+    /// A bound for the phase's first frame too (a render-size change).
+    first: Option<(f32, f32)>,
+}
+
+fn extent(width: u32, height: u32) -> vk::Extent2D {
+    vk::Extent2D { width, height }
 }
 
 /// The phases, in order (see the module documentation).
+#[allow(clippy::too_many_lines)] // One table.
 fn phases() -> Vec<Phase> {
     let quality = Fsr3Mode::Quality.render_size(OUTPUT);
     let converge = 2 * jitter_phases(quality, OUTPUT);
     let field = Phase {
-        name: "static",
+        name: STATIC,
         frames: converge,
         render: quality,
         content: Content::Field(0.0),
@@ -271,6 +376,8 @@ fn phases() -> Vec<Phase> {
         reset_history: false,
         sharpness: 0.0,
         bound: STATIC_BOUND,
+        full: FULL_BOUND,
+        first: None,
     };
     let mut phases = vec![
         Phase {
@@ -290,7 +397,7 @@ fn phases() -> Vec<Phase> {
             ..field
         },
         Phase {
-            name: "sharpened",
+            name: SHARPENED,
             reset: false,
             reset_history: true,
             sharpness: 0.25,
@@ -298,10 +405,6 @@ fn phases() -> Vec<Phase> {
             ..field
         },
     ];
-    let odd = vk::Extent2D {
-        width: 77,
-        height: 43,
-    };
     for (name, render) in [
         ("sizes: balanced", Fsr3Mode::Balanced.render_size(OUTPUT)),
         (
@@ -312,7 +415,7 @@ fn phases() -> Vec<Phase> {
             "sizes: ultra performance",
             Fsr3Mode::UltraPerformance.render_size(OUTPUT),
         ),
-        ("sizes: odd 77x43", odd),
+        ("sizes: odd 77x43", extent(77, 43)),
         ("sizes: back to quality", quality),
     ] {
         phases.push(Phase {
@@ -321,39 +424,67 @@ fn phases() -> Vec<Phase> {
             render,
             reset: false,
             bound: SIZES_BOUND,
+            first: Some(SIZE_STEP_BOUND),
             ..field
         });
     }
-    // No bounds of their own: only the ratio of the two errors is checked.
-    let fine = Phase {
-        name: FINE_FIRST,
-        frames: 1,
-        content: Content::Fine,
-        bound: (1.0, 1.0),
-        ..field
-    };
-    phases.push(fine);
+    // The smallest sizes: no reference to converge to, only finite output inside the image's
+    // range and no read outside the rectangle; then the context must recover.
+    for (name, render) in [
+        ("sizes: tiny 9x5", extent(9, 5)),
+        ("sizes: tiny 2x1", extent(2, 1)),
+        ("sizes: tiny 1x1", extent(1, 1)),
+    ] {
+        phases.push(Phase {
+            name,
+            frames: 8,
+            render,
+            reset: false,
+            bound: UNBOUNDED,
+            full: TINY_FULL_BOUND,
+            ..field
+        });
+    }
     phases.push(Phase {
-        name: FINE,
-        frames: converge - 1,
+        name: "sizes: quality after 1x1",
+        frames: converge,
         reset: false,
-        ..fine
+        bound: SIZES_BOUND,
+        ..field
     });
+    for (first_name, name, motion) in [
+        (FINE_FIRST, FINE, 0.0),
+        (FINE_MOVING_FIRST, FINE_MOVING, -1.0),
+    ] {
+        let fine = Phase {
+            name: first_name,
+            frames: 1,
+            content: Content::Fine(0.0),
+            motion,
+            bound: FINE_FIRST_BOUND,
+            ..field
+        };
+        phases.push(fine);
+        phases.push(Phase {
+            name,
+            frames: converge - 1,
+            reset: false,
+            bound: UNBOUNDED,
+            ..fine
+        });
+    }
     phases
 }
 
-/// The run as frames, with a checkpoint after each phase's last.
-fn script() -> Vec<(Frame, Option<Checkpoint>)> {
+/// The run as frames, with the checkpoints made on each.
+fn script() -> Vec<(Frame, Vec<Checkpoint>)> {
     let mut frames = Vec::new();
     for phase in phases() {
         for index in 0..phase.frames {
-            let content = match phase.content {
-                // One render pixel is `OUTPUT / render` output pixels.
-                Content::Field(_) => Content::Field(
-                    -phase.motion * OUTPUT.width as f32 / phase.render.width as f32 * index as f32,
-                ),
-                other => other,
-            };
+            // One render pixel is `OUTPUT / render` output pixels.
+            let shift =
+                -phase.motion * OUTPUT.width as f32 / phase.render.width as f32 * index as f32;
+            let content = phase.content.shifted(shift);
             let frame = Frame {
                 render: phase.render,
                 content,
@@ -362,19 +493,37 @@ fn script() -> Vec<(Frame, Option<Checkpoint>)> {
                 reset_history: phase.reset_history && index == 0,
                 sharpness: phase.sharpness,
             };
-            let checkpoint = Checkpoint {
-                name: phase.name,
-                content,
-                bound: phase.bound,
-            };
-            frames.push((frame, (index + 1 == phase.frames).then_some(checkpoint)));
+            let mut checks = Vec::new();
+            if let (0, Some(bound)) = (index, phase.first) {
+                checks.push(Checkpoint {
+                    name: format!("{}: first frame", phase.name),
+                    content,
+                    bound,
+                    full: phase.full,
+                });
+            }
+            if index + 1 == phase.frames {
+                checks.push(Checkpoint {
+                    name: String::from(phase.name),
+                    content,
+                    bound: phase.bound,
+                    full: phase.full,
+                });
+            }
+            frames.push((frame, checks));
         }
     }
     frames
 }
 
-/// The caller-owned images: inputs at the maximum render size, the output, and the
-/// staging and readback buffers.
+/// A frame slot: its staging and readback buffers, reused two frames later.
+struct Slot {
+    staging: GpuBuffer,
+    readback: GpuBuffer,
+}
+
+/// The caller-owned images: inputs at the maximum render size, two outputs, and a slot per
+/// frame in flight.
 struct Targets {
     color: GpuImage,
     depth: GpuImage,
@@ -382,9 +531,8 @@ struct Targets {
     reactive: GpuImage,
     transparency: GpuImage,
     exposure: GpuImage,
-    output: GpuImage,
-    staging: GpuBuffer,
-    readback: GpuBuffer,
+    outputs: [GpuImage; 2],
+    slots: [Slot; 2],
 }
 
 impl Targets {
@@ -401,8 +549,40 @@ impl Targets {
                 aspect,
             )
         };
-        let color = vk::ImageAspectFlags::COLOR;
+        let output = |name: &str| {
+            GpuImage::new(
+                device.device.clone(),
+                device.allocator(),
+                name,
+                OUTPUT,
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+                vk::ImageAspectFlags::COLOR,
+            )
+        };
         let texels = u64::from(max.width * max.height);
+        let slot = |name: &str| -> RenderResult<Slot> {
+            Ok(Slot {
+                // Colour 8, depth 4, motion 4, two masks 1 each, and the exposure.
+                staging: GpuBuffer::new(
+                    device.device.clone(),
+                    device.allocator(),
+                    &format!("fsr3-smoke-staging-{name}"),
+                    texels * 18 + 4,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                    MemoryLocation::CpuToGpu,
+                )?,
+                readback: GpuBuffer::new(
+                    device.device.clone(),
+                    device.allocator(),
+                    &format!("fsr3-smoke-readback-{name}"),
+                    u64::from(OUTPUT.width * OUTPUT.height) * 8,
+                    vk::BufferUsageFlags::TRANSFER_DST,
+                    MemoryLocation::GpuToCpu,
+                )?,
+            })
+        };
+        let color = vk::ImageAspectFlags::COLOR;
         Ok(Self {
             color: input(
                 "fsr3-smoke-color",
@@ -421,39 +601,15 @@ impl Targets {
             transparency: input("fsr3-smoke-tc", max, vk::Format::R8_UNORM, color)?,
             exposure: input(
                 "fsr3-smoke-exposure",
-                vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                },
+                extent(1, 1),
                 vk::Format::R32_SFLOAT,
                 color,
             )?,
-            output: GpuImage::new(
-                device.device.clone(),
-                device.allocator(),
-                "fsr3-smoke-output",
-                OUTPUT,
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
-                color,
-            )?,
-            // Colour 8, depth 4, motion 4, two masks 1 each, and the exposure.
-            staging: GpuBuffer::new(
-                device.device.clone(),
-                device.allocator(),
-                "fsr3-smoke-staging",
-                texels * 18 + 4,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                MemoryLocation::CpuToGpu,
-            )?,
-            readback: GpuBuffer::new(
-                device.device.clone(),
-                device.allocator(),
-                "fsr3-smoke-readback",
-                u64::from(OUTPUT.width * OUTPUT.height) * 8,
-                vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuToCpu,
-            )?,
+            outputs: [
+                output("fsr3-smoke-output-a")?,
+                output("fsr3-smoke-output-b")?,
+            ],
+            slots: [slot("a")?, slot("b")?],
         })
     }
 
@@ -471,8 +627,7 @@ impl Targets {
 struct Run {
     /// FNV-1a of every output frame.
     hashes: Vec<u64>,
-    /// `(checkpoint, mean, max, finite)`.
-    results: Vec<(Checkpoint, f32, f32, bool)>,
+    results: Vec<(Checkpoint, Measured)>,
     vram_bytes: u64,
     /// The context's answers to the ADR-0021 §4a queries.
     facts: Vec<String>,
@@ -480,8 +635,32 @@ struct Run {
     accepts: (bool, bool),
 }
 
+/// A submitted frame: its slot and checks.
+struct InFlight<'a> {
+    submit: PendingSubmit<'a>,
+    slot: usize,
+    checks: Vec<Checkpoint>,
+}
+
+/// Waits for `frame` and reads its output back into `run`.
+fn finish(frame: InFlight<'_>, targets: &Targets, run: &mut Run) -> RenderResult<()> {
+    frame.submit.wait()?;
+    let mut bytes = vec![0u8; (OUTPUT.width * OUTPUT.height * 8) as usize];
+    if !targets.slots[frame.slot].readback.read_bytes(0, &mut bytes) {
+        return Err(RenderError::Shader(
+            "fsr3 smoke readback is not host visible",
+        ));
+    }
+    run.hashes.push(fnv(0xcbf2_9ce4_8422_2325, &bytes));
+    for checkpoint in frame.checks {
+        let measured = measure(&bytes, checkpoint.content);
+        run.results.push((checkpoint, measured));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Uploads, barriers, the upscale and the readback, in order.
-fn run_once(gpu: &Headless) -> RenderResult<Run> {
+fn run_once(gpu: &Headless, poison: bool) -> RenderResult<Run> {
     let device = &gpu.device;
     let max = Fsr3Mode::Quality.render_size(OUTPUT);
     let mut fsr = Fsr3::new(device, max, OUTPUT)?;
@@ -514,23 +693,21 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
             fsr.jitter_phases(high, OUTPUT)
         ));
     }
-    let too_big = vk::Extent2D {
-        width: max.width + 1,
-        height: max.height,
-    };
     run.accepts = (
-        fsr.accepts(too_big, OUTPUT),
-        fsr.accepts(
-            vk::Extent2D {
-                width: 77,
-                height: 43,
-            },
-            OUTPUT,
-        ),
+        fsr.accepts(extent(max.width + 1, max.height), OUTPUT),
+        fsr.accepts(extent(77, 43), OUTPUT),
     );
     let mut jitter_index = 0u32;
-    let mut output_bytes = vec![0u8; (OUTPUT.width * OUTPUT.height * 8) as usize];
-    for (number, (frame, checkpoint)) in script().into_iter().enumerate() {
+    let mut output_used = [false; 2];
+    let mut in_flight: VecDeque<InFlight<'_>> = VecDeque::with_capacity(2);
+    for (number, (frame, checks)) in script().into_iter().enumerate() {
+        let slot = number % 2;
+        // Two frames in flight: the frame two back used this slot (and this parity of the
+        // context), so wait for it before reusing either.
+        if in_flight.len() == 2 {
+            let oldest = in_flight.pop_front().expect("two frames in flight");
+            finish(oldest, &targets, &mut run)?;
+        }
         if frame.reset_history {
             fsr.reset_history();
         }
@@ -539,9 +716,10 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
         let index = (jitter_index - 1) % phases + 1;
         let jitter = [halton(index, 2) - 0.5, halton(index, 3) - 0.5];
         let bytes = upload(max, frame.render, frame.content, jitter, frame.motion);
+        let staging = &mut targets.slots[slot].staging;
         let mut offset = 0;
         let mut offsets = [0u64; 6];
-        for (slot, data) in [
+        for (index, data) in [
             &bytes.color,
             &bytes.depth,
             &bytes.motion,
@@ -552,10 +730,13 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
         .into_iter()
         .enumerate()
         {
-            targets.staging.write_bytes(offset, data);
-            offsets[slot] = offset as u64;
+            staging.write_bytes(offset, data);
+            offsets[index] = offset as u64;
             offset += data.len();
         }
+        // The output alternates every two frames, so each parity sees both images.
+        let target = (number >> 1) & 1;
+        let output_first = !core::mem::replace(&mut output_used[target], true);
         // The reactive mask is `masks` (1 outside the rectangle); the transparency and
         // composition mask is all zero.
         let inputs = Fsr3Inputs {
@@ -564,14 +745,7 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
             motion: Targets::image(&targets.motion, vk::Format::R16G16_SFLOAT, max),
             reactive: Targets::image(&targets.reactive, vk::Format::R8_UNORM, max),
             transparency: Targets::image(&targets.transparency, vk::Format::R8_UNORM, max),
-            exposure: Targets::image(
-                &targets.exposure,
-                vk::Format::R32_SFLOAT,
-                vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                },
-            ),
+            exposure: Targets::image(&targets.exposure, vk::Format::R32_SFLOAT, extent(1, 1)),
             jitter,
             render_size: frame.render,
             dt_ms: 16.0,
@@ -582,7 +756,11 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
             sharpness: frame.sharpness,
         };
         let output = Fsr3Output {
-            image: Targets::image(&targets.output, vk::Format::R16G16B16A16_SFLOAT, OUTPUT),
+            image: Targets::image(
+                &targets.outputs[target],
+                vk::Format::R16G16B16A16_SFLOAT,
+                OUTPUT,
+            ),
         };
         let first = number == 0;
         let images = [
@@ -609,18 +787,22 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
             (
                 &targets.exposure,
                 vk::ImageAspectFlags::COLOR,
-                vk::Extent2D {
-                    width: 1,
-                    height: 1,
-                },
+                extent(1, 1),
                 offsets[5],
             ),
         ];
-        let staging = targets.staging.handle();
-        let readback = targets.readback.handle();
-        let output_image = targets.output.image();
-        submit_one_shot(device, |cmd| {
-            // Inputs to transfer, the output from its last copy to compute.
+        let staging = staging.handle();
+        let readback = targets.slots[slot].readback.handle();
+        let output_image = targets.outputs[target].image();
+        let fsr = &mut fsr;
+        let pending = submit(device, |cmd| {
+            if first && poison {
+                // SAFETY: `cmd` is recording on this device, and this frame's `record` below
+                // follows in the same command buffer.
+                unsafe { fsr.poison(cmd) };
+            }
+            // Inputs to transfer (after the previous frame's reads), the output from its last
+            // copy to compute.
             let to_transfer: Vec<vk::ImageMemoryBarrier2> = images
                 .iter()
                 .map(|(image, aspect, _, _)| {
@@ -649,7 +831,7 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
                 })
                 .chain(core::iter::once(crate::bindless::color_barrier(
                     output_image,
-                    if first {
+                    if output_first {
                         (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE)
                     } else {
                         (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::NONE)
@@ -658,7 +840,7 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
                         vk::PipelineStageFlags2::COMPUTE_SHADER,
                         vk::AccessFlags2::SHADER_STORAGE_WRITE,
                     ),
-                    if first {
+                    if output_first {
                         vk::ImageLayout::UNDEFINED
                     } else {
                         vk::ImageLayout::GENERAL
@@ -684,7 +866,8 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
                         depth: 1,
                     });
                 // SAFETY: the image was created with TRANSFER_DST and is in
-                // TRANSFER_DST_OPTIMAL; the staging buffer holds the whole image at `offset`.
+                // TRANSFER_DST_OPTIMAL; this slot's staging buffer holds the whole image at
+                // `offset` and the host finished writing it before this submission.
                 unsafe {
                     device.device.cmd_copy_buffer_to_image(
                         cmd,
@@ -719,7 +902,11 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
                 &vk::DependencyInfo::default().image_memory_barriers(&to_read),
             );
 
-            fsr.record(cmd, &inputs, &output);
+            // SAFETY: `cmd` is recording on this device and is submitted once, just below.
+            // The record two back (the frame that used this slot) has finished: it was waited
+            // for at the top of this iteration. The inputs and outputs live in `targets`,
+            // which outlives every submission (each is waited for before `run_once` returns).
+            unsafe { fsr.record(cmd, &inputs, &output) };
 
             let to_copy = crate::bindless::color_barrier(
                 output_image,
@@ -750,8 +937,9 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
                     height: OUTPUT.height,
                     depth: 1,
                 });
-            // SAFETY: the output was created with TRANSFER_SRC and is in GENERAL; the
-            // readback buffer holds the whole image.
+            // SAFETY: the output was created with TRANSFER_SRC and is in GENERAL; this slot's
+            // readback buffer holds the whole image and the host reads it only after this
+            // submission's fence.
             unsafe {
                 device.device.cmd_copy_image_to_buffer(
                     cmd,
@@ -763,76 +951,149 @@ fn run_once(gpu: &Headless) -> RenderResult<Run> {
             }
             host_read_barrier(device, cmd);
         })?;
-        if !targets.readback.read_bytes(0, &mut output_bytes) {
-            return Err(RenderError::Shader(
-                "fsr3 smoke readback is not host visible",
-            ));
-        }
-        run.hashes.push(fnv(0xcbf2_9ce4_8422_2325, &output_bytes));
-        if let Some(checkpoint) = checkpoint {
-            let (mean, max_error, finite) = error(&output_bytes, checkpoint.content);
-            run.results.push((checkpoint, mean, max_error, finite));
-        }
+        in_flight.push_back(InFlight {
+            submit: pending,
+            slot,
+            checks,
+        });
+    }
+    while let Some(frame) = in_flight.pop_front() {
+        finish(frame, &targets, &mut run)?;
     }
     Ok(run)
 }
 
+/// The context's `vram_bytes` at real sizes, one context resized through them (nothing is
+/// recorded, so no GPU work is pending at any resize).
+fn vram_at_real_sizes(gpu: &Headless) -> RenderResult<Vec<String>> {
+    let sizes = [
+        ("1920x1080 Quality", extent(1920, 1080), Fsr3Mode::Quality),
+        ("2560x1440 Quality", extent(2560, 1440), Fsr3Mode::Quality),
+        ("2560x1440 NativeAa", extent(2560, 1440), Fsr3Mode::NativeAa),
+        (
+            "3840x2160 Performance",
+            extent(3840, 2160),
+            Fsr3Mode::Performance,
+        ),
+    ];
+    let mut notes = Vec::new();
+    let mut fsr: Option<Fsr3> = None;
+    for (name, output, mode) in sizes {
+        let render = mode.render_size(output);
+        match fsr.as_mut() {
+            None => fsr = Some(Fsr3::new(&gpu.device, render, output)?),
+            // SAFETY: this context never recorded anything.
+            Some(fsr) => unsafe { fsr.resize(&gpu.device, render, output)? },
+        }
+        let bytes = fsr.as_ref().map_or(0, Fsr3::vram_bytes);
+        notes.push(format!(
+            "vram at {name} (render {}x{}): {:.1} MiB",
+            render.width,
+            render.height,
+            bytes as f64 / f64::from(1u32 << 20)
+        ));
+    }
+    Ok(notes)
+}
+
+#[allow(clippy::too_many_lines)] // One check after another.
 pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> {
-    let first = run_once(gpu)?;
-    let second = run_once(gpu)?;
+    let first = run_once(gpu, true)?;
+    let second = run_once(gpu, false)?;
     report.notes.extend(first.facts.iter().cloned());
     report.check(
         || String::from("refuses a render size above the maximum, accepts 77x43"),
         first.accepts,
         (false, true),
     );
-    let mean = |name: &str| {
+    let result = |name: &str| {
         first
             .results
             .iter()
-            .find(|(checkpoint, ..)| checkpoint.name == name)
-            .map_or(f32::NAN, |(_, mean, ..)| *mean)
+            .find(|(checkpoint, _)| checkpoint.name == name)
+            .map(|(_, measured)| *measured)
     };
-    let (single, converged) = (mean(FINE_FIRST), mean(FINE));
+    for (first_name, name, convergence) in [
+        (FINE_FIRST, FINE, CONVERGENCE),
+        (FINE_MOVING_FIRST, FINE_MOVING, MOVING_CONVERGENCE),
+    ] {
+        let single = result(first_name).map_or(f32::NAN, |measured| measured.mean);
+        let converged = result(name).map_or(f32::NAN, |measured| measured.mean);
+        report.notes.push(format!(
+            "accumulation: {name} {converged:.5} vs {single:.5} on the first frame ({:.2}x)",
+            converged / single
+        ));
+        report.check(
+            || format!("{name}: {converged} at most {convergence} x the first frame's {single}"),
+            converged <= convergence * single,
+            true,
+        );
+    }
+    let (plain, sharpened) = (result(STATIC), result(SHARPENED));
+    let ratio = match (plain, sharpened) {
+        (Some(plain), Some(sharpened)) => sharpened.contrast / plain.contrast,
+        _ => f32::NAN,
+    };
     report.notes.push(format!(
-        "accumulation: fine-detail error {converged:.5} converged vs {single:.5} on the first \
-         frame ({:.2}x)",
-        converged / single
+        "sharpening: local contrast {ratio:.4}x the unsharpened output's"
     ));
     report.check(
-        || format!("fine error {converged} at most {CONVERGENCE} x the first frame's {single}"),
-        converged <= CONVERGENCE * single,
+        || format!("sharpened contrast {ratio} x the unsharpened, at least {SHARPENING}"),
+        ratio >= SHARPENING,
+        true,
+    );
+    report.check(
+        || String::from("the sharpened output differs from the unsharpened one"),
+        plain.map(|measured| measured.hash) != sharpened.map(|measured| measured.hash),
         true,
     );
 
-    for (checkpoint, mean, max, finite) in &first.results {
+    for (checkpoint, measured) in &first.results {
+        let name = &checkpoint.name;
         report.notes.push(format!(
-            "{}: mean error {mean:.5}, max {max:.5} (bounds {:.3}, {:.3}), finite {finite}",
-            checkpoint.name, checkpoint.bound.0, checkpoint.bound.1
+            "{name}: mean error {:.5}, max {:.5} (bounds {:.3}, {:.3}), whole image {:.5} \
+             (bound {:.2}), finite {}",
+            measured.mean,
+            measured.max,
+            checkpoint.bound.0,
+            checkpoint.bound.1,
+            measured.full_max,
+            checkpoint.full,
+            measured.finite
         ));
         report.check(
-            || format!("{}: every output texel finite", checkpoint.name),
-            *finite,
+            || format!("{name}: every output texel finite"),
+            measured.finite,
             true,
         );
         report.check(
             || {
                 format!(
-                    "{}: mean error {mean} below {}",
-                    checkpoint.name, checkpoint.bound.0
+                    "{name}: mean error {} below {}",
+                    measured.mean, checkpoint.bound.0
                 )
             },
-            *mean < checkpoint.bound.0,
+            measured.mean < checkpoint.bound.0,
             true,
         );
         report.check(
             || {
                 format!(
-                    "{}: max error {max} below {}",
-                    checkpoint.name, checkpoint.bound.1
+                    "{name}: max error {} below {}",
+                    measured.max, checkpoint.bound.1
                 )
             },
-            *max < checkpoint.bound.1,
+            measured.max < checkpoint.bound.1,
+            true,
+        );
+        report.check(
+            || {
+                format!(
+                    "{name}: whole-image max error {} below {}",
+                    measured.full_max, checkpoint.full
+                )
+            },
+            measured.full_max < checkpoint.full,
             true,
         );
     }
@@ -843,7 +1104,7 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         .filter(|(a, b)| a != b)
         .count();
     report.check(
-        || String::from("output frames differing between the two runs"),
+        || String::from("output frames differing between the poisoned and the fresh run"),
         (differing, second.hashes.len()),
         (0, first.hashes.len()),
     );
@@ -854,13 +1115,15 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
             fnv(hash, &frame.to_le_bytes())
         });
     report.notes.push(format!(
-        "{} frames, output digest {digest:016x} (identical across two runs: {})",
+        "{} frames, two in flight, output digest {digest:016x} (identical across two runs, \
+         the first poisoned: {})",
         first.hashes.len(),
         differing == 0
     ));
     report
         .notes
         .push(format!("context vram_bytes {}", first.vram_bytes));
+    report.notes.extend(vram_at_real_sizes(gpu)?);
     Ok(())
 }
 
@@ -896,16 +1159,16 @@ mod tests {
                 .all(|(frame, _)| frame.render.width <= max.width
                     && frame.render.height <= max.height)
         );
-        assert_eq!(
-            frames
-                .iter()
-                .filter(|(_, checkpoint)| checkpoint.is_some())
-                .count(),
-            11
-        );
-        // Only the static and fine phases (by flag) and the sharpened one (through
+        let checks: Vec<&str> = frames
+            .iter()
+            .flat_map(|(_, checks)| checks.iter().map(|check| check.name.as_str()))
+            .collect();
+        // 4 still/moving/sharpened phases, 5 size steps with their first frames, 3 tiny sizes,
+        // the recovery, and 2 fine phases with their first frames.
+        assert_eq!(checks.len(), 4 + 5 * 2 + 3 + 1 + 4, "{checks:?}");
+        // Only the static and the two fine phases (by flag) and the sharpened one (through
         // `reset_history`) reset; the size sweep never does.
-        assert_eq!(frames.iter().filter(|(frame, _)| frame.reset).count(), 2);
+        assert_eq!(frames.iter().filter(|(frame, _)| frame.reset).count(), 3);
         assert_eq!(
             frames
                 .iter()
@@ -913,5 +1176,23 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The moving fine field moves one render pixel a frame (1.5 output pixels at Quality),
+    /// against its motion vectors.
+    #[test]
+    fn the_fine_field_moves_with_its_motion() {
+        let frames = script();
+        let moving: Vec<&Frame> = frames
+            .iter()
+            .map(|(frame, _)| frame)
+            .filter(|frame| matches!(frame.content, Content::Fine(_)) && frame.motion[0] != 0.0)
+            .collect();
+        assert!(moving.len() > 2);
+        let (Content::Fine(a), Content::Fine(b)) = (moving[1].content, moving[2].content) else {
+            unreachable!()
+        };
+        assert!((b - a - 1.5).abs() < 1e-4, "{a} -> {b}");
+        assert_eq!(moving[1].motion, [-1.0, 0.0]);
     }
 }

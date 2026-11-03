@@ -27,7 +27,7 @@ mod context;
 
 use ash::vk;
 
-pub(crate) use context::Fsr3;
+pub(crate) use context::{Fsr3, MAX_FRAMES_IN_FLIGHT};
 
 /// The back end's name in `MOBA_UPSCALER` and the frame logs.
 pub(crate) const KIND: &str = "fsr3";
@@ -83,10 +83,12 @@ impl Fsr3Mode {
 }
 
 /// ADR-0021 §1's phase count: `ceil(8 r²)` with `r` = output ÷ render width rounded to three
-/// decimals (8 at native, 18 at 1.5×, 24 at 1.7×, 32 at 2×, 72 at 3×). FSR's own
-/// `ffxFsr3UpscalerGetJitterPhaseCount` truncates instead (23 at 1.7×); the port passes this
-/// count to the shaders as the jitter sequence length, so they see the sequence the renderer
-/// actually runs (ADR-0021 amendment 1).
+/// decimals: 8 at native, 18 at exactly 1.5×, 24 at 1.7×, 32 at 2× and 72 at exactly 3×. The
+/// SDK's mode sizes are truncated, so their ratios land just above the nominal ones: at 2560
+/// output, Quality (1706) gives 1.501 and 19 phases, Ultra Performance (853) 3.001 and 73.
+/// FSR's own `ffxFsr3UpscalerGetJitterPhaseCount` truncates instead (23 at 1.7×); the port
+/// passes this count to the shaders as the jitter sequence length, so they see the sequence
+/// the renderer actually runs (ADR-0021 amendment 1).
 #[must_use]
 pub(crate) fn jitter_phases(render: vk::Extent2D, output: vk::Extent2D) -> u32 {
     let ratio = f64::from(output.width) / f64::from(render.width.max(1));

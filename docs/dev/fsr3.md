@@ -86,29 +86,57 @@ TAAU), and creates every internal image at the maximum sizes, as the SDK does:
 | dilated motion | `R16G16_SFLOAT` | render | |
 | reconstructed previous depth | `R32_UINT` | render | atomic min |
 
-Format features (Vulkan 1.3 format features 2, optimal tiling): every float storage format,
-and the caller's `RGBA16F` output, needs `STORAGE_WRITE_WITHOUT_FORMAT`; the three read back
-through storage views (`R8_UNORM` new locks, `RGBA32F` frame info, `R16G16_SFLOAT` SPD mip 5)
-also `STORAGE_READ_WITHOUT_FORMAT`; `R32_UINT` needs `STORAGE_IMAGE_ATOMIC`. The SPIR-V
-capabilities `StorageImage{Read,Write}WithoutFormat` are allowed by Vulkan 1.3 itself, so no
-device feature beyond the tiered set is enabled.
+Format features (Vulkan 1.3 format features 2, optimal tiling), read off the passes' SPIR-V:
+every float storage format, and the caller's `RGBA16F` output, needs
+`STORAGE_WRITE_WITHOUT_FORMAT` (they are declared `Unknown`); the two read back through
+storage views without a format (`RGBA32F` frame info, `R16G16_SFLOAT` SPD mip 5) also
+`STORAGE_READ_WITHOUT_FORMAT` (the new locks are declared `R8` and the reactive masks
+`Rgba8`, so they need neither); the formats sampled through the linear sampler need
+`SAMPLED_IMAGE_FILTER_LINEAR` (all but `R32_SFLOAT`, `RGBA32F` and `R32_UINT`, which are only
+loaded); `R32_UINT` needs `STORAGE_IMAGE_ATOMIC`. The SPIR-V capabilities
+`StorageImage{Read,Write}WithoutFormat` are allowed by Vulkan 1.3 itself, so no device feature
+beyond the tiered set is enabled.
+
+Each pass has one descriptor set per parity. Because the history pairs swap by parity, two
+sets per pass cover every frame. Their internal descriptors (the constant blocks, the sampler,
+the internal images) are written once, at creation and after `resize`. The descriptors that
+name the caller's images are rewritten in this frame's parity on every
+`record`, from fixed arrays, so a view the caller recreated is never read through a stale
+descriptor, even one whose handle value was reused.
+
+`record` is an `unsafe fn`. Its safety contract: the command buffer of the call two `record`s
+back has finished executing (or will never be submitted), each recorded command buffer is
+submitted at most once, and the caller's images live until the GPU is done. That is at most
+two frames in flight (`MAX_FRAMES_IN_FLIGHT`), which the renderer's `FRAMES_IN_FLIGHT`
+asserts at compile time: `record` rewrites this parity's descriptor sets and constant slot,
+which the frame two back used. `resize` (new maximum sizes: new images, the pipelines kept)
+and dropping the context both need the GPU to have finished all of its work; the renderer
+idles the device first, as for every pass.
 
 `record` follows `fsr3upscalerDispatch`:
 
 1. **Constants** for this frame (`UpscalerConstants::advance`, the SPD set-up, `FsrRcasCon`)
    into this parity's slot of one host-visible uniform buffer.
-2. **Descriptor sets**, one per pass and parity, rewritten only when the caller's views change.
-   Because the history pairs swap by parity, two sets per pass cover every frame; with at most
-   two frames in flight (the renderer's `FRAMES_IN_FLIGHT`), the GPU never uses the parity
-   being rewritten.
+2. **The caller's descriptors** in this parity's sets, as above.
 3. **Clears.** The first frame moves every internal image to `GENERAL` (they stay there) and
-   zeroes both accumulation and luma images. A reset zeroes this frame's accumulation and sets
-   the frame info to (−1, 1, 0, 0). Every frame clears the reconstructed depth to the far plane
-   (the bits of the float 1.0, as the SDK's Vulkan back end does on this `R32_UINT` image), the
-   SPD counter and the SPD mips to 0.
+   initialises every one of them: zero, except the reconstructed depth (the far plane) and the
+   frame info (−1, 1, 0, 0). The SDK leaves most of them uninitialised; clearing them once
+   means no pass can read garbage on the first frame (the new locks, for one, are written only
+   where a lock forms and read everywhere). Later frames: a reset zeroes this frame's
+   accumulation and sets the frame info to (−1, 1, 0, 0), and every frame clears the
+   reconstructed depth to the far plane (the bits of the float 1.0, as the SDK's Vulkan back
+   end does on this `R32_UINT` image), the SPD counter and the SPD mips to 0, whole images, as
+   the SDK does.
 4. **The passes** in the order of the table above (accumulate, or accumulate-and-sharpen and
    RCAS when the sharpness is above 0), each after a global compute-to-compute memory barrier.
+   The SPD pyramids hand data between work groups inside one dispatch (the last group, counted
+   with an atomic, reads the others' `globallycoherent` level 5): the upstream pattern.
 5. The **resource frame index** advances modulo 16; its parity picks the history images.
+
+A context whose maximum render size is below 64 has fewer than six SPD levels; the views of
+the missing levels alias the last one so every pass's six bindings stay bound. They are never
+written: SPD writes level `i` only for `i < floor(log2(max(render)))`, which fits the image
+for any render size up to the maximum.
 
 The caller (the render graph, ADR-0021 §4a) moves the inputs to `SHADER_READ_ONLY_OPTIMAL` and
 the output to `GENERAL` before `record`, and makes the output's compute writes visible to its
@@ -143,12 +171,23 @@ MOBA_RENDER_PATH=tiered MOBA_VULKAN_VALIDATION=required cargo run --release -p m
 
 It upscales a synthetic scene whose ideal output is known exactly: a flat colour, a smooth
 analytic field (static, moving one render pixel a frame with matching motion vectors, and
-sharpened), the render-size sweep, and a fine field near the render resolution's limit, where
-the converged error must be at most 0.9× the first frame's (the accumulation recovers detail).
-Each phase's mean and largest error must stay under its bound, every output frame of a second
-run on a fresh context must be bit-identical to the first, and any validation or
-synchronization-validation message fails it. It runs in CI (render-golden) on lavapipe.
-Flipping the jitter sign fails it (the moving and Ultra Performance phases exceed their bounds).
+sharpened), the render-size sweep (with the first frame after each change checked, then 9×5,
+2×1 and 1×1, and back), and a fine field near the render resolution's limit, still and moving,
+where the converged error must be at most 0.9× (0.95× moving) the first frame's: the
+accumulation recovers detail, and when moving only if the reprojection is right. Each
+checkpoint bounds the mean and largest error over the interior and the largest over the whole
+image (a read outside the render rectangle brings in a sentinel of 1000), and the sharpened
+output must have more local contrast than the unsharpened one.
+
+It runs as a renderer would: two frames in flight, the output alternating between two images.
+The first of its two runs fills every internal image with garbage (NaN, all ones) before the
+first frame (`Fsr3::poison`), the second starts from fresh allocations, and every output frame
+of the two must be bit-identical. Any validation or synchronization-validation message fails
+it. It runs in CI (render-golden) on lavapipe. Each of these faults, injected one at a time,
+fails it: the motion-vector scale wrong or zero, the jitter flipped on x or y alone, RCAS not
+run, a wrong render size in the constants. A stale previous-frame render size does not (it
+feeds only the luma-instability and shading-change masks, which these scenes, with no change
+in shading, leave near zero). The smoke also reports `vram_bytes` at real sizes.
 Results on lavapipe, an RTX 5070 Ti and a Radeon 610M: [docs/perf/0030](../perf/0030-fsr3-port.md).
 
 ## Updating the SDK
