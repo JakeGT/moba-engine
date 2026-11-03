@@ -451,3 +451,30 @@ fn ray_traced_lighting_needs_the_tiered_path_and_ray_queries() {
         Err(String::from("the device has no rayQuery"))
     );
 }
+
+/// `caps` as if it also advertised `VK_AMD_anti_lag` with its feature (Mesa 26.2's layer does
+/// on every device; Mesa 26.3's RADV natively).
+fn with_anti_lag(mut caps: DeviceCapabilities) -> DeviceCapabilities {
+    caps.extensions.push(String::from("VK_AMD_anti_lag"));
+    caps.extensions.sort();
+    caps.features.insert(String::from("antiLag"), true);
+    caps
+}
+
+#[test]
+fn only_one_latency_extension_is_enabled_reflex_first() {
+    // ADR-0021 §6a: NVIDIA's wins, and the other is not even enabled.
+    let (path, enabled) = enabled_on(&with_anti_lag(fixture("rtx-5070-ti")));
+    assert_eq!(path, RenderPath::Tiered);
+    assert!(enabled.iter().any(|name| name == "VK_NV_low_latency2"));
+    assert!(!enabled.iter().any(|name| name == "VK_AMD_anti_lag"));
+    assert_eq!(latency::detect(&enabled), LatencyMode::Reflex);
+    // RADV with native Anti-Lag (Mesa 26.3) runs it.
+    let caps = with_anti_lag(fixture("radeon-610m"));
+    let (path, enabled) = enabled_on(&caps);
+    assert_eq!(path, RenderPath::Tiered);
+    assert_eq!(latency::detect(&enabled), LatencyMode::AntiLag);
+    // Today's RADV (Mesa 26.2.5) advertises neither natively: no back end.
+    let (_, enabled) = enabled_on(&fixture("radeon-610m"));
+    assert_eq!(latency::detect(&enabled), LatencyMode::None);
+}

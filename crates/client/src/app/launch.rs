@@ -132,6 +132,118 @@ pub(crate) fn shader_dir() -> Option<PathBuf> {
     }
 }
 
+/// The frame limiter's default rate (the platform's `max_frame_rate`). While Reflex or
+/// Anti-Lag paces the frames it replaces the platform limiter and enforces this rate itself
+/// (ADR-0021 §6b).
+pub(crate) const FRAME_RATE_LIMIT: u32 = 240;
+
+/// The frame limiter's rate: `MOBA_MAX_FPS=<n>` (0: uncapped, for latency and GPU-bound
+/// measurements), else [`FRAME_RATE_LIMIT`]. An empty or invalid value is the default.
+pub(crate) fn frame_rate_limit(value: Option<&str>) -> u32 {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            value.parse().ok().or_else(|| {
+                eprintln!("MOBA_MAX_FPS={value:?} is not a frame rate; using {FRAME_RATE_LIMIT}");
+                None
+            })
+        })
+        .unwrap_or(FRAME_RATE_LIMIT)
+}
+
+/// Who paced the frame for the platform: the latency sleep (`slept`, which also enforced the
+/// frame-rate limit) replaces the platform limiter, otherwise the limiter runs.
+pub(crate) fn pacing(slept: bool) -> moba_platform::Pacing {
+    if slept {
+        moba_platform::Pacing::External
+    } else {
+        moba_platform::Pacing::Platform
+    }
+}
+
+/// Measured frames the frame log leaves out at the start (pipeline and cache warm-up).
+pub(crate) const FRAME_LOG_WARMUP: u64 = 60;
+
+/// The latency setting: `MOBA_LATENCY` when it names one (`off`, `on`, `boost`), else the
+/// settings' (an unknown value says so once). An empty value is unset.
+pub(crate) fn latency_setting(
+    value: Option<&str>,
+    settings: moba_render::LatencySetting,
+) -> moba_render::LatencySetting {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => settings,
+        Some(name) => moba_render::LatencySetting::parse(name).unwrap_or_else(|| {
+            eprintln!("MOBA_LATENCY={name:?} is not off/on/boost; using settings");
+            settings
+        }),
+    }
+}
+
+/// One frame-log sample of Reflex's timings, `[simulation, render_submit, present, gpu,
+/// total]` in milliseconds.
+pub(crate) fn latency_sample(frame: &moba_render::LatencyFrame) -> [f32; 5] {
+    let ms = |us: u64| us as f32 / 1_000.0;
+    [
+        ms(frame.simulation_us),
+        ms(frame.render_submit_us),
+        ms(frame.present_us),
+        ms(frame.gpu_us),
+        ms(frame.total_us),
+    ]
+}
+
+/// The frame log's latency columns: the back end, the setting, how many of the logged frames
+/// its sleep paced, and Reflex's timings (`latency_frames=0` when Reflex runs but no frame
+/// completed in the log; `latency_timing=unavailable` without Reflex).
+pub(crate) fn latency_report(
+    mode: moba_render::LatencyMode,
+    setting: moba_render::LatencySetting,
+    paced: u64,
+    frames: u64,
+    samples: &[[f32; 5]],
+) -> String {
+    use core::fmt::Write as _;
+    let mut columns = format!(
+        "latency={} latency_setting={} paced_frames={paced}/{frames} ",
+        mode.name(),
+        setting.name()
+    );
+    if samples.is_empty() {
+        columns.push_str(if mode == moba_render::LatencyMode::Reflex {
+            "latency_frames=0 "
+        } else {
+            "latency_timing=unavailable "
+        });
+        return columns;
+    }
+    let _ = write!(columns, "latency_frames={} ", samples.len());
+    for (lane, name) in [
+        "latency_sim",
+        "latency_submit",
+        "latency_present",
+        "latency_gpu",
+        "pc_latency",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut values: Vec<f32> = samples.iter().map(|sample| sample[lane]).collect();
+        values.sort_by(f32::total_cmp);
+        let at = |fraction: f32| values[((values.len() - 1) as f32 * fraction).round() as usize];
+        let _ = write!(
+            columns,
+            "{name}_p50_ms={:.3} {name}_p95_ms={:.3} ",
+            at(0.50),
+            at(0.95)
+        );
+        if lane == 4 {
+            let _ = write!(columns, "{name}_p99_ms={:.3} ", at(0.99));
+        }
+    }
+    columns
+}
+
 /// `MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU even where the GPU samples
 /// them (to exercise the fallback path); anything else keeps the default.
 /// Frame-log samples kept (`MOBA_FRAME_LOG_FRAMES`, default 10,000, clamped to
@@ -1135,7 +1247,9 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&error),
     );
     let (width, height) = parse_window_size(std::env::var("MOBA_WINDOW_SIZE").ok().as_deref());
-    let config = WindowConfig::new("MOBA", width, height);
+    let config = WindowConfig::new("MOBA", width, height).with_max_frame_rate(frame_rate_limit(
+        std::env::var("MOBA_MAX_FPS").ok().as_deref(),
+    ));
     run_window(config, app)?;
     if let Some(message) = error.lock().ok().and_then(|mut slot| slot.take()) {
         return Err(message.into());
@@ -1164,7 +1278,9 @@ impl Drop for ClientApp {
         else {
             return;
         };
-        let warmup = samples.len().min(60);
+        let warmup = samples
+            .len()
+            .min(usize::try_from(FRAME_LOG_WARMUP).unwrap_or(usize::MAX));
         let mut samples = samples.split_off(warmup);
         if samples.is_empty() {
             return;
@@ -1242,6 +1358,19 @@ impl Drop for ClientApp {
                 cull.terrain_chunks,
             )
         });
+        // ADR-0021 §6b: the latency back end, who paced the frames, and Reflex's timings.
+        let latency_samples = self.latency_log.take().unwrap_or_default();
+        let latency = latency_report(
+            self.renderer
+                .as_ref()
+                .map_or(moba_render::LatencyMode::None, |renderer| {
+                    renderer.vendor_backends().latency
+                }),
+            self.latency,
+            self.paced_frames,
+            self.logged_frames,
+            &latency_samples,
+        );
         let stress = self
             .stress
             .as_ref()
@@ -1258,7 +1387,7 @@ impl Drop for ClientApp {
             "frames={} frames_dropped={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
              render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} {scale}\
-             {gpu_columns}{stress}{memory}quality={quality} {admission} extent={extent} gpu=\"{gpu}\"\n",
+             {gpu_columns}{latency}{stress}{memory}quality={quality} {admission} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             self.frames_dropped,
             percentile(0.50),
@@ -1523,6 +1652,75 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_frame_rate_limit_defaults_to_240_and_zero_uncaps() {
+        use super::frame_rate_limit;
+        assert_eq!(frame_rate_limit(None), 240);
+        assert_eq!(frame_rate_limit(Some("")), 240);
+        assert_eq!(frame_rate_limit(Some(" 0 ")), 0);
+        assert_eq!(frame_rate_limit(Some("144")), 144);
+        assert_eq!(frame_rate_limit(Some("fast")), 240);
+    }
+
+    #[test]
+    fn a_frame_the_latency_sleep_paced_replaces_the_platform_limiter() {
+        use super::pacing;
+        assert_eq!(pacing(true), moba_platform::Pacing::External);
+        assert_eq!(pacing(false), moba_platform::Pacing::Platform);
+    }
+
+    #[test]
+    fn latency_setting_takes_the_environment_over_settings() {
+        use super::latency_setting;
+        use moba_render::LatencySetting::{Boost, Off, On};
+        assert_eq!(latency_setting(None, On), On);
+        assert_eq!(latency_setting(Some(""), Boost), Boost);
+        assert_eq!(latency_setting(Some("off"), On), Off);
+        assert_eq!(latency_setting(Some("BOOST"), Off), Boost);
+        assert_eq!(latency_setting(Some("fast"), Off), Off);
+    }
+
+    #[test]
+    fn latency_report_lists_reflex_timings_or_says_unavailable() {
+        use super::latency_report;
+        use moba_render::{LatencyMode, LatencySetting};
+        assert_eq!(
+            latency_report(LatencyMode::None, LatencySetting::On, 0, 10, &[]),
+            "latency=none latency_setting=on paced_frames=0/10 latency_timing=unavailable "
+        );
+        // Reflex ran, but no frame's timings landed in the log (a short run).
+        assert_eq!(
+            latency_report(LatencyMode::Reflex, LatencySetting::On, 3, 3, &[]),
+            "latency=reflex latency_setting=on paced_frames=3/3 latency_frames=0 "
+        );
+        let samples: Vec<[f32; 5]> = (1..=100)
+            .map(|index| {
+                let ms = index as f32 / 10.0;
+                [0.1, 0.2, 0.05, 0.6, ms]
+            })
+            .collect();
+        let report = latency_report(
+            LatencyMode::Reflex,
+            LatencySetting::Boost,
+            99,
+            100,
+            &samples,
+        );
+        assert!(
+            report.starts_with(
+                "latency=reflex latency_setting=boost paced_frames=99/100 latency_frames=100 \
+                 latency_sim_p50_ms=0.100 latency_sim_p95_ms=0.100 "
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "pc_latency_p50_ms=5.100 pc_latency_p95_ms=9.500 pc_latency_p99_ms=9.900 "
+            ),
+            "{report}"
+        );
+    }
 
     #[test]
     fn demo_orders_parse_in_tick_order() {

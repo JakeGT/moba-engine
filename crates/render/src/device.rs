@@ -853,7 +853,9 @@ impl Drop for DeviceContext {
 
 /// The tiered extensions a device enables: on a tiered device, every required one plus each
 /// optional or tier-gated one that is present with its features (ADR-0020 §1e). Empty on
-/// Compat.
+/// Compat. Of the two latency extensions only one is enabled, Reflex first (ADR-0021 §6a):
+/// a device that offers both (Mesa 26.2's anti-lag layer also advertises `VK_AMD_anti_lag`
+/// on NVIDIA's driver) runs `VK_NV_low_latency2`, and the other is never enabled.
 pub(crate) struct TieredExtensions {
     pub(crate) names: Vec<std::ffi::CString>,
 }
@@ -861,9 +863,16 @@ pub(crate) struct TieredExtensions {
 impl TieredExtensions {
     pub(crate) fn of(capabilities: &DeviceCapabilities, path: RenderPath) -> Self {
         let names = if path == RenderPath::Tiered {
-            caps::EXTENSIONS
+            let present: Vec<&caps::ExtensionSpec> = caps::EXTENSIONS
                 .iter()
                 .filter(|extension| caps::extension_present(capabilities, extension))
+                .collect();
+            let reflex = present
+                .iter()
+                .any(|extension| extension.name == "VK_NV_low_latency2");
+            present
+                .into_iter()
+                .filter(|extension| !(reflex && extension.name == "VK_AMD_anti_lag"))
                 .map(|extension| {
                     std::ffi::CString::new(extension.name).expect("extension names have no NUL")
                 })

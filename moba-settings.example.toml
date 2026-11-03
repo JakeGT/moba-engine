@@ -7,6 +7,9 @@ settings_version = 1
 quality = "auto"
 # Render path: auto, tiered or compat (MOBA_RENDER_PATH overrides it).
 render_path = "auto"
+# Latency reduction where the GPU has it (Reflex or Anti-Lag, tiered path): off, on or boost
+# (MOBA_LATENCY overrides it). While on, its sleep replaces the frame limiter.
+latency = "on"
 audio_volume = 0.7
 audio_mute = false
 camera_sensitivity = 1.0

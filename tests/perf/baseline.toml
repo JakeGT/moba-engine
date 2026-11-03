@@ -31,7 +31,8 @@ gpu_total_p95_ms = 0.664
 render_p95_ms = 0.254
 
 # Tiered path (ADR-0021 amendment 2, item 16; docs/perf/0031-n1a-temporal.md). Recorded
-# 2026-11-03 on feat/n1a-temporal (N1a: temporal AA, TAAU Quality, the overlay) on the same
+# 2026-11-03 on feat/n1a-temporal (N1a: temporal AA, TAAU Quality, the overlay; merged with
+# N1d's latency back ends, Reflex on by default) on the same
 # machine, from the medians of three interleaved rounds of the 5v5 teamfight replay
 # (tests/replays/teamfight-5v5.mbr, 3,000 frames, cold pipeline cache), not the 18,000-tick
 # perf-replay.sh run above: a perf-replay.sh run on Tiered is the re-recording step for the

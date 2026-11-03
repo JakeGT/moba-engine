@@ -109,6 +109,12 @@
 //!   `MOBA_FRAME_LOG_FRAMES=<n>` (frame-log samples, default 10,000). The frame log and the
 //!   startup `[vram]` line report memory against the tier's budgets and any upload or
 //!   pipeline build after the match started (`locked_uploads`, `locked_pipelines`).
+//! - `MOBA_LATENCY=off|on|boost` (the `latency` setting; ADR-0021 §6): Reflex
+//!   (`VK_NV_low_latency2`) or Anti-Lag (`VK_AMD_anti_lag`) on a tiered device that has one.
+//!   On by default, boost off; while on, the latency sleep replaces the frame limiter. The
+//!   frame log reports the mode, who paced the frames and Reflex's timings (`pc_latency_*`).
+//! - `MOBA_MAX_FPS=<n>`: the frame limiter's rate (default 240; 0 uncaps the loop, for
+//!   latency and GPU-bound measurements).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -120,10 +126,10 @@ use moba_core::Fix;
 use moba_core::math::Vec3;
 use moba_net::protocol::{MatchPhase, SnapshotState, WireCommand, quantize_position};
 use moba_net::{ClientEvent, Interpolator, PredictionState};
-use moba_platform::{App, Frame, FrameOutcome, Key, Window};
+use moba_platform::{App, Frame, FrameOutcome, Key, MouseButton, Pacing, Window};
 use moba_render::{
-    Camera, OffscreenRender, RenderConfig, Renderer, Scene, UiDrawList, UiImage, UnitInstance,
-    ValidationMode,
+    Camera, LatencyMarker, LatencySetting, OffscreenRender, RenderConfig, Renderer, Scene,
+    UiDrawList, UiImage, UnitInstance, ValidationMode,
 };
 use moba_sim::{SimConfig, Simulation};
 use std::collections::VecDeque;
@@ -258,6 +264,19 @@ struct ClientApp {
     gpu_log: Option<Vec<[f32; launch::GPU_LANES.len()]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
+    /// Per-frame Reflex timings `[simulation, render_submit, present, gpu, total]` in ms
+    /// while logging ([`moba_render::Renderer::latency_report`]); empty without Reflex.
+    latency_log: Option<Vec<[f32; 5]>>,
+    /// The latency setting (`MOBA_LATENCY`, else the settings' `latency`; ADR-0021 §6b).
+    latency: LatencySetting,
+    /// Logged frames (measured, past the frame log's warm-up) the latency sleep paced
+    /// (`App::pace` returned `External`).
+    paced_frames: u64,
+    /// Measured frames past the frame log's warm-up ([`launch::FRAME_LOG_WARMUP`]): the
+    /// `paced_frames` denominator.
+    logged_frames: u64,
+    /// The frame number (`frames`) of the latest of `logged_frames` (0: none yet).
+    logged_frame: u64,
     frame_log_path: Option<PathBuf>,
     /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
     network_warmup: Option<u32>,
@@ -331,6 +350,13 @@ impl ClientApp {
         let gpu_log = frame_log_path
             .as_ref()
             .map(|_| Vec::with_capacity(frame_log_frames));
+        let latency_log = frame_log_path
+            .as_ref()
+            .map(|_| Vec::with_capacity(frame_log_frames));
+        let latency = launch::latency_setting(
+            std::env::var("MOBA_LATENCY").ok().as_deref(),
+            settings.latency(),
+        );
         // An empty value is unset, as for `MOBA_QUALITY`.
         let render_path = std::env::var("MOBA_RENDER_PATH")
             .ok()
@@ -472,6 +498,11 @@ impl ClientApp {
             work_log,
             gpu_log,
             gpu_logged_frame: None,
+            latency_log,
+            latency,
+            paced_frames: 0,
+            logged_frames: 0,
+            logged_frame: 0,
             frame_log_path,
             // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
             network_warmup: std::env::var("MOBA_SERVER")
@@ -692,6 +723,10 @@ impl App for ClientApp {
             .with_quality_tier(self.quality)
             .with_render_path(self.render_target.choice)
             .with_tiered_cpu_devices(self.render_target.allow_cpu)
+            .with_latency(self.latency)
+            .with_frame_rate_limit(launch::frame_rate_limit(
+                std::env::var("MOBA_MAX_FPS").ok().as_deref(),
+            ))
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
@@ -843,8 +878,30 @@ impl App for ClientApp {
         }
     }
 
+    /// ADR-0021 §6b: Reflex or Anti-Lag sleeps here, after this frame's present and before
+    /// the next frame's input; while it does, it replaces the platform's frame limiter.
+    fn pace(&mut self) -> Pacing {
+        let slept = self
+            .renderer
+            .as_mut()
+            .is_some_and(moba_render::Renderer::latency_sleep);
+        if slept && self.logged_frame == self.frames {
+            self.paced_frames += 1;
+        }
+        launch::pacing(slept)
+    }
+
     #[allow(clippy::too_many_lines)] // The frame is one explicit presentation sequence.
     fn on_frame(&mut self, frame: &mut Frame<'_>) -> FrameOutcome {
+        // ADR-0021 §6b: the frame starts and samples its input here (the latency sleep
+        // already ran, in `pace`, before this frame's input was gathered).
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.latency_marker(LatencyMarker::SimulationStart);
+            renderer.latency_marker(LatencyMarker::InputSample);
+            if frame.input().was_mouse_pressed(MouseButton::Left) {
+                renderer.latency_marker(LatencyMarker::TriggerFlash);
+            }
+        }
         if frame.input().was_key_pressed(Key::M)
             && let Some(network) = self.network.as_mut()
         {
@@ -867,6 +924,10 @@ impl App for ClientApp {
                 network.phase == MatchPhase::Playing && network.last_tick >= warmup
             })
         });
+        if measuring && self.measured_frames >= launch::FRAME_LOG_WARMUP {
+            self.logged_frames += 1;
+            self.logged_frame = self.frames;
+        }
         if measuring {
             self.measured_frames += 1;
             if let Some(samples) = self.frame_log.as_mut() {
@@ -1374,6 +1435,7 @@ impl App for ClientApp {
                         let warm_up_due = capture_due && network.two_tick_warm_up_due();
                         let mut warmed_up = false;
                         if let Some(renderer) = renderer.as_mut() {
+                            renderer.latency_marker(LatencyMarker::SimulationEnd);
                             if warm_up_due {
                                 match renderer.warm_up_temporal(&scene, Some(ui)) {
                                     Ok(()) => {
@@ -1617,6 +1679,7 @@ impl App for ClientApp {
                         .with_environment(environment)
                         .with_effects(screen_fx.update(frame_ms / 1_000.0));
                     if let Some(renderer) = renderer.as_mut() {
+                        renderer.latency_marker(LatencyMarker::SimulationEnd);
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
                                 renderer,
@@ -1687,6 +1750,17 @@ impl App for ClientApp {
                     .as_ref()
                     .map_or(0.0, |renderer| renderer.light_stats().binned as f32);
                 gpu.push(launch::gpu_sample(&timings, stats, lights));
+            }
+        }
+        // Reflex's timings for the frames that completed since the last call (it keeps 64):
+        // drained every frame, kept only for logged frames (warm-up frames are dropped).
+        if let (Some(log), Some(renderer)) = (self.latency_log.as_mut(), self.renderer.as_mut()) {
+            let frame_logged = self.logged_frame == self.frames;
+            for timing in renderer.latency_report() {
+                if !frame_logged || log.len() == log.capacity() {
+                    break;
+                }
+                log.push(launch::latency_sample(timing));
             }
         }
         if let Some(message) = failure {

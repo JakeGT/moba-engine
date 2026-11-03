@@ -185,8 +185,10 @@ and FSR 4 needs AMD's own driver (RADV and AMDVLK are refused). FSR 4's RDNA 2 m
 reliable device field, so the FidelityFX API checks it when N1 creates the context. The open build logs no `[vendor]` line. Reflex
 (`VK_NV_low_latency2`) and Anti-Lag (`VK_AMD_anti_lag`) need no feature; `latency=` reports
 which extension the device was **created with** (the tiered path enables
-`VK_NV_low_latency2` only with `presentId`; Compat enables neither, whatever the device
-advertises). `Renderer::vendor_backends()` returns the same choice as data. The
+`VK_NV_low_latency2` only with `presentId`, never both latency extensions; Compat enables
+neither, whatever the device advertises). Since N1d the renderer runs that back end and logs
+one `[latency]` line either way (ADR-0021 §6 and amendment 3). `Renderer::vendor_backends()`
+returns the same choice as data. The
 selection is a trait object chosen inside `crates/render/src/vendor/`; no call site outside it
 uses `cfg`.
 
