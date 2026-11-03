@@ -1038,7 +1038,11 @@ from the text above, or the text left a choice open, this is what was done and w
 9. **Capture warm-up.** A capture renders two phase cycles of the same scene; particle spawns
    are kept only in the first warm-up frame. `Renderer::warm_up_temporal` is the two-tick API:
    the client's `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=n`) warms up at tick
-   `n − 1`, then captures tick `n` with the camera panned by a fixed 0.75 m.
+   `n − 1`, then captures tick `n` with the camera panned by a fixed 0.75 m. The warm-up
+   blocks the client's loop for seconds on a software rasteriser after tick `n`'s snapshot,
+   the loopback server's last, has arrived, so the capture frame after it skips the network
+   (polling would only see that silence as the 5 s connection timeout). A run with lavapipe
+   on one thread (`LP_NUM_THREADS=1`, a 10.5 s warm-up) captures the same bytes.
 10. **Motion keys** are `net_id << 16 | part`, parts numbered from 1 so no unit part has key 0
     (the static key). A living unit's parts stop at `0x7FFF` (any further instance shares the
     last key); a dying minion's corpse is keyed `net_id << 16 | 0x8000 | slot`, so a corpse

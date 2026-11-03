@@ -941,10 +941,17 @@ impl App for ClientApp {
                 ..
             } = self;
             if let Some(network) = network {
-                if let Err(error) = network.client.poll() {
+                // A two-tick capture's warm-up blocks this loop for two jitter-phase cycles
+                // (seconds on a software rasteriser) after the capture tick's snapshot, the
+                // loopback server's last, arrived. Nothing more will arrive, so the capture
+                // frame that follows skips the network: polling would only see the silence as
+                // the connection timing out.
+                let capture_pending = network.capture_two_tick && network.capture_warmed_up;
+                if !capture_pending && let Err(error) = network.client.poll() {
                     failure = Some(format!("receive failed: {error}"));
                 }
                 if failure.is_none()
+                    && !capture_pending
                     && let Err(error) = network.client.update()
                 {
                     failure = Some(format!("network update failed: {error}"));
