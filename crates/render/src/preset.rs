@@ -1,9 +1,10 @@
 //! Tier presets (ADR-0020 §5a, §5e): the roadmap's §3 feature matrix as data, and how each
 //! tier maps onto today's switches until the phases that build its features land.
 //!
-//! In N0 the tiered path runs today's frame (§2c). [`config_tier`] picks the Compat tier whose
-//! configuration it runs: tiered Low uses today's High (FXAA), and tiered Medium and up use
-//! today's Ultra, MSAA 4× included, until N1 replaces MSAA with TAA and the upscalers.
+//! The tiered path runs today's frame (§2c) with N1a's temporal foundation. [`config_tier`]
+//! picks the Compat tier whose configuration it runs: tiered Low uses today's High and tiered
+//! Medium and up today's Ultra, with temporal AA and TAAU in place of FXAA and MSAA 4×
+//! (MSAA is Compat-only, ADR-0021 §7).
 //! [`TierPreset::features`] lists the §3 matrix per tier; a feature not built yet is
 //! [`FeatureState::Planned`] with its phase, so a settings menu can show it greyed out.
 

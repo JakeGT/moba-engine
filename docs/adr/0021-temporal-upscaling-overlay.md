@@ -807,7 +807,9 @@ maintainer may fold these in when this ADR is accepted.
   3. N1c: DLSS, FSR 4 and XeSS;
   4. N1d: latency.
 
-  N1a alone closes the readability and perf-gate requirements.
+  N1a alone closes the readability requirements. For `perf-gate`, N1a makes Tiered's absolute
+  per-tier budgets fail and commits report-only `[tiered.<tier>]` baselines; the last N1 part
+  to merge makes the baseline regression check fail (amendment 2, item 16).
 
 ## Verification and evidence gates
 
@@ -1000,7 +1002,8 @@ own; wiring it behind N1a's `TemporalUpscaler` follows N1a. How it is built is i
 
 Recorded in the N1a PR (`feat/n1a-temporal`): jitter, motion vectors and masks, TAAU, the
 `TemporalUpscaler` interface, the overlay layer and MSAA's retirement on the tiered path. The
-§4a trait is built exactly as specified; N1b and N1c port against it. Where the code departs
+§4a trait is built as specified, with `record` made `unsafe` and `resize` and
+`reload_shaders` added (items 17–18); N1b and N1c port against it. Where the code departs
 from the text above, or the text left a choice open, this is what was done and why.
 
 1. **TAAU owns its history (§3).** The output-resolution history pair and the previous linear
@@ -1009,10 +1012,14 @@ from the text above, or the text left a choice open, this is what was done and w
    the render graph. Every back end owns its state behind the trait (`reset_history`,
    `vram_bytes`); FSR 3.1 and the vendor SDKs keep theirs inside their contexts, so the graph
    stays the same whichever back end runs.
-2. **The overlay shaders are GLSL** (`overlay.frag`, the overlay prepass and the overlay
-   particle permutation), not Slang. They reuse `decals.glsl` and the outline dilation that
+2. **The overlay and mask shaders are GLSL**, not Slang as the Shaders bullet above says:
+   `overlay.frag`, the overlay prepass and the overlay particle permutation, `tc_mask.frag`
+   and `prepass_motion.frag`. The overlay reuses `decals.glsl` and the outline dilation that
    the scene shaders compile, and one copy of the shape code is the point (§5: "the same
-   32×32 ground bins and `decals.glsl` shape code"). They move to Slang with the decal library.
+   32×32 ground bins and `decals.glsl` shape code"); the masks and the motion prepass are
+   permutations of the GLSL scene shaders and share their includes (`motion.glsl`,
+   `camera.glsl`). They move to Slang with the decal library and the scene shaders. Only
+   `temporal_taau` and `exposure_linear` are Slang.
 3. **Telegraph particles reach the overlay by a vertex-stage role filter.** The overlay draw
    re-draws the particle buffer with a `VFX_OVERLAY` permutation that keeps only enemy-telegraph
    roles (the scene's VFX draw skips them), instead of compacting them into a second list.
@@ -1032,26 +1039,103 @@ from the text above, or the text left a choice open, this is what was done and w
    are kept only in the first warm-up frame. `Renderer::warm_up_temporal` is the two-tick API:
    the client's `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=n`) warms up at tick
    `n − 1`, then captures tick `n` with the camera panned by a fixed 0.75 m.
-10. **Motion keys** are `net_id << 8 | (part + 1)`, so no unit part has key 0 (the static key).
+10. **Motion keys** are `net_id << 16 | part`, parts numbered from 1 so no unit part has key 0
+    (the static key). A living unit's parts stop at `0x7FFF` (any further instance shares the
+    last key); a dying minion's corpse is keyed `net_id << 16 | 0x8000 | slot`, so a corpse
+    never shares a key with a living unit that reuses its `net_id` (before, corpses had key
+    0 and drew camera-only motion). A unit's first drawn frame needs no `motion_reset`: its
+    key has no entry yet, which is the same camera-only path (§2c's missing key).
 11. **`independentBlend`** was added to every capability fixture by hand: `vulkan-probe --json`
     reports it on all three recorded devices, and the synthetic fixtures inherit it from the
     RTX dump (Q7; `caps/fixtures/README.md`).
 12. **Foliage's vertex stage** now uses four storage buffers (the previous-instance buffer
     joined), exactly the guaranteed minimum; the descriptor-budget test pins it.
-13. **Readback usage.** On the temporal path the `depth` and `motion` transients carry
-    `TRANSFER_SRC`, for the motion probe's readback. Compat's descriptions are unchanged.
+13. **Readback usage.** The `depth` and `motion` transients carry `TRANSFER_SRC` only when
+    the renderer is created with `RenderConfig::with_readback` (the client sets it for
+    `MOBA_MOTION_PROBE=1`); a game frame's descriptions are as without it. Compat's are
+    unchanged either way.
 14. **Per-pass lanes** (gate 6): `temporal`, `tc_mask`, `overlay_prepass` and `overlay` join the
     frame log (`prepass` was already there). Like the fog-of-war lanes they are left out when
     they never ran, so Compat logs are unchanged.
-15. **`maxColorAttachments ≥ 5`** joins the tiered admission limits. OIT on the temporal path
-    writes HDR, its two accumulation targets, motion and the reactive mask in one pass, one
-    more than Vulkan guarantees. Every recorded device reports 8.
-16. **`perf-gate` stays report-only on Tiered after N1a.** §7 and gate 6 have tiered budgets
-    fail "from N1", with baselines re-recorded per `(gpu, path, tier)` and the upscaler named.
-    N1a is the first of four N1 parts and N1b–N1d each change what a tiered frame runs, so
-    the flip, and the `[tiered.<tier>]` tables in `tests/perf/baseline.toml`, land with the
-    last N1 part to merge. N1a's RTX medians are in `docs/perf/0031-n1a-temporal.md` as the
-    reference those tables start from.
+15. **`maxColorAttachments`, `maxFragmentOutputAttachments` and
+    `maxFragmentCombinedOutputResources` ≥ 5** join the tiered admission limits. OIT on the
+    temporal path writes HDR, its two accumulation targets, motion and the reactive mask in
+    one pass, one more colour output than Vulkan guarantees (4); the combined limit also
+    counts the pass's storage resources, and the guaranteed 4 would not hold the five
+    outputs. Every capability fixture reports 8 colour attachments and 8 fragment outputs;
+    the combined limit is 4,294,967,295 on the RTX, 8,388,606 on the Radeon 610M and 104 on
+    lavapipe.
+16. **`perf-gate` on Tiered after N1a: budgets fail, baselines report.** §7 and gate 6 have
+    tiered budgets fail "from N1", with baselines re-recorded per `(gpu, path, tier)` and the
+    upscaler named. N1a is the first of four N1 parts and N1b–N1d each change what a tiered
+    frame runs, so the gate is split. **Absolute per-tier budget breaches fail now** (§7's
+    `gpu_total_p95_ms` and the replay's render p95, on every tier). The `[tiered.low]`,
+    `[tiered.high]` and `[tiered.ultra]` regression baselines in `tests/perf/baseline.toml`
+    are committed now from N1a's RTX medians (perf/0031) and compared **report-only**
+    (`TIERED_BASELINE_FAILS` in `perf-gate`). Each later N1 part re-records them; whichever
+    N1 part merges last flips the regression check to failing, after a rerun on a quiet
+    machine (perf/0031's frame-time note). `docs/status.md` names that owner.
+17. **`TemporalUpscaler::record` is an `unsafe fn`**, with the same contract as N1b's
+    `Fsr3::record`: every recorded command buffer is submitted exactly once, in record order,
+    on one queue, or the caller treats a failure to submit as fatal or calls
+    `reset_history`/`resize` before the next record; at most `FRAMES_IN_FLIGHT` records are
+    pending (the command buffer of the record that many calls back has finished); the inputs
+    and the output are alive and in the stated layouts until that command buffer finishes.
+    The back ends commit state at record time: TAAU flips its history parity, clears
+    `fresh` (the first-use transitions are recorded) and `reset`, and advances its descriptor
+    ring; `exposure_linear` advances its ring and marks its placeholder initialised. Both
+    rings hold three sets, more than `FRAMES_IN_FLIGHT` (2), which the renderer asserts at
+    compile time, so a set is never rewritten while a pending frame reads it. A record
+    whose command buffer is never submitted would leave that state ahead of the GPU, so the
+    renderer calls `forget_unsubmitted` (which sets `fresh` and `reset` again) on every error
+    path between recording and submission.
+18. **`resize` never builds a pipeline.** `TemporalUpscaler::resize(output, max_render)`
+    recreates only the history images and starts a fresh history (`fresh`, `reset`). A
+    swapchain recreation calls it; `exposure_linear` has no size-dependent images and is not
+    rebuilt. Debug builds' shader hot reload (`MOBA_SHADER_DIR`) rebuilds TAAU's and
+    `exposure_linear`'s pipelines (`reload_shaders`, a default no-op for back ends without
+    shaders of ours).
+19. **Render sizes round to nearest, and the §4a trait is authoritative for N1b stage 2.**
+    TAAU's mode sizes round to nearest, the same rule as the dynamic-resolution controller,
+    so its ceiling is a size the controller produces (Quality at 2560 is 1707). FSR 3.1's
+    SDK truncates (1706); a back end with an SDK rule reports its own range and the
+    controller clamps to it. N1b stage 1 shipped `Fsr3` with local types; stage 2 adapts it
+    to this trait: `kind()` returns `UpscalerKind::Fsr3` (not the name `"fsr3"`), the
+    client's `UpscaleMode` maps onto `Fsr3Mode` (`Native` ↔ `NativeAa`, the rest by name),
+    `UpscaleInputs`/`UpscaleOutput` replace the local mirrors, and its `render_size_range`
+    stays the SDK's (1706). The two contracts above (17) already agree.
+20. **The overlay prepass's depth uses the main depth format** (`FrameSpec::depth_format`
+    and aspect, D32 or D32S8 by device), not a hard-coded D32.
+21. **`Scene::history_reset` is wired in the client**: set on a map load or rotation (a new
+    map-visuals generation) and when the followed hero changes (spectating), in the
+    networked game, which replays use too, and in the local preview. Other camera cuts (none
+    today) must set it too.
+22. **`MOBA_AA=msaa4` on Tiered** runs the tiered default (temporal) with a log line: MSAA is
+    Compat-only (§7). **`MOBA_UPSCALE_MODE=performance`** at a preset whose floor is
+    already Performance's scale gets Ultra Performance (1/3) as its floor, one mode down, so
+    dynamic resolution keeps a range instead of floor = ceiling.
+23. **The terrain mip bias is clamped** to the device's `maxSamplerLodBias`
+    (`FrameTemporal::with_max_lod_bias`, read from the device at creation). §1's formula
+    reaches −2.58 at 3×, past Vulkan's guaranteed 2; the RTX 5070 Ti reports 15 and the
+    Radeon 610M 16, so the clamp only binds on a device at the minimum.
+24. **TAAU's confidence is the largest weight, not the total** (§3 says the total). The 3×3
+    reconstruction weights its samples by `exp(−2.29·d²)` of their jittered distance (a
+    Gaussian fit of Blackman-Harris) and normalises by their sum; the confidence that lowers
+    the history weight is the largest single weight, the nearest sample's closeness. The
+    total depends on the jitter phase even where a sample lands exactly on the pixel; the
+    largest does not.
+25. **`animated_uv` is not handled.** §2d's `tc_mask` draws water and "any material flagged
+    `animated_uv`"; no material has that flag, so only water draws. A material with
+    scrolling UVs would get motion for its geometry only and its texture would reproject as
+    if still; it joins `tc_mask` when one exists.
+26. **Motion history load.** The 4,096-slot table takes at most 3,072 keys a frame (3/4
+    load), so a probe (hit or miss) is a short run; further keys get camera-only motion.
+    Recording and reading back 1,000 units of 40 joints costs about 66 µs of CPU a frame on
+    the 9800X3D (`benches/motion_history.rs`, perf/0031).
+27. **Gate 1's client test** checks the client's mapping from settings to the renderer's
+    configuration (tiers, modes, floors and the warnings), which is close to restating the
+    code; what jitter, motion and TAAU do with that configuration is checked by the renderer's
+    tests and gates 2–3.
 
 **How the gates were made concrete:**
 
@@ -1062,22 +1146,44 @@ from the text above, or the text left a choice open, this is what was done and w
   the twin rebuilds each pixel's world position from depth through the jittered matrix and
   projects it through the unjittered ones, and every classified pixel must match within
   1/64 render pixel. The foliage is in a steady wind at the same environment time in both
-  frames, so the prepass's second evaluation at the previous time and displacers is
-  exercised; wind *animation* between frames is not twinned. Particle motion is not in the
-  gate's list and is not probed.
+  frames, so the prepass's second evaluation at the previous time is exercised; wind
+  *animation* between frames is not twinned. A second foliage patch has a displacer in frame
+  B only (**foliage-pushed**): with no per-blade twin it is checked by direction and share,
+  at least 30 % of its pixels moving 0.25 px or more beyond camera-only and at least 70 % of
+  those pointing back towards the displacer (blades flatten as well as bend). Dropping the
+  prepass's second evaluation makes every pushed blade camera-only, and the class fails
+  (checked by mutation). Particle motion is not in the gate's list here; gate 3's particle
+  projectile measures it.
 - **Gate 3, ghost energy,** is `Renderer::ghost_probe` (`MOBA_GHOST_PROBE=1`,
-  `scripts/ghost-probe.sh`). A hero-sized box dashes at 10 m per 0.2 s at 120 fps and a small
-  projectile crosses the screen at 1 m per frame. The 24-frame sequence is rendered with
-  history and again with every frame a history reset (the no-history reference), from the
-  same jitter phase. The wake is every pixel either object covered in the previous 12 frames
-  and more than 2 px from where it is now. Antialiasing is left out and counted: pixels on an
-  edge of the still scene (a 3×3 neighbourhood spanning more than 8/255) and pixels where the
-  same sequence without the movers already differs from its reference. **The fixed bound is
-  3 % of the wake on every one of the last 20 frames.** TAAU measured at most 2.39 % at
-  Quality and 1.20 % at native when the bound was set; the residue is the trailing edge of
-  the hero's moving shadow (a shadow has no motion of its own, and a still pixel's clip box
-  is the wider γ 1.25) and faint grid lines re-converging after a disocclusion. FSR 3.1 runs
-  it in N1b and DLSS on the RTX in N1c.
+  `scripts/ghost-probe.sh`). A hero-sized box dashes at 10 m per 0.2 s at 120 fps; a small box
+  projectile and a particle projectile cross the screen at 0.7 m per frame. The hero is three
+  slabs, dark, light, dark, over mid-tone tiles, so its neighbourhood spans the backdrop's
+  colours and the clip cannot hide a wrong history fetch on it. The 24-frame sequence is
+  rendered with history and again with every frame a history reset (the no-history
+  reference), from the same jitter phase, and the last 20 frames are measured three ways
+  (a pixel counts when a channel differs from the reference by more than 4/255):
+  - **Wake:** every pixel a mover covered in the previous 12 frames and more than 2 px from
+    where it is now. Antialiasing is left out and counted: pixels on an edge of the still
+    scene (a 3×3 neighbourhood spanning more than 8/255) and pixels where the same sequence
+    without the movers already differs from its reference. **Bound 3 % on every frame.**
+  - **Hero smear:** the hero's interior, off its silhouette and stripe edges. **Bound 1.75 %.**
+  - **Particle smear:** the particle's bright core. **Bound 7.5 %.**
+
+  **The bounds are regression tripwires, not perceptual thresholds**, each set about 25 %
+  above TAAU's lavapipe measurement. The wake's 3 % was set over the first version's 2.39 %
+  at Quality (1.20 % native); with the striped hero and the projectiles TAAU measures 0.57 %
+  native, 1.14 % Quality, 1.33 % Balanced and 1.98 % Performance. Its residue is the
+  trailing edge of the hero's moving shadow (a shadow has no motion of its own, and a still
+  pixel's clip box is the wider γ 1.25) and faint grid lines re-converging after a
+  disocclusion. The wake does **not** see a missing motion vector: with the hero's motion
+  keys removed it is unchanged (1.13 % at Quality), because the clip and the disocclusion
+  test rescue the trail. The on-object measures do. The hero's interior measures 0.00 %
+  native, 0.73 % Quality, 1.02 % Balanced and 1.37 % Performance, and 2.59 % (Quality) and
+  7.30 % (Performance) without its motion keys, which fail; at native it barely smears either
+  way (0.14 %), so native does not discriminate. The particle's core measures 1.40 %
+  native, 3.77 % Quality, 5.37 % Balanced and 5.88 % Performance, and 29.96 % at Quality
+  with the particles' motion output zeroed. FSR 3.1 runs the probe in N1b and DLSS on the
+  RTX in N1c.
 - **Gate 3, overlay invariance,** is `scripts/overlay-invariance.sh`: captures of the overlay
   IDs (`MOBA_DEBUG_VIEW=overlay-ids`) are byte-identical under TAAU at Quality, native and
   Performance, FXAA at scale 1.0 and 0.6, and AA off. FSR 3.1 joins in N1b.

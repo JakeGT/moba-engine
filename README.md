@@ -69,8 +69,9 @@ path `auto` is detected on every interactive start from the GPU's reference tabl
 its `max_tier`. A file without `settings_version = 1` was written before the tiered path, so
 its tier is re-detected on the tiered path and kept on Compat. `overdrive` is the tiered
 path's top tier and runs as `ultra` on Compat.
-On the tiered path dynamic resolution aims at the tier's GPU budget (§5c); until N1 ships the
-upscalers it is off unless `MOBA_DYNRES=on` (or a target in ms) turns it on. Today it picks the HDR
+On the tiered path dynamic resolution aims at the tier's GPU budget (§5c). With temporal AA
+(the tiered default since N1a) it runs between the upscale mode's scale and the tier's floor;
+with temporal AA off it is off unless `MOBA_DYNRES=on` (or a target in ms) turns it on. Today it picks the HDR
 target format (Low uses the packed 32-bit format) and the hero-portrait rate (static on Low,
 re-rendered only when the heroes change; `MOBA_PORTRAITS=off|static|animated|<hz>` and `MOBA_MINIMAP_BAKE=off|once` switch
 the portraits and the baked minimap). `render_path` (`auto`/`tiered`/`compat`, default `auto`)

@@ -132,6 +132,13 @@ Second-audit plan: [`docs/plans/audit-remediation-2026-10-19.md`](plans/audit-re
 - **#45** — extensibility roadmap map, not unfinished implementation work.
 - **#276** — asset pipeline, GPU skinning and mirror/balance: done (#308, #309, #311, #314,
   #316–#319). The epic and #286/#290 are still open on GitHub. Items have no asset references yet.
+- **Tiered perf-gate baselines (ADR-0021 amendment 2, item 16).** Since N1a, Tiered's absolute
+  per-tier budgets fail `perf-gate`, and the `[tiered.low|high|ultra]` baselines in
+  `tests/perf/baseline.toml` are compared report-only (`TIERED_BASELINE_FAILS = false`). Each
+  N1 part (N1b stage 2, N1c, N1d) re-records them; **the owner of the flip is whichever N1
+  part merges last**: it re-records the baselines on a quiet machine and sets
+  `TIERED_BASELINE_FAILS = true` in the same PR. Open after N1a; N1b stage 2, N1c and N1d
+  are still to merge.
 - Multi-match flood isolation (#292) is application-layer only: a spoofed multi-source flood
   on one port can still starve new handshakes on that port (other matches are unaffected, see
   [perf/0010](perf/0010-multi-match.md#flood-isolation)); public servers still need a
