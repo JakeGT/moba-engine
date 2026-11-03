@@ -4,7 +4,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use super::Fsr3Inputs;
+use crate::upscale::UpscaleInputs;
 
 /// `cbFSR3Upscaler` (HLSL packing; the field offsets are checked against the `slangc`
 /// reflection in the tests).
@@ -74,7 +74,7 @@ impl UpscalerConstants {
     /// phase count of this frame's sizes (ADR-0021 §1, see [`super::jitter_phases`]).
     pub(super) fn advance(
         &mut self,
-        inputs: &Fsr3Inputs,
+        inputs: &UpscaleInputs,
         upscale: [u32; 2],
         reset: bool,
         phases: u32,
@@ -122,7 +122,7 @@ impl UpscalerConstants {
 
 /// `setupDeviceDepthToViewSpaceDepthParams` for a non-inverted depth with a finite far plane
 /// (ADR-0021 §2a).
-fn device_to_view_depth(inputs: &Fsr3Inputs, aspect: f32) -> [f32; 4] {
+fn device_to_view_depth(inputs: &UpscaleInputs, aspect: f32) -> [f32; 4] {
     let near = inputs.near.min(inputs.far);
     let far = inputs.near.max(inputs.far);
     let q = far / (near - far);
@@ -176,7 +176,7 @@ fn to_i32(value: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsr3::{Fsr3Image, Fsr3Inputs};
+    use crate::upscale::{UpscaleImage, UpscaleInputs};
     use ash::vk;
     use moba_shaders::fsr3 as shaders;
 
@@ -330,14 +330,14 @@ mod tests {
         }
     }
 
-    fn inputs(render: (u32, u32)) -> Fsr3Inputs {
-        let image = Fsr3Image {
+    fn inputs(render: (u32, u32)) -> UpscaleInputs {
+        let image = UpscaleImage {
             image: vk::Image::null(),
             view: vk::ImageView::null(),
             format: vk::Format::UNDEFINED,
             extent: vk::Extent2D::default(),
         };
-        Fsr3Inputs {
+        UpscaleInputs {
             color: image,
             depth: image,
             motion: image,
@@ -355,6 +355,7 @@ mod tests {
             fov_y: core::f32::consts::FRAC_PI_3,
             reset: false,
             sharpness: 0.25,
+            frame_slot: 0,
         }
     }
 

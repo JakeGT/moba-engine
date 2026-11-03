@@ -69,8 +69,8 @@ use crate::targets::{self, OffscreenTarget, TargetExtents, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
 use crate::upscale::exposure::ExposureLinearPass;
 use crate::upscale::frame::{TemporalFrame, TemporalState};
-use crate::upscale::taau::{Taau, TaauDebugView};
-use crate::upscale::{TemporalUpscaler, UpscaleImage, UpscaleInputs, UpscaleOutput};
+use crate::upscale::taau::TaauDebugView;
+use crate::upscale::{UpscaleImage, UpscaleInputs, UpscaleOutput};
 use crate::vendor::latency::{self, LatencyBackend, LatencyFrame, LatencyMarker, LatencySetting};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 use crate::world::{
@@ -97,9 +97,9 @@ const _: () = assert!(
     crate::passes::fog::FOG_IMAGES == FRAMES_IN_FLIGHT
         && crate::lighting::MAIN_SETS == FRAMES_IN_FLIGHT
 );
-// FSR 3.1 keeps its descriptor sets and constants per history parity (ADR-0021 amendment 1).
+// FSR 3.1 keeps its descriptor sets and constants per frame slot too (ADR-0021 amendment 4).
 #[cfg(feature = "fsr3")]
-const _: () = assert!(FRAMES_IN_FLIGHT <= crate::fsr3::MAX_FRAMES_IN_FLIGHT);
+const _: () = assert!(crate::fsr3::SET_RING >= FRAMES_IN_FLIGHT);
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
 /// Largest side of an offscreen [`UiImage`] (the guaranteed `maxImageDimension2D`).
@@ -1139,22 +1139,23 @@ impl Renderer {
                 )
             })
             .transpose()?;
-        // ADR-0021 §3, §4: the back end (TAAU in the open build, Q1) with histories for the
-        // dynamic-resolution ceiling.
+        // ADR-0021 §3, §4: the back end (`MOBA_UPSCALER`; `auto` is TAAU in the open build,
+        // Q1) with its state sized for the dynamic-resolution ceiling. A back end that cannot
+        // run here falls back to TAAU with one log line.
         let temporal_state = if temporal {
-            let kind = crate::upscale::resolve(post_config.upscaler);
-            let taau = Taau::new(
+            let upscaler = crate::upscale::create(
                 &device,
                 &shaders,
+                post_config.upscaler,
                 swapchain.extent,
                 extents.render,
                 TaauDebugView::of(config.debug_view),
             )?;
-            let (smallest, largest) = taau.render_size_range(swapchain.extent, upscale_mode);
+            let (smallest, largest) = upscaler.render_size_range(swapchain.extent, upscale_mode);
             eprintln!(
                 "[render] anti-aliasing: temporal, upscaler {} ({} mode, render scale {:.3}..{:.3}, \
                  back-end range {}x{}..{}x{}, sharpness {:.2}{})",
-                kind.name(),
+                upscaler.kind().name(),
                 upscale_mode.name(),
                 post_config.min_render_scale.min(post_config.render_scale),
                 post_config.render_scale,
@@ -1165,14 +1166,14 @@ impl Renderer {
                 post_config.sharpness,
                 // ADR-0021 §3: a back end without its own sharpening needs the renderer's
                 // `sharpen` pass, which arrives with the vendor back ends (N1c).
-                if taau.has_sharpening() {
+                if upscaler.has_sharpening() {
                     ", fused"
                 } else {
                     ", no sharpening until N1c"
                 }
             );
             Some(
-                TemporalState::new(Box::new(taau), upscale_mode, post_config.sharpness)
+                TemporalState::new(upscaler, upscale_mode, post_config.sharpness)
                     .with_max_lod_bias(device.max_sampler_lod_bias),
             )
         } else {
@@ -3598,12 +3599,21 @@ impl Renderer {
         // (the shadow map) are kept.
         let extents = target_extents(swapchain.extent, self.post_config.render_scale);
         // ADR-0021 §2c: a resize re-sizes the back end's images (no pipeline is built,
-        // amendment 2 item 18) and forgets every history. The device is idle. Done before
-        // the swap below so a failed allocation cannot pair the new extent with old images.
+        // amendment 2 item 18) and forgets every history. Done before the swap below so a
+        // failed allocation cannot pair the new extent with old images. If the transients'
+        // resize below then fails, the error returns before any frame is recorded and the
+        // renderer keeps the old swapchain extent (that swapchain was retired by the new
+        // one's creation), so the next frame resizes again (its extent check, or an
+        // OUT_OF_DATE acquire) before recording: the back end's `accepts` never sees the
+        // targets at another size.
         if let Some(temporal) = self.temporal.as_mut() {
-            temporal
-                .upscaler
-                .resize(&self.device, swapchain.extent, extents.render)?;
+            // SAFETY: the device is idle (waited for at the top of this function), so no
+            // recorded frame is pending.
+            unsafe {
+                temporal
+                    .upscaler
+                    .resize(&self.device, swapchain.extent, extents.render)?;
+            }
             temporal.invalidate();
         }
         self.transients

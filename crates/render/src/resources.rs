@@ -501,7 +501,6 @@ impl GpuImage {
 
     /// Device memory this image holds: its allocation's size.
     #[inline]
-    #[cfg(feature = "fsr3")]
     pub(crate) fn allocated_bytes(&self) -> u64 {
         self.tracked.1
     }

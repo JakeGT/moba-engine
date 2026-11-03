@@ -1,9 +1,10 @@
 # FSR 3.1.6 upscaler port
 
 The open build's vendor-neutral temporal upscaler is our port of the AMD FidelityFX **FSR
-3.1.6 upscaler** (ADR-0020 §6a and Q9, ADR-0021 §4b, amendment 1). Frame generation is not
-ported. It is the `fsr3` cargo feature of `moba-render` (on by default) and needs nothing
-fetched.
+3.1.6 upscaler** (ADR-0020 §6a and Q9, ADR-0021 §4b, amendments 1 and 4). Frame generation is
+not ported. It is the `fsr3` cargo feature of `moba-render` (on by default) and needs nothing
+fetched. In the frame it is a `TemporalUpscaler` back end, chosen with `MOBA_UPSCALER=fsr3`
+(see [In the renderer](#in-the-renderer)); `auto` keeps TAAU (ADR-0021 Q1, amendment 4).
 
 | Piece | Where | Upstream |
 |---|---|---|
@@ -11,7 +12,8 @@ fetched.
 | The build of the passes | `crates/shaders/build.rs` (`FSR3_PASSES`, `compile_fsr3`) | the SDK's shader permutations |
 | The pass and binding table | `crates/shaders/src/fsr3.rs` (`moba_shaders::fsr3::PASSES`) | `ffx_fsr3upscaler_resources.h`, the passes' `register`s |
 | The constants | `crates/render/src/fsr3/constants.rs` | `fsr3upscalerDispatch` and `setupDeviceDepthToViewSpaceDepthParams` (`ffx_fsr3upscaler.cpp`), `ffxSpdSetup` (`ffx_spd.h`), `FsrRcasCon` (`ffx_fsr1.h`) |
-| Resources, descriptors, clears, barriers and dispatches | `crates/render/src/fsr3/context.rs` (`Fsr3`) | `fsr3upscalerDispatch`, `getInternalResourceDescriptions`, the Vulkan back end's clear jobs and samplers (`ffx_vk.cpp`) |
+| Resources, descriptors, clears, barriers and dispatches | `crates/render/src/fsr3/context.rs` (`Fsr3`, its `TemporalUpscaler` impl) | `fsr3upscalerDispatch`, `getInternalResourceDescriptions`, the Vulkan back end's clear jobs and samplers (`ffx_vk.cpp`) |
+| Choosing it, and the fallback to TAAU | `crates/render/src/upscale/mod.rs` (`resolve`, `create`) | — |
 | The smoke test | `crates/render/src/smoke/fsr3.rs`, `fsr3-smoke` | — |
 
 ## Building the passes
@@ -97,32 +99,38 @@ loaded); `R32_UINT` needs `STORAGE_IMAGE_ATOMIC`. The SPIR-V capabilities
 `StorageImage{Read,Write}WithoutFormat` are allowed by Vulkan 1.3 itself, so no device feature
 beyond the tiered set is enabled.
 
-Each pass has one descriptor set per parity. Because the history pairs swap by parity, two
-sets per pass cover every frame. Their internal descriptors (the constant blocks, the sampler,
-the internal images) are written once, at creation and after `resize`. The descriptors that
-name the caller's images are rewritten in this frame's parity on every
-`record`, from fixed arrays, so a view the caller recreated is never read through a stale
-descriptor, even one whose handle value was reused.
+Each pass has one descriptor set per frame-in-flight slot and history parity (`SET_RING`
+slots, 2, × 2 parities), and the constants one block of each kind per slot. The slot is the
+trait's `UpscaleInputs::frame_slot` (ADR-0021 amendment 2, item 17); the parity is the
+resource frame index's, because the history pairs swap by parity. The internal descriptors
+(the constant blocks, the sampler, the internal images) are written once, at creation and
+after `resize`. The descriptors that name the caller's images are rewritten in this frame's
+slot and parity on every `record`, from fixed arrays, so a view the caller recreated is never
+read through a stale descriptor, even one whose handle value was reused.
 
-`record` is an `unsafe fn`. Its safety contract: every recorded command buffer is submitted
-exactly once, in `record` order, on one queue (the context assumes its images were transitioned
-and cleared by the records before, and orders each frame only against the previous one on that
-queue; to start over, `resize` or drop the context); the command buffer of the call two
-`record`s back has finished executing; and the caller's images live until the GPU is done.
-That is at most
-two frames in flight (`MAX_FRAMES_IN_FLIGHT`), which the renderer's `FRAMES_IN_FLIGHT`
-asserts at compile time: `record` rewrites this parity's descriptor sets and constant slot,
-which the frame two back used. `resize` (new maximum sizes: new images, the pipelines kept)
-and dropping the context both need the GPU to have finished all of its work; the renderer
-idles the device first, as for every pass.
+`record` (the `TemporalUpscaler` method) is an `unsafe fn` with the trait's contract: every
+recorded command buffer is submitted exactly once, in `record` order, on one queue (the
+context assumes its images were transitioned and cleared by the records before, and orders
+each frame only against the previous one on that queue); at most `FRAMES_IN_FLIGHT` records
+are pending and `frame_slot`'s last submission has finished (this record rewrites that slot's
+sets and constants, which the renderer asserts at compile time with `SET_RING >=
+FRAMES_IN_FLIGHT`); and the caller's images live until the GPU is done. A caller that drops a
+recorded command buffer unsubmitted calls `reset_history` (the renderer's
+`forget_unsubmitted`), which makes the next record a first frame: every internal image is
+re-initialised, after a barrier that waits for every earlier compute and clear on the queue
+(`first_frame_barrier`, pinned by a unit test, since synchronization validation does not flag a
+`NONE` source). `resize` (new maximum sizes: new images, the pipelines kept; an `unsafe fn`
+on the trait) and dropping the context both need the GPU to have finished all of its work; the
+renderer idles the device first, as for every pass. `resize` builds the new images before
+dropping the old ones, so it briefly holds both sets.
 
 `record` follows `fsr3upscalerDispatch`:
 
 1. **Constants** for this frame (`UpscalerConstants::advance`, the SPD set-up, `FsrRcasCon`)
-   into this parity's slot of one host-visible uniform buffer.
-2. **The caller's descriptors** in this parity's sets, as above.
-3. **Clears.** The first frame moves every internal image to `GENERAL` (they stay there) and
-   initialises every one of them: zero, except the reconstructed depth (the far plane) and the
+   into this frame slot's blocks of one host-visible uniform buffer.
+2. **The caller's descriptors** in this slot's and parity's sets, as above.
+3. **Clears.** The first frame (at creation, after `resize` or `reset_history`) moves every
+   internal image to `GENERAL` (they stay there) and initialises every one of them: zero, except the reconstructed depth (the far plane) and the
    frame info (−1, 1, 0, 0). The SDK leaves most of them uninitialised; clearing them once
    means no pass can read garbage on the first frame (the new locks, for one, are written only
    where a lock forms and read everywhere). Later frames: a reset zeroes this frame's
@@ -152,6 +160,20 @@ the pre-exposure is 1; depth not inverted with a finite far plane. The tuning co
 SDK's defaults (velocity factor 1, reactiveness and shading-change scales 1, accumulation
 added per frame 1/3, minimum disocclusion accumulation −1/3).
 
+## In the renderer
+
+`upscale::create` builds the back end `MOBA_UPSCALER` resolves to (`upscale::resolve`): with
+`fsr3`, an `Fsr3` for the swapchain extent with the dynamic-resolution ceiling as its maximum
+render size; when the device cannot run it (`Fsr3::new`'s refusal above), TAAU with one log
+line. Only the chosen back end exists, so TAAU's history is never allocated while FSR 3.1 runs
+(`upscaler_vram_mb` in the frame log is FSR's own). `auto` is TAAU in the open build
+(`AUTO_OPEN_BUILD`, ADR-0021 Q1; the decision and its numbers are amendment 4 and
+[perf/0033](../perf/0033-fsr3-in-frame.md)). The client's mode maps by ratio (`Native` is FSR's
+native AA). FSR reports its own range, the SDK's truncated sizes (1706 at 2560 Quality, where
+TAAU and the controller round to 1707), but the controller is not clamped to it: the context
+accepts every size up to its maximum, which is the controller's ceiling. `MOBA_DEBUG_VIEW`'s
+temporal views are drawn by TAAU only (one log line under FSR 3.1).
+
 ## Render sizes (ADR-0021 §4c)
 
 **Any render size from 1×1 to the context's maximum is accepted, frame to frame, without a
@@ -177,7 +199,13 @@ analytic field (static, moving one render pixel a frame with matching motion vec
 sharpened), the render-size sweep (with the first frame after each change checked, then 9×5,
 2×1 and 1×1, and back), and a fine field near the render resolution's limit, still and moving,
 where the converged error must be at most 0.9× (0.95× moving) the first frame's: the
-accumulation recovers detail, and when moving only if the reprojection is right. Each
+accumulation recovers detail, and when moving only if the reprojection is right. Two
+**occluder** runs follow (ADR-0021 amendment 4): a box at a nearer depth crosses the still
+fine field with motion vectors on the box only, so there is a depth edge and a disoccluded
+trail. The trail the box left over 40 frames before the last must converge to at most 0.9× the
+fine field's single-frame error; and over a coarse checkerboard of the fine field, stepping
+from Performance to Quality halfway without a reset, the background's error must stay within
+5 % of the frame before for the two frames after the step. Each
 checkpoint bounds the mean and largest error over the interior and the largest over the whole
 image (a read outside the render rectangle brings in a sentinel of 1000), and the sharpened
 output must have more local contrast than the unsharpened one.
@@ -188,15 +216,26 @@ first frame (`Fsr3::poison`), the second starts from fresh allocations, and ever
 of the two must be bit-identical. Any validation or synchronization-validation message fails
 it. It runs in CI (render-golden) on lavapipe. Each of these faults, injected one at a time,
 fails it: the motion-vector scale wrong or zero, the jitter flipped on x or y alone, RCAS not
-run, a wrong render size in the constants. Two do not, because the scenes are a constant
-depth plane with no change in shading: a stale previous-frame render size (it feeds only the
-luma-instability and shading-change masks, which stay near zero here) and skipping the
-every-frame clear of the reconstructed previous depth (nothing is disoccluded, so the depth
-reconstruction never matters). Stage 2 needs a scene with a depth edge and disocclusion, and a
-change in shading across a size step, to cover both. Do not loosen the moving fine field's
-0.95× bound: RADV's clean 0.88 sits about 7 % under it, and misscaled motion vectors give 1.003.
-The smoke also reports `vram_bytes` at real sizes.
-Results on lavapipe, an RTX 5070 Ti and a Radeon 610M: [docs/perf/0030](../perf/0030-fsr3-port.md).
+run, a wrong render size in the constants, and (since the occluder runs) a stale
+previous-frame render size (the step's background error drops 11 %: FSR reads the previous
+luma and accumulation at the wrong scale) and skipping the every-frame clear of the
+reconstructed previous depth (the old trail stays at 0.97× the single-frame error: everywhere
+the box ever was stays disoccluded). Do not loosen the moving fine field's 0.95× bound:
+RADV's clean 0.88 sits about 7 % under it, and misscaled motion vectors give 1.003. The smoke
+also reports `vram_bytes` at real sizes. Results on lavapipe, an RTX 5070 Ti and a Radeon
+610M: [docs/perf/0030](../perf/0030-fsr3-port.md) and, with the occluder runs,
+[docs/perf/0033](../perf/0033-fsr3-in-frame.md).
+
+In the frame, FSR 3.1 also runs in the readability gates (ADR-0021 gate 3: the ghost probe
+and overlay invariance) and in `scripts/tiered-goldens.sh` (two lavapipe runs byte-identical,
+an exact SHA-256 per capture checked only on CI's lavapipe, where a device mismatch fails
+the job, fingerprints that catch a broken
+frame on any lavapipe, and a mid-stream reset every fifth frame under synchronization
+validation), all in CI's `tiered-temporal` job (`UPSCALERS=fsr3`). A change that alters
+FSR 3.1's output on purpose regenerates the hashes from CI's artifact (or `WRITE_HASHES=1` on
+that lavapipe). Run the ghost probe on a real GPU as well as lavapipe
+(ADR-0021 amendment 4, item 14): its particle bound is 7.5 % at Quality and native and 15 %
+from Performance down.
 
 ## Updating the SDK
 

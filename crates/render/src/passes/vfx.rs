@@ -466,6 +466,9 @@ pub(crate) struct VfxPipelines {
     simulate: GraphicsPipeline,
     sprite: GraphicsPipeline,
     mesh: Option<GraphicsPipeline>,
+    /// With temporal AA, the motion-only draws of the sprites and the mesh particles
+    /// (ADR-0021 §2b, amendment 4).
+    motion: Option<(GraphicsPipeline, Option<GraphicsPipeline>)>,
     resolve: Option<GraphicsPipeline>,
     /// The heat-haze pipeline (ADR-0019); `None` without distortion.
     distortion: Option<GraphicsPipeline>,
@@ -509,7 +512,8 @@ pub(crate) struct VfxPass {
     mesh_region: u32,
     hdr_format: vk::Format,
     depth_format: vk::Format,
-    /// The draws also write motion and the reactive mask (ADR-0021 §2d).
+    /// The colour draws also write the reactive mask, and a second, motion-only draw writes
+    /// the particles' motion (ADR-0021 §2d, amendment 4 item 13).
     temporal: bool,
     /// The overlay's target format (Tiered, ADR-0021 §5b).
     overlay_format: Option<vk::Format>,
@@ -1317,19 +1321,21 @@ impl VfxPass {
                 count += 1;
             }
         }
-        // ADR-0021 §2d: the prepass's motion and the cleared reactive mask, both loaded.
-        if self.temporal
+        // ADR-0021 §2d: the cleared reactive mask, loaded. The prepass's motion is the
+        // motion-only draw's own attachment, below (amendment 4).
+        let motion = if self.temporal
             && let Some((motion, reactive)) = targets.temporal
         {
-            for view in [motion, reactive] {
-                colors[count] = vk::RenderingAttachmentInfo::default()
-                    .image_view(view)
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .load_op(vk::AttachmentLoadOp::LOAD)
-                    .store_op(vk::AttachmentStoreOp::STORE);
-                count += 1;
-            }
-        }
+            colors[count] = vk::RenderingAttachmentInfo::default()
+                .image_view(reactive)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            count += 1;
+            Some(motion)
+        } else {
+            None
+        };
         // Read-only depth: tested, never written (STORE_OP_NONE), and sampled for soft
         // particles in the same pass.
         let depth = vk::RenderingAttachmentInfo::default()
@@ -1365,7 +1371,41 @@ impl VfxPass {
                 &[],
             );
         }
-        bind_graphics(device, command_buffer, &self.pipelines.sprite);
+        self.draw_particles(
+            device,
+            command_buffer,
+            scene,
+            &self.pipelines.sprite,
+            self.pipelines.mesh.as_ref(),
+        );
+        device.cmd_end_rendering(command_buffer);
+        // ADR-0021 §2b, amendment 4: the same particles again in a scope of their own, with
+        // the prepass's motion as the only colour attachment, writing their motion where
+        // their coverage reaches the core. The sets, viewport and scissor stay bound.
+        if let (Some(view), Some((sprite, mesh))) = (motion, &self.pipelines.motion) {
+            let motion = [vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE)];
+            let render_info = render_info.color_attachments(&motion);
+            device.cmd_begin_rendering(command_buffer, &render_info);
+            self.draw_particles(device, command_buffer, scene, sprite, mesh.as_ref());
+            device.cmd_end_rendering(command_buffer);
+        }
+    }
+
+    /// Records the sprite draw and every mesh slot's draw with `sprite` and `mesh`, inside
+    /// the particle pass's rendering scope with its sets bound.
+    fn draw_particles(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        scene: &ScenePass,
+        sprite: &GraphicsPipeline,
+        mesh: Option<&GraphicsPipeline>,
+    ) {
+        bind_graphics(device, command_buffer, sprite);
         self.push(device, command_buffer, 0, 0);
         // SAFETY: the args buffer holds a VkDrawIndirectCommand at offset 0 whose instance
         // count the simulation clamped to the sprite list's capacity, and was created with
@@ -1375,7 +1415,7 @@ impl VfxPass {
                 .device
                 .cmd_draw_indirect(command_buffer, self.args.handle(), 0, 1, 16);
         }
-        if let Some(pipeline) = &self.pipelines.mesh {
+        if let Some(pipeline) = mesh {
             let mut bound = false;
             for (slot, entry) in self.mesh_slots.iter().enumerate() {
                 let Some(mesh) = entry.and_then(|(id, _)| scene.mesh(id)) else {
@@ -1421,7 +1461,6 @@ impl VfxPass {
                 }
             }
         }
-        device.cmd_end_rendering(command_buffer);
     }
 
     /// Records `overlay_vfx` (ADR-0021 §5b): the enemy-telegraph particles (the sprite
@@ -1817,7 +1856,8 @@ struct PipelineLayouts {
 struct TargetFormats {
     hdr: vk::Format,
     depth: vk::Format,
-    /// The draws add motion and the reactive mask (ADR-0021 §2d).
+    /// The colour draws add the reactive mask; the motion-only draw is built too (ADR-0021
+    /// §2d, amendment 4 item 13).
     temporal: bool,
     /// The overlay's target (ADR-0021 §5b).
     overlay: Option<vk::Format>,
@@ -1858,8 +1898,8 @@ fn build_pipelines(
     } else {
         Blend::Premultiplied
     };
-    // ADR-0021 §2d: motion (exact replace or keep) and the reactive mask (MAX) follow the
-    // colour targets.
+    // ADR-0021 §2d: the reactive mask (MAX) follows the colour targets. Motion is the
+    // motion-only draw's own target (amendment 4).
     let mut formats = [vk::Format::UNDEFINED; 5];
     let mut blends = [blend; 5];
     let mut count = 0;
@@ -1871,11 +1911,9 @@ fn build_pipelines(
         count += 1;
     }
     if temporal {
-        formats[count] = crate::frame_graph::MOTION_FORMAT;
-        blends[count] = Blend::Motion;
-        formats[count + 1] = crate::frame_graph::MASK_FORMAT;
-        blends[count + 1] = Blend::Max;
-        count += 2;
+        formats[count] = crate::frame_graph::MASK_FORMAT;
+        blends[count] = Blend::Max;
+        count += 1;
     }
     let (sprite_vertex, mesh_vertex) = if temporal {
         ("vfx_temporal.vert", "vfx_mesh_temporal.vert")
@@ -1909,6 +1947,29 @@ fn build_pipelines(
                 mesh_input: true,
             },
         )?)
+    } else {
+        None
+    };
+    let motion = if temporal {
+        // Both blend paths: the draw writes no colour (`vfx_motion.frag`).
+        let fragment = module("vfx_motion.frag")?;
+        let spec = |vertex: vk::ShaderModule, mesh_input| ParticleSpec {
+            layout,
+            vertex,
+            fragment: fragment.handle(),
+            formats: &[crate::frame_graph::MOTION_FORMAT],
+            blends: &[Blend::Motion],
+            depth_format,
+            mesh_input,
+        };
+        let sprite = particle_pipeline(device, &spec(sprite_vertex.handle(), false))?;
+        let mesh = if meshes {
+            let vertex = module(mesh_vertex)?;
+            Some(particle_pipeline(device, &spec(vertex.handle(), true))?)
+        } else {
+            None
+        };
+        Some((sprite, mesh))
     } else {
         None
     };
@@ -1980,6 +2041,7 @@ fn build_pipelines(
         simulate,
         sprite,
         mesh,
+        motion,
         resolve,
         distortion,
         overlay,
@@ -1997,8 +2059,11 @@ enum Blend {
     /// `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` on colour, destination alpha kept: the heat haze
     /// cross-fades overlapping sprites (ADR-0019).
     Refract,
-    /// Motion vectors (ADR-0021 §2d): `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` on red and green
-    /// only, with an alpha of 0 or 1: an exact replace or an exact keep.
+    /// Motion vectors (ADR-0021 §2d, amendment 4): no blending, red and green written, the
+    /// only target of the motion-only draw, which clears the sample mask of the fragments
+    /// that keep what is under them. Nothing depends on how a two-channel target takes a
+    /// source alpha or a write mask beside other targets (lavapipe does neither as the spec
+    /// says).
     Motion,
     /// `MAX` on red only: the reactive mask (ADR-0021 §2d).
     Max,
@@ -2020,15 +2085,21 @@ struct ParticleSpec<'a> {
 
 /// One attachment's blend state.
 fn blend_state(blend: Blend) -> vk::PipelineColorBlendAttachmentState {
+    if blend == Blend::Motion {
+        return vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(false)
+            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G);
+    }
     let (src, dst) = match blend {
         Blend::Add | Blend::Max => (vk::BlendFactor::ONE, vk::BlendFactor::ONE),
         Blend::Premultiplied => (vk::BlendFactor::ONE, vk::BlendFactor::ONE_MINUS_SRC_ALPHA),
-        Blend::Over | Blend::Refract | Blend::Motion => (
+        Blend::Motion => unreachable!("returned above"),
+        Blend::Over | Blend::Refract => (
             vk::BlendFactor::SRC_ALPHA,
             vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
         ),
     };
-    let (src_alpha, dst_alpha) = if matches!(blend, Blend::Refract | Blend::Motion) {
+    let (src_alpha, dst_alpha) = if blend == Blend::Refract {
         (vk::BlendFactor::ZERO, vk::BlendFactor::ONE)
     } else {
         (src, dst)
@@ -2039,7 +2110,6 @@ fn blend_state(blend: Blend) -> vk::PipelineColorBlendAttachmentState {
         vk::BlendOp::ADD
     };
     let mask = match blend {
-        Blend::Motion => vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
         Blend::Max => vk::ColorComponentFlags::R,
         _ => vk::ColorComponentFlags::RGBA,
     };

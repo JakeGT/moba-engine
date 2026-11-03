@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Overlay invariance (ADR-0021 §5, verification gate 3): the post-upscale gameplay overlay
 # reads only the unjittered output-resolution overlay prepass, so its ID target must be
-# byte-identical whichever anti-aliasing runs and at every render scale. Each capture shows
+# byte-identical whichever anti-aliasing and upscaler (TAAU, FSR 3.1) run and at every render
+# scale. Each capture shows
 # the overlay IDs (MOBA_DEBUG_VIEW=overlay-ids) of the VFX preview arena with an outlined
 # enemy hero in the open (MOBA_OUTLINE_PROBE=open), on the tiered path, and every one must
 # equal the first.
@@ -28,20 +29,44 @@ capture() {
     exit 1
   fi
 }
-cases=(
-  "taau-quality MOBA_AA=temporal MOBA_UPSCALE_MODE=quality"
-  "taau-native MOBA_AA=temporal MOBA_UPSCALE_MODE=native"
-  "taau-performance MOBA_AA=temporal MOBA_UPSCALE_MODE=performance"
-  "fxaa MOBA_AA=fxaa"
-  "fxaa-scaled MOBA_AA=fxaa MOBA_RENDER_SCALE=0.6"
-  "off MOBA_AA=off"
-)
+# UPSCALERS picks the temporal back ends (default "taau fsr3"). The reference is always TAAU
+# Quality; the FXAA and no-AA cases run with TAAU's set. CI runs "taau" in the required
+# renderer-gate and "fsr3" in tiered-temporal.
+upscalers=" ${UPSCALERS:-taau fsr3} "
+cases=("taau-quality MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=quality")
+if [[ $upscalers == *" taau "* ]]; then
+  cases+=(
+    "taau-native MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=native"
+    "taau-performance MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=performance"
+    "fxaa MOBA_AA=fxaa"
+    "fxaa-scaled MOBA_AA=fxaa MOBA_RENDER_SCALE=0.6"
+    "off MOBA_AA=off"
+  )
+fi
+if [[ $upscalers == *" fsr3 "* ]]; then
+  cases+=(
+    "fsr3-quality MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=quality"
+    "fsr3-native MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=native"
+    "fsr3-performance MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=performance"
+  )
+fi
 status=0
 reference=
 for entry in "${cases[@]}"; do
   read -r name settings <<< "$entry"
   # shellcheck disable=SC2086 # settings are separate assignments.
   capture "$name" $settings
+  # A back end that fell back would compare TAAU with itself.
+  case $name in
+    fsr3-*)
+      if ! grep -q "upscaler fsr3 " "$out/$name.log"; then
+        echo "FAIL: $name did not run fsr3"
+        grep "upscaler" "$out/$name.log" || true
+        status=1
+        continue
+      fi
+      ;;
+  esac
   if [ -z "$reference" ]; then
     reference=$name
     echo "reference: $name"

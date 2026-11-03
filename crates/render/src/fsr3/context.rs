@@ -8,7 +8,7 @@ use gpu_allocator::MemoryLocation;
 use moba_shaders::fsr3::{self as shaders, Kind, Pass};
 
 use super::constants::{RcasConstants, SpdConstants, UpscalerConstants};
-use super::{Fsr3Inputs, Fsr3Mode, Fsr3Output, KIND, jitter_phases};
+use super::{Fsr3Mode, jitter_phases};
 use crate::caps::RenderPath;
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
@@ -16,12 +16,17 @@ use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GpuImage, GraphicsPipeline, PipelineLayout,
     Sampler, ShaderModule,
 };
+use crate::upscale::{
+    Extent, TemporalUpscaler, UpscaleInputs, UpscaleMode, UpscaleOutput, UpscalerKind,
+};
 
-/// The frames in flight one context supports: its descriptor sets and constant slots are kept
-/// per parity of the resource frame index, so the record two calls back must have completed
-/// before the next (see [`Fsr3::record`]'s safety section). The renderer asserts its
-/// `FRAMES_IN_FLIGHT` against this.
-pub(crate) const MAX_FRAMES_IN_FLIGHT: usize = 2;
+/// Frame-in-flight slots: each pass keeps a descriptor set per slot and history parity, and
+/// the constants a block per slot, chosen by `UpscaleInputs::frame_slot` (ADR-0021 amendment
+/// 2, item 17). The caller records a slot only after that slot's last submission finished,
+/// so a set or constant block is never rewritten while a pending frame reads it, however many
+/// recorded frames were dropped unsubmitted. The renderer asserts `SET_RING >=
+/// FRAMES_IN_FLIGHT`.
+pub(crate) const SET_RING: usize = 2;
 
 /// `FSR3UPSCALER_MAX_QUEUED_FRAMES`: the resource frame index runs modulo this (even) count;
 /// its parity picks the history images.
@@ -157,7 +162,7 @@ enum Source {
     LinearClamp,
 }
 
-/// The three constant blocks of one parity slot.
+/// The three constant blocks of one frame slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Block {
     Upscaler,
@@ -165,7 +170,7 @@ enum Block {
     Rcas,
 }
 
-/// A caller's image: one of [`Fsr3Inputs`]' or the output.
+/// A caller's image: one of [`UpscaleInputs`]' or the output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum External {
     Color,
@@ -192,7 +197,7 @@ impl External {
         })
     }
 
-    fn view(self, inputs: &Fsr3Inputs, out: &Fsr3Output) -> vk::ImageView {
+    fn view(self, inputs: &UpscaleInputs, out: &UpscaleOutput) -> vk::ImageView {
         match self {
             Self::Color => inputs.color.view,
             Self::Depth => inputs.depth.view,
@@ -214,7 +219,7 @@ impl External {
     }
 }
 
-/// One descriptor that names a caller's image: rewritten in this frame's parity sets on every
+/// One descriptor that names a caller's image: rewritten in this frame's sets on every
 /// `record`, so a view the caller recreated (even one whose handle value is reused) is never
 /// read through a stale descriptor.
 #[derive(Clone, Copy, Debug)]
@@ -225,13 +230,13 @@ struct ExternalBinding {
     external: External,
 }
 
-/// One pass's pipeline and its descriptor set for each parity.
+/// One pass's pipeline and its descriptor sets, by frame slot and history parity.
 struct PassPipeline {
     // Destroyed in field order: the pipeline before its layouts.
     pipeline: GraphicsPipeline,
     layout: PipelineLayout,
     _set_layout: DescriptorSetLayout,
-    sets: [vk::DescriptorSet; 2],
+    sets: [[vk::DescriptorSet; 2]; SET_RING],
 }
 
 /// One internal image with its format and the value the first frame clears it to.
@@ -570,7 +575,7 @@ pub(crate) struct Fsr3 {
     device: ash::Device,
     max_render: vk::Extent2D,
     max_output: vk::Extent2D,
-    /// Host-visible: two parity slots of the three constant blocks.
+    /// Host-visible: the three constant blocks per frame slot ([`SET_RING`] of them).
     uniforms: GpuBuffer,
     /// Bytes from one constant block to the next (aligned for uniform offsets).
     block_stride: u64,
@@ -633,7 +638,7 @@ impl Fsr3 {
             device.device.clone(),
             device.allocator(),
             "fsr3-constants",
-            block_stride * 3 * 2,
+            block_stride * 3 * SET_RING as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             MemoryLocation::CpuToGpu,
         )?;
@@ -643,11 +648,13 @@ impl Fsr3 {
         for (index, pass) in shaders::PASSES.iter().enumerate() {
             for binding in pass.bindings.iter().filter(|binding| binding.used) {
                 let ty = descriptor_type(binding.kind);
+                // One per set: two history parities in each frame slot.
+                let sets = 2 * SET_RING as u32;
                 match pool_sizes.iter_mut().find(|size| size.ty == ty) {
-                    Some(size) => size.descriptor_count += 2,
+                    Some(size) => size.descriptor_count += sets,
                     None => pool_sizes.push(vk::DescriptorPoolSize {
                         ty,
-                        descriptor_count: 2,
+                        descriptor_count: sets,
                     }),
                 }
                 if let Some(external) = External::of(binding.name) {
@@ -665,7 +672,11 @@ impl Fsr3 {
             "FSR 3.1: {} descriptors name a caller's image, over {MAX_EXTERNAL_WRITES}",
             externals.len()
         );
-        let pool = DescriptorPool::new(device.device.clone(), &pool_sizes, PASS_COUNT as u32 * 2)?;
+        let pool = DescriptorPool::new(
+            device.device.clone(),
+            &pool_sizes,
+            (PASS_COUNT * 2 * SET_RING) as u32,
+        )?;
         let mut passes = Vec::with_capacity(PASS_COUNT);
         for pass in shaders::PASSES {
             passes.push(PassPipeline::new(device, pass, &pool)?);
@@ -699,7 +710,7 @@ impl Fsr3 {
 
     /// Re-creates the internal images for new maximum sizes, keeping the pipelines, the
     /// descriptor pool and sets, the sampler and the constant buffer, and starts over as a new
-    /// context (the next frame is a first frame).
+    /// context (the next frame is a first frame). [`TemporalUpscaler::resize`].
     ///
     /// # Errors
     /// A Vulkan or allocation error; the context is then unchanged. (The new images are
@@ -707,11 +718,7 @@ impl Fsr3 {
     ///
     /// # Panics
     /// Unless `0 < max_render <= max_output` on both axes.
-    ///
-    /// # Safety
-    /// The GPU has finished every command buffer this context recorded (the old images are
-    /// destroyed here and the descriptor sets rewritten).
-    pub(crate) unsafe fn resize(
+    fn reallocate(
         &mut self,
         device: &DeviceContext,
         max_render: vk::Extent2D,
@@ -734,43 +741,6 @@ impl Fsr3 {
         Ok(())
     }
 
-    /// `"fsr3"`.
-    #[allow(clippy::unused_self)] // The shape of ADR-0021 §4a's trait method.
-    pub(crate) fn kind(&self) -> &'static str {
-        KIND
-    }
-
-    /// The render sizes this context accepts for `output` in `mode`: from Ultra Performance's
-    /// size (the largest ratio FSR 3.1 documents, 3×, and the dynamic-resolution floor's
-    /// lowest mode, ADR-0021 §4c) up to the mode's size, both clamped to the context's
-    /// maximum. Any size in between works (§4c, amendment 1).
-    pub(crate) fn render_size_range(
-        &self,
-        output: vk::Extent2D,
-        mode: Fsr3Mode,
-    ) -> (vk::Extent2D, vk::Extent2D) {
-        let clamp = |size: vk::Extent2D| vk::Extent2D {
-            width: size.width.min(self.max_render.width),
-            height: size.height.min(self.max_render.height),
-        };
-        (
-            clamp(Fsr3Mode::UltraPerformance.render_size(output)),
-            clamp(mode.render_size(output)),
-        )
-    }
-
-    /// The jitter phase count for these sizes (ADR-0021 §1).
-    #[allow(clippy::unused_self)] // The shape of ADR-0021 §4a's trait method.
-    pub(crate) fn jitter_phases(&self, render: vk::Extent2D, output: vk::Extent2D) -> u32 {
-        jitter_phases(render, output)
-    }
-
-    /// FSR sharpens with RCAS itself, so the renderer's `sharpen` pass does not run.
-    #[allow(clippy::unused_self)] // The shape of ADR-0021 §4a's trait method.
-    pub(crate) fn has_sharpening(&self) -> bool {
-        true
-    }
-
     /// Whether `record` takes this render size and output size.
     pub(crate) fn accepts(&self, render: vk::Extent2D, output: vk::Extent2D) -> bool {
         render.width > 0
@@ -781,16 +751,6 @@ impl Fsr3 {
             && output.height <= self.max_output.height
             && render.width <= output.width
             && render.height <= output.height
-    }
-
-    /// Forgets every history: the next frame starts from its own sample.
-    pub(crate) fn reset_history(&mut self) {
-        self.reset_requested = true;
-    }
-
-    /// Device memory the context owns: its images and constant buffer.
-    pub(crate) fn vram_bytes(&self) -> u64 {
-        self.vram_bytes
     }
 
     fn measure_vram(&self) -> u64 {
@@ -820,19 +780,10 @@ impl Fsr3 {
             "FSR 3.1: poison before the first frame only"
         );
         let entries = self.images.all();
+        // As a fresh first frame's transition (also valid after a mid-stream history reset).
         let barriers: Vec<vk::ImageMemoryBarrier2> = entries
             .iter()
-            .map(|entry| {
-                image_barrier(
-                    entry.image,
-                    (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
-                    (
-                        vk::PipelineStageFlags2::CLEAR,
-                        vk::AccessFlags2::TRANSFER_WRITE,
-                    ),
-                    vk::ImageLayout::UNDEFINED,
-                )
-            })
+            .map(|entry| first_frame_barrier(entry.image.image(), false))
             .collect();
         self.barrier(cmd, &[], &barriers);
         for entry in &entries {
@@ -872,20 +823,22 @@ impl Fsr3 {
     ///   be in `GENERAL` and initialised, and each frame's barriers order it only against the
     ///   previous record's commands earlier on the same queue. Dropping a recorded command
     ///   buffer unsubmitted (or reordering two) leaves later records reading images that were
-    ///   never transitioned or cleared; to start over, `resize` (which makes the next record
-    ///   a first frame again) or drop the context.
-    /// - **At most [`MAX_FRAMES_IN_FLIGHT`] records in flight.** When this is called, the
-    ///   command buffer of the call two `record`s back has finished executing. This call
-    ///   rewrites the descriptor sets and the host-visible constant slot of its parity, which
-    ///   that command buffer used: rewriting them while it is pending is undefined behaviour.
+    ///   never transitioned or cleared; to start over, call
+    ///   [`TemporalUpscaler::reset_history`] or `resize` (either makes the next record a
+    ///   first frame again, whose re-initialisation waits for every earlier compute and clear
+    ///   on the queue) or drop the context.
+    /// - **At most [`SET_RING`] records pending, and `inputs.frame_slot`'s last submission
+    ///   has finished.** This call rewrites that slot's descriptor sets and constant blocks,
+    ///   which that submission used: rewriting them while it is pending is undefined
+    ///   behaviour.
     /// - Every image and view in `inputs` and `out` stays alive until this command buffer
     ///   has finished executing.
     #[allow(clippy::too_many_lines)] // The SDK's dispatch, in order.
-    pub(crate) unsafe fn record(
+    unsafe fn record_frame(
         &mut self,
         cmd: vk::CommandBuffer,
-        inputs: &Fsr3Inputs,
-        out: &Fsr3Output,
+        inputs: &UpscaleInputs,
+        out: &UpscaleOutput,
     ) {
         let render = inputs.render_size;
         let output = out.image.extent;
@@ -920,12 +873,14 @@ impl Fsr3 {
         );
         let odd = self.frame_index & 1 == 1;
         let parity = usize::from(odd);
+        let slot = inputs.frame_slot % SET_RING;
         let first = self.first_frame;
         let reset = inputs.reset || self.reset_requested || first;
         self.first_frame = false;
         self.reset_requested = false;
 
-        // Constants, into this parity's slot (not in use by the GPU: the safety contract).
+        // Constants, into this frame slot's blocks (not in use by the GPU: the safety
+        // contract).
         self.constants.advance(
             inputs,
             [output.width, output.height],
@@ -934,51 +889,29 @@ impl Fsr3 {
         );
         let (spd, spd_groups) = SpdConstants::new([render.width, render.height]);
         let rcas = RcasConstants::new(inputs.sharpness);
-        let slot = self.slot_offset(parity, Block::Upscaler);
+        let offset = self.slot_offset(slot, Block::Upscaler);
         self.uniforms
-            .write_bytes(slot as usize, bytemuck::bytes_of(&self.constants));
-        let slot = self.slot_offset(parity, Block::Spd);
+            .write_bytes(offset as usize, bytemuck::bytes_of(&self.constants));
+        let offset = self.slot_offset(slot, Block::Spd);
         self.uniforms
-            .write_bytes(slot as usize, bytemuck::bytes_of(&spd));
-        let slot = self.slot_offset(parity, Block::Rcas);
+            .write_bytes(offset as usize, bytemuck::bytes_of(&spd));
+        let offset = self.slot_offset(slot, Block::Rcas);
         self.uniforms
-            .write_bytes(slot as usize, bytemuck::bytes_of(&rcas));
+            .write_bytes(offset as usize, bytemuck::bytes_of(&rcas));
 
         // The caller's views, every frame.
-        self.write_external_sets(parity, inputs, out);
+        self.write_external_sets(slot, parity, inputs, out);
 
         // Clears. The first frame moves every internal image to GENERAL (from the poison
         // hook's clears when it ran) and initialises all of them; later frames wait for the
         // previous frame's compute work on them.
         if first {
-            let (src, old_layout) = if self.poisoned {
-                (
-                    (
-                        vk::PipelineStageFlags2::CLEAR,
-                        vk::AccessFlags2::TRANSFER_WRITE,
-                    ),
-                    vk::ImageLayout::GENERAL,
-                )
-            } else {
-                (
-                    (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
-                    vk::ImageLayout::UNDEFINED,
-                )
-            };
+            let poisoned = self.poisoned;
+            self.poisoned = false;
             let entries = self.images.all();
             let barriers: Vec<vk::ImageMemoryBarrier2> = entries
                 .iter()
-                .map(|entry| {
-                    image_barrier(
-                        entry.image,
-                        src,
-                        (
-                            vk::PipelineStageFlags2::CLEAR,
-                            vk::AccessFlags2::TRANSFER_WRITE,
-                        ),
-                        old_layout,
-                    )
-                })
+                .map(|entry| first_frame_barrier(entry.image.image(), poisoned))
                 .collect();
             self.barrier(cmd, &[], &barriers);
             for entry in &entries {
@@ -1092,17 +1025,18 @@ impl Fsr3 {
                 );
             }
             // SAFETY: `cmd` is recording; the layout and the set are live and compatible.
-            // Every descriptor of this parity's set is written: the internal ones at creation
-            // (their images are in GENERAL from this frame's first-frame barrier on) and the
-            // caller's just above, in the layouts this method's preconditions name; the caller
-            // guarantees the GPU is not using this parity's set (the safety contract).
+            // Every descriptor of the set `sets[slot][parity]` is written: the internal ones at
+            // creation (their images are in GENERAL from this frame's first-frame barrier on)
+            // and the caller's just above, in the layouts this method's preconditions name; the
+            // caller guarantees that frame slot `slot`'s last submission has finished, so the
+            // GPU is not using any of its sets (the safety contract).
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::COMPUTE,
                     pass.layout.handle(),
                     0,
-                    &[pass.sets[parity]],
+                    &[pass.sets[slot][parity]],
                     &[],
                 );
             }
@@ -1114,8 +1048,9 @@ impl Fsr3 {
         self.frame_index = (self.frame_index + 1) % MAX_QUEUED_FRAMES;
     }
 
-    fn slot_offset(&self, parity: usize, block: Block) -> u64 {
-        let index = parity as u64 * 3
+    /// The byte offset of `block` in frame slot `slot`'s constants.
+    fn slot_offset(&self, slot: usize, block: Block) -> u64 {
+        let index = slot as u64 * 3
             + match block {
                 Block::Upscaler => 0,
                 Block::Spd => 1,
@@ -1125,15 +1060,15 @@ impl Fsr3 {
     }
 
     /// Writes every internal descriptor (constant blocks, the sampler, internal images) of
-    /// both parities' sets. At creation and after `resize` only: these never change between
-    /// frames.
+    /// every slot's and parity's sets. At creation and after `resize` only: these never change
+    /// between frames.
     fn write_internal_sets(&self) {
         let mut image_infos: Vec<[vk::DescriptorImageInfo; 1]> = Vec::new();
         let mut buffer_infos: Vec<[vk::DescriptorBufferInfo; 1]> = Vec::new();
         // (set, binding, type, image info index or buffer info index).
         let mut targets: Vec<(vk::DescriptorSet, u32, vk::DescriptorType, bool, usize)> =
             Vec::new();
-        for parity in 0..2 {
+        for (slot, parity) in (0..SET_RING).flat_map(|slot| [(slot, 0), (slot, 1)]) {
             let odd = parity == 1;
             for (pass, pipeline) in shaders::PASSES.iter().zip(&self.passes) {
                 for binding in pass.bindings.iter().filter(|binding| binding.used) {
@@ -1150,7 +1085,7 @@ impl Fsr3 {
                             };
                             buffer_infos.push([vk::DescriptorBufferInfo {
                                 buffer: self.uniforms.handle(),
-                                offset: self.slot_offset(parity, block),
+                                offset: self.slot_offset(slot, block),
                                 range: size as u64,
                             }]);
                             (false, buffer_infos.len() - 1)
@@ -1172,7 +1107,13 @@ impl Fsr3 {
                             (true, image_infos.len() - 1)
                         }
                     };
-                    targets.push((pipeline.sets[parity], binding.binding, ty, is_image, index));
+                    targets.push((
+                        pipeline.sets[slot][parity],
+                        binding.binding,
+                        ty,
+                        is_image,
+                        index,
+                    ));
                 }
             }
         }
@@ -1197,9 +1138,15 @@ impl Fsr3 {
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
     }
 
-    /// Writes the descriptors that name the caller's images in parity `parity`'s sets, from
-    /// fixed arrays (no allocation per frame).
-    fn write_external_sets(&self, parity: usize, inputs: &Fsr3Inputs, out: &Fsr3Output) {
+    /// Writes the descriptors that name the caller's images in frame slot `slot`'s sets of
+    /// parity `parity`, from fixed arrays (no allocation per frame).
+    fn write_external_sets(
+        &self,
+        slot: usize,
+        parity: usize,
+        inputs: &UpscaleInputs,
+        out: &UpscaleOutput,
+    ) {
         let count = self.externals.len();
         let mut infos = [vk::DescriptorImageInfo::default(); MAX_EXTERNAL_WRITES];
         for (info, external) in infos.iter_mut().zip(&self.externals) {
@@ -1212,15 +1159,15 @@ impl Fsr3 {
         let mut writes = [vk::WriteDescriptorSet::default(); MAX_EXTERNAL_WRITES];
         for ((write, external), info) in writes.iter_mut().zip(&self.externals).zip(&infos) {
             *write = vk::WriteDescriptorSet::default()
-                .dst_set(self.passes[external.pass].sets[parity])
+                .dst_set(self.passes[external.pass].sets[slot][parity])
                 .dst_binding(external.binding)
                 .descriptor_type(external.ty)
                 .image_info(core::slice::from_ref(info));
         }
         // SAFETY: every set and the caller's views are live (the views until this frame's
         // command buffer completes, by `record`'s contract) and each write matches its
-        // binding's type. The GPU is not using this parity's sets and no unsubmitted command
-        // buffer has them bound: `record`'s in-flight contract.
+        // binding's type. The GPU is not using this slot's sets: `record`'s in-flight
+        // contract (the slot's last submission has finished).
         unsafe { self.device.update_descriptor_sets(&writes[..count], &[]) };
     }
 
@@ -1272,10 +1219,89 @@ impl Fsr3 {
     }
 }
 
+impl TemporalUpscaler for Fsr3 {
+    fn kind(&self) -> UpscalerKind {
+        UpscalerKind::Fsr3
+    }
+
+    /// From Ultra Performance's size (the largest ratio FSR 3.1 documents, 3×, and the
+    /// dynamic-resolution floor's lowest mode, ADR-0021 §4c) up to the mode's size, as the SDK
+    /// computes them (truncated: 1706 at 2560 Quality, where TAAU's round-to-nearest gives
+    /// 1707, amendment 2 item 19), both clamped to the context's maximum. Any size from 1×1 to
+    /// the maximum works (§4c, amendment 1).
+    fn render_size_range(&self, output: Extent, mode: UpscaleMode) -> (Extent, Extent) {
+        let clamp = |size: vk::Extent2D| vk::Extent2D {
+            width: size.width.min(self.max_render.width),
+            height: size.height.min(self.max_render.height),
+        };
+        (
+            clamp(Fsr3Mode::UltraPerformance.render_size(output)),
+            clamp(Fsr3Mode::from(mode).render_size(output)),
+        )
+    }
+
+    fn jitter_phases(&self, render: Extent, output: Extent) -> u32 {
+        jitter_phases(render, output)
+    }
+
+    /// FSR sharpens with RCAS itself, so the renderer's `sharpen` pass does not run.
+    fn has_sharpening(&self) -> bool {
+        true
+    }
+
+    /// See [`Fsr3::record_frame`].
+    ///
+    /// # Panics
+    /// When [`Fsr3::accepts`] rejects the sizes.
+    unsafe fn record(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        inputs: &UpscaleInputs,
+        out: &UpscaleOutput,
+    ) {
+        // SAFETY: the trait's contract gives `record_frame`'s: each recorded buffer submitted
+        // once, in order, on one queue, and at most FRAMES_IN_FLIGHT pending with
+        // `inputs.frame_slot`'s last submission finished. `record_frame` needs at most
+        // SET_RING pending, which the renderer's `SET_RING >= FRAMES_IN_FLIGHT` assert
+        // (renderer.rs) guarantees.
+        unsafe { self.record_frame(cmd, inputs, out) };
+    }
+
+    /// The next frame is a first frame: every internal image is re-initialised (after every
+    /// earlier compute and clear on the queue, [`first_frame_barrier`]), so a record that was
+    /// never submitted leaves nothing assumed.
+    fn reset_history(&mut self) {
+        self.first_frame = true;
+        self.reset_requested = true;
+    }
+
+    unsafe fn resize(
+        &mut self,
+        device: &DeviceContext,
+        output: Extent,
+        max_render: Extent,
+    ) -> RenderResult<()> {
+        let output = vk::Extent2D {
+            width: output.width.max(1),
+            height: output.height.max(1),
+        };
+        let max_render = vk::Extent2D {
+            width: max_render.width.clamp(1, output.width),
+            height: max_render.height.clamp(1, output.height),
+        };
+        self.reallocate(device, max_render, output)
+    }
+
+    /// The context's images and constant buffer, as allocated.
+    fn vram_bytes(&self) -> u64 {
+        self.vram_bytes
+    }
+}
+
 /// A barrier moving every level of `image` from `old_layout` (with `src`) to `GENERAL` for
 /// `dst`.
 fn image_barrier(
-    image: &GpuImage,
+    image: vk::Image,
     src: (vk::PipelineStageFlags2, vk::AccessFlags2),
     dst: (vk::PipelineStageFlags2, vk::AccessFlags2),
     old_layout: vk::ImageLayout,
@@ -1289,8 +1315,37 @@ fn image_barrier(
         .new_layout(vk::ImageLayout::GENERAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image.image())
+        .image(image)
         .subresource_range(color_range(0, vk::REMAINING_MIP_LEVELS))
+}
+
+/// The first frame's transition of one internal image to `GENERAL` for its clear. Fresh (at
+/// creation, after `resize` or [`TemporalUpscaler::reset_history`]), the image goes from
+/// `UNDEFINED`; after the poison hook's clears, from `GENERAL`, keeping its garbage.
+///
+/// A history reset happens mid-stream: the previous frame's passes may still be reading and
+/// writing the image, and its per-frame clears writing it. The transition (a write) and the
+/// clears after it therefore wait for every earlier compute and clear on the queue and make
+/// their writes available (WAR and WAW), never `NONE` (ADR-0021 amendment 2, item 28;
+/// `first_frame_barrier_waits_for_earlier_work`). At creation there is no earlier work and
+/// the dependency is free.
+fn first_frame_barrier(image: vk::Image, poisoned: bool) -> vk::ImageMemoryBarrier2<'static> {
+    image_barrier(
+        image,
+        (
+            vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::CLEAR,
+            vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
+        ),
+        (
+            vk::PipelineStageFlags2::CLEAR,
+            vk::AccessFlags2::TRANSFER_WRITE,
+        ),
+        if poisoned {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::UNDEFINED
+        },
+    )
 }
 
 /// `new`'s and `resize`'s size check.
@@ -1342,12 +1397,12 @@ impl PassPipeline {
             device.device.clone(),
             device.create_compute_pipeline(&info)?,
         );
-        let sets = pool.allocate(&device.device, &[set_layout.handle(); 2])?;
+        let sets = pool.allocate(&device.device, &[set_layout.handle(); 2 * SET_RING])?;
         Ok(Self {
             pipeline,
             layout,
             _set_layout: set_layout,
-            sets: [sets[0], sets[1]],
+            sets: core::array::from_fn(|slot| [sets[2 * slot], sets[2 * slot + 1]]),
         })
     }
 }
@@ -1444,6 +1499,39 @@ mod tests {
             externals > 0 && externals <= MAX_EXTERNAL_WRITES,
             "{externals}"
         );
+    }
+
+    /// A history reset re-initialises images the previous frame's passes and clears may still
+    /// use, so the first frame's transition waits for them (ADR-0021 amendment 2, item 28).
+    /// Synchronization validation does not catch a `NONE` source on lavapipe, the RTX 5070 Ti
+    /// or RADV, so this pins it.
+    #[test]
+    fn first_frame_barrier_waits_for_earlier_work() {
+        for poisoned in [false, true] {
+            let b = first_frame_barrier(vk::Image::null(), poisoned);
+            assert!(
+                b.src_stage_mask.contains(
+                    vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::CLEAR
+                ),
+                "{:?}",
+                b.src_stage_mask
+            );
+            assert!(
+                b.src_access_mask.contains(
+                    vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE
+                ),
+                "{:?}",
+                b.src_access_mask
+            );
+            assert_eq!(b.dst_stage_mask, vk::PipelineStageFlags2::CLEAR);
+            assert_eq!(b.new_layout, vk::ImageLayout::GENERAL);
+            let old = if poisoned {
+                vk::ImageLayout::GENERAL
+            } else {
+                vk::ImageLayout::UNDEFINED
+            };
+            assert_eq!(b.old_layout, old);
+        }
     }
 
     /// The far plane's bits are the float 1.0's.

@@ -48,7 +48,8 @@
 //! **The tiered frame from N1** (ADR-0021 §5a) changes the middle of that chain. With temporal
 //! AA ([`FrameSpec::temporal`]) the prepass also writes `motion` (jittered, render
 //! resolution), `mask_clear` clears `reactive` and `tc_mask`, the distortion and the particles
-//! add to `reactive` (the particles also write their dominant fragments' motion), then:
+//! add to `reactive` (a second, motion-only particle draw writes the motion of fragments
+//! with coverage from 0.1, ADR-0021 amendment 4), then:
 //!
 //! ```text
 //! tc_mask         water surfaces, depth-tested → tc_mask (MAX)
@@ -981,7 +982,8 @@ pub(crate) fn build_variant(
                 .access(accum, Access::ColorWrite)
                 .access(reveal, Access::ColorWrite);
         }
-        // ADR-0021 §2d: the reactive mask (MAX) and the dominant fragments' motion.
+        // ADR-0021 §2d: the reactive mask (MAX) and the covered fragments' motion
+        // (amendment 4).
         if let Some(temporal) = temporal {
             pass = pass
                 .access(temporal.motion, Access::ColorReadWrite)
