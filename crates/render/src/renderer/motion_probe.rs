@@ -446,8 +446,16 @@ impl Renderer {
                 }
             }
         }
+        let swapchain_a = (self.swapchain.handle(), self.render_extent);
         if drawn < 3 || !self.render_internal(&scene_b, None, &[])? {
             return Err(probe_error("a probe frame was skipped"));
+        }
+        // A present that re-created the swapchain would leave fresh transients and a reset
+        // history behind; the readback would then compare against nothing frame B wrote.
+        // Frame B uses plan 0 (no capture, no offscreen view, no haze in the probe scene), whose
+        // final layouts the readback assumes.
+        if (self.swapchain.handle(), self.render_extent) != swapchain_a {
+            return Err(probe_error("the swapchain was re-created during the probe"));
         }
         let jitter = self
             .temporal
@@ -632,6 +640,12 @@ impl Renderer {
                 (depth_layout, all, any),
             ),
         ];
+        // The copies' writes made available to the host reads after the queue wait.
+        let to_host = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
         let region = |aspect: vk::ImageAspectFlags| {
             [vk::BufferImageCopy::default()
                 .image_subresource(
@@ -682,7 +696,9 @@ impl Renderer {
         unsafe {
             device.cmd_pipeline_barrier2(
                 cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&back),
+                &vk::DependencyInfo::default()
+                    .memory_barriers(&to_host)
+                    .image_memory_barriers(&back),
             );
         }
         // SAFETY: recording into `cmd` began above.

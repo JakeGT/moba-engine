@@ -149,7 +149,7 @@ impl ExposureLinearPass {
                     cmd,
                     &vk::DependencyInfo::default().image_memory_barriers(&barrier),
                 );
-            };
+            }
             self.placeholder_ready = true;
         }
         let set = self.sets[self.next];

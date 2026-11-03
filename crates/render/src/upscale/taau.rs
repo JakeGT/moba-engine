@@ -326,9 +326,7 @@ impl Taau {
             // before this frame's writes (same queue, earlier submission).
             let barrier = [vk::MemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .src_access_mask(
-                    vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::SHADER_SAMPLED_READ,
-                )
+                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
                 .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .dst_access_mask(
                     vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,

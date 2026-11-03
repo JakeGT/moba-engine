@@ -953,6 +953,9 @@ from the text above, or the text left a choice open, this is what was done and w
 14. **Per-pass lanes** (gate 6): `temporal`, `tc_mask`, `overlay_prepass` and `overlay` join the
     frame log (`prepass` was already there). Like the fog-of-war lanes they are left out when
     they never ran, so Compat logs are unchanged.
+15. **`maxColorAttachments ≥ 5`** joins the tiered admission limits. OIT on the temporal path
+    writes HDR, its two accumulation targets, motion and the reactive mask in one pass, one
+    more than Vulkan guarantees. Every recorded device reports 8.
 
 **How the gates were made concrete:**
 

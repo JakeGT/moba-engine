@@ -3399,22 +3399,25 @@ impl Renderer {
         // allocation cannot pair the new extent with old-size transients. Fixed-size slots
         // (the shadow map) are kept.
         let extents = target_extents(swapchain.extent, self.post_config.render_scale);
+        // ADR-0021 §2c: a resize re-creates the back end at the new output and forgets every
+        // history. Built before the swap below for the same reason as the transients.
+        let taau = match self.temporal {
+            Some(_) => Some(Taau::new(
+                &self.device,
+                &self.shaders,
+                swapchain.extent,
+                extents.render,
+                TaauDebugView::of(self.config.debug_view),
+            )?),
+            None => None,
+        };
         self.transients
             .resize(&self.device, self.plans[0].graph.slots(), extents)?;
         self.extents = extents;
         self.render_extent =
             dynres::render_extent(swapchain.extent, extents.render, self.render_scale());
         self.swapchain = swapchain;
-        // ADR-0021 §2c: a resize re-creates the back end at the new output and forgets every
-        // history.
-        if let Some(temporal) = self.temporal.as_mut() {
-            let taau = Taau::new(
-                &self.device,
-                &self.shaders,
-                self.swapchain.extent,
-                extents.render,
-                TaauDebugView::of(self.config.debug_view),
-            )?;
+        if let (Some(temporal), Some(taau)) = (self.temporal.as_mut(), taau) {
             temporal.upscaler = Box::new(taau);
             temporal.invalidate();
         }
