@@ -25,6 +25,14 @@
 //!   `<file>.slang.json`; the layout tests compare it with the Rust `#[repr(C)]` mirrors.
 //! - **No network access:** this script never downloads anything.
 //!
+//! **FSR 3.1.6** (feature `fsr3`, ADR-0020 §6a and Q9, ADR-0021 §4b): the AMD FidelityFX
+//! upscaler's MIT HLSL passes, vendored unmodified under `third_party/fidelityfx/`, compile
+//! with the same pinned `slangc` to `fsr3_<pass>.spv` (see [`FSR3_PASSES`] and
+//! `docs/dev/fsr3.md`). They differ from our own modules in four flags only: `-lang slang`
+//! (Slang's HLSL front end applies the legacy for-loop scope, which two of the passes do not
+//! compile under), the subgroup quad capability (the SPD passes), DXC-style register shifts
+//! for explicit bindings, and two warnings that the vendor code trips disabled.
+//!
 //! - **Includes:** shaders `#include "name.glsl"` (with
 //!   `#extension GL_GOOGLE_include_directive : require`) from `shaders/include/`, which holds
 //!   the shared camera block, instance buffer, lighting and material declarations. Include
@@ -146,6 +154,96 @@ const PERMUTATIONS: &[Permutation] = &[
 /// The pinned Slang version and per-host archive checksums (ADR-0020 §4c).
 const SLANG_PIN: &str = "slang-version.txt";
 
+/// The vendored FidelityFX tree (`fsr3` feature), relative to this crate.
+const FIDELITYFX: &str = "../../third_party/fidelityfx/Kits/FidelityFX";
+
+/// One FSR 3.1.6 upscaler pass: the vendored entry file, the module it becomes
+/// (`<output>.spv`) and the defines beyond [`FSR3_DEFINES`].
+struct VendorPass {
+    source: &'static str,
+    output: &'static str,
+    defines: &'static [&'static str],
+}
+
+/// The passes of one FSR 3.1.6 upscale, in dispatch order (`fsr3upscalerDispatch` in the
+/// SDK's `ffx_fsr3upscaler.cpp`), plus the sharpening variant of the accumulate pass.
+/// `moba_shaders::fsr3::PASSES` lists the same modules with their binding tables.
+const FSR3_PASSES: &[VendorPass] = &[
+    VendorPass {
+        source: "ffx_fsr3upscaler_prepare_inputs_pass.hlsl",
+        output: "fsr3_prepare_inputs",
+        defines: &[],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_luma_pyramid_pass.hlsl",
+        output: "fsr3_luma_pyramid",
+        defines: &[],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_shading_change_pyramid_pass.hlsl",
+        output: "fsr3_shading_change_pyramid",
+        defines: &[],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_shading_change_pass.hlsl",
+        output: "fsr3_shading_change",
+        defines: &[],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_prepare_reactivity_pass.hlsl",
+        output: "fsr3_prepare_reactivity",
+        defines: &[],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_luma_instability_pass.hlsl",
+        output: "fsr3_luma_instability",
+        defines: &[],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_accumulate_pass.hlsl",
+        output: "fsr3_accumulate",
+        defines: &["FFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING=0"],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_accumulate_pass.hlsl",
+        output: "fsr3_accumulate_sharpen",
+        defines: &["FFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING=1"],
+    },
+    VendorPass {
+        source: "ffx_fsr3upscaler_rcas_pass.hlsl",
+        output: "fsr3_rcas",
+        defines: &[],
+    },
+];
+
+/// Every FSR pass's permutation: HLSL-style GPU code, 32-bit math (no `FFX_HALF`), linear HDR
+/// colour, render-resolution motion vectors without jitter, non-inverted depth (ADR-0021 §2a),
+/// and the reference Lanczos kernels (the SDK's choice on every device but 32/64-wide AMD
+/// ones, where it takes a lookup table instead). `FFX_HLSL_SM` and
+/// `FFX_IMPLICIT_SHADER_REGISTER_BINDING_HLSL` are what the SDK's own build defines.
+const FSR3_DEFINES: &[&str] = &[
+    "FFX_GPU=1",
+    "FFX_HLSL=1",
+    "FFX_HLSL_SM=62",
+    "FFX_IMPLICIT_SHADER_REGISTER_BINDING_HLSL=0",
+    "FFX_HALF=0",
+    "FFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=1",
+    "FFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS=1",
+    "FFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS=0",
+    "FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0",
+    "FFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE=0",
+];
+
+/// Register shifts that turn the vendor HLSL's `register(bN)`, `tN`, `uN` and `sN` into
+/// explicit Vulkan bindings of set 0: constant buffers from 0, sampled images from 16,
+/// storage images from 32 and samplers from 48 (no pass declares more than 16 of a kind).
+const FSR3_SHIFTS: &[(&str, &str)] = &[
+    ("-fvk-b-shift", "0"),
+    ("-fvk-t-shift", "16"),
+    ("-fvk-u-shift", "32"),
+    ("-fvk-s-shift", "48"),
+];
+
 /// One compile: a source, its output module and its defines.
 struct Job {
     source: PathBuf,
@@ -153,6 +251,7 @@ struct Job {
     defines: &'static [&'static str],
 }
 
+#[allow(clippy::too_many_lines)] // Three kinds of job, the tools, then the run, in order.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     // A directory watch covers every file below it, including `shaders/include/` and
@@ -163,6 +262,7 @@ fn main() {
     for variable in ["GLSLC", "SLANGC", "MOBA_SLANG_ANY_VERSION"] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
+    let fsr3 = env::var_os("CARGO_FEATURE_FSR3").is_some();
 
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
@@ -171,6 +271,12 @@ fn main() {
     let include_dir = shader_dir.join("include");
     let slang_dir = shader_dir.join("slang");
     let slang_lib_dir = slang_dir.join("lib");
+    let fidelityfx = manifest_dir.join(FIDELITYFX);
+    let fsr3_jobs = if fsr3 {
+        fsr3_jobs(&fidelityfx, &out_dir)
+    } else {
+        Vec::new()
+    };
 
     let shaders = sources(&shader_dir, &["vert", "frag", "comp"]);
     assert!(!shaders.is_empty(), "no GLSL shaders found in shaders/");
@@ -219,7 +325,7 @@ fn main() {
     // Find every tool before compiling anything, so a missing one is the first error.
     let compiler = find_compiler();
     let validator = find_program("spirv-val");
-    let slang = (!slang_jobs.is_empty()).then(|| {
+    let slang = (!slang_jobs.is_empty() || !fsr3_jobs.is_empty()).then(|| {
         let version = pinned_slang_version(&manifest_dir.join(SLANG_PIN));
         let slangc = find_slangc(&out_dir, &version);
         // Re-fetching or replacing the compiler in place rebuilds the modules.
@@ -255,9 +361,29 @@ fn main() {
                 validate(validator, &job.output);
             }));
         }
+        for job in &fsr3_jobs {
+            let include = fidelityfx.join("upscalers/fsr3/include/gpu");
+            work.push(Box::new(move || {
+                compile_fsr3(slangc, job, &include);
+                validate(validator, &job.output);
+            }));
+        }
     }
     run_parallel(&work);
-    write_reflection_table(&slang_jobs, &out_dir);
+    write_reflection_table(
+        &slang_jobs,
+        &out_dir,
+        "slang_reflection.rs",
+        "SLANG_REFLECTION",
+    );
+    if fsr3 {
+        write_reflection_table(
+            &fsr3_jobs,
+            &out_dir,
+            "fsr3_reflection.rs",
+            "FSR3_REFLECTION",
+        );
+    }
 }
 
 /// Runs every item of `work` on up to Cargo's `NUM_JOBS` threads (`-j`).
@@ -279,12 +405,29 @@ fn run_parallel(work: &[Box<dyn Fn() + Sync + '_>]) {
     });
 }
 
-/// `slang_reflection.rs`: `(module name, reflection JSON)` for every Slang module, for
-/// `moba_shaders::reflection` and the crate's own binding test.
-fn write_reflection_table(jobs: &[Job], out_dir: &Path) {
-    let mut table = String::from(
-        "/// `(module name, slangc -reflection-json)` for every Slang module (generated).\n\
-         const SLANG_REFLECTION: &[(&str, &str)] = &[\n",
+/// The FSR 3.1.6 passes ([`FSR3_PASSES`]) under the vendored tree `fidelityfx`, which a
+/// change anywhere in rebuilds.
+fn fsr3_jobs(fidelityfx: &Path, out_dir: &Path) -> Vec<Job> {
+    println!("cargo:rerun-if-changed={}", fidelityfx.display());
+    FSR3_PASSES
+        .iter()
+        .map(|pass| Job {
+            source: fidelityfx
+                .join("upscalers/fsr3/internal/shaders")
+                .join(pass.source),
+            output: out_dir.join(format!("{}.spv", pass.output)),
+            defines: pass.defines,
+        })
+        .collect()
+}
+
+/// `file` (`slang_reflection.rs`, or `fsr3_reflection.rs` for the FSR passes): `(module name,
+/// reflection JSON)` for every module of `jobs`, as the constant `name`, for
+/// `moba_shaders::reflection` and the crate's binding tests.
+fn write_reflection_table(jobs: &[Job], out_dir: &Path, file: &str, name: &str) {
+    let mut table = format!(
+        "/// `(module name, slangc -reflection-json)` for every module (generated).\n\
+         const {name}: &[(&str, &str)] = &[\n",
     );
     for job in jobs {
         let module = job.output.file_stem().and_then(|stem| stem.to_str());
@@ -300,7 +443,7 @@ fn write_reflection_table(jobs: &[Job], out_dir: &Path) {
         .expect("writing to a String cannot fail");
     }
     table.push_str("];\n");
-    let path = out_dir.join("slang_reflection.rs");
+    let path = out_dir.join(file);
     fs::write(&path, table)
         .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
 }
@@ -523,6 +666,43 @@ fn compile_slang(slangc: &Path, job: &Job, lib_dir: &Path) {
         .arg("-I")
         .arg(lib_dir);
     for define in job.defines {
+        command.arg(format!("-D{define}"));
+    }
+    command
+        .arg("-o")
+        .arg(&job.output)
+        .arg("-reflection-json")
+        .arg(job.output.with_extension("json"));
+    run(&mut command, slangc, job);
+}
+
+/// One vendored FSR 3.1.6 pass (`fsr3` feature): the vendor HLSL compiled with the flags of
+/// [`compile_slang`] plus the Slang language front end, the quad-subgroup capability, explicit
+/// register shifts ([`FSR3_SHIFTS`]), [`FSR3_DEFINES`], and two warnings off for the vendor
+/// code: 15205 (an undefined macro in `#if`, which the vendor headers rely on for their
+/// console paths) and 41000 (unreachable code after a commented-out return in `ffx_spd.h`).
+/// The entry point is the SDK's `CS`.
+fn compile_fsr3(slangc: &Path, job: &Job, include: &Path) {
+    let mut command = Command::new(slangc);
+    command
+        .args(["-lang", "slang"])
+        .arg(&job.source)
+        .args(["-entry", "CS", "-stage", "compute"])
+        .args(["-target", "spirv", "-profile", "spirv_1_6"])
+        .args(["-capability", "spvGroupNonUniformQuad"])
+        .args([
+            "-matrix-layout-column-major",
+            "-O2",
+            "-fvk-use-entrypoint-name",
+        ])
+        .args(["-warnings-as-errors", "all"])
+        .args(["-warnings-disable", "15205,41000"])
+        .arg("-I")
+        .arg(include);
+    for (flag, shift) in FSR3_SHIFTS {
+        command.args([flag, shift, "0"]);
+    }
+    for define in FSR3_DEFINES.iter().chain(job.defines) {
         command.arg(format!("-D{define}"));
     }
     command

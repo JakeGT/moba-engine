@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **940 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **956 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -62,8 +62,9 @@ crates/render     ash/Vulkan renderer: render graph, HDR + tonemap, splat terrai
                   texture, height fog + sky, MSDF UI text,
                   animated rig, GPU skinning, materials, pipeline cache, per-pass GPU timestamps,
                   compute GPU particles (ADR-0013), post chain: bloom, exposure, grading,
-                  FXAA/MSAA, GTAO, render scale (ADR-0015)
-crates/shaders    GLSL -> SPIR-V build (shared #include files, enumerated permutations)
+                  FXAA/MSAA, GTAO, render scale (ADR-0015), FSR 3.1.6 port (`fsr3/`, N1b)
+crates/shaders    GLSL -> SPIR-V build (shared #include files, enumerated permutations),
+                  Slang modules, the vendored FSR 3.1.6 passes (`fsr3` feature)
 crates/platform   winit window/input/fixed step
 crates/client     playable client, HUD, spectator, settings, audio, capture modes
 crates/server     headless dedicated server
@@ -73,10 +74,11 @@ crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wir
                   minion VATs), link-proxy (RTT/jitter/loss UDP proxy), grade-bake (LUTs),
                   mesh-bake (R8 meshoptimizer LODs; `--features mesh-bake`),
                   perf-gate (R8 frame-log budget gate), bindless-smoke and
-                  rt-smoke (N0.5 tiered-path smokes)
+                  rt-smoke (N0.5 tiered-path smokes), fsr3-smoke (N1b FSR 3.1 port)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
+third_party/      vendored MIT sources: FidelityFX FSR 3.1.6 upscaler HLSL (unmodified)
 docs/             architecture, status, tasks, ADRs, perf logs, screenshots, agent guide
 fuzz/             standalone cargo-fuzz crate (wire/replay/content/glb/ktx2/vfx/grading)
 scripts/          agent-verify.sh and operational helpers
@@ -175,6 +177,7 @@ cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/
 cargo run -p moba-tools --bin vulkan-probe
 MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin bindless-smoke   # tiered path; MOBA_RENDER_PATH=tiered on lavapipe
 MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin rt-smoke         # BLAS/TLAS + ray query, exact readback
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin fsr3-smoke       # FSR 3.1.6 port: error bounds, size sweep, 2 identical runs
 scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)
 scripts/cull-probe.sh                                 # culling on == off, byte for byte (R8)
 scripts/perf-replay.sh                                # 10-minute replay per tier + perf-gate (R8, real GPU)

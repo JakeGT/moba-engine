@@ -161,8 +161,8 @@ the semver check):
   - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
     `auto`, so an A/B between the paths stays on one GPU. The caps types are
     `#[non_exhaustive]`.
-- **Latency: Reflex and Anti-Lag (ADR-0021 §6 and amendment 1, N1d;
-  [perf/0030](docs/perf/0030-latency.md)):**
+- **Latency: Reflex and Anti-Lag (ADR-0021 §6 and amendment 3, N1d;
+  [perf/0032](docs/perf/0032-latency.md)):**
   - On a tiered device with `VK_NV_low_latency2` (Reflex) or native `VK_AMD_anti_lag`, the
     renderer runs a latency back end: Reflex creates its swapchains for low latency, sets the
     sleep mode, chains present IDs on the frame's submits and present, sets the frame markers
@@ -186,7 +186,7 @@ the semver check):
     frame limit (default 240, 0 uncapped).
   - Measured on the RTX 5070 Ti: validation-clean, the pacing gate holds (the driver's interval
     runs about 1 % longer than the platform limiter's), and no PC-latency gain on that desktop,
-    capped, vsync-on or uncapped and GPU-bound (amendment 1, item 9): on by default follows the
+    capped, vsync-on or uncapped and GPU-bound (amendment 3, item 9): on by default follows the
     maintainer's answer, not a measured benefit. Anti-Lag is untested at run time until Mesa
     26.3 (blocked).
 - **Vendor SDK cargo features (ADR-0020 §6 and amendment 6, N0.6;

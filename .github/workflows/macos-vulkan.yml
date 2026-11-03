@@ -6,6 +6,7 @@ on:
     paths:
       - 'crates/render/**'
       - 'crates/shaders/**'
+      - 'third_party/**'
       - 'crates/platform/**'
       - 'crates/client/**'
       - 'crates/tools/**'

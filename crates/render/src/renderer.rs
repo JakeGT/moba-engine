@@ -78,6 +78,9 @@ const _: () = assert!(
     crate::passes::fog::FOG_IMAGES == FRAMES_IN_FLIGHT
         && crate::lighting::MAIN_SETS == FRAMES_IN_FLIGHT
 );
+// FSR 3.1 keeps its descriptor sets and constants per history parity (ADR-0021 amendment 1).
+#[cfg(feature = "fsr3")]
+const _: () = assert!(FRAMES_IN_FLIGHT <= crate::fsr3::MAX_FRAMES_IN_FLIGHT);
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
 /// Largest side of an offscreen [`UiImage`] (the guaranteed `maxImageDimension2D`).

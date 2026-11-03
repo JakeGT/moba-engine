@@ -1,9 +1,10 @@
 //! AMD FidelityFX Super Resolution (ADR-0020 §6).
 //!
-//! - **FSR 3.1** (feature `fsr3`, on by default): the open build's upscaler. Its MIT shaders
-//!   are ported into `third_party/fidelityfx/` with N1 (ADR-0020 Q9 and amendment 6); N0
-//!   vendors nothing and registers no back end, so the upscaler stays on the built-in
-//!   render-scale filter.
+//! - **FSR 3.1** (feature `fsr3`, on by default): the open build's upscaler, needing nothing
+//!   fetched. Its MIT HLSL is vendored unmodified in `third_party/fidelityfx/` and built by
+//!   `moba-shaders`; the host side is our Rust port in `crate::fsr3` (N1b, ADR-0020 Q9,
+//!   ADR-0021 §4b and amendment 1). It has no probe here: `crate::fsr3::Fsr3::new` checks the
+//!   device.
 //! - **FSR 4** (feature `fsr4`, development-only, ADR-0020 Q6): the signed
 //!   `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from FidelityFX SDK
 //!   2.4.0, opened at run time from beside the executable with `libloading` and kept loaded

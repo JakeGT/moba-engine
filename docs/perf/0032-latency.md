@@ -2,7 +2,7 @@
 
 Captured 2026-11-02 and 2026-11-03 on the development workstation for ADR-0021 §6,
 verification gate 7 and
-[amendment 1](../adr/0021-temporal-upscaling-overlay.md#amendment-1-2026-11-02-n1d-latency-as-built).
+[amendment 3](../adr/0021-temporal-upscaling-overlay.md#amendment-3-2026-11-02-n1d-latency-as-built).
 
 - GPU: NVIDIA GeForce RTX 5070 Ti, driver 615.78.08, `VK_NV_low_latency2` revision 3
   (tiered path, `max_tier=overdrive`); Radeon 610M iGPU on RADV, Mesa 26.2.5
@@ -51,7 +51,7 @@ MOBA_SMOKE_FRAMES=600 MOBA_VSYNC=0|1 MOBA_WINDOW_SIZE=1920x1080 MOBA_FRAME_LOG=v
 The first run found one bug: passing the same `VkLatencyTimingsFrameReportNV` array to
 `vkGetLatencyTimingsNV` twice failed `VUID-VkLatencyTimingsFrameReportNV-sType-sType` (the
 driver writes the structures back whole). The back end now resets the array before each
-call (amendment 1, item 8); every run above is after the fix.
+call (amendment 3, item 8); every run above is after the fix.
 
 ## Reflex on and off (RTX, teamfight replay)
 
@@ -74,7 +74,7 @@ has none.
 | on | boost | 6.067 / 6.613 / 7.540 | 1.243 | 6.037 | 0.708 | 2,339 / 2,340 | 0.140 | 0.728 | **12.879 / 13.367 / 14.397** |
 
 The simulation span is 0.008–0.010 ms and the present call 0.018–0.021 ms in every Reflex
-row. `pc_latency` is simulation start to the end of the frame's GPU work (amendment 1,
+row. `pc_latency` is simulation start to the end of the frame's GPU work (amendment 3,
 item 8). `Paced by the sleep` counts the logged frames (past the warm-up).
 
 Reading it:
@@ -82,7 +82,7 @@ Reading it:
   IDs and the submit chain cost nothing measurable.
 - **The render-submit span is now the render thread's work.** With vsync on it is
   0.12–0.14 ms; before the review fix (the marker set before the fence and acquire waits) it
-  was 6.0 ms, the whole vsync block (amendment 1, item 5).
+  was 6.0 ms, the whole vsync block (amendment 3, item 5).
 - **The sleep replaces the limiter.** With vsync off, `on` paces 2,339 of 2,340 logged frames
   and the 240 fps limit becomes `minimumIntervalUs = 4166`. The driver's interval comes out
   0.042 ms longer than the platform's `WaitUntil` (4.220 vs 4.178 ms, 237 vs 239 fps).
@@ -133,7 +133,7 @@ Each frame's latency is spent where the extension does not reach:
   frames deep with the sleep on. An XWayland run of the first draft gave 4.06 vs 4.27 ms, a
   single run recorded only as a lead.
 
-So §6b's expected gain is **not demonstrated** on this desktop (amendment 1, item 9), and
+So §6b's expected gain is **not demonstrated** on this desktop (amendment 3, item 9), and
 on-by-default rests on the maintainer's answer to Q5, not on a measured benefit. The
 integration does what the extension asks (validation-clean, timings reported, sleep mode
 applied per swapchain, every frame attributed to its present ID). `pc_latency` also stops at

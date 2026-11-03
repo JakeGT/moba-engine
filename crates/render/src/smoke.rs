@@ -14,11 +14,17 @@
 //! - [`rt_smoke`]: builds a BLAS and a TLAS and traces one ray per pixel with
 //!   `GL_EXT_ray_query`, writing the closest hit's instance, custom index, primitive and `t` as
 //!   integers.
+//! - [`fsr3_smoke`] (N1b, ADR-0021 §4b and §4c): runs the FSR 3.1.6 port on synthetic inputs
+//!   with a known ideal output. Being an upscaler it is compared within error bounds rather than
+//!   exactly, and it must be bit-identical across two runs.
 //!
-//! `moba-tools` runs them as the `bindless-smoke` and `rt-smoke` binaries. A CPU device such as
-//! lavapipe needs `MOBA_RENDER_PATH=tiered`; any validation message fails a run.
+//! `moba-tools` runs them as the `bindless-smoke`, `rt-smoke` and `fsr3-smoke` binaries. A CPU
+//! device such as lavapipe needs `MOBA_RENDER_PATH=tiered`; any validation message fails a
+//! run.
 
 pub(crate) mod bindless;
+#[cfg(feature = "fsr3")]
+pub(crate) mod fsr3;
 pub(crate) mod rt;
 
 use crate::caps::{PathChoice, RenderPath};
@@ -33,7 +39,7 @@ const QUOTED_MISMATCHES: usize = 8;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct SmokeReport {
-    /// `"bindless_smoke"` or `"rt_smoke"`.
+    /// `"bindless_smoke"`, `"rt_smoke"` or `"fsr3_smoke"`.
     pub name: &'static str,
     /// The device's name.
     pub device: String,
@@ -137,6 +143,28 @@ pub fn bindless_smoke(choice: PathChoice, validation: ValidationMode) -> RenderR
 /// As [`bindless_smoke`].
 pub fn rt_smoke(choice: PathChoice, validation: ValidationMode) -> RenderResult<SmokeReport> {
     run("rt_smoke", choice, validation, rt::run)
+}
+
+/// Runs `fsr3_smoke` on a headless tiered device: the FSR 3.1.6 upscaler on synthetic
+/// inputs whose ideal output is known (a flat colour, a static and a moving analytic field,
+/// sharpening, and a sweep of render sizes inside one context, ADR-0021 §4c), checking every
+/// phase's error against its bound and that a second run on a fresh context is bit-identical.
+///
+/// # Errors
+/// As [`bindless_smoke`], and also when the device cannot run FSR 3.1 or the build lacks the
+/// `fsr3` feature.
+pub fn fsr3_smoke(choice: PathChoice, validation: ValidationMode) -> RenderResult<SmokeReport> {
+    #[cfg(feature = "fsr3")]
+    {
+        run("fsr3_smoke", choice, validation, fsr3::run)
+    }
+    #[cfg(not(feature = "fsr3"))]
+    {
+        let _ = (choice, validation);
+        Err(RenderError::NoSuitableDevice(String::from(
+            "fsr3_smoke needs moba-render's `fsr3` feature",
+        )))
+    }
 }
 
 fn run(

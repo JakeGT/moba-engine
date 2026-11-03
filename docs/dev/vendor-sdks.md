@@ -13,7 +13,7 @@ The features live on `moba-render` and are forwarded with the same names by `mob
 
 | Feature | Slot | SDK | Builds on | Run-time binary |
 |---|---|---|---|---|
-| `fsr3` (default) | upscaler | none in N0 (FSR 3.1 shaders arrive in N1) | all | — |
+| `fsr3` (default) | upscaler | none fetched: FSR 3.1.6's MIT sources are vendored in `third_party/fidelityfx/` ([fsr3.md](fsr3.md)) | all | none (compiled into the build) |
 | `dlss` | upscaler (1st) | DLSS 310.9.16 | Linux, Windows | NGX loads `libnvidia-ngx-dlss.so.310.9.16` / `nvngx_dlss.dll` |
 | `fsr4` | upscaler (2nd) | FidelityFX SDK 2.4.0 | Linux, Windows (headers) | `amd_fidelityfx_{loader,upscaler}_vk.dll`, Windows only |
 | `xess` | upscaler (3rd) | XeSS 3.0.2 | Linux, Windows (headers) | `libxess.dll`, Windows only; never selected in N0 (see below) |
