@@ -5,7 +5,8 @@ Captured 2026-11-03 for ADR-0021 (N1b stage 2) and its
 The port itself is [perf/0030](0030-fsr3-port.md) and [dev/fsr3.md](../dev/fsr3.md).
 
 - GPUs: NVIDIA GeForce RTX 5070 Ti, driver 615.78.08 (timings, ghost probe, smoke); AMD
-  Radeon 610M on RADV (Low-class timing, ghost probe, smoke); software: lavapipe (Mesa llvmpipe) with the Khronos validation layer,
+  Radeon 610M on RADV (RDNA 2 iGPU below the Low class: an upper-bound
+  timing, ghost probe, smoke); software: lavapipe (Mesa llvmpipe) with the Khronos validation layer,
   `MOBA_VULKAN_VALIDATION=required`
 - CPU: AMD Ryzen 7 9800X3D; OS: Linux 7.3.0-5-cachyos, Wayland
 - Toolchain: rustc 1.99.1 stable, the pinned `slangc` 2026.20
@@ -93,14 +94,16 @@ and no AA): nine captures, one hash (`4adde3f7af91db8c`). Each FSR case checks i
 - **Compat:** the seven scenes of the stage-1 review (default, network, Ember, VAT, Ultra,
   Low scaled, decals) are byte-identical between origin/main `761beb3` and the branch, run
   twice (lavapipe, SHA-256 of the PPMs; `golden/summary.txt` in the evidence).
-- **Tiered, TAAU:** `scripts/tiered-goldens.sh` renders low, high, native and overlay twice
-  each; every pair is byte-identical and matches its committed fingerprint, unchanged from
-  N1a.
-- **Tiered, FSR 3.1:** the script renders the same four scenes with `MOBA_UPSCALER=fsr3`,
-  twice each, requires each pair to be byte-identical and the log to name `upscaler fsr3`,
-  and **compares them with committed fingerprints**
-  (`tests/golden/render-tiered-fsr3-{low,high,native,overlay}-fingerprint.rgb`, Q8, amendment
-  4 item 7). The fingerprints were written from CI's output for `c0ff307`, the reference.
+- **Tiered, TAAU and FSR 3.1:** `scripts/tiered-goldens.sh` renders low, high, native and
+  overlay twice per back end (`UPSCALERS`; CI runs TAAU in `renderer-gate` and FSR 3.1 in
+  `tiered-temporal`), requires each pair to be byte-identical and the log to name the back
+  end, then checks:
+  - **an exact SHA-256** per capture against `tests/golden/render-tiered-hashes.txt`, generated
+    from CI's artifact for `d9c2d6a` (the same hashes as `c0ff307`'s, so stable across runs
+    on CI). It applies only on the lavapipe named in the file
+    (`llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335`, read with `vulkan-probe`); elsewhere the
+    script prints "exact hashes: skipped" and, on CI, a warning to regenerate them;
+  - the 64×36 fingerprint, on any lavapipe. It does not catch an FSR 3.1 regression (below).
 - **Why CI's bytes differ from a local run.** SHA-256 prefixes of the captures:
 
   | Scene | CI (lavapipe, LLVM 21.1.8) | Local (lavapipe, LLVM 23.1.3) |
@@ -115,9 +118,24 @@ and no AA): nine captures, one hash (`4adde3f7af91db8c`). Each FSR case checks i
   raw bytes differ for TAAU as much as for FSR 3.1; both are byte-identical run to run on
   either. The fingerprints absorb it: the local captures compare with CI's fingerprints at a
   mean of 0.066–0.088 and a max of 1–2 for FSR 3.1 (TAAU 0.059–0.074, max 2), where the check
-  allows 2.0 and 24. TAAU's fingerprints were written locally in N1a and pass on CI the same
-  way. The particle-motion fix leaves every tiered capture unchanged (TAAU still matches at
-  mean 0.000 locally; the FSR 3.1 hashes above are the same before and after it).
+  allows 2.0 and 24. The particle-motion fix leaves every tiered capture unchanged.
+- **The fingerprints cannot see an FSR 3.1 regression; the exact hashes can.** Three
+  mutations of FSR 3.1's constants, each run through the script on local lavapipe against
+  hashes written by the same script on that lavapipe (`WRITE_HASHES=1`; the committed file
+  is CI's, so a local run skips it). The fingerprint figures are mean / max against the
+  committed fingerprints (tolerance 2.0 / 24):
+
+  | Mutation | Exact hash (low, high, native, overlay) | Fingerprint low | high | native | overlay |
+  |---|---|---|---|---|---|
+  | none | pass, pass, pass, pass | 0.081 / 2 | 0.077 / 2 | 0.066 / 2 | 0.088 / 1 |
+  | jitter sign flipped | **fail, fail, fail, fail** | 0.168 / 4 | 0.170 / 6 | 0.122 / 4 | 0.187 / 4 |
+  | motion-vector sign flipped | **fail, fail**, pass, **fail** | 0.081 / 2 | 0.077 / 2 | 0.066 / 2 | 0.677 / 17 |
+  | accumulation 1/3 → 1 per frame | **fail, fail, fail, fail** | 0.086 / 2 | 0.082 / 2 | 0.075 / 2 | 0.037 / 1 |
+
+  Every mutation passes every fingerprint and fails the exact check in at least three of the
+  four scenes (the native capture's bytes did not change with the motion vectors flipped;
+  why was not investigated). These were local runs; on CI the hashes
+  are CI's, and a mutation changes CI's bytes as it changes these.
 - **Mid-stream history reset:** 40 frames of High with `MOBA_TEMPORAL_RESET_EVERY=5`, now
   under TAAU and FSR 3.1 each, with synchronization validation: 0 messages. As for TAAU, this
   is a validation smoke, not a regression check for the reset barrier (perf/0031); FSR 3.1's
@@ -183,9 +201,8 @@ time was paced (Reflex on Tiered, the compositor on Compat): p50 4.19–4.21 ms 
 - **The particle motion draw costs nothing measurable here.** `vfx_draw` (which now holds
   the second, motion-only particle pass) is 0.006–0.007 ms on the branch against 0.006 ms on
   main, and the branch's TAAU GPU total is within 0.002 ms of main's on both tiers; Compat is
-  unchanged (it has no motion target). The teamfight peaks at about 690 live particles on the RTX runs
-  (`vfx_alive_max`); the cost is one more vertex pass over them, so a heavier scene costs
-  more.
+  unchanged (it has no motion target). The teamfight peaks at about 690 live particles here
+  and overdraw 0.25, so the stress runs below load it further.
 - **TAAU's `upscaler_vram_mb` is now its allocations** (41.2 MB, the sum of its images'
   `allocated_bytes()`, the basis FSR 3.1's 75.4 MB uses), not the 38.7 MB formula main
   reports; the frame's peak is the same on both.
@@ -200,6 +217,29 @@ time was paced (Reflex on Tiered, the compositor on Compat): p50 4.19–4.21 ms 
   A resize builds FSR 3.1's new images before dropping the old ones, so it briefly holds
   about 2 × 75 MB.
 
+**The motion draw under load.** The motion-only draw is a second vertex **and fragment**
+pass over every particle: its fragment shader still samples the atlas and the scene depth
+for the opacity, and the sample mask stops only the write, so its cost scales with overdraw
+× pixels. Measured with perf/0016's stress method (the same replay with every burst and rate
+multiplied by `MOBA_VFX_SCALE`), Tiered High and Ultra, TAAU, main against the branch,
+1,500 frames, three interleaved rounds, medians (range in brackets):
+
+| Tier, scale | Live particles (max) | Overdraw p95 / max | `vfx_draw` p50, main → branch | p95, main → branch | GPU total p95, main → branch |
+|---|---|---|---|---|---|
+| High ×8 | 2,830 | 1.33 / 1.68 | 0.011 → 0.011 ms | 0.044 → 0.038 ms | 0.592 → 0.586 ms |
+| Ultra ×8 | 2,830 | 1.32 / 1.65 | 0.012 → 0.011 ms | 0.044 → 0.039 ms | 0.592 → 0.586 ms |
+| High ×16 | 5,260–5,290 | 2.64 / 3.28 | 0.017 → 0.016 ms | 0.080 → 0.071 ms | 0.629 → 0.619 ms |
+| Ultra ×16 | 5,250–5,270 | 2.64 / 3.23 | 0.017 → 0.016 ms | 0.081 → 0.070 ms | 0.629 → 0.618 ms |
+
+Ranges were within 0.003 ms; `locked_pipelines` 0 and no frame dropped. **The branch's
+`vfx_draw` is no higher than main's, and about 0.01 ms lower at p95**: main's colour draw
+blended every fragment into the motion target as an extra attachment, and the branch's
+colour draw no longer does; the motion-only draw (one two-channel target, no blending)
+costs less than that did. So no cheaper motion permutation was needed. ×16 is the stress
+knob's maximum: 5,300 particles and overdraw 3.3, below the Ultra budgets (49,152 particles,
+overdraw 8), which were not reached. The Tiered High and Ultra rows render the same
+configuration here (1260×709 at the dynamic-resolution ceiling).
+
 **Q1: `auto` stays TAAU.** Q1 gives FSR 3.1 the open build's `auto` slot when it passes the
 same readability tests as TAAU and costs within 0.2 ms of it on this GPU. It is within the
 cost (+0.134 ms p50, +0.157 ms p95 in the lane), but on all three devices it smears the
@@ -207,12 +247,13 @@ particle core more than TAAU at every ratio and needs its own 15 % tripwire from
 down (gate 3 above), so `AUTO_OPEN_BUILD` stays `Taau` and FSR 3.1 is selectable with
 `MOBA_UPSCALER=fsr3`.
 
-## The Low class: FP32 FSR 3.1 against TAAU on the Radeon 610M
+## Below the Low class: FP32 FSR 3.1 against TAAU on the Radeon 610M (an upper bound)
 
 The SDK's 16-bit permutation does not compile unmodified with the pinned `slangc` (amendment
 4 item 9), and no published AMD figure for its saving was found, so the 32-bit permutation
-was timed against TAAU on the Radeon 610M (RADV, RDNA 2 with two compute units; a part on
-which the SDK would choose the 16-bit path, so this is an upper bound for FSR 3.1 there).
+was timed against TAAU on the Radeon 610M (RADV, an RDNA 2 iGPU with two compute units,
+**below the Low class**: 20 ms of GPU frame; a part on which the SDK would choose the 16-bit
+path, so this is an upper bound for FSR 3.1 there).
 Same replay and settings, Tiered Low, 1920×1080 output; dynamic resolution sat at its floor,
 render scale 0.5 (960×540), for both back ends throughout. Three interleaved rounds, medians
 (ranges within 0.06 ms):
@@ -225,8 +266,9 @@ render scale 0.5 (960×540), for both back ends throughout. Three interleaved ro
 **FSR 3.1 costs +3.54 ms at p50 and +3.69 ms at p95 in the lane on this part**, about 37 %
 more than TAAU, whose own 9.5 ms is already half the frame. **FSR 3.1 must not enter `auto` or
 a Low preset without a measurement on a Low-class part** (the RTX 2060 or an RDNA 2 discrete
-card), with FP16 if it is built by then; the review estimates the RTX 2060's lane delta at
-0.3–0.5 ms, which was not measured.
+card), with FP16 if it is built by then. The round-1 perf review estimates the RTX 2060's
+lane delta at 0.3–0.5 ms (unmeasured). FSR 3.1 costs 1.37× TAAU's lane here against 1.93× on
+the RTX 5070 Ti (High), so neither part predicts the Low class.
 
 ## Not verified here
 
@@ -240,8 +282,14 @@ card), with FP16 if it is built by then; the review estimates the RTX 2060's lan
   to take `auto`.
 - **The ghost probe on hardware is not in CI**: CI's lavapipe run is a tripwire; the hardware
   runs here are by hand.
-- **`tiered-temporal`**, the new CI job that holds the ADR-0021 probes, is not a required
-  check; making it one is a repository setting.
+- **`tiered-temporal`**, the new CI job that holds FSR 3.1's cases of the tiered probes and
+  goldens, is not a required check, so they do not block a merge; it should become one (a
+  repository ruleset change for the maintainer). TAAU's cases stay in the required
+  `renderer-gate`.
+- **The smoke-over-unit trade-off** (ADR-0021 amendment 4 item 13): translucent particles
+  from 0.1 opacity replace a moving unit's motion; the round-2 review measured TAAU's hero
+  smear past its bound under smoke (1.81–1.90 % against 1.75 %). The probe does not cover it
+  yet: #368.
 - **Machine state:** the timings ran on a working desktop, not an idle one; the three rounds
   agree within the ranges shown. The tiered baselines' flip stays with the last N1 part, on
   a quiet machine.

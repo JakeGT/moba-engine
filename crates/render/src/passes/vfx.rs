@@ -512,7 +512,8 @@ pub(crate) struct VfxPass {
     mesh_region: u32,
     hdr_format: vk::Format,
     depth_format: vk::Format,
-    /// The draws also write motion and the reactive mask (ADR-0021 §2d).
+    /// The colour draws also write the reactive mask, and a second, motion-only draw writes
+    /// the particles' motion (ADR-0021 §2d, amendment 4 item 13).
     temporal: bool,
     /// The overlay's target format (Tiered, ADR-0021 §5b).
     overlay_format: Option<vk::Format>,
@@ -1855,7 +1856,8 @@ struct PipelineLayouts {
 struct TargetFormats {
     hdr: vk::Format,
     depth: vk::Format,
-    /// The draws add motion and the reactive mask (ADR-0021 §2d).
+    /// The colour draws add the reactive mask; the motion-only draw is built too (ADR-0021
+    /// §2d, amendment 4 item 13).
     temporal: bool,
     /// The overlay's target (ADR-0021 §5b).
     overlay: Option<vk::Format>,
@@ -1949,11 +1951,8 @@ fn build_pipelines(
         None
     };
     let motion = if temporal {
-        let fragment = module(if oit {
-            "vfx_oit_motion.frag"
-        } else {
-            "vfx_motion.frag"
-        })?;
+        // Both blend paths: the draw writes no colour (`vfx_motion.frag`).
+        let fragment = module("vfx_motion.frag")?;
         let spec = |vertex: vk::ShaderModule, mesh_input| ParticleSpec {
             layout,
             vertex,

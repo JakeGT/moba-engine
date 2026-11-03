@@ -232,11 +232,6 @@ const PERMUTATIONS: &[Permutation] = &[
     },
     Permutation {
         source: "vfx.frag",
-        output: "vfx_oit_motion.frag",
-        defines: &["VFX_OIT", "VFX_TEMPORAL", "VFX_MOTION"],
-    },
-    Permutation {
-        source: "vfx.frag",
         output: "vfx_overlay.frag",
         defines: &["VFX_OVERLAY"],
     },

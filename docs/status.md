@@ -105,8 +105,9 @@ an external security review, real Windows/macOS GPU runs and crates.io ownership
   [v0.4.1](https://github.com/JakeGT/moba-engine/releases/tag/v0.4.1) (security patch from `release/0.4.x`) is the current preview; `main` targets 0.5.0.
   crates.io publication remains opt-in (`publish = false`, #21).
 - CI: Linux/Windows/macOS gates, Miri, cargo-deny, release tests/doctests, MSRV, no-op/real
-  `renderer-gate` and, beside it, `tiered-temporal` (ADR-0021's tiered probes and goldens,
-  split out in N1b stage 2; not yet a required check), docs link/contract check,
+  `renderer-gate` (with ADR-0021's TAAU probes and tiered goldens) and, beside it,
+  `tiered-temporal` (FSR 3.1's cases, split out in N1b stage 2; it should become a required
+  check, a ruleset change for the maintainer), docs link/contract check,
   golden/fuzz/Loom/platform workflows. Nightly
   failures open an issue automatically. Hosted-runner capability limits are documented, not treated as passes.
 

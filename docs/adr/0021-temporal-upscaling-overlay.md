@@ -1390,14 +1390,20 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
    FSR 3.1 at Quality, native and Performance and under every earlier case. Every Compat
    golden is byte-identical to `origin/main`. Q8 ("Goldens cover TAAU and FSR 3.1") and §7
    include FSR 3.1, so its four tiered captures (low, high, native and overlay; high is
-   Quality at the High preset) now have committed fingerprints
-   (`tests/golden/render-tiered-fsr3-*-fingerprint.rgb`) beside TAAU's, checked by
-   `tiered-goldens.sh` after the two-run byte-identity check. Their raw bytes differ between
-   CI's lavapipe (LLVM 21.1.8) and a newer one (LLVM 23.1.3) for TAAU and FSR 3.1 alike, as
-   llvmpipe's code generation differs; the fingerprints absorb it (FSR 3.1 mean 0.066–0.088,
-   max 1–2; TAAU 0.059–0.074, max 2; the check allows 2.0 and 24). They were written from
-   CI's output, the reference; TAAU's were written from the newer one in N1a and still pass
-   on CI.
+   Quality at the High preset) are checked by `tiered-goldens.sh` in three ways:
+   - the two runs must be byte-identical;
+   - **an exact SHA-256 per capture** (`tests/golden/render-tiered-hashes.txt`, TAAU's too),
+     checked only on the lavapipe that generated the file: CI's (LLVM 21.1.8, Vulkan 1.4.335,
+     from `vulkan-probe`). Elsewhere the script logs that it skipped them. llvmpipe's code
+     generation differs between LLVM versions, so a newer one (LLVM 23.1.3 here) renders
+     other bytes for TAAU and FSR 3.1 alike; on CI the hashes were the same across two runs
+     of different code (`c0ff307`, `d9c2d6a`);
+   - the 64×36 fingerprints (`render-tiered-fsr3-*-fingerprint.rgb`, written from CI's
+     output). **They do not catch an FSR 3.1 regression:** at mean ≤ 2.0 and max ≤ 24 they
+     cannot tell FSR 3.1 from TAAU (mean 0.22–0.38, max 3–6 apart, per the round-2 review),
+     and a flipped jitter sign, accumulation at 1 instead of 1/3 and a flipped motion-vector
+     sign all pass them. They catch a broken frame on any lavapipe; the exact hashes are the
+     regression check, on CI (perf/0033 has the mutations against both).
 8. **Q1: `auto` stays TAAU.** Q1 gives FSR 3.1 the open build's `auto` slot when its port
    passes the same readability tests and costs within 0.2 ms of TAAU on the RTX 5070 Ti. Its
    cost is within that (the temporal lane on the RTX 5070 Ti at 1440p, three interleaved
@@ -1421,8 +1427,10 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
    against 39.4 MiB. On this two-CU part FSR 3.1 costs about 37 % more than TAAU, which is
    already half the frame. **FSR 3.1 does not enter `auto` or
    a Low preset without a measurement on a Low-class part** (the RTX 2060 or an RDNA 2
-   discrete card), with FP16 if it is built by then. The review of this amendment estimates the
-   RTX 2060's lane delta at 0.3–0.5 ms; it was not measured.
+   discrete card), with FP16 if it is built by then. The round-1 perf review estimates the RTX
+   2060's lane delta at 0.3–0.5 ms (an estimate, unmeasured). FSR 3.1 costs 1.37× TAAU's
+   lane on the 610M against 1.93× on the RTX 5070 Ti (High), so neither part predicts the
+   Low class.
 10. **The stage-1 coverage gaps are closed.** `fsr3-smoke` gains two occluder runs (a box at a
     nearer depth crosses the still fine field, motion on the box only). Skipping the
     every-frame clear of the reconstructed previous depth now fails it (the trail the box left
@@ -1474,9 +1482,21 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
     Performance 6.52 / 6.56 / 5.88 %, native 1.23 / 1.27 / 1.40 % on the RTX, RADV and
     lavapipe), so the bounds are re-derived from all three: TAAU's particle tripwire stays
     7.5 % (14 % above its worst, 6.56 % on RADV at Performance), and losing the motion fails
-    it everywhere (29.96–32.23 % Quality). The cost is a second vertex pass over the live
-    particles (perf/0033). The tiered goldens' scenes are unchanged by it (their fingerprints
-    match exactly).
+    it everywhere (29.96–32.23 % Quality). The cost is a second vertex **and fragment** pass over the live
+    particles: the motion fragment shader still samples the atlas and the scene depth for the
+    opacity, and the sample mask stops only the write. Under perf/0016's stress (`MOBA_VFX_SCALE`
+    8 and 16, about 2,800 and 5,300 live particles, overdraw up to 3.3) `vfx_draw` is no higher
+    than main's, whose colour draw blended into the motion target (perf/0033). The tiered
+    goldens' scenes are unchanged by it (their hashes match exactly).
+
+    **The trade-off: translucent layers over moving units.** At 0.1 a translucent particle
+    (smoke) replaces the motion of the unit under it with its own. The round-2 review put
+    seven static 2.5 m smoke sprites over the probe's hero path (RTX 5070 Ti, Quality): TAAU's
+    hero smear was 1.81 % at opacity 0.2 and 1.90 % at 0.4, against 1.44 % and 1.65 % without
+    particle motion and the 1.75 % bound; FSR 3.1 improved (0.27 %). **TAAU can exceed the
+    hero bound under translucent smoke.** The probe does not cover the case yet; #368 tracks
+    adding it and choosing a rule (a per-effect flag, a higher threshold for alpha-blended
+    particles, or a wider bound).
 14. **The ghost probe is run on a real GPU, not only lavapipe.** Item 13's bug passed CI's
     lavapipe run, so gate 3's ghost energy is verified on lavapipe **and** on hardware (the
     RTX 5070 Ti and RADV here) whenever particle, motion or upscaler code changes; CI's
@@ -1487,12 +1507,14 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
     because `recreate_swapchain` idles the device first. Its contract is now a `# Safety`
     section (the device is idle; no recorded frame is pending), for TAAU and FSR 3.1, and
     each caller says why it holds.
-16. **The tiered probes run in their own CI job.** With FSR 3.1 in the ghost probe, overlay
-    invariance and the tiered goldens, `renderer-gate` took 64 minutes of its 75. ADR-0021's
-    tiered probes and goldens now run in a parallel `tiered-temporal` job in the same
-    workflow; `renderer-gate` keeps its name (a required check) and the Compat goldens.
-    `tiered-temporal` is not a required check until the ruleset adds it (a maintainer
-    setting).
+16. **FSR 3.1's CI cases run in their own job.** With FSR 3.1 in the ghost probe, overlay
+    invariance and the tiered goldens, `renderer-gate` took 64 minutes of its 75. FSR 3.1's
+    cases now run in a parallel `tiered-temporal` job in the same workflow (the scripts take
+    `UPSCALERS`); TAAU's (the motion probe, the TAAU ghost probe, TAAU overlay invariance,
+    the tiered outline probe, the TAAU tiered goldens and their mid-stream reset) stay in the
+    required `renderer-gate`, because they guard the default frame. **`tiered-temporal`
+    should become a required check**, which is a repository ruleset change for the
+    maintainer; until then FSR 3.1's CI cases do not block a merge.
 
 ## Sources
 

@@ -29,17 +29,27 @@ capture() {
     exit 1
   fi
 }
-cases=(
-  "taau-quality MOBA_AA=temporal MOBA_UPSCALE_MODE=quality"
-  "taau-native MOBA_AA=temporal MOBA_UPSCALE_MODE=native"
-  "taau-performance MOBA_AA=temporal MOBA_UPSCALE_MODE=performance"
-  "fsr3-quality MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=quality"
-  "fsr3-native MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=native"
-  "fsr3-performance MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=performance"
-  "fxaa MOBA_AA=fxaa"
-  "fxaa-scaled MOBA_AA=fxaa MOBA_RENDER_SCALE=0.6"
-  "off MOBA_AA=off"
-)
+# UPSCALERS picks the temporal back ends (default "taau fsr3"). The reference is always TAAU
+# Quality; the FXAA and no-AA cases run with TAAU's set. CI runs "taau" in the required
+# renderer-gate and "fsr3" in tiered-temporal.
+upscalers=" ${UPSCALERS:-taau fsr3} "
+cases=("taau-quality MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=quality")
+if [[ $upscalers == *" taau "* ]]; then
+  cases+=(
+    "taau-native MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=native"
+    "taau-performance MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=performance"
+    "fxaa MOBA_AA=fxaa"
+    "fxaa-scaled MOBA_AA=fxaa MOBA_RENDER_SCALE=0.6"
+    "off MOBA_AA=off"
+  )
+fi
+if [[ $upscalers == *" fsr3 "* ]]; then
+  cases+=(
+    "fsr3-quality MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=quality"
+    "fsr3-native MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=native"
+    "fsr3-performance MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=performance"
+  )
+fi
 status=0
 reference=
 for entry in "${cases[@]}"; do

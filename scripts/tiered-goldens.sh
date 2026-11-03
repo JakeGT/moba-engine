@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Tiered goldens (ADR-0021 §7, verification gate 4): TAAU at Low (Quality), at High and at
-# native, and the overlay over moving units (a two-tick capture: the history warms up at
-# tick n - 1 and tick n is captured with the camera panned), on lavapipe at 640x360 with the
-# HUD at half scale. Each is captured twice and the two runs must be byte-identical; then its
-# 64x36 fingerprint is compared with tests/golden/render-tiered-<name>-fingerprint.rgb
-# (WRITE=1 rewrites them).
+# Tiered goldens (ADR-0021 §7, verification gate 4): Low (Quality), High, native and the
+# overlay over moving units (a two-tick capture: the history warms up at tick n - 1 and tick n
+# is captured with the camera panned), on lavapipe at 640x360 with the HUD at half scale.
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
-# FSR 3.1 (ADR-0021 Q8, amendment 4) captures the same four scenes twice each, which must be
-# byte-identical, and compares them with its own fingerprints
-# (tests/golden/render-tiered-fsr3-<name>-fingerprint.rgb). The fingerprints are written from
-# CI's lavapipe (LLVM 21): a newer llvmpipe renders different bytes for TAAU and FSR 3.1
-# alike, within the fingerprint's tolerance (perf/0033).
+# UPSCALERS picks the back ends (default "taau fsr3"); CI runs "taau" in the required
+# renderer-gate and "fsr3" in tiered-temporal. Per back end and scene:
+#   - two captures, which must be byte-identical;
+#   - an exact SHA-256 check against tests/golden/render-tiered-hashes.txt, but only on the
+#     device that file was generated on (CI's lavapipe: its `device` line, from
+#     `vulkan-probe`). Elsewhere it is skipped with a log line: llvmpipe's code generation
+#     differs between LLVM versions, so another lavapipe renders other bytes for every back
+#     end. WRITE_HASHES=1 rewrites the file for the current device; TIERED_HASHES names
+#     another file;
+#   - the 64x36 fingerprint (tests/golden/render-tiered-[fsr3-]<name>-fingerprint.rgb, WRITE=1
+#     rewrites them). It catches a broken frame, not an upscaler regression: it cannot tell
+#     FSR 3.1 from TAAU (perf/0033), which is why the exact check exists.
 #
 # Captures fail on any validation message, and so does a 40-frame run per back end that
-# resets the temporal history every 5th frame with frames in flight. CI runs it under lavapipe with validation and
-# sync validation (render-golden.yml); set RUN="xvfb-run -a" when there is no display.
+# resets the temporal history every 5th frame with frames in flight. CI runs it under
+# lavapipe with validation and sync validation (render-golden.yml); set RUN="xvfb-run -a"
+# when there is no display.
 set -euo pipefail
 client=${1:-./target/release/moba-client}
 check=${2:-./target/release/image-check}
@@ -43,35 +48,64 @@ cases=(
   "native MOBA_QUALITY=high MOBA_UPSCALE_MODE=native ${local_scene[*]}"
   "overlay MOBA_QUALITY=high MOBA_CAPTURE_TWO_TICK=1 ${network_scene[*]}"
 )
+upscalers=${UPSCALERS:-taau fsr3}
+hashes=${TIERED_HASHES:-tests/golden/render-tiered-hashes.txt}
+probe="$(dirname "$client")/vulkan-probe"
+# shellcheck disable=SC2086 # RUN is a command prefix.
+device=$(${RUN:-} "$probe" 2>/dev/null |
+  sed -n 's/^device 0: "\([^"]*\)" kind=[A-Za-z]* api=\([0-9.]*\).*/\1 api=\2/p' || true)
+expected_device=$(sed -n 's/^device //p' "$hashes" 2>/dev/null || true)
+exact=0
+if [ "${WRITE_HASHES:-0}" = 1 ]; then
+  test -n "$device" || { echo "FAIL: vulkan-probe named no device"; exit 1; }
+  printf '%s\n%s\n' "# SHA-256 of the tiered captures (scripts/tiered-goldens.sh) on this device only." \
+    "device $device" > "$hashes.new"
+elif [ -n "$device" ] && [ "$device" = "$expected_device" ]; then
+  exact=1
+  echo "exact hashes: on $device"
+else
+  echo "exact hashes: skipped, this device is '${device:-unknown}' and $hashes is for" \
+    "'${expected_device:-none}'; the fingerprints alone are checked"
+  # On CI that means the runner's lavapipe changed: warn, so the hashes get regenerated.
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::warning::tiered-goldens: exact hashes skipped (lavapipe is '${device:-unknown}');" \
+      "regenerate $hashes from this run's captures"
+  fi
+fi
 status=0
-for entry in "${cases[@]}"; do
-  read -r name settings <<< "$entry"
-  # shellcheck disable=SC2086 # settings are separate assignments.
-  capture "$out/$name-1.ppm" $settings
-  # shellcheck disable=SC2086
-  capture "$out/$name-2.ppm" $settings
-  grep -E "anti-aliasing" "$out/$name-1.ppm.log" || true
-  if cmp -s "$out/$name-1.ppm" "$out/$name-2.ppm"; then
-    echo "ok: tiered $name: two runs byte-identical"
-  else
-    echo "FAIL: tiered $name: the two runs differ"
-    status=1
-  fi
-  # FSR 3.1: the same scene, deterministic across two runs, with its own fingerprint (Q8).
-  # shellcheck disable=SC2086
-  capture "$out/fsr3-$name-1.ppm" MOBA_UPSCALER=fsr3 $settings
-  # shellcheck disable=SC2086
-  capture "$out/fsr3-$name-2.ppm" MOBA_UPSCALER=fsr3 $settings
-  if ! grep -q "upscaler fsr3 " "$out/fsr3-$name-1.ppm.log"; then
-    echo "FAIL: tiered fsr3 $name: did not run fsr3"
-    status=1
-  elif cmp -s "$out/fsr3-$name-1.ppm" "$out/fsr3-$name-2.ppm"; then
-    echo "ok: tiered fsr3 $name: two runs byte-identical ($(sha256sum < "$out/fsr3-$name-1.ppm" | cut -c1-16))"
-  else
-    echo "FAIL: tiered fsr3 $name: the two runs differ"
-    status=1
-  fi
-  for capture_name in "$name" "fsr3-$name"; do
+for upscaler in $upscalers; do
+  prefix=; [ "$upscaler" = taau ] || prefix="$upscaler-"
+  for entry in "${cases[@]}"; do
+    read -r name settings <<< "$entry"
+    capture_name="$prefix$name"
+    # shellcheck disable=SC2086 # settings are separate assignments.
+    capture "$out/$capture_name-1.ppm" MOBA_UPSCALER="$upscaler" $settings
+    # shellcheck disable=SC2086
+    capture "$out/$capture_name-2.ppm" MOBA_UPSCALER="$upscaler" $settings
+    grep -E "anti-aliasing" "$out/$capture_name-1.ppm.log" || true
+    hash=$(sha256sum < "$out/$capture_name-1.ppm" | cut -d' ' -f1)
+    # A back end that fell back would check TAAU's output under another name.
+    if ! grep -q "upscaler $upscaler " "$out/$capture_name-1.ppm.log"; then
+      echo "FAIL: tiered $capture_name: did not run $upscaler"
+      status=1
+      continue
+    elif cmp -s "$out/$capture_name-1.ppm" "$out/$capture_name-2.ppm"; then
+      echo "ok: tiered $capture_name: two runs byte-identical (${hash:0:16})"
+    else
+      echo "FAIL: tiered $capture_name: the two runs differ"
+      status=1
+    fi
+    if [ "${WRITE_HASHES:-0}" = 1 ]; then
+      echo "$capture_name $hash" >> "$hashes.new"
+    elif [ "$exact" = 1 ]; then
+      want=$(sed -n "s/^$capture_name //p" "$hashes")
+      if [ "$hash" = "$want" ]; then
+        echo "ok: tiered $capture_name: exact hash"
+      else
+        echo "FAIL: tiered $capture_name: hash ${hash:0:16}, expected ${want:0:16}"
+        status=1
+      fi
+    fi
     fingerprint="tests/golden/render-tiered-$capture_name-fingerprint.rgb"
     if [ "${WRITE:-0}" = 1 ]; then
       "$check" "$out/$capture_name-1.ppm" --expected "$fingerprint" --write
@@ -82,11 +116,22 @@ for entry in "${cases[@]}"; do
     fi
   done
 done
+if [ "${WRITE_HASHES:-0}" = 1 ]; then
+  # Keep the other back ends' lines when only some were run.
+  if [ -f "$hashes" ] && [ "$(sed -n 's/^device //p' "$hashes")" = "$device" ]; then
+    grep -v -e '^#' -e '^device ' "$hashes" | while read -r name hash; do
+      grep -q "^$name " "$hashes.new" || echo "$name $hash" >> "$hashes.new"
+    done
+  fi
+  { head -2 "$hashes.new"; tail -n +3 "$hashes.new" | sort; } > "$hashes"
+  rm "$hashes.new"
+  echo "wrote $hashes for $device"
+fi
 # A history reset mid-stream (ADR-0021 amendment 2 item 28): every 5th frame resets the
 # temporal history with the previous frame still in flight, under the same validation. This
 # is a validation smoke of the reset path: synchronization validation does not flag the
 # reset barrier with a NONE source (on lavapipe, NVIDIA or RADV), so unit tests pin it.
-for upscaler in taau fsr3; do
+for upscaler in $upscalers; do
   reset_log="$out/mid-stream-reset-$upscaler.log"
   # shellcheck disable=SC2086 # RUN is a command prefix.
   if env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \
