@@ -316,6 +316,10 @@ impl TemporalUpscaler for Sharpened {
         self.inner.vram_bytes() + u64::from(self.extent.width) * u64::from(self.extent.height) * 8
     }
 
+    fn sdk_bytes(&self) -> u64 {
+        self.inner.sdk_bytes()
+    }
+
     fn reload_shaders(
         &mut self,
         device: &DeviceContext,
@@ -354,10 +358,9 @@ fn intermediate(device: &DeviceContext, output: Extent) -> RenderResult<GpuImage
             height: output.height.max(1),
         },
         FORMAT,
-        // TRANSFER_DST: NGX may clear its output (ADR-0021 amendment 5).
-        vk::ImageUsageFlags::STORAGE
-            | vk::ImageUsageFlags::SAMPLED
-            | vk::ImageUsageFlags::TRANSFER_DST,
+        // The back end writes here: TRANSFER_DST in a vendor build (NGX may clear its output,
+        // ADR-0021 amendment 5).
+        vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED | super::VENDOR_OUTPUT_USAGE,
         vk::ImageAspectFlags::COLOR,
     )
 }

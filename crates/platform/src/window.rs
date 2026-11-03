@@ -184,6 +184,14 @@ impl Window {
         self.inner.request_redraw();
     }
 
+    /// Asks the windowing system for a new inner size in physical pixels. The resize, if
+    /// granted, arrives later as an [`App::on_resize`](crate::App::on_resize) like any other.
+    pub fn request_size(&self, width: u32, height: u32) {
+        let _ = self
+            .inner
+            .request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+    }
+
     /// Changes the window title.
     pub fn set_title(&self, title: &str) {
         self.inner.set_title(title);

@@ -544,8 +544,20 @@ impl DeviceContext {
             .iter()
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
-        let mut enabled_features =
-            FeatureBits::of(&base_features, &features_11, &features_12, &features_13);
+        // Only the structures that were chained were enabled (Compat chains no 1.2 one, and
+        // the 1.1 one only for a vendor request).
+        let unchained_11 = vk::PhysicalDeviceVulkan11Features::default();
+        let unchained_12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut enabled_features = FeatureBits::of(
+            &base_features,
+            if chain_11 {
+                &features_11
+            } else {
+                &unchained_11
+            },
+            if tiered { &features_12 } else { &unchained_12 },
+            &features_13,
+        );
         if chain_mutable {
             enabled_features = enabled_features.with(MUTABLE_DESCRIPTOR_TYPE);
         }

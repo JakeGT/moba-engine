@@ -302,8 +302,8 @@ pub(crate) fn memory_summary(stats: &moba_render::MemoryStats) -> String {
     format!(
         "vram_mb={:.1} vram_budget_mb={:.0} vram_peak_mb={:.1} vram_over_budget={} \
          vram_reserved_mb={:.1} texture_mb={:.1} texture_budget_mb={:.0} targets_mb={:.1} \
-         buffers_mb={:.1} swapchain_mb={:.1} degraded_textures={} refused_textures={} \
-         uploads={} locked_uploads={} locked_pipelines={}",
+         buffers_mb={:.1} swapchain_mb={:.1} sdk_mb={:.1} degraded_textures={} \
+         refused_textures={} uploads={} locked_uploads={} locked_pipelines={}",
         mib(stats.total_bytes()),
         mib(stats.total_budget),
         mib(stats.peak_bytes),
@@ -314,6 +314,7 @@ pub(crate) fn memory_summary(stats: &moba_render::MemoryStats) -> String {
         mib(stats.target_bytes),
         mib(stats.buffer_bytes),
         mib(stats.swapchain_bytes),
+        mib(stats.sdk_bytes),
         stats.degraded_textures,
         stats.refused_textures,
         stats.uploads,
@@ -1057,6 +1058,33 @@ pub(crate) fn parse_window_size(value: Option<&str>) -> (u32, u32) {
         .unwrap_or((1_280, 720))
 }
 
+/// `MOBA_SMOKE_RESIZE=<frame>:<w>x<h>[,<frame>:<w>x<h>…]`: physical window sizes to request
+/// at those frames, for resize smokes (each size 1..=7680 by 1..=4320). Malformed entries are
+/// reported once and skipped.
+pub(crate) fn parse_smoke_resizes(value: Option<&str>) -> Vec<(u64, [u32; 2])> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let parse = |entry: &str| {
+        let (frame, size) = entry.trim().split_once(':')?;
+        let (width, height) = size.trim().split_once(['x', 'X'])?;
+        let frame: u64 = frame.trim().parse().ok()?;
+        let width: u32 = width.trim().parse().ok()?;
+        let height: u32 = height.trim().parse().ok()?;
+        ((1..=7_680).contains(&width) && (1..=4_320).contains(&height))
+            .then_some((frame, [width, height]))
+    };
+    let mut resizes = Vec::new();
+    for entry in value.split(',').filter(|entry| !entry.trim().is_empty()) {
+        match parse(entry) {
+            Some(resize) => resizes.push(resize),
+            None => eprintln!("MOBA_SMOKE_RESIZE entry {entry:?} is not <frame>:<w>x<h>; skipped"),
+        }
+    }
+    resizes.sort_unstable_by_key(|&(frame, _)| frame);
+    resizes
+}
+
 /// Latest snapshot tick the client has processed, published for the lock-stepped local
 /// capture server (see [`run_local_server`]). Unused otherwise.
 pub(crate) static LOCAL_CAPTURE_ACK: AtomicU32 = AtomicU32::new(0);
@@ -1755,8 +1783,9 @@ mod tests {
     }
     use super::{
         cull_mode_from, environment_config_from, frame_log_frames_from, gpu_report,
-        lighting_config_from, mesh_lod_from, parse_hex32, parse_preview_camera, parse_window_size,
-        pipeline_cache_path_from, post_config_from, upload_lock_wanted, world_config_from,
+        lighting_config_from, mesh_lod_from, parse_hex32, parse_preview_camera,
+        parse_smoke_resizes, parse_window_size, pipeline_cache_path_from, post_config_from,
+        upload_lock_wanted, world_config_from,
     };
 
     #[test]
@@ -2391,6 +2420,11 @@ mod tests {
     #[test]
     fn window_size_parses_or_falls_back() {
         assert_eq!(parse_window_size(None), (1_280, 720));
+        assert_eq!(
+            parse_smoke_resizes(Some("90:8x8, 30:1280x720,bad,10:0x5")),
+            [(30, [1_280, 720]), (90, [8, 8])]
+        );
+        assert_eq!(parse_smoke_resizes(None), []);
         assert_eq!(parse_window_size(Some("1920x1080")), (1_920, 1_080));
         assert_eq!(parse_window_size(Some(" 2560 X 1440 ")), (2_560, 1_440));
         for bad in ["", "1920", "0x0", "99999x1080", "axb", "1920x1080x2"] {

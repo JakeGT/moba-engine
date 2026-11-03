@@ -34,8 +34,15 @@
 //!   evaluation takes no latency markers (only frame generation, through Streamline in N9,
 //!   does). The renderer's markers bracket the whole frame's recording and submission, DLSS
 //!   included.
+//!
+//! - **A record that is never submitted** still advanced the SDK's own internal state (its
+//!   history and frame counter live inside the SDK, which recorded its work into our command
+//!   buffer). `reset_history` asks the next evaluation for a reset, which covers the history;
+//!   anything else the SDK tracks is outside our control, so a caller that drops a recorded
+//!   command buffer must treat it as the `record` contract's fatal case and drop the back end
+//!   (the renderer submits every recorded frame, and a failed submission is fatal).
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
 
@@ -45,7 +52,7 @@ use super::{SDK_VERSION, Session, handle, result_name, succeeded, sys};
 use crate::upscale::{
     Extent, TemporalUpscaler, UpscaleImage, UpscaleInputs, UpscaleMode, UpscaleOutput, UpscalerKind,
 };
-use crate::vendor::barriers::{internal_barrier, output_after, output_before};
+use crate::vendor::barriers::{inputs_after, internal_barrier, output_after, output_before};
 use crate::vendor::{Unavailable, UpscalerRequest};
 
 /// An NGX parameter map from `GetCapabilityParameters`, destroyed on drop (before the session
@@ -54,11 +61,16 @@ struct Params {
     raw: *mut sys::NVSDK_NGX_Parameter,
 }
 
-/// A NUL-terminated parameter name from the generated bindings.
+/// A NUL-terminated parameter name from the generated bindings (`b"…\0"` literals). Only the
+/// terminator is checked (O(1); `record` names about 40 parameters a frame): C reads up to
+/// the first NUL, so an interior one would only shorten the name.
 fn name(bytes: &'static [u8]) -> *const c_char {
-    CStr::from_bytes_with_nul(bytes)
-        .expect("NGX parameter names are NUL-terminated string literals")
-        .as_ptr()
+    assert_eq!(
+        bytes.last(),
+        Some(&0),
+        "NGX parameter names are NUL-terminated string literals"
+    );
+    bytes.as_ptr().cast()
 }
 
 impl Params {
@@ -91,7 +103,10 @@ impl Params {
     }
 
     /// Stores a pointer; NGX reads through it only during the next create or evaluate call,
-    /// so the pointee must live until that call returns.
+    /// so the pointee must live until that call returns. The map keeps the pointer value
+    /// afterwards, so every caller nulls it again before the pointee goes out of scope
+    /// (`record` clears the resource pointers right after the evaluation); a stale pointer
+    /// is never left in the map for a later call to read.
     fn set_ptr(&self, key: &'static [u8], value: *mut c_void) {
         // SAFETY: as for `set_ui`; NGX stores the pointer value, not the pointee.
         unsafe { sys::NVSDK_NGX_Parameter_SetVoidPointer(self.raw, name(key), value) };
@@ -571,11 +586,14 @@ impl TemporalUpscaler for DlssUpscaler {
             sys::NVSDK_NGX_VULKAN_EvaluateFeature_C(handle(cmd.as_raw()), feature.raw, p.raw, None)
         };
         let after = [output_after(image)];
+        let sdk_after = [inputs_after()];
         // SAFETY: as for the barrier before the evaluation.
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&after),
+                &vk::DependencyInfo::default()
+                    .memory_barriers(&sdk_after)
+                    .image_memory_barriers(&after),
             );
         }
         // The descriptions are about to go out of scope: clear the pointers to them.
@@ -625,11 +643,16 @@ impl TemporalUpscaler for DlssUpscaler {
     ) -> crate::error::RenderResult<()> {
         // DLSS must be re-created for a new output size (guide §3.2.2).
         self.create(device, output)
-            .map_err(crate::error::RenderError::NoSuitableDevice)
+            .map_err(crate::error::RenderError::Upscaler)
     }
 
     fn vram_bytes(&self) -> u64 {
         self.vram
+    }
+
+    fn sdk_bytes(&self) -> u64 {
+        // All of it: the SDK allocates its own memory.
+        self.vram_bytes()
     }
 }
 

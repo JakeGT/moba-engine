@@ -20,6 +20,13 @@
 //!
 //! Compile-only on this project's machines (Windows binaries, AMD hardware; ADR-0021
 //! amendment 5): nothing here has run.
+//!
+//! - **A record that is never submitted** still advanced the SDK's own internal state (its
+//!   history and frame counter live inside the SDK, which recorded its work into our command
+//!   buffer). `reset_history` asks the next evaluation for a reset, which covers the history;
+//!   anything else the SDK tracks is outside our control, so a caller that drops a recorded
+//!   command buffer must treat it as the `record` contract's fatal case and drop the back end
+//!   (the renderer submits every recorded frame, and a failed submission is fatal).
 
 #![allow(
     clippy::unnecessary_cast,
@@ -473,11 +480,16 @@ impl TemporalUpscaler for Fsr4Upscaler {
         max_render: Extent,
     ) -> crate::error::RenderResult<()> {
         self.create(output, max_render)
-            .map_err(crate::error::RenderError::NoSuitableDevice)
+            .map_err(crate::error::RenderError::Upscaler)
     }
 
     fn vram_bytes(&self) -> u64 {
         self.vram
+    }
+
+    fn sdk_bytes(&self) -> u64 {
+        // All of it: the SDK allocates its own memory.
+        self.vram_bytes()
     }
 }
 

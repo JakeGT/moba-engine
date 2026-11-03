@@ -390,6 +390,9 @@ pub(crate) struct Selection {
     latency: LatencyMode,
     /// One line per candidate that was compiled in but unavailable, then the summary.
     lines: Vec<String>,
+    /// The upscaler that actually runs, once the renderer has created it (`builtin` when TAAU
+    /// runs in place of the slot's back end, ADR-0021 amendment 5); the slot's choice before.
+    upscaler_in_use: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Selection {
@@ -429,10 +432,46 @@ impl Selection {
             .map_or_else(|| slot.builtin(), |(_, backend)| backend.name())
     }
 
-    /// Plain-data view for the public API.
+    /// Records the upscaler that runs (a vendor back end's name, or `builtin`), for
+    /// [`Self::backends`] and the summary line.
+    pub(crate) fn set_upscaler_in_use(&mut self, name: &'static str) {
+        self.upscaler_in_use = Some(name);
+    }
+
+    /// The summary line (`[vendor] selected: …`), naming the upscaler that runs; `None` in
+    /// the open build.
+    pub(crate) fn summary(&self) -> Option<String> {
+        if self.compiled.is_empty() {
+            return None;
+        }
+        let backends = self.backends();
+        let mut summary = String::from("[vendor] selected:");
+        for slot in Slot::ALL {
+            let name = if slot == Slot::Upscaler {
+                backends.upscaler
+            } else {
+                self.backend(slot)
+            };
+            let _ = write!(summary, " {}={}", slot.name(), name);
+        }
+        let _ = write!(
+            summary,
+            " latency={} compiled={}",
+            self.latency.name(),
+            self.compiled.join(",")
+        );
+        for (_, backend) in &self.chosen {
+            let _ = write!(summary, " {}=[{}]", backend.name(), backend.detail());
+        }
+        Some(summary)
+    }
+
+    /// Plain-data view for the public API: the upscaler is the one that runs.
     pub(crate) fn backends(&self) -> VendorBackends {
         VendorBackends {
-            upscaler: self.backend(Slot::Upscaler),
+            upscaler: self
+                .upscaler_in_use
+                .unwrap_or_else(|| self.backend(Slot::Upscaler)),
             denoiser: self.backend(Slot::Denoiser),
             direct_lighting: self.backend(Slot::DirectLighting),
             radiance_cache: self.backend(Slot::RadianceCache),
@@ -539,6 +578,7 @@ pub(crate) fn resolve<C: ?Sized, P: Fn(&C) -> Result<Box<dyn Backend>, Unavailab
         compiled: candidates.iter().map(|candidate| candidate.name).collect(),
         latency,
         lines: Vec::new(),
+        upscaler_in_use: None,
     };
     for (slot, name, reason) in &rejected {
         let fallback = selection.backend(*slot);
@@ -548,20 +588,7 @@ pub(crate) fn resolve<C: ?Sized, P: Fn(&C) -> Result<Box<dyn Backend>, Unavailab
         ));
     }
     selection.rejected = rejected;
-    if !selection.compiled.is_empty() {
-        let mut summary = String::from("[vendor] selected:");
-        for slot in Slot::ALL {
-            let _ = write!(summary, " {}={}", slot.name(), selection.backend(slot));
-        }
-        let _ = write!(
-            summary,
-            " latency={} compiled={}",
-            latency.name(),
-            selection.compiled.join(",")
-        );
-        for (_, backend) in &selection.chosen {
-            let _ = write!(summary, " {}=[{}]", backend.name(), backend.detail());
-        }
+    if let Some(summary) = selection.summary() {
         selection.lines.push(summary);
     }
     selection
@@ -624,12 +651,15 @@ fn candidates() -> Vec<Candidate<Probe>> {
     list
 }
 
-/// Selects the vendor back ends for a created device and logs the result (one line per
-/// fallback, then a summary; nothing in the open build). `latency` is the latency back end
-/// that runs (`latency::create`), so the summary and [`Selection::backends`] agree with it.
+/// Selects the vendor back ends for a created device and logs one line per fallback
+/// (nothing in the open build). `latency` is the latency back end that runs
+/// (`latency::create`), so the summary and [`Selection::backends`] agree with it. The
+/// summary line is logged by the renderer once the upscaler that runs is known
+/// ([`Selection::set_upscaler_in_use`], [`Selection::summary`]).
 pub(crate) fn select(context: &ProbeContext<'_>, latency: LatencyMode) -> Selection {
     let selection = resolve(&candidates(), context, latency);
-    for line in selection.lines() {
+    let fallbacks = selection.lines().len() - usize::from(!selection.compiled.is_empty());
+    for line in &selection.lines()[..fallbacks] {
         eprintln!("{line}");
     }
     selection

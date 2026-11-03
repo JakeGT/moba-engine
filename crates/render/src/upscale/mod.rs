@@ -131,6 +131,12 @@ pub(crate) trait TemporalUpscaler {
     ) -> crate::error::RenderResult<()>;
     /// Device memory the back end owns (its histories and internal targets).
     fn vram_bytes(&self) -> u64;
+    /// The part of [`Self::vram_bytes`] a vendor SDK allocated itself, outside the renderer's
+    /// allocator and so outside its memory accounting (ADR-0021 amendment 5); the renderer
+    /// adds it to the frame log's VRAM figures. 0 for our own back ends.
+    fn sdk_bytes(&self) -> u64 {
+        0
+    }
     /// Debug builds' shader hot reload (`MOBA_SHADER_DIR`): rebuilds the back end's pipelines
     /// from `shaders`, replacing them only on success. The device is idle. A back end without
     /// shaders of ours (the vendor SDKs) keeps the default, which does nothing.
@@ -158,6 +164,16 @@ pub(crate) fn scaled_range(output: Extent, mode: UpscaleMode, floor: f32) -> (Ex
     let ceiling = mode.scale();
     (size(floor.min(ceiling)), size(ceiling))
 }
+
+/// Extra usage of the temporal output and the `sharpen` intermediate a vendor SDK writes
+/// into: `TRANSFER_DST` (NGX clears its output with `vkCmdClearColorImage`, ADR-0021
+/// amendment 5) in a build with a vendor upscaler, none in the open build.
+pub(crate) const VENDOR_OUTPUT_USAGE: ash::vk::ImageUsageFlags =
+    if cfg!(any(feature = "dlss", feature = "fsr4", feature = "xess")) {
+        ash::vk::ImageUsageFlags::TRANSFER_DST
+    } else {
+        ash::vk::ImageUsageFlags::empty()
+    };
 
 /// `auto`'s back end in the open build, after the vendor back ends (ADR-0021 §4b and Q1).
 pub(crate) const AUTO_OPEN_BUILD: UpscalerKind = UpscalerKind::Taau;
@@ -236,7 +252,7 @@ pub(crate) struct Created {
 /// ([`crate::post::PostConfig::sharpness_for`]) is above 0.
 ///
 /// # Errors
-/// TAAU or the `sharpen` pass cannot be created (a Vulkan or allocation error).
+/// TAAU cannot be created (a Vulkan or allocation error).
 pub(crate) fn create(setup: &mut Setup<'_>) -> crate::error::RenderResult<Created> {
     let vendor_kind = match setup.requested {
         None => match auto_vendor(
@@ -300,21 +316,98 @@ pub(crate) fn create(setup: &mut Setup<'_>) -> crate::error::RenderResult<Create
             setup.debug,
         )?) as Box<dyn TemporalUpscaler>
     };
-    let sharpness = setup.post.sharpness_for(upscaler.kind());
-    let sharpen_pass = needs_sharpen_pass(upscaler.has_sharpening(), sharpness);
+    Ok(finish(
+        setup.device,
+        setup.shaders,
+        upscaler,
+        setup.output,
+        setup.post,
+    ))
+}
+
+/// TAAU in place of a vendor back end that stopped working (a resize it cannot follow,
+/// ADR-0021 amendment 5), with its sharpness and `sharpen` pass.
+///
+/// # Errors
+/// TAAU cannot be created (a Vulkan or allocation error).
+pub(crate) fn taau_fallback(
+    device: &crate::device::DeviceContext,
+    shaders: &crate::shaders::ShaderSource,
+    output: Extent,
+    max_render: Extent,
+    debug: taau::TaauDebugView,
+    post: &crate::post::PostConfig,
+) -> crate::error::RenderResult<Created> {
+    let upscaler = Box::new(taau::Taau::new(device, shaders, output, max_render, debug)?);
+    Ok(finish(device, shaders, upscaler, output, post))
+}
+
+/// Picks the back end's sharpness and wraps it in the `sharpen` pass when it needs one. A
+/// `sharpen` pass that cannot be created leaves the back end unsharpened, with one line.
+fn finish(
+    device: &crate::device::DeviceContext,
+    shaders: &crate::shaders::ShaderSource,
+    upscaler: Box<dyn TemporalUpscaler>,
+    output: Extent,
+    post: &crate::post::PostConfig,
+) -> Created {
+    let mut sharpness = post.sharpness_for(upscaler.kind());
+    let mut sharpen_pass = needs_sharpen_pass(upscaler.has_sharpening(), sharpness);
     let upscaler = if sharpen_pass {
-        Box::new(
-            sharpen::Sharpened::new(setup.device, setup.shaders, upscaler, setup.output)
-                .map_err(|(_, error)| error)?,
-        )
+        match sharpen::Sharpened::new(device, shaders, upscaler, output) {
+            Ok(sharpened) => Box::new(sharpened) as Box<dyn TemporalUpscaler>,
+            Err((upscaler, error)) => {
+                eprintln!(
+                    "[render] the sharpen pass cannot be created ({error}); {} runs unsharpened",
+                    upscaler.kind().name()
+                );
+                sharpness = 0.0;
+                sharpen_pass = false;
+                upscaler
+            }
+        }
     } else {
         upscaler
     };
-    Ok(Created {
+    Created {
         upscaler,
         sharpness,
         sharpen_pass,
-    })
+    }
+}
+
+/// The render allocation and scale bounds a back end needs (ADR-0021 §4c, amendment 5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fit {
+    /// The allocation, raised on each side to the back end's minimum for the mode (DLAA's is
+    /// close to native whatever the render scale), never above the output.
+    pub(crate) alloc: Extent,
+    /// The render scales the back end accepts, `lo <= hi`, both in `0..=1`: the
+    /// dynamic-resolution controller's floor and ceiling are clamped into them.
+    pub(crate) scale: (f32, f32),
+}
+
+/// What a back end with render-size `range` at `output` needs of the allocation `alloc`.
+#[must_use]
+pub(crate) fn fit(output: Extent, alloc: Extent, range: (Extent, Extent)) -> Fit {
+    let (low, high) = range;
+    let side = |alloc: u32, low: u32, output: u32| alloc.max(low.min(output)).max(1);
+    let ratio = |size: u32, output: u32| size as f32 / output.max(1) as f32;
+    let lo = ratio(low.width, output.width)
+        .max(ratio(low.height, output.height))
+        .min(1.0);
+    // The larger side's ratio, so rounding never puts the ceiling a pixel under the range's
+    // maximum (`clamp_render` trims the other side to it).
+    let hi = ratio(high.width, output.width)
+        .max(ratio(high.height, output.height))
+        .clamp(lo, 1.0);
+    Fit {
+        alloc: Extent {
+            width: side(alloc.width, low.width, output.width),
+            height: side(alloc.height, low.height, output.height),
+        },
+        scale: (lo, hi),
+    }
 }
 
 /// Whether the renderer's `sharpen` pass runs after a back end (ADR-0021 §3): only when the
@@ -326,8 +419,8 @@ pub(crate) fn needs_sharpen_pass(has_sharpening: bool, sharpness: f32) -> bool {
 
 /// Clamps this frame's render size to the back end's range for the mode (ADR-0021 §4c,
 /// amendment 2 item 19) and to the render allocation `alloc`. The allocation wins when the
-/// two disagree (a back end whose minimum is larger than the allocation): the images cannot
-/// be larger than they are.
+/// two disagree, since the images cannot be larger than they are; [`fit`] raises the
+/// allocation to the back end's minimum, so with temporal AA they never disagree.
 pub(crate) fn clamp_render(render: Extent, range: (Extent, Extent), alloc: Extent) -> Extent {
     let (low, high) = range;
     let side = |size: u32, low: u32, high: u32, cap: u32| {
@@ -468,5 +561,26 @@ mod tests {
             clamp_render(e(1280, 720), fixed, e(2560, 1440)),
             e(1708, 960)
         );
+    }
+
+    /// ADR-0021 §4c, amendment 5: DLAA's range (1267x713..1280x720 at 720p, measured)
+    /// raises a 0.6 allocation to its minimum, and the controller's bounds follow the range.
+    #[test]
+    fn the_allocation_covers_the_back_end_minimum() {
+        let e = |width, height| Extent { width, height };
+        let output = e(1280, 720);
+        let dlaa = fit(output, e(768, 432), (e(1267, 713), e(1280, 720)));
+        assert_eq!(dlaa.alloc, e(1267, 713));
+        // The larger of the two sides' ratios (713/720 > 1267/1280), so both fit.
+        assert!((dlaa.scale.0 - 713.0 / 720.0).abs() < 1e-6);
+        assert!((dlaa.scale.1 - 1.0).abs() < 1e-6);
+        // A range inside the allocation changes nothing; the bounds are the range's.
+        let quality = fit(output, e(853, 480), (e(640, 360), e(1280, 720)));
+        assert_eq!(quality.alloc, e(853, 480));
+        assert!((quality.scale.0 - 0.5).abs() < 1e-6 && (quality.scale.1 - 1.0).abs() < 1e-6);
+        // A degenerate range never inverts the bounds or leaves the output.
+        let odd = fit(e(8, 8), e(4, 4), (e(16, 4), e(2, 2)));
+        assert_eq!(odd.alloc, e(8, 4));
+        assert!(odd.scale.0 <= odd.scale.1 && odd.scale.1 <= 1.0);
     }
 }

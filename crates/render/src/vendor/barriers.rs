@@ -13,16 +13,19 @@
 
 use ash::vk;
 
-/// What the SDK's evaluation may do to the output: compute writes and reads, and a clear
+/// What the SDK's evaluation may do to the output: compute writes and reads, a clear
 /// (`vkCmdClearColorImage`, seen with driver 615.78.08 on the RTX 5070 Ti; NGX documents
-/// neither, and records no barrier for it).
+/// neither, and records no barrier for it), and any other transfer (a copy or blit, which
+/// XeSS's unobserved runtime may record): every transfer stage, not only `CLEAR`.
 const SDK_STAGES: vk::PipelineStageFlags2 = vk::PipelineStageFlags2::from_raw(
-    vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw() | vk::PipelineStageFlags2::CLEAR.as_raw(),
+    vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw()
+        | vk::PipelineStageFlags2::ALL_TRANSFER.as_raw(),
 );
 const SDK_ACCESS: vk::AccessFlags2 = vk::AccessFlags2::from_raw(
     vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw()
         | vk::AccessFlags2::SHADER_STORAGE_READ.as_raw()
-        | vk::AccessFlags2::TRANSFER_WRITE.as_raw(),
+        | vk::AccessFlags2::TRANSFER_WRITE.as_raw()
+        | vk::AccessFlags2::TRANSFER_READ.as_raw(),
 );
 
 /// What the SDK's evaluation does to its own resources: compute, clears and fills
@@ -44,6 +47,20 @@ pub(crate) fn internal_barrier() -> vk::MemoryBarrier2<'static> {
         .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
         .dst_stage_mask(SDK_INTERNAL_STAGES)
         .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+}
+
+/// After the evaluation, for the inputs and the SDK's own resources: the graph orders the
+/// next frame's writes to the inputs after the `temporal` pass's compute stage only, so any
+/// transfer the SDK recorded on them (a copy of an input) is chained into the compute stage
+/// here (a write-after-read otherwise). Its writes are made available as well.
+pub(crate) fn inputs_after() -> vk::MemoryBarrier2<'static> {
+    vk::MemoryBarrier2::default()
+        .src_stage_mask(SDK_INTERNAL_STAGES)
+        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_access_mask(
+            vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        )
 }
 
 fn output_range() -> vk::ImageSubresourceRange {
@@ -102,10 +119,11 @@ mod tests {
             before.src_stage_mask,
             vk::PipelineStageFlags2::COMPUTE_SHADER
         );
+        // Every transfer stage, not only clears (a copy or blit by an SDK).
         assert!(
             before
                 .dst_stage_mask
-                .contains(vk::PipelineStageFlags2::CLEAR)
+                .contains(vk::PipelineStageFlags2::ALL_TRANSFER)
         );
         assert!(
             before
@@ -116,7 +134,12 @@ mod tests {
         assert!(
             after
                 .src_stage_mask
-                .contains(vk::PipelineStageFlags2::CLEAR)
+                .contains(vk::PipelineStageFlags2::ALL_TRANSFER)
+        );
+        assert!(
+            after
+                .src_access_mask
+                .contains(vk::AccessFlags2::TRANSFER_READ)
         );
         assert!(
             after
@@ -156,6 +179,27 @@ mod tests {
             barrier
                 .dst_access_mask
                 .contains(vk::AccessFlags2::MEMORY_WRITE)
+        );
+    }
+
+    /// A transfer the SDK records on an input (or its own resources) is chained into the
+    /// compute stage the graph's next barrier on the inputs starts from.
+    #[test]
+    fn sdk_transfers_chain_into_the_graph() {
+        let barrier = inputs_after();
+        assert!(
+            barrier
+                .src_stage_mask
+                .contains(vk::PipelineStageFlags2::ALL_TRANSFER)
+        );
+        assert!(
+            barrier
+                .src_stage_mask
+                .contains(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        );
+        assert_eq!(
+            barrier.dst_stage_mask,
+            vk::PipelineStageFlags2::COMPUTE_SHADER
         );
     }
 }

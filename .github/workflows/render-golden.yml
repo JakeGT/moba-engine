@@ -53,6 +53,7 @@ jobs:
               - 'scripts/ghost-probe.sh'
               - 'scripts/overlay-invariance.sh'
               - 'scripts/tiered-goldens.sh'
+              - 'scripts/resize-smoke.sh'
               # ADR-0020 gate 3: the tiered smoke binaries.
               - 'crates/tools/src/tiered_smoke.rs'
               - 'crates/tools/src/bin/bindless-smoke.rs'
@@ -454,6 +455,11 @@ jobs:
         env:
           RUN: xvfb-run -a
           MOBA_RENDER_PATH: tiered
+      - name: Resize smoke, tiered and Compat (ADR-0021 amendment 5)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/resize-smoke.sh ./target/release/moba-client resize-smoke
+        env:
+          RUN: xvfb-run -a
       - name: Tiered goldens (ADR-0021 gate 4)
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: |
@@ -470,6 +476,7 @@ jobs:
             ghost-probe
             overlay-invariance
             outline-probe-tiered
+            resize-smoke
             tiered-goldens
             render-actual.ppm
             render-diff.ppm

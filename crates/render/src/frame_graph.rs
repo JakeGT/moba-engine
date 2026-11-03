@@ -712,13 +712,14 @@ pub(crate) fn build_variant(
                 },
             ),
         ),
-        // TRANSFER_DST because NGX may clear the output inside its evaluation
-        // (`vkCmdClearColorImage`, ADR-0021 amendment 5); the DLSS back end orders the clear
-        // with its own barriers.
+        // TRANSFER_DST in a build with a vendor upscaler, because NGX may clear the output
+        // inside its evaluation (`vkCmdClearColorImage`, ADR-0021 amendment 5) and the other
+        // SDKs may copy into it; the back end orders that with its own barriers. The open
+        // build's image is unchanged.
         hdr_out: graph.transient_image(
             "hdr_out",
             ImageDesc {
-                extra_usage: vk::ImageUsageFlags::TRANSFER_DST,
+                extra_usage: crate::upscale::VENDOR_OUTPUT_USAGE,
                 ..image(HDR_OUT_FORMAT, ImageSize::Output { shift: 0 })
             },
         ),

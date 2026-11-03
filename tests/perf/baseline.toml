@@ -39,16 +39,20 @@ render_p95_ms = 0.254
 # next N1 part. **Report-only:** perf-gate prints a Tiered regression as a `report-only` note
 # (`TIERED_BASELINE_FAILS = false`) until the last N1 part re-records these and flips it;
 # Tiered's absolute per-tier budgets already fail. Tiered High runs the Ultra configuration,
-# so the two tables match.
+# so the two tables match. Each table names its upscaler (ADR-0021 §7, amendment 5): a run
+# with another one (a DLSS build) is a baseline breach, never compared or re-recorded.
 
 [tiered.low]
+upscaler = "taau"
 gpu_total_p95_ms = 0.551
 render_p95_ms = 0.338
 
 [tiered.high]
+upscaler = "taau"
 gpu_total_p95_ms = 0.598
 render_p95_ms = 0.344
 
 [tiered.ultra]
+upscaler = "taau"
 gpu_total_p95_ms = 0.599
 render_p95_ms = 0.327

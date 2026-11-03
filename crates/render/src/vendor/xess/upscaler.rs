@@ -20,6 +20,13 @@
 //! Compile-only on this project's machines (XeSS 3.0.2 ships Windows binaries only; ADR-0021
 //! amendment 5): nothing here has run, and the jitter sign follows FSR's and DLSS's (verified
 //! on DLSS only).
+//!
+//! - **A record that is never submitted** still advanced the SDK's own internal state (its
+//!   history and frame counter live inside the SDK, which recorded its work into our command
+//!   buffer). `reset_history` asks the next evaluation for a reset, which covers the history;
+//!   anything else the SDK tracks is outside our control, so a caller that drops a recorded
+//!   command buffer must treat it as the `record` contract's fatal case and drop the back end
+//!   (the renderer submits every recorded frame, and a failed submission is fatal).
 
 #![allow(
     clippy::unnecessary_cast,
@@ -34,7 +41,7 @@ use super::sys;
 use crate::upscale::{
     Extent, TemporalUpscaler, UpscaleImage, UpscaleInputs, UpscaleMode, UpscaleOutput, UpscalerKind,
 };
-use crate::vendor::barriers::{internal_barrier, output_after, output_before};
+use crate::vendor::barriers::{inputs_after, internal_barrier, output_after, output_before};
 use crate::vendor::{Unavailable, UpscalerRequest};
 
 /// XeSS's quality setting for one of our modes (nearest by ratio).
@@ -109,6 +116,8 @@ pub(crate) struct XessUpscaler {
     /// The (minimum, maximum) input size for every mode at `output`.
     ranges: [Option<(Extent, Extent)>; 5],
     reset: bool,
+    /// XeSS's reported temporary heaps, in bytes (`xessGetProperties`).
+    vram: u64,
     failures: u32,
 }
 
@@ -129,6 +138,7 @@ impl XessUpscaler {
             output: request.output,
             ranges: [None; 5],
             reset: true,
+            vram: 0,
             failures: 0,
         };
         upscaler.create(request.output)?;
@@ -167,10 +177,16 @@ impl XessUpscaler {
         self.context = context;
         // SAFETY: the context is live.
         let result = unsafe { self.api.xessSetJitterScale(self.context, 1.0, 1.0) };
-        check(result, "xessSetJitterScale")?;
+        if let Err(error) = check(result, "xessSetJitterScale") {
+            self.destroy();
+            return Err(error);
+        }
         // SAFETY: the context is live.
         let result = unsafe { self.api.xessSetVelocityScale(self.context, 1.0, 1.0) };
-        check(result, "xessSetVelocityScale")?;
+        if let Err(error) = check(result, "xessSetVelocityScale") {
+            self.destroy();
+            return Err(error);
+        }
         let size = xy(output);
         for (slot, &mode) in self.ranges.iter_mut().zip(UpscaleMode::ALL) {
             let (mut optimal, mut min, mut max) = (xy(output), xy(output), xy(output));
@@ -218,7 +234,30 @@ impl XessUpscaler {
         }
         self.output = output;
         self.reset = true;
+        self.vram = self.properties(size);
         Ok(())
+    }
+
+    /// XeSS's temporary heaps for `output` (`xessGetProperties`), which it allocates itself
+    /// when no heap is given; 0 if not reported. Its persistent resources are not reported.
+    fn properties(&self, output: sys::xess_2d_t) -> u64 {
+        let mut properties = sys::xess_properties_t {
+            requiredDescriptorCount: 0,
+            tempBufferHeapSize: 0,
+            tempTextureHeapSize: 0,
+        };
+        // SAFETY: the context is live; both pointers are valid for the call.
+        let result = unsafe {
+            self.api
+                .xessGetProperties(self.context, &raw const output, &raw mut properties)
+        };
+        if result == sys::XESS_RESULT_SUCCESS {
+            properties
+                .tempBufferHeapSize
+                .saturating_add(properties.tempTextureHeapSize)
+        } else {
+            0
+        }
     }
 }
 
@@ -303,11 +342,14 @@ impl TemporalUpscaler for XessUpscaler {
                 .xessVKExecute(self.context, handle(cmd.as_raw()), &raw const params)
         };
         let after = [output_after(image)];
+        let sdk_after = [inputs_after()];
         // SAFETY: as for the barrier before the execution.
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&after),
+                &vk::DependencyInfo::default()
+                    .memory_barriers(&sdk_after)
+                    .image_memory_barriers(&after),
             );
         }
         if result == sys::XESS_RESULT_SUCCESS {
@@ -344,12 +386,18 @@ impl TemporalUpscaler for XessUpscaler {
         _max_render: Extent,
     ) -> crate::error::RenderResult<()> {
         self.create(output)
-            .map_err(crate::error::RenderError::NoSuitableDevice)
+            .map_err(crate::error::RenderError::Upscaler)
     }
 
     fn vram_bytes(&self) -> u64 {
-        // XeSS reports no memory query in its Vulkan API; its allocations are its own.
-        0
+        // The temporary heaps XeSS allocates itself (its persistent resources are not
+        // reported by its API).
+        self.vram
+    }
+
+    fn sdk_bytes(&self) -> u64 {
+        // All of it: the SDK allocates its own memory.
+        self.vram_bytes()
     }
 }
 

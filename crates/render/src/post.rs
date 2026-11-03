@@ -368,7 +368,9 @@ pub struct PostConfig {
     /// Sharpening after the temporal pass, `0..=1` (`MOBA_SHARPNESS`), shared by every back
     /// end. Used only when [`Self::sharpness_explicit`]; otherwise each back end takes its own
     /// default ([`UpscalerKind::default_sharpness`]: [`DEFAULT_SHARPNESS`] for TAAU and FSR,
-    /// 0 for DLSS and XeSS, ADR-0021 §3).
+    /// 0 for DLSS and XeSS, ADR-0021 §3). Set it with [`Self::with_sharpness`], which also
+    /// sets [`Self::sharpness_explicit`]: writing this field alone changes nothing, since
+    /// every back end then keeps its own default.
     pub sharpness: f32,
     /// [`Self::sharpness`] was chosen ([`Self::with_sharpness`]) rather than left at the
     /// default, so it overrides the back end's own default.

@@ -8,7 +8,8 @@
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
-# Captures fail on any validation message, and so does a 40-frame run that resets the
+# TAAU is pinned (MOBA_UPSCALER=taau), so a build with a vendor upscaler captures the same
+# frames. Captures fail on any validation message, and so does a 40-frame run that resets the
 # temporal history every 5th frame with frames in flight. CI runs it under lavapipe with validation and
 # sync validation (render-golden.yml); set RUN="xvfb-run -a" when there is no display.
 set -euo pipefail
@@ -20,7 +21,7 @@ capture() {
   local file=$1
   shift
   # shellcheck disable=SC2086 # RUN is a command prefix.
-  env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 \
+  env MOBA_RENDER_PATH=tiered MOBA_UPSCALER=taau MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 \
     MOBA_CAPTURE="$file" "$@" timeout 300 ${RUN:-} "$client" > "$file.log" 2>&1 || { cat "$file.log"; exit 1; }
   test -s "$file"
   if grep -E '^\[vulkan' "$file.log"; then
@@ -65,7 +66,7 @@ done
 # reset barrier with a NONE source (on lavapipe, NVIDIA or RADV), so unit tests pin it.
 reset_log="$out/mid-stream-reset.log"
 # shellcheck disable=SC2086 # RUN is a command prefix.
-if env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \
+if env MOBA_RENDER_PATH=tiered MOBA_UPSCALER=taau MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \
   MOBA_SMOKE_FRAMES=40 MOBA_TEMPORAL_RESET_EVERY=5 timeout 300 ${RUN:-} "$client" \
   > "$reset_log" 2>&1 && ! grep -E '^\[vulkan' "$reset_log"; then
   echo "ok: tiered mid-stream history reset: no validation messages"

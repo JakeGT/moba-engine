@@ -752,9 +752,9 @@ fn xess(context: &Context) {
     .clang_args(["-x", "c", "-std=c11"])
     .clang_arg(format!("-I{}", shim.display()))
     .allowlist_function(
-        "xess(GetVersion|VKGetRequiredInstanceExtensions|VKGetRequiredDeviceExtensions|VKGetRequiredDeviceFeatures|VKCreateContext|VKInit|VKExecute|DestroyContext|GetOptimalInputResolution|SetJitterScale|SetVelocityScale)",
+        "xess(GetVersion|VKGetRequiredInstanceExtensions|VKGetRequiredDeviceExtensions|VKGetRequiredDeviceFeatures|VKCreateContext|VKInit|VKExecute|DestroyContext|GetOptimalInputResolution|GetProperties|SetJitterScale|SetVelocityScale)",
     )
-    .allowlist_type("_?xess_(vk_init_params_t|vk_execute_params_t|vk_image_view_info|2d_t|coord_t|quality_settings_t|init_flags_t|context_handle_t)")
+    .allowlist_type("_?xess_(vk_init_params_t|vk_execute_params_t|vk_image_view_info|2d_t|coord_t|quality_settings_t|init_flags_t|context_handle_t|properties_t)")
     .allowlist_type("_?xess_version_t")
     .allowlist_type("_?xess_result_t")
     .dynamic_library_name("XessApi")
