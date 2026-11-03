@@ -65,7 +65,15 @@ impl TaauDebugView {
             View::TcMask => Self::TcMask,
             View::Disocclusion => Self::Disocclusion,
             View::Confidence => Self::Confidence,
-            View::Off | View::OverlayIds => Self::None,
+            View::Off
+            | View::OverlayIds
+            | View::Albedo
+            | View::Normal
+            | View::Roughness
+            | View::Metallic
+            | View::Model
+            | View::RimSlot
+            | View::Flags => Self::None,
         }
     }
 }
@@ -85,15 +93,16 @@ pub(crate) struct TaauPush {
     flags: u32,
 }
 
-/// `(p22, p23)` with linear depth `p23 / (depth + p22)` for a non-inverted `0..1` depth with a
-/// finite far plane; `(-1, -1)` (linear = 1/(1 − d), still monotonic) without one.
+/// `(p22, p23)` with linear depth `p23 / (depth + p22)` for the upscaler inputs' reversed-Z
+/// depth (1 near, 0 far, ADR-0023 §1c) with a finite far plane; `(0, 1)` (linear = 1/d, still
+/// monotonic) without one.
 #[must_use]
 pub(crate) fn depth_linearisation(near: f32, far: f32) -> (f32, f32) {
     if near.is_finite() && far.is_finite() && near > 0.0 && far > near {
         let range = far - near;
-        (-far / range, -near * far / range)
+        (near / range, near * far / range)
     } else {
-        (-1.0, -1.0)
+        (0.0, 1.0)
     }
 }
 
@@ -553,13 +562,13 @@ mod tests {
     fn depth_linearisation_inverts_the_engine_projection() {
         let (near, far) = (0.1_f32, 1_000.0_f32);
         let (p22, p23) = depth_linearisation(near, far);
-        // Depth of a point at view distance z with the engine's 0..1 projection.
+        // Reversed-Z depth of a point at view distance z (1 near, 0 far).
         for z in [0.5_f32, 10.0, 300.0] {
-            let depth = far / (far - near) - far * near / ((far - near) * z);
+            let depth = 1.0 - (far / (far - near) - far * near / ((far - near) * z));
             let linear = p23 / (depth + p22);
             assert!((linear - z).abs() < z * 1e-3, "{linear} vs {z}");
         }
-        assert_eq!(depth_linearisation(0.0, 0.0), (-1.0, -1.0));
+        assert_eq!(depth_linearisation(0.0, 0.0), (0.0, 1.0));
     }
 
     #[test]
@@ -573,6 +582,16 @@ mod tests {
         );
         for &view in View::ALL {
             assert_eq!(View::from_name(view.name()), Some(view));
+            // ADR-0023 §1f: the G-buffer views are drawn by their own pass, never by TAAU.
+            if view.gbuffer_view().is_some() {
+                assert_eq!(TaauDebugView::of(view), TaauDebugView::None, "{view:?}");
+            }
         }
+        let gbuffer: Vec<u32> = View::ALL
+            .iter()
+            .filter_map(|view| view.gbuffer_view())
+            .collect();
+        assert_eq!(gbuffer, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(View::from_name("rim-slot"), Some(View::RimSlot));
     }
 }

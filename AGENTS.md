@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **1003 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **1022 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -73,7 +73,8 @@ crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wir
                   minion VATs), link-proxy (RTT/jitter/loss UDP proxy), grade-bake (LUTs),
                   mesh-bake (R8 meshoptimizer LODs; `--features mesh-bake`),
                   perf-gate (R8 frame-log budget gate), bindless-smoke and
-                  rt-smoke (N0.5 tiered-path smokes)
+                  rt-smoke (N0.5 tiered-path smokes), fsr3-smoke (N1b),
+                  gbuffer-smoke (N2a G-buffer encoding, ADR-0023 gate 1)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
@@ -175,6 +176,7 @@ cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/
 cargo run -p moba-tools --bin vulkan-probe
 MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin bindless-smoke   # tiered path; MOBA_RENDER_PATH=tiered on lavapipe
 MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin rt-smoke         # BLAS/TLAS + ray query, exact readback
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin gbuffer-smoke    # G-buffer GLSL/Slang/Rust encode byte for byte (ADR-0023 gate 1)
 scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)
 scripts/cull-probe.sh                                 # culling on == off, byte for byte (R8)
 scripts/perf-replay.sh                                # 10-minute replay per tier + perf-gate (R8, real GPU)

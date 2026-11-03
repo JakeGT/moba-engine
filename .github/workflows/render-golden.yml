@@ -64,6 +64,8 @@ jobs:
               - 'crates/tools/src/bin/rt-smoke.rs'
               # ADR-0021 §4b (N1b): the FSR 3.1.6 port, its vendored shaders and its smoke.
               - 'crates/tools/src/bin/fsr3-smoke.rs'
+              # ADR-0023 gate 1 (N2a): the G-buffer encoding smoke.
+              - 'crates/tools/src/bin/gbuffer-smoke.rs'
               - 'third_party/**'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -587,6 +589,8 @@ jobs:
               - 'crates/tools/src/bin/rt-smoke.rs'
               # ADR-0021 §4b (N1b): the FSR 3.1.6 port, its vendored shaders and its smoke.
               - 'crates/tools/src/bin/fsr3-smoke.rs'
+              # ADR-0023 gate 1 (N2a): the G-buffer encoding smoke.
+              - 'crates/tools/src/bin/gbuffer-smoke.rs'
               - 'third_party/**'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
@@ -609,6 +613,14 @@ jobs:
       - name: Build client and tools
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
         run: cargo build --release --locked -p moba-client -p moba-tools
+      # ADR-0023 verification gate 1 (N2a): 4096 fixed surfaces through the G-buffer encoding
+      # in GLSL (into the real target formats) and Slang, and the Slang decode, checked against
+      # the Rust twin byte for byte, failing on any validation message.
+      - name: G-buffer encoding smoke with validation + sync validation (ADR-0023 gate 1)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: ./target/release/gbuffer-smoke
+        env:
+          MOBA_RENDER_PATH: tiered
       # ADR-0021 (N1b): FSR 3.1's cases of the tiered probes and goldens, on lavapipe with
       # validation + sync validation; TAAU's run in renderer-gate. This job should become a
       # required check (a repository ruleset change; ADR-0021 amendment 4 item 16).

@@ -120,16 +120,17 @@ impl UpscalerConstants {
     }
 }
 
-/// `setupDeviceDepthToViewSpaceDepthParams` for a non-inverted depth with a finite far plane
-/// (ADR-0021 §2a).
+/// `setupDeviceDepthToViewSpaceDepthParams` for an inverted (reversed-Z, ADR-0023 §1c) depth
+/// with a finite far plane (ADR-0021 §2a): the SDK swaps the planes for an inverted depth.
 fn device_to_view_depth(inputs: &UpscaleInputs, aspect: f32) -> [f32; 4] {
-    let near = inputs.near.min(inputs.far);
-    let far = inputs.near.max(inputs.far);
-    let q = far / (near - far);
+    // The SDK's `fMin` and `fMax` after its inverted-depth swap: the far and the near plane.
+    let min = inputs.near.max(inputs.far);
+    let max = inputs.near.min(inputs.far);
+    let q = max / (min - max);
     let cot_half_fov_y = (0.5 * inputs.fov_y).cos() / (0.5 * inputs.fov_y).sin();
     let a = cot_half_fov_y / aspect;
     let b = cot_half_fov_y;
-    [-q, q * near, 1.0 / a, 1.0 / b]
+    [-q, q * min, 1.0 / a, 1.0 / b]
 }
 
 impl SpdConstants {
@@ -370,9 +371,15 @@ mod tests {
         assert_eq!(constants.frame_index, 0.0);
         assert_eq!(constants.delta_time, 0.016);
         assert_eq!(constants.motion_vector_scale, [1.0 / 1280.0, 1.0 / 720.0]);
-        let q = 100.0f32 / (0.1 - 100.0);
+        // Inverted depth (ADR-0023 §1c): the SDK swaps the planes.
+        let q = 0.1f32 / (100.0 - 0.1);
         assert_eq!(constants.device_to_view_depth[0], -q);
-        assert_eq!(constants.device_to_view_depth[1], q * 0.1);
+        assert_eq!(constants.device_to_view_depth[1], q * 100.0);
+        // View depth `[1] / (d - [0])`: the near plane at depth 1, the far plane at 0.
+        let view =
+            |d: f32| constants.device_to_view_depth[1] / (d - constants.device_to_view_depth[0]);
+        assert!((view(1.0) - 0.1).abs() < 1e-5);
+        assert!((view(0.0) - 100.0).abs() < 1e-2);
         // tan(30°) × aspect and its inverse.
         let tan = (core::f32::consts::FRAC_PI_6).tan();
         assert!((constants.device_to_view_depth[3] - tan).abs() < 1e-6);

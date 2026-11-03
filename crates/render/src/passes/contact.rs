@@ -4,6 +4,7 @@
 
 use ash::vk;
 
+use crate::depth::DepthConvention;
 use crate::device::DeviceContext;
 use crate::error::RenderResult;
 use crate::frame_graph::CONTACT_FORMAT;
@@ -21,14 +22,18 @@ pub(crate) struct ContactPass {
     sampler: Sampler,
     pipeline_layout: PipelineLayout,
     pipeline: GraphicsPipeline,
+    /// The main view's depth convention (ADR-0023 §1c).
+    depth: DepthConvention,
 }
 
 impl ContactPass {
-    /// `camera_layout` is the scene's camera set layout (set 0).
+    /// `camera_layout` is the scene's camera set layout (set 0); `depth` the main view's
+    /// depth convention.
     pub(crate) fn new(
         device: &DeviceContext,
         shaders: &ShaderSource,
         camera_layout: vk::DescriptorSetLayout,
+        depth: DepthConvention,
     ) -> RenderResult<Self> {
         let binding = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
@@ -56,7 +61,7 @@ impl ContactPass {
             &[camera_layout, set_layout.handle()],
             &[],
         )?;
-        let pipeline = build_pipeline(device, shaders, pipeline_layout.handle())?;
+        let pipeline = build_pipeline(device, shaders, pipeline_layout.handle(), depth)?;
         Ok(Self {
             set,
             _descriptor_pool: descriptor_pool,
@@ -64,6 +69,7 @@ impl ContactPass {
             sampler,
             pipeline_layout,
             pipeline,
+            depth,
         })
     }
 
@@ -73,7 +79,7 @@ impl ContactPass {
         device: &DeviceContext,
         shaders: &ShaderSource,
     ) -> RenderResult<GraphicsPipeline> {
-        build_pipeline(device, shaders, self.pipeline_layout.handle())
+        build_pipeline(device, shaders, self.pipeline_layout.handle(), self.depth)
     }
 
     /// Installs a pipeline from [`Self::build_pipeline`]. The device must be idle.
@@ -151,9 +157,17 @@ fn build_pipeline(
     device: &DeviceContext,
     shaders: &ShaderSource,
     layout: vk::PipelineLayout,
+    depth: DepthConvention,
 ) -> RenderResult<GraphicsPipeline> {
     let vertex = shaders.module(device, "fullscreen.vert")?;
-    let fragment = shaders.module(device, "contact_shadows.frag")?;
+    let fragment = shaders.module(
+        device,
+        if depth.is_reversed() {
+            "contact_shadows_reversed.frag"
+        } else {
+            "contact_shadows.frag"
+        },
+    )?;
     let handle = pipeline::create_fullscreen(
         device,
         layout,

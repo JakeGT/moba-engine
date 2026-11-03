@@ -18,6 +18,31 @@ deterministic simulation tick; minions and structures retain the instanced-cube 
 Local bot preview after 3,000 warmup ticks on an RTX 5070 Ti with validation required; frame log
 p95 4.197 ms / max 4.538 ms with vsync off.
 
+### Tiered G-buffer debug views (N2a)
+![The G-buffer debug views](images/n2a-gbuffer-views.png)
+
+The networked golden frame (tick 120) on the tiered path, Tiered High with TAAU, on an RTX 5070
+Ti at 1280×720 (shown at half size), with validation required and zero messages. From the top
+left: the frame, then `MOBA_DEBUG_VIEW=albedo`, `normal`, `roughness`, `metallic`, `model`,
+`rim-slot` and `flags` ([ADR-0023](adr/0023-frame-architecture-materials.md) §1f and
+amendment 1).
+- Each view decodes one channel of the thin G-buffer that the temporal prepass writes.
+  The `gbuffer_debug` compute pass draws it over the upscaler's output (nearest render pixel,
+  divided by the exposure), so the grade, the tonemap and the HUD still apply.
+- `normal` shows the world normal as colour: flat ground is +y, which is light green.
+- `model` shows terrain and units as `STANDARD` (grey) and foliage as `FOLIAGE` (green).
+- `flags` shows `UNIT` in red and `NO_FOG_OF_WAR` in green. Units carry both, so they show
+  yellow.
+- `metallic` and `rim-slot` are black: nothing in this frame is metallic, and the team rims
+  arrive in N2e. The sky and anything not drawn decode as `UNLIT` (black).
+
+```bash
+MOBA_DEBUG_VIEW=albedo MOBA_QUALITY=high MOBA_WINDOW_SIZE=1280x720 MOBA_SERVER=local \
+MOBA_HERO_MODELS=sentinel-skinned MOBA_CAPTURE_TICK=120 MOBA_SMOKE_FRAMES=100000 \
+MOBA_CAPTURE=/tmp/n2a-albedo.ppm cargo run --release -p moba-client
+# lavapipe needs MOBA_RENDER_PATH=tiered; the views need temporal AA (the tiered default)
+```
+
 ### GPU particle VFX (R5)
 ![Scripted 5v5 teamfight with VFX](images/r5-vfx-teamfight.png)
 

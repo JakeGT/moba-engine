@@ -8,6 +8,7 @@
 // its shadow-map term by the result (1 = lit).
 
 #include "camera.glsl"
+#include "depth.glsl"
 
 layout(set = 1, binding = 0) uniform sampler2D scene_depth;
 
@@ -23,7 +24,7 @@ void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     float depth = texelFetch(scene_depth, pixel, 0).r;
     out_visibility = 1.0;
-    if (depth >= 1.0) {
+    if (DEPTH_IS_FAR(depth)) {
         return; // Background.
     }
     vec2 uv = (vec2(pixel) + 0.5) * camera.viewport.zw;
@@ -56,7 +57,7 @@ void main() {
         }
         ivec2 tap = clamp(ivec2(point_uv * camera.viewport.xy), ivec2(0), last);
         float scene = texelFetch(scene_depth, tap, 0).r;
-        if (scene >= ndc.z) {
+        if (DEPTH_AT_OR_BEHIND(scene, ndc.z)) {
             continue; // Nothing in front of the ray point.
         }
         float gap = distance(eye, point) - distance(eye, world_at(point_uv, scene));

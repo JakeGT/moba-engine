@@ -1120,7 +1120,11 @@ fn build_pipelines(
         )?,
         gtao: optional(
             spec.ambient_occlusion,
-            "gtao.frag",
+            if spec.depth.is_reversed() {
+                "gtao_reversed.frag"
+            } else {
+                "gtao.frag"
+            },
             AO_RAW_FORMAT,
             FullscreenBlend::None,
         )?,

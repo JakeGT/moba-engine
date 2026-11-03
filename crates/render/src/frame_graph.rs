@@ -86,6 +86,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use ash::vk;
 
+use crate::depth::DepthConvention;
 use crate::device::DeviceContext;
 use crate::graph::{
     Access, Barrier, CompiledGraph, GraphBuilder, GraphError, ImageDesc, ImageSize, ImportState,
@@ -175,6 +176,8 @@ pub(crate) enum PassKind {
     ExposureLinear,
     /// The temporal upscaler: TAAU, FSR 3.1 or a vendor back end (ADR-0021 §3, §4).
     Temporal,
+    /// A G-buffer debug view over the upscaler's output (ADR-0023 §1f).
+    GBufferDebug,
     /// The output-resolution, unjittered overlay depth and IDs (ADR-0021 §5c).
     OverlayPrepass,
     /// Glow decals and outlines over the LDR image into the swapchain (ADR-0021 §5b).
@@ -262,6 +265,9 @@ pub(crate) struct TemporalResources {
     pub(crate) exposure_linear: ResourceId,
     /// The upscaler's output, `RGBA16F` at output resolution.
     pub(crate) hdr_out: ResourceId,
+    /// The thin G-buffer `gb0`–`gb2` (ADR-0023 §1a), render resolution, written by the
+    /// prepass with the motion ([`crate::gbuffer`] has the encoding).
+    pub(crate) gbuffer: [ResourceId; 3],
 }
 
 /// Resource ids of the overlay passes (ADR-0021 §5).
@@ -381,6 +387,11 @@ pub(crate) struct FrameSpec {
     /// The post-upscale gameplay overlay (ADR-0021 §5; Tiered only): replaces R2b's
     /// `outline` pass, and the last post pass writes an LDR image the overlay reads.
     pub(crate) overlay: bool,
+    /// The depth convention of every view (ADR-0023 §1c: reversed-Z on Tiered).
+    pub(crate) depth: DepthConvention,
+    /// A G-buffer debug view (ADR-0023 §1f) replaces the upscaler's output; with
+    /// [`Self::temporal`] only (its prepass writes the G-buffer).
+    pub(crate) gbuffer_debug: bool,
 }
 
 impl FrameSpec {
@@ -414,6 +425,8 @@ impl FrameSpec {
             temporal: false,
             readback: false,
             overlay: false,
+            depth: DepthConvention::Forward,
+            gbuffer_debug: false,
         }
     }
 
@@ -717,6 +730,14 @@ pub(crate) fn build_variant(
             "hdr_out",
             image(HDR_OUT_FORMAT, ImageSize::Output { shift: 0 }),
         ),
+        // ADR-0023 §1a, §1e: the G-buffer, with the temporal prepass that writes it.
+        // TRANSFER_SRC for the motion probe's readback, as the motion.
+        gbuffer: [
+            ("gb0", crate::gbuffer::GB0_FORMAT),
+            ("gb1", crate::gbuffer::GB1_FORMAT),
+            ("gb2", crate::gbuffer::GB2_FORMAT),
+        ]
+        .map(|(name, format)| graph.transient_image(name, image(format, render))),
     });
     // ADR-0021 §5c: the overlay's own unjittered depth and IDs at output resolution.
     let overlay_targets = spec.overlay.then(|| {
@@ -840,9 +861,13 @@ pub(crate) fn build_variant(
             Some(OutlineIdResources { ids, msaa: None }) => pass.access(ids, Access::ColorWrite),
             None => pass,
         };
-        // ADR-0021 §2b: every opaque main-view draw writes its motion with its depth.
+        // ADR-0021 §2b: every opaque main-view draw writes its motion with its depth; ADR-0023
+        // §1e: and its surface into the G-buffer.
         let _ = match temporal {
-            Some(temporal) => pass.access(temporal.motion, Access::ColorWrite),
+            Some(temporal) => temporal.gbuffer.iter().fold(
+                pass.access(temporal.motion, Access::ColorWrite),
+                |pass, &target| pass.access(target, Access::ColorWrite),
+            ),
             None => pass,
         };
     }
@@ -1022,6 +1047,18 @@ pub(crate) fn build_variant(
             .access(temporal.tc_mask, Access::SampledCompute)
             .access(temporal.exposure_linear, Access::SampledCompute)
             .access(temporal.hdr_out, Access::StorageImageWrite);
+        if spec.gbuffer_debug {
+            // ADR-0023 §1f: one decoded G-buffer channel replaces the upscaler's output.
+            let _ = temporal
+                .gbuffer
+                .iter()
+                .fold(
+                    graph.pass("gbuffer_debug", PassKind::GBufferDebug),
+                    |pass, &target| pass.access(target, Access::SampledCompute),
+                )
+                .access(temporal.exposure_linear, Access::SampledCompute)
+                .access(temporal.hdr_out, Access::StorageImageReadWrite);
+        }
     }
     // The post chain's HDR input: the upscaler's output with temporal AA.
     let post_hdr = temporal.map_or(hdr, |temporal| temporal.hdr_out);
@@ -2276,6 +2313,50 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    /// A G-buffer debug view (ADR-0023 §1f) runs after `temporal` and before the post chain,
+    /// keeps the upscaler live (nothing culled) and shares every variant's transients.
+    #[test]
+    fn the_gbuffer_debug_view_overwrites_the_upscaled_frame() {
+        for spec in tiered_specs() {
+            let spec = FrameSpec {
+                gbuffer_debug: true,
+                ..spec
+            };
+            let base = build(&spec, false, 0).expect("compiles");
+            for haze in [false, true] {
+                for capture in [false, true] {
+                    for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
+                        let frame = build_variant(&spec, capture, offscreen, haze)
+                            .expect("variant compiles");
+                        assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
+                        assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
+                    }
+                }
+            }
+            let passes = kinds(&base);
+            let at = |kind| passes.iter().position(|&pass| pass == kind);
+            let debug = at(PassKind::GBufferDebug).expect("gbuffer_debug");
+            assert_eq!(at(PassKind::Temporal), Some(debug - 1), "{spec:?}");
+            assert!(at(PassKind::Composite).is_some_and(|composite| composite > debug));
+            let temporal = base.resources.temporal.expect("temporal resources");
+            for gb in temporal.gbuffer {
+                let read = barrier(&base.graph.passes()[debug], gb);
+                assert_eq!(read.new_layout, L::SHADER_READ_ONLY_OPTIMAL, "{spec:?}");
+            }
+            // Without the view the pass is absent.
+            let plain = build(
+                &FrameSpec {
+                    gbuffer_debug: false,
+                    ..spec
+                },
+                false,
+                0,
+            )
+            .expect("compiles");
+            assert!(!kinds(&plain).contains(&PassKind::GBufferDebug));
+        }
     }
 
     #[test]

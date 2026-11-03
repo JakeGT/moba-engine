@@ -299,10 +299,9 @@ impl Drop for MipView {
 }
 
 /// The reconstructed depth's far plane: the SDK's Vulkan back end clears this `R32_UINT`
-/// image with the bits of the float 1.0 (non-inverted depth).
-const FAR_DEPTH_BITS: vk::ClearColorValue = vk::ClearColorValue {
-    uint32: [0x3F80_0000; 4],
-};
+/// image with the bits of the float 0.0 for an inverted (reversed-Z, ADR-0023 §1c) depth,
+/// whose reconstruction stores with `InterlockedMax` (1.0 for a non-inverted one).
+const FAR_DEPTH_BITS: vk::ClearColorValue = vk::ClearColorValue { uint32: [0; 4] };
 const ZERO: vk::ClearColorValue = vk::ClearColorValue { float32: [0.0; 4] };
 const ZERO_UINT: vk::ClearColorValue = vk::ClearColorValue { uint32: [0; 4] };
 /// The frame info after a reset: no previous exposure (−1), pre-exposure 1.
@@ -1534,10 +1533,10 @@ mod tests {
         }
     }
 
-    /// The far plane's bits are the float 1.0's.
+    /// The far plane's bits are the float 0.0's (reversed-Z).
     #[test]
-    fn far_depth_is_one() {
+    fn far_depth_is_zero() {
         // SAFETY: reading the `uint32` member of a value written through it.
-        assert_eq!(unsafe { FAR_DEPTH_BITS.uint32 }[0], 1.0f32.to_bits());
+        assert_eq!(unsafe { FAR_DEPTH_BITS.uint32 }[0], 0.0f32.to_bits());
     }
 }

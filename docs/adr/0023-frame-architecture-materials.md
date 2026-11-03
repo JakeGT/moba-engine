@@ -2,7 +2,9 @@
 
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
-[Maintainer answers](#maintainer-answers-2026-11-02)). Proposed 2026-11-02. This is phase N2 of the
+[Maintainer answers](#maintainer-answers-2026-11-02)). N2a is recorded in
+[Amendment 1](#amendment-1-2026-11-03-n2a-reversed-z-and-the-g-buffer-targets-as-built).
+Proposed 2026-11-02. This is phase N2 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§3, §4, §5.2, §6.2, §6.6, §8
 and §12), written before the code.
 - **Builds on:**
@@ -974,6 +976,102 @@ The maintainer accepted this ADR with **every recommendation above taken**, Q1 t
 - the tiered path requires `maxColorAttachments ≥ 8`;
 - the emissive mask goes in `metallic_roughness.b` on both paths, with its Compat fallback;
 - the stylisation layer leaves Tiered in N2e, together with the team rims.
+
+### Amendment 1 (2026-11-03, N2a): reversed-Z and the G-buffer targets as built
+
+Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs under
+[Consequences](#consequences). The evidence is in [perf/0035](../perf/0035-n2a-gbuffer.md).
+§1 and §11 hold, with these departures and clarifications:
+
+1. **Reversed-Z is one `DepthConvention` per path** (`crates/render/src/depth.rs`): `Forward`
+   on Compat, `Reversed` on Tiered. It gives the clear value (0), the compare op
+   (`GREATER_OR_EQUAL`), the far value and the sky's vertex stage. The **reversal happens
+   only at the GPU boundary**: the camera uniform, the VFX uniforms, the environment's inverse
+   view-projection, the overlay block and the probes' CPU twins. Culling, the shadow fit, the
+   light grid, `Temporal::begin_frame` and picking keep the forward matrices, so nothing on
+   the CPU side changed. The projection's depth row is rebuilt as
+   `z' = n·f/(f − n) − n/(f − n)·w`, which maps near to 1 and the finite far plane to 0 and
+   commutes with the jitter (a unit test).
+2. **Shadow maps stay forward** (cleared to 1, `LESS_OR_EQUAL`). They are orthographic, where
+   reversed-Z gains nothing, and they are shared with Compat. The first draft cleared them to
+   0 with the main view, which removed every shadow on Tiered, so the shadow clear is now
+   separate from the main view's.
+3. **Every tiered depth consumer switched together** (§1c): the prepass and the scene, the
+   overlay prepass, the sky (`sky_reversed.vert`), water's depth fade (`MOBA_REVERSED_Z` on
+   `water_tiered`/`water_refraction_tiered`), soft particles and the distortion draw (the VFX
+   pipelines' compare op and reconstruction), GTAO (`gtao_reversed.frag`), contact shadows
+   (`contact_shadows_reversed.frag`), TAAU's nearest-depth cross and linearisation, and the
+   motion probe's twin. Decals need no change: on both paths they are applied inside the
+   terrain and foliage shaders, not drawn as depth-tested geometry. **Compat's SPIR-V is
+   byte-identical**, module by module, to origin/main's: the shared shaders take the
+   convention from macros (`include/depth.glsl`) whose Compat expansion is the original
+   expression, and only the new `*_reversed` and tiered permutations differ.
+4. **The upscalers are told.** `UpscaleInputs::depth` is documented as reversed (1 near, 0
+   far, finite far plane). FSR 3.1 builds with `FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=1`,
+   `device_to_view_depth` applies the SDK's plane swap for an inverted depth, and the
+   reconstructed-depth target is cleared to the bits of 0.0 (its `InterlockedMax` far value)
+   instead of 1.0. DLSS's `DepthInverted`, FSR 4's and XeSS's inverted-depth flags belong to
+   #365 (N1c), which had not merged when this PR opened; see item 15.
+5. **The G-buffer fragment stages are GLSL, not new Slang shaders** (departs from §1e). They
+   are `GBUFFER` permutations of today's forward `unit.frag`, `terrain.frag` and
+   `foliage.frag` (11 new modules in all, with the `GBUFFER` vertex permutations of `unit`,
+   `skinned` and `vat`), and they encode the forward shading's own surface. N2a's forward
+   `scene` still shades, so the encoder has to see the same albedo, normal, roughness and
+   occlusion that `shade()` sees. A Slang port of those inputs would be thrown away in N2c,
+   when the material table and the bindless materials (§6d) replace them. The **reference
+   encoding is Slang** (`slang/lib/gbuffer.slang`, `encode_gbuffer`/`decode_gbuffer`). Its
+   GLSL twin (`include/gbuffer.glsl`) is what the raster stages call, and its Rust twin
+   (`crates/render/src/gbuffer.rs`) is what the tests use. `gbuffer-smoke` checks all three
+   (item 11). The GLSL-vertex/Slang-fragment interface test in gate 1 therefore moves to N2c,
+   with the first Slang fragment stage. Materials still bind through today's per-draw sets, so
+   **the tiered pipeline count rises** in N2a instead of dropping (§1e's "about 10" is N2c's).
+   The count before and after is in perf/0035.
+6. **No `hdr` attachment in the G-buffer pass** (departs from §1a and §1e). Emissive and unlit
+   radiance still come from the forward `scene`, which writes `hdr`. The pass binds motion and
+   `gb0`–`gb2` (attachments 0–3), plus the outline IDs (attachment 4) when screen-space
+   outlines are on: at most five, as §1d planned. N2b adds `hdr` when the `scene` leaves Tiered.
+7. **One group, not `gbuffer_receivers` then `gbuffer_rest`** (departs from §1e). The split
+   exists so that `Paint` decals can land between the groups. Those decals arrive in N2c (§7),
+   and the split arrives with them. Until then, the foliage and terrain G-buffer stages apply
+   today's paint decals to their albedo, as the forward shading does.
+8. **The G-buffer exists only with temporal AA.** The temporal prepass is the G-buffer pass.
+   A tiered frame without temporal AA (a device or setting that turns it off) has no G-buffer,
+   and the G-buffer debug views then log one line and draw the frame. Compat never has one.
+9. **What each surface writes in N2a.** Units (static, skinned, VAT; textured or not): model
+   `STANDARD`, F0 0.04 (IOR 1.5, §6b), material AO, flags `UNIT | NO_FOG_OF_WAR`. Terrain:
+   `STANDARD`, F0 0.04, AO from the surface's occlusion, no flags. Foliage: `FOLIAGE`, with the
+   forward back light's `0.35 · height` as its translucency. Every rim slot is 0 until N2e (§8).
+   **`UNIT` is set on exactly what N1's unit mask covers**: everything drawn by the unit,
+   skinned and VAT pipelines, which includes structures and props. The sky draws in the pass
+   for its background motion only (its G-buffer writes are masked), so the far plane keeps
+   the clear value 0, which decodes as `UNLIT`.
+10. **Quantisation is explicit**: `floor(x · (2ᵇ − 1) + 0.5) / (2ᵇ − 1)` in the shader, so the
+    stored bytes do not depend on the device's float-to-UNORM rounding. The octahedral map
+    folds about +y in the (x, z) plane, because the map's normals are mostly +y. Measured by
+    the twin tests over a dense sphere: maximum angular error 0.237°, mean 0.084° (bounds 0.25° and 0.088°).
+    sRGB 8-bit relative step at most 4.6 %. The F0 0.04 default stores 128.
+11. **Gate 1's lavapipe check is `gbuffer-smoke`** (`crates/tools/src/bin/gbuffer-smoke.rs`, in
+    the `tiered-temporal` job). It raster-encodes 4,096 surfaces over the eight models, every
+    flag combination and rim slots 0–15 through the GLSL encoder. It reads the three targets
+    back and compares them byte for byte with the Slang encoder (a compute dispatch) and the
+    Rust twin, and checks the Slang decode against the Rust decode. A value within 0.01 of a
+    step of a rounding boundary is redrawn, so the check does not depend on last-ulp float
+    differences between compilers. Its push and bindings, and those of `gbuffer_debug.slang`,
+    are pinned by reflection tests.
+12. **Debug views** (§1f): `MOBA_DEBUG_VIEW=albedo|normal|roughness|metallic|model|rim-slot|
+    flags` are new `TemporalDebugView` variants. `tiles`, `light-count` and `lit-only` come
+    with N2b's passes. The view is a compute pass, `gbuffer_debug`, after `temporal`. It
+    overwrites `hdr_out` with the decoded channel (nearest render pixel, divided by the
+    exposure as TAAU's views are), and it is in the graph only while a G-buffer view is
+    selected. It reads `hdr_out` as well as writing it (a new `StorageImageReadWrite`
+    access), so the upscaler stays live and its history and timings are the frame's.
+13. **Admission:** `maxColorAttachments ≥ 8` joined the tiered limits (§1d), with a capability
+    test.
+14. **Graph:** the G-buffer adds three render-resolution transients and, with a debug view,
+    one pass. Every frame variant still shares its transients and start states (unit tests).
+15. **#365 (N1c):** *to be completed before merge (see the PR): whether DLSS
+    `DepthInverted`, FSR 4's and XeSS's inverted-depth flags were wired here or are left to
+    #365.*
 
 ## Corrections to the roadmap
 

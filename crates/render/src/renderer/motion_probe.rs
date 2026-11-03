@@ -565,7 +565,14 @@ impl Renderer {
                 expected: Vec3::ZERO,
             },
         ];
-        let raster = jittered(camera_b.view_proj, jitter, render);
+        // The matrix the depth was rasterised with, in the frame's depth convention (reversed
+        // on Tiered, ADR-0023 §1c).
+        let depth_convention = self.frame_spec.depth;
+        let raster = depth_convention.view_proj(
+            jittered(camera_b.view_proj, jitter, render),
+            camera_b.near,
+            camera_b.far,
+        );
         let unproject = raster.inverse();
         let mut tallies = [Tally::default(); CLASSES.len()];
         let mut pushed = PushCheck::default();
@@ -577,7 +584,7 @@ impl Renderer {
             for x in 0..w {
                 let index = y * w + x;
                 let d = depth[index];
-                if d >= 1.0 {
+                if !depth_convention.nearer(d, depth_convention.far()) {
                     skipped += 1;
                     continue;
                 }

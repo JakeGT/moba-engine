@@ -211,8 +211,9 @@ pub const MIN_TEMPORAL_RENDER_SCALE: f32 = 1.0 / 3.0;
 /// Default [`PostConfig::sharpness`]: TAAU's and FSR 3.1's starting point (ADR-0021 §3).
 pub const DEFAULT_SHARPNESS: f32 = 0.25;
 
-/// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): what the temporal pass or the overlay draws instead of
-/// the frame, for inspection. Tiered only; ignored elsewhere.
+/// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5; ADR-0023 §1f): what the temporal pass, the G-buffer
+/// debug pass or the overlay draws instead of the frame, for inspection. Tiered only (the
+/// G-buffer views with temporal AA, which writes the G-buffer); ignored elsewhere.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TemporalDebugView {
     /// The frame.
@@ -230,6 +231,20 @@ pub enum TemporalDebugView {
     Confidence,
     /// The overlay's ID target.
     OverlayIds,
+    /// The G-buffer's base colour (ADR-0023 §1f).
+    Albedo,
+    /// The G-buffer's world normal, as colour.
+    Normal,
+    /// The G-buffer's perceptual roughness.
+    Roughness,
+    /// The G-buffer's metallic.
+    Metallic,
+    /// The G-buffer's shading model, one colour per ID.
+    Model,
+    /// The G-buffer's team-rim slot, one colour per slot.
+    RimSlot,
+    /// The G-buffer's flags: red `UNIT`, green `NO_FOG_OF_WAR`, blue reserved.
+    Flags,
 }
 
 impl TemporalDebugView {
@@ -242,6 +257,13 @@ impl TemporalDebugView {
         Self::Disocclusion,
         Self::Confidence,
         Self::OverlayIds,
+        Self::Albedo,
+        Self::Normal,
+        Self::Roughness,
+        Self::Metallic,
+        Self::Model,
+        Self::RimSlot,
+        Self::Flags,
     ];
 
     /// The `MOBA_DEBUG_VIEW` name.
@@ -255,6 +277,35 @@ impl TemporalDebugView {
             Self::Disocclusion => "disocclusion",
             Self::Confidence => "confidence",
             Self::OverlayIds => "overlay-ids",
+            Self::Albedo => "albedo",
+            Self::Normal => "normal",
+            Self::Roughness => "roughness",
+            Self::Metallic => "metallic",
+            Self::Model => "model",
+            Self::RimSlot => "rim-slot",
+            Self::Flags => "flags",
+        }
+    }
+
+    /// The G-buffer debug pass's view (`gbuffer_debug.slang`'s `push.view`, 1–7), or `None`
+    /// for a view something else draws.
+    #[must_use]
+    pub(crate) const fn gbuffer_view(self) -> Option<u32> {
+        match self {
+            Self::Albedo => Some(1),
+            Self::Normal => Some(2),
+            Self::Roughness => Some(3),
+            Self::Metallic => Some(4),
+            Self::Model => Some(5),
+            Self::RimSlot => Some(6),
+            Self::Flags => Some(7),
+            Self::Off
+            | Self::Motion
+            | Self::Reactive
+            | Self::TcMask
+            | Self::Disocclusion
+            | Self::Confidence
+            | Self::OverlayIds => None,
         }
     }
 

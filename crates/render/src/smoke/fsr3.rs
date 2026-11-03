@@ -5,7 +5,7 @@
 //! samples the field at `i + 0.5 − jitter` (Halton (2, 3), ADR-0021 §1), scaled to output
 //! pixels; depth is a constant plane (two depths in the occluder runs), the masks are zero and
 //! the exposure is 1. Outside the
-//! frame's render rectangle every input holds a sentinel (colour 1000, motion ±40 px, depth 0,
+//! frame's render rectangle every input holds a sentinel (colour 1000, motion ±40 px, depth 1,
 //! masks 1), so a pass that read outside the rectangle would show: besides the interior
 //! bounds, every checkpoint bounds the largest error over the whole output, edges included.
 //!
@@ -74,7 +74,7 @@ const OUTPUT: vk::Extent2D = vk::Extent2D {
 const MARGIN: u32 = 6;
 /// The flat colour.
 const FLAT: [f32; 3] = [0.6, 0.3, 0.15];
-/// Depth everywhere inside the render rectangle (0 near, 1 far).
+/// Depth everywhere inside the render rectangle (reversed-Z: 1 near, 0 far, ADR-0023 §1c).
 const DEPTH: f32 = 0.5;
 
 /// Error bounds against the ideal output, as (mean, max) absolute error per channel over the
@@ -172,11 +172,11 @@ const OCCLUDER_TOP: f32 = 30.0;
 const OCCLUDER_BOTTOM: f32 = 78.0;
 /// Its speed, output pixels a frame (2 render pixels at Quality).
 const OCCLUDER_SPEED: f32 = 3.0;
-/// Depths of the occluder and of the background behind it (0 near).
-const OCCLUDER_DEPTH: f32 = 0.3;
+/// Depths of the occluder and of the background behind it (reversed-Z: 1 near).
+const OCCLUDER_DEPTH: f32 = 0.7;
 /// The checkerboard's cell, output pixels.
 const CHECKER: f32 = 24.0;
-const BACKGROUND_DEPTH: f32 = 0.6;
+const BACKGROUND_DEPTH: f32 = 0.4;
 
 /// What the frame shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -291,7 +291,7 @@ fn upload(
                 };
                 (content.at(u, v), content.depth(u, v), mv, 0u8)
             } else {
-                ([1000.0; 3], 0.0, [40.0, -40.0], 255u8)
+                ([1000.0; 3], 1.0, [40.0, -40.0], 255u8)
             };
             for channel in [rgb[0], rgb[1], rgb[2], 1.0] {
                 out.color.extend(f16_bits(channel).to_le_bytes());
