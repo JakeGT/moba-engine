@@ -26,6 +26,9 @@ mod fsr4 {
         load_beside_executable,
     };
     use crate::caps::RenderPath;
+    use crate::vendor::{UpscalerRequest, UpscalerResult};
+
+    mod upscaler;
 
     #[allow(
         non_camel_case_types,
@@ -61,7 +64,7 @@ mod fsr4 {
 
     /// The FSR 4 back end: the process-lifetime FidelityFX API loader.
     struct Fsr4 {
-        _api: &'static sys::FfxApi,
+        api: &'static sys::FfxApi,
     }
 
     impl Backend for Fsr4 {
@@ -71,6 +74,14 @@ mod fsr4 {
 
         fn detail(&self) -> String {
             format!("FidelityFX SDK {SDK_VERSION}")
+        }
+
+        fn upscaler(&self, request: &UpscalerRequest<'_>) -> Option<UpscalerResult> {
+            Some(
+                upscaler::Fsr4Upscaler::new(self.api, request).map(|upscaler| {
+                    Box::new(upscaler) as Box<dyn crate::upscale::TemporalUpscaler>
+                }),
+            )
         }
     }
 
@@ -86,7 +97,7 @@ mod fsr4 {
                 "the device runs the compat path, and the vendor upscalers are tiered-only",
             ));
         }
-        api().map(|api| Box::new(Fsr4 { _api: api }) as Box<dyn Backend>)
+        api().map(|api| Box::new(Fsr4 { api }) as Box<dyn Backend>)
     }
 
     /// The loader, opened on first use and never unloaded (see [`super::super::Loaded`]).

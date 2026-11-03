@@ -16,6 +16,7 @@ use crate::descriptor_budget::UpdateAfterBindLimits;
 use crate::error::{RenderError, RenderResult};
 use crate::instance::InstanceContext;
 use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
+use crate::vendor::features::{FeatureBits, MUTABLE_DESCRIPTOR_TYPE};
 
 const SWAPCHAIN: &CStr = c"VK_KHR_swapchain";
 const PORTABILITY_SUBSET: &CStr = c"VK_KHR_portability_subset";
@@ -91,6 +92,9 @@ pub(crate) struct DeviceContext {
     /// Every device extension enabled at `vkCreateDevice` (the vendor probes and the latency
     /// mode read this, not what the device advertises).
     pub(crate) enabled_extensions: Vec<String>,
+    /// The core feature bits enabled at `vkCreateDevice` (the vendor back ends' probes check
+    /// theirs against it, ADR-0021 amendment 5).
+    pub(crate) enabled_features: FeatureBits,
     /// The update-after-bind descriptor limits that bound tiered pipeline layouts (ADR-0020
     /// §3b, [`crate::descriptor_budget::check_tiered`]); all zero on Compat, which never
     /// creates an update-after-bind layout.
@@ -248,7 +252,7 @@ impl DeviceContext {
         let depth_clamp = supported.depth_clamp == vk::TRUE;
         let tiered = candidate.admission.path == RenderPath::Tiered;
         let present = |name: &str| candidate.capabilities.feature(name);
-        let base_features = vk::PhysicalDeviceFeatures::default()
+        let mut base_features = vk::PhysicalDeviceFeatures::default()
             .texture_compression_bc(texture_compression_bc)
             .sampler_anisotropy(sampler_anisotropy)
             .depth_clamp(depth_clamp)
@@ -319,6 +323,50 @@ impl DeviceContext {
         features_12.shader_output_viewport_index =
             vk::Bool32::from(vendor.features.shader_output_viewport_index);
         features_12.shader_output_layer = vk::Bool32::from(vendor.features.shader_output_layer);
+        // ADR-0021 amendment 5: the device features the compiled-in back ends ask for (XeSS's
+        // `xessVKGetRequiredDeviceFeatures`), folded into the core structures (a standalone
+        // structure may not sit beside its core one, VUID-VkDeviceCreateInfo-pNext-02830) and
+        // enabled where the device supports them; the back end's probe rejects it when one is
+        // missing. Nothing in the open build or on Compat.
+        let mut features_11 = vk::PhysicalDeviceVulkan11Features::default();
+        let vendor_features = if request_vendor && tiered {
+            crate::vendor::device_features(&crate::vendor::DeviceQuery {
+                instance,
+                physical,
+                capabilities: &candidate.capabilities,
+                path: candidate.admission.path,
+            })
+        } else {
+            FeatureBits::default()
+        };
+        let vendor_enabled = if vendor_features.is_empty() {
+            FeatureBits::default()
+        } else {
+            vendor_features.common(&query_core_features(
+                instance,
+                physical,
+                candidate
+                    .capabilities
+                    .has_extension(MUTABLE_DESCRIPTOR_TYPE_EXT),
+            ))
+        };
+        vendor_enabled.enable(
+            &mut base_features,
+            &mut features_11,
+            &mut features_12,
+            &mut features_13,
+        );
+        // Chained only when a back end asked for one of its bits.
+        let chain_11 = vendor_enabled.has_vulkan11();
+        // An extension feature, chained only with its extension (which the same back end asked
+        // for).
+        let chain_mutable = vendor_enabled.contains(MUTABLE_DESCRIPTOR_TYPE)
+            && vendor
+                .names
+                .iter()
+                .any(|name| name.as_bytes() == MUTABLE_DESCRIPTOR_TYPE_EXT.as_bytes());
+        let mut mutable_features = vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT::default()
+            .mutable_descriptor_type(true);
         let mut acceleration = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
             .acceleration_structure(true);
         let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
@@ -373,6 +421,12 @@ impl DeviceContext {
         }
         if tiered {
             features_2 = features_2.push(&mut features_12);
+        }
+        if chain_11 {
+            features_2 = features_2.push(&mut features_11);
+        }
+        if chain_mutable {
+            features_2 = features_2.push(&mut mutable_features);
         }
         if enabled.has("VK_KHR_acceleration_structure") {
             features_2 = features_2.push(&mut acceleration);
@@ -490,6 +544,23 @@ impl DeviceContext {
             .iter()
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
+        // Only the structures that were chained were enabled (Compat chains no 1.2 one, and
+        // the 1.1 one only for a vendor request).
+        let unchained_11 = vk::PhysicalDeviceVulkan11Features::default();
+        let unchained_12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut enabled_features = FeatureBits::of(
+            &base_features,
+            if chain_11 {
+                &features_11
+            } else {
+                &unchained_11
+            },
+            if tiered { &features_12 } else { &unchained_12 },
+            &features_13,
+        );
+        if chain_mutable {
+            enabled_features = enabled_features.with(MUTABLE_DESCRIPTOR_TYPE);
+        }
 
         // SAFETY: `physical` came from this instance.
         let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
@@ -581,6 +652,7 @@ impl DeviceContext {
             admission: candidate.admission.clone(),
             capabilities: candidate.capabilities.clone(),
             enabled_extensions,
+            enabled_features,
             update_after_bind,
         })
     }
@@ -1145,6 +1217,41 @@ fn query_update_after_bind(
         set_samplers: p.max_descriptor_set_update_after_bind_samplers,
         set_sampled_images: p.max_descriptor_set_update_after_bind_sampled_images,
         set_storage_images: p.max_descriptor_set_update_after_bind_storage_images,
+    }
+}
+
+/// The device extension of [`MUTABLE_DESCRIPTOR_TYPE`].
+const MUTABLE_DESCRIPTOR_TYPE_EXT: &str = "VK_EXT_mutable_descriptor_type";
+
+/// Every core feature bit the device supports (base, Vulkan 1.1, 1.2 and 1.3), and
+/// `mutableDescriptorType` when the device has its extension (`mutable_ext`).
+fn query_core_features(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+    mutable_ext: bool,
+) -> FeatureBits {
+    let mut v11 = vk::PhysicalDeviceVulkan11Features::default();
+    let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut v13 = vk::PhysicalDeviceVulkan13Features::default();
+    let mut mutable = vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT::default();
+    let base = {
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default()
+            .push(&mut v11)
+            .push(&mut v12)
+            .push(&mut v13);
+        if mutable_ext {
+            features_2 = features_2.push(&mut mutable);
+        }
+        // SAFETY: the physical device belongs to this instance (Vulkan 1.3, so every core
+        // structure is valid in the chain) and the chain is valid for the call.
+        unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
+        features_2.features
+    };
+    let bits = FeatureBits::of(&base, &v11, &v12, &v13);
+    if mutable.mutable_descriptor_type == vk::TRUE {
+        bits.with(MUTABLE_DESCRIPTOR_TYPE)
+    } else {
+        bits
     }
 }
 

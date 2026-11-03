@@ -1404,24 +1404,22 @@ impl LightingResources {
         self.decals[frame % MAIN_SETS].write_bytes(0, upload.bytes());
     }
 
-    /// Points the main view's sets at `shadow` (the shadow transient) and `contact` (the
-    /// contact-shadow transient), or the defaults. The device must be idle or the sets unused
-    /// by pending work (creation, resize).
+    /// Points the main view's sets at `shadow` (the shadow transient), `contact` (the
+    /// contact-shadow transient) and `ao` (the blurred AO transient, R6), or the defaults
+    /// (white for AO). All three are set before the sets are written once: a resize
+    /// reallocates every transient, so writing after only some were replaced would write a
+    /// destroyed view. The device must be idle or the sets unused by pending work (creation,
+    /// resize).
     pub(crate) fn bind_transients(
         &mut self,
         device: &DeviceContext,
         shadow: Option<vk::ImageView>,
         contact: Option<vk::ImageView>,
+        ao: Option<vk::ImageView>,
     ) {
         self.shadow_view = shadow.unwrap_or(self.default_shadow.view());
         self.contact_view = contact;
-        self.write(device);
-    }
-
-    /// Points the main view's sets at `view` (the blurred AO transient, R6) or white. The
-    /// device must be idle or the sets unused by pending work (creation, resize).
-    pub(crate) fn bind_ao(&mut self, device: &DeviceContext, view: Option<vk::ImageView>) {
-        self.ao_view = view.unwrap_or(self.default_ramp.view());
+        self.ao_view = ao.unwrap_or(self.default_ramp.view());
         self.write(device);
     }
 

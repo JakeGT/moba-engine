@@ -232,7 +232,7 @@ fn bindings(name: &str, wrapper: &str, include: &Path) -> bindgen::Builder {
 /// includes no Vulkan header; `xess_vk.h` includes `<vulkan/vulkan.h>`, which `xess` points
 /// at a copy of this). Written from the Vulkan specification's ABI for 64-bit targets, where
 /// every handle is pointer-sized; no system Vulkan headers are needed.
-#[cfg(any(feature = "dlss", feature = "xess"))]
+#[cfg(any(feature = "dlss", feature = "xess", feature = "fsr4"))]
 const VULKAN_DECLARATIONS: &str = "\
 #ifndef MOBA_VULKAN_DECLARATIONS
 #define MOBA_VULKAN_DECLARATIONS
@@ -269,9 +269,13 @@ typedef PFN_vkVoidFunction (*PFN_vkGetDeviceProcAddr)(VkDevice, const char *);
 ";
 
 /// DLSS through NGX: bindings for the extension-requirement queries, the Vulkan init,
-/// capability query and shutdown, and the static NGX library (ADR-0020 §6b). NGX has no Apple
-/// library, so on Apple targets the feature needs nothing here and compiles to a probe that
-/// always reports DLSS unavailable.
+/// capability query and shutdown, the DLSS feature's creation, evaluation and release with the
+/// parameter-map accessors they need (ADR-0021 §4b), and the static NGX library (ADR-0020
+/// §6b). The SDK's `static inline` helpers (`NGX_VULKAN_CREATE_DLSS_EXT1`,
+/// `NGX_VULKAN_EVALUATE_DLSS_EXT`, `NGX_DLSS_GET_OPTIMAL_SETTINGS`, `NGX_DLSS_GET_STATS`) have
+/// no symbol to bind; `vendor::ngx` sets the same parameters through the accessors. NGX has
+/// no Apple library, so on Apple targets the feature needs nothing here and compiles to a
+/// probe that always reports DLSS unavailable.
 #[cfg(feature = "dlss")]
 fn dlss(context: &Context) {
     if context.target_vendor == "apple" {
@@ -282,12 +286,16 @@ fn dlss(context: &Context) {
     let builder = bindings("ngx", &wrapper, &sdk.dir.join("include"))
         .clang_args(["-x", "c", "-std=c11"])
         .allowlist_function(
-            "NVSDK_NGX_VULKAN_(Init_with_ProjectID|Shutdown1|GetCapabilityParameters|DestroyParameters|GetFeatureInstanceExtensionRequirements|GetFeatureDeviceExtensionRequirements)",
+            "NVSDK_NGX_VULKAN_(Init_with_ProjectID|Shutdown1|GetCapabilityParameters|DestroyParameters|GetFeatureInstanceExtensionRequirements|GetFeatureDeviceExtensionRequirements|CreateFeature1|EvaluateFeature_C|ReleaseFeature)",
         )
-        .allowlist_function("NVSDK_NGX_Parameter_GetI")
+        .allowlist_function("NVSDK_NGX_Parameter_(GetI|GetUI|GetULL|GetVoidPointer|SetI|SetUI|SetF|SetVoidPointer)")
         .allowlist_var("NVSDK_NGX_Parameter_SuperSampling_(Available|NeedsUpdatedDriver|FeatureInitResult|MinDriverVersionMajor|MinDriverVersionMinor)")
+        // The parameter names the DLSS create and evaluate helpers set (nvsdk_ngx_helpers*.h).
+        .allowlist_var("NVSDK_NGX_Parameter_(CreationNodeMask|VisibilityNodeMask|Width|Height|OutWidth|OutHeight|PerfQualityValue|RTXValue|FreeMemOnReleaseFeature|SizeInBytes|DLSSOptimalSettingsCallback|DLSSGetStatsCallback|Color|Output|Depth|MotionVectors|ExposureTexture|Jitter_Offset_X|Jitter_Offset_Y|Sharpness|Reset|MV_Scale_X|MV_Scale_Y|FrameTimeDeltaInMsec)")
+        .allowlist_var("NVSDK_NGX_Parameter_DLSS_(Feature_Create_Flags|Enable_Output_Subrects|Get_Dynamic_(Max|Min)_Render_(Width|Height)|Input_Color_Subrect_Base_[XY]|Input_Depth_Subrect_Base_[XY]|Input_MV_SubrectBase_[XY]|Output_Subrect_Base_[XY]|Render_Subrect_Dimensions_(Width|Height)|Pre_Exposure|Exposure_Scale)")
         // Enum constants come with their (allowlisted) enum types.
-        .allowlist_type("NVSDK_NGX_(Result|EngineType|Version|Feature|Application_Identifier_Type)");
+        .allowlist_type("NVSDK_NGX_(Result|EngineType|Version|Feature|Application_Identifier_Type|PerfQuality_Value|DLSS_Feature_Flags|Resource_VK|Resource_VK_Type|ImageViewInfo_VK|Handle)")
+        .allowlist_type("PFN_NVSDK_NGX_DLSS_(GetOptimalSettings|GetStats)Callback");
     context.write(builder, "ngx.rs");
 
     let lib = sdk.dir.join("lib");
@@ -671,19 +679,26 @@ fn sharc(context: &Context) {
     }
 }
 
-/// FSR 4 through the FidelityFX API loader: bindings for its entry points, loaded at run time
-/// with libloading (no link line).
+/// FSR 4 through the FidelityFX API loader: bindings for its entry points, the upscaler's
+/// create, dispatch and query descriptions and the Vulkan back-end description (ADR-0021 §4b),
+/// loaded at run time with libloading (no link line). `ffx_api_vk.h` includes
+/// `<vulkan/vulkan.h>`; a minimal one is written into `OUT_DIR`. The description type IDs are
+/// function-like macros bindgen cannot evaluate; `vendor::fsr` spells them out.
 #[cfg(feature = "fsr4")]
 fn fsr4(context: &Context) {
     let sdk = context.require("fidelityfx", "fsr4");
+    let shim = context.out.join("ffx-vulkan");
+    let declarations = format!("{VULKAN_DECLARATIONS}{FFX_VULKAN_DECLARATIONS}");
+    fs::create_dir_all(shim.join("vulkan"))
+        .and_then(|()| fs::write(shim.join("vulkan").join("vulkan.h"), declarations))
+        .unwrap_or_else(|error| fail(format!("writing the Vulkan shim for fsr4: {error}")));
+    let kit = sdk.dir.join("Kits").join("FidelityFX");
     let builder = bindings(
         "ffx",
-        "#include <wchar.h>\n#include \"ffx_api.h\"\n",
-        &sdk.dir
-            .join("Kits")
-            .join("FidelityFX")
-            .join("api")
-            .join("include"),
+        "#include <wchar.h>\n#include <stdbool.h>\n#include \"ffx_api.h\"\n\
+         #include \"ffx_api_types.h\"\n#include \"vk/ffx_api_vk.h\"\n\
+         #include \"ffx_upscale.h\"\n",
+        &kit.join("api").join("include"),
     )
     // `FFX_API_ENTRY` is `__declspec(dllexport)` on every platform.
     .clang_args([
@@ -693,14 +708,34 @@ fn fsr4(context: &Context) {
         "-fdeclspec",
         "-Wno-ignored-attributes",
     ])
-    .allowlist_function("ffx(CreateContext|DestroyContext|Query)")
+    .clang_arg(format!("-I{}", kit.join("upscalers").join("include").display()))
+    .clang_arg(format!("-I{}", shim.display()))
+    .allowlist_function("ffx(CreateContext|DestroyContext|Query|Dispatch)")
+    .allowlist_type(
+        "ffx(CreateContextDescUpscale|DispatchDescUpscale|QueryDescUpscaleGetRenderResolutionFromQualityMode|QueryDescUpscaleGetJitterPhaseCount|QueryDescUpscaleGetGPUMemoryUsage|QueryGetProviderVersion|CreateBackendVKDesc|ApiHeader)",
+    )
+    .allowlist_type("Ffx(ApiResource|ApiResourceDescription|ApiEffectMemoryUsage|ApiReturnCodes|ApiUpscaleQualityMode|ApiCreateContextUpscaleFlags|ApiResourceState|ApiResourceUsage|ApiResourceType|ApiSurfaceFormat)")
     .dynamic_library_name("FfxApi")
     .dynamic_link_require_all(true);
     context.write(builder, "ffx.rs");
 }
 
-/// XeSS: bindings for `xessGetVersion` and the Vulkan extension-requirement queries, loaded
-/// at run time with libloading (no link line). `xess_vk.h` includes `<vulkan/vulkan.h>`; a
+/// The Vulkan declarations `ffx_api_vk.h` needs beyond [`VULKAN_DECLARATIONS`] (only behind
+/// pointers or as handles).
+#[cfg(feature = "fsr4")]
+const FFX_VULKAN_DECLARATIONS: &str = "\
+#ifndef MOBA_FFX_VULKAN_DECLARATIONS
+#define MOBA_FFX_VULKAN_DECLARATIONS
+typedef struct VkQueue_T *VkQueue;
+typedef struct VkFence_T *VkFence;
+typedef int32_t VkResult;
+typedef struct VkSubmitInfo VkSubmitInfo;
+#endif
+";
+
+/// XeSS: bindings for `xessGetVersion`, the Vulkan extension and feature requirement queries
+/// and the Vulkan context's creation, initialisation, execution and destruction (ADR-0021
+/// §4b, amendment 5), loaded at run time with libloading (no link line). `xess_vk.h` includes `<vulkan/vulkan.h>`; a
 /// minimal one is written into `OUT_DIR`, so no Vulkan SDK headers are needed.
 #[cfg(feature = "xess")]
 fn xess(context: &Context) {
@@ -717,8 +752,9 @@ fn xess(context: &Context) {
     .clang_args(["-x", "c", "-std=c11"])
     .clang_arg(format!("-I{}", shim.display()))
     .allowlist_function(
-        "xess(GetVersion|VKGetRequiredInstanceExtensions|VKGetRequiredDeviceExtensions)",
+        "xess(GetVersion|VKGetRequiredInstanceExtensions|VKGetRequiredDeviceExtensions|VKGetRequiredDeviceFeatures|VKCreateContext|VKInit|VKExecute|DestroyContext|GetOptimalInputResolution|GetProperties|SetJitterScale|SetVelocityScale)",
     )
+    .allowlist_type("_?xess_(vk_init_params_t|vk_execute_params_t|vk_image_view_info|2d_t|coord_t|quality_settings_t|init_flags_t|context_handle_t|properties_t)")
     .allowlist_type("_?xess_version_t")
     .allowlist_type("_?xess_result_t")
     .dynamic_library_name("XessApi")

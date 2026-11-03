@@ -12,8 +12,10 @@
 # (default tests/perf/baseline.toml; empty skips the regression check), WINDOW (default
 # 1920x1080), RENDER_PATH (default compat; "tiered" runs the tiered presets: since N1a their
 # absolute budgets fail perf-gate, while their [tiered.<tier>] baseline regressions are
-# report-only until the last N1 part flips them, ADR-0021 amendment 2), RUN (a command prefix
-# such as "xvfb-run -a"). The replay itself is evidence
+# report-only until the last N1 part flips them, ADR-0021 amendment 2), UPSCALER (default
+# taau: the tiered path's upscaler, pinned so a build with a vendor upscaler measures the
+# baseline's back end unless asked; perf-gate checks it against the table's `upscaler`, ADR-0021
+# amendment 5), RUN (a command prefix such as "xvfb-run -a"). The replay itself is evidence
 # only and never committed. Needs `cargo build --release -p moba-client -p moba-tools`.
 set -euo pipefail
 out=${1:-perf-replay}
@@ -21,6 +23,7 @@ ticks=${TICKS:-18000}
 tiers=${TIERS:-low medium high ultra}
 baseline=${BASELINE-tests/perf/baseline.toml}
 path=${RENDER_PATH:-compat}
+upscaler=${UPSCALER:-taau}
 mkdir -p "$out"
 replay="$out/teamfight-$ticks.mbr"
 if [ ! -s "$replay" ]; then
@@ -34,13 +37,13 @@ for tier in $tiers; do
   # --warm-cache): the tier's every pipeline is then a cache hit.
   # shellcheck disable=SC2086 # RUN is a command prefix.
   env MOBA_SETTINGS=/dev/null MOBA_QUALITY="$tier" MOBA_RENDER_PATH="$path" MOBA_VULKAN_VALIDATION=off \
-    MOBA_SMOKE_FRAMES=30 \
+    MOBA_UPSCALER="$upscaler" MOBA_SMOKE_FRAMES=30 \
     MOBA_WINDOW_SIZE="${WINDOW:-1920x1080}" \
     timeout 300 ${RUN:-} ./target/release/moba-client > "$out/warm-$tier.log" 2>&1 \
     || { tail -20 "$out/warm-$tier.log"; exit 1; }
   # shellcheck disable=SC2086 # RUN is a command prefix.
   env MOBA_SETTINGS=/dev/null MOBA_QUALITY="$tier" MOBA_RENDER_PATH="$path" MOBA_REPLAY="$replay" \
-    MOBA_REPLAY_EXIT=1 \
+    MOBA_REPLAY_EXIT=1 MOBA_UPSCALER="$upscaler" \
     MOBA_WARMUP_TICKS=0 \
     MOBA_VULKAN_VALIDATION="${MOBA_VULKAN_VALIDATION:-off}" MOBA_VSYNC="${MOBA_VSYNC:-0}" \
     MOBA_WINDOW_SIZE="${WINDOW:-1920x1080}" MOBA_SMOKE_FRAMES=100000000 \

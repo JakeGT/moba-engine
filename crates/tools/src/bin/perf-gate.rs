@@ -26,7 +26,10 @@
 //! The baseline names the GPU it was measured on (top-level `gpu = "..."`) and holds one
 //! table per path and tier: `[low]` … `[ultra]` for Compat and `[tiered.low]` …
 //! `[tiered.overdrive]` for Tiered, each with exactly `gpu_total_p95_ms` and
-//! `render_p95_ms`; unknown tables or keys are an error. With
+//! `render_p95_ms`; unknown tables or keys are an error. A `[tiered.*]` table also names the
+//! upscaler it was recorded with (`upscaler = "taau"`, ADR-0021 §7, amendment 5), and a log
+//! whose `upscaler=` differs is a baseline breach: a build with a vendor upscaler (DLSS) is not
+//! compared with, or recorded as, the open build's numbers. With
 //! `--baseline`, a log whose tier has no table, or that ran on another GPU, fails: a baseline
 //! only means something on the GPU that recorded it, so a new runner records its own
 //! (`BASELINE= scripts/perf-replay.sh`). Without `--baseline` only the budgets are checked.
@@ -127,12 +130,15 @@ const BASELINE_KEYS: [&str; 2] = ["gpu_total_p95_ms", "render_p95_ms"];
 struct Baseline {
     gpu: String,
     tables: Vec<(String, Vec<(String, f64)>)>,
+    /// The upscaler each `[tiered.*]` table was recorded with.
+    upscalers: Vec<(String, String)>,
 }
 
 impl Baseline {
     fn parse(text: &str) -> Result<Self, String> {
         let mut gpu = None;
         let mut tables: Vec<(String, Vec<(String, f64)>)> = Vec::new();
+        let mut upscalers: Vec<(String, String)> = Vec::new();
         for (number, raw) in text.lines().enumerate() {
             let at = |message: String| format!("line {}: {message}", number + 1);
             let line = strip_comment(raw).trim();
@@ -169,6 +175,18 @@ impl Baseline {
                 gpu = Some(name.to_owned());
                 continue;
             };
+            if key == "upscaler" && table.starts_with("tiered.") {
+                if upscalers.iter().any(|(name, _)| name == table) {
+                    return Err(at(format!("upscaler appears twice in [{table}]")));
+                }
+                let name = value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| at("upscaler must be a non-empty quoted string".to_owned()))?;
+                upscalers.push((table.clone(), name.to_owned()));
+                continue;
+            }
             if !BASELINE_KEYS.contains(&key) {
                 return Err(at(format!(
                     "unknown key {key:?} in [{table}] (expected {})",
@@ -191,13 +209,30 @@ impl Baseline {
                     return Err(format!("[{table}] has no {key}"));
                 }
             }
+            if table.starts_with("tiered.") && !upscalers.iter().any(|(name, _)| name == table) {
+                return Err(format!(
+                    "[{table}] names no upscaler (upscaler = \"taau\", ADR-0021 §7)"
+                ));
+            }
         }
         let gpu = gpu.ok_or_else(|| "the baseline names no gpu (gpu = \"...\")".to_owned())?;
-        Ok(Self { gpu, tables })
+        Ok(Self {
+            gpu,
+            tables,
+            upscalers,
+        })
     }
 
     fn has_table(&self, table: &str) -> bool {
         self.tables.iter().any(|(name, _)| name == table)
+    }
+
+    /// The upscaler a `[tiered.*]` table was recorded with.
+    fn upscaler(&self, table: &str) -> Option<&str> {
+        self.upscalers
+            .iter()
+            .find(|(name, _)| name == table)
+            .map(|(_, upscaler)| upscaler.as_str())
     }
 
     fn get(&self, table: &str, key: &str) -> Option<f64> {
@@ -355,6 +390,15 @@ fn applicable<'a>(
         None
     } else if !reference.has_table(tier) {
         breaches.push(format!("{tier}: the baseline has no [{tier}] table"));
+        None
+    } else if let Some(expected) = reference.upscaler(tier)
+        && log.get("upscaler") != Some(expected)
+    {
+        breaches.push(format!(
+            "{tier}: the baseline was recorded with upscaler {expected:?}, this run used {:?} \
+             (pin it: UPSCALER={expected} scripts/perf-replay.sh)",
+            log.get("upscaler").unwrap_or("not reported")
+        ));
         None
     } else {
         Some(reference)
@@ -638,12 +682,12 @@ mod tests {
         // A tiered baseline table parses and is compared, still report-only
         // (`TIERED_BASELINE_FAILS` is false until the last N1 part).
         let tiered = Baseline::parse(
-            "gpu = \"NVIDIA GeForce RTX 5070 Ti\"\n[tiered.ultra]\ngpu_total_p95_ms = 0.5\n\
-             render_p95_ms = 0.2\n",
+            "gpu = \"NVIDIA GeForce RTX 5070 Ti\"\n[tiered.ultra]\nupscaler = \"taau\"\n\
+             gpu_total_p95_ms = 0.5\nrender_p95_ms = 0.2\n",
         )
         .expect("a tiered baseline");
         let (failures, notes) = check(
-            &log("path=tiered gpu_total_p95_ms=0.9"),
+            &log("path=tiered upscaler=taau gpu_total_p95_ms=0.9"),
             Some(&tiered),
             LIMITS,
         );
@@ -683,6 +727,30 @@ mod tests {
         assert!(
             notes.iter().any(|note| note.contains("budget 7.5 ms")),
             "{notes:?}"
+        );
+        // ADR-0021 amendment 5: a run with another upscaler (a DLSS build) is not compared.
+        let (_, notes) = check(
+            &log("path=tiered upscaler=dlss gpu_total_p95_ms=0.9"),
+            Some(&tiered),
+            LIMITS,
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("recorded with upscaler \"taau\"")
+                    && note.contains("\"dlss\"")),
+            "{notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|note| note.contains("regressed")),
+            "{notes:?}"
+        );
+        // A tiered table must name its upscaler.
+        assert!(
+            Baseline::parse(
+                "gpu = \"x\"\n[tiered.ultra]\ngpu_total_p95_ms = 0.5\nrender_p95_ms = 0.2\n"
+            )
+            .is_err()
         );
         assert!(Baseline::parse("gpu = \"x\"\n[tiered.epic]\n").is_err());
         assert!(

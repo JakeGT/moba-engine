@@ -38,6 +38,7 @@ static LOCKED_PIPELINES: AtomicU64 = AtomicU64::new(0);
 static LOCKED_LOGGED: AtomicBool = AtomicBool::new(false);
 static DEGRADED_TEXTURES: AtomicU64 = AtomicU64::new(0);
 static REFUSED_TEXTURES: AtomicU64 = AtomicU64::new(0);
+static SDK_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// The accounting class of an allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +123,15 @@ fn current_total() -> u64 {
         + TARGET_BYTES.load(Ordering::Relaxed)
         + BUFFER_BYTES.load(Ordering::Relaxed)
         + SWAPCHAIN_BYTES.load(Ordering::Relaxed)
+        + SDK_BYTES.load(Ordering::Relaxed)
+}
+
+/// Sets the device memory a vendor SDK reports it allocated itself (a vendor upscaler's,
+/// ADR-0021 amendment 5), replacing the previous figure; it counts towards the total and the
+/// peak like any allocation.
+pub(crate) fn set_sdk_bytes(bytes: u64) {
+    SDK_BYTES.store(bytes, Ordering::Relaxed);
+    PEAK_BYTES.fetch_max(current_total(), Ordering::Relaxed);
 }
 
 /// Bytes of textures allocated now.
@@ -187,6 +197,9 @@ pub struct MemoryStats {
     pub buffer_bytes: u64,
     /// Swapchain images, bytes (estimated: width × height × texel size × images).
     pub swapchain_bytes: u64,
+    /// Memory vendor SDKs allocated themselves, as they report it (a vendor upscaler's,
+    /// ADR-0021 amendment 5), bytes.
+    pub sdk_bytes: u64,
     /// Device memory the allocator holds in blocks, including their free space, bytes (the
     /// driver-side cost of the live total; the swapchain is not in it).
     pub reserved_bytes: u64,
@@ -211,10 +224,14 @@ pub struct MemoryStats {
 }
 
 impl MemoryStats {
-    /// Every allocation now, swapchain included, bytes.
+    /// Every allocation now, swapchain and vendor SDKs included, bytes.
     #[must_use]
     pub const fn total_bytes(&self) -> u64 {
-        self.texture_bytes + self.target_bytes + self.buffer_bytes + self.swapchain_bytes
+        self.texture_bytes
+            + self.target_bytes
+            + self.buffer_bytes
+            + self.swapchain_bytes
+            + self.sdk_bytes
     }
 
     /// Whether the peak went over the tier's total budget.
@@ -231,6 +248,7 @@ pub(crate) fn stats(texture_budget: u64, total_budget: u64, reserved_bytes: u64)
         target_bytes: TARGET_BYTES.load(Ordering::Relaxed),
         buffer_bytes: BUFFER_BYTES.load(Ordering::Relaxed),
         swapchain_bytes: SWAPCHAIN_BYTES.load(Ordering::Relaxed),
+        sdk_bytes: SDK_BYTES.load(Ordering::Relaxed),
         reserved_bytes,
         peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
         texture_budget,
