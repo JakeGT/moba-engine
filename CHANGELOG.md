@@ -183,7 +183,12 @@ the semver check):
     projectile's core against a no-history reference),
     `scripts/overlay-invariance.sh`, `scripts/outline-probe.sh` on Tiered and
     `scripts/tiered-goldens.sh` (TAAU Low, High, native and a two-tick overlay golden,
-    `MOBA_CAPTURE_TWO_TICK=1`) run in `renderer-gate`.
+    `MOBA_CAPTURE_TWO_TICK=1`, plus 40 frames of High with a history reset every fifth frame,
+    `MOBA_TEMPORAL_RESET_EVERY=5`, under synchronization validation) run in `renderer-gate`.
+  - A history reset's re-initialisation waits on the previous frame's compute (pinned by unit
+    tests on the barriers; synchronization validation does not flag a `NONE` source), and
+    TAAU's and `exposure_linear`'s descriptor sets are keyed by the frame-in-flight slot
+    (`UpscaleInputs::frame_slot`). `scripts/ghost-probe.sh` adds Performance mode.
 - **Capability gate and render paths (ADR-0020 §2, N0.2;
   [perf/0026](docs/perf/0026-capability-gate.md)):**
   - `moba_render::caps` probes each device's extensions, features and limits

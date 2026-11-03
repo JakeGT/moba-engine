@@ -283,22 +283,7 @@ impl Taau {
             // reading and writing these images, so the transition waits for every earlier
             // compute work on the queue and its storage writes (WAR and WAW); at creation
             // there is none and the dependency is free.
-            let barriers = images.map(|image| {
-                vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .dst_access_mask(
-                        vk::AccessFlags2::SHADER_SAMPLED_READ
-                            | vk::AccessFlags2::SHADER_STORAGE_WRITE,
-                    )
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(range)
-            });
+            let barriers = images.map(|image| fresh_barrier(image, range));
             let dependency = vk::DependencyInfo::default().image_memory_barriers(&barriers);
             // SAFETY: the images are live and owned here; recording into `cmd`.
             unsafe { self.device.cmd_pipeline_barrier2(cmd, &dependency) };
@@ -510,9 +495,51 @@ fn images(
     Ok((history, prev_depth, vram))
 }
 
+/// The transition of one history or previous-depth image on first use or after a history
+/// reset: `UNDEFINED` → `GENERAL`. A layout transition is a write, and after a mid-stream
+/// reset the previous frame's dispatch may still be reading and writing the image, so the
+/// source is every earlier compute work on the queue and its storage writes (WAR and WAW),
+/// never `NONE` (ADR-0021 amendment 2, item 28; `fresh_barrier_waits_for_earlier_compute`).
+pub(crate) fn fresh_barrier(
+    image: vk::Image,
+    range: vk::ImageSubresourceRange,
+) -> vk::ImageMemoryBarrier2<'static> {
+    vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_access_mask(
+            vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        )
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::GENERAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(range)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_barrier_waits_for_earlier_compute() {
+        // A mid-stream reset re-initialises images the previous frame's dispatch may still
+        // use: the transition must wait for it (amendment 2, item 28). Synchronization
+        // validation on lavapipe does not catch a `NONE` source, so this pins it.
+        let b = fresh_barrier(vk::Image::null(), vk::ImageSubresourceRange::default());
+        assert!(
+            b.src_stage_mask
+                .contains(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        );
+        assert!(
+            b.src_access_mask
+                .contains(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        );
+        assert_eq!(b.old_layout, vk::ImageLayout::UNDEFINED);
+        assert_eq!(b.new_layout, vk::ImageLayout::GENERAL);
+    }
 
     #[test]
     fn the_push_block_is_56_bytes() {

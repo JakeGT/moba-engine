@@ -60,7 +60,9 @@ for entry in "${cases[@]}"; do
   fi
 done
 # A history reset mid-stream (ADR-0021 amendment 2 item 28): every 5th frame resets the
-# temporal history with the previous frame still in flight, under the same validation.
+# temporal history with the previous frame still in flight, under the same validation. This
+# is a validation smoke of the reset path: synchronization validation does not flag the
+# reset barrier with a NONE source (on lavapipe, NVIDIA or RADV), so unit tests pin it.
 reset_log="$out/mid-stream-reset.log"
 # shellcheck disable=SC2086 # RUN is a command prefix.
 if env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \

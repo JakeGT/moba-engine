@@ -88,7 +88,9 @@ by mutation on lavapipe:
 
 The wake does not see a missing motion vector (it is unchanged under the first mutation):
 TAAU's clip and disocclusion test rescue the trail. The on-object measures do, except at
-native, where a missing vector barely smears (0.14 %). The wake's residue is the moving
+native, where a missing vector barely smears (0.14 %), so native does not detect missing
+hero motion keys; `scripts/ghost-probe.sh` runs Quality, Performance (the strongest
+hero-smear check) and native. The wake's residue is the moving
 box's shadow trailing edge and thin grid lines re-converging.
 
 **Overlay invariance** (`scripts/overlay-invariance.sh`): the overlay-ID debug view on Tiered
@@ -112,6 +114,16 @@ contrast 1.511, worst rim lift 1.266 where the tint has headroom.
   byte-identical and matches its committed fingerprint (`mean_abs_diff=0.000 max_diff=0`).
   The tiered goldens are new: MSAA is retired on Tiered, so there is no earlier tiered image
   to compare with.
+- **Mid-stream history reset** (amendment 2, item 28): `scripts/tiered-goldens.sh` also runs
+  40 frames of High with `MOBA_TEMPORAL_RESET_EVERY=5` under synchronization validation; 0
+  messages. **It is a validation smoke, not a regression check for the reset barrier:**
+  with the TAAU fresh barrier's source mutated back to `NONE`/`NONE`, synchronization
+  validation (VVL 1.4.363) stays clean on lavapipe, on the RTX 5070 Ti and on RADV (Radeon
+  610M), for 40 and 400 frames with a reset every fifth frame and for 1,000 frames with
+  vsync off and a reset every second frame (`target/n1a/mutant/`, not committed). The
+  barrier's source is pinned by unit tests on the barriers instead
+  (`fresh_barrier_waits_for_earlier_compute`, `placeholder_barrier_waits_for_earlier_compute`);
+  the first fails on the mutant.
 
 ## Gate 6: performance on the RTX 5070 Ti
 
@@ -164,11 +176,27 @@ recording and submission, both from the frame log):
   pairs at a 1080p output). Low costs 0.045 ms and 44.6 MB more: it had no MSAA to give back
   (it ran FXAA at native), and TAAU at a 1080p output (0.147 ms) costs more than rendering
   at 0.656 saves. Compat is unchanged within noise.
-- **Session-to-session drift.** An earlier A/B of this branch against `e9d5f91` (before the
-  N1d merge, the same day) measured TAAU at 0.130 ms and every configuration, both builds,
-  0.005–0.04 ms lower than here (Tiered Low main 0.486 ms, branch 0.499 ms). Both builds
-  moved together, so the comparisons within a session hold; the absolute values depend on
-  the GPU's state that session (perf/0022's memory-clock note), which was not logged.
+- **Session-to-session drift, asymmetric.** An earlier A/B of this branch against `e9d5f91`
+  (before the N1d merge, the same day) measured lower GPU totals than here, and the two
+  builds did not move together (GPU total p50, this session minus the earlier one, ms):
+
+  | Build | Low | High | Ultra | Compat |
+  |---|---|---|---|---|
+  | main | +0.010 | +0.005 | +0.005 | +0.004 |
+  | branch | +0.042 | +0.037 | +0.038 | +0.004 |
+
+  Most of the branch's rise is TAAU (0.130 → 0.144–0.147 ms; water +0.004, bloom +0.003).
+  **It is not a code change.** The earlier branch binary was `9d3562b`, which already had
+  the review's mip-bias and foliage fixes. A three-round Tiered High A/B on the RTX 5070 Ti
+  (`target/n1a/ab4/`) of `9d3562b`, this head with Reflex on, and this head with
+  `MOBA_LATENCY=off` measured GPU total p50 0.586–0.587, 0.587 and 0.586–0.587 ms, with
+  TAAU at 0.144 ms in all three: neither the later review fixes nor the N1d latency merge
+  moved it. What changed is the GPU's state that session (perf/0022's memory-clock note),
+  which was not logged; why it landed mostly on TAAU is not known.
+  The comparisons within a session hold; the committed baselines come from this session,
+  with every fix in. Render CPU drifts between sessions too: the head's Tiered High render
+  p50 was 0.156–0.158 ms in that A/B against 0.183 ms here, so the render-CPU delta below
+  holds only within a session.
 - **Render CPU rose by 0.014–0.020 ms at p50 on every tiered tier** (0.162–0.169 →
   0.182–0.183 ms, +8–12 %); Compat is flat (0.168 → 0.169). The p95s rise by 0.01–0.05 ms
   and spread by up to 0.04 ms across rounds. Where the p50 delta goes, from one more run
@@ -205,7 +233,9 @@ recording and submission, both from the frame log):
 - **1440p was not run**; every figure here is at 1080p. TAAU's memory and cost scale with the
   output (its history is output-sized), so a 1440p run belongs with N1b's FSR 3.1 comparison.
 
-**`perf-gate` (amendment 2, item 16).** The branch's logs pass
+**`perf-gate` (amendment 2, item 16).** The High, Ultra and Overdrive budgets are defined
+at 1440p (`GPU_BUDGETS`; Low and Medium at 1080p) and these runs are at 1080p, so the
+absolute check is lenient on those tiers until a 1440p run. The branch's logs pass
 `perf-gate --baseline tests/perf/baseline.toml` with every Tiered budget checked as a failure
 (Low, High and Ultra at 0.55–0.60 ms against 12, 7.5 and 9 ms) and the new
 `[tiered.low|high|ultra]` baselines compared report-only. Those baselines are the branch
@@ -242,6 +272,8 @@ the previous-bone upload: 1.9 MB each way at 1,000 units).
   probe's particle projectile measures it. Wind *animation* between the two probe frames is
   not twinned (the wind is steady), and the pushed foliage is checked by direction and share,
   not to 1/64 px.
+- **The reset barrier's hazard** is not observed by any tool here (item 28): no validation
+  run, on lavapipe, NVIDIA or RADV, distinguishes the fixed barrier from a `NONE` source.
 - **The Tiered baseline regression check** is report-only until the last N1 part flips it;
   the absolute budgets fail now (Amendment 2 item 16).
 - **1440p**, the overlay's VFX filter at Ultra's particle cap, and a render-thread profile

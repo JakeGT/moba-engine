@@ -157,24 +157,7 @@ impl ExposureLinearPass {
         exposure: f32,
     ) {
         if adapted.is_none() && !self.placeholder_ready {
-            let barrier = [vk::ImageMemoryBarrier2::default()
-                // After `forget` an earlier frame's pass may still be sampling the
-                // placeholder: the transition waits for earlier compute work (WAR).
-                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .src_access_mask(vk::AccessFlags2::NONE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(self.placeholder.image())
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .level_count(1)
-                        .layer_count(1),
-                )];
+            let barrier = [placeholder_barrier(self.placeholder.image())];
             // SAFETY: the placeholder is live and owned here; recording into `cmd`.
             unsafe {
                 self.device.cmd_pipeline_barrier2(
@@ -241,5 +224,42 @@ impl ExposureLinearPass {
         }
         // SAFETY: one invocation with the pipeline, set and push constants bound above.
         unsafe { self.device.cmd_dispatch(cmd, 1, 1, 1) };
+    }
+}
+
+/// The placeholder's first-use transition, `UNDEFINED` → `SHADER_READ_ONLY_OPTIMAL`. After
+/// `forget` an earlier frame's pass may still be sampling the placeholder, so the transition
+/// waits for earlier compute work (WAR; ADR-0021 amendment 2, item 28), never `NONE`.
+pub(crate) fn placeholder_barrier(image: vk::Image) -> vk::ImageMemoryBarrier2<'static> {
+    vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .src_access_mask(vk::AccessFlags2::NONE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1)
+                .layer_count(1),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_barrier_waits_for_earlier_compute() {
+        let b = placeholder_barrier(vk::Image::null());
+        assert!(
+            b.src_stage_mask
+                .contains(vk::PipelineStageFlags2::COMPUTE_SHADER)
+        );
+        assert_eq!(b.new_layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     }
 }

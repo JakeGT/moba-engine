@@ -6,6 +6,11 @@
 #
 #   scripts/ghost-probe.sh [client binary] [output dir]
 #
+# Modes: Quality, Performance and native. Performance is the strongest check of the hero's
+# motion keys (its interior smears 7.30 % without them against a 1.75 % bound, Quality
+# 2.59 %); native does not detect missing hero motion keys (0.14 %) and is the no-upscale
+# baseline (perf/0031).
+#
 # CI runs it under lavapipe with validation (render-golden.yml); set RUN="xvfb-run -a" when
 # there is no display.
 set -euo pipefail
@@ -13,7 +18,7 @@ client=${1:-./target/release/moba-client}
 out=${2:-ghost-probe}
 mkdir -p "$out"
 status=0
-for mode in quality native; do
+for mode in quality performance native; do
   log="$out/ghost-$mode.log"
   # shellcheck disable=SC2086 # RUN is a command prefix.
   if env MOBA_GHOST_PROBE=1 MOBA_RENDER_PATH=tiered MOBA_AA=temporal MOBA_QUALITY=high \

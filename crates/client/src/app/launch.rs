@@ -1173,7 +1173,7 @@ pub(crate) fn parse_identity_seed() -> Result<Option<[u8; 32]>, String> {
     hex32_env("MOBA_CLIENT_IDENTITY")
 }
 
-/// `MOBA_TEMPORAL_RESET_EVERY=<n>` (a synchronisation check, ADR-0021 amendment 2 item 28):
+/// `MOBA_TEMPORAL_RESET_EVERY=<n>` (a validation smoke, ADR-0021 amendment 2 item 28):
 /// the local preview resets every temporal history before every `n`th frame, with earlier
 /// frames still in flight, so sync validation sees the history re-initialised mid-stream.
 pub(crate) fn temporal_reset_every() -> Option<u64> {

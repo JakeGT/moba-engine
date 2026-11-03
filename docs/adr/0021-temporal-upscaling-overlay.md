@@ -1088,10 +1088,14 @@ from the text above, or the text left a choice open, this is what was done and w
     pending (the command buffer of the record that many calls back has finished); the inputs
     and the output are alive and in the stated layouts until that command buffer finishes.
     The back ends commit state at record time: TAAU flips its history parity, clears
-    `fresh` (the first-use transitions are recorded) and `reset`, and advances its descriptor
-    ring; `exposure_linear` advances its ring and marks its placeholder initialised. Both
-    rings hold three sets, more than `FRAMES_IN_FLIGHT` (2), which the renderer asserts at
-    compile time, so a set is never rewritten while a pending frame reads it. A record
+    `fresh` (the first-use transitions are recorded) and `reset`; `exposure_linear` marks
+    its placeholder initialised. Their descriptor sets are keyed by the frame-in-flight
+    slot, not by a ring that advances per record: `UpscaleInputs` gains `frame_slot` (a
+    departure from §4a's input list) and `exposure_linear::record` takes it too. Each holds
+    one set per slot, which the renderer asserts at compile time (`SET_RING >=
+    FRAMES_IN_FLIGHT`), and the renderer waits on a slot's fence before recording into it,
+    so a set is never rewritten while a pending frame reads it, however many frames are
+    dropped between records. A record
     whose command buffer is never submitted would leave that state ahead of the GPU, so the
     renderer calls `forget_unsubmitted` (which sets `fresh` and `reset` again) on every error
     path between recording and submission.
@@ -1142,6 +1146,23 @@ from the text above, or the text left a choice open, this is what was done and w
     configuration (tiers, modes, floors and the warnings), which is close to restating the
     code; what jitter, motion and TAAU do with that configuration is checked by the renderer's
     tests and gates 2–3.
+28. **A history reset waits for the frame in flight.** A `reset_history` mid-stream (a map
+    load, a rotation, a resize) makes the next record transition the history images from
+    `UNDEFINED` to `GENERAL`. That transition is a write, and the previous frame's TAAU
+    dispatch may still be reading or writing those images, so the barrier's source is
+    `COMPUTE_SHADER` with `SHADER_STORAGE_WRITE` (not `NONE`); `exposure_linear`'s
+    placeholder transition likewise waits on `COMPUTE_SHADER`. `scripts/tiered-goldens.sh`
+    runs 40 frames of Tiered High with `MOBA_TEMPORAL_RESET_EVERY=5` (a reset every fifth
+    frame, with the previous frame in flight) under synchronization validation and fails on
+    any message. **That run is a validation smoke, not a regression check for this barrier.**
+    Synchronization validation (VVL 1.4.363) stays clean with the source mutated back to
+    `NONE`/`NONE` on lavapipe, on the RTX 5070 Ti (NVIDIA 615.78.08) and on RADV (the
+    Radeon 610M), for 40 and 400 frames with a reset every fifth frame and 1,000 frames with
+    vsync off and a reset every second frame; it was also clean with the per-frame barrier
+    removed. The source is pinned instead by unit tests on the barriers themselves
+    (`fresh_barrier_waits_for_earlier_compute` in `upscale/taau.rs`,
+    `placeholder_barrier_waits_for_earlier_compute` in `upscale/exposure.rs`); the first
+    fails on the `NONE` mutant.
 
 **How the gates were made concrete:**
 
@@ -1186,7 +1207,8 @@ from the text above, or the text left a choice open, this is what was done and w
   test rescue the trail. The on-object measures do. The hero's interior measures 0.00 %
   native, 0.73 % Quality, 1.02 % Balanced and 1.37 % Performance, and 2.59 % (Quality) and
   7.30 % (Performance) without its motion keys, which fail; at native it barely smears either
-  way (0.14 %), so native does not discriminate. The particle's core measures 1.40 %
+  way (0.14 %), so native does not discriminate; the script runs Quality, Performance (the
+  strongest hero-smear check) and native. The particle's core measures 1.40 %
   native, 3.77 % Quality, 5.37 % Balanced and 5.88 % Performance, and 29.96 % at Quality
   with the particles' motion output zeroed. FSR 3.1 runs the probe in N1b and DLSS on the
   RTX in N1c.
