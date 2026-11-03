@@ -58,11 +58,31 @@ pub(crate) fn motion_probe_requested() -> bool {
     std::env::var_os("MOBA_MOTION_PROBE").is_some_and(|value| value != "0")
 }
 
+/// `MOBA_GHOST_PROBE=1` (ADR-0021 gate 3): run [`Renderer::ghost_probe`] once the renderer
+/// is up, print its report and exit (0 passed, 1 failed, 2 could not run).
+pub(crate) fn ghost_probe_requested() -> bool {
+    std::env::var_os("MOBA_GHOST_PROBE").is_some_and(|value| value != "0")
+}
+
+/// Runs the ghost probe and returns the process exit code.
+pub(crate) fn run_ghost_probe(renderer: &mut Renderer) -> i32 {
+    match renderer.ghost_probe() {
+        Ok(report) => {
+            eprintln!("{report}");
+            i32::from(!report.passed())
+        }
+        Err(error) => {
+            eprintln!("ghost probe could not run: {error}");
+            2
+        }
+    }
+}
+
 /// Runs the motion probe and returns the process exit code.
 pub(crate) fn run_motion_probe(renderer: &mut Renderer) -> i32 {
     match renderer.motion_probe() {
         Ok(report) => {
-            println!("{report}");
+            eprintln!("{report}");
             i32::from(!report.passed())
         }
         Err(error) => {

@@ -76,7 +76,9 @@ use crate::world::{
     WorldConfig, WorldFrame,
 };
 
+mod ghost_probe;
 mod motion_probe;
+pub use ghost_probe::{GhostFrame, GhostProbeReport};
 pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport};
 
 const FRAMES_IN_FLIGHT: usize = 2;

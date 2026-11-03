@@ -71,7 +71,7 @@ pub use environment::{
     Decal, DecalRole, DecalShape, DecalStyle, EnvironmentConfig, EnvironmentFrame, FoliageData,
     FoliageDisplacer, FoliageInstanceData, MAX_DECALS, MAX_FOLIAGE_DISPLACERS,
     MAX_FOLIAGE_INSTANCES, MAX_WATER_BODIES, MAX_WATER_VERTICES, WaterData, WaterMode, WaterStyle,
-    WaterVertexData, glow_reference, telegraph_mark,
+    WaterVertexData, glow_display_reference, glow_reference, telegraph_mark,
 };
 pub use error::{RenderError, RenderResult};
 pub use instance::{
@@ -101,9 +101,9 @@ pub use preset::{
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;
 pub use renderer::{
-    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, MAX_UI_IMAGE_SIZE,
-    MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PipelineStats, RenderConfig,
-    Renderer,
+    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, GhostFrame, GhostProbeReport,
+    MAX_UI_IMAGE_SIZE, MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PipelineStats,
+    RenderConfig, Renderer,
 };
 pub use scene::{
     BoneRange, Camera, ClearRect, MAX_OUTLINE_WIDTH, MeshId, OFFSCREEN_MAX_BONES,

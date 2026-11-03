@@ -94,6 +94,8 @@
 //! - `MOBA_MOTION_PROBE=1` (render tests, ADR-0021 gate 2): once the renderer is up, render
 //!   the motion-vector probe's two scripted frames, print the comparison with its CPU twin
 //!   and exit (0 passed, 1 failed, 2 could not run). Needs temporal AA (the tiered path).
+//!   `MOBA_GHOST_PROBE=1` (gate 3) does the same for the ghost-energy probe: a dashing hero
+//!   and a projectile, history against no-history renders.
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
@@ -739,9 +741,13 @@ impl App for ClientApp {
                     renderer.config_tier(),
                     renderer.admission().path.name()
                 );
-                if launch::motion_probe_requested() {
-                    // ADR-0021 gate 2: the probe's scripted frames, then exit.
-                    let code = launch::run_motion_probe(&mut renderer);
+                if launch::motion_probe_requested() || launch::ghost_probe_requested() {
+                    // ADR-0021 gates 2 and 3: the probes' scripted frames, then exit.
+                    let code = if launch::motion_probe_requested() {
+                        launch::run_motion_probe(&mut renderer)
+                    } else {
+                        launch::run_ghost_probe(&mut renderer)
+                    };
                     drop(renderer);
                     std::process::exit(code);
                 }
