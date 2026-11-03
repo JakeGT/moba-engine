@@ -195,6 +195,24 @@ uses `cfg`.
 The RTX 5070 Ti run with every Linux-buildable back end is in
 [perf/0029](../perf/0029-vendor-sdks.md).
 
+## Upscalers (N1c)
+
+`dlss`, `fsr4` and `xess` builds each add a `TemporalUpscaler` back end for the tiered path
+(ADR-0021 §3 and amendment 5). `MOBA_UPSCALER=dlss|fsr4|xess` asks for one; it is probed on
+demand if the start-up selection did not pick it, and falls back to TAAU with one
+`[render] upscaler X cannot run here (why); using taau` line. `auto` takes DLSS where it runs
+and XeSS on an Intel GPU, never FSR 4 until it passes on an AMD card.
+
+- **DLSS** runs on Linux with NVIDIA's driver: copy `libnvidia-ngx-dlss.so.310.9.16` from the
+  fetched SDK (`target/vendor-sdks/dlss-v310.9.16/lib/Linux_x86_64/rel/`) beside the client before running a `dlss` build. The
+  `dev` and `rel` binaries are for development only; never ship them (see above).
+- **FSR 4** needs `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` beside the client on AMD's Windows driver and an RDNA
+  card; **XeSS** needs `libxess.dll` on Windows. Neither has been run yet (`windows-vm`).
+- **Checking each back end's overlay invariance:**
+  `VENDOR_UPSCALERS="dlss" scripts/overlay-invariance.sh` adds a Quality, Performance and
+  native case per listed back end; each case fails if the log does not name the back end it
+  asked for.
+
 ## Verification and CI
 
 - `scripts/agent-verify.sh --full` checks `moba-engine --features sim,net,render,fsr3`

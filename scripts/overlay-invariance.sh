@@ -9,7 +9,10 @@
 #   scripts/overlay-invariance.sh [client binary] [output dir]
 #
 # Captures are pinned (fixed tick per frame). CI runs it under lavapipe with validation
-# (render-golden.yml); set RUN="xvfb-run -a" when there is no display.
+# (render-golden.yml); set RUN="xvfb-run -a" when there is no display. VENDOR_UPSCALERS
+# (e.g. "dlss") adds each vendor back end at Quality, Performance and native, for a client
+# built with its feature on a GPU that runs it (ADR-0021 amendment 5); each such capture must
+# also log that the back end ran.
 set -euo pipefail
 client=${1:-./target/release/moba-client}
 out=${2:-overlay-invariance}
@@ -36,12 +39,27 @@ cases=(
   "fxaa-scaled MOBA_AA=fxaa MOBA_RENDER_SCALE=0.6"
   "off MOBA_AA=off"
 )
+for upscaler in ${VENDOR_UPSCALERS:-}; do
+  for mode in quality performance native; do
+    cases+=("$upscaler-$mode MOBA_AA=temporal MOBA_UPSCALER=$upscaler MOBA_UPSCALE_MODE=$mode")
+  done
+done
 status=0
 reference=
 for entry in "${cases[@]}"; do
   read -r name settings <<< "$entry"
   # shellcheck disable=SC2086 # settings are separate assignments.
   capture "$name" $settings
+  case "$settings" in
+    *MOBA_UPSCALER=*)
+      upscaler=${settings##*MOBA_UPSCALER=}
+      upscaler=${upscaler%% *}
+      if ! grep -q "upscaler $upscaler " "$out/$name.log"; then
+        echo "FAIL: $name did not run $upscaler"
+        status=1
+      fi
+      ;;
+  esac
   if [ -z "$reference" ]; then
     reference=$name
     echo "reference: $name"

@@ -140,6 +140,21 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Vendor upscalers: DLSS SR, FSR 4 and XeSS (ADR-0021 N1c and amendment 5;
+  [perf/0034](docs/perf/0034-vendor-upscalers.md)), Tiered path only:**
+  - `dlss`, `fsr4` and `xess` builds implement `TemporalUpscaler` (NGX directly, the
+    FidelityFX API, and the XeSS Vulkan API). `MOBA_UPSCALER=dlss|fsr4|xess` picks one, probing
+    it on demand; `auto` picks DLSS where it runs and XeSS on Intel, never FSR 4 until it is
+    tested on an AMD card. A back end that cannot run falls back to TAAU with one line.
+  - DLSS runs on the RTX 5070 Ti under Linux, validation-clean in every mode: 0.567 ms at
+    1260×709 → 1080p, ghosting well below TAAU's, overlay IDs byte-identical. FSR 4 and XeSS
+    are compiled and unit-tested only (their runtimes need Windows; FSR 4 also an AMD card).
+  - Each frame's render size is clamped to the back end's range; a one-size range turns
+    dynamic resolution off. Per-back-end sharpness defaults (0 for DLSS and XeSS) and an RCAS
+    sharpen pass for back ends without their own. Mip bias follows the back end. The tiered
+    `hdr_out` target gains `TRANSFER_DST` (NGX clears it).
+  - XeSS's required device features are folded into the core feature structures at device
+    creation.
 - **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;
   [perf/0031](docs/perf/0031-n1a-temporal.md)), Tiered path only; Compat is byte-identical:**
   - **Jitter:** Halton (2, 3) with `ceil(8r²)` phases on the main view's raster matrix only;

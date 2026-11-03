@@ -69,8 +69,8 @@ use crate::targets::{self, OffscreenTarget, TargetExtents, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
 use crate::upscale::exposure::ExposureLinearPass;
 use crate::upscale::frame::{TemporalFrame, TemporalState};
-use crate::upscale::taau::{Taau, TaauDebugView};
-use crate::upscale::{TemporalUpscaler, UpscaleImage, UpscaleInputs, UpscaleOutput};
+use crate::upscale::taau::TaauDebugView;
+use crate::upscale::{UpscaleImage, UpscaleInputs, UpscaleOutput};
 use crate::vendor::latency::{self, LatencyBackend, LatencyFrame, LatencyMarker, LatencySetting};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 use crate::world::{
@@ -89,6 +89,7 @@ const FRAMES_IN_FLIGHT: usize = 2;
 const _: () = assert!(
     crate::upscale::taau::SET_RING >= FRAMES_IN_FLIGHT
         && crate::upscale::exposure::SET_RING >= FRAMES_IN_FLIGHT
+        && crate::upscale::sharpen::SET_RING >= FRAMES_IN_FLIGHT
 );
 // The fog-of-war ping-pong (image `f` written in frame slot `f`, the other read as history)
 // and the lighting set per frame slot that names image `f` assume exactly this many frames in
@@ -755,7 +756,7 @@ impl Renderer {
         eprintln!("{latency_line}");
         // ADR-0020 §6c: probe the compiled-in vendor back ends against this device; each one
         // that is unavailable logs one line naming its fallback (nothing in the open build).
-        let vendor = crate::vendor::select(
+        let mut vendor = crate::vendor::select(
             &crate::vendor::ProbeContext {
                 entry: &instance.entry,
                 instance: &instance.instance,
@@ -765,6 +766,7 @@ impl Renderer {
                 path,
                 instance_extensions: &instance.enabled_extensions,
                 device_extensions: &device.enabled_extensions,
+                enabled_features: &device.enabled_features,
             },
             latency.mode(),
         );
@@ -1139,22 +1141,43 @@ impl Renderer {
                 )
             })
             .transpose()?;
-        // ADR-0021 §3, §4: the back end (TAAU in the open build, Q1) with histories for the
-        // dynamic-resolution ceiling.
+        // ADR-0021 §3, §4: the back end `MOBA_UPSCALER` asks for (a vendor one through the
+        // vendor selection, else TAAU, the open build's, Q1), with histories for the
+        // dynamic-resolution ceiling, wrapped in the `sharpen` pass when it needs one.
+        let mut fixed_render = false;
         let temporal_state = if temporal {
-            let kind = crate::upscale::resolve(post_config.upscaler);
-            let taau = Taau::new(
-                &device,
-                &shaders,
-                swapchain.extent,
-                extents.render,
-                TaauDebugView::of(config.debug_view),
-            )?;
-            let (smallest, largest) = taau.render_size_range(swapchain.extent, upscale_mode);
+            let probe = crate::vendor::ProbeContext {
+                entry: &instance.entry,
+                instance: &instance.instance,
+                physical: device.physical,
+                device: &device.device,
+                capabilities: &device.capabilities,
+                path,
+                instance_extensions: &instance.enabled_extensions,
+                device_extensions: &device.enabled_extensions,
+                enabled_features: &device.enabled_features,
+            };
+            let created = crate::upscale::create(&mut crate::upscale::Setup {
+                device: &device,
+                shaders: &shaders,
+                vendor: &mut vendor,
+                probe: &probe,
+                requested: post_config.upscaler,
+                output: swapchain.extent,
+                max_render: extents.render,
+                mode: upscale_mode,
+                post: &post_config,
+                debug: TaauDebugView::of(config.debug_view),
+            })?;
+            let upscaler = created.upscaler;
+            let (smallest, largest) = upscaler.render_size_range(swapchain.extent, upscale_mode);
+            // ADR-0021 §4c: a back end with one render size for the mode (DLSS on a mode
+            // without a dynamic range) turns dynamic resolution off.
+            fixed_render = smallest == largest;
             eprintln!(
                 "[render] anti-aliasing: temporal, upscaler {} ({} mode, render scale {:.3}..{:.3}, \
                  back-end range {}x{}..{}x{}, sharpness {:.2}{})",
-                kind.name(),
+                upscaler.kind().name(),
                 upscale_mode.name(),
                 post_config.min_render_scale.min(post_config.render_scale),
                 post_config.render_scale,
@@ -1162,22 +1185,32 @@ impl Renderer {
                 smallest.height,
                 largest.width,
                 largest.height,
-                post_config.sharpness,
-                // ADR-0021 §3: a back end without its own sharpening needs the renderer's
-                // `sharpen` pass, which arrives with the vendor back ends (N1c).
-                if taau.has_sharpening() {
-                    ", fused"
+                created.sharpness,
+                // ADR-0021 §3: a back end without its own sharpening gets the renderer's
+                // `sharpen` pass (when the sharpness is above 0).
+                if created.sharpness <= 0.0 {
+                    ", off"
+                } else if created.sharpen_pass {
+                    ", sharpen pass"
                 } else {
-                    ", no sharpening until N1c"
+                    ", fused"
                 }
             );
             Some(
-                TemporalState::new(Box::new(taau), upscale_mode, post_config.sharpness)
+                TemporalState::new(upscaler, upscale_mode, created.sharpness)
                     .with_max_lod_bias(device.max_sampler_lod_bias),
             )
         } else {
             None
         };
+        if fixed_render && post_config.dynamic_resolution {
+            eprintln!(
+                "[render] dynamic resolution: off (the upscaler has one render size for {} \
+                 mode, ADR-0021 §4c)",
+                upscale_mode.name()
+            );
+            post_config = post_config.with_dynamic_resolution(false);
+        }
         let exposure_linear = temporal
             .then(|| ExposureLinearPass::new(&device, &shaders))
             .transpose()?;
@@ -1533,6 +1566,26 @@ impl Renderer {
         self.dynres
             .as_ref()
             .map_or(self.post_config.render_scale, DynamicResolution::scale)
+    }
+
+    /// This frame's render size: the swapchain size times [`Self::render_scale`], within the
+    /// allocation and, with temporal AA, within the back end's range for the mode (ADR-0021
+    /// §4c, amendment 2 item 19: DLSS rejects a size outside the range it reported).
+    fn frame_render_extent(&self) -> vk::Extent2D {
+        let render = dynres::render_extent(
+            self.swapchain.extent,
+            self.extents.render,
+            self.render_scale(),
+        );
+        self.temporal.as_ref().map_or(render, |temporal| {
+            crate::upscale::clamp_render(
+                render,
+                temporal
+                    .upscaler
+                    .render_size_range(self.swapchain.extent, temporal.mode),
+                self.extents.render,
+            )
+        })
     }
 
     /// The size the scene was rendered at in the latest frame, in pixels (the swapchain
@@ -2544,11 +2597,7 @@ impl Renderer {
         {
             dynres.observe(timings.frame, timings.total_ms);
         }
-        self.render_extent = dynres::render_extent(
-            self.swapchain.extent,
-            self.extents.render,
-            self.render_scale(),
-        );
+        self.render_extent = self.frame_render_extent();
         // ADR-0021 §1: this frame's jitter and previous view (presentation state only; the
         // client's `Camera` is read, never changed).
         let temporal_frame = self.temporal.as_mut().map(|temporal| {
@@ -3609,9 +3658,8 @@ impl Renderer {
         self.transients
             .resize(&self.device, self.plans[0].graph.slots(), extents)?;
         self.extents = extents;
-        self.render_extent =
-            dynres::render_extent(swapchain.extent, extents.render, self.render_scale());
         self.swapchain = swapchain;
+        self.render_extent = self.frame_render_extent();
         self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
         self.frame_index = 0;
