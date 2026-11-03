@@ -776,6 +776,7 @@ exception: they stay all-rights-reserved and are listed as such.
    transparents, G-buffer decals, the multi-layer material model and team rims. Drafted as
    [ADR-0023](../adr/0023-frame-architecture-materials.md) (accepted 2026-11-02), with the
    vendor claims re-checked and its corrections to this plan listed there.
+8. **ADR-0024 (N7):** GPU-driven geometry. Drafted as [ADR-0024](../adr/0024-gpu-driven-geometry.md) (proposed 2026-11-03), with its corrections to this plan listed there.
 
 ## 13. Open questions for the maintainer
 
