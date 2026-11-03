@@ -158,27 +158,107 @@ pub(crate) fn scaled_range(output: Extent, mode: UpscaleMode, floor: f32) -> (Ex
     (size(floor.min(ceiling)), size(ceiling))
 }
 
-/// What `MOBA_UPSCALER` asked for and what runs: `auto` takes the first back end compiled in
-/// and supported (DLSS, FSR 4, XeSS, then TAAU; ADR-0021 §4b and Q1), and a named back end that
-/// is not available falls back to TAAU with one log line. No vendor back end is wired into the
-/// frame yet (N1b, N1c), so today every choice resolves to TAAU.
+/// `auto`'s back end in the open build, after the vendor back ends (ADR-0021 §4b and Q1).
+/// FSR 3.1 takes the slot only once its port passes the readability gates and costs within
+/// 0.2 ms of TAAU on the RTX 5070 Ti; the Q1 measurement is in perf/0033 (amendment 4).
+pub(crate) const AUTO_OPEN_BUILD: UpscalerKind = UpscalerKind::Taau;
+
+/// What `MOBA_UPSCALER` asked for and what to try: `auto` takes the first back end compiled in
+/// and supported (DLSS, FSR 4, XeSS, then [`AUTO_OPEN_BUILD`]; ADR-0021 §4b and Q1), and a
+/// named back end that is not compiled in or not wired yet falls back to TAAU with one log
+/// line. FSR 3.1 is wired (`fsr3`, N1b); the vendor back ends arrive with N1c. Whether the
+/// chosen back end can run on this device is [`create`]'s question.
 #[must_use]
 pub(crate) fn resolve(requested: Option<UpscalerKind>) -> UpscalerKind {
+    let fsr3 = cfg!(feature = "fsr3");
     match requested {
-        None | Some(UpscalerKind::Taau) => UpscalerKind::Taau,
+        None if AUTO_OPEN_BUILD == UpscalerKind::Fsr3 && !fsr3 => UpscalerKind::Taau,
+        None => AUTO_OPEN_BUILD,
+        Some(UpscalerKind::Taau) => UpscalerKind::Taau,
+        Some(UpscalerKind::Fsr3) if fsr3 => UpscalerKind::Fsr3,
         Some(other) => {
-            let phase = match other {
-                UpscalerKind::Fsr3 => "the FSR 3.1 port (N1b)",
-                _ => "the vendor back ends (N1c)",
+            let reason = match other {
+                UpscalerKind::Fsr3 => "the `fsr3` feature is not compiled in",
+                _ => "the vendor back ends arrive with N1c",
             };
             eprintln!(
-                "[render] upscaler {} is not available in this build until {phase} lands; \
-                 using taau",
+                "[render] upscaler {} is not available in this build ({reason}); using taau",
                 other.name()
             );
             UpscalerKind::Taau
         }
     }
+}
+
+/// Creates the back end `requested` resolves to ([`resolve`]) for `output` with render sizes up
+/// to `max_render`. One that cannot run on this device (FSR 3.1 without its format features or
+/// quad subgroups, ADR-0021 amendment 1) falls back to TAAU with one log line (§4b): the device
+/// is never rejected. Only TAAU's resources are allocated when TAAU runs, and only the other
+/// back end's when it does (amendment 1: the two never hold memory at once).
+///
+/// # Errors
+/// TAAU itself cannot be created (a Vulkan or allocation error).
+pub(crate) fn create(
+    device: &crate::device::DeviceContext,
+    shaders: &crate::shaders::ShaderSource,
+    requested: Option<UpscalerKind>,
+    output: Extent,
+    max_render: Extent,
+    debug: taau::TaauDebugView,
+) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
+    let kind = resolve(requested);
+    if kind == UpscalerKind::Fsr3 {
+        match new_fsr3(device, output, max_render) {
+            Ok(fsr3) => {
+                if debug != taau::TaauDebugView::None {
+                    eprintln!(
+                        "[render] MOBA_DEBUG_VIEW {debug:?} is drawn by taau only; fsr3 shows \
+                         the frame"
+                    );
+                }
+                return Ok(fsr3);
+            }
+            Err(error) => {
+                eprintln!("[render] upscaler fsr3 cannot run here ({error}); using taau");
+            }
+        }
+    }
+    Ok(Box::new(taau::Taau::new(
+        device, shaders, output, max_render, debug,
+    )?))
+}
+
+/// FSR 3.1's context for `output` and render sizes up to `max_render` (at least 1×1, at most
+/// the output).
+#[cfg(feature = "fsr3")]
+fn new_fsr3(
+    device: &crate::device::DeviceContext,
+    output: Extent,
+    max_render: Extent,
+) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
+    let output = Extent {
+        width: output.width.max(1),
+        height: output.height.max(1),
+    };
+    let max_render = Extent {
+        width: max_render.width.clamp(1, output.width),
+        height: max_render.height.clamp(1, output.height),
+    };
+    Ok(Box::new(crate::fsr3::Fsr3::new(
+        device, max_render, output,
+    )?))
+}
+
+/// Never reached: [`resolve`] picks FSR 3.1 only with the `fsr3` feature.
+#[cfg(not(feature = "fsr3"))]
+fn new_fsr3(
+    _device: &crate::device::DeviceContext,
+    _output: Extent,
+    _max_render: Extent,
+) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
+    Err(crate::error::RenderError::NoSuitableDevice(String::from(
+        "the `fsr3` feature is not compiled in",
+    )))
 }
 
 #[cfg(test)]
@@ -257,9 +337,22 @@ mod tests {
     }
 
     #[test]
-    fn every_choice_resolves_to_taau_until_the_ports_land() {
-        assert_eq!(resolve(None), UpscalerKind::Taau);
-        for &kind in UpscalerKind::ALL {
+    fn choices_resolve_to_what_this_build_has() {
+        let fsr3 = if cfg!(feature = "fsr3") {
+            UpscalerKind::Fsr3
+        } else {
+            UpscalerKind::Taau
+        };
+        let auto = if AUTO_OPEN_BUILD == UpscalerKind::Fsr3 {
+            fsr3
+        } else {
+            UpscalerKind::Taau
+        };
+        assert_eq!(resolve(None), auto);
+        assert_eq!(resolve(Some(UpscalerKind::Taau)), UpscalerKind::Taau);
+        assert_eq!(resolve(Some(UpscalerKind::Fsr3)), fsr3);
+        // The vendor back ends are not wired until N1c.
+        for kind in [UpscalerKind::Dlss, UpscalerKind::Fsr4, UpscalerKind::Xess] {
             assert_eq!(resolve(Some(kind)), UpscalerKind::Taau);
         }
     }

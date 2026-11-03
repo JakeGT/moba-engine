@@ -8,8 +8,11 @@
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
-# Captures fail on any validation message, and so does a 40-frame run that resets the
-# temporal history every 5th frame with frames in flight. CI runs it under lavapipe with validation and
+# FSR 3.1 (ADR-0021 amendment 4) captures the same four scenes twice each, which must be
+# byte-identical, but has no committed fingerprint: the committed goldens are TAAU's.
+#
+# Captures fail on any validation message, and so does a 40-frame run per back end that
+# resets the temporal history every 5th frame with frames in flight. CI runs it under lavapipe with validation and
 # sync validation (render-golden.yml); set RUN="xvfb-run -a" when there is no display.
 set -euo pipefail
 client=${1:-./target/release/moba-client}
@@ -51,6 +54,20 @@ for entry in "${cases[@]}"; do
     echo "FAIL: tiered $name: the two runs differ"
     status=1
   fi
+  # FSR 3.1: the same scene, deterministic across two runs, no fingerprint.
+  # shellcheck disable=SC2086
+  capture "$out/fsr3-$name-1.ppm" MOBA_UPSCALER=fsr3 $settings
+  # shellcheck disable=SC2086
+  capture "$out/fsr3-$name-2.ppm" MOBA_UPSCALER=fsr3 $settings
+  if ! grep -q "upscaler fsr3 " "$out/fsr3-$name-1.ppm.log"; then
+    echo "FAIL: tiered fsr3 $name: did not run fsr3"
+    status=1
+  elif cmp -s "$out/fsr3-$name-1.ppm" "$out/fsr3-$name-2.ppm"; then
+    echo "ok: tiered fsr3 $name: two runs byte-identical ($(sha256sum < "$out/fsr3-$name-1.ppm" | cut -c1-16))"
+  else
+    echo "FAIL: tiered fsr3 $name: the two runs differ"
+    status=1
+  fi
   fingerprint="tests/golden/render-tiered-$name-fingerprint.rgb"
   if [ "${WRITE:-0}" = 1 ]; then
     "$check" "$out/$name-1.ppm" --expected "$fingerprint" --write
@@ -63,15 +80,18 @@ done
 # temporal history with the previous frame still in flight, under the same validation. This
 # is a validation smoke of the reset path: synchronization validation does not flag the
 # reset barrier with a NONE source (on lavapipe, NVIDIA or RADV), so unit tests pin it.
-reset_log="$out/mid-stream-reset.log"
-# shellcheck disable=SC2086 # RUN is a command prefix.
-if env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \
-  MOBA_SMOKE_FRAMES=40 MOBA_TEMPORAL_RESET_EVERY=5 timeout 300 ${RUN:-} "$client" \
-  > "$reset_log" 2>&1 && ! grep -E '^\[vulkan' "$reset_log"; then
-  echo "ok: tiered mid-stream history reset: no validation messages"
-else
-  tail -20 "$reset_log"
-  echo "FAIL: tiered mid-stream history reset"
-  status=1
-fi
+for upscaler in taau fsr3; do
+  reset_log="$out/mid-stream-reset-$upscaler.log"
+  # shellcheck disable=SC2086 # RUN is a command prefix.
+  if env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 MOBA_QUALITY=high \
+    MOBA_UPSCALER="$upscaler" MOBA_SMOKE_FRAMES=40 MOBA_TEMPORAL_RESET_EVERY=5 timeout 300 \
+    ${RUN:-} "$client" > "$reset_log" 2>&1 && ! grep -E '^\[vulkan' "$reset_log" &&
+    grep -q "upscaler $upscaler " "$reset_log"; then
+    echo "ok: tiered mid-stream history reset ($upscaler): no validation messages"
+  else
+    tail -20 "$reset_log"
+    echo "FAIL: tiered mid-stream history reset ($upscaler)"
+    status=1
+  fi
+done
 exit "$status"

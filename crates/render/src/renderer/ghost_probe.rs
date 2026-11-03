@@ -73,6 +73,25 @@ pub(crate) const SMEAR_BOUND: f32 = 0.0175;
 /// 5.88 % Performance). With the particles' motion output zeroed it measures 29.96 % at
 /// Quality, which fails.
 pub(crate) const PARTICLE_BOUND: f32 = 0.075;
+/// FSR 3.1's particle tripwire at Performance and below (ADR-0021 amendment 4): about 25 %
+/// above its lavapipe measurement at Performance (20.26 %). FSR 3.1 dilates motion vectors by
+/// the nearest depth in each 3×3 neighbourhood, and particles write no depth, so a projectile's
+/// core takes the ground's motion in places; its reactive input lowers the accumulation through
+/// the shading-change term only. It measures 4.19 % native, 6.63 % Quality, 12.80 % Balanced,
+/// 20.26 % Performance and 30.57 % Ultra Performance, so Quality and native keep
+/// [`PARTICLE_BOUND`]. This is why FSR 3.1 does not take `auto`'s slot (Q1).
+pub(crate) const FSR3_PARTICLE_BOUND: f32 = 0.25;
+
+/// The particle bound for the back end and mode the probe ran: TAAU's tripwire everywhere,
+/// FSR 3.1's own from Performance (ratio 2) down.
+#[must_use]
+pub(crate) fn particle_bound(kind: crate::post::UpscalerKind, ratio: f32) -> f32 {
+    if kind == crate::post::UpscalerKind::Fsr3 && ratio >= 2.0 {
+        FSR3_PARTICLE_BOUND
+    } else {
+        PARTICLE_BOUND
+    }
+}
 
 /// A particle core pixel: within its disc, and its no-history render differs from the same
 /// frame without the movers by more than this in a channel (the glow's bright centre; a soft
@@ -147,6 +166,11 @@ pub struct GhostProbeReport {
     pub render: [u32; 2],
     /// The measured frames.
     pub frames: Vec<GhostFrame>,
+    /// The back end that ran (`MOBA_UPSCALER`'s name).
+    pub upscaler: &'static str,
+    /// The particle core's bound for that back end and mode (TAAU's 7.5 % tripwire unless
+    /// FSR 3.1 ran at Performance or below, where it is 25 %: ADR-0021 amendment 4).
+    pub particle_bound: f32,
 }
 
 impl GhostProbeReport {
@@ -178,7 +202,7 @@ impl GhostProbeReport {
     }
 
     /// Every measured frame has a wake, a hero interior and a particle core, and stays within
-    /// `GHOST_BOUND`, `SMEAR_BOUND` and `PARTICLE_BOUND`.
+    /// `GHOST_BOUND`, `SMEAR_BOUND` and the report's particle bound.
     #[must_use]
     pub fn passed(&self) -> bool {
         self.frames.len() == GHOST_FRAMES
@@ -188,7 +212,7 @@ impl GhostProbeReport {
                     && frame.particle > 0
                     && frame.share() <= GHOST_BOUND
                     && frame.smear_share() <= SMEAR_BOUND
-                    && frame.particle_share() <= PARTICLE_BOUND
+                    && frame.particle_share() <= self.particle_bound
             })
     }
 }
@@ -197,8 +221,9 @@ impl fmt::Display for GhostProbeReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "ghost probe: output {}x{}, render {}x{}, wake {} frames, edge {} px, threshold \
-             {}/255, bound {:.1} %",
+            "ghost probe: upscaler {}, output {}x{}, render {}x{}, wake {} frames, edge {} px, \
+             threshold {}/255, bound {:.1} %",
+            self.upscaler,
             self.output[0],
             self.output[1],
             self.render[0],
@@ -236,7 +261,7 @@ impl fmt::Display for GhostProbeReport {
             self.worst_smear() * 100.0,
             SMEAR_BOUND * 100.0,
             self.worst_particle() * 100.0,
-            PARTICLE_BOUND * 100.0,
+            self.particle_bound * 100.0,
             if self.passed() { "passed" } else { "FAILED" }
         )
     }
@@ -570,10 +595,18 @@ impl Renderer {
             }
             frames.push(measured);
         }
+        let (upscaler, ratio) = self
+            .temporal
+            .as_ref()
+            .map_or((crate::post::UpscalerKind::Taau, 1.0), |temporal| {
+                (temporal.upscaler.kind(), temporal.mode.ratio())
+            });
         Ok(GhostProbeReport {
             output: [output.width, output.height],
             render: [render.width, render.height],
             frames,
+            upscaler: upscaler.name(),
+            particle_bound: particle_bound(upscaler, ratio),
         })
     }
 }
@@ -595,6 +628,27 @@ mod tests {
         assert!((inside_distance(&square, Vec2::new(2.0, 2.0)) - 2.0).abs() < 1e-6);
         assert!(inside_distance(&square, Vec2::new(7.0, 2.0)) < -2.0);
         assert!(inside_distance(&[], Vec2::ZERO) < 0.0);
+    }
+
+    /// TAAU keeps its tripwire in every mode; FSR 3.1 only from Performance down (amendment 4).
+    #[test]
+    fn particle_bounds_by_back_end() {
+        use crate::post::{UpscaleMode, UpscalerKind};
+        for &mode in UpscaleMode::ALL {
+            assert_eq!(
+                particle_bound(UpscalerKind::Taau, mode.ratio()),
+                PARTICLE_BOUND
+            );
+        }
+        for (mode, bound) in [
+            (UpscaleMode::Native, PARTICLE_BOUND),
+            (UpscaleMode::Quality, PARTICLE_BOUND),
+            (UpscaleMode::Balanced, PARTICLE_BOUND),
+            (UpscaleMode::Performance, FSR3_PARTICLE_BOUND),
+            (UpscaleMode::UltraPerformance, FSR3_PARTICLE_BOUND),
+        ] {
+            assert_eq!(particle_bound(UpscalerKind::Fsr3, mode.ratio()), bound);
+        }
     }
 
     #[test]

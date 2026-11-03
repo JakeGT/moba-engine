@@ -8,13 +8,13 @@
 //! the dispatch sequence with its barriers. `docs/dev/fsr3.md` maps each piece to its
 //! upstream source.
 //!
-//! [`Fsr3`] has the shape of ADR-0021 §4a's `TemporalUpscaler` (`kind`, `render_size_range`,
-//! `jitter_phases`, `has_sharpening`, `record`, `reset_history`, `vram_bytes`). Its inputs
-//! ([`Fsr3Inputs`]) follow §4a: render-resolution images in the top-left sub-rectangle,
-//! moved to `SHADER_READ_ONLY_OPTIMAL` by the caller, and an `RGBA16F` storage output in
-//! `GENERAL`. Motion vectors are render pixels to the previous position (scale (1, 1)),
-//! depth is `D32_SFLOAT` with 0 near and a finite far plane, and the exposure is a 1×1
-//! linear multiplier.
+//! [`Fsr3`] is a [`TemporalUpscaler`](crate::upscale::TemporalUpscaler) (ADR-0021 §4a,
+//! amendment 2 item 19): `MOBA_UPSCALER=fsr3` selects it. Its inputs are the trait's
+//! [`UpscaleInputs`](crate::upscale::UpscaleInputs): render-resolution images in the top-left
+//! sub-rectangle, moved to `SHADER_READ_ONLY_OPTIMAL` by the caller, and an `RGBA16F` storage
+//! output in `GENERAL`. Motion vectors are render pixels to the previous position (scale
+//! (1, 1)), depth is `D32_SFLOAT` with 0 near and a finite far plane, and the exposure is a
+//! 1×1 linear multiplier.
 //!
 //! **Render sizes (ADR-0021 §4c).** One context accepts any render size from 1×1 up to the
 //! maximum it was created with, changing from frame to frame without a reset: every pass reads
@@ -27,10 +27,9 @@ mod context;
 
 use ash::vk;
 
-pub(crate) use context::{Fsr3, MAX_FRAMES_IN_FLIGHT};
+pub(crate) use context::{Fsr3, SET_RING};
 
-/// The back end's name in `MOBA_UPSCALER` and the frame logs.
-pub(crate) const KIND: &str = "fsr3";
+use crate::upscale::UpscaleMode;
 
 /// The FSR 3.1 quality modes by ratio (output ÷ render per axis), ADR-0021 §4b.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +46,23 @@ pub(crate) enum Fsr3Mode {
     UltraPerformance,
 }
 
+impl From<UpscaleMode> for Fsr3Mode {
+    /// The menu's modes by ratio (ADR-0021 §4b): `Native` is FSR's native AA, the rest by name
+    /// (amendment 2, item 19).
+    fn from(mode: UpscaleMode) -> Self {
+        match mode {
+            UpscaleMode::Native => Self::NativeAa,
+            UpscaleMode::Quality => Self::Quality,
+            UpscaleMode::Balanced => Self::Balanced,
+            UpscaleMode::Performance => Self::Performance,
+            UpscaleMode::UltraPerformance => Self::UltraPerformance,
+        }
+    }
+}
+
 impl Fsr3Mode {
     /// Every mode, largest render size first.
+    #[cfg(test)]
     pub(crate) const ALL: &'static [Self] = &[
         Self::NativeAa,
         Self::Quality,
@@ -96,57 +110,6 @@ pub(crate) fn jitter_phases(render: vk::Extent2D, output: vk::Extent2D) -> u32 {
     (8.0 * ratio * ratio).ceil().max(1.0) as u32
 }
 
-/// One image the upscaler reads or writes (ADR-0021 §4a).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Fsr3Image {
-    pub(crate) image: vk::Image,
-    pub(crate) view: vk::ImageView,
-    pub(crate) format: vk::Format,
-    /// The image's allocation; the valid region of an input is [`Fsr3Inputs::render_size`].
-    pub(crate) extent: vk::Extent2D,
-}
-
-/// One frame's inputs (ADR-0021 §4a), all at render resolution in the top-left sub-rectangle
-/// and in `SHADER_READ_ONLY_OPTIMAL`, their writes made visible to compute reads by the caller.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Fsr3Inputs {
-    /// The jittered linear HDR colour.
-    pub(crate) color: Fsr3Image,
-    /// Depth, `D32_SFLOAT`, 0 near and 1 far (not inverted), a depth-aspect view.
-    pub(crate) depth: Fsr3Image,
-    /// Motion vectors, `R16G16_SFLOAT`: render pixels from the sample to its previous
-    /// position, x right and y down, without jitter.
-    pub(crate) motion: Fsr3Image,
-    /// FSR's reactive mask (`R8_UNORM`).
-    pub(crate) reactive: Fsr3Image,
-    /// FSR's transparency-and-composition mask (`R8_UNORM`).
-    pub(crate) transparency: Fsr3Image,
-    /// 1×1 `R32_SFLOAT` linear exposure multiplier.
-    pub(crate) exposure: Fsr3Image,
-    /// The jitter in render pixels, x right and y down: the sample at pixel `i` shows the scene
-    /// at `i + 0.5 − jitter`.
-    pub(crate) jitter: [f32; 2],
-    /// This frame's render size, at most the context's maximum.
-    pub(crate) render_size: vk::Extent2D,
-    /// Frame time in milliseconds.
-    pub(crate) dt_ms: f32,
-    /// The camera's near and far planes and vertical field of view (radians).
-    pub(crate) near: f32,
-    pub(crate) far: f32,
-    pub(crate) fov_y: f32,
-    /// Start from this frame's sample: no history.
-    pub(crate) reset: bool,
-    /// The sharpening amount, `0..=1`; 0 skips RCAS.
-    pub(crate) sharpness: f32,
-}
-
-/// The output: an `RGBA16F` storage image at output resolution, in `GENERAL`. The whole image
-/// is written.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Fsr3Output {
-    pub(crate) image: Fsr3Image,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +144,14 @@ mod tests {
             Fsr3Mode::UltraPerformance.render_size(extent(2, 1)),
             extent(1, 1)
         );
+    }
+
+    #[test]
+    fn the_menu_modes_map_by_ratio() {
+        for &mode in UpscaleMode::ALL {
+            assert_eq!(Fsr3Mode::from(mode).ratio(), mode.ratio(), "{mode:?}");
+        }
+        assert_eq!(Fsr3Mode::from(UpscaleMode::Native), Fsr3Mode::NativeAa);
     }
 
     #[test]

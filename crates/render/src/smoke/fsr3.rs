@@ -3,7 +3,8 @@
 //! The scene is an analytic colour field over the output plane, so every frame's
 //! render-resolution input and the ideal output are known exactly. Each render pixel `i`
 //! samples the field at `i + 0.5 − jitter` (Halton (2, 3), ADR-0021 §1), scaled to output
-//! pixels; depth is a constant plane, the masks are zero and the exposure is 1. Outside the
+//! pixels; depth is a constant plane (two depths in the occluder runs), the masks are zero and
+//! the exposure is 1. Outside the
 //! frame's render rectangle every input holds a sentinel (colour 1000, motion ±40 px, depth 0,
 //! masks 1), so a pass that read outside the rectangle would show: besides the interior
 //! bounds, every checkpoint bounds the largest error over the whole output, edges included.
@@ -23,7 +24,18 @@
 //! 6. **fine**: a field with detail near the render resolution's limit, still and then moving
 //!    one render pixel a frame: one frame cannot resolve it, so the converged error must be
 //!    at most 0.9× the first frame's (0.95× moving, which holds only when the reprojection is
-//!    right).
+//!    right);
+//! 7. **occluder** (ADR-0021 amendment 4): a box at a nearer depth crosses the still fine
+//!    field 3 output pixels a frame, with motion vectors on the box only: a depth edge, and a
+//!    disoccluded trail behind it. The trail the box left over 40 frames before the last must
+//!    converge to at most 0.9× the fine field's single-frame error, which needs each frame's
+//!    reconstructed previous depth cleared to the far plane (without the clear the whole trail
+//!    stays disoccluded: 0.97×);
+//! 8. **occluder across a size step**: the same over a coarse checkerboard of the fine field,
+//!    stepping from Performance to Quality halfway without a reset. The background below the
+//!    box's rows must keep its error within 5 % of the frame before for the two frames after
+//!    the step, which needs the previous frame's render size in the constants (a stale one
+//!    reads the previous luma and accumulation at the wrong scale: 11 % lower).
 //!
 //! The concurrency a renderer has is reproduced: two frames are in flight (each frame is
 //! submitted without waiting, and its slot's staging and readback buffers are reused two
@@ -46,9 +58,10 @@ use super::bindless::host_read_barrier;
 use super::{Headless, SmokeReport};
 use crate::bindless::{PendingSubmit, submit};
 use crate::error::{RenderError, RenderResult};
-use crate::fsr3::{Fsr3, Fsr3Image, Fsr3Inputs, Fsr3Mode, Fsr3Output, jitter_phases};
+use crate::fsr3::{Fsr3, Fsr3Mode, jitter_phases};
 use crate::passes::vfx::f16_bits;
 use crate::resources::{GpuBuffer, GpuImage};
+use crate::upscale::{TemporalUpscaler, UpscaleImage, UpscaleInputs, UpscaleMode, UpscaleOutput};
 
 /// The output size.
 const OUTPUT: vk::Extent2D = vk::Extent2D {
@@ -105,6 +118,27 @@ const FINE_FIRST: &str = "fine: first frame after the reset";
 const FINE: &str = "fine: converged";
 const FINE_MOVING_FIRST: &str = "fine moving: first frame after the reset";
 const FINE_MOVING: &str = "fine moving: converged";
+const OCCLUDER_RUN: &str = "occluder";
+const OCCLUDER_STEP: &str = "occluder across a size step";
+/// Frames of each occluder run (half of them after the size step).
+const OCCLUDER_FRAMES: u32 = 60;
+/// The trail checkpoints: label, and the newest and oldest frames since the box left.
+const OCCLUDER_TRAILS: [(&str, u32, u32); 3] = [
+    ("2-8 frames old", 2, 8),
+    ("8-24 frames old", 8, 24),
+    (OLD_TRAIL, 40, 60),
+];
+const OLD_TRAIL: &str = "over 40 frames old";
+/// The occluder's oldest trail must converge to at most this fraction of the fine field's
+/// single-frame error (clean runs: 0.785 on lavapipe). Each frame's reconstructed previous
+/// depth must start at the far plane: without that clear, every place the box ever covered
+/// stays disoccluded and the trail stays at the single-frame error (0.97).
+const TRAIL_CONVERGENCE: f32 = 0.9;
+/// Across the size step, the converged background's error stays within this fraction of the
+/// frame before (clean runs: 1.0 % and 1.7 % lower on the two frames after the step, on
+/// lavapipe). With the previous render size stale (the current one), FSR reads the previous
+/// frame's luma and accumulation at the wrong scale and the error jumps by 11 % (lavapipe).
+const STEP_CONTINUITY: f32 = 0.05;
 
 /// The analytic field at output position `(u, v)` (output pixels), linear HDR.
 fn field(u: f32, v: f32) -> [f32; 3] {
@@ -128,6 +162,22 @@ fn fine(u: f32, v: f32) -> [f32; 3] {
     ]
 }
 
+/// The occluder's colour: far from every value of the fine field behind it.
+const OCCLUDER: [f32; 3] = [0.1, 0.2, 0.9];
+/// The occluder's rectangle at the start of its run, output pixels: left edge, width, top
+/// and bottom.
+const OCCLUDER_LEFT: f32 = 8.0;
+const OCCLUDER_WIDTH: f32 = 30.0;
+const OCCLUDER_TOP: f32 = 30.0;
+const OCCLUDER_BOTTOM: f32 = 78.0;
+/// Its speed, output pixels a frame (2 render pixels at Quality).
+const OCCLUDER_SPEED: f32 = 3.0;
+/// Depths of the occluder and of the background behind it (0 near).
+const OCCLUDER_DEPTH: f32 = 0.3;
+/// The checkerboard's cell, output pixels.
+const CHECKER: f32 = 24.0;
+const BACKGROUND_DEPTH: f32 = 0.6;
+
 /// What the frame shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Content {
@@ -136,6 +186,12 @@ enum Content {
     Field(f32),
     /// The fine field, shifted right by this many output pixels.
     Fine(f32),
+    /// The still fine field at [`BACKGROUND_DEPTH`] behind an [`OCCLUDER`] box at
+    /// [`OCCLUDER_DEPTH`] whose left edge is this many output pixels from the left. Only the
+    /// box moves: a depth edge, and a disoccluded trail behind it. With `true`, the field is
+    /// modulated by a coarse checkerboard (strong luma structure at the scale of FSR's
+    /// shading-change pyramid).
+    Occluded(f32, bool),
 }
 
 impl Content {
@@ -144,6 +200,31 @@ impl Content {
             Self::Flat => FLAT,
             Self::Field(shift) => field(u - shift, v),
             Self::Fine(shift) => fine(u - shift, v),
+            Self::Occluded(..) if self.in_front(u, v) => OCCLUDER,
+            Self::Occluded(_, false) => fine(u, v),
+            Self::Occluded(_, true) => {
+                let dark = ((u / CHECKER).floor() + (v / CHECKER).floor()) as i32 % 2 == 0;
+                fine(u, v).map(|c| c * if dark { 0.3 } else { 1.3 })
+            }
+        }
+    }
+
+    /// Whether `(u, v)` shows the occluder (the content that moves; all of it otherwise).
+    fn in_front(self, u: f32, v: f32) -> bool {
+        match self {
+            Self::Occluded(left, _) => {
+                (left..left + OCCLUDER_WIDTH).contains(&u)
+                    && (OCCLUDER_TOP..OCCLUDER_BOTTOM).contains(&v)
+            }
+            _ => true,
+        }
+    }
+
+    fn depth(self, u: f32, v: f32) -> f32 {
+        match self {
+            Self::Occluded(..) if self.in_front(u, v) => OCCLUDER_DEPTH,
+            Self::Occluded(..) => BACKGROUND_DEPTH,
+            _ => DEPTH,
         }
     }
 
@@ -153,6 +234,7 @@ impl Content {
             Self::Flat => Self::Flat,
             Self::Field(_) => Self::Field(shift),
             Self::Fine(_) => Self::Fine(shift),
+            Self::Occluded(_, checker) => Self::Occluded(OCCLUDER_LEFT + shift, checker),
         }
     }
 }
@@ -201,7 +283,13 @@ fn upload(
             let (rgb, depth, mv, mask) = if inside {
                 let u = (x as f32 + 0.5 - jitter[0]) * scale[0];
                 let v = (y as f32 + 0.5 - jitter[1]) * scale[1];
-                (content.at(u, v), DEPTH, motion, 0u8)
+                // What does not move (the occluder's background) has no motion.
+                let mv = if content.in_front(u, v) {
+                    motion
+                } else {
+                    [0.0; 2]
+                };
+                (content.at(u, v), content.depth(u, v), mv, 0u8)
             } else {
                 ([1000.0; 3], 0.0, [40.0, -40.0], 255u8)
             };
@@ -248,8 +336,9 @@ struct Measured {
     hash: u64,
 }
 
-/// Measures `rgba` (the output's halves) against `content`.
-fn measure(rgba: &[u8], content: Content) -> Measured {
+/// Measures `rgba` (the output's halves) against `content`, the interior metrics over `region`
+/// (or every texel at least [`MARGIN`] from an edge).
+fn measure(rgba: &[u8], content: Content, region: Option<[u32; 4]>) -> Measured {
     let texel = |x: u32, y: u32| -> [f32; 3] {
         let at = ((y * OUTPUT.width + x) * 8) as usize;
         core::array::from_fn(|c| {
@@ -264,10 +353,16 @@ fn measure(rgba: &[u8], content: Content) -> Measured {
             let value = texel(x, y);
             finite &= value.iter().all(|v| v.is_finite());
             let ideal = content.at(x as f32 + 0.5, y as f32 + 0.5);
-            let interior = x >= MARGIN
-                && y >= MARGIN
-                && x < OUTPUT.width - MARGIN
-                && y < OUTPUT.height - MARGIN;
+            let [x0, y0, x1, y1] = region.unwrap_or([
+                MARGIN,
+                MARGIN,
+                OUTPUT.width - MARGIN,
+                OUTPUT.height - MARGIN,
+            ]);
+            let interior = x >= x0.max(1)
+                && y >= y0.max(1)
+                && x < x1.min(OUTPUT.width - 1)
+                && y < y1.min(OUTPUT.height - 1);
             for c in 0..3 {
                 // NaN fails `finite`; keep it out of the maxima so they stay readable.
                 let e = (value[c] - ideal[c]).abs();
@@ -332,6 +427,9 @@ struct Frame {
 struct Checkpoint {
     name: String,
     content: Content,
+    /// The output rectangle the interior metrics cover (`[x0, y0, x1, y1)`), or every texel at
+    /// least [`MARGIN`] from an edge.
+    region: Option<[u32; 4]>,
     /// (mean, max) over the interior.
     bound: (f32, f32),
     /// The largest error anywhere.
@@ -500,6 +598,7 @@ fn script() -> Vec<(Frame, Vec<Checkpoint>)> {
                 checks.push(Checkpoint {
                     name: format!("{}: first frame", phase.name),
                     content,
+                    region: None,
                     bound,
                     full: phase.full,
                 });
@@ -508,11 +607,109 @@ fn script() -> Vec<(Frame, Vec<Checkpoint>)> {
                 checks.push(Checkpoint {
                     name: String::from(phase.name),
                     content,
+                    region: None,
                     bound: phase.bound,
                     full: phase.full,
                 });
             }
             frames.push((frame, checks));
+        }
+    }
+    frames.extend(occluder_frames());
+    frames
+}
+
+/// The checkpoint of the background below the occluder `offset` frames after the size step.
+fn step_name(offset: i64) -> String {
+    format!("{OCCLUDER_STEP}: below the box, frame {offset} after the step")
+}
+
+/// The trail the occluder left between `newest` and `oldest` frames before frame `frame` of
+/// its run (`[x0, y0, x1, y1)`, clear of the box's edges by 3 output pixels), if any.
+fn trail(frame: u32, newest: u32, oldest: u32) -> Option<[u32; 4]> {
+    let at = |age: u32| OCCLUDER_LEFT + OCCLUDER_SPEED * frame.saturating_sub(age) as f32;
+    let x0 = at(oldest).max(OCCLUDER_LEFT + 3.0).ceil() as u32;
+    let x1 = at(newest).floor() as u32;
+    (frame >= newest + 2 && x1 > x0).then_some([
+        x0,
+        (OCCLUDER_TOP + 3.0) as u32,
+        x1,
+        (OCCLUDER_BOTTOM - 3.0) as u32,
+    ])
+}
+
+/// The occluder runs (see the module documentation): the box crosses the still fine field
+/// from a reset, once at Quality and once stepping from Performance to Quality halfway.
+fn occluder_frames() -> Vec<(Frame, Vec<Checkpoint>)> {
+    let quality = Fsr3Mode::Quality.render_size(OUTPUT);
+    let performance = Fsr3Mode::Performance.render_size(OUTPUT);
+    let mut frames = Vec::new();
+    for (name, checker, legs) in [
+        (
+            OCCLUDER_RUN,
+            false,
+            [
+                (quality, OCCLUDER_FRAMES / 2),
+                (quality, OCCLUDER_FRAMES / 2),
+            ],
+        ),
+        (
+            OCCLUDER_STEP,
+            true,
+            [
+                (performance, OCCLUDER_FRAMES / 2),
+                (quality, OCCLUDER_FRAMES / 2),
+            ],
+        ),
+    ] {
+        let mut index = 0;
+        for (render, count) in legs {
+            for _ in 0..count {
+                let content =
+                    Content::Occluded(OCCLUDER_LEFT + OCCLUDER_SPEED * index as f32, checker);
+                // Render pixels from the box's sample to where it was: it moves right.
+                let motion = -OCCLUDER_SPEED * render.width as f32 / OUTPUT.width as f32;
+                let frame = Frame {
+                    render,
+                    content,
+                    motion: [motion, 0.0],
+                    reset: index == 0,
+                    reset_history: false,
+                    sharpness: 0.0,
+                };
+                let mut checks = Vec::new();
+                // The background below the box's rows, which it never crosses: around the
+                // size step (or the same frames without one).
+                let below = [
+                    MARGIN,
+                    OCCLUDER_BOTTOM as u32 + 3,
+                    OUTPUT.width - MARGIN,
+                    OUTPUT.height - MARGIN,
+                ];
+                let half = OCCLUDER_FRAMES / 2;
+                if checker && (half - 1..half + 2).contains(&index) {
+                    checks.push(Checkpoint {
+                        name: step_name(i64::from(index) - i64::from(half)),
+                        content,
+                        region: Some(below),
+                        bound: UNBOUNDED,
+                        full: TINY_FULL_BOUND,
+                    });
+                }
+                if index + 1 == OCCLUDER_FRAMES {
+                    for (label, newest, oldest) in OCCLUDER_TRAILS {
+                        checks.push(Checkpoint {
+                            name: format!("{name}: trail {label}"),
+                            content,
+                            region: trail(index, newest, oldest),
+                            bound: UNBOUNDED,
+                            full: TINY_FULL_BOUND,
+                        });
+                    }
+                }
+                frames.push((frame, checks));
+                index += 1;
+            }
         }
     }
     frames
@@ -615,8 +812,8 @@ impl Targets {
         })
     }
 
-    fn image(image: &GpuImage, format: vk::Format, extent: vk::Extent2D) -> Fsr3Image {
-        Fsr3Image {
+    fn image(image: &GpuImage, format: vk::Format, extent: vk::Extent2D) -> UpscaleImage {
+        UpscaleImage {
             image: image.image(),
             view: image.view(),
             format,
@@ -655,7 +852,7 @@ fn finish(frame: InFlight<'_>, targets: &Targets, run: &mut Run) -> RenderResult
     }
     run.hashes.push(fnv(0xcbf2_9ce4_8422_2325, &bytes));
     for checkpoint in frame.checks {
-        let measured = measure(&bytes, checkpoint.content);
+        let measured = measure(&bytes, checkpoint.content, checkpoint.region);
         run.results.push((checkpoint, measured));
     }
     Ok(())
@@ -677,14 +874,14 @@ fn run_once(gpu: &Headless, poison: bool) -> RenderResult<Run> {
     };
     run.facts.push(format!(
         "back end {} (sharpens itself: {}), context max render {}x{}, output {}x{}",
-        fsr.kind(),
+        fsr.kind().name(),
         fsr.has_sharpening(),
         max.width,
         max.height,
         OUTPUT.width,
         OUTPUT.height
     ));
-    for &mode in Fsr3Mode::ALL {
+    for &mode in UpscaleMode::ALL {
         let (low, high) = fsr.render_size_range(OUTPUT, mode);
         run.facts.push(format!(
             "{mode:?}: render sizes {}x{} to {}x{}, {} jitter phases at the top",
@@ -741,7 +938,7 @@ fn run_once(gpu: &Headless, poison: bool) -> RenderResult<Run> {
         let output_first = !core::mem::replace(&mut output_used[target], true);
         // The reactive mask is `masks` (1 outside the rectangle); the transparency and
         // composition mask is all zero.
-        let inputs = Fsr3Inputs {
+        let inputs = UpscaleInputs {
             color: Targets::image(&targets.color, vk::Format::R16G16B16A16_SFLOAT, max),
             depth: Targets::image(&targets.depth, vk::Format::D32_SFLOAT, max),
             motion: Targets::image(&targets.motion, vk::Format::R16G16_SFLOAT, max),
@@ -756,8 +953,9 @@ fn run_once(gpu: &Headless, poison: bool) -> RenderResult<Run> {
             fov_y: core::f32::consts::FRAC_PI_3,
             reset: frame.reset,
             sharpness: frame.sharpness,
+            frame_slot: slot,
         };
-        let output = Fsr3Output {
+        let output = UpscaleOutput {
             image: Targets::image(
                 &targets.outputs[target],
                 vk::Format::R16G16B16A16_SFLOAT,
@@ -984,10 +1182,10 @@ fn vram_at_real_sizes(gpu: &Headless) -> RenderResult<Vec<String>> {
         let render = mode.render_size(output);
         match fsr.as_mut() {
             None => fsr = Some(Fsr3::new(&gpu.device, render, output)?),
-            // SAFETY: this context never recorded anything.
-            Some(fsr) => unsafe { fsr.resize(&gpu.device, render, output)? },
+            // Nothing was recorded, so no GPU work is pending (the device-idle precondition).
+            Some(fsr) => fsr.resize(&gpu.device, output, render)?,
         }
-        let bytes = fsr.as_ref().map_or(0, Fsr3::vram_bytes);
+        let bytes = fsr.as_ref().map_or(0, TemporalUpscaler::vram_bytes);
         notes.push(format!(
             "vram at {name} (render {}x{}): {:.1} MiB",
             render.width,
@@ -1028,6 +1226,35 @@ pub(super) fn run(gpu: &Headless, report: &mut SmokeReport) -> RenderResult<()> 
         report.check(
             || format!("{name}: {converged} at most {convergence} x the first frame's {single}"),
             converged <= convergence * single,
+            true,
+        );
+    }
+    // The occluder (ADR-0021 amendment 4): its trail converges once the box has left it.
+    let single = result(FINE_FIRST).map_or(f32::NAN, |measured| measured.mean);
+    let trail_name = format!("{OCCLUDER_RUN}: trail {OLD_TRAIL}");
+    let old_trail = result(&trail_name).map_or(f32::NAN, |measured| measured.mean);
+    report.notes.push(format!(
+        "occluder: {trail_name} {old_trail:.5} vs {single:.5} for one frame ({:.3}x)",
+        old_trail / single
+    ));
+    report.check(
+        || format!("{trail_name}: {old_trail} at most {TRAIL_CONVERGENCE} x {single}"),
+        old_trail <= TRAIL_CONVERGENCE * single,
+        true,
+    );
+    // ... and the background's error carries across a size step.
+    let before = result(&step_name(-1)).map_or(f32::NAN, |measured| measured.mean);
+    for offset in [0, 1] {
+        let name = step_name(offset);
+        let after = result(&name).map_or(f32::NAN, |measured| measured.mean);
+        let change = after / before - 1.0;
+        report.notes.push(format!(
+            "size step: {name} {after:.5} vs {before:.5} the frame before ({:+.2} %)",
+            change * 100.0
+        ));
+        report.check(
+            || format!("{name}: {after} within {STEP_CONTINUITY} of {before}"),
+            change.abs() <= STEP_CONTINUITY,
             true,
         );
     }
@@ -1166,11 +1393,20 @@ mod tests {
             .flat_map(|(_, checks)| checks.iter().map(|check| check.name.as_str()))
             .collect();
         // 4 still/moving/sharpened phases, 5 size steps with their first frames, 3 tiny sizes,
-        // the recovery, and 2 fine phases with their first frames.
-        assert_eq!(checks.len(), 4 + 5 * 2 + 3 + 1 + 4, "{checks:?}");
-        // Only the static and the two fine phases (by flag) and the sharpened one (through
-        // `reset_history`) reset; the size sweep never does.
-        assert_eq!(frames.iter().filter(|(frame, _)| frame.reset).count(), 3);
+        // the recovery, 2 fine phases with their first frames, and the two occluder runs'
+        // trails (3 each) and the 3 frames around the second's size step.
+        assert_eq!(
+            checks.len(),
+            4 + 5 * 2 + 3 + 1 + 4 + 2 * 3 + 3,
+            "{checks:?}"
+        );
+        for name in [step_name(-1), step_name(0), step_name(1)] {
+            assert!(checks.contains(&name.as_str()), "{name}");
+        }
+        assert!(checks.contains(&format!("{OCCLUDER_RUN}: trail {OLD_TRAIL}").as_str()));
+        // Only the static, the two fine and the two occluder phases (by flag) and the
+        // sharpened one (through `reset_history`) reset; the size sweeps never do.
+        assert_eq!(frames.iter().filter(|(frame, _)| frame.reset).count(), 5);
         assert_eq!(
             frames
                 .iter()
@@ -1182,6 +1418,38 @@ mod tests {
 
     /// The moving fine field moves one render pixel a frame (1.5 output pixels at Quality),
     /// against its motion vectors.
+    /// The occluder's trail regions lie where the box was and is no longer, clear of it.
+    #[test]
+    fn the_trail_is_behind_the_box() {
+        let last = OCCLUDER_FRAMES - 1;
+        let [x0, y0, x1, y1] = trail(last, 40, 60).expect("an old trail");
+        let box_left = OCCLUDER_LEFT + OCCLUDER_SPEED * last as f32;
+        assert!(
+            x0 as f32 >= OCCLUDER_LEFT && (x1 as f32) < box_left,
+            "{x0}..{x1}"
+        );
+        assert!(y0 as f32 > OCCLUDER_TOP && (y1 as f32) < OCCLUDER_BOTTOM);
+        let content = Content::Occluded(box_left, false);
+        for x in x0..x1 {
+            assert!(!content.in_front(x as f32 + 0.5, (y0 + y1) as f32 * 0.5));
+            assert_eq!(
+                content.depth(x as f32 + 0.5, y0 as f32 + 0.5),
+                BACKGROUND_DEPTH
+            );
+        }
+        assert!(content.in_front(box_left + 1.0, 50.0));
+        assert_eq!(content.depth(box_left + 1.0, 50.0), OCCLUDER_DEPTH);
+        // Every pixel of the trail was covered by the box at least 40 frames ago.
+        let covered = |x: f32| {
+            (0..last - 40).any(|frame| {
+                let left = OCCLUDER_LEFT + OCCLUDER_SPEED * frame as f32;
+                (left..left + OCCLUDER_WIDTH).contains(&x)
+            })
+        };
+        assert!((x0..x1).all(|x| covered(x as f32 + 0.5)));
+        assert_eq!(trail(5, 40, 60), None);
+    }
+
     #[test]
     fn the_fine_field_moves_with_its_motion() {
         let frames = script();

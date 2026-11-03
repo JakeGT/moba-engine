@@ -3,7 +3,8 @@
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-02)). N1a is built
-([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)). Proposed 2026-10-31. This is phase N1 of the
+([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), and FSR 3.1
+runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)). Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
 - **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
@@ -1312,6 +1313,101 @@ Recorded in the N1d PR (`feat/n1d-latency`), with the evidence in
     (selected, 299 of 300 frames paced by `vkAntiLagUpdateAMD`), but validation then reports
     `VUID-vkCmdWriteTimestamp-None-00830` on the layer's own timestamp queries (not the
     renderer's), so that run is a smoke of the code path, not the gate.
+
+### Amendment 4 (2026-11-03, N1b stage 2): FSR 3.1 in the frame
+
+Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
+`TemporalUpscaler` (`MOBA_UPSCALER=fsr3`); the evidence is in
+[perf/0033](../perf/0033-fsr3-in-frame.md), the port in [docs/dev/fsr3.md](../dev/fsr3.md).
+
+1. **The adaptation is amendment 2 item 19's.** `Fsr3` implements the trait: `kind()` is
+   `UpscalerKind::Fsr3`, the client's `UpscaleMode` maps onto `Fsr3Mode` by ratio (`Native` ↔
+   `NativeAa`), and the trait's `UpscaleInputs`/`UpscaleOutput` replace stage 1's local
+   mirrors. `upscale::create` builds the back end `MOBA_UPSCALER` resolves to; one that cannot
+   run on the device (FSR 3.1 without its format features or quad subgroups, amendment 1) falls
+   back to TAAU with one log line (§4b). `MOBA_DEBUG_VIEW`'s temporal views are TAAU's own
+   and are not drawn under FSR 3.1 (one log line).
+2. **Descriptor sets and constants are per frame slot** (amendment 2, item 17), replacing
+   amendment 1's per-parity contract (the record two calls back finished): each pass holds a
+   set per frame-in-flight slot and history parity (`SET_RING` × 2) and the constants a block
+   per slot, chosen by `UpscaleInputs::frame_slot`, so dropped records can never make a
+   rewrite land on a set a pending frame reads. The renderer asserts `fsr3::SET_RING >=
+   FRAMES_IN_FLIGHT`.
+3. **`reset_history` makes the next record a first frame.** Stage 1's reset only restarted
+   the accumulation; the trait needs a reset to leave nothing assumed after a record that was
+   never submitted (`forget_unsubmitted`). The next record therefore transitions and
+   re-initialises every internal image, and that barrier waits for every earlier compute and
+   clear on the queue with their writes (`COMPUTE_SHADER | CLEAR`, `SHADER_STORAGE_WRITE |
+   TRANSFER_WRITE`), never `NONE` (item 28's rule; `first_frame_barrier_waits_for_earlier_work`
+   pins it, since synchronization validation does not flag a `NONE` source). A mid-stream reset
+   every fifth frame runs under synchronization validation in `tiered-goldens.sh`, as TAAU's
+   does. The smoke's output is unchanged by it (the same digest as stage 1 before the new
+   runs).
+4. **The controller is not clamped to FSR 3.1's reported range.** Item 19 lets a back end with
+   an SDK rule report its own range for the controller to clamp to. FSR 3.1 reports the SDK's
+   truncated sizes (1706 at 2560 Quality), but its context accepts every size from 1×1 to its
+   maximum (amendment 1), and that maximum is the controller's own ceiling (the High preset's
+   1260×709 at 1080p, or 1707 at 2560 Quality). So FSR runs exactly the frames TAAU would, and
+   the range is only logged.
+5. **Only one back end holds memory.** The back end is chosen at renderer creation and only it
+   is created, so TAAU's history and previous-depth pairs are never allocated while FSR 3.1
+   runs (amendment 1's request): `upscaler_vram_mb` is FSR's own, 75.4 MB at a 1080p output
+   against TAAU's 38.7 MB, and the frame's VRAM peak is 34.2 MB higher than under TAAU on
+   Tiered High and Low.
+6. **Ghost energy (gate 3): FSR 3.1 has its own particle tripwire from Performance down.**
+   FSR 3.1 passes the wake and the hero's interior at every mode the probe runs, below TAAU's
+   own measurements (wake 0.41 % Quality, 0.84 % Performance, 0.40 % native; hero 0.00 %,
+   0.49 %, 0.00 %), but the particle's core smears more as the ratio grows: 4.19 % native,
+   6.63 % Quality, 12.80 % Balanced, 20.26 % Performance and 30.57 % Ultra Performance, against
+   TAAU's 1.40–5.88 % and its 7.5 % tripwire. FSR 3.1 dilates motion vectors by the nearest
+   depth in each 3×3 neighbourhood, and particles write no depth, so a projectile's core takes
+   the ground's motion in places; and FSR 3.1's reactive input lowers the accumulation only
+   through its shading-change term (binding the reactive mask as the transparency-and-
+   composition mask as well, as a local experiment, left every measured share unchanged). The tripwires are TAAU's regression bounds
+   (amendment 2), not perceptual thresholds, so FSR 3.1 keeps them at Quality and native and
+   gets its own at Performance and below, `FSR3_PARTICLE_BOUND` = 25 % (about 25 % above its
+   Performance measurement, as TAAU's were set). **This is a readability shortfall of FSR 3.1,
+   not a tuning choice,** and it decides Q1 (item 8). Tuning FSR's knobs (reactiveness scale,
+   velocity factor) away from the SDK's defaults, or giving particles depth, are the
+   follow-ups if FSR 3.1 is to take `auto`'s slot.
+   Balanced (12.80 %) is over TAAU's 7.5 % but under the ratio-2 cut-off, so the probe would
+   fail it there; the probe does not run Balanced or Ultra Performance for either back end
+   (TAAU fails Ultra Performance too: wake 4.54 %, hero 4.30 %).
+7. **Overlay invariance and goldens (gates 3 and 4).** The overlay IDs are byte-identical under
+   FSR 3.1 at Quality, native and Performance and under every earlier case. Every Compat golden
+   is byte-identical to `origin/main`, and the four TAAU tiered goldens still match their
+   fingerprints. FSR 3.1's captures of the same four scenes are byte-identical across two
+   lavapipe runs with validation and synchronization validation clean, but are **not
+   committed as fingerprints**: the coordinator's reading of Q8 keeps the committed goldens to
+   TAAU, while Q8's own text says the goldens cover TAAU and FSR 3.1. Their hashes are in
+   perf/0033; committing them is one `WRITE=1` run if Q8's text is meant.
+8. **Q1: `auto` stays TAAU.** Q1 gives FSR 3.1 the open build's `auto` slot when its port
+   passes the same readability tests and costs within 0.2 ms of TAAU on the RTX 5070 Ti. Its
+   cost is within it: 0.281 ms against TAAU's 0.145 ms in the `temporal` lane (+0.136 ms) and
+   +0.108 ms of GPU total on Tiered High and Low (1080p output, Quality at the 0.656 ceiling,
+   medians of three interleaved rounds), but it does not pass the same particle bound (item 6), so
+   `AUTO_OPEN_BUILD` stays `Taau`; FSR 3.1 is selectable by name.
+9. **FP32 against FP16 is not measured.** Amendment 1 asked stage 2 to time the 32-bit
+   permutation against a 16-bit one. The SDK's 16-bit permutation (`FFX_HALF=1`) does not
+   compile unmodified with the pinned `slangc` (2026.20): at `FFX_HLSL_SM=62` `asfloat16` is
+   ambiguous in `ffx_core_hlsl.h`, and at `FFX_HLSL_SM=60` the half-precision helpers are
+   defined twice and 36 identifiers are undefined. Building it would mean patching the
+   vendored headers or adding DXC, both outside this stage. So the Low tier's FSR cost
+   (Turing and RDNA 2 parts, where the SDK would take the 16-bit path) is **unverified**, and
+   the FP16 permutation stays the first follow-up should FSR 3.1 need the margin.
+10. **The stage-1 coverage gaps are closed.** `fsr3-smoke` gains two occluder runs (a box at a
+    nearer depth crosses the still fine field, motion on the box only). Skipping the
+    every-frame clear of the reconstructed previous depth now fails it (the trail the box left
+    over 40 frames ago stays at 0.97× the single-frame error, against ≤ 0.9× and 0.785× clean),
+    and so does a stale previous-frame render size (across a Performance-to-Quality step over a
+    coarse checkerboard, the background's error drops 11–12 %, against ≤ 5 % and 1.0–1.7 %
+    clean), on lavapipe, the RTX 5070 Ti and the Radeon 610M alike, with validation silent.
+11. **The jitter sign** (amendment 1's request): §1's sign test now also checks that the jitter
+    handed to the back ends, unchanged, is in FSR's convention (the sample at pixel centre `c`
+    shows the scene at `c − jitter`).
+12. **The tiered perf-gate baselines are not re-recorded here.** `auto` is still TAAU, so the
+    default tiered frame is the one amendment 2 recorded (perf/0033 measures it against
+    `origin/main`), and the flip of item 16 stays with whichever N1 part merges last.
 
 ## Sources
 
