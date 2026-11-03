@@ -176,15 +176,19 @@ impl ExposureLinearPass {
             exposure,
             auto_exposure: u32::from(adapted.is_some()),
         };
-        // SAFETY: the set is not read by any submitted frame (ring longer than the frames in
-        // flight); the views are live in the layouts named; the push range matches.
+        // SAFETY: no submitted frame reads the set (the ring is longer than the frames in
+        // flight) and both views are live in the layouts named.
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        // SAFETY: the pipeline is live; recording into `cmd`.
         unsafe {
-            self.device.update_descriptor_sets(&writes, &[]);
             self.device.cmd_bind_pipeline(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline.handle(),
             );
+        }
+        // SAFETY: the set matches the layout's only set.
+        unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -193,6 +197,9 @@ impl ExposureLinearPass {
                 &[set],
                 &[],
             );
+        }
+        // SAFETY: the layout's push range is the compute stage's 8 bytes at offset 0.
+        unsafe {
             self.device.cmd_push_constants(
                 cmd,
                 self.layout.handle(),
@@ -200,7 +207,8 @@ impl ExposureLinearPass {
                 0,
                 bytes_of(&push),
             );
-            self.device.cmd_dispatch(cmd, 1, 1, 1);
         }
+        // SAFETY: one invocation with the pipeline, set and push constants bound above.
+        unsafe { self.device.cmd_dispatch(cmd, 1, 1, 1) };
     }
 }

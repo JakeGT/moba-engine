@@ -534,7 +534,7 @@ impl VfxPass {
     /// pipelines. `oit` selects the weighted blended OIT draw (and the resolve pass);
     /// `budget.distortion` the heat-haze pipeline and its set (ADR-0019), whose layout is
     /// checked against the device's per-stage descriptor limits.
-    #[allow(clippy::too_many_lines)] // One linear set-up sequence.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One linear set-up.
     pub(crate) fn new(
         device: &DeviceContext,
         shaders: &ShaderSource,
@@ -1062,6 +1062,7 @@ impl VfxPass {
 
     /// Allocates slots for this frame's spawns and writes the spawn upload and the uniform
     /// block. The frame's fence must have been waited on. Allocation-free.
+    #[allow(clippy::too_many_lines)] // Spawns, then every member of the block.
     pub(crate) fn prepare(
         &mut self,
         frame: usize,
@@ -1285,6 +1286,7 @@ impl VfxPass {
     }
 
     /// Records the particle draw into the HDR target (and the OIT targets).
+    #[allow(clippy::too_many_lines)] // Attachments, then the sprite and mesh draws.
     pub(crate) fn record_draw(
         &self,
         device: &DeviceContext,
@@ -1553,7 +1555,7 @@ impl VfxPass {
             attachment(targets.hdr),
             attachment(targets.reactive.unwrap_or(targets.hdr)),
         ];
-        let colors = &colors[..1 + usize::from(self.temporal && targets.reactive.is_some())];
+        let colors = &colors[..=usize::from(self.temporal && targets.reactive.is_some())];
         // Read-only depth: tested, never written, and sampled in the same pass.
         let depth = vk::RenderingAttachmentInfo::default()
             .image_view(targets.depth)

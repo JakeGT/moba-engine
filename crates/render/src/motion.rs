@@ -240,7 +240,7 @@ mod tests {
         let (state, joints) = history.previous(7, false, &at(1.5)).expect("history");
         assert_eq!(state.transform, at(1.0));
         assert_eq!(state.vat, pose());
-        assert!(joints.is_empty());
+        assert_eq!(joints, &[] as &[JointMatrix]);
         // Not drawn this frame: gone the frame after.
         history.begin_frame(false);
         assert!(history.previous(7, false, &at(1.5)).is_none());

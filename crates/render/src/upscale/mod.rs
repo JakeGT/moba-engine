@@ -22,7 +22,7 @@ pub(crate) mod taau;
 
 use ash::vk;
 
-pub use crate::post::{UpscaleMode, UpscalerKind};
+pub(crate) use crate::post::{UpscaleMode, UpscalerKind};
 pub(crate) use crate::temporal::Extent;
 
 /// One image the upscaler reads or writes.
@@ -97,7 +97,6 @@ pub(crate) trait TemporalUpscaler {
 /// (a render scale): the mode's size and the floor's, both at least 1×1 and with the output's
 /// aspect ratio (the controller scales both axes together, ADR-0021 §4c). TAAU's rule; vendor
 /// back ends clamp it to what their SDK reports.
-#[must_use]
 pub(crate) fn scaled_range(output: Extent, mode: UpscaleMode, floor: f32) -> (Extent, Extent) {
     let size = |scale: f32| crate::dynres::render_extent(output, output, scale);
     let ceiling = mode.scale();

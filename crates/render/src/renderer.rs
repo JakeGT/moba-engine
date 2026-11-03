@@ -69,12 +69,15 @@ use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
 use crate::upscale::exposure::ExposureLinearPass;
 use crate::upscale::frame::{TemporalFrame, TemporalState};
 use crate::upscale::taau::{Taau, TaauDebugView};
-use crate::upscale::{UpscaleImage, UpscaleInputs, UpscaleOutput};
+use crate::upscale::{TemporalUpscaler, UpscaleImage, UpscaleInputs, UpscaleOutput};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 use crate::world::{
     DEFAULT_MAX_VISION_SOURCES, FogOfWarMode, FogShaderMode, TerrainData, TerrainShading,
     WorldConfig, WorldFrame,
 };
+
+mod motion_probe;
+pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport};
 
 const FRAMES_IN_FLIGHT: usize = 2;
 // The fog-of-war ping-pong (image `f` written in frame slot `f`, the other read as history)
@@ -1071,14 +1074,26 @@ impl Renderer {
                 extents.render,
                 TaauDebugView::of(config.debug_view),
             )?;
+            let (smallest, largest) = taau.render_size_range(swapchain.extent, upscale_mode);
             eprintln!(
                 "[render] anti-aliasing: temporal, upscaler {} ({} mode, render scale {:.3}..{:.3}, \
-                 sharpness {:.2})",
+                 back-end range {}x{}..{}x{}, sharpness {:.2}{})",
                 kind.name(),
                 upscale_mode.name(),
                 post_config.min_render_scale.min(post_config.render_scale),
                 post_config.render_scale,
-                post_config.sharpness
+                smallest.width,
+                smallest.height,
+                largest.width,
+                largest.height,
+                post_config.sharpness,
+                // ADR-0021 §3: a back end without its own sharpening needs the renderer's
+                // `sharpen` pass, which arrives with the vendor back ends (N1c).
+                if taau.has_sharpening() {
+                    ", fused"
+                } else {
+                    ", no sharpening until N1c"
+                }
             );
             Some(TemporalState::new(
                 Box::new(taau),
@@ -3631,4 +3646,24 @@ fn target_extents(swapchain: vk::Extent2D, render_scale: f32) -> TargetExtents {
 
 fn duration_ms(duration: Duration) -> f32 {
     duration.as_secs_f32() * 1_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapturedFrame, RenderResult, Renderer, Scene};
+    use crate::scene::Camera;
+
+    /// ADR-0021 gate 1: `Scene::camera` is unchanged after a frame. Every frame entry point
+    /// borrows the scene immutably and `Camera` is plain `Copy` data with no interior
+    /// mutability, so the renderer cannot write the client's matrix; the jittered matrix
+    /// exists only in its own uniforms (`TemporalState::begin_frame` takes the client's
+    /// matrix by value and returns it unchanged as `unjittered`, `upscale::frame` tests).
+    #[test]
+    fn frames_borrow_the_scene_and_its_camera_immutably() {
+        fn plain_data<T: Copy + Send + Sync + core::panic::RefUnwindSafe + 'static>() {}
+        let _: fn(&mut Renderer, &Scene<'_>) -> RenderResult<()> = Renderer::render;
+        let _: fn(&mut Renderer, &Scene<'_>) -> RenderResult<CapturedFrame> =
+            Renderer::capture_frame;
+        plain_data::<Camera>();
+    }
 }

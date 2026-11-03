@@ -520,7 +520,12 @@ pub(crate) fn build_variant(
             aspect: spec.depth_aspect,
             size: render,
             samples: vk::SampleCountFlags::TYPE_1,
-            extra_usage: vk::ImageUsageFlags::SAMPLED,
+            // Temporal AA: TRANSFER_SRC for the motion probe's readback (ADR-0021 gate 2).
+            extra_usage: if spec.temporal {
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC
+            } else {
+                vk::ImageUsageFlags::SAMPLED
+            },
         },
     );
     let msaa = spec.msaa.then(|| MsaaResources {
@@ -681,7 +686,14 @@ pub(crate) fn build_variant(
     // ADR-0021 §2, §4: render-resolution motion and masks, the one-texel exposure multiplier
     // and the upscaler's output-resolution HDR image.
     let temporal = spec.temporal.then(|| TemporalResources {
-        motion: graph.transient_image("motion", image(MOTION_FORMAT, render)),
+        // TRANSFER_SRC for the motion probe's readback (ADR-0021 gate 2).
+        motion: graph.transient_image(
+            "motion",
+            ImageDesc {
+                extra_usage: vk::ImageUsageFlags::TRANSFER_SRC,
+                ..image(MOTION_FORMAT, render)
+            },
+        ),
         reactive: graph.transient_image("reactive", image(MASK_FORMAT, render)),
         tc_mask: graph.transient_image("tc_mask", image(MASK_FORMAT, render)),
         exposure_linear: graph.transient_image(
@@ -2236,5 +2248,176 @@ mod tests {
         }
         // The largest frame: 33 of 40 passes (ADR-0019).
         assert_eq!(largest, 33);
+    }
+
+    /// The tiered frames (ADR-0021 §5a): every post topology with temporal AA and the overlay.
+    fn tiered_specs() -> Vec<FrameSpec> {
+        post_specs()
+            .into_iter()
+            .filter(|spec| !spec.msaa)
+            .flat_map(|spec| {
+                [false, true].map(|water| FrameSpec {
+                    temporal: true,
+                    overlay: true,
+                    outline_ids: true,
+                    water,
+                    distortion: true,
+                    ..spec
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_temporal_frame_masks_upscales_then_posts_and_overlays_at_output_resolution() {
+        let mut largest = 0;
+        for spec in tiered_specs() {
+            let base = build(&spec, false, 0).expect("compiles");
+            for haze in [false, true] {
+                for capture in [false, true] {
+                    for offscreen in [0, OFFSCREEN_VARIANTS - 1] {
+                        let frame = build_variant(&spec, capture, offscreen, haze)
+                            .expect("variant compiles");
+                        assert!(frame.graph.shares_transients_with(&base.graph), "{spec:?}");
+                        assert_eq!(frame.graph.culled(), [] as [&str; 0], "{spec:?}");
+                        largest = largest.max(frame.graph.passes().len());
+                    }
+                }
+            }
+            let passes = kinds(&base);
+            let at = |kind| passes.iter().position(|&pass| pass == kind);
+            // Temporal replaces FXAA, the upscale and R2b's outline pass.
+            for gone in [PassKind::Fxaa, PassKind::Upscale, PassKind::Outline] {
+                assert!(at(gone).is_none(), "{spec:?}: {gone:?}");
+            }
+            let prepass = at(PassKind::Prepass).expect("prepass");
+            let clear = at(PassKind::MaskClear).expect("mask clear");
+            let scene = at(PassKind::Scene).expect("scene");
+            let tc = at(PassKind::TcMask).expect("tc mask");
+            let exposure = at(PassKind::ExposureLinear).expect("exposure_linear");
+            let temporal = at(PassKind::Temporal).expect("temporal");
+            let composite = at(PassKind::Composite).expect("composite");
+            let overlay_prepass = at(PassKind::OverlayPrepass).expect("overlay prepass");
+            let overlay = at(PassKind::Overlay).expect("overlay");
+            let ui = at(PassKind::Ui).expect("ui");
+            assert!(prepass < clear && clear < scene, "{spec:?}");
+            // The masks are complete (distortion, particles, water) before the upscaler.
+            for writer in [PassKind::Distortion, PassKind::VfxDraw, PassKind::Water] {
+                assert!(
+                    at(writer).is_none_or(|pass| pass < tc),
+                    "{spec:?}: {writer:?}"
+                );
+            }
+            assert!(tc < exposure && exposure < temporal, "{spec:?}");
+            // The whole post chain reads the upscaler's output.
+            assert!(at(PassKind::BloomDown(0)).is_none_or(|down| down > temporal));
+            assert!(at(PassKind::Exposure).is_none_or(|meter| meter > temporal));
+            assert!(temporal < composite && composite < overlay_prepass);
+            assert_eq!(overlay, overlay_prepass + 1);
+            match spec.vfx {
+                VfxMode::Off => assert!(at(PassKind::OverlayVfx).is_none()),
+                _ => assert_eq!(at(PassKind::OverlayVfx), Some(overlay + 1), "{spec:?}"),
+            }
+            assert!(at(PassKind::OverlayVfx).unwrap_or(overlay) < ui);
+            let temporal_ids = base.resources.temporal.expect("temporal resources");
+            let overlay_ids = base.resources.overlay.expect("overlay resources");
+            // The composite writes the LDR image the overlay reads, at output resolution.
+            assert_eq!(Some(overlay_ids.source), base.resources.ldr, "{spec:?}");
+            assert!(base.resources.ldr2.is_none() && base.resources.ldr_out.is_none());
+            let size = |resource| {
+                base.graph
+                    .slot_of(resource)
+                    .map(|slot| base.graph.slots()[slot].desc.size)
+            };
+            let output = Some(ImageSize::Output { shift: 0 });
+            for resource in [
+                temporal_ids.hdr_out,
+                overlay_ids.depth,
+                overlay_ids.ids,
+                overlay_ids.source,
+            ] {
+                assert_eq!(size(resource), output, "{spec:?}");
+            }
+            let render = Some(ImageSize::Render { shift: 0 });
+            for resource in [
+                temporal_ids.motion,
+                temporal_ids.reactive,
+                temporal_ids.tc_mask,
+            ] {
+                assert_eq!(size(resource), render, "{spec:?}");
+            }
+            if let Some(mips) = base.resources.bloom {
+                assert_eq!(size(mips[0]), Some(ImageSize::Output { shift: 1 }));
+            }
+            // The upscaler's inputs are sampled by compute; its output is a storage image.
+            let passes = base.graph.passes();
+            let output = barrier(&passes[temporal], temporal_ids.hdr_out);
+            assert_eq!(output.new_layout, L::GENERAL);
+            let motion = barrier(&passes[temporal], temporal_ids.motion);
+            assert_eq!(motion.new_layout, L::SHADER_READ_ONLY_OPTIMAL);
+            // Only the overlay and the UI write the swapchain.
+            let writers = base
+                .graph
+                .passes()
+                .iter()
+                .filter(|pass| pass.uses(base.resources.swapchain))
+                .count();
+            assert_eq!(
+                writers,
+                2 + usize::from(spec.vfx != VfxMode::Off),
+                "{spec:?}"
+            );
+        }
+        assert!(largest <= crate::graph::MAX_PASSES, "{largest}");
+    }
+
+    #[test]
+    fn temporal_off_on_tiered_keeps_the_render_resolution_chain_under_the_overlay() {
+        for (fxaa, upscale) in [(false, false), (true, false), (false, true), (true, true)] {
+            let spec = FrameSpec {
+                temporal: false,
+                overlay: true,
+                outline_ids: true,
+                fxaa,
+                upscale,
+                vfx: VfxMode::Unsorted,
+                ..plain()
+            };
+            let frame = build(&spec, false, 0).expect("compiles");
+            let passes = kinds(&frame);
+            let at = |kind| passes.iter().position(|&pass| pass == kind);
+            assert!(at(PassKind::Temporal).is_none() && at(PassKind::MaskClear).is_none());
+            assert!(
+                at(PassKind::Outline).is_none(),
+                "the overlay draws the outlines"
+            );
+            assert_eq!(at(PassKind::Fxaa).is_some(), fxaa);
+            assert_eq!(at(PassKind::Upscale).is_some(), upscale);
+            let overlay = frame.resources.overlay.expect("overlay");
+            // The overlay reads the last LDR image: the upscale's output, else FXAA's, else
+            // the composite's; never the swapchain.
+            let expected = if upscale {
+                frame.resources.ldr_out
+            } else if fxaa {
+                frame.resources.ldr2
+            } else {
+                frame.resources.ldr
+            };
+            assert_eq!(Some(overlay.source), expected, "{fxaa} {upscale}");
+            let last_post = [PassKind::Upscale, PassKind::Fxaa, PassKind::Composite]
+                .into_iter()
+                .find_map(at)
+                .expect("a post pass");
+            assert_eq!(at(PassKind::OverlayPrepass), Some(last_post + 1));
+        }
+    }
+
+    #[test]
+    fn compat_frames_have_no_temporal_or_overlay_resources() {
+        for spec in post_specs() {
+            let frame = build(&spec, false, 0).expect("compiles");
+            assert!(frame.resources.temporal.is_none() && frame.resources.overlay.is_none());
+            assert!(frame.resources.ldr_out.is_none());
+        }
     }
 }

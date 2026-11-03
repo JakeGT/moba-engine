@@ -709,8 +709,8 @@ pub(crate) struct CameraUniform {
 
 /// This frame's temporal camera state (ADR-0021 §1): the jittered matrix the main view
 /// rasterises with, the unjittered one and the previous frame's for motion vectors, the jitter
-/// (current and previous, render pixels) and the material mip bias. [`Self::still`] is the
-/// identity of temporal off and of Compat: both matrices equal the camera's and the rest is 0.
+/// (current and previous, render pixels) and the material mip bias. Compat and temporal off
+/// upload none of it (the members stay 0).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TemporalCamera {
     pub(crate) jittered: Mat4,
@@ -722,22 +722,6 @@ pub(crate) struct TemporalCamera {
     /// The render size motion vectors are measured in (pixels).
     pub(crate) render: [u32; 2],
     pub(crate) live: bool,
-}
-
-impl TemporalCamera {
-    /// No jitter, no motion: what Compat and temporal off upload.
-    pub(crate) const fn still(view_proj: Mat4) -> Self {
-        Self {
-            jittered: view_proj,
-            unjittered: view_proj,
-            previous: view_proj,
-            jitter: [0.0; 2],
-            previous_jitter: [0.0; 2],
-            mip_bias: 0.0,
-            render: [0; 2],
-            live: false,
-        }
-    }
 }
 
 impl CameraUniform {

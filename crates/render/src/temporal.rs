@@ -142,6 +142,7 @@ pub(crate) fn motion_pixels(
 
 /// Which mip-bias formula a back end documents (ADR-0021 §1, "Texture LOD bias").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // XeSS's rule arrives with N1c; `Off` documents temporal off.
 pub(crate) enum MipBiasRule {
     /// DLSS, FSR 3.1, FSR 4 and TAAU: `log2(render_w / output_w) - 1`.
     Standard,

@@ -274,14 +274,17 @@ impl GameplayOverlay {
             .color_attachments(core::slice::from_ref(&color));
         device.cmd_begin_rendering(command_buffer, &render_info);
         super::set_viewport_scissor(device, command_buffer, super::full_viewport(extent), extent);
-        // SAFETY: the pipeline and set are live and match the layout; the graph moved the
-        // three images to SHADER_READ_ONLY_OPTIMAL before this pass.
+        // SAFETY: the pipeline is live and recording happens inside dynamic rendering.
         unsafe {
             device.device.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline.handle(),
             );
+        }
+        // SAFETY: the set is live and matches the layout; the graph moved the three images
+        // to SHADER_READ_ONLY_OPTIMAL before this pass.
+        unsafe {
             device.device.cmd_bind_descriptor_sets(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -290,8 +293,9 @@ impl GameplayOverlay {
                 &[self.frames[frame].set],
                 &[],
             );
-            device.device.cmd_draw(command_buffer, 3, 1, 0, 0);
         }
+        // SAFETY: a fullscreen triangle with the pipeline and set bound above.
+        unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
         device.cmd_end_rendering(command_buffer);
     }
 }
@@ -316,11 +320,11 @@ fn build_pipeline(
 }
 
 /// A combined-image-sampler write of `info` to `binding` of `set`.
-fn image_write<'a>(
+fn image_write(
     set: vk::DescriptorSet,
     binding: u32,
-    info: &'a [vk::DescriptorImageInfo; 1],
-) -> vk::WriteDescriptorSet<'a> {
+    info: &[vk::DescriptorImageInfo; 1],
+) -> vk::WriteDescriptorSet<'_> {
     vk::WriteDescriptorSet::default()
         .dst_set(set)
         .dst_binding(binding)

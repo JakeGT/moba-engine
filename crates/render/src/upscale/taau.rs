@@ -120,6 +120,7 @@ pub(crate) struct Taau {
 impl Taau {
     /// Creates the back end for `output` (the swapchain) with histories for render sizes up
     /// to `max_render` (the dynamic-resolution ceiling).
+    #[allow(clippy::too_many_lines)] // Layout, pool, pipeline, sampler and images, in order.
     pub(crate) fn new(
         device: &DeviceContext,
         shaders: &ShaderSource,
@@ -395,15 +396,17 @@ impl TemporalUpscaler for Taau {
             out.image.extent.width.div_ceil(TILE),
             out.image.extent.height.div_ceil(TILE),
         ];
-        // SAFETY: the pipeline, layout and set are live and match; the push block is the
-        // layout's 56-byte compute range; the graph moved the inputs to
-        // SHADER_READ_ONLY_OPTIMAL and the output to GENERAL, and `barriers` the history.
+        // SAFETY: the pipeline is live; recording into `cmd`.
         unsafe {
             self.device.cmd_bind_pipeline(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline.handle(),
             );
+        }
+        // SAFETY: the set matches the layout; the graph moved the inputs to
+        // SHADER_READ_ONLY_OPTIMAL and the output to GENERAL, and `barriers` the history.
+        unsafe {
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
@@ -412,6 +415,9 @@ impl TemporalUpscaler for Taau {
                 &[set],
                 &[],
             );
+        }
+        // SAFETY: the layout's push range is the compute stage's 56 bytes at offset 0.
+        unsafe {
             self.device.cmd_push_constants(
                 cmd,
                 self.pipeline_layout.handle(),
@@ -419,8 +425,9 @@ impl TemporalUpscaler for Taau {
                 0,
                 bytes_of(&push),
             );
-            self.device.cmd_dispatch(cmd, groups[0], groups[1], 1);
         }
+        // SAFETY: the dispatch covers the output with the state bound above.
+        unsafe { self.device.cmd_dispatch(cmd, groups[0], groups[1], 1) };
         self.parity = 1 - self.parity;
         self.reset = false;
         self.prev_render = inputs.render_size;

@@ -52,6 +52,26 @@ pub(crate) fn capture_and_exit(
     }
 }
 
+/// `MOBA_MOTION_PROBE=1` (ADR-0021 gate 2): run [`Renderer::motion_probe`] once the renderer
+/// is up, print its report and exit (0 passed, 1 failed, 2 could not run).
+pub(crate) fn motion_probe_requested() -> bool {
+    std::env::var_os("MOBA_MOTION_PROBE").is_some_and(|value| value != "0")
+}
+
+/// Runs the motion probe and returns the process exit code.
+pub(crate) fn run_motion_probe(renderer: &mut Renderer) -> i32 {
+    match renderer.motion_probe() {
+        Ok(report) => {
+            println!("{report}");
+            i32::from(!report.passed())
+        }
+        Err(error) => {
+            eprintln!("motion probe could not run: {error}");
+            2
+        }
+    }
+}
+
 /// Where the renderer keeps its `VkPipelineCache`: `MOBA_PIPELINE_CACHE` (a file path, or
 /// `off`), else a per-user cache file: `$XDG_CACHE_HOME` or `~/.cache` on Linux/BSD,
 /// `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows, each under
@@ -358,10 +378,13 @@ fn lighting_config_from(
 /// `MOBA_SCREEN_EFFECTS=off`. With `capture` (`MOBA_CAPTURE`), auto exposure and dynamic
 /// resolution are pinned off unless set explicitly, so captures stay byte-identical.
 ///
-/// On the tiered path, `tiered` (from [`tiered_scale`]) gives dynamic resolution the tier's
-/// GPU budget as its target and the tier's scale range (ADR-0020 §5c); the settings' scale
-/// can lower the ceiling, not raise it. Until N1 it stays off unless `MOBA_DYNRES` turns it on
-/// (ADR-0020 amendment 3).
+/// On the tiered path, `tiered` (from [`tiered_scale`]) makes temporal AA the default
+/// (ADR-0021 §4b) and gives dynamic resolution the tier's GPU budget as its target and the
+/// tier's scale range (ADR-0020 §5c, ADR-0021 §4c): the upscaler mode's scale is the ceiling
+/// (the settings' scale can lower it, not raise it) and dynamic resolution is on. With
+/// `MOBA_AA=fxaa|off` (temporal off) the tiered path keeps today's chain: full scale, a 0.5
+/// floor and dynamic resolution off unless `MOBA_DYNRES` asks. `MOBA_UPSCALER`,
+/// `MOBA_UPSCALE_MODE` and `MOBA_SHARPNESS` choose the back end, the mode and the sharpening.
 pub(crate) fn post_config(
     tier: moba_render::QualityTier,
     render_scale: f32,
@@ -373,16 +396,30 @@ pub(crate) fn post_config(
     })
 }
 
+/// `MOBA_DEBUG_VIEW=motion|reactive|tc|disocclusion|confidence|overlay-ids` (ADR-0021 §3, §5):
+/// a tiered debug view instead of the frame. Read once at startup.
+pub(crate) fn debug_view() -> moba_render::TemporalDebugView {
+    let Ok(value) = std::env::var("MOBA_DEBUG_VIEW") else {
+        return moba_render::TemporalDebugView::Off;
+    };
+    moba_render::TemporalDebugView::from_name(&value).unwrap_or_else(|| {
+        eprintln!(
+            "MOBA_DEBUG_VIEW={value:?} is not \
+             off/motion/reactive/tc/disocclusion/confidence/overlay-ids; off"
+        );
+        moba_render::TemporalDebugView::Off
+    })
+}
+
 /// Dynamic resolution's defaults on the tiered path (ADR-0020 §5c).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TieredScale {
     /// The tier's GPU budget, ms (`moba_assets::GPU_BUDGETS`).
     pub(crate) target_ms: f32,
-    /// The scale range's floor, at least today's 0.5 until N1 ships the upscalers.
+    /// The scale range's floor ([`moba_assets::GpuBudget::scale_range_at`]), at least the
+    /// temporal path's 1/3.
     pub(crate) floor: f32,
-    /// The scale ceiling. From N1 it is the preset's upscaler mode
-    /// ([`moba_assets::GpuBudget::scale_range_at`]); until an upscaler fills the gap it is
-    /// today's full scale, so the tiered path does not render softer than Compat.
+    /// The scale ceiling under temporal AA: the preset's upscaler mode (ADR-0021 §4c).
     pub(crate) ceiling: f32,
 }
 
@@ -397,14 +434,15 @@ pub(crate) fn tiered_scale(
         return None;
     }
     let budget = moba_assets::gpu_budget(tier.name())?;
-    let (floor, _upscaler_mode) = budget.scale_range_at(height);
+    let (floor, ceiling) = budget.scale_range_at(height);
     Some(TieredScale {
         target_ms: budget.budget_ms,
-        floor: floor.max(moba_render::MIN_RENDER_SCALE),
-        ceiling: 1.0,
+        floor: floor.max(moba_render::MIN_TEMPORAL_RENDER_SCALE),
+        ceiling,
     })
 }
 
+#[allow(clippy::too_many_lines)] // One override per environment variable, in order.
 fn post_config_from(
     tier: moba_render::QualityTier,
     render_scale: f32,
@@ -413,13 +451,59 @@ fn post_config_from(
     var: impl Fn(&str) -> Option<String>,
 ) -> moba_render::PostConfig {
     let mut config = moba_render::PostConfig::for_tier(tier).with_render_scale(render_scale);
+    if tiered.is_some() {
+        config = config.with_anti_aliasing(moba_render::AntiAliasing::Temporal);
+    }
+    if let Some(value) = var("MOBA_AA") {
+        match moba_render::AntiAliasing::from_name(&value) {
+            Some(mode) => config = config.with_anti_aliasing(mode),
+            None => eprintln!("MOBA_AA={value:?} is not temporal/fxaa/off/msaa4; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_UPSCALER") {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => config = config.with_upscaler(None),
+            _ => match moba_render::UpscalerKind::from_name(&value) {
+                Some(kind) => config = config.with_upscaler(Some(kind)),
+                None => eprintln!(
+                    "MOBA_UPSCALER={value:?} is not auto/taau/fsr3/dlss/fsr4/xess; using auto"
+                ),
+            },
+        }
+    }
+    if let Some(value) = var("MOBA_UPSCALE_MODE") {
+        match moba_render::UpscaleMode::from_name(&value) {
+            Some(mode) => config = config.with_upscale_mode(Some(mode)),
+            None => eprintln!(
+                "MOBA_UPSCALE_MODE={value:?} is not \
+                 native/quality/balanced/performance/ultra-performance; using the tier's"
+            ),
+        }
+    }
+    if let Some(value) = var("MOBA_SHARPNESS") {
+        match value.trim().parse::<f32>() {
+            Ok(sharpness) if sharpness.is_finite() => config = config.with_sharpness(sharpness),
+            _ => eprintln!("MOBA_SHARPNESS={value:?} is not a number in 0..1; using the default"),
+        }
+    }
     if let Some(tiered) = tiered {
-        // Off by default until N1: at full scale the upscale pass would cost a full-screen
-        // resample every frame for nothing. `MOBA_DYNRES=on` runs it against the budget.
+        let temporal = config.anti_aliasing == moba_render::AntiAliasing::Temporal;
+        let (ceiling, floor) = if temporal {
+            // ADR-0021 §4c: the mode's scale is the ceiling, the preset's floor below it.
+            let ceiling = config
+                .upscale_mode
+                .map_or(tiered.ceiling, moba_render::UpscaleMode::scale);
+            (ceiling, tiered.floor.min(ceiling))
+        } else {
+            (1.0, tiered.floor.max(moba_render::MIN_RENDER_SCALE))
+        };
+        // Temporal off keeps today's default: at full scale the upscale pass would cost a
+        // full-screen resample every frame for nothing. `MOBA_DYNRES=on` runs it.
         config = config
             .with_dynamic_target_ms(tiered.target_ms)
-            .with_render_scale(render_scale.min(tiered.ceiling))
-            .with_min_render_scale(tiered.floor);
+            .with_render_scale(render_scale.min(ceiling))
+            .with_min_render_scale(floor)
+            .with_dynamic_resolution(temporal);
     }
     let switch = |name: &str| {
         let value = var(name)?;
@@ -443,12 +527,6 @@ fn post_config_from(
     }
     if let Some(on) = switch("MOBA_SCREEN_EFFECTS") {
         config = config.with_screen_effects(on);
-    }
-    if let Some(value) = var("MOBA_AA") {
-        match moba_render::AntiAliasing::from_name(&value) {
-            Some(mode) => config = config.with_anti_aliasing(mode),
-            None => eprintln!("MOBA_AA={value:?} is not off/fxaa/msaa4; using the tier's"),
-        }
     }
     if let Some(value) = var("MOBA_UPSCALE") {
         match moba_render::UpscaleFilter::from_name(&value) {
@@ -1169,7 +1247,8 @@ fn quality_summary(renderer: &moba_render::Renderer) -> String {
     let environment = renderer.environment_config();
     let [render_width, render_height] = renderer.render_extent();
     format!(
-        "{} config_tier={} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
+        "{} config_tier={} hdr={} shadows={} shadow_size={} aa={} upscaler={} upscale_mode={} \
+             render_scale={:.3} jitter_phases={} upscaler_vram_mb={:.1} bloom={} ao={} \
              auto_exposure={} grading={} render={render_width}x{render_height} \
              dynres={} ibl={} specular_ibl={} vat_meshes={} terrain={} fow={} fow_size={} \
              fog={} sky={} decals={} foliage={} water={} pipelines={} pipeline_build_ms={:.3} \
@@ -1179,7 +1258,14 @@ fn quality_summary(renderer: &moba_render::Renderer) -> String {
         renderer.hdr_format_name(),
         lighting.shadows,
         lighting.shadow_resolution,
-        post.anti_aliasing,
+        renderer.anti_aliasing(),
+        renderer.upscaler_name(),
+        renderer
+            .upscale_mode()
+            .map_or("none", moba_render::UpscaleMode::name),
+        renderer.render_scale(),
+        renderer.jitter_phases(),
+        renderer.upscaler_vram_bytes() as f64 / (1024.0 * 1024.0),
         on_off(post.bloom),
         on_off(post.ambient_occlusion),
         on_off(post.auto_exposure && renderer.post_look().auto_exposure),
@@ -1649,10 +1735,69 @@ mod tests {
         assert_eq!(bad, PostConfig::for_tier(QualityTier::Ultra));
     }
 
+    /// ADR-0021 gate 1: picking is jitter-free by construction. The same cursor gives
+    /// byte-identical `WireCommand`s under temporal AA, FXAA and AA off, at render scales 0.5
+    /// and 1.0: `cursor_ground` reads only the client's camera and the window size, never the
+    /// post settings, the render size or the renderer's jittered matrices.
+    #[test]
+    fn the_same_cursor_sends_the_same_command_under_every_aa_and_scale() {
+        use moba_core::math::{Vec2, Vec3};
+        use moba_net::protocol::{InputMessage, WireCommand, encode_input, quantize_position};
+        use moba_render::{AntiAliasing, Camera, QualityTier};
+        let camera = Camera::perspective(
+            Vec3::new(10.0, 30.0, 25.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::Y,
+            0.8,
+            16.0 / 9.0,
+            0.5,
+            400.0,
+        );
+        let tiered = super::tiered_scale(moba_render::RenderPath::Tiered, QualityTier::High, 720);
+        let mut sent = Vec::new();
+        for aa in ["temporal", "fxaa", "off"] {
+            for scale in [0.5_f32, 1.0] {
+                let scale_text = if scale < 1.0 { "0.5" } else { "1.0" };
+                let pairs: Vec<(&str, String)> = vec![
+                    ("MOBA_AA", aa.to_owned()),
+                    ("MOBA_RENDER_SCALE", scale_text.to_owned()),
+                ];
+                let post = post_config_from(QualityTier::High, 1.0, false, tiered, |name| {
+                    pairs
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.clone())
+                });
+                assert_eq!(post.anti_aliasing, AntiAliasing::from_name(aa).expect("aa"));
+                assert_eq!(post.render_scale, scale.max(1.0 / 3.0));
+                let before = camera;
+                let ground = crate::input::cursor_ground(
+                    &camera,
+                    Vec2::new(812.5, 377.25),
+                    1280,
+                    720,
+                    100.0,
+                )
+                .expect("the cursor hits the ground");
+                assert_eq!(
+                    camera.view_proj, before.view_proj,
+                    "the camera is never jittered"
+                );
+                let (x, y) = quantize_position(ground);
+                sent.push(encode_input(&InputMessage {
+                    client_tick: 120,
+                    input_seq: 7,
+                    command: WireCommand::MoveTo { x, y },
+                }));
+            }
+        }
+        assert!(sent.windows(2).all(|pair| pair[0] == pair[1]), "{sent:?}");
+    }
+
     #[test]
     fn tiered_presets_turn_dynamic_resolution_on_with_the_budget() {
         use super::{TieredScale, tiered_scale};
-        use moba_render::QualityTier;
+        use moba_render::{AntiAliasing, QualityTier, UpscaleMode, UpscalerKind};
         let env = |pairs: &'static [(&'static str, &'static str)]| {
             move |name: &str| {
                 pairs
@@ -1661,35 +1806,66 @@ mod tests {
                     .map(|(_, value)| (*value).to_owned())
             }
         };
-        // The tiered path: the tier's budget and floor, the settings' scale capped at the
-        // preset's ceiling; dynamic resolution off until N1 unless `MOBA_DYNRES` asks.
+        // The tiered path (ADR-0021 §4b, §4c): temporal AA, the tier's budget, the preset's
+        // Quality ceiling and Performance floor, dynamic resolution on.
         let tiered = tiered_scale(moba_render::RenderPath::Tiered, QualityTier::Ultra, 1440);
         assert_eq!(
             tiered,
             Some(TieredScale {
                 target_ms: 9.0,
                 floor: 0.5,
-                ceiling: 1.0
+                ceiling: 0.67
             })
         );
         let ultra = post_config_from(QualityTier::Ultra, 1.0, false, tiered, env(&[]));
-        assert!(!ultra.dynamic_resolution && !ultra.scaled());
+        assert_eq!(ultra.anti_aliasing, AntiAliasing::Temporal);
+        assert!(ultra.dynamic_resolution);
+        assert_eq!((ultra.render_scale, ultra.min_render_scale), (0.67, 0.5));
+        assert_eq!(ultra.dynamic_target_ms, 9.0);
+        // The settings' scale is kept below the ceiling; the ceiling only lowers it.
+        let lowered = post_config_from(QualityTier::Ultra, 0.6, false, tiered, env(&[]));
+        assert_eq!(lowered.render_scale, 0.6);
+        // An explicit mode moves the ceiling (and the floor never exceeds it).
+        let performance = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[
+                ("MOBA_UPSCALE_MODE", "Performance"),
+                ("MOBA_UPSCALER", "fsr3"),
+                ("MOBA_SHARPNESS", "0.6"),
+            ]),
+        );
+        assert_eq!(performance.upscale_mode, Some(UpscaleMode::Performance));
+        assert_eq!(performance.upscaler, Some(UpscalerKind::Fsr3));
+        assert_eq!(performance.sharpness, 0.6);
+        assert_eq!(
+            (performance.render_scale, performance.min_render_scale),
+            (0.5, 0.5)
+        );
+        // Temporal off keeps today's tiered chain: full scale, dynamic resolution off unless
+        // `MOBA_DYNRES` asks.
+        let fxaa = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[("MOBA_AA", "fxaa")]),
+        );
+        assert_eq!(fxaa.anti_aliasing, AntiAliasing::Fxaa);
+        assert!(!fxaa.dynamic_resolution && !fxaa.scaled());
+        assert_eq!((fxaa.render_scale, fxaa.min_render_scale), (1.0, 0.5));
         let on = post_config_from(
             QualityTier::Ultra,
             1.0,
             false,
             tiered,
-            env(&[("MOBA_DYNRES", "on")]),
+            env(&[("MOBA_AA", "off"), ("MOBA_DYNRES", "on")]),
         );
         assert!(on.dynamic_resolution);
         assert_eq!(on.dynamic_target_ms, 9.0);
-        assert_eq!((ultra.render_scale, ultra.min_render_scale), (1.0, 0.5));
-        assert_eq!(ultra.dynamic_target_ms, 9.0);
-        // The settings' scale is kept; the ceiling only lowers it.
-        let lowered = post_config_from(QualityTier::Ultra, 0.8, false, tiered, env(&[]));
-        assert_eq!(lowered.render_scale, 0.8);
-        // Until N1 ships the upscalers: Overdrive's 0.33 floor is held at today's 0.5 and
-        // its Performance-mode ceiling at full scale.
+        // Overdrive: Performance ceiling, Ultra Performance floor (1/3).
         let overdrive = tiered_scale(
             moba_render::RenderPath::Tiered,
             QualityTier::Overdrive,
@@ -1697,11 +1873,11 @@ mod tests {
         );
         assert_eq!(
             overdrive.map(|scale| (scale.floor, scale.ceiling)),
-            Some((0.5, 1.0))
+            Some((moba_render::MIN_TEMPORAL_RENDER_SCALE, 0.5))
         );
         let capture = post_config_from(QualityTier::Ultra, 1.0, true, tiered, env(&[]));
         assert!(!capture.dynamic_resolution);
-        assert_eq!(capture.render_scale, 1.0);
+        assert_eq!(capture.render_scale, 0.67);
         assert_eq!(
             tiered_scale(moba_render::RenderPath::Compat, QualityTier::Ultra, 1440),
             None

@@ -79,6 +79,18 @@ impl HeroDraw {
     };
 }
 
+/// Gives a unit's instances (`units`, everything pushed for it this frame) their motion keys
+/// (ADR-0021 §2c): `net_id << 8 | part`, parts numbered from 1 so no key is 0 (static, map
+/// instances). `reset` starts a new history (a respawn, recall or blink teleport), so the
+/// jump is not drawn as motion. Presentation only: the keys are read from `net_id`s the
+/// client already has (§8).
+pub(crate) fn key_motion(units: &mut [UnitInstance], net_id: u16, reset: bool) {
+    for (part, unit) in units.iter_mut().enumerate() {
+        let part = u32::try_from(part + 1).unwrap_or(u32::MAX).min(0xFF);
+        *unit = unit.with_motion((u32::from(net_id) << 8) | part, reset);
+    }
+}
+
 /// A minion drawn from its VAT (R4b): the interpolated speed picks idle ↔ run, the facing is
 /// the movement direction or the driver's rest facing. Returns `false` (nothing pushed) for a
 /// unit without a VAT visual.
@@ -298,6 +310,7 @@ pub(crate) fn rebuild_network_units(
                 .flatten();
             push_hero(units, bones, models, model, &pose, animator, draw);
             outlines::mark(&mut units[first..], outline);
+            key_motion(&mut units[first..], entity.net_id, teleported);
             continue;
         }
         anchors.push(UnitAnchor {
@@ -334,6 +347,7 @@ pub(crate) fn rebuild_network_units(
             ) {
                 // VAT minions are outlined like the rest (hover, attack target).
                 outlines::mark(&mut units[first..], outline);
+                key_motion(&mut units[first..], entity.net_id, false);
                 continue;
             }
         }
@@ -347,6 +361,7 @@ pub(crate) fn rebuild_network_units(
             center,
         );
         outlines::mark(&mut units[first..], outline);
+        key_motion(&mut units[first..], entity.net_id, false);
     }
     push_minion_corpses(units, &mut animation, now, center);
     for projectile in network.projectiles.iter().filter(|_| projectile_cubes) {
@@ -484,6 +499,7 @@ pub(crate) fn rebuild_local_units(
                 target: false,
             });
             outlines::mark(&mut units[first..], outline);
+            key_motion(&mut units[first..], entity.net_id, distance > 3.0);
             continue;
         }
         anchors.push(UnitAnchor {
@@ -493,6 +509,7 @@ pub(crate) fn rebuild_local_units(
             model: None,
         });
         let (_, color) = unit_appearance(kind, team, fraction, entity.status_bits);
+        let first = units.len();
         if matches!(kind, UnitKind::MeleeMinion | UnitKind::RangedMinion)
             && push_vat_minion(
                 units,
@@ -506,6 +523,7 @@ pub(crate) fn rebuild_local_units(
                 color,
             )
         {
+            key_motion(&mut units[first..], entity.net_id, distance > 3.0);
             continue;
         }
         push_unit(
@@ -517,6 +535,7 @@ pub(crate) fn rebuild_local_units(
             entity.status_bits,
             center,
         );
+        key_motion(&mut units[first..], entity.net_id, distance > 3.0);
     }
     push_minion_corpses(units, &mut animation, now, center);
 }

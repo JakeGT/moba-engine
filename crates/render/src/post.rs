@@ -191,10 +191,11 @@ impl UpscaleMode {
     #[must_use]
     pub const fn for_tier(tier: QualityTier, height: u32) -> Self {
         match tier {
-            QualityTier::Low | QualityTier::Medium | QualityTier::High => Self::Quality,
             QualityTier::Ultra if height >= 2160 => Self::Performance,
-            QualityTier::Ultra => Self::Quality,
             QualityTier::Overdrive => Self::Performance,
+            QualityTier::Low | QualityTier::Medium | QualityTier::High | QualityTier::Ultra => {
+                Self::Quality
+            }
         }
     }
 }

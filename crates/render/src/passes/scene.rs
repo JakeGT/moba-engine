@@ -543,6 +543,7 @@ pub(crate) struct WaterTargets {
 
 /// What one [`ScenePipelines`] set is built for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Independent pipeline-set features.
 pub(crate) struct SceneSetSpec {
     pub(crate) samples: vk::SampleCountFlags,
     /// Build the shadow casters (the single-sample set only).
@@ -1037,6 +1038,7 @@ impl ScenePipelines {
     /// (attachment 1) when `ids` (the heat haze keeps it). The terrain, the foliage and the
     /// background leave the mask alone (an empty write mask; `independentBlend`).
     #[allow(clippy::too_many_arguments)] // One set of pipelines.
+    #[allow(clippy::too_many_lines)] // One pipeline per drawable kind, in draw order.
     fn build_motion_prepass(
         device: &DeviceContext,
         shaders: &ShaderSource,
@@ -1317,6 +1319,7 @@ pub(crate) struct ScenePass {
 
 /// How the main view is drawn (ADR-0015).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Independent main-view features.
 pub(crate) struct MainViewSpec {
     pub(crate) samples: vk::SampleCountFlags,
     pub(crate) prepass: bool,
@@ -1876,7 +1879,7 @@ impl ScenePass {
     /// with shadows, against the shadow box for the caster list), picks its mesh level and
     /// computes the terrain's visible runs (R8). The frame's fence must have been waited on.
     /// The truncation counters and [`Self::cull_stats`] report the main view (0) only.
-    #[allow(clippy::too_many_lines)] // Cull, bucket and scatter belong together.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // Cull, bucket, scatter.
     pub(crate) fn prepare(
         &mut self,
         view: usize,
@@ -2531,6 +2534,7 @@ impl ScenePass {
     /// make the ID target's depth test disagree with the scene's at grazing occluders,
     /// leaking a hidden unit's outline over a wall. Uses the main view's camera, instances
     /// and bones prepared for the scene; materials are not bound.
+    #[allow(clippy::too_many_lines)] // Attachments, then each drawable kind in order.
     pub(crate) fn record_prepass(
         &self,
         device: &DeviceContext,
@@ -3150,6 +3154,7 @@ impl ScenePass {
 impl SceneView {
     /// Creates `budget`'s per-frame buffers and writes `sets` (camera, instances: two per
     /// frame) for them.
+    #[allow(clippy::too_many_lines)] // Every per-frame buffer and its descriptors.
     fn new(
         device: &DeviceContext,
         budget: ViewBudget,

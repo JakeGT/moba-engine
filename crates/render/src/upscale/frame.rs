@@ -73,6 +73,11 @@ impl TemporalState {
         self.last_phases
     }
 
+    /// The jitter of the latest submitted frame (the motion probe's twin).
+    pub(crate) fn previous_jitter(&self) -> Option<[f32; 2]> {
+        self.previous.map(|previous| previous.jitter)
+    }
+
     /// This frame's camera state for `view_proj` (the client's, unjittered) at `render` of
     /// `output`. `scene_reset` is [`crate::Scene::history_reset`]; a camera cut (§2c) resets
     /// too.

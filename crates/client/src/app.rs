@@ -91,6 +91,9 @@
 //!   `MOBA_OUTLINE_PROBE=hidden|open|hit` (render tests) adds an outlined enemy unit behind a
 //!   wall, in the open or under the effect; hidden, the capture must equal one with
 //!   `MOBA_OUTLINES=off`.
+//! - `MOBA_MOTION_PROBE=1` (render tests, ADR-0021 gate 2): once the renderer is up, render
+//!   the motion-vector probe's two scripted frames, print the comparison with its CPU twin
+//!   and exit (0 passed, 1 failed, 2 could not run). Needs temporal AA (the tiered path).
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
@@ -696,7 +699,8 @@ impl App for ClientApp {
             .with_world(Some(launch::world_config(self.config_quality)))
             .with_culling(launch::cull_mode())
             .with_mesh_lod(launch::mesh_lod())
-            .with_environment(Some(launch::environment_config(self.config_quality)));
+            .with_environment(Some(launch::environment_config(self.config_quality)))
+            .with_debug_view(launch::debug_view());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -735,6 +739,12 @@ impl App for ClientApp {
                     renderer.config_tier(),
                     renderer.admission().path.name()
                 );
+                if launch::motion_probe_requested() {
+                    // ADR-0021 gate 2: the probe's scripted frames, then exit.
+                    let code = launch::run_motion_probe(&mut renderer);
+                    drop(renderer);
+                    std::process::exit(code);
+                }
                 if renderer.admission().path != self.render_target.path {
                     // The configuration was built for the probed path; say so if the
                     // renderer's device (the one that can present) differs.
