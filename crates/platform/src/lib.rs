@@ -16,6 +16,6 @@ mod app;
 mod input;
 mod window;
 
-pub use app::{App, Frame, FrameOutcome, run};
+pub use app::{App, Frame, FrameOutcome, Pacing, run};
 pub use input::{InputState, Key, MouseButton};
 pub use window::{PlatformError, Window, WindowConfig};

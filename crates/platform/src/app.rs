@@ -108,6 +108,22 @@ pub enum FrameOutcome {
     Exit,
 }
 
+/// Who paced the frame that just ended ([`App::pace`]).
+///
+/// The platform's own limiter waits until `1 / WindowConfig::max_frame_rate` after a frame
+/// started before it starts the next one. An app that paces itself (a latency-reduction
+/// sleep such as Reflex or Anti-Lag, ADR-0021 §6b) has already waited the right amount when
+/// `pace` returns, so a second wait would only add latency: one limiter, not two.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Pacing {
+    /// The platform limiter paces the next frame, as without the hook.
+    #[default]
+    Platform,
+    /// The app paced this frame itself: the next frame is due at once.
+    External,
+}
+
 /// An application driven by the platform loop.
 ///
 /// `on_start` is called every time a window becomes available (including after a resume),
@@ -123,6 +139,18 @@ pub trait App {
     /// Return [`FrameOutcome::Exit`] to close the app cleanly (menu quit, `Escape` during
     /// development, a scripted test run).
     fn on_frame(&mut self, frame: &mut Frame<'_>) -> FrameOutcome;
+
+    /// Called once per frame after [`App::on_frame`] returned (so after the frame's present),
+    /// and before the platform gathers the next frame's input.
+    ///
+    /// A latency-reduction sleep belongs here: input that arrives during it is queued by the
+    /// OS and delivered before the next `on_frame`, which therefore samples the freshest
+    /// input (ADR-0021 §6b). Return [`Pacing::External`] when this call paced the frame, so
+    /// the platform's frame limiter stands down for it; the default does nothing and returns
+    /// [`Pacing::Platform`]. Not called for the frame that exits.
+    fn pace(&mut self) -> Pacing {
+        Pacing::Platform
+    }
 
     /// Called when the window's physical size changes.
     fn on_resize(&mut self, size: [u32; 2]) {
@@ -167,6 +195,8 @@ struct Runner<A: App> {
     frame_interval: Option<Duration>,
     last_frame: Instant,
     next_frame: Instant,
+    /// What the app's [`App::pace`] said for the latest frame.
+    pacing: Pacing,
     elapsed_secs: f64,
     error: Option<PlatformError>,
 }
@@ -191,6 +221,7 @@ impl<A: App> Runner<A> {
             frame_interval,
             last_frame: now,
             next_frame: now,
+            pacing: Pacing::Platform,
             elapsed_secs: 0.0,
             error: None,
         }
@@ -219,10 +250,14 @@ impl<A: App> Runner<A> {
         };
         let outcome = self.app.on_frame(&mut frame);
         self.input.clear_edges();
-        self.next_frame = self.frame_interval.map_or(now, |interval| now + interval);
         if outcome == FrameOutcome::Exit {
             event_loop.exit();
+            return;
         }
+        // ADR-0021 §6b: the app's latency sleep runs after this frame's present and before
+        // the next frame's input is gathered.
+        self.pacing = self.app.pace();
+        self.next_frame = next_frame(now, self.frame_interval, self.pacing);
     }
 }
 
@@ -318,14 +353,72 @@ impl<A: App> ApplicationHandler for Runner<A> {
         let now = Instant::now();
         if now >= self.next_frame {
             window.request_redraw();
-            match self.frame_interval {
-                Some(interval) => {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(now + interval));
-                }
+            match due_wait(now, self.frame_interval, self.pacing) {
+                Some(until) => event_loop.set_control_flow(ControlFlow::WaitUntil(until)),
                 None => event_loop.set_control_flow(ControlFlow::Poll),
             }
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
         }
+    }
+}
+
+/// When the frame after one that started at `started` is due: one interval later under the
+/// platform limiter, at once when the app paced the frame itself or there is no limit.
+fn next_frame(started: Instant, interval: Option<Duration>, pacing: Pacing) -> Instant {
+    match (pacing, interval) {
+        (Pacing::Platform, Some(interval)) => started + interval,
+        _ => started,
+    }
+}
+
+/// How long the loop may wait after requesting a redraw at `now`: until the limiter's next
+/// slot, or not at all (`None`, poll) when the app paces itself or there is no limit.
+fn due_wait(now: Instant, interval: Option<Duration>, pacing: Pacing) -> Option<Instant> {
+    match (pacing, interval) {
+        (Pacing::Platform, Some(interval)) => Some(now + interval),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pacing_defaults_to_platform() {
+        struct Plain;
+        impl App for Plain {
+            fn on_frame(&mut self, _frame: &mut Frame<'_>) -> FrameOutcome {
+                FrameOutcome::Continue
+            }
+        }
+        assert_eq!(Plain.pace(), Pacing::Platform);
+        assert_eq!(Pacing::default(), Pacing::Platform);
+    }
+
+    #[test]
+    fn platform_pacing_keeps_the_limiter() {
+        let start = Instant::now();
+        let interval = Duration::from_micros(4_167);
+        assert_eq!(
+            next_frame(start, Some(interval), Pacing::Platform),
+            start + interval
+        );
+        assert_eq!(
+            due_wait(start, Some(interval), Pacing::Platform),
+            Some(start + interval)
+        );
+        // Uncapped: due at once, polling.
+        assert_eq!(next_frame(start, None, Pacing::Platform), start);
+        assert_eq!(due_wait(start, None, Pacing::Platform), None);
+    }
+
+    #[test]
+    fn external_pacing_replaces_the_limiter() {
+        let start = Instant::now();
+        let interval = Duration::from_micros(4_167);
+        assert_eq!(next_frame(start, Some(interval), Pacing::External), start);
+        assert_eq!(due_wait(start, Some(interval), Pacing::External), None);
     }
 }

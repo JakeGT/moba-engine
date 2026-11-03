@@ -171,6 +171,10 @@ pub(crate) struct Settings {
     pub(crate) version: u32,
     /// Render path: `auto`, `tiered` or `compat` (`MOBA_RENDER_PATH` overrides; ADR-0020 §2b).
     pub(crate) render_path: String,
+    /// Latency reduction (Reflex or Anti-Lag, where the GPU has one): `off`, `on` or `boost`
+    /// (`MOBA_LATENCY` overrides; ADR-0021 §6b). On by default; while on it replaces the
+    /// frame limiter.
+    pub(crate) latency: String,
     pub(crate) audio_volume: f32,
     pub(crate) audio_mute: bool,
     pub(crate) camera_sensitivity: f32,
@@ -201,6 +205,7 @@ impl Default for Settings {
             quality: String::from(QUALITY_AUTO),
             version: SETTINGS_VERSION,
             render_path: String::from("auto"),
+            latency: String::from(moba_render::LatencySetting::default().name()),
             audio_volume: 0.7,
             audio_mute: false,
             camera_sensitivity: 1.0,
@@ -424,6 +429,12 @@ impl Settings {
         moba_render::PathChoice::parse(&self.render_path).unwrap_or_default()
     }
 
+    /// The configured latency setting (validated by [`Self::sanitize`]).
+    #[must_use]
+    pub(crate) fn latency(&self) -> moba_render::LatencySetting {
+        moba_render::LatencySetting::parse(&self.latency).unwrap_or_default()
+    }
+
     /// The configured team palette (validated by [`Self::sanitize`]).
     #[must_use]
     pub(crate) fn team_palette(&self) -> crate::hud::theme::TeamPalette {
@@ -455,6 +466,13 @@ impl Settings {
                 self.render_path
             ));
             self.render_path = String::from("auto");
+        }
+        if moba_render::LatencySetting::parse(&self.latency).is_none() {
+            warnings.push(format!(
+                "settings: unknown latency {:?} (off/on/boost); using on",
+                self.latency
+            ));
+            self.latency = String::from(moba_render::LatencySetting::default().name());
         }
         if !self.ui_scale.is_finite() {
             self.ui_scale = 1.0;
@@ -665,6 +683,23 @@ mod tests {
         let text = toml::to_string_pretty(&old).expect("serialise");
         let again: Settings = toml::from_str(&text).expect("round trip");
         assert_eq!(again.version, 0);
+    }
+
+    #[test]
+    fn latency_defaults_on_and_validates() {
+        use moba_render::LatencySetting;
+        // ADR-0021 Q5: on by default, boost off; a file without the key gets the default.
+        assert_eq!(Settings::default().latency(), LatencySetting::On);
+        let old: Settings = toml::from_str("settings_version = 1").expect("settings");
+        assert_eq!(old.latency(), LatencySetting::On);
+        let set: Settings = toml::from_str("latency = \"boost\"").expect("settings");
+        assert_eq!(set.latency(), LatencySetting::Boost);
+        let mut wrong = Settings {
+            latency: String::from("max"),
+            ..Settings::default()
+        };
+        assert_eq!(wrong.sanitize().len(), 1);
+        assert_eq!(wrong.latency, "on");
     }
 
     #[test]

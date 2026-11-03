@@ -34,7 +34,7 @@ use crate::caps::{DeviceCapabilities, RenderPath};
 
 #[cfg(any(feature = "fsr3", feature = "fsr4"))]
 mod fsr;
-mod latency;
+pub(crate) mod latency;
 // NGX ships Linux and Windows libraries only; on Apple targets `dlss` is a probe that always
 // says so (see `ngx_unavailable`).
 #[cfg(all(feature = "dlss", not(target_vendor = "apple")))]
@@ -50,7 +50,7 @@ mod streamline;
 #[cfg(feature = "xess")]
 mod xess;
 
-pub use latency::LatencyMode;
+pub use latency::{LatencyFrame, LatencyMarker, LatencyMode, LatencySetting};
 
 /// A part of the frame that a vendor back end can take over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

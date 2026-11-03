@@ -161,6 +161,28 @@ the semver check):
   - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
     `auto`, so an A/B between the paths stays on one GPU. The caps types are
     `#[non_exhaustive]`.
+- **Latency: Reflex and Anti-Lag (ADR-0021 §6 and amendment 1, N1d;
+  [perf/0030](docs/perf/0030-latency.md)):**
+  - On a tiered device with `VK_NV_low_latency2` (Reflex) or native `VK_AMD_anti_lag`, the
+    renderer runs a latency back end: Reflex creates its swapchains for low latency, sets the
+    sleep mode, chains present IDs on the frame's submits and present, sets the frame markers
+    and reads `vkGetLatencyTimingsNV`; Anti-Lag calls `vkAntiLagUpdateAMD` at its `INPUT` and
+    `PRESENT` stages. Only one of the two is ever enabled (Reflex first). A device with
+    neither, and every Compat device, logs one `[latency] unavailable` line and is unchanged.
+  - `moba_platform::App::pace() -> Pacing` (`Platform`, the default, or `External`) runs after
+    each frame's present and before the next frame's input. The client sleeps there through
+    `Renderer::latency_sleep`; while the sleep paces the frames it replaces the platform's
+    frame limiter (240 fps becomes Reflex's `minimumIntervalUs` or Anti-Lag's `maxFPS`).
+  - New public API: `Pacing`, `App::pace`, `LatencySetting`, `LatencyMarker`, `LatencyFrame`,
+    `Renderer::{latency_sleep, latency_marker, latency_report}` and
+    `RenderConfig::{latency, frame_rate_limit}` (all additive; the types are
+    `#[non_exhaustive]`).
+  - The `latency` setting and `MOBA_LATENCY=off|on|boost`: on by default, boost off. The frame
+    log adds `latency=`, `latency_setting=`, `paced_frames=` and, with Reflex, the
+    `latency_sim/submit/present/gpu` and `pc_latency` percentiles.
+  - Measured on the RTX 5070 Ti: validation-clean, frame pacing unchanged, and no PC-latency
+    gain on that desktop (amendment 1, item 8). Anti-Lag is untested at run time until Mesa
+    26.3 (blocked).
 - **Vendor SDK cargo features (ADR-0020 §6 and amendment 6, N0.6;
   [perf/0029](docs/perf/0029-vendor-sdks.md), [dev/vendor-sdks.md](docs/dev/vendor-sdks.md)):**
   - New `moba-render` features, forwarded by `moba-client` and `moba-engine`: `dlss`,

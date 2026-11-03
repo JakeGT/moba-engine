@@ -768,6 +768,19 @@ impl Semaphore {
         let handle = unsafe { device.create_semaphore(&create_info, None) }?;
         Ok(Self { device, handle })
     }
+
+    /// A timeline semaphore starting at 0. The device must enable `timelineSemaphore` (the
+    /// tiered path does).
+    pub(crate) fn timeline(device: ash::Device) -> RenderResult<Self> {
+        let mut kind = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let create_info = vk::SemaphoreCreateInfo::default().push(&mut kind);
+        // SAFETY: the device is live, enables `timelineSemaphore`, and the create info's chain
+        // (`kind`) outlives the call.
+        let handle = unsafe { device.create_semaphore(&create_info, None) }?;
+        Ok(Self { device, handle })
+    }
 }
 
 impl Fence {
