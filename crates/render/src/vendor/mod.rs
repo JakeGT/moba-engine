@@ -34,7 +34,7 @@ use crate::caps::{DeviceCapabilities, RenderPath};
 
 #[cfg(any(feature = "fsr3", feature = "fsr4"))]
 mod fsr;
-mod latency;
+pub(crate) mod latency;
 // NGX ships Linux and Windows libraries only; on Apple targets `dlss` is a probe that always
 // says so (see `ngx_unavailable`).
 #[cfg(all(feature = "dlss", not(target_vendor = "apple")))]
@@ -50,7 +50,7 @@ mod streamline;
 #[cfg(feature = "xess")]
 mod xess;
 
-pub use latency::LatencyMode;
+pub use latency::{LatencyFrame, LatencyMarker, LatencyMode, LatencySetting};
 
 /// A part of the frame that a vendor back end can take over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -483,9 +483,9 @@ fn candidates() -> Vec<Candidate<Probe>> {
 }
 
 /// Selects the vendor back ends for a created device and logs the result (one line per
-/// fallback, then a summary; nothing in the open build).
-pub(crate) fn select(context: &ProbeContext<'_>) -> Selection {
-    let latency = latency::detect(context.device_extensions);
+/// fallback, then a summary; nothing in the open build). `latency` is the latency back end
+/// that runs (`latency::create`), so the summary and [`Selection::backends`] agree with it.
+pub(crate) fn select(context: &ProbeContext<'_>, latency: LatencyMode) -> Selection {
     let selection = resolve(&candidates(), context, latency);
     for line in selection.lines() {
         eprintln!("{line}");

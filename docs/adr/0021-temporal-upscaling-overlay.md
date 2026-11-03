@@ -995,6 +995,92 @@ own; wiring it behind N1a's `TemporalUpscaler` follows N1a. How it is built is i
   must also check that the jitter handed to the upscalers is in FSR's convention, so the two
   agree.
 
+### Amendment 3 (2026-11-02, N1d): latency as built
+
+Recorded in the N1d PR (`feat/n1d-latency`), with the evidence in
+[perf/0032](../perf/0032-latency.md). §6 holds, with these departures and clarifications:
+
+1. **The setting is `LatencySetting`, not `LatencyMode`.** N0.6 had already made
+   `LatencyMode { Reflex, AntiLag, None }` public as the enabled back end
+   (`VendorBackends::latency`, which now reports the back end that runs), so the player's
+   choice is a new `LatencySetting { Off, On (default), Boost }`. The API under
+   [Consequences](#consequences) also gains what its three methods need:
+   `LatencyMarker` (the four app-side markers; the renderer sets the render-submit and present
+   ones itself), `LatencyFrame` (one frame of `vkGetLatencyTimingsNV`, in microseconds) and
+   `RenderConfig::{latency, frame_rate_limit}` (`frame_rate_limit` defaults to 240, the
+   platform's default, so a latency back end never runs uncapped by accident).
+   `Renderer::latency_sleep` returns `bool` (whether it paced the frame), which the client maps
+   to `Pacing::External`; `moba-render` does not name `moba_platform::Pacing`. The client has a
+   `latency` setting (`off`/`on`/`boost`, default `on`) that `MOBA_LATENCY` overrides, and
+   `MOBA_MAX_FPS=<n>` (default 240, 0 uncapped) sets the limit for measurements.
+2. **Only one latency extension is enabled.** The §1e table (ADR-0020) has declared both
+   extensions before `vkCreateDevice` since N0.2, so N1d adds no request of its own; it adds
+   the rule that a device offering `VK_NV_low_latency2` never also enables `VK_AMD_anti_lag`
+   (§6a's "NVIDIA's wins", now applied at creation rather than only at selection). On this
+   machine the Radeon's Mesa 26.2 offers `VK_AMD_anti_lag` only through the implicit
+   `VK_LAYER_MESA_anti_lag`, which stays off unless `ENABLE_LAYER_MESA_ANTI_LAG=1` is set, so
+   by default the Radeon enables no latency extension and logs `[latency] unavailable`; the
+   back end does not depend on the layer (item 10). Compat still enables neither extension.
+3. **What `off` means.** Reflex off keeps the swapchain's latency mode, the markers and the
+   timings (with `lowLatencyMode` false and no sleep), so the frame log can compare off with
+   on; the platform limiter paces the frames. Anti-Lag off calls `vkAntiLagUpdateAMD` with
+   mode `OFF` once per frame, so a driver default cannot turn it on. Boost sets
+   `lowLatencyBoost`; Anti-Lag has no boost and treats it as on.
+4. **Frame IDs.** The ID of the frame being built is one more than the last presented one's.
+   A frame skipped before submission (a minimised window, an out-of-date swapchain) reuses
+   it, and its `SIMULATION_START` is sent only once; the ID advances with every
+   `vkQueuePresentKHR` call, failed or not, so present IDs always grow. `VkPresentIdKHR` is
+   chained only when Reflex runs, not on every tiered device. Anti-Lag sends its `PRESENT`
+   stage only for a frame whose `INPUT` stage it sent.
+5. **Submits and markers.** The renderer submits frames with `vkQueueSubmit` (not
+   `vkQueueSubmit2`), in two batches; both carry `VkLatencySubmissionPresentIdNV`. The one-shot
+   upload submits run at load time, outside any frame (the R8 upload lock), and carry none.
+   `RENDERSUBMIT_START` is set after the frame-slot fence, the acquire and the image's fence,
+   so a frame blocked on the swapchain does not count as render-thread work (the first draft
+   set it before them, and with vsync the render-submit span was the whole 6 ms frame).
+6. **Who paces.** The sleep is skipped, returning `false` so the platform limiter paces, when
+   the latest frame was not submitted (a minimised window would otherwise spin). A frame the
+   sleep let through in less than 90 % of the limit's interval also returns `false`, so the
+   platform limiter waits out the rest: the 240 fps cap never rests on the driver honouring
+   `minimumIntervalUs` or `maxFPS` alone. The interval runs from one sleep's end to the next;
+   after a frame the platform limiter paced, it restarts at the next `SIMULATION_START`, so
+   the platform's wait is not counted as the next frame's.
+   While the app paces, the platform loop still sleeps one interval between redraw requests,
+   so a window that draws nothing does not spin.
+7. **A failing sleep.** A Reflex sleep that fails, or whose semaphore does not signal within
+   250 ms, stops sleeping with one log line and resumes on the next swapchain, at most three
+   times. A timed-out sleep still owes its signal: before the swapchain is replaced or the
+   renderer dropped, the renderer waits up to 100 ms for it, and otherwise leaks that
+   semaphore (making a new one for the next swapchain) rather than destroying it under a
+   pending signal. On the renderer's drop the device is then destroyed with the leaked
+   semaphore alive (`VUID-vkDestroyDevice-device-05137`), accepted only in that case.
+8. **Timings.** The frame log's `pc_latency_*` is simulation start to the end of the frame's
+   GPU work; the extension reports no scan-out time, so the compositor's and the display's
+   share is invisible (`VK_KHR_present_wait` timestamps would close that; not done). Every
+   `vkGetLatencyTimingsNV` call starts from fresh structures: NVIDIA 615.78.08 writes them back
+   whole, and passing them again failed `VUID-VkLatencyTimingsFrameReportNV-sType-sType`. A
+   frame whose report never completes (retried on a new swapchain) is skipped rather than
+   holding back the frames after it. Only frames past the frame log's warm-up are logged.
+9. **Measured gain: none on this machine (gate 7).** On the RTX 5070 Ti under KDE Wayland,
+   PC latency over the teamfight replay is the same with Reflex on and off, with vsync off
+   (5.11 vs 5.07 ms p50), with vsync on (12.88 vs 12.89 ms), and uncapped and GPU-bound at
+   2560×1380 (GPU about 88 % busy: 4.21 vs 4.27 ms, inside the round-to-round spread). The driver's
+   sleep enforces `minimumIntervalUs` and otherwise returns at once, also after the
+   render-submit marker moved (item 5). The render call still blocks for nearly the whole
+   frame before its submit (with vsync, in `vkAcquireNextImageKHR`; GPU-bound, in the fence
+   and swapchain waits, not split further), and the frame's GPU work waits on the image's
+   acquire semaphore: queueing in the swapchain, which the extension does not manage. So §6b's expected gain ("the render queue") is **not demonstrated**, and
+   on-by-default rests on the maintainer's Q5 answer, not on a measured benefit. The follow-up
+   is an X11 or direct-scan-out session and the swapchain's own queueing (image count, present
+   mode, present wait). Pacing holds with the platform limiter replaced (perf/0032).
+10. **Anti-Lag is not run-time tested.** Native `VK_AMD_anti_lag` needs Mesa 26.3 (RADV); the
+    machine's Radeon 610M runs Mesa 26.2.5, which only has the layer, so gate 7's Anti-Lag
+    smoke is **blocked** on a Mesa 26.3 install (and its numbers on an AMD card). With the
+    layer forced on (`ENABLE_LAYER_MESA_ANTI_LAG=1`) the Anti-Lag back end runs on the Radeon
+    (selected, 299 of 300 frames paced by `vkAntiLagUpdateAMD`), but validation then reports
+    `VUID-vkCmdWriteTimestamp-None-00830` on the layer's own timestamp queries (not the
+    renderer's), so that run is a smoke of the code path, not the gate.
+
 ## Sources
 
 All accessed 2026-10-31.
