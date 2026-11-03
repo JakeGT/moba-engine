@@ -956,6 +956,12 @@ from the text above, or the text left a choice open, this is what was done and w
 15. **`maxColorAttachments ≥ 5`** joins the tiered admission limits. OIT on the temporal path
     writes HDR, its two accumulation targets, motion and the reactive mask in one pass, one
     more than Vulkan guarantees. Every recorded device reports 8.
+16. **`perf-gate` stays report-only on Tiered after N1a.** §7 and gate 6 have tiered budgets
+    fail "from N1", with baselines re-recorded per `(gpu, path, tier)` and the upscaler named.
+    N1a is the first of four N1 parts and N1b–N1d each change what a tiered frame runs, so
+    the flip, and the `[tiered.<tier>]` tables in `tests/perf/baseline.toml`, land with the
+    last N1 part to merge. N1a's RTX medians are in `docs/perf/0031-n1a-temporal.md` as the
+    reference those tables start from.
 
 **How the gates were made concrete:**
 

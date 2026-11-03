@@ -104,7 +104,7 @@ impl GhostProbeReport {
             .fold(0.0, f32::max)
     }
 
-    /// Every measured frame has a wake and stays within [`GHOST_BOUND`].
+    /// Every measured frame has a wake and stays within `GHOST_BOUND` (3 %).
     #[must_use]
     pub fn passed(&self) -> bool {
         self.frames.len() == GHOST_FRAMES

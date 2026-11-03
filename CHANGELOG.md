@@ -167,7 +167,8 @@ the semver check):
     displayed image, and the enemy-telegraph particles; none of it enters a history.
     Telegraphs lose bloom, the grade and the screen effects and gain a fixed soft halo (Q4).
     Hull outlines are Compat-only. `glow_display_reference` is the CPU twin.
-  - MSAA leaves the tiered presets; `independentBlend` joins the tiered required features.
+  - MSAA leaves the tiered presets; `independentBlend` joins the tiered required features and
+    `maxColorAttachments ≥ 5` the required limits.
   - **Probes and goldens:** `MOBA_MOTION_PROBE=1` (`scripts/motion-probe.sh`, motion within
     1/64 px of a CPU twin), `MOBA_GHOST_PROBE=1` (`scripts/ghost-probe.sh`),
     `scripts/overlay-invariance.sh`, `scripts/outline-probe.sh` on Tiered and
