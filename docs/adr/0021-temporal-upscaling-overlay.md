@@ -1072,8 +1072,10 @@ from the text above, or the text left a choice open, this is what was done and w
 16. **`perf-gate` on Tiered after N1a: budgets fail, baselines report.** §7 and gate 6 have
     tiered budgets fail "from N1", with baselines re-recorded per `(gpu, path, tier)` and the
     upscaler named. N1a is one of four N1 parts and each changes what a tiered frame runs
-    (N1b stage 1 and N1d merged before it; N1b stage 2 and N1c follow), so the gate is split. **Absolute per-tier budget breaches fail now** (§7's
-    `gpu_total_p95_ms` and the replay's render p95, on every tier). The `[tiered.low]`,
+    (N1b stage 1 and N1d merged before it; N1b stage 2 and N1c follow), so the gate is
+    split. **Absolute per-tier budget breaches fail now** (§7's `gpu_total_p95_ms` and the
+    VRAM peak, on every tier; there is no absolute render-p95 budget, and `render_p95_ms`
+    is only a baseline comparison). The `[tiered.low]`,
     `[tiered.high]` and `[tiered.ultra]` regression baselines in `tests/perf/baseline.toml`
     are committed now from N1a's RTX medians (perf/0031) and compared **report-only**
     (`TIERED_BASELINE_FAILS` in `perf-gate`). Each later N1 part re-records them; whichever
