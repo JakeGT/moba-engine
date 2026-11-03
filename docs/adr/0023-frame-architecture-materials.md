@@ -1024,8 +1024,10 @@ Recorded in the N2a PR (`feat/n2a-gbuffer-reversed-z`), the first of the six PRs
    (`crates/render/src/gbuffer.rs`) is what the tests use. `gbuffer-smoke` checks all three
    (item 11). The GLSL-vertex/Slang-fragment interface test in gate 1 therefore moves to N2c,
    with the first Slang fragment stage. Materials still bind through today's per-draw sets, so
-   **the tiered pipeline count rises** in N2a instead of dropping (§1e's "about 10" is N2c's).
-   The count before and after is in perf/0035.
+   **the tiered pipeline count rises** in N2a, 46 → 48 on the RTX replay (the textured unit
+   and skinned G-buffer variants), instead of dropping; §1e's "about 10" is N2c's. The counts
+   are in perf/0035, with the G-buffer's cost (about +0.045 ms in the `prepass` lane on the
+   RTX 5070 Ti) and reversed-Z's (none measurable).
 6. **No `hdr` attachment in the G-buffer pass** (departs from §1a and §1e). Emissive and unlit
    radiance still come from the forward `scene`, which writes `hdr`. The pass binds motion and
    `gb0`–`gb2` (attachments 0–3), plus the outline IDs (attachment 4) when screen-space

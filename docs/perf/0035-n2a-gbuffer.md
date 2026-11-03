@@ -113,6 +113,46 @@ They were captured on the RTX with validation required.
 
 ## Gate 7: performance
 
-*Pending.* The RTX 5070 Ti A/B (three interleaved rounds against origin/main, Tiered
-Low/High/Ultra and Compat) is queued behind another measurement on the same GPU and will
-be added to this PR.
+RTX 5070 Ti, the teamfight replay (`MOBA_WARMUP_TICKS=330`) at 1920×1080, vsync off, the 240 fps
+limit, validation off, the pipeline cache off, 3000 frames per run (the log covers the last
+2940). Three rounds, each running every configuration on origin/main and then the branch, run
+under the shared GPU lock with no other GPU client running. Medians of the three rounds, in ms.
+A first A/B overlapped another agent's measurement on the same GPU and was discarded.
+
+| Configuration | GPU total p50 | GPU total p95 | `prepass` p50 | `scene` p50 | `temporal` p50 | Frame p95 |
+|---|---|---|---|---|---|---|
+| Tiered Low, main | 0.539 | 0.547 | 0.022 | 0.083 | 0.144 | 4.239 |
+| Tiered Low, branch | 0.585 | 0.595 | 0.065 | 0.081 | 0.146 | 4.240 |
+| Tiered High, main | 0.588 | 0.597 | 0.026 | 0.095 | 0.144 | 4.238 |
+| Tiered High, branch | 0.638 | 0.648 | 0.073 | 0.093 | 0.146 | 4.240 |
+| Tiered Ultra, main | 0.588 | 0.597 | 0.025 | 0.095 | 0.144 | 4.241 |
+| Tiered Ultra, branch | 0.638 | 0.648 | 0.073 | 0.092 | 0.146 | 4.239 |
+| Compat Ultra, main | 0.715 | 0.727 | 0.068 | 0.275 | — | 4.193 |
+| Compat Ultra, branch | 0.715 | 0.727 | 0.068 | 0.276 | — | 4.193 |
+
+- **Reversed-Z costs nothing measurable.** The `scene` lane, which runs the same draws with
+  the reversed compare, is 0.001–0.003 ms faster. `temporal` (TAAU's reversed depth
+  linearisation) is 0.002 ms slower. Both are at the noise floor.
+- **The G-buffer writes cost about +0.045 ms in the `prepass` lane** (0.022 → 0.065 at Low,
+  0.025 → 0.073 at High and Ultra), which is all of the +0.046–0.051 ms in the GPU total.
+  The pass now writes 12 more bytes per pixel at render resolution and binds the textured
+  materials. The frame time does not move: these frames are limited at 240 fps.
+- **perf-gate** against `tests/perf/baseline.toml` passes every branch log: Tiered High and
+  Ultra at 0.648 ms against an allowed 0.747 and 0.749, Low at 0.595 against 0.689, and Compat
+  Ultra at 0.727 ms against an allowed 0.830. No pacing or run-integrity failure. Tiered
+  baselines are still report-only (`TIERED_BASELINE_FAILS`), but no tiered log breaches one.
+- **`locked_uploads=0`, `locked_pipelines=0` and `frames_dropped=0`** in every run.
+- **Pipelines:**
+  - On the RTX the replay builds **46 tiered pipelines on main and 48 on the branch**.
+    Compat stays at 42.
+  - On lavapipe at 640×360 High it is 45 → 47 with TAAU and 53 → 55 with FSR 3.1.
+  - The two new pipelines are the textured unit and skinned G-buffer variants, because the
+    textured materials now feed the G-buffer.
+  - §1e's drop to about one pipeline per vertex format comes with N2c's bindless materials
+    (amendment 1 item 5).
+- **VRAM against §1b:**
+  - `targets_mb` rises by **11.2–11.3 MB** at every tiered preset (132.0 → 143.2 at Low and
+    180.5 → 191.8 at High and Ultra), and `vram_peak_mb` by 11.3 MB.
+  - §1b predicts 11.1 MB at the 1280×720 ceiling of a 1080p output (12 B/px × 0.92 M px).
+  - On lavapipe the same growth is 1.2 MB at 427×240 and 2.7 MB at 640×360. Compat does not
+    change.
