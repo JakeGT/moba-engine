@@ -1968,7 +1968,8 @@ fn build_pipelines(
                     fragment: fragment.handle(),
                     formats: &[format],
                     blends: &[Blend::Premultiplied],
-                    depth_format: crate::frame_graph::OVERLAY_DEPTH_FORMAT,
+                    // The overlay depth has the main depth's format.
+                    depth_format,
                     mesh_input: false,
                 },
             )?)

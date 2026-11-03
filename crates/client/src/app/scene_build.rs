@@ -79,15 +79,47 @@ impl HeroDraw {
     };
 }
 
+/// What the temporal history continues across (ADR-0021 §2c): the bound map (its bind
+/// generation) and, for a spectator, the followed hero. [`Self::cut`] reports a change, which
+/// the frame passes on as `Scene::history_reset`. The first frame is not a cut: the renderer
+/// starts every history fresh anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ViewContinuity {
+    last: Option<(u32, Option<(u8, u8)>)>,
+}
+
+impl ViewContinuity {
+    /// Whether this frame's map generation or followed hero differs from the last frame's.
+    pub(crate) fn cut(&mut self, map_generation: u32, followed: Option<(u8, u8)>) -> bool {
+        let now = (map_generation, followed);
+        let cut = self.last.is_some_and(|last| last != now);
+        self.last = Some(now);
+        cut
+    }
+}
+
+/// A unit part's motion key (ADR-0021 §2c, amendment 2 item 10): `net_id << 16 | part`. Living
+/// units number their parts from 1 (so no key is 0, the static key) up to
+/// [`MAX_UNIT_PARTS`]; corpses use [`CORPSE_PARTS`] and up, so a corpse never shares a key
+/// with a living unit that reuses its `net_id`.
+pub(crate) const fn motion_key(net_id: u16, part: u16) -> u32 {
+    ((net_id as u32) << 16) | part as u32
+}
+
+/// Parts a living unit keys distinctly; any further instance shares the last key (no unit
+/// draws anywhere near this many).
+pub(crate) const MAX_UNIT_PARTS: u16 = 0x7FFF;
+/// The first corpse part: a dying minion's key is `motion_key(net_id, CORPSE_PARTS | slot)`.
+pub(crate) const CORPSE_PARTS: u16 = 0x8000;
+
 /// Gives a unit's instances (`units`, everything pushed for it this frame) their motion keys
-/// (ADR-0021 §2c): `net_id << 8 | part`, parts numbered from 1 so no key is 0 (static, map
-/// instances). `reset` starts a new history (a respawn, recall or blink teleport), so the
-/// jump is not drawn as motion. Presentation only: the keys are read from `net_id`s the
-/// client already has (§8).
+/// ([`motion_key`], parts numbered from 1). `reset` starts a new history (a respawn, recall
+/// or blink teleport), so the jump is not drawn as motion. Presentation only: the keys are
+/// read from `net_id`s the client already has (§8).
 pub(crate) fn key_motion(units: &mut [UnitInstance], net_id: u16, reset: bool) {
     for (part, unit) in units.iter_mut().enumerate() {
-        let part = u32::try_from(part + 1).unwrap_or(u32::MAX).min(0xFF);
-        *unit = unit.with_motion((u32::from(net_id) << 8) | part, reset);
+        let part = u16::try_from(part + 1).map_or(MAX_UNIT_PARTS, |part| part.min(MAX_UNIT_PARTS));
+        *unit = unit.with_motion(motion_key(net_id, part), reset);
     }
 }
 
@@ -925,6 +957,30 @@ fn network_camera_unpanned(network: &NetworkView, aspect: f32, elapsed: f32) -> 
 #[cfg(test)]
 mod tests {
     use moba_core::FixVec2;
+
+    /// ADR-0021 §2c: a map change or a spectator switch cuts the history; nothing else does.
+    #[test]
+    fn map_changes_and_spectator_switches_cut_the_history() {
+        let mut view = super::ViewContinuity::default();
+        assert!(!view.cut(1, None), "the first frame is not a cut");
+        assert!(!view.cut(1, None));
+        assert!(view.cut(2, None), "a new map");
+        assert!(!view.cut(2, None));
+        assert!(view.cut(2, Some((0, 1))), "spectating a hero");
+        assert!(!view.cut(2, Some((0, 1))));
+        assert!(view.cut(2, Some((1, 1))), "another hero");
+    }
+
+    /// Living parts and corpses never share a motion key, and no key is the static 0.
+    #[test]
+    fn motion_keys_keep_parts_and_corpses_apart() {
+        use super::{CORPSE_PARTS, MAX_UNIT_PARTS, motion_key};
+        assert_ne!(motion_key(0, 1), 0);
+        assert_eq!(motion_key(7, 3), (7 << 16) | 3);
+        const { assert!(MAX_UNIT_PARTS < CORPSE_PARTS) };
+        assert_ne!(motion_key(7, MAX_UNIT_PARTS), motion_key(7, CORPSE_PARTS));
+        assert_ne!(motion_key(7, 1), motion_key(8, 1));
+    }
     use moba_game::Team;
     use moba_render::{MeshData, MeshId, UnitInstance};
 

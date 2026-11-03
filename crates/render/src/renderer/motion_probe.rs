@@ -345,6 +345,11 @@ impl Renderer {
                 "temporal anti-aliasing is off: no motion target",
             ));
         }
+        if !self.frame_spec.readback {
+            return Err(probe_error(
+                "the renderer was created without RenderConfig::readback",
+            ));
+        }
         let (positions, normals, indices) = cube_mesh();
         let plain = MeshData::new(positions.clone(), normals.clone(), indices.clone())
             .map_err(|_| probe_error("cube mesh"))?;

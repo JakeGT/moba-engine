@@ -2,7 +2,7 @@
 //! presented frame, so the prepass can write per-object motion vectors.
 //!
 //! The client gives every unit part a [`UnitInstance::motion_key`](crate::UnitInstance)
-//! (`net_id << 8 | part`; 0 for map instances, which have no history) and sets
+//! (`net_id << 16 | part`; 0 for map instances, which have no history) and sets
 //! `motion_reset` on a unit's first drawn frame and across teleports. The renderer records the
 //! transform, joint matrices and VAT pose it **drew** for each key, and reads them back the
 //! next frame: the drawn path is what the reprojection needs, whatever the frame rate or the
@@ -19,8 +19,11 @@
 use moba_assets::{JointMatrix, VatPose};
 use moba_core::math::Mat4;
 
-/// Entries per table (ADR-0021 §2c). Keys beyond it get no history (camera-only motion).
+/// Slots per table (ADR-0021 §2c).
 pub(crate) const MOTION_HISTORY_CAPACITY: usize = 4096;
+/// Keys recorded per frame: the table is never filled past 3/4, so a lookup (hit or miss)
+/// probes a short run. Keys beyond it get no history (camera-only motion).
+pub(crate) const MOTION_HISTORY_KEYS: usize = MOTION_HISTORY_CAPACITY / 4 * 3;
 /// A keyed instance whose drawn position moved further than this in one frame is treated as
 /// reset: no interpolated move can do that (ADR-0021 §2c).
 pub(crate) const TELEPORT_GUARD_METRES: f32 = 20.0;
@@ -99,7 +102,7 @@ impl Frame {
 
 const _: () = assert!(MOTION_HISTORY_CAPACITY.is_power_of_two());
 
-/// Fibonacci hashing of a motion key (`net_id << 8 | part` keeps the part in the low bits).
+/// Fibonacci hashing of a motion key (`net_id << 16 | part` keeps the part in the low bits).
 fn hash(key: u32) -> usize {
     (key.wrapping_mul(0x9E37_79B9) >> 20) as usize
 }
@@ -164,8 +167,8 @@ impl MotionHistory {
     }
 
     /// Records what `key` drew this frame (`joints`: its joint matrices, empty when
-    /// unskinned). Key 0, a full table and a full joint store are skipped: the key then has
-    /// no history (or no joint history) next frame.
+    /// unskinned). Key 0, a new key past [`MOTION_HISTORY_KEYS`] and a full joint store are
+    /// skipped: the key then has no history (or no joint history) next frame.
     pub(crate) fn record(
         &mut self,
         key: u32,
@@ -180,6 +183,10 @@ impl MotionHistory {
         let Some(index) = frame.slot(key) else {
             return;
         };
+        let new = frame.entries[index].stamp != frame.stamp;
+        if new && frame.len >= MOTION_HISTORY_KEYS {
+            return;
+        }
         let (first_joint, joint_count) =
             if frame.joints.len() + joints.len() <= frame.joints.capacity() {
                 let first = frame.joints.len();
@@ -192,7 +199,7 @@ impl MotionHistory {
                 (0, 0)
             };
         let entry = &mut frame.entries[index];
-        if entry.stamp != frame.stamp {
+        if new {
             frame.len += 1;
         }
         *entry = Entry {
@@ -287,18 +294,25 @@ mod tests {
     }
 
     #[test]
-    fn the_table_holds_its_capacity_and_no_more() {
+    fn the_table_holds_three_quarters_of_its_slots_and_no_more() {
         let mut history = MotionHistory::new(0);
         history.begin_frame(false);
         for key in 1..=(MOTION_HISTORY_CAPACITY as u32 + 10) {
-            history.record(key << 8, at(0.0), pose(), &[]);
+            history.record(key << 16, at(0.0), pose(), &[]);
         }
-        assert_eq!(history.len(), MOTION_HISTORY_CAPACITY);
+        assert_eq!(history.len(), MOTION_HISTORY_KEYS);
         history.begin_frame(false);
         let found = (1..=MOTION_HISTORY_CAPACITY as u32)
-            .filter(|key| history.previous(key << 8, false, &at(0.0)).is_some())
+            .filter(|key| history.previous(key << 16, false, &at(0.0)).is_some())
             .count();
-        assert_eq!(found, MOTION_HISTORY_CAPACITY);
+        assert_eq!(found, MOTION_HISTORY_KEYS);
+        // The first keys are the ones kept, and a later key is a miss.
+        assert!(history.previous(1 << 16, false, &at(0.0)).is_some());
+        assert!(
+            history
+                .previous((MOTION_HISTORY_CAPACITY as u32) << 16, false, &at(0.0))
+                .is_none()
+        );
         // Re-recording a key in the same frame replaces it.
         history.record(5, at(1.0), pose(), &[]);
         history.record(5, at(2.0), pose(), &[]);

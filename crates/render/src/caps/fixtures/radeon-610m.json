@@ -296,6 +296,8 @@
   "limits": {
     "maxBoundDescriptorSets": 32,
     "maxColorAttachments": 8,
+    "maxFragmentCombinedOutputResources": 8388606,
+    "maxFragmentOutputAttachments": 8,
     "maxDescriptorSetUpdateAfterBindSampledImages": 8388606,
     "maxPerStageDescriptorSamplers": 8388606,
     "maxPerStageDescriptorUpdateAfterBindSampledImages": 8388606,

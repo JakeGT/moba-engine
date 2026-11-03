@@ -18,6 +18,11 @@ Khronos validation layer loaded. The layer printed no message.
 --json` reported it true on all three recorded devices; the synthetic files inherit it from the
 RTX dump, and every device class they stand for supports it.
 
+`maxFragmentOutputAttachments` and `maxFragmentCombinedOutputResources` (ADR-0021 amendment 2,
+item 15) were added on 2026-11-03 from `vulkan-probe --json` on the three recorded devices
+(8 and 4294967295 on the RTX, 8 and 8388606 on RADV, 8 and 104 on lavapipe); the synthetic
+files inherit the RTX values.
+
 To record a device, run `vulkan-probe --json`. Keep that device's object from the array and
 commit it here with `"source": "recorded"`. When a reference GPU arrives (#9/#127), its dump
 replaces the synthetic stand-in for its class.

@@ -154,7 +154,7 @@ mod tests {
         fn has_sharpening(&self) -> bool {
             true
         }
-        fn record(
+        unsafe fn record(
             &mut self,
             _cmd: ash::vk::CommandBuffer,
             _inputs: &super::super::UpscaleInputs,
@@ -162,6 +162,14 @@ mod tests {
         ) {
         }
         fn reset_history(&mut self) {}
+        fn resize(
+            &mut self,
+            _device: &crate::device::DeviceContext,
+            _output: Extent,
+            _max_render: Extent,
+        ) -> crate::error::RenderResult<()> {
+            Ok(())
+        }
         fn vram_bytes(&self) -> u64 {
             0
         }

@@ -949,6 +949,7 @@ impl ScenePipelines {
                 layout,
                 vat_layout,
                 environment.water,
+                depth_format,
                 skinned.is_some(),
                 vat.is_some(),
             )?)
@@ -1179,6 +1180,7 @@ impl ScenePipelines {
         layout: vk::PipelineLayout,
         vat_layout: vk::PipelineLayout,
         water_layout: vk::PipelineLayout,
+        depth_format: vk::Format,
         skinned: bool,
         vat: bool,
     ) -> RenderResult<OverlayPipelines> {
@@ -1200,7 +1202,7 @@ impl ScenePipelines {
                         vertex,
                         fragment: Some(fragment),
                         colors: &ids,
-                        depth_format: crate::frame_graph::OVERLAY_DEPTH_FORMAT,
+                        depth_format,
                         depth_write: true,
                         samples: vk::SampleCountFlags::TYPE_1,
                     },

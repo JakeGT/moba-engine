@@ -82,6 +82,12 @@ pub use ghost_probe::{GhostFrame, GhostProbeReport};
 pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport};
 
 const FRAMES_IN_FLIGHT: usize = 2;
+// ADR-0021: the temporal back end's and `exposure_linear`'s descriptor rings are rewritten one
+// set per record; longer than the frames in flight, a set is never rewritten while pending.
+const _: () = assert!(
+    crate::upscale::taau::SET_RING > FRAMES_IN_FLIGHT
+        && crate::upscale::exposure::SET_RING > FRAMES_IN_FLIGHT
+);
 // The fog-of-war ping-pong (image `f` written in frame slot `f`, the other read as history)
 // and the lighting set per frame slot that names image `f` assume exactly this many frames in
 // flight (R3a review).
@@ -205,6 +211,10 @@ pub struct RenderConfig {
     /// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): a temporal or overlay debug view on the tiered
     /// path. Default [`TemporalDebugView::Off`].
     pub debug_view: TemporalDebugView,
+    /// Adds `TRANSFER_SRC` to the temporal path's depth and motion targets so the motion
+    /// probe can read them back (ADR-0021 gate 2). Off for every normal run, so production
+    /// frames keep their usage minimal (some drivers drop compression for copy sources).
+    pub readback: bool,
 }
 
 impl Default for RenderConfig {
@@ -238,6 +248,7 @@ impl Default for RenderConfig {
             render_path: PathChoice::Auto,
             tiered_cpu_devices: false,
             debug_view: TemporalDebugView::Off,
+            readback: false,
         }
     }
 }
@@ -345,6 +356,13 @@ impl RenderConfig {
     #[must_use]
     pub fn with_tiered_cpu_devices(mut self, allow: bool) -> Self {
         self.tiered_cpu_devices = allow;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::readback`] set.
+    #[must_use]
+    pub const fn with_readback(mut self, readback: bool) -> Self {
+        self.readback = readback;
         self
     }
 
@@ -912,6 +930,7 @@ impl Renderer {
             water: full_water,
             distortion: vfx.as_ref().is_some_and(VfxPass::has_distortion),
             temporal,
+            readback: temporal && config.readback,
             overlay: tiered,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
@@ -2059,7 +2078,21 @@ impl Renderer {
             .as_ref()
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
+        let exposure_linear = self
+            .exposure_linear
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
+        // Last of the builds: the back end replaces its own pipeline only on success.
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal
+                .upscaler
+                .reload_shaders(&self.device, &self.shaders)?;
+        }
         self.scene.install_pipelines(scene);
+        if let (Some(pass), Some(pipeline)) = (self.exposure_linear.as_mut(), exposure_linear) {
+            pass.install_pipeline(pipeline);
+        }
         if let (Some(pass), Some(pipeline)) = (self.overlay.as_mut(), overlay) {
             pass.install_pipeline(pipeline);
         }
@@ -2159,6 +2192,18 @@ impl Renderer {
     #[must_use]
     pub fn last_frame_submitted(&self) -> bool {
         self.last_submitted
+    }
+
+    /// A frame recorded but not submitted (an error between the two): the temporal back end
+    /// and `exposure_linear` advanced state at record time (the upscaler's `record` contract,
+    /// ADR-0021 amendment 2 item 17), so both start over as first frames.
+    fn forget_unsubmitted(&mut self) {
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal.invalidate();
+        }
+        if let Some(pass) = self.exposure_linear.as_mut() {
+            pass.forget();
+        }
     }
 
     /// The plan variant for a capture flag, an offscreen mask and whether heat haze is in
@@ -2607,16 +2652,22 @@ impl Renderer {
             view_proj: raster_view_proj,
             eye: scene.camera.position,
         };
-        self.record_frame(
+        if let Err(error) = self.record_frame(
             command_buffers,
             frame_index,
             image_index,
             (offscreen_mask, offscreen),
             &post_frame,
-        )?;
+        ) {
+            self.forget_unsubmitted();
+            return Err(error);
+        }
         for &command_buffer in &command_buffers {
             // SAFETY: the command buffer is recording and is ended exactly once.
-            unsafe { self.device.device.end_command_buffer(command_buffer) }?;
+            if let Err(error) = unsafe { self.device.device.end_command_buffer(command_buffer) } {
+                self.forget_unsubmitted();
+                return Err(error.into());
+            }
         }
 
         let render_finished = self.swapchain.render_finished[image_index as usize].handle();
@@ -2637,14 +2688,20 @@ impl Renderer {
         // Reset as late as possible: every fallible recording step is complete, so a
         // failure before this point cannot leave an unsignalled fence for the next wait.
         // SAFETY: the fence was waited on above and is not in use by a submit.
-        unsafe { self.device.device.reset_fences(&[fence]) }?;
+        if let Err(error) = unsafe { self.device.device.reset_fences(&[fence]) } {
+            self.forget_unsubmitted();
+            return Err(error.into());
+        }
         // SAFETY: both command buffers are executable and the semaphores are live. One
         // submission command, so the fence signal covers both batches.
-        unsafe {
+        if let Err(error) = unsafe {
             self.device
                 .device
                 .queue_submit(self.device.graphics_queue, &submits, fence)
-        }?;
+        } {
+            self.forget_unsubmitted();
+            return Err(error.into());
+        }
         self.profiler.submitted(frame_index);
         self.last_submitted = true;
         if let Some(vfx) = self.vfx.as_mut() {
@@ -3172,7 +3229,14 @@ impl Renderer {
                             image: image(resources.hdr_out, frame_graph::HDR_OUT_FORMAT, extent),
                         };
                         if let Some(state) = self.temporal.as_mut() {
-                            state.upscaler.record(command_buffer, &inputs, &output);
+                            // SAFETY: `command_buffer` is recording on this device; the frame
+                            // submits it exactly once, after the previous frame's and before
+                            // the next, on the graphics queue, and a failure before the submit
+                            // calls `forget_unsubmitted` (which resets the back end's
+                            // history). The frame fence keeps at most FRAMES_IN_FLIGHT
+                            // pending. The inputs and output are this frame's transients,
+                            // alive until the frame's fence, in the layouts the graph set.
+                            unsafe { state.upscaler.record(command_buffer, &inputs, &output) };
                         }
                     }
                 }
@@ -3404,26 +3468,21 @@ impl Renderer {
         let extents = target_extents(swapchain.extent, self.post_config.render_scale);
         // ADR-0021 §2c: a resize re-creates the back end at the new output and forgets every
         // history. Built before the swap below for the same reason as the transients.
-        let taau = match self.temporal {
-            Some(_) => Some(Taau::new(
-                &self.device,
-                &self.shaders,
-                swapchain.extent,
-                extents.render,
-                TaauDebugView::of(self.config.debug_view),
-            )?),
-            None => None,
-        };
+        // ADR-0021 §2c: a resize re-sizes the back end's images (no pipeline is built,
+        // amendment 2 item 18) and forgets every history. The device is idle. Done before
+        // the swap below so a failed allocation cannot pair the new extent with old images.
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal
+                .upscaler
+                .resize(&self.device, swapchain.extent, extents.render)?;
+            temporal.invalidate();
+        }
         self.transients
             .resize(&self.device, self.plans[0].graph.slots(), extents)?;
         self.extents = extents;
         self.render_extent =
             dynres::render_extent(swapchain.extent, extents.render, self.render_scale());
         self.swapchain = swapchain;
-        if let (Some(temporal), Some(taau)) = (self.temporal.as_mut(), taau) {
-            temporal.upscaler = Box::new(taau);
-            temporal.invalidate();
-        }
         self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
         self.frame_index = 0;

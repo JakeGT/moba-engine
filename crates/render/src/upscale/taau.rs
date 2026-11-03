@@ -10,7 +10,12 @@
 //! does.
 //!
 //! **Descriptors:** a ring of [`SET_RING`] sets, one per recorded frame, rewritten before
-//! use. With two frames in flight a set is never rewritten while a submitted frame reads it.
+//! use. `record`'s contract allows at most `FRAMES_IN_FLIGHT` (2) pending records, and the
+//! renderer asserts `SET_RING > FRAMES_IN_FLIGHT`, so a set is never rewritten while a
+//! submitted frame reads it.
+//!
+//! **Resize** keeps the pipeline, layouts, pool and sampler and re-creates only the four
+//! images, so a mid-match window resize builds no pipeline.
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable, bytes_of};
@@ -24,8 +29,8 @@ use crate::resources::{
 use crate::shaders::ShaderSource;
 
 /// Descriptor sets in the ring: more than the frames in flight, so a set a submitted frame
-/// may still read is never rewritten (even after a frame that recorded but never submitted).
-const SET_RING: usize = 3;
+/// may still read is never rewritten (asserted against `FRAMES_IN_FLIGHT` in the renderer).
+pub(crate) const SET_RING: usize = 3;
 /// The colour history's format.
 pub(crate) const HISTORY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 /// The previous linear depth's format.
@@ -190,32 +195,7 @@ impl Taau {
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
         )?;
-        let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
-        let image = |name, extent: Extent, format| {
-            GpuImage::new(
-                device.device.clone(),
-                device.allocator(),
-                name,
-                vk::Extent2D {
-                    width: extent.width.max(1),
-                    height: extent.height.max(1),
-                },
-                format,
-                usage,
-                vk::ImageAspectFlags::COLOR,
-            )
-        };
-        let history = [
-            image("taau-history-0", output, HISTORY_FORMAT)?,
-            image("taau-history-1", output, HISTORY_FORMAT)?,
-        ];
-        let prev_depth = [
-            image("taau-prev-depth-0", max_render, PREV_DEPTH_FORMAT)?,
-            image("taau-prev-depth-1", max_render, PREV_DEPTH_FORMAT)?,
-        ];
-        let vram = 2
-            * (u64::from(output.width) * u64::from(output.height) * 8
-                + u64::from(max_render.width) * u64::from(max_render.height) * 4);
+        let (history, prev_depth, vram) = images(device, output, max_render)?;
         Ok(Self {
             device: device.device.clone(),
             pipeline,
@@ -383,7 +363,12 @@ impl TemporalUpscaler for Taau {
         true
     }
 
-    fn record(&mut self, cmd: vk::CommandBuffer, inputs: &UpscaleInputs, out: &UpscaleOutput) {
+    unsafe fn record(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        inputs: &UpscaleInputs,
+        out: &UpscaleOutput,
+    ) {
         self.barriers(cmd);
         let reset = self.reset || inputs.reset;
         let set = self.sets[self.next_set];
@@ -432,11 +417,40 @@ impl TemporalUpscaler for Taau {
     }
 
     fn reset_history(&mut self) {
+        // A first frame again: the images go UNDEFINED → GENERAL (always valid, contents
+        // discarded), so a record that was never submitted leaves nothing assumed.
+        self.fresh = true;
         self.reset = true;
+    }
+
+    fn resize(
+        &mut self,
+        device: &DeviceContext,
+        output: Extent,
+        max_render: Extent,
+    ) -> RenderResult<()> {
+        // Built before replacing anything, so a failed allocation keeps the old pair.
+        let (history, prev_depth, vram) = images(device, output, max_render)?;
+        self.history = history;
+        self.prev_depth = prev_depth;
+        self.vram = vram;
+        self.prev_render = max_render;
+        self.parity = 0;
+        self.reset_history();
+        Ok(())
     }
 
     fn vram_bytes(&self) -> u64 {
         self.vram
+    }
+
+    fn reload_shaders(
+        &mut self,
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+    ) -> RenderResult<()> {
+        self.pipeline = build_pipeline(device, shaders, self.pipeline_layout.handle())?;
+        Ok(())
     }
 }
 
@@ -456,6 +470,42 @@ fn build_pipeline(
             .layout(layout),
     )?;
     Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
+}
+
+/// The colour history pair at `output` and the previous-depth pair at `max_render`, with
+/// their device memory in bytes.
+fn images(
+    device: &DeviceContext,
+    output: Extent,
+    max_render: Extent,
+) -> RenderResult<([GpuImage; 2], [GpuImage; 2], u64)> {
+    let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
+    let image = |name, extent: Extent, format| {
+        GpuImage::new(
+            device.device.clone(),
+            device.allocator(),
+            name,
+            vk::Extent2D {
+                width: extent.width.max(1),
+                height: extent.height.max(1),
+            },
+            format,
+            usage,
+            vk::ImageAspectFlags::COLOR,
+        )
+    };
+    let history = [
+        image("taau-history-0", output, HISTORY_FORMAT)?,
+        image("taau-history-1", output, HISTORY_FORMAT)?,
+    ];
+    let prev_depth = [
+        image("taau-prev-depth-0", max_render, PREV_DEPTH_FORMAT)?,
+        image("taau-prev-depth-1", max_render, PREV_DEPTH_FORMAT)?,
+    ];
+    let vram = 2
+        * (u64::from(output.width) * u64::from(output.height) * 8
+            + u64::from(max_render.width) * u64::from(max_render.height) * 4);
+    Ok((history, prev_depth, vram))
 }
 
 #[cfg(test)]

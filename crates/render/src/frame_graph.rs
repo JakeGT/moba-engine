@@ -127,8 +127,6 @@ pub(crate) const MASK_FORMAT: vk::Format = vk::Format::R8_UNORM;
 pub(crate) const EXPOSURE_LINEAR_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
 /// The upscaler's output (ADR-0021 §4a).
 pub(crate) const HDR_OUT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
-/// The overlay prepass's depth (ADR-0021 §5c).
-pub(crate) const OVERLAY_DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 /// What a compiled pass records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,7 +266,7 @@ pub(crate) struct TemporalResources {
 /// Resource ids of the overlay passes (ADR-0021 §5).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OverlayResources {
-    /// `D32_SFLOAT` at output resolution, unjittered.
+    /// The main depth's format at output resolution, unjittered.
     pub(crate) depth: ResourceId,
     /// `R8_UINT` IDs at output resolution: 0 nothing, 1–7 outline slots, 8 occluder, 9 ground.
     pub(crate) ids: ResourceId,
@@ -376,6 +374,9 @@ pub(crate) struct FrameSpec {
     /// composite run at output resolution on its output. Implies the prepass; the `fxaa`
     /// and `upscale` switches are ignored with it.
     pub(crate) temporal: bool,
+    /// `TRANSFER_SRC` on the temporal depth and motion, for the motion probe's readback only
+    /// (`RenderConfig::readback`).
+    pub(crate) readback: bool,
     /// The post-upscale gameplay overlay (ADR-0021 §5; Tiered only): replaces R2b's
     /// `outline` pass, and the last post pass writes an LDR image the overlay reads.
     pub(crate) overlay: bool,
@@ -410,6 +411,7 @@ impl FrameSpec {
             water: false,
             distortion: false,
             temporal: false,
+            readback: false,
             overlay: false,
         }
     }
@@ -520,8 +522,8 @@ pub(crate) fn build_variant(
             aspect: spec.depth_aspect,
             size: render,
             samples: vk::SampleCountFlags::TYPE_1,
-            // Temporal AA: TRANSFER_SRC for the motion probe's readback (ADR-0021 gate 2).
-            extra_usage: if spec.temporal {
+            // TRANSFER_SRC only for the motion probe's readback (ADR-0021 gate 2).
+            extra_usage: if spec.temporal && spec.readback {
                 vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC
             } else {
                 vk::ImageUsageFlags::SAMPLED
@@ -686,11 +688,15 @@ pub(crate) fn build_variant(
     // ADR-0021 §2, §4: render-resolution motion and masks, the one-texel exposure multiplier
     // and the upscaler's output-resolution HDR image.
     let temporal = spec.temporal.then(|| TemporalResources {
-        // TRANSFER_SRC for the motion probe's readback (ADR-0021 gate 2).
+        // TRANSFER_SRC only for the motion probe's readback (ADR-0021 gate 2).
         motion: graph.transient_image(
             "motion",
             ImageDesc {
-                extra_usage: vk::ImageUsageFlags::TRANSFER_SRC,
+                extra_usage: if spec.readback {
+                    vk::ImageUsageFlags::TRANSFER_SRC
+                } else {
+                    vk::ImageUsageFlags::empty()
+                },
                 ..image(MOTION_FORMAT, render)
             },
         ),
@@ -717,8 +723,10 @@ pub(crate) fn build_variant(
             graph.transient_image(
                 "overlay_depth",
                 ImageDesc {
-                    format: OVERLAY_DEPTH_FORMAT,
-                    aspect: vk::ImageAspectFlags::DEPTH,
+                    // The main depth's format, which `choose_depth_format` admitted as a
+                    // sampled depth attachment (D32 or D16), ADR-0021 amendment 2 item 20.
+                    format: spec.depth_format,
+                    aspect: spec.depth_aspect,
                     size: ImageSize::Output { shift: 0 },
                     samples: vk::SampleCountFlags::TYPE_1,
                     extra_usage: vk::ImageUsageFlags::SAMPLED,

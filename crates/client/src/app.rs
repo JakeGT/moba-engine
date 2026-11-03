@@ -184,6 +184,9 @@ struct ClientApp {
     anchors: vfx::Anchors,
     /// This frame's foliage displacers, from the drawn units only (R3b).
     displacers: foliage::Displacers,
+    /// What the temporal history continues across: the bound map and the spectated hero
+    /// (ADR-0021 §2c, `Scene::history_reset`).
+    view_continuity: scene_build::ViewContinuity,
     /// `MOBA_REPLAY`: the recorded inputs the local view plays, and the next frame.
     replay: Option<(moba_sim::Replay, usize)>,
     /// `MOBA_REPLAY_EXIT=1`: exit once the replay's last frame has played (R8).
@@ -427,6 +430,7 @@ impl ClientApp {
             },
             anchors: vfx::Anchors::new(),
             displacers: foliage::Displacers::new(),
+            view_continuity: scene_build::ViewContinuity::default(),
             replay: None,
             replay_exit: std::env::var("MOBA_REPLAY_EXIT").is_ok_and(|value| value.trim() == "1"),
             preview: None,
@@ -708,7 +712,8 @@ impl App for ClientApp {
             .with_culling(launch::cull_mode())
             .with_mesh_lod(launch::mesh_lod())
             .with_environment(Some(launch::environment_config(self.config_quality)))
-            .with_debug_view(launch::debug_view());
+            .with_debug_view(launch::debug_view())
+            .with_readback(launch::motion_probe_requested());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -912,6 +917,7 @@ impl App for ClientApp {
                 vfx,
                 anchors,
                 displacers,
+                view_continuity,
                 replay,
                 preview,
                 minions,
@@ -1304,7 +1310,18 @@ impl App for ClientApp {
                             render_tick / 30.0,
                             displacers.as_slice(),
                         );
+                        // ADR-0021 §2c: a map change or a switch of the spectated hero starts
+                        // a new history (a minimap jump moves the camera past the renderer's
+                        // own 8 m cut).
+                        let history_reset = view_continuity.cut(
+                            map_visuals.generation(),
+                            network
+                                .spectator
+                                .then_some(network.spectator_follow)
+                                .flatten(),
+                        );
                         let mut scene = Scene::with_vision(camera, units, vision)
+                            .with_history_reset(history_reset)
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
                             .with_atmosphere(map_visuals.scene_atmosphere())
@@ -1579,7 +1596,9 @@ impl App for ClientApp {
                         render_tick / 30.0,
                         displacers.as_slice(),
                     );
+                    let history_reset = view_continuity.cut(map_visuals.generation(), None);
                     let scene = Scene::new(camera, units)
+                        .with_history_reset(history_reset)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
                         .with_atmosphere(map_visuals.scene_atmosphere())

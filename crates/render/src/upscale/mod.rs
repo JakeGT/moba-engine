@@ -13,8 +13,9 @@
 //! (its dispatches and the barriers of the resources it owns, such as its history).
 //!
 //! **Contexts** are created with the renderer at the maximum render size of the
-//! dynamic-resolution range and re-created with it on a resize or a settings change, never
-//! mid-match (`locked_pipelines=0`).
+//! dynamic-resolution range. A swapchain resize only re-sizes their images
+//! ([`TemporalUpscaler::resize`]); pipelines are built at creation and on a settings change,
+//! never mid-match (`locked_pipelines=0`).
 
 pub(crate) mod exposure;
 pub(crate) mod frame;
@@ -86,17 +87,65 @@ pub(crate) trait TemporalUpscaler {
     /// Whether the back end sharpens itself (otherwise the renderer's `sharpen` pass runs).
     fn has_sharpening(&self) -> bool;
     /// Records the back end's work for this frame into `cmd`.
-    fn record(&mut self, cmd: vk::CommandBuffer, inputs: &UpscaleInputs, out: &UpscaleOutput);
-    /// Forgets every history: the next frame starts from its current sample.
+    ///
+    /// # Safety
+    ///
+    /// The same contract as FSR 3.1's `Fsr3::record` (ADR-0021 amendment 2, item 17):
+    /// - `cmd` is a command buffer of the back end's device in the recording state.
+    /// - **Every command buffer recorded here is submitted exactly once, in `record` order, on
+    ///   one queue.** A back end advances its own state when it records (history parity,
+    ///   first-use layout transitions, descriptor ring slots) and orders each frame only
+    ///   against the previous record's commands earlier on the same queue. A caller that
+    ///   drops a recorded command buffer unsubmitted (a failure between recording and
+    ///   submission) calls [`Self::reset_history`] before the next `record`, which makes that
+    ///   record a first frame again, or treats the failure as fatal and drops the back end.
+    /// - **At most `FRAMES_IN_FLIGHT` (2) records are pending.** When this is called, the
+    ///   command buffer of the call two `record`s back has finished executing; descriptor
+    ///   sets and constants it used may be rewritten.
+    /// - Every image and view in `inputs` and `out` stays alive until this command buffer has
+    ///   finished executing, in the layouts the module documentation states.
+    unsafe fn record(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        inputs: &UpscaleInputs,
+        out: &UpscaleOutput,
+    );
+    /// Forgets every history: the next frame starts from its current sample, as a first
+    /// frame (its own images are re-initialised, whatever was or was not submitted before).
     fn reset_history(&mut self);
+    /// Re-sizes the back end's own images for a new `output` and dynamic-resolution ceiling
+    /// `max_render` (a swapchain resize) without building pipelines (`locked_pipelines=0`,
+    /// ADR-0021 amendment 2, item 18). Forgets every history. The device is idle.
+    fn resize(
+        &mut self,
+        device: &crate::device::DeviceContext,
+        output: Extent,
+        max_render: Extent,
+    ) -> crate::error::RenderResult<()>;
     /// Device memory the back end owns (its histories and internal targets).
     fn vram_bytes(&self) -> u64;
+    /// Debug builds' shader hot reload (`MOBA_SHADER_DIR`): rebuilds the back end's pipelines
+    /// from `shaders`, replacing them only on success. The device is idle. A back end without
+    /// shaders of ours (the vendor SDKs) keeps the default, which does nothing.
+    fn reload_shaders(
+        &mut self,
+        _device: &crate::device::DeviceContext,
+        _shaders: &crate::shaders::ShaderSource,
+    ) -> crate::error::RenderResult<()> {
+        Ok(())
+    }
 }
 
 /// The render-size range for `mode` at `output` with a dynamic-resolution floor of `floor`
 /// (a render scale): the mode's size and the floor's, both at least 1×1 and with the output's
 /// aspect ratio (the controller scales both axes together, ADR-0021 §4c). TAAU's rule; vendor
 /// back ends clamp it to what their SDK reports.
+///
+/// **Rounding is deliberate** (ADR-0021 amendment 2, item 19): sizes round to nearest, the
+/// same rule as the dynamic-resolution controller (`dynres::render_extent`), so TAAU's
+/// ceiling is exactly a size the controller can produce. Quality at 2560 is 1707 here; FSR
+/// 3.1's SDK truncates (1706). A back end with an SDK rule reports its own range, and the
+/// controller clamps to it.
 pub(crate) fn scaled_range(output: Extent, mode: UpscaleMode, floor: f32) -> (Extent, Extent) {
     let size = |scale: f32| crate::dynres::render_extent(output, output, scale);
     let ceiling = mode.scale();
@@ -129,6 +178,19 @@ pub(crate) fn resolve(requested: Option<UpscalerKind>) -> UpscalerKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TAAU rounds to nearest (amendment 2, item 19); FSR 3.1's SDK truncates.
+    #[test]
+    fn taau_mode_sizes_round_to_nearest() {
+        let output = Extent {
+            width: 2560,
+            height: 1440,
+        };
+        let (_, quality) = scaled_range(output, UpscaleMode::Quality, 0.5);
+        assert_eq!((quality.width, quality.height), (1707, 960));
+        let (floor, _) = scaled_range(output, UpscaleMode::Quality, 0.5);
+        assert_eq!((floor.width, floor.height), (1280, 720));
+    }
 
     #[test]
     fn modes_have_one_naming_scheme_by_ratio() {

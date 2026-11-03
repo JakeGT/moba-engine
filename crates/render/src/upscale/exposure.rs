@@ -15,8 +15,9 @@ use crate::resources::{
 };
 use crate::shaders::ShaderSource;
 
-/// Descriptor sets in the ring (as TAAU's: longer than the frames in flight).
-const SET_RING: usize = 3;
+/// Descriptor sets in the ring (as TAAU's: longer than the frames in flight, asserted in the
+/// renderer).
+pub(crate) const SET_RING: usize = 3;
 
 /// `ExposurePush` in `exposure_linear.slang`.
 #[repr(C)]
@@ -80,17 +81,7 @@ impl ExposureLinearPass {
             &[set_layout.handle()],
             &push,
         )?;
-        let module = shaders.module(device, "exposure_linear.slang")?;
-        let stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(compute)
-            .module(module.handle())
-            .name(c"main");
-        let handle = device.create_compute_pipeline(
-            &vk::ComputePipelineCreateInfo::default()
-                .stage(stage)
-                .layout(layout.handle()),
-        )?;
-        let pipeline = GraphicsPipeline::from_raw(device.device.clone(), handle);
+        let pipeline = Self::build(device, shaders, layout.handle())?;
         let placeholder = GpuImage::new(
             device.device.clone(),
             device.allocator(),
@@ -114,6 +105,46 @@ impl ExposureLinearPass {
             placeholder,
             placeholder_ready: false,
         })
+    }
+
+    fn build(
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+        layout: vk::PipelineLayout,
+    ) -> RenderResult<GraphicsPipeline> {
+        let module = shaders.module(device, "exposure_linear.slang")?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(module.handle())
+            .name(c"main");
+        let handle = device.create_compute_pipeline(
+            &vk::ComputePipelineCreateInfo::default()
+                .stage(stage)
+                .layout(layout),
+        )?;
+        Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
+    }
+
+    /// Debug builds' shader hot reload: a new pipeline from `shaders` (installed with
+    /// [`Self::install_pipeline`]).
+    pub(crate) fn build_pipeline(
+        &self,
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+    ) -> RenderResult<GraphicsPipeline> {
+        Self::build(device, shaders, self.layout.handle())
+    }
+
+    /// Replaces the pipeline (the device is idle).
+    pub(crate) fn install_pipeline(&mut self, pipeline: GraphicsPipeline) {
+        self.pipeline = pipeline;
+    }
+
+    /// A recorded frame was never submitted: the placeholder's first-use transition may not
+    /// have run, so the next record transitions it again (UNDEFINED → read-only is always
+    /// valid for an image never written).
+    pub(crate) fn forget(&mut self) {
+        self.placeholder_ready = false;
     }
 
     /// Records the pass: `adapted` is the persistent adapted-EV image's view when auto

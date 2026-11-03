@@ -186,7 +186,7 @@ pub struct UnitInstance {
     pub vat: VatPose,
     /// Presentation identity for motion vectors (ADR-0021 §2c): the renderer keeps what this
     /// key drew on the previous presented frame. `0` (the default) is static: no history,
-    /// camera-only motion (map instances). The client uses `net_id << 8 | part`.
+    /// camera-only motion (map instances). The client uses `net_id << 16 | part`.
     pub motion_key: u32,
     /// This frame starts a new history for [`Self::motion_key`] (the unit's first drawn
     /// frame, a respawn or recall teleport): its motion is camera-only.

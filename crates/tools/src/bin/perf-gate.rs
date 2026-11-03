@@ -16,9 +16,12 @@
 //! Each frame log names its tier (`quality=`), render path (`path=`, ADR-0020 §5d; a log
 //! without it is Compat) and GPU (`gpu=`). Compat logs are checked against today's budgets
 //! (`moba_assets::COMPAT_GPU_BUDGETS`); a breach fails. Tiered logs are checked against
-//! `moba_assets::GPU_BUDGETS` and their own baselines, **report-only until N1** (ADR-0020
-//! §5d): budget and baseline breaches print as `report-only` lines and do not fail; the
-//! pacing and run-integrity checks still do.
+//! `moba_assets::GPU_BUDGETS` and their own `[tiered.<tier>]` baselines. Since N1a (ADR-0020
+//! §5d, ADR-0021 amendment 2 item 16) a Tiered **budget** breach fails; Tiered **baseline**
+//! breaches (regressions, a missing table, another GPU) stay report-only until the last N1
+//! part merges and flips them (`TIERED_BASELINE_FAILS`; the owner is tracked in
+//! `docs/status.md`): they print as `report-only` lines. The pacing and run-integrity checks
+//! fail on both paths.
 //!
 //! The baseline names the GPU it was measured on (top-level `gpu = "..."`) and holds one
 //! table per path and tier: `[low]` … `[ultra]` for Compat and `[tiered.low]` …
@@ -42,6 +45,11 @@ fn known_table(table: &str) -> bool {
             .any(|(tier, _)| *tier == table),
     }
 }
+
+/// Whether a Tiered baseline breach fails (`false`: report-only). Each N1 part re-records the
+/// `[tiered.*]` baselines; the last one to merge sets this to `true` (ADR-0021 amendment 2,
+/// item 16; the owner is in `docs/status.md`).
+const TIERED_BASELINE_FAILS: bool = false;
 
 /// Allowed growth over the baseline before the gate fails.
 const DEFAULT_MAX_REGRESSION: f64 = 0.25;
@@ -226,7 +234,8 @@ fn check(
             return (failures, notes);
         }
     };
-    // Budget and baseline breaches; on Tiered they report, not fail, until N1 (§5d).
+    // Budget breaches fail on both paths; baseline breaches on Tiered report only until the
+    // last N1 part flips `TIERED_BASELINE_FAILS`.
     let mut breaches = Vec::new();
     let need = |key: &str, failures: &mut Vec<String>| {
         let value = log.number(key);
@@ -242,7 +251,7 @@ fn check(
             "{tier}: gpu_total_p95 {gpu_p95:.3} ms (budget {budget} ms)"
         ));
         if gpu_p95 > budget {
-            breaches.push(format!(
+            failures.push(format!(
                 "{tier}: GPU p95 {gpu_p95:.3} ms is over the §7 budget of {budget} ms"
             ));
         }
@@ -286,12 +295,10 @@ fn check(
             ));
         }
     }
-    if tiered {
-        notes.extend(
-            breaches
-                .into_iter()
-                .map(|breach| format!("report-only until N1: {breach}")),
-        );
+    if tiered && !TIERED_BASELINE_FAILS {
+        notes.extend(breaches.into_iter().map(|breach| {
+            format!("report-only (Tiered baseline, until the last N1 part merges): {breach}")
+        }));
     } else {
         failures.extend(breaches);
     }
@@ -592,15 +599,21 @@ mod tests {
         );
     }
 
-    /// ADR-0020 §5d: a tiered log is checked against `GPU_BUDGETS` and a `[tiered.<tier>]`
-    /// baseline, report-only until N1; its integrity checks still fail.
+    /// ADR-0020 §5d and ADR-0021 amendment 2 item 16: a tiered log's budget breach fails;
+    /// its `[tiered.<tier>]` baseline breaches report only until the last N1 part flips them;
+    /// its integrity checks fail.
     #[test]
-    fn tiered_logs_report_budgets_and_still_fail_integrity() {
-        // Over Ultra's 9 ms and with no tiered baseline table: notes, not failures.
+    fn tiered_logs_fail_budgets_report_baselines_and_fail_integrity() {
+        // Over Ultra's 9 ms: a failure. No tiered baseline table: a report-only note.
         let baseline = Baseline::parse(&baseline_for("0.5")).expect("baseline");
         let over = log("path=tiered gpu_total_p95_ms=12.0");
         let (failures, notes) = check(&over, Some(&baseline), LIMITS);
-        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("over the §7 budget of 9 ms")),
+            "{failures:?}"
+        );
         assert!(
             notes.iter().any(|note| note.contains("budget 9 ms")),
             "{notes:?}"
@@ -608,19 +621,22 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|note| note.starts_with("report-only until N1") && note.contains("over")),
+                .any(|note| note.starts_with("report-only")
+                    && note.contains("no [tiered.ultra] table")),
             "{notes:?}"
         );
-        assert!(
-            notes
-                .iter()
-                .any(|note| note.contains("no [tiered.ultra] table")),
-            "{notes:?}"
+        // Inside the budget, the missing table alone does not fail.
+        let (failures, _) = check(
+            &log("path=tiered gpu_total_p95_ms=1.0"),
+            Some(&baseline),
+            LIMITS,
         );
+        assert!(failures.is_empty(), "{failures:?}");
         // The same numbers on Compat fail, as today.
         let (failures, _) = check(&log("path=compat gpu_total_p95_ms=12.0"), None, LIMITS);
         assert!(failures.iter().any(|failure| failure.contains("budget")));
-        // A tiered baseline table parses and is compared, still report-only.
+        // A tiered baseline table parses and is compared, still report-only
+        // (`TIERED_BASELINE_FAILS` is false until the last N1 part).
         let tiered = Baseline::parse(
             "gpu = \"NVIDIA GeForce RTX 5070 Ti\"\n[tiered.ultra]\ngpu_total_p95_ms = 0.5\n\
              render_p95_ms = 0.2\n",

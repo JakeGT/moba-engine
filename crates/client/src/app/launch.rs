@@ -507,13 +507,26 @@ fn post_config_from(
         }
     }
     if let Some(tiered) = tiered {
+        // MSAA is Compat-only (ADR-0021 §7): on Tiered `msaa4` runs the tiered default,
+        // temporal AA with its dynamic-resolution range, not a temporal-off chain.
+        if config.anti_aliasing == moba_render::AntiAliasing::Msaa4 {
+            eprintln!("[render] MOBA_AA=msaa4 is Compat-only; the tiered path runs temporal");
+            config = config.with_anti_aliasing(moba_render::AntiAliasing::Temporal);
+        }
         let temporal = config.anti_aliasing == moba_render::AntiAliasing::Temporal;
         let (ceiling, floor) = if temporal {
-            // ADR-0021 §4c: the mode's scale is the ceiling, the preset's floor below it.
+            // ADR-0021 §4c: the mode's scale is the ceiling and the preset's floor sits below
+            // it; a mode already at or under the preset's floor (Performance) gets Ultra
+            // Performance (0.33) as its floor, one mode down.
             let ceiling = config
                 .upscale_mode
                 .map_or(tiered.ceiling, moba_render::UpscaleMode::scale);
-            (ceiling, tiered.floor.min(ceiling))
+            let floor = if ceiling <= tiered.floor {
+                moba_render::MIN_TEMPORAL_RENDER_SCALE.min(ceiling)
+            } else {
+                tiered.floor
+            };
+            (ceiling, floor)
         } else {
             (1.0, tiered.floor.max(moba_render::MIN_RENDER_SCALE))
         };
@@ -1767,8 +1780,11 @@ mod tests {
 
     /// ADR-0021 gate 1: picking is jitter-free by construction. The same cursor gives
     /// byte-identical `WireCommand`s under temporal AA, FXAA and AA off, at render scales 0.5
-    /// and 1.0: `cursor_ground` reads only the client's camera and the window size, never the
-    /// post settings, the render size or the renderer's jittered matrices.
+    /// and 1.0. This is a regression guard, not a measurement: `cursor_ground` reads only the
+    /// client's camera and the window size, so today it cannot differ; the test fails if a
+    /// later change routes the post settings or render size into picking. The structural half
+    /// is in `moba-render` (`Scene::camera` is never jittered: the renderer's frame state keeps
+    /// the client's matrix as `unjittered` and rasterises with a copy).
     #[test]
     fn the_same_cursor_sends_the_same_command_under_every_aa_and_scale() {
         use moba_core::math::{Vec2, Vec3};
@@ -1824,6 +1840,44 @@ mod tests {
         assert!(sent.windows(2).all(|pair| pair[0] == pair[1]), "{sent:?}");
     }
 
+    /// `MOBA_AA=msaa4` is Compat-only (ADR-0021 §7): on Tiered it runs exactly the temporal
+    /// default, dynamic-resolution range included.
+    #[test]
+    fn msaa_on_tiered_runs_the_temporal_default() {
+        use super::tiered_scale;
+        use moba_render::{AntiAliasing, QualityTier};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        let tiered = tiered_scale(moba_render::RenderPath::Tiered, QualityTier::Ultra, 1440);
+        let msaa = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[("MOBA_AA", "msaa4")]),
+        );
+        let default = post_config_from(QualityTier::Ultra, 1.0, false, tiered, env(&[]));
+        assert_eq!(msaa.anti_aliasing, AntiAliasing::Temporal);
+        assert_eq!(
+            (
+                msaa.render_scale,
+                msaa.min_render_scale,
+                msaa.dynamic_resolution
+            ),
+            (
+                default.render_scale,
+                default.min_render_scale,
+                default.dynamic_resolution
+            )
+        );
+    }
+
     #[test]
     fn tiered_presets_turn_dynamic_resolution_on_with_the_budget() {
         use super::{TieredScale, tiered_scale};
@@ -1855,7 +1909,8 @@ mod tests {
         // The settings' scale is kept below the ceiling; the ceiling only lowers it.
         let lowered = post_config_from(QualityTier::Ultra, 0.6, false, tiered, env(&[]));
         assert_eq!(lowered.render_scale, 0.6);
-        // An explicit mode moves the ceiling (and the floor never exceeds it).
+        // An explicit mode moves the ceiling; Performance (at the preset's floor) gets Ultra
+        // Performance as its floor, one mode down (§4c), so dynamic resolution keeps a range.
         let performance = post_config_from(
             QualityTier::Ultra,
             1.0,
@@ -1872,8 +1927,9 @@ mod tests {
         assert_eq!(performance.sharpness, 0.6);
         assert_eq!(
             (performance.render_scale, performance.min_render_scale),
-            (0.5, 0.5)
+            (0.5, 1.0 / 3.0)
         );
+        assert!(performance.dynamic_resolution);
         // Temporal off keeps today's tiered chain: full scale, dynamic resolution off unless
         // `MOBA_DYNRES` asks.
         let fxaa = post_config_from(
