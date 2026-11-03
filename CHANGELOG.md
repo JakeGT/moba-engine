@@ -140,6 +140,21 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Reversed-Z and the thin G-buffer on Tiered (ADR-0023 N2a and amendment 1;
+  [perf/0035](docs/perf/0035-n2a-gbuffer.md)). Compat is byte-identical, SPIR-V included:**
+  - **Reversed-Z:** depth is cleared to 0 and tested `GREATER_OR_EQUAL`, with a finite far
+    plane. It covers the prepass, the scene, the overlay prepass, the sky, water depth fade,
+    particles and distortion, GTAO, contact shadows and TAAU. FSR 3.1 builds its
+    inverted-depth permutation. The CPU keeps forward matrices (`DepthConvention`), and shadow
+    maps stay forward.
+  - **G-buffer:** the temporal prepass also writes `gb0` (sRGB base colour, metallic), `gb1`
+    (octahedral normal, roughness, `UNIT` flag) and `gb2` (model data, shading model,
+    `NO_FOG_OF_WAR`, rim slot). The encoding has twins in GLSL, Slang and Rust, checked
+    against each other byte for byte by the new `gbuffer-smoke` tool. The forward `scene`
+    still shades.
+  - `MOBA_DEBUG_VIEW` gains `albedo`, `normal`, `roughness`, `metallic`, `model`, `rim-slot`
+    and `flags` (`TemporalDebugView`), drawn by a `gbuffer_debug` compute pass after
+    `temporal`. The tiered path now requires `maxColorAttachments ≥ 8`.
 - **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;
   [perf/0031](docs/perf/0031-n1a-temporal.md)), Tiered path only; Compat is byte-identical:**
   - **Jitter:** Halton (2, 3) with `ceil(8r²)` phases on the main view's raster matrix only;

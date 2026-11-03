@@ -528,16 +528,17 @@ pub(crate) fn post_config(
     })
 }
 
-/// `MOBA_DEBUG_VIEW=motion|reactive|tc|disocclusion|confidence|overlay-ids` (ADR-0021 §3, §5):
-/// a tiered debug view instead of the frame. Read once at startup.
+/// `MOBA_DEBUG_VIEW=motion|reactive|tc|disocclusion|confidence|overlay-ids` (ADR-0021 §3, §5)
+/// or `albedo|normal|roughness|metallic|model|rim-slot|flags` (the G-buffer, ADR-0023 §1f): a
+/// tiered debug view instead of the frame. Read once at startup.
 pub(crate) fn debug_view() -> moba_render::TemporalDebugView {
     let Ok(value) = std::env::var("MOBA_DEBUG_VIEW") else {
         return moba_render::TemporalDebugView::Off;
     };
     moba_render::TemporalDebugView::from_name(&value).unwrap_or_else(|| {
         eprintln!(
-            "MOBA_DEBUG_VIEW={value:?} is not \
-             off/motion/reactive/tc/disocclusion/confidence/overlay-ids; off"
+            "MOBA_DEBUG_VIEW={value:?} is not off/motion/reactive/tc/disocclusion/confidence/\
+             overlay-ids/albedo/normal/roughness/metallic/model/rim-slot/flags; off"
         );
         moba_render::TemporalDebugView::Off
     })

@@ -44,6 +44,7 @@ use moba_assets::JointMatrix;
 use moba_core::math::Mat4;
 
 use crate::cull::{CullMode, CullStats, Frustum, LodConfig, LodMetric, Planes};
+use crate::depth::DepthConvention;
 use crate::device::DeviceContext;
 use crate::environment::EnvironmentConfig;
 use crate::error::{RenderError, RenderResult};
@@ -237,7 +238,10 @@ pub(crate) struct PrepassTarget {
     pub(crate) outline_ids: Option<OutlineIdTarget>,
     /// The temporal prepass's motion target (ADR-0021 §2b; cleared to 0), first attachment.
     pub(crate) motion: Option<vk::ImageView>,
-    /// The main view's lighting set (the temporal prepass's foliage binds it).
+    /// The G-buffer `gb0`–`gb2` (ADR-0023 §1a; cleared to 0), attachments 1–3, with the
+    /// motion.
+    pub(crate) gbuffer: Option<[vk::ImageView; 3]>,
+    /// The main view's lighting set (the G-buffer prepass's fragment stages read it).
     pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
 }
@@ -501,9 +505,15 @@ pub(crate) struct ScenePipelines {
 pub(crate) struct PrepassPipelines {
     terrain: GraphicsPipeline,
     unit: GraphicsPipeline,
+    /// The textured meshes' G-buffer pipeline (temporal prepass only, ADR-0023 §1e); the
+    /// position-only prepass draws them with [`Self::unit`].
+    unit_textured: Option<GraphicsPipeline>,
     /// `None` without skinning, or if it failed to build (skinned meshes are then drawn by
     /// the scene pass alone: correct, without early rejection, AO depth or an outline ID).
     skinned: Option<GraphicsPipeline>,
+    /// The textured skinned meshes' G-buffer pipeline (temporal prepass only); `None`
+    /// elsewhere, or if it failed to build (they are then drawn with [`Self::skinned`]).
+    skinned_textured: Option<GraphicsPipeline>,
     /// `None` with [`ScenePipelines::vat`] (uses the VAT layout).
     vat: Option<GraphicsPipeline>,
     /// The foliage (temporal prepass only, ADR-0021 §2b: brush joins the prepass).
@@ -560,6 +570,8 @@ pub(crate) struct SceneSetSpec {
     /// Tiered (ADR-0021 §5): glow decals leave the scene shaders and the overlay prepass is
     /// built.
     pub(crate) overlay: bool,
+    /// The depth convention of every view (ADR-0023 §1c: reversed-Z on Tiered).
+    pub(crate) depth: DepthConvention,
 }
 
 impl ScenePipelines {
@@ -583,7 +595,9 @@ impl ScenePipelines {
             hull,
             temporal,
             overlay,
+            depth,
         } = set;
+        let depth_compare = depth.compare();
         let module = |name| shaders.module(device, name);
         let unit_vertex = module("unit.vert")?;
         let unit_fragment = module("unit.frag")?;
@@ -610,6 +624,7 @@ impl ScenePipelines {
                     cull_mode: vk::CullModeFlags::NONE,
                     samples,
                     depth_write: true,
+                    depth_compare,
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -638,7 +653,7 @@ impl ScenePipelines {
                 samples.as_raw()
             );
         }
-        let sky_vertex = module("sky.vert")?;
+        let sky_vertex = module(depth.sky_vertex())?;
         let sky_fragment = module("sky.frag")?;
         let sky = pipeline::create_vertexless(
             device,
@@ -647,7 +662,7 @@ impl ScenePipelines {
             sky_fragment.handle(),
             color_format,
             false,
-            VertexlessDepth::TestOnly(depth_format, samples),
+            VertexlessDepth::TestOnly(depth_format, samples, depth_compare),
         )
         .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
         let (skinned, skinned_textured) = if skinning {
@@ -714,6 +729,7 @@ impl ScenePipelines {
                         cull_mode: vk::CullModeFlags::NONE,
                         samples,
                         depth_write: true,
+                        depth_compare,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -765,7 +781,7 @@ impl ScenePipelines {
             foliage_fragment.handle(),
             color_format,
             false,
-            VertexlessDepth::ReadWrite(depth_format, samples),
+            VertexlessDepth::ReadWrite(depth_format, samples, depth_compare),
         )
         .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
         let water_vertex = module("water.vert")?;
@@ -780,7 +796,14 @@ impl ScenePipelines {
             samples,
             // Water never writes depth (the particles and decals see the bed through it).
             depth_write: false,
+            depth_compare,
         };
+        // The tiered permutations are also the reversed-Z ones (ADR-0023 §1c); Tiered never
+        // runs without the overlay (it refuses MSAA, the only case that drops it).
+        debug_assert!(
+            !depth.is_reversed() || overlay,
+            "reversed-Z water needs the tiered set"
+        );
         let water_fragment = module(if overlay {
             "water_tiered.frag"
         } else {
@@ -840,6 +863,7 @@ impl ScenePipelines {
                 vat_layout,
                 environment.foliage,
                 depth_format,
+                depth,
                 samples,
                 outline_ids,
                 skinned.is_some(),
@@ -865,6 +889,7 @@ impl ScenePipelines {
                     id_format,
                     depth_format,
                     samples,
+                    depth_compare,
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
             };
@@ -909,7 +934,9 @@ impl ScenePipelines {
             Some(PrepassPipelines {
                 terrain,
                 unit,
+                unit_textured: None,
                 skinned,
+                skinned_textured: None,
                 vat: vat_prepass,
                 foliage: None,
                 sky: None,
@@ -934,6 +961,7 @@ impl ScenePipelines {
                         colors: &target,
                         depth_format,
                         depth_write: false,
+                        depth_compare,
                         samples,
                     },
                 )
@@ -950,6 +978,7 @@ impl ScenePipelines {
                 vat_layout,
                 environment.water,
                 depth_format,
+                depth_compare,
                 skinned.is_some(),
                 vat.is_some(),
             )?)
@@ -971,6 +1000,7 @@ impl ScenePipelines {
                         cull_mode: vk::CullModeFlags::NONE,
                         samples,
                         depth_write: false,
+                        depth_compare,
                     },
                 )
                 .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -1034,10 +1064,14 @@ impl ScenePipelines {
         })
     }
 
-    /// The temporal prepass (ADR-0021 §2b): every opaque main-view draw writes depth and its
-    /// motion (attachment 0, `R16G16_SFLOAT`), the units also their slot into the unit mask
-    /// (attachment 1) when `ids` (the heat haze keeps it). The terrain, the foliage and the
-    /// background leave the mask alone (an empty write mask; `independentBlend`).
+    /// The temporal prepass, which is the G-buffer pass (ADR-0021 §2b, ADR-0023 §1e): every
+    /// opaque main-view draw writes depth, its motion (attachment 0, `R16G16_SFLOAT`) and its
+    /// surface into `gb0`–`gb2` (attachments 1–3, [`crate::gbuffer`]), the units also their
+    /// slot into the unit mask (attachment 4) when `ids` (the heat haze keeps it). The terrain
+    /// and the foliage leave the mask alone, and the background's camera motion also the
+    /// G-buffer (an empty write mask; `independentBlend`), which stays at its clear (`UNLIT`).
+    /// The fragment stages are the forward shaders' `GBUFFER` permutations, so the surface is
+    /// the one the forward `scene` shades (ADR-0023 amendment 1).
     #[allow(clippy::too_many_arguments)] // One set of pipelines.
     #[allow(clippy::too_many_lines)] // One pipeline per drawable kind, in draw order.
     fn build_motion_prepass(
@@ -1047,35 +1081,50 @@ impl ScenePipelines {
         vat_layout: vk::PipelineLayout,
         foliage_layout: vk::PipelineLayout,
         depth_format: vk::Format,
+        depth: DepthConvention,
         samples: vk::SampleCountFlags,
         ids: bool,
         skinned: bool,
         vat: bool,
     ) -> RenderResult<PrepassPipelines> {
         let module = |name| shaders.module(device, name);
-        let motion_fragment = module("prepass_motion.frag")?;
-        let ids_fragment = module(if ids {
-            "prepass_motion_ids.frag"
+        let depth_compare = depth.compare();
+        let unit_fragment = module(if ids {
+            "unit_gbuffer_ids.frag"
         } else {
-            "prepass_motion.frag"
+            "unit_gbuffer.frag"
         })?;
-        let motion = ColorTarget {
-            format: crate::frame_graph::MOTION_FORMAT,
-            write_mask: vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
+        let unit_textured_fragment = module(if ids {
+            "unit_textured_gbuffer_ids.frag"
+        } else {
+            "unit_textured_gbuffer.frag"
+        })?;
+        let target = |format, write_mask| ColorTarget {
+            format,
+            write_mask,
             blend: TargetBlend::None,
         };
-        let id = |write: bool| ColorTarget {
-            format: crate::frame_graph::OUTLINE_ID_FORMAT,
-            write_mask: if write {
-                vk::ColorComponentFlags::R
-            } else {
-                vk::ColorComponentFlags::empty()
-            },
-            blend: TargetBlend::None,
+        let rgba = vk::ColorComponentFlags::RGBA;
+        let none = vk::ColorComponentFlags::empty();
+        let motion = target(
+            crate::frame_graph::MOTION_FORMAT,
+            vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
+        );
+        let gbuffer = |write_mask| {
+            [
+                target(crate::gbuffer::GB0_FORMAT, write_mask),
+                target(crate::gbuffer::GB1_FORMAT, write_mask),
+                target(crate::gbuffer::GB2_FORMAT, write_mask),
+            ]
         };
-        let count = 1 + usize::from(ids);
-        let plain = [motion, id(false)];
-        let with_ids = [motion, id(true)];
+        let id = |write_mask| target(crate::frame_graph::OUTLINE_ID_FORMAT, write_mask);
+        let [g0, g1, g2] = gbuffer(rgba);
+        let [n0, n1, n2] = gbuffer(none);
+        let count = 4 + usize::from(ids);
+        // Terrain and foliage: motion and G-buffer; units also the mask; the sky motion only.
+        let surfaces = [motion, g0, g1, g2, id(none)];
+        let units = [motion, g0, g1, g2, id(vk::ColorComponentFlags::R)];
+        let background = [motion, n0, n1, n2, id(none)];
         let build = |layout,
                      vertex_layout,
                      vertex: vk::ShaderModule,
@@ -1093,6 +1142,7 @@ impl ScenePipelines {
                     depth_format,
                     depth_write,
                     samples,
+                    depth_compare,
                 },
             )
             .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -1101,44 +1151,67 @@ impl ScenePipelines {
             layout,
             Some(VertexLayout::Terrain),
             module("terrain_motion.vert")?.handle(),
-            motion_fragment.handle(),
-            &plain[..count],
+            module("terrain_gbuffer.frag")?.handle(),
+            &surfaces[..count],
             true,
         )?;
         let unit = build(
             layout,
-            Some(VertexLayout::StaticShadow),
-            module("unit_motion.vert")?.handle(),
-            ids_fragment.handle(),
-            &with_ids[..count],
+            Some(VertexLayout::Static),
+            module("unit_gbuffer.vert")?.handle(),
+            unit_fragment.handle(),
+            &units[..count],
             true,
         )?;
-        let skinned = if skinned {
-            module("skinned_motion.vert")
-                .and_then(|vertex| {
-                    build(
-                        layout,
-                        Some(VertexLayout::SkinnedShadow),
-                        vertex.handle(),
-                        ids_fragment.handle(),
-                        &with_ids[..count],
-                        true,
-                    )
-                })
-                .inspect_err(|error| {
-                    eprintln!("[render] skinned motion prepass pipeline unavailable ({error})");
-                })
-                .ok()
+        let unit_textured = build(
+            layout,
+            Some(VertexLayout::StaticTextured),
+            module("unit_textured_gbuffer.vert")?.handle(),
+            unit_textured_fragment.handle(),
+            &units[..count],
+            true,
+        )?;
+        let skinned_pipeline =
+            |vertex, vertex_layout, fragment: &crate::resources::ShaderModule| {
+                module(vertex)
+                    .and_then(|vertex| {
+                        build(
+                            layout,
+                            Some(vertex_layout),
+                            vertex.handle(),
+                            fragment.handle(),
+                            &units[..count],
+                            true,
+                        )
+                    })
+                    .inspect_err(|error| {
+                        eprintln!("[render] skinned G-buffer pipeline unavailable ({error})");
+                    })
+                    .ok()
+            };
+        let (skinned, skinned_textured) = if skinned {
+            (
+                skinned_pipeline(
+                    "skinned_gbuffer.vert",
+                    VertexLayout::Skinned,
+                    &unit_fragment,
+                ),
+                skinned_pipeline(
+                    "skinned_textured_gbuffer.vert",
+                    VertexLayout::SkinnedTextured,
+                    &unit_textured_fragment,
+                ),
+            )
         } else {
-            None
+            (None, None)
         };
         let vat = if vat {
             Some(build(
                 vat_layout,
-                Some(VertexLayout::StaticShadow),
-                module("vat_motion.vert")?.handle(),
-                ids_fragment.handle(),
-                &with_ids[..count],
+                Some(VertexLayout::Static),
+                module("vat_gbuffer.vert")?.handle(),
+                unit_fragment.handle(),
+                &units[..count],
                 true,
             )?)
         } else {
@@ -1148,23 +1221,25 @@ impl ScenePipelines {
             foliage_layout,
             None,
             module("foliage_motion.vert")?.handle(),
-            motion_fragment.handle(),
-            &plain[..count],
+            module("foliage_gbuffer.frag")?.handle(),
+            &surfaces[..count],
             true,
         )?;
         // On the far plane, tested only: where nothing was drawn.
         let sky = build(
             layout,
             None,
-            module("sky.vert")?.handle(),
+            module(depth.sky_vertex())?.handle(),
             module("sky_motion.frag")?.handle(),
-            &plain[..count],
+            &background[..count],
             false,
         )?;
         Ok(PrepassPipelines {
             terrain,
             unit,
+            unit_textured: Some(unit_textured),
             skinned,
+            skinned_textured,
             vat,
             foliage: Some(foliage),
             sky: Some(sky),
@@ -1174,6 +1249,7 @@ impl ScenePipelines {
     /// The overlay prepass (ADR-0021 §5c): the `*_prepass.vert` shaders through the overlay
     /// camera; the units write their slot (or `OCCLUDER`, 8) with `prepass.frag`, the terrain
     /// and the water `GROUND` (9) with `overlay_ground.frag`.
+    #[allow(clippy::too_many_arguments)] // The layouts, formats and the drawable kinds.
     fn build_overlay(
         device: &DeviceContext,
         shaders: &ShaderSource,
@@ -1181,6 +1257,7 @@ impl ScenePipelines {
         vat_layout: vk::PipelineLayout,
         water_layout: vk::PipelineLayout,
         depth_format: vk::Format,
+        depth_compare: vk::CompareOp,
         skinned: bool,
         vat: bool,
     ) -> RenderResult<OverlayPipelines> {
@@ -1204,6 +1281,7 @@ impl ScenePipelines {
                         colors: &ids,
                         depth_format,
                         depth_write: true,
+                        depth_compare,
                         samples: vk::SampleCountFlags::TYPE_1,
                     },
                 )
@@ -1334,6 +1412,8 @@ pub(crate) struct MainViewSpec {
     pub(crate) temporal: bool,
     /// The Tiered path's overlay (ADR-0021 §5). Never with MSAA.
     pub(crate) overlay: bool,
+    /// The depth convention of every view (ADR-0023 §1c: reversed-Z on Tiered).
+    pub(crate) depth: DepthConvention,
 }
 
 impl MainViewSpec {
@@ -1347,6 +1427,7 @@ impl MainViewSpec {
             hull: self.hull && !msaa,
             temporal: self.temporal && !msaa,
             overlay: self.overlay && !msaa,
+            depth: self.depth,
         };
         let main = msaa.then_some(SceneSetSpec {
             samples: self.samples,
@@ -1356,6 +1437,7 @@ impl MainViewSpec {
             hull: self.hull,
             temporal: false,
             overlay: false,
+            depth: self.depth,
         });
         (base, main)
     }
@@ -1895,6 +1977,7 @@ impl ScenePass {
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
         let culling = self.culling;
+        let depth = self.main.depth;
         let Self {
             views,
             meshes,
@@ -1934,10 +2017,11 @@ impl ScenePass {
             world,
             &scene.outlines,
             [extent.width, extent.height],
+            depth,
         );
         // ADR-0021 §1: the jittered matrix and the motion members (Compat: none of it).
         let uniform = match main.and_then(|main| main.temporal.as_ref()) {
-            Some(temporal) => uniform.with_temporal(temporal),
+            Some(temporal) => uniform.with_temporal(temporal, depth, &scene.camera),
             None => uniform,
         };
         target.camera_buffer.write_bytes(0, bytes_of(&uniform));
@@ -1951,6 +2035,7 @@ impl ScenePass {
                 world,
                 &scene.outlines,
                 [main.output.width, main.output.height],
+                depth,
             );
             buffer.write_bytes(0, bytes_of(&overlay));
         }
@@ -2211,10 +2296,7 @@ impl ScenePass {
             .load_op(depth_load)
             .store_op(depth_store)
             .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
+                depth_stencil: self.main.depth.clear(),
             });
         if let Some(resolve) = targets.resolve {
             // MSAA: only the resolved images live on; the multisampled colour is discarded.
@@ -2475,6 +2557,7 @@ impl ScenePass {
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
+            // The shadow map keeps the forward convention (ADR-0023 §1c).
             .clear_value(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: 1.0,
@@ -2528,14 +2611,16 @@ impl ScenePass {
     }
 
     /// Records the main view's depth prepass (R6, ADR-0015; R2b, ADR-0016): terrain, static,
-    /// skinned and VAT meshes into `target` (cleared to 1 and stored for the scene, which
-    /// loads it), resolving sample 0 into the single-sample depth with MSAA, plus the units'
-    /// outline slots into the ID target (cleared to 0, resolved the same way). **Unbiased**:
-    /// every scene vertex shader's `gl_Position` is `invariant`, so the scene pass reproduces
-    /// these depths and its `LESS_OR_EQUAL` test passes where the prepass drew; a bias would
-    /// make the ID target's depth test disagree with the scene's at grazing occluders,
-    /// leaking a hidden unit's outline over a wall. Uses the main view's camera, instances
-    /// and bones prepared for the scene; materials are not bound.
+    /// skinned and VAT meshes into `target` (cleared to the far plane and stored for the
+    /// scene, which loads it), resolving sample 0 into the single-sample depth with MSAA,
+    /// plus the units' outline slots into the ID target (cleared to 0, resolved the same way).
+    /// With temporal AA it is also the G-buffer pass (ADR-0023 §1e): motion and `gb0`–`gb2`,
+    /// with the lighting set and the textured materials bound. **Unbiased**: every scene
+    /// vertex shader's `gl_Position` is `invariant`, so the scene pass reproduces these depths
+    /// and its depth test (ADR-0023 §1c) passes where the prepass drew; a bias would make the
+    /// ID target's depth test disagree with the scene's at grazing occluders, leaking a hidden
+    /// unit's outline over a wall. Uses the main view's camera, instances and bones prepared
+    /// for the scene.
     #[allow(clippy::too_many_lines)] // Attachments, then each drawable kind in order.
     pub(crate) fn record_prepass(
         &self,
@@ -2554,10 +2639,7 @@ impl ScenePass {
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
+                depth_stencil: self.main.depth.clear(),
             });
         if let Some(resolve) = target.resolve {
             depth_attachment = depth_attachment
@@ -2582,8 +2664,9 @@ impl ScenePass {
                 None => attachment,
             }
         });
-        // ADR-0021 §2b: motion first, cleared to 0 (no motion), then the unit mask.
-        let motion_attachment = target.motion.map(|view| {
+        // ADR-0021 §2b: motion first, cleared to 0 (no motion), then (ADR-0023 §1e) the
+        // G-buffer, cleared to 0 (`UNLIT`, no flags), then the unit mask.
+        let cleared = |view| {
             vk::RenderingAttachmentInfo::default()
                 .image_view(view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -2592,10 +2675,16 @@ impl ScenePass {
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue { float32: [0.0; 4] },
                 })
-        });
-        let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 2];
+        };
+        let motion_attachment = target.motion.map(cleared);
+        let gbuffer_attachments = target.gbuffer.into_iter().flatten().map(cleared);
+        let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 5];
         let mut color_count = 0;
-        for attachment in motion_attachment.into_iter().chain(id_attachment) {
+        for attachment in motion_attachment
+            .into_iter()
+            .chain(gbuffer_attachments)
+            .chain(id_attachment)
+        {
             color_attachments[color_count] = attachment;
             color_count += 1;
         }
@@ -2615,37 +2704,65 @@ impl ScenePass {
             target.extent,
         );
         self.bind_view_sets(device, command_buffer, state, frame);
+        // ADR-0023 §1e: the G-buffer prepass's fragment stages are the forward shaders'
+        // surfaces, which read the lighting set (3) and the materials (2), as `record`.
+        let gbuffer = target.gbuffer.is_some();
+        if gbuffer {
+            // SAFETY: as in `record`: the lighting set matches the layout's set 3 and lives
+            // as long as the renderer.
+            unsafe {
+                device.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout.handle(),
+                    3,
+                    &[target.lighting],
+                    &[],
+                );
+            }
+        }
         // The same terrain runs as `record` (the map's heightfield, or the R2a plane).
         self.draw_terrain(device, command_buffer, state, &prepass.terrain);
         // The position-only prepass shaders read no material, so one pipeline draws both
-        // the vertex-colour and the textured meshes. The camera list, as the scene's.
+        // the vertex-colour and the textured meshes; the G-buffer prepass has a textured
+        // pipeline that binds the materials. The camera list, as the scene's.
         let list = &state.camera;
         if list.len > 0 {
             for textured in [false, true] {
-                self.draw_static(device, command_buffer, list, &prepass.unit, textured, false);
+                let pipeline = match (textured, &prepass.unit_textured) {
+                    (true, Some(textured)) => textured,
+                    _ => &prepass.unit,
+                };
+                self.draw_static(device, command_buffer, list, pipeline, textured, gbuffer);
             }
         }
         if !list.skinned.is_empty()
             && let Some(skinned) = &prepass.skinned
         {
             for textured in [false, true] {
+                let pipeline = match (textured, &prepass.skinned_textured) {
+                    (true, Some(textured)) => textured,
+                    _ => skinned,
+                };
                 self.draw_skinned(
                     device,
                     command_buffer,
                     list,
-                    skinned,
+                    pipeline,
                     textured,
-                    false,
+                    gbuffer,
                     false,
                 );
             }
         }
         // VAT minions (R4b), so GTAO, contact shadows, outlines and the particles' depth test
-        // see them; last, as in `record` (the VAT layout re-binds set 2).
+        // see them; last, as in `record` (the VAT layout re-binds set 2, and set 3 with the
+        // G-buffer's lighting).
         if list.len > 0
             && let Some(vat) = &prepass.vat
         {
-            self.draw_vat(device, command_buffer, list, vat, None, false);
+            let lighting = gbuffer.then_some(target.lighting);
+            self.draw_vat(device, command_buffer, list, vat, lighting, false);
         }
         // ADR-0021 §2b: the temporal prepass also draws the foliage (with its own layout's
         // sets 2/3) and, last, the background's camera motion on the far plane.
@@ -2749,10 +2866,7 @@ impl ScenePass {
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
+                depth_stencil: self.main.depth.clear(),
             });
         let render_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {

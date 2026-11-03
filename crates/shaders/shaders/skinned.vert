@@ -65,6 +65,11 @@ layout(location = 2) out vec3 out_world_pos;
 layout(location = 3) out vec2 out_uv;
 layout(location = 4) out vec4 out_world_tangent;
 #endif
+#ifdef GBUFFER
+// ADR-0023 §1e: the G-buffer prepass takes the scene's varyings, the outline slot (the unit
+// mask) and the motion (with MOTION_VECTORS).
+layout(location = 13) flat out uint out_outline_slot;
+#endif
 
 // The joint matrix of `joint` in the palette starting at `first`.
 mat4 bone_from(uint first, uint joint) {
@@ -152,6 +157,18 @@ void main() {
     out_world_normal = normalize(transpose(inverse(mat3(model))) * in_normal);
     out_color = instance.color.rgb;
     out_world_pos = world.xyz;
+#ifdef GBUFFER
+    out_outline_slot = instance.params.x;
+#ifdef MOTION_VECTORS
+    uint index = uint(gl_InstanceIndex);
+    vec3 previous = world.xyz;
+    if (prev_valid(index)) {
+        mat4 prev_skinning = skin.reserved1 != 0u ? skin_matrix(skin.reserved0) : skinning;
+        previous = (prev_model(index) * prev_skinning * vec4(in_position, 1.0)).xyz;
+    }
+    write_motion(world.xyz, previous);
+#endif
+#endif
 #endif
 #ifdef MATERIAL_TEXTURED
     out_uv = in_uv;

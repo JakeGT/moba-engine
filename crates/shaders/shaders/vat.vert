@@ -63,6 +63,11 @@ layout(location = 0) out vec3 out_world_normal;
 layout(location = 1) out vec3 out_color;
 layout(location = 2) out vec3 out_world_pos;
 #endif
+#ifdef GBUFFER
+// ADR-0023 §1e: the G-buffer prepass takes the scene's varyings, the outline slot (the unit
+// mask) and the motion (with MOTION_VECTORS).
+layout(location = 13) flat out uint out_outline_slot;
+#endif
 
 vec4 fetch(uint texel) {
     return texelFetch(vat_texture, ivec2(int(texel % vat.width), int(texel / vat.width)), 0);
@@ -163,5 +168,26 @@ void main() {
     out_world_normal = normalize(mat3(transpose(inverse(instance.model))) * normal);
     out_color = instance.color.rgb;
     out_world_pos = world.xyz;
+#ifdef GBUFFER
+    out_outline_slot = instance.params.x;
+#ifdef MOTION_VECTORS
+    uint index = uint(gl_InstanceIndex);
+    vec3 previous = world.xyz;
+    if (prev_valid(index)) {
+        vec3 prev_position = in_position;
+        if (vat.vertex_count > 0u && vat.frame_count > 0u) {
+            uvec4 pose = prev_instance_data.prev_instances[index].pose;
+            vec2 t = unpackUnorm2x16(pose.z);
+            float blend = unpackUnorm2x16(pose.w & 0xFFFFu).x;
+            vec4 from_sample = vec4(float(pose.x & 0xFFFFu), float(pose.x >> 16u), t.x, blend);
+            vec4 to_sample = vec4(float(pose.y & 0xFFFFu), float(pose.y >> 16u), t.y, 0.0);
+            uint vertex = min(uint(gl_VertexIndex), vat.vertex_count - 1u);
+            prev_position = pose_position(from_sample, to_sample, vertex, in_position);
+        }
+        previous = (prev_model(index) * vec4(prev_position, 1.0)).xyz;
+    }
+    write_motion(world.xyz, previous);
+#endif
+#endif
 #endif
 }

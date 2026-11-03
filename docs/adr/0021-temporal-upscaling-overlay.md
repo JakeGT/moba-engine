@@ -200,7 +200,9 @@ Constraints:
   those stay off.
 - **Depth** is today's `D32_SFLOAT`, non-inverted and with a finite far plane. Every back end
   has flags for inverted depth [S1][S2][S5]. Reversed Z is left to N2, whose G-buffer
-  rewrite touches every depth consumer anyway.
+  rewrite touches every depth consumer anyway. *(Since N2a the tiered depth is reversed-Z
+  and every back end is told so: [ADR-0023](0023-frame-architecture-materials.md) §1c and
+  amendment 1, items 1–4.)*
 
 **2b. Who writes motion vectors.** The render-resolution `prepass`, which every tiered
 preset already has (tiered Low runs today's High configuration, which has the prepass;

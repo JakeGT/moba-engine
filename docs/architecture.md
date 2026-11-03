@@ -161,6 +161,17 @@ passes run in this order:
     fog-of-war image;
 14. `capture` copies the swapchain image for readback, in capture frames only.
 
+That is the Compat frame. On the tiered path, with temporal AA
+([ADR-0021](adr/0021-temporal-upscaling-overlay.md)), the `prepass` is jittered and also
+writes motion vectors. Since N2a it is the G-buffer pass as well
+([ADR-0023](adr/0023-frame-architecture-materials.md) §1 and amendment 1): `gb0`–`gb2` hold
+base colour and metallic, the octahedral normal, roughness and flags, and the model data, rim
+slot and shading model (`crates/render/src/gbuffer.rs`). The forward `scene` still shades
+until N2b. Depth on Tiered is **reversed-Z**: cleared to 0, tested `GREATER_OR_EQUAL`, with a
+finite far plane. The reversal is applied only where matrices reach the GPU
+(`crates/render/src/depth.rs`), and shadow maps stay forward. `temporal` then upscales to
+output resolution, the post chain runs there, and the gameplay overlay draws after it.
+
 The offscreen images are graph imports, not transients: they keep their contents across
 frames and start and end every frame in `SHADER_READ_ONLY_OPTIMAL`, so a frame that does not
 re-render one still samples last frame's contents with no transition. Every combination of
