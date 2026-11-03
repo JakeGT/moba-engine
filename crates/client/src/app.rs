@@ -105,6 +105,8 @@
 //!   (`VK_NV_low_latency2`) or Anti-Lag (`VK_AMD_anti_lag`) on a tiered device that has one.
 //!   On by default, boost off; while on, the latency sleep replaces the frame limiter. The
 //!   frame log reports the mode, who paced the frames and Reflex's timings (`pc_latency_*`).
+//! - `MOBA_MAX_FPS=<n>`: the frame limiter's rate (default 240; 0 uncaps the loop, for
+//!   latency and GPU-bound measurements).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -256,8 +258,14 @@ struct ClientApp {
     latency_log: Option<Vec<[f32; 5]>>,
     /// The latency setting (`MOBA_LATENCY`, else the settings' `latency`; ADR-0021 §6b).
     latency: LatencySetting,
-    /// Measured frames the latency sleep paced (`App::pace` returned `External`).
+    /// Logged frames (measured, past the frame log's warm-up) the latency sleep paced
+    /// (`App::pace` returned `External`).
     paced_frames: u64,
+    /// Measured frames past the frame log's warm-up ([`launch::FRAME_LOG_WARMUP`]): the
+    /// `paced_frames` denominator.
+    logged_frames: u64,
+    /// The frame number (`frames`) of the latest of `logged_frames` (0: none yet).
+    logged_frame: u64,
     frame_log_path: Option<PathBuf>,
     /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
     network_warmup: Option<u32>,
@@ -481,6 +489,8 @@ impl ClientApp {
             latency_log,
             latency,
             paced_frames: 0,
+            logged_frames: 0,
+            logged_frame: 0,
             frame_log_path,
             // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
             network_warmup: std::env::var("MOBA_SERVER")
@@ -699,7 +709,9 @@ impl App for ClientApp {
             .with_render_path(self.render_target.choice)
             .with_tiered_cpu_devices(self.render_target.allow_cpu)
             .with_latency(self.latency)
-            .with_frame_rate_limit(launch::FRAME_RATE_LIMIT)
+            .with_frame_rate_limit(launch::frame_rate_limit(
+                std::env::var("MOBA_MAX_FPS").ok().as_deref(),
+            ))
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
@@ -842,16 +854,14 @@ impl App for ClientApp {
     /// ADR-0021 §6b: Reflex or Anti-Lag sleeps here, after this frame's present and before
     /// the next frame's input; while it does, it replaces the platform's frame limiter.
     fn pace(&mut self) -> Pacing {
-        if self
+        let slept = self
             .renderer
             .as_mut()
-            .is_some_and(moba_render::Renderer::latency_sleep)
-        {
+            .is_some_and(moba_render::Renderer::latency_sleep);
+        if slept && self.logged_frame == self.frames {
             self.paced_frames += 1;
-            Pacing::External
-        } else {
-            Pacing::Platform
         }
+        launch::pacing(slept)
     }
 
     #[allow(clippy::too_many_lines)] // The frame is one explicit presentation sequence.
@@ -887,6 +897,10 @@ impl App for ClientApp {
                 network.phase == MatchPhase::Playing && network.last_tick >= warmup
             })
         });
+        if measuring && self.measured_frames >= launch::FRAME_LOG_WARMUP {
+            self.logged_frames += 1;
+            self.logged_frame = self.frames;
+        }
         if measuring {
             self.measured_frames += 1;
             if let Some(samples) = self.frame_log.as_mut() {
@@ -1372,6 +1386,7 @@ impl App for ClientApp {
                         }
                         let mut submitted = false;
                         if let Some(renderer) = renderer.as_mut() {
+                            renderer.latency_marker(LatencyMarker::SimulationEnd);
                             if capture_due {
                                 submitted = capture_and_exit(
                                     renderer,
@@ -1402,7 +1417,6 @@ impl App for ClientApp {
                                 }
                             } else {
                                 render_started = Some(Instant::now());
-                                renderer.latency_marker(LatencyMarker::SimulationEnd);
                                 match renderer.render_with_offscreen(&scene, ui, &offscreen) {
                                     Ok(done) => submitted = done,
                                     Err(error) => {
@@ -1601,6 +1615,7 @@ impl App for ClientApp {
                         .with_environment(environment)
                         .with_effects(screen_fx.update(frame_ms / 1_000.0));
                     if let Some(renderer) = renderer.as_mut() {
+                        renderer.latency_marker(LatencyMarker::SimulationEnd);
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
                                 renderer,
@@ -1613,7 +1628,6 @@ impl App for ClientApp {
                             exit_after_capture = true;
                         } else {
                             render_started = Some(Instant::now());
-                            renderer.latency_marker(LatencyMarker::SimulationEnd);
                             if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }
@@ -1674,12 +1688,12 @@ impl App for ClientApp {
                 gpu.push(launch::gpu_sample(&timings, stats, lights));
             }
         }
-        // Reflex's timings for the frames that completed since the last call (it keeps 64).
-        if measuring
-            && let (Some(log), Some(renderer)) = (self.latency_log.as_mut(), self.renderer.as_mut())
-        {
+        // Reflex's timings for the frames that completed since the last call (it keeps 64):
+        // drained every frame, kept only for logged frames (warm-up frames are dropped).
+        if let (Some(log), Some(renderer)) = (self.latency_log.as_mut(), self.renderer.as_mut()) {
+            let frame_logged = self.logged_frame == self.frames;
             for timing in renderer.latency_report() {
-                if log.len() == log.capacity() {
+                if !frame_logged || log.len() == log.capacity() {
                     break;
                 }
                 log.push(launch::latency_sample(timing));

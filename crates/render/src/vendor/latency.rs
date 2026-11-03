@@ -18,7 +18,7 @@
 //! `minimumIntervalUs` or Anti-Lag's `maxFPS` (maintainer answer to ADR-0021 Q5).
 
 use core::fmt::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ash::vk;
 
@@ -181,9 +181,86 @@ pub(crate) fn minimum_interval_us(max_frame_rate: u32) -> u32 {
     1_000_000_u32.checked_div(max_frame_rate).unwrap_or(0)
 }
 
+/// The share of the frame interval a frame must have lasted, from its start to the end of
+/// its latency sleep, for the sleep to count as having paced it. A shorter frame means the
+/// driver did not hold it to `minimumIntervalUs` / `maxFPS`, so the platform limiter waits out
+/// the rest (the backstop).
+const BACKSTOP: f64 = 0.9;
+
+/// Whether a frame counts as paced by the latency sleep: the back end slept (`slept`) and,
+/// when there is a limit, the frame lasted at least [`BACKSTOP`] of its interval
+/// (`since_start`, from the frame's start to the end of the sleep; `None` for the first frame).
+/// Otherwise the platform limiter paces it, so the cap never rests on the driver alone.
+pub(crate) fn held(slept: bool, since_start: Option<Duration>, max_frame_rate: u32) -> bool {
+    match (slept, since_start) {
+        (false, _) => false,
+        (true, Some(since)) if max_frame_rate > 0 => {
+            since.as_secs_f64() * f64::from(max_frame_rate) >= BACKSTOP
+        }
+        (true, _) => true,
+    }
+}
+
+/// The renderer's side of the frame loop around a [`LatencyBackend`]: which frames sleep,
+/// the [`held`] backstop, and one `SIMULATION_START` per present ID.
+#[derive(Debug, Default)]
+pub(crate) struct Pacer {
+    /// When the frame being built started: its `SimulationStart` marker, else the end of the
+    /// previous sleep.
+    frame_start: Option<Instant>,
+    /// The present ID whose `SimulationStart` was already set (0: none yet).
+    started: u64,
+}
+
+impl Pacer {
+    /// The latency sleep after `frame - 1`'s present ([`crate::Renderer::latency_sleep`]).
+    /// Skipped, returning `false`, when the latest frame was not submitted (a minimised window
+    /// would otherwise spin through sleeps). Returns whether the sleep paced the frame.
+    pub(crate) fn sleep(
+        &mut self,
+        backend: &mut dyn LatencyBackend,
+        swapchain: vk::SwapchainKHR,
+        frame: u64,
+        submitted: bool,
+        max_frame_rate: u32,
+    ) -> bool {
+        if !submitted {
+            return false;
+        }
+        let slept = backend.sleep(swapchain, frame);
+        let now = Instant::now();
+        let since = self
+            .frame_start
+            .map(|start| now.saturating_duration_since(start));
+        self.frame_start = Some(now);
+        held(slept, since, max_frame_rate)
+    }
+
+    /// Whether `marker` for `frame` goes to the back end. A frame skipped before submission
+    /// keeps its present ID, so its next attempt would set `SIMULATION_START` again (possibly
+    /// on a new swapchain): only the first one is sent, and it starts the frame's clock.
+    pub(crate) fn marker(&mut self, frame: u64, marker: LatencyMarker) -> bool {
+        if marker == LatencyMarker::SimulationStart {
+            if self.started == frame {
+                return false;
+            }
+            self.started = frame;
+            self.frame_start = Some(Instant::now());
+        }
+        true
+    }
+}
+
 /// How long a Reflex sleep may take before the back end gives up sleeping. A healthy sleep
 /// lasts at most about one frame; this only guards against a driver that never signals.
 const SLEEP_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long a swapchain's destruction waits for a timed-out sleep's late signal before the
+/// semaphore is leaked instead (the driver may still signal it).
+const SETTLE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// How many times Reflex resumes sleeping on a new swapchain after it stopped.
+const MAX_RESUMES: u32 = 3;
 
 /// Frame reports `vkGetLatencyTimingsNV` keeps (the extension's limit).
 const TIMING_FRAMES: usize = 64;
@@ -218,6 +295,50 @@ pub(crate) trait LatencyBackend: Send {
         let _ = swapchain;
         &[]
     }
+    /// Called before the current swapchain is destroyed (recreation, renderer drop), after
+    /// the device is idle: anything the driver still owes on it is waited for, bounded.
+    fn settle(&mut self) {}
+}
+
+/// Whether Reflex sleeps, and what a stopped sleep still owes (ADR-0021 §6b).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SleepState {
+    /// A sleep failed or timed out: sleeping stopped (logged once per stop).
+    stopped: bool,
+    /// The semaphore value a timed-out sleep still owes; the semaphore and the swapchain wait
+    /// for it ([`LatencyBackend::settle`]) before either is destroyed.
+    pending: Option<u64>,
+    /// Times sleeping resumed on a new swapchain, at most [`MAX_RESUMES`].
+    resumes: u32,
+}
+
+impl SleepState {
+    /// `vkLatencySleepNV` failed: nothing is owed.
+    fn failed(&mut self) {
+        self.stopped = true;
+    }
+
+    /// The sleep's semaphore did not reach `value` in time: the driver still owes it.
+    fn timed_out(&mut self, value: u64) {
+        self.stopped = true;
+        self.pending = Some(value);
+    }
+
+    /// The owed value arrived, or its semaphore was replaced.
+    fn settled(&mut self) {
+        self.pending = None;
+    }
+
+    /// A new swapchain has its sleep mode: a stopped sleep resumes if nothing is owed and it
+    /// has resumes left. Returns whether it resumed.
+    fn resume(&mut self) -> bool {
+        if !self.stopped || self.pending.is_some() || self.resumes >= MAX_RESUMES {
+            return false;
+        }
+        self.stopped = false;
+        self.resumes += 1;
+        true
+    }
 }
 
 /// No latency extension: the platform limiter paces every frame.
@@ -235,12 +356,13 @@ struct Reflex {
     loader: ash::nv::low_latency2::Device,
     setting: LatencySetting,
     minimum_interval_us: u32,
-    /// Signalled by the driver when a sleep ends (timeline).
-    semaphore: Semaphore,
+    /// Signalled by the driver when a sleep ends (timeline). `None` once a semaphore whose
+    /// signal never came was leaked and no new one could be made: sleeping stays stopped.
+    semaphore: Option<Semaphore>,
     /// The value the latest sleep asked for.
     value: u64,
-    /// A sleep failed or timed out: the back end stopped sleeping (logged once).
-    stopped: bool,
+    /// Whether it sleeps, and what a stopped sleep still owes.
+    state: SleepState,
     /// `vkGetLatencyTimingsNV`'s output, allocated once.
     timings: Box<[vk::LatencyTimingsFrameReportNV<'static>]>,
     /// The latest report's complete new frames, capacity [`TIMING_FRAMES`].
@@ -265,41 +387,82 @@ impl LatencyBackend for Reflex {
             .minimum_interval_us(self.minimum_interval_us);
         // SAFETY: the swapchain belongs to this device and was created with
         // `VkSwapchainLatencyCreateInfoNV` (`Self::reflex`); the info is fully initialised.
-        if let Err(error) = unsafe { self.loader.set_latency_sleep_mode(swapchain, Some(&mode)) }
-            && !self.stopped
-        {
-            self.stop(&format!("vkSetLatencySleepModeNV failed ({error})"));
+        match unsafe { self.loader.set_latency_sleep_mode(swapchain, Some(&mode)) } {
+            Err(error) => {
+                if !self.state.stopped {
+                    self.state.failed();
+                    Self::log_stop(&format!("vkSetLatencySleepModeNV failed ({error})"));
+                }
+            }
+            Ok(()) => {
+                if self.setting != LatencySetting::Off
+                    && self.semaphore.is_some()
+                    && self.state.resume()
+                {
+                    eprintln!(
+                        "[latency] reflex: sleeping resumes on the new swapchain ({} of {MAX_RESUMES})",
+                        self.state.resumes
+                    );
+                }
+            }
         }
     }
 
     fn sleep(&mut self, swapchain: vk::SwapchainKHR, _frame: u64) -> bool {
-        if self.setting == LatencySetting::Off || self.stopped {
+        if self.setting == LatencySetting::Off || self.state.stopped {
             return false;
         }
+        let Some(semaphore) = self.semaphore.as_ref().map(Semaphore::handle) else {
+            return false;
+        };
         self.value += 1;
         let info = vk::LatencySleepInfoNV::default()
-            .signal_semaphore(self.semaphore.handle())
+            .signal_semaphore(semaphore)
             .value(self.value);
         // SAFETY: the swapchain belongs to this device and has a sleep mode; the semaphore is
         // a live timeline semaphore of this device, and `value` grows with every call.
         if let Err(error) = unsafe { self.loader.latency_sleep(swapchain, &info) } {
-            return self.stop(&format!("vkLatencySleepNV failed ({error})"));
+            self.state.failed();
+            Self::log_stop(&format!("vkLatencySleepNV failed ({error})"));
+            return false;
         }
-        let semaphores = [self.semaphore.handle()];
-        let values = [self.value];
-        let wait = vk::SemaphoreWaitInfo::default()
-            .semaphores(&semaphores)
-            .values(&values);
-        let timeout = u64::try_from(SLEEP_TIMEOUT.as_nanos()).unwrap_or(u64::MAX);
-        // SAFETY: the semaphore is a live timeline semaphore of this device (the tiered path
-        // enables `timelineSemaphore`), and the arrays outlive the call.
-        match unsafe { self.device.wait_semaphores(&wait, timeout) } {
+        match self.wait(self.value, SLEEP_TIMEOUT) {
             Ok(()) => true,
-            Err(error) => self.stop(&format!(
-                "the sleep's semaphore did not signal within {} ms ({error})",
-                SLEEP_TIMEOUT.as_millis()
-            )),
+            Err(error) => {
+                self.state.timed_out(self.value);
+                Self::log_stop(&format!(
+                    "the sleep's semaphore did not signal within {} ms ({error})",
+                    SLEEP_TIMEOUT.as_millis()
+                ));
+                false
+            }
         }
+    }
+
+    fn settle(&mut self) {
+        let Some(value) = self.state.pending else {
+            return;
+        };
+        if self.wait(value, SETTLE_TIMEOUT).is_ok() {
+            self.state.settled();
+            return;
+        }
+        // The driver may still signal the old semaphore: leak it rather than destroy it under
+        // a pending signal, and start a fresh one (values restart at 0).
+        core::mem::forget(self.semaphore.take());
+        self.value = 0;
+        self.state.settled();
+        // SAFETY: Reflex runs only on the tiered path, whose device enables
+        // `timelineSemaphore` (`crate::device`).
+        self.semaphore = unsafe { Semaphore::timeline(self.device.clone()) }.ok();
+        eprintln!(
+            "[latency] reflex: a timed-out sleep never signalled; its semaphore is leaked{}",
+            if self.semaphore.is_some() {
+                ""
+            } else {
+                " and no new one could be made, so sleeping stays stopped"
+            }
+        );
     }
 
     fn marker(&self, swapchain: vk::SwapchainKHR, frame: u64, marker: vk::LatencyMarkerNV) {
@@ -333,17 +496,36 @@ impl LatencyBackend for Reflex {
 }
 
 impl Reflex {
-    /// Gives up sleeping (one log line) and reports that this frame was not paced.
-    fn stop(&mut self, reason: &str) -> bool {
-        self.stopped = true;
-        eprintln!("[latency] reflex: {reason}; sleeping stops, the platform limiter paces frames");
-        false
+    /// The one line for a stop.
+    fn log_stop(reason: &str) {
+        eprintln!(
+            "[latency] reflex: {reason}; sleeping stops until the next swapchain, the platform \
+             limiter paces frames"
+        );
+    }
+
+    /// Waits up to `timeout` for the sleep semaphore to reach `value`.
+    fn wait(&self, value: u64, timeout: Duration) -> Result<(), vk::Result> {
+        let Some(semaphore) = self.semaphore.as_ref() else {
+            return Err(vk::Result::ERROR_UNKNOWN);
+        };
+        let semaphores = [semaphore.handle()];
+        let values = [value];
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        let timeout = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        // SAFETY: the semaphore is a live timeline semaphore of this device (the tiered path
+        // enables `timelineSemaphore`), and the arrays outlive the call.
+        unsafe { self.device.wait_semaphores(&wait, timeout) }
     }
 }
 
 /// Appends the complete frames of `timings` newer than `reported` to `frames`, oldest first,
-/// and advances `reported`. A frame the driver has not finished stops the scan, so it is
-/// reported by a later call instead of being skipped.
+/// and advances `reported`. An incomplete frame is skipped: the newest ones are still in
+/// flight (nothing newer is complete, so `reported` stays below them and a later call reports
+/// them), and an older one never completes (a frame retried on a new swapchain, whose
+/// `SIMULATION_START` went to the old one), so waiting on it would stall the report.
 fn collect_frames(
     timings: &mut [vk::LatencyTimingsFrameReportNV<'_>],
     reported: &mut u64,
@@ -356,7 +538,7 @@ fn collect_frames(
             continue;
         }
         let Some(frame) = LatencyFrame::from_report(report) else {
-            break;
+            continue;
         };
         if frames.len() == frames.capacity() {
             break;
@@ -373,6 +555,8 @@ struct AntiLag {
     setting: LatencySetting,
     /// `maxFPS`: the platform's `max_frame_rate` (0, no limit, for an uncapped loop).
     max_fps: u32,
+    /// The frame whose `INPUT` stage was sent: `PRESENT` goes only with a matching one.
+    input_frame: Option<u64>,
 }
 
 impl AntiLag {
@@ -402,14 +586,34 @@ impl LatencyBackend for AntiLag {
     fn sleep(&mut self, _swapchain: vk::SwapchainKHR, frame: u64) -> bool {
         // Off still says so once per frame, so the driver's own default cannot apply.
         self.update(vk::AntiLagStageAMD::INPUT, frame);
-        self.setting != LatencySetting::Off
+        self.input_frame = Some(frame);
+        anti_lag_sleeps(self.setting)
     }
 
     fn marker(&self, _swapchain: vk::SwapchainKHR, frame: u64, marker: vk::LatencyMarkerNV) {
-        if marker == vk::LatencyMarkerNV::PRESENT_START && self.setting != LatencySetting::Off {
+        if anti_lag_presents(self.setting, self.input_frame, frame, marker) {
             self.update(vk::AntiLagStageAMD::PRESENT, frame);
         }
     }
+}
+
+/// Whether Anti-Lag's `INPUT` call paces the frame: it waits only when the mode is on.
+fn anti_lag_sleeps(setting: LatencySetting) -> bool {
+    setting != LatencySetting::Off
+}
+
+/// Whether `marker` sends Anti-Lag's `PRESENT` stage for `frame`: at present start, with the
+/// mode on, and only after that frame's `INPUT` (the first frame, and one after a skipped
+/// sleep, have none).
+fn anti_lag_presents(
+    setting: LatencySetting,
+    input_frame: Option<u64>,
+    frame: u64,
+    marker: vk::LatencyMarkerNV,
+) -> bool {
+    marker == vk::LatencyMarkerNV::PRESENT_START
+        && anti_lag_sleeps(setting)
+        && input_frame == Some(frame)
 }
 
 /// What [`create`] needs: the created device and the configuration.
@@ -434,7 +638,9 @@ pub(crate) fn create(context: &LatencyContext<'_>) -> (Box<dyn LatencyBackend>, 
     let setting = context.setting;
     match mode {
         LatencyMode::Reflex if context.path == RenderPath::Tiered => {
-            match Semaphore::timeline(context.device.clone()) {
+            // SAFETY: this arm runs on the tiered path only, whose device enables
+            // `timelineSemaphore` (`crate::device`).
+            match unsafe { Semaphore::timeline(context.device.clone()) } {
                 Ok(semaphore) => {
                     let backend = Reflex {
                         device: context.device.clone(),
@@ -444,9 +650,9 @@ pub(crate) fn create(context: &LatencyContext<'_>) -> (Box<dyn LatencyBackend>, 
                         ),
                         setting,
                         minimum_interval_us: interval,
-                        semaphore,
+                        semaphore: Some(semaphore),
                         value: 0,
-                        stopped: false,
+                        state: SleepState::default(),
                         timings: vec![vk::LatencyTimingsFrameReportNV::default(); TIMING_FRAMES]
                             .into_boxed_slice(),
                         frames: Vec::with_capacity(TIMING_FRAMES),
@@ -471,6 +677,7 @@ pub(crate) fn create(context: &LatencyContext<'_>) -> (Box<dyn LatencyBackend>, 
                 loader: ash::amd::anti_lag::Device::load(context.instance, context.device),
                 setting,
                 max_fps: context.max_frame_rate,
+                input_frame: None,
             };
             let revision = spec_version(context, c"VK_AMD_anti_lag");
             let line = active_line(mode, revision, setting, interval, context.max_frame_rate);
@@ -602,13 +809,13 @@ mod tests {
     fn reports_are_new_complete_frames_in_order() {
         let mut frames = Vec::with_capacity(TIMING_FRAMES);
         let mut reported = 0;
-        // Out of order, with frame 4 still on the GPU.
+        // Out of order, with frames 4 and 5 still on the GPU.
         let mut timings = [
             report(3, 3_000, 5_000),
             report(1, 1_000, 3_000),
             report(4, 4_000, 0),
             report(2, 2_000, 4_000),
-            report(5, 5_000, 7_000),
+            report(5, 5_000, 0),
         ];
         collect_frames(&mut timings, &mut reported, &mut frames);
         let ids: Vec<u64> = frames.iter().map(|frame| frame.present_id).collect();
@@ -627,6 +834,126 @@ mod tests {
         let ids: Vec<u64> = frames.iter().map(|frame| frame.present_id).collect();
         assert_eq!(ids, [4, 5]);
         assert_eq!(reported, 5);
+        // Frame 6 never started on this swapchain (retried on a new one) and never completes:
+        // it does not stall the frames after it.
+        frames.clear();
+        let mut timings = [report(6, 0, 9_000), report(7, 7_000, 9_500)];
+        collect_frames(&mut timings, &mut reported, &mut frames);
+        let ids: Vec<u64> = frames.iter().map(|frame| frame.present_id).collect();
+        assert_eq!(ids, [7]);
+        assert_eq!(reported, 7);
+    }
+
+    /// A back end that records its sleeps and answers with `slept`.
+    struct Fake {
+        slept: bool,
+        sleeps: Vec<u64>,
+    }
+
+    impl LatencyBackend for Fake {
+        fn mode(&self) -> LatencyMode {
+            LatencyMode::Reflex
+        }
+
+        fn sleep(&mut self, _swapchain: vk::SwapchainKHR, frame: u64) -> bool {
+            self.sleeps.push(frame);
+            self.slept
+        }
+    }
+
+    #[test]
+    fn the_backstop_hands_early_frames_to_the_platform_limiter() {
+        let ms = Duration::from_millis;
+        // 240 fps: an interval of 4.17 ms, so a frame needs 3.75 ms to count as paced.
+        assert!(held(true, Some(ms(4)), 240));
+        assert!(!held(true, Some(ms(3)), 240));
+        // The first frame has no start to measure from; an uncapped loop has no interval.
+        assert!(held(true, None, 240));
+        assert!(held(true, Some(Duration::ZERO), 0));
+        // A back end that did not sleep never paces.
+        assert!(!held(false, Some(ms(10)), 240));
+        assert!(!held(false, None, 0));
+    }
+
+    #[test]
+    fn the_pacer_skips_unsubmitted_frames_and_backstops_early_ones() {
+        let swapchain = vk::SwapchainKHR::null();
+        let mut backend = Fake {
+            slept: true,
+            sleeps: Vec::new(),
+        };
+        let mut pacer = Pacer::default();
+        // The latest frame was not submitted (a minimised window): no sleep at all.
+        assert!(!pacer.sleep(&mut backend, swapchain, 1, false, 1));
+        assert_eq!(backend.sleeps, Vec::<u64>::new());
+        // The first sleep has no frame start to measure from: paced.
+        assert!(pacer.sleep(&mut backend, swapchain, 1, true, 1));
+        // At 1 fps the next frame "lasted" microseconds: the driver let it through early, so
+        // the platform limiter takes it.
+        assert!(!pacer.sleep(&mut backend, swapchain, 2, true, 1));
+        assert_eq!(backend.sleeps, [1, 2]);
+        // Uncapped, a sleep that ran always paces.
+        assert!(pacer.sleep(&mut backend, swapchain, 3, true, 0));
+        // A back end that did not sleep (setting off, stopped) never paces.
+        backend.slept = false;
+        assert!(!pacer.sleep(&mut backend, swapchain, 4, true, 0));
+    }
+
+    #[test]
+    fn simulation_start_is_sent_once_per_frame() {
+        let mut pacer = Pacer::default();
+        assert!(pacer.marker(1, LatencyMarker::SimulationStart));
+        assert!(pacer.marker(1, LatencyMarker::InputSample));
+        // Frame 1 was skipped before submission and is retried with the same present ID.
+        assert!(!pacer.marker(1, LatencyMarker::SimulationStart));
+        assert!(pacer.marker(1, LatencyMarker::SimulationEnd));
+        assert!(pacer.marker(2, LatencyMarker::SimulationStart));
+    }
+
+    #[test]
+    fn a_stopped_sleep_resumes_on_a_new_swapchain_only_when_nothing_is_owed() {
+        let mut state = SleepState::default();
+        assert!(!state.resume(), "a running sleep has nothing to resume");
+        // A failed `vkLatencySleepNV` owes nothing: the next swapchain resumes it.
+        state.failed();
+        assert!(state.stopped);
+        assert_eq!(state.pending, None);
+        assert!(state.resume());
+        assert!(!state.stopped);
+        // A timeout owes its value until it is settled.
+        state.timed_out(41);
+        assert_eq!(state.pending, Some(41));
+        assert!(!state.resume());
+        assert!(state.stopped);
+        state.settled();
+        assert!(state.resume());
+        // At most `MAX_RESUMES` times.
+        state.failed();
+        assert!(state.resume());
+        state.failed();
+        assert_eq!(state.resumes, MAX_RESUMES);
+        assert!(!state.resume());
+        assert!(state.stopped);
+    }
+
+    #[test]
+    fn anti_lag_paces_only_when_on_and_presents_after_its_input() {
+        assert!(!anti_lag_sleeps(LatencySetting::Off));
+        assert!(anti_lag_sleeps(LatencySetting::On));
+        assert!(anti_lag_sleeps(LatencySetting::Boost));
+        let present = vk::LatencyMarkerNV::PRESENT_START;
+        assert!(anti_lag_presents(LatencySetting::On, Some(5), 5, present));
+        // No `INPUT` for this frame yet (the first frame, or a skipped sleep).
+        assert!(!anti_lag_presents(LatencySetting::On, None, 1, present));
+        assert!(!anti_lag_presents(LatencySetting::On, Some(4), 5, present));
+        // Off sends no `PRESENT`; other markers are not Anti-Lag stages.
+        assert!(!anti_lag_presents(LatencySetting::Off, Some(5), 5, present));
+        assert!(!anti_lag_presents(
+            LatencySetting::On,
+            Some(5),
+            5,
+            vk::LatencyMarkerNV::PRESENT_END
+        ));
     }
 
     #[test]

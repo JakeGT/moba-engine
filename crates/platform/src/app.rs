@@ -195,8 +195,6 @@ struct Runner<A: App> {
     frame_interval: Option<Duration>,
     last_frame: Instant,
     next_frame: Instant,
-    /// What the app's [`App::pace`] said for the latest frame.
-    pacing: Pacing,
     elapsed_secs: f64,
     error: Option<PlatformError>,
 }
@@ -221,7 +219,6 @@ impl<A: App> Runner<A> {
             frame_interval,
             last_frame: now,
             next_frame: now,
-            pacing: Pacing::Platform,
             elapsed_secs: 0.0,
             error: None,
         }
@@ -256,8 +253,7 @@ impl<A: App> Runner<A> {
         }
         // ADR-0021 §6b: the app's latency sleep runs after this frame's present and before
         // the next frame's input is gathered.
-        self.pacing = self.app.pace();
-        self.next_frame = next_frame(now, self.frame_interval, self.pacing);
+        self.next_frame = paced_next_frame(&mut self.app, now, self.frame_interval);
     }
 }
 
@@ -353,7 +349,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
         let now = Instant::now();
         if now >= self.next_frame {
             window.request_redraw();
-            match due_wait(now, self.frame_interval, self.pacing) {
+            match due_wait(now, self.frame_interval) {
                 Some(until) => event_loop.set_control_flow(ControlFlow::WaitUntil(until)),
                 None => event_loop.set_control_flow(ControlFlow::Poll),
             }
@@ -372,13 +368,18 @@ fn next_frame(started: Instant, interval: Option<Duration>, pacing: Pacing) -> I
     }
 }
 
-/// How long the loop may wait after requesting a redraw at `now`: until the limiter's next
-/// slot, or not at all (`None`, poll) when the app paces itself or there is no limit.
-fn due_wait(now: Instant, interval: Option<Duration>, pacing: Pacing) -> Option<Instant> {
-    match (pacing, interval) {
-        (Pacing::Platform, Some(interval)) => Some(now + interval),
-        _ => None,
-    }
+/// Asks the app to pace the frame that started at `now` ([`App::pace`]) and returns when the
+/// next one is due.
+fn paced_next_frame<A: App>(app: &mut A, now: Instant, interval: Option<Duration>) -> Instant {
+    next_frame(now, interval, app.pace())
+}
+
+/// How long the loop may wait after requesting a redraw at `now`: until one interval later,
+/// or not at all (`None`, poll) when there is no limit. This holds when the app paces itself
+/// too: the requested redraw ends the wait at once, and a window that draws nothing
+/// (minimised, occluded) wakes once per interval instead of spinning a core.
+fn due_wait(now: Instant, interval: Option<Duration>) -> Option<Instant> {
+    interval.map(|interval| now + interval)
 }
 
 #[cfg(test)]
@@ -405,13 +406,10 @@ mod tests {
             next_frame(start, Some(interval), Pacing::Platform),
             start + interval
         );
-        assert_eq!(
-            due_wait(start, Some(interval), Pacing::Platform),
-            Some(start + interval)
-        );
+        assert_eq!(due_wait(start, Some(interval)), Some(start + interval));
         // Uncapped: due at once, polling.
         assert_eq!(next_frame(start, None, Pacing::Platform), start);
-        assert_eq!(due_wait(start, None, Pacing::Platform), None);
+        assert_eq!(due_wait(start, None), None);
     }
 
     #[test]
@@ -419,6 +417,38 @@ mod tests {
         let start = Instant::now();
         let interval = Duration::from_micros(4_167);
         assert_eq!(next_frame(start, Some(interval), Pacing::External), start);
-        assert_eq!(due_wait(start, Some(interval), Pacing::External), None);
+        // The loop still sleeps between redraw requests, so a window that draws nothing
+        // does not spin.
+        assert_eq!(due_wait(start, Some(interval)), Some(start + interval));
+    }
+
+    #[test]
+    fn the_runner_schedules_by_what_pace_returns() {
+        struct Paced {
+            pacing: Pacing,
+            calls: u32,
+        }
+        impl App for Paced {
+            fn on_frame(&mut self, _frame: &mut Frame<'_>) -> FrameOutcome {
+                FrameOutcome::Continue
+            }
+            fn pace(&mut self) -> Pacing {
+                self.calls += 1;
+                self.pacing
+            }
+        }
+        let start = Instant::now();
+        let interval = Some(Duration::from_micros(4_167));
+        let mut app = Paced {
+            pacing: Pacing::External,
+            calls: 0,
+        };
+        assert_eq!(paced_next_frame(&mut app, start, interval), start);
+        app.pacing = Pacing::Platform;
+        assert_eq!(
+            paced_next_frame(&mut app, start, interval),
+            start + Duration::from_micros(4_167)
+        );
+        assert_eq!(app.calls, 2);
     }
 }

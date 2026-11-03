@@ -172,16 +172,22 @@ the semver check):
   - `moba_platform::App::pace() -> Pacing` (`Platform`, the default, or `External`) runs after
     each frame's present and before the next frame's input. The client sleeps there through
     `Renderer::latency_sleep`; while the sleep paces the frames it replaces the platform's
-    frame limiter (240 fps becomes Reflex's `minimumIntervalUs` or Anti-Lag's `maxFPS`).
+    frame limiter (240 fps becomes Reflex's `minimumIntervalUs` or Anti-Lag's `maxFPS`). A
+    frame the driver lets through in under 90 % of the interval goes back to the platform
+    limiter, so the cap never rests on the driver alone. A failed or stuck Reflex sleep stops
+    with one line and resumes on the next swapchain (at most three times).
   - New public API: `Pacing`, `App::pace`, `LatencySetting`, `LatencyMarker`, `LatencyFrame`,
     `Renderer::{latency_sleep, latency_marker, latency_report}` and
     `RenderConfig::{latency, frame_rate_limit}` (all additive; the types are
     `#[non_exhaustive]`).
   - The `latency` setting and `MOBA_LATENCY=off|on|boost`: on by default, boost off. The frame
     log adds `latency=`, `latency_setting=`, `paced_frames=` and, with Reflex, the
-    `latency_sim/submit/present/gpu` and `pc_latency` percentiles.
-  - Measured on the RTX 5070 Ti: validation-clean, frame pacing unchanged, and no PC-latency
-    gain on that desktop (amendment 1, item 8). Anti-Lag is untested at run time until Mesa
+    `latency_sim/submit/present/gpu` and `pc_latency` percentiles. `MOBA_MAX_FPS=<n>` sets the
+    frame limit (default 240, 0 uncapped).
+  - Measured on the RTX 5070 Ti: validation-clean, the pacing gate holds (the driver's interval
+    runs about 1 % longer than the platform limiter's), and no PC-latency gain on that desktop,
+    capped, vsync-on or uncapped and GPU-bound (amendment 1, item 9): on by default follows the
+    maintainer's answer, not a measured benefit. Anti-Lag is untested at run time until Mesa
     26.3 (blocked).
 - **Vendor SDK cargo features (ADR-0020 §6 and amendment 6, N0.6;
   [perf/0029](docs/perf/0029-vendor-sdks.md), [dev/vendor-sdks.md](docs/dev/vendor-sdks.md)):**

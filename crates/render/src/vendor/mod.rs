@@ -483,9 +483,9 @@ fn candidates() -> Vec<Candidate<Probe>> {
 }
 
 /// Selects the vendor back ends for a created device and logs the result (one line per
-/// fallback, then a summary; nothing in the open build).
-pub(crate) fn select(context: &ProbeContext<'_>) -> Selection {
-    let latency = latency::detect(context.device_extensions);
+/// fallback, then a summary; nothing in the open build). `latency` is the latency back end
+/// that runs (`latency::create`), so the summary and [`Selection::backends`] agree with it.
+pub(crate) fn select(context: &ProbeContext<'_>, latency: LatencyMode) -> Selection {
     let selection = resolve(&candidates(), context, latency);
     for line in selection.lines() {
         eprintln!("{line}");

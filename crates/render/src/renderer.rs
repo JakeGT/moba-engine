@@ -193,8 +193,9 @@ pub struct RenderConfig {
     pub latency: LatencySetting,
     /// The platform's frame-rate limit (`moba_platform::WindowConfig::max_frame_rate`; 0:
     /// uncapped). While a latency back end paces the frames it replaces that limiter, and
-    /// enforces this rate itself (Reflex's `minimumIntervalUs`, Anti-Lag's `maxFPS`).
-    /// Default 0.
+    /// enforces this rate itself (Reflex's `minimumIntervalUs`, Anti-Lag's `maxFPS`), with
+    /// the platform limiter as a backstop for a frame the driver let through early.
+    /// Default 240, `WindowConfig`'s default.
     pub frame_rate_limit: u32,
 }
 
@@ -229,7 +230,7 @@ impl Default for RenderConfig {
             render_path: PathChoice::Auto,
             tiered_cpu_devices: false,
             latency: LatencySetting::On,
-            frame_rate_limit: 0,
+            frame_rate_limit: 240,
         }
     }
 }
@@ -607,6 +608,8 @@ pub struct Renderer {
     /// The present ID of the frame being built: one more than the last presented frame's.
     /// Reflex's markers, its submit and present chains and Anti-Lag's frame index use it.
     latency_frame: u64,
+    /// Which frames sleep, the frame-rate backstop and one `SIMULATION_START` per frame.
+    latency_pacer: latency::Pacer,
     /// The tiered path's bindless table (ADR-0020 §3); `None` on Compat, which keeps plain
     /// descriptor sets. N0 creates it and no pass reads it yet. Dropped before the device.
     #[allow(dead_code)] // Held for its lifetime until the N1+ tiered passes bind it.
@@ -683,18 +686,6 @@ impl Renderer {
         config.quality_tier = crate::preset::config_tier(path, requested_tier);
         let memory_budget = crate::preset::total_memory_budget(path, requested_tier);
         crate::memory::begin_renderer(memory_budget);
-        // ADR-0020 §6c: probe the compiled-in vendor back ends against this device; each one
-        // that is unavailable logs one line naming its fallback (nothing in the open build).
-        let vendor = crate::vendor::select(&crate::vendor::ProbeContext {
-            entry: &instance.entry,
-            instance: &instance.instance,
-            physical: device.physical,
-            device: &device.device,
-            capabilities: &device.capabilities,
-            path,
-            instance_extensions: &instance.enabled_extensions,
-            device_extensions: &device.enabled_extensions,
-        });
         // ADR-0021 §6: the latency back end the enabled extensions allow, with one log line
         // either way.
         let (mut latency, latency_line) = latency::create(&latency::LatencyContext {
@@ -707,6 +698,21 @@ impl Renderer {
             max_frame_rate: config.frame_rate_limit,
         });
         eprintln!("{latency_line}");
+        // ADR-0020 §6c: probe the compiled-in vendor back ends against this device; each one
+        // that is unavailable logs one line naming its fallback (nothing in the open build).
+        let vendor = crate::vendor::select(
+            &crate::vendor::ProbeContext {
+                entry: &instance.entry,
+                instance: &instance.instance,
+                physical: device.physical,
+                device: &device.device,
+                capabilities: &device.capabilities,
+                path,
+                instance_extensions: &instance.enabled_extensions,
+                device_extensions: &device.enabled_extensions,
+            },
+            latency.mode(),
+        );
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
         let bindless = if path == RenderPath::Tiered {
@@ -1130,6 +1136,7 @@ impl Renderer {
             vendor,
             latency,
             latency_frame: 1,
+            latency_pacer: latency::Pacer::default(),
             bindless,
             device,
             surface,
@@ -1542,10 +1549,7 @@ impl Renderer {
     /// frame.
     #[must_use]
     pub fn vendor_backends(&self) -> crate::VendorBackends {
-        let mut backends = self.vendor.backends();
-        // The back end actually running (a Reflex device whose set-up failed runs none).
-        backends.latency = self.latency.mode();
-        backends
+        self.vendor.backends()
     }
 
     /// The latency sleep (ADR-0021 §6b): call it once per frame, after the frame's present
@@ -1557,22 +1561,31 @@ impl Renderer {
     /// [`RenderConfig::frame_rate_limit`], so the caller's own frame limiter should stand down
     /// (`moba_platform::Pacing::External`). Returns `false`, without sleeping, when the device
     /// has neither extension, the setting is [`LatencySetting::Off`], or the latest frame was
-    /// not presented (a minimised window).
+    /// not presented (a minimised window). Also `false`, after sleeping, when the frame
+    /// (from its [`LatencyMarker::SimulationStart`], else the previous sleep) lasted less than
+    /// 90 % of the limit's interval: the driver let it through early, so the caller's limiter
+    /// waits out the rest.
     pub fn latency_sleep(&mut self) -> bool {
-        if !self.last_submitted {
-            return false;
-        }
-        self.latency
-            .sleep(self.swapchain.handle(), self.latency_frame)
+        self.latency_pacer.sleep(
+            &mut *self.latency,
+            self.swapchain.handle(),
+            self.latency_frame,
+            self.last_submitted,
+            self.config.frame_rate_limit,
+        )
     }
 
     /// Reports a point of the app's frame loop for the frame being built (Reflex's markers,
     /// ADR-0021 §6b): [`LatencyMarker::SimulationStart`] and [`LatencyMarker::InputSample`]
     /// at the top of the frame, [`LatencyMarker::TriggerFlash`] on a click,
     /// [`LatencyMarker::SimulationEnd`] once the scene is built. The renderer sets the
-    /// render-submit and present markers itself. A no-op without Reflex.
+    /// render-submit and present markers itself. `SimulationStart` also starts the frame's
+    /// clock for the [`Renderer::latency_sleep`] backstop, once per frame: a frame retried
+    /// after a skipped submission keeps its first start. Otherwise a no-op without Reflex.
     pub fn latency_marker(&mut self, marker: LatencyMarker) {
-        self.set_latency_marker(marker.nv());
+        if self.latency_pacer.marker(self.latency_frame, marker) {
+            self.set_latency_marker(marker.nv());
+        }
     }
 
     /// The frames whose Reflex timings (`vkGetLatencyTimingsNV`) completed since the last
@@ -2216,8 +2229,6 @@ impl Renderer {
         if !self.sync_extent()? {
             return Ok(false);
         }
-        // ADR-0021 §6b: recording and submission, up to `vkQueueSubmit`.
-        self.set_latency_marker(vk::LatencyMarkerNV::RENDERSUBMIT_START);
         if self.capture_pending {
             if !self.swapchain.transfer_src {
                 return Err(RenderError::NoSuitableDevice(String::from(
@@ -2259,6 +2270,10 @@ impl Renderer {
             }?;
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
+        // ADR-0021 §6b: recording and submission, up to `vkQueueSubmit`. Set after the
+        // frame-slot fence, the acquire and the image's fence, so a frame blocked on the
+        // swapchain (vsync) does not count as render-thread work.
+        self.set_latency_marker(vk::LatencyMarkerNV::RENDERSUBMIT_START);
 
         if let Some(dynres) = self.dynres.as_mut()
             && let Some(timings) = self.profiler.latest()
@@ -3036,6 +3051,8 @@ impl Renderer {
         // SAFETY: waiting for the device to idle guarantees no frame is still using the old
         // swapchain or transient images before they are replaced.
         unsafe { self.device.device.device_wait_idle() }?;
+        // A timed-out latency sleep may still owe a signal on the swapchain being retired.
+        self.latency.settle();
         let extent = vk::Extent2D { width, height };
         let swapchain = Swapchain::new(
             &self.instance,
@@ -3226,6 +3243,8 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
+        // Before the swapchain and the latency semaphore are dropped (ADR-0021 §6b).
+        self.latency.settle();
         crate::memory::set_locked(false);
         if let Some(path) = &self.config.pipeline_cache
             && let Err(error) = self.device.save_pipeline_cache(path)
