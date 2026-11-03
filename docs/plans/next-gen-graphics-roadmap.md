@@ -776,6 +776,7 @@ exception: they stay all-rights-reserved and are listed as such.
    transparents, G-buffer decals, the multi-layer material model and team rims. Drafted as
    [ADR-0023](../adr/0023-frame-architecture-materials.md) (accepted 2026-11-02), with the
    vendor claims re-checked and its corrections to this plan listed there.
+8. **ADR-0025 (N6):** the Hillaire sky, froxel volumetric fog, backdrop clouds, wetness and puddles. Drafted as [ADR-0025](../adr/0025-atmosphere-weather.md) (proposed 2026-11-03), with its corrections to this plan listed there.
 
 ## 13. Open questions for the maintainer
 
