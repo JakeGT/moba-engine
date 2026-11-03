@@ -42,13 +42,13 @@ render_p95_ms = 0.254
 # so the two tables match.
 
 [tiered.low]
-gpu_total_p95_ms = 0.507
-render_p95_ms = 0.307
+gpu_total_p95_ms = 0.551
+render_p95_ms = 0.338
 
 [tiered.high]
-gpu_total_p95_ms = 0.558
-render_p95_ms = 0.310
+gpu_total_p95_ms = 0.598
+render_p95_ms = 0.344
 
 [tiered.ultra]
-gpu_total_p95_ms = 0.558
-render_p95_ms = 0.297
+gpu_total_p95_ms = 0.599
+render_p95_ms = 0.327

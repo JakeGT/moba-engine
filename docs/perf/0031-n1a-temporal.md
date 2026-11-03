@@ -7,8 +7,9 @@ Captured 2026-11-03 for ADR-0021 (N1a) and its
   (Mesa llvmpipe) with the Khronos validation layer, `MOBA_VULKAN_VALIDATION=required`
 - CPU: AMD Ryzen 7 9800X3D; OS: Linux 7.3.0-5-cachyos, Wayland
 - Toolchain: rustc 1.99.1 stable
-- Branch `feat/n1a-temporal` (after the review fixes); baseline: origin/main `e9d5f91` (with
-  N1b stage 1), built detached in its own worktree
+- Branch `feat/n1a-temporal` (after the review fixes); baseline for gate 6: origin/main
+  `620f11c` (with N1b stage 1 and N1d), built detached in its own worktree; Compat identity
+  and goldens against the same commit
 
 Every lavapipe run below printed no `[vulkan` line: validation and synchronisation validation
 were clean.
@@ -117,99 +118,105 @@ contrast 1.511, worst rim lift 1.266 where the tint has headroom.
 The teamfight replay (`tests/replays/teamfight-5v5.mbr`, 330 warm-up ticks) at 1920×1080,
 release builds, validation off, `MOBA_VSYNC=0`, `MOBA_PIPELINE_CACHE=off`, 3 000 frames (the
 log covers the last 2 940). Three rounds, interleaved: in each round every configuration ran
-on origin/main `e9d5f91` and then on the branch (after the review fixes). Values are the
-medians of the three rounds (range in brackets where it is wider than 0.002 ms). The
-branch's tiered runs use their tier defaults: temporal AA, TAAU Quality, render scale 0.656
-(dynamic resolution held the ceiling throughout).
+on origin/main `620f11c` (N1b stage 1 and N1d merged) and then on the branch (the review
+fixes, merged with it). Both builds run N1d's defaults: on Tiered, Reflex on and the 240 fps
+limit. Values are the medians of the three rounds (range in brackets where it is wider
+than 0.004 ms). The branch's tiered runs use their tier defaults: temporal AA, TAAU Quality,
+render scale 0.656 (dynamic resolution held the ceiling throughout).
 
 **GPU and memory:**
 
 | Path, tier | Build | AA | GPU total p50, ms | GPU total p95, ms | VRAM peak | `locked_uploads` / `locked_pipelines` |
 |---|---|---|---|---|---|---|
-| Tiered Low | main | FXAA, native | 0.486 | 0.494 | 136.0 MB | 0 / 0 |
-| Tiered Low | branch | TAAU Quality | 0.499 | 0.507 | 180.6 MB | 0 / 0 |
-| Tiered High | main | MSAA 4× | 0.654 (0.652–0.655) | 0.662 | 292.9 MB | 0 / 0 |
-| Tiered High | branch | TAAU Quality | 0.551 | 0.558 | 242.4 MB | 0 / 0 |
-| Tiered Ultra | main | MSAA 4× | 0.653 (0.653–0.655) | 0.662 | 292.9 MB | 0 / 0 |
-| Tiered Ultra | branch | TAAU Quality | 0.551 | 0.558 | 242.4 MB | 0 / 0 |
-| Compat Ultra | main | MSAA 4× | 0.658 | 0.665 | 292.9 MB | 0 / 0 |
-| Compat Ultra | branch | MSAA 4× | 0.659 | 0.667 | 292.9 MB | 0 / 0 |
+| Tiered Low | main | FXAA, native | 0.496 (0.493–0.498) | 0.511 | 136.0 MB | 0 / 0 |
+| Tiered Low | branch | TAAU Quality | 0.541 | 0.551 | 180.6 MB | 0 / 0 |
+| Tiered High | main | MSAA 4× | 0.659 (0.656–0.663) | 0.718 | 292.9 MB | 0 / 0 |
+| Tiered High | branch | TAAU Quality | 0.588 | 0.598 | 242.4 MB | 0 / 0 |
+| Tiered Ultra | main | MSAA 4× | 0.658 (0.654–0.666) | 0.718 | 292.9 MB | 0 / 0 |
+| Tiered Ultra | branch | TAAU Quality | 0.589 | 0.599 | 242.4 MB | 0 / 0 |
+| Compat Ultra | main | MSAA 4× | 0.662 (0.659–0.663) | 0.724 | 292.9 MB | 0 / 0 |
+| Compat Ultra | branch | MSAA 4× | 0.663 | 0.721 | 292.9 MB | 0 / 0 |
 
-Per-pass lanes on the branch (median p50, ms; identical within 0.001 ms across rounds):
+Per-pass lanes on the branch (median p50, ms; within 0.001 ms across rounds):
 
 | Tier | `prepass` | `temporal` (TAAU) | `tc_mask` | `overlay_prepass` | `overlay` | `scene` (main → branch) |
 |---|---|---|---|---|---|---|
-| Low | 0.020 | 0.130 | 0.004 | 0.022 | 0.050 | 0.159 → 0.079 |
-| High | 0.024 | 0.130 | 0.004 | 0.023 | 0.050 | 0.250 → 0.091 |
-| Ultra | 0.024 | 0.130 | 0.004 | 0.022 | 0.050 | 0.250 → 0.091 |
+| Low | 0.022 | 0.147 | 0.004 | 0.024 | 0.051 | 0.161 → 0.084 |
+| High | 0.025 | 0.144 | 0.004 | 0.025 | 0.051 | 0.254 → 0.094 |
+| Ultra | 0.025 | 0.144 | 0.004 | 0.025 | 0.051 | 0.254 → 0.094 |
 
 **CPU** (`cpu_*`: the client's frame work before rendering; `render_*`: the renderer's
 recording and submission, both from the frame log):
 
-| Path, tier | Build | `cpu` p50 / p95, ms | `render` p50, ms | `render` p95, ms (rounds) |
+| Path, tier | Build | `cpu` p50, ms | `render` p50, ms | `render` p95, ms (rounds) |
 |---|---|---|---|---|
-| Tiered Low | main | 0.009 / 0.028 | 0.159 | 0.246 (0.195–0.270) |
-| Tiered Low | branch | 0.010 / 0.028 | 0.181 | 0.307 (0.249–0.340) |
-| Tiered High | main | 0.009 / 0.028 | 0.167 | 0.280 (0.234–0.301) |
-| Tiered High | branch | 0.010 / 0.028 | 0.182 | 0.310 (0.272–0.336) |
-| Tiered Ultra | main | 0.009 / 0.028 | 0.167 | 0.249 (0.228–0.301) |
-| Tiered Ultra | branch | 0.010 / 0.028 | 0.181 | 0.297 (0.250–0.335) |
-| Compat Ultra | main | 0.009 / 0.028 | 0.166 | 0.273 (0.248–0.297) |
-| Compat Ultra | branch | 0.010 / 0.028 | 0.167 | 0.242 (0.234–0.298) |
+| Tiered Low | main | 0.009 | 0.162 | 0.289 (0.282–0.304) |
+| Tiered Low | branch | 0.010 | 0.182 | 0.338 (0.332–0.342) |
+| Tiered High | main | 0.009 | 0.169 | 0.316 (0.310–0.318) |
+| Tiered High | branch | 0.010 | 0.183 | 0.344 (0.327–0.344) |
+| Tiered Ultra | main | 0.009 | 0.169 | 0.314 (0.271–0.315) |
+| Tiered Ultra | branch | 0.010 | 0.183 | 0.327 (0.322–0.341) |
+| Compat Ultra | main | 0.009 | 0.168 | 0.315 (0.314–0.318) |
+| Compat Ultra | branch | 0.010 | 0.169 | 0.318 (0.317–0.318) |
 
-- **GPU.** High and Ultra are 0.103 ms cheaper and 50.5 MB smaller than the MSAA 4× they
+- **GPU.** High and Ultra are 0.07 ms cheaper and 50.5 MB smaller than the MSAA 4× they
   replace; TAAU's own memory is 38.7 MB (`upscaler_vram_mb`: the history and previous-depth
-  pairs at a 1080p output). Low costs 0.013 ms and 44.6 MB more: it had no MSAA to give back
-  (it ran FXAA at native), and TAAU at a 1080p output costs about what rendering at 0.656
-  saves. Compat is unchanged within noise. Against the first measurement of this branch
-  (before the review fixes) TAAU fell from 0.145 to 0.130 ms and the tiered scene pass from
-  0.084–0.094 to 0.079–0.091 ms; the one change on that path is that `depth` and `motion`
-  no longer carry `TRANSFER_SRC` outside the motion probe (amendment 2 item 13), which is
-  consistent with the driver keeping them compressed. That attribution is an inference,
-  not measured separately.
-- **Render CPU rose by about 0.015 ms at p50 on every tiered tier** (0.159–0.167 →
-  0.181–0.182 ms, +9–14 %); Compat is flat (0.166 → 0.167). The p95s move by +0.03–0.06 ms,
-  but they spread by up to 0.1 ms across rounds on both builds, so the p95 delta is within
-  that spread. Where the p50 delta goes, from one more run each of the branch's Tiered Ultra
-  with `MOBA_AA=fxaa` (0.169 ms) and with temporal AA (0.180 ms): about 0.002 ms is the
-  overlay (its prepass and pass are recorded under every AA mode), and about 0.011 ms is the
-  temporal path. Its parts are the motion history and the previous-state upload, the prepass
-  permutations with motion and the `tc_mask` pass, and TAAU's and `exposure_linear`'s
-  descriptor writes (12 and 2 descriptors a frame). The motion part is measured on its own
-  by `benches/motion_history.rs` (below): the frame log does not count keyed units, but at
-  the bench's costs (about 17 ns a unit unskinned, 59 ns with 40 joints) even 150 skinned
-  units are 0.009 ms, and a 5v5 teamfight keys fewer (10 heroes and the minion waves), so
-  the motion work is at most about 0.009 of the 0.011 ms; how the rest splits is not
-  measured.
-  Nothing was trimmed: no single part is large enough to be worth a change without a
-  profiler on the render thread, and the delta is about 0.2 % of Ultra's 9 ms budget.
-- **Overlay prepass at 1080p on Low:** 0.022 ms on the 5070 Ti. Scaled by the RTX 2060's
-  ≈ 7× lower shader throughput and ≈ 2.7× lower bandwidth, the estimate is about 0.15 ms,
+  pairs at a 1080p output). Low costs 0.045 ms and 44.6 MB more: it had no MSAA to give back
+  (it ran FXAA at native), and TAAU at a 1080p output (0.147 ms) costs more than rendering
+  at 0.656 saves. Compat is unchanged within noise.
+- **Session-to-session drift.** An earlier A/B of this branch against `e9d5f91` (before the
+  N1d merge, the same day) measured TAAU at 0.130 ms and every configuration, both builds,
+  0.005–0.04 ms lower than here (Tiered Low main 0.486 ms, branch 0.499 ms). Both builds
+  moved together, so the comparisons within a session hold; the absolute values depend on
+  the GPU's state that session (perf/0022's memory-clock note), which was not logged.
+- **Render CPU rose by 0.014–0.020 ms at p50 on every tiered tier** (0.162–0.169 →
+  0.182–0.183 ms, +8–12 %); Compat is flat (0.168 → 0.169). The p95s rise by 0.01–0.05 ms
+  and spread by up to 0.04 ms across rounds. Where the p50 delta goes, from one more run
+  each of the pre-merge branch's Tiered Ultra with `MOBA_AA=fxaa` (0.169 ms) and with
+  temporal AA (0.180 ms): about 0.002 ms is the overlay (its prepass and pass are recorded
+  under every AA mode) and about 0.011 ms the temporal path. Its parts are the motion history
+  and the previous-state upload, the prepass permutations with motion and the `tc_mask`
+  pass, and TAAU's and `exposure_linear`'s descriptor writes (12 and 2 descriptors a frame).
+  The motion part is measured on its own by `benches/motion_history.rs` (below): the frame
+  log does not count keyed units, but at the bench's costs (about 17 ns a unit unskinned,
+  59 ns with 40 joints) even 150 skinned units are 0.009 ms, and a 5v5 teamfight keys fewer
+  (10 heroes and the minion waves), so the motion work is at most about 0.009 of the
+  0.011 ms; how the rest splits is not measured. Nothing was trimmed: no single part is
+  large enough to be worth a change without a profiler on the render thread, and the delta
+  is about 0.2 % of Ultra's 9 ms budget.
+- **Overlay prepass at 1080p on Low:** 0.024 ms on the 5070 Ti. Scaled by the RTX 2060's
+  ≈ 7× lower shader throughput and ≈ 2.7× lower bandwidth, the estimate is about 0.17 ms,
   under the 0.4 ms gate. This is an **estimate**: per the ADR it does not close the target
   until an RTX 2060 (the Low reference class) is measured.
 - **Overlay VFX filter.** The overlay re-draws the particle buffer and keeps only enemy
   telegraphs in the vertex stage, so its vertex work scales with live particles, not
   telegraphs. This replay peaks at 663–693 live particles (`vfx_alive_max`); Ultra's cap is
-  49,152. The cost at the cap was not measured; the `overlay` lane above (0.050 ms) is
+  49,152. The cost at the cap was not measured; the `overlay` lane above (0.051 ms) is
   dominated by its full-screen work at this load.
-- **Frame time is presentation-paced and symmetric across builds.** Frame p50 was
-  4.177–4.178 ms in every run on both builds although `MOBA_VSYNC=0`: the compositor paces
-  presentation on this display (240 Hz), so frame time does not measure this change. In this
-  rerun p99 was 4.192–4.202 ms everywhere (p99 ÷ p50 ≤ 1.01). In the first run of this A/B
-  (before the review fixes, with other agents' builds on the machine) the R8 pacing rule
-  (p99 ≤ 1.5× p50) was breached once on each build: branch Tiered High in round 1 (1.62×)
-  and main Tiered Low in round 2 (1.52×). Those were load on the machine, not this change.
-  **Before the last N1 part flips the Tiered baseline check, the baselines are re-recorded on
-  a quiet machine.**
+- **Frame time is paced and symmetric across builds.** Frame p50 was 4.220 ms on Tiered and
+  4.178 ms on Compat in every run on both builds although `MOBA_VSYNC=0`: Tiered runs N1d's
+  Reflex pacing at the 240 fps limit, and Compat's presentation is paced by the compositor on
+  this 240 Hz display, so frame time does not measure this change. p99 was 4.196–4.257 ms
+  everywhere (p99 ÷ p50 ≤ 1.01). In the first A/B of this branch (before the review fixes,
+  with other agents' builds on the machine) the R8 pacing rule (p99 ≤ 1.5× p50) was breached
+  once on each build: branch Tiered High in round 1 (1.62×) and main Tiered Low in round 2
+  (1.52×); that was load on the machine, not this change. **Before the last N1 part flips
+  the Tiered baseline check, the baselines are re-recorded on a quiet machine.**
 - **1440p was not run**; every figure here is at 1080p. TAAU's memory and cost scale with the
   output (its history is output-sized), so a 1440p run belongs with N1b's FSR 3.1 comparison.
 
-**`perf-gate` (amendment 2, item 16).** The branch's round-2 logs pass
+**`perf-gate` (amendment 2, item 16).** The branch's logs pass
 `perf-gate --baseline tests/perf/baseline.toml` with every Tiered budget checked as a failure
-(Low 0.506 of 12 ms, High 0.558 of 7.5 ms, Ultra 0.558 of 9 ms) and the new
+(Low, High and Ultra at 0.55–0.60 ms against 12, 7.5 and 9 ms) and the new
 `[tiered.low|high|ultra]` baselines compared report-only. Those baselines are the branch
 medians above (GPU total p95 and render p95); every later N1 part re-records them, and the
-last flips the regression check to failing.
+last flips the regression check to failing. Compat Ultra's render p95 sits on its
+committed limit (0.318 ms against `[ultra]`'s 0.254 ms + 25 %) on **both** builds: main
+`620f11c` fails it in round 1 and the branch in rounds 1 and 2, at 0.314–0.318 ms. These
+short replays are not `perf-replay.sh`'s conditions (18,000 ticks, a warm pipeline cache)
+that the Compat baseline was recorded under, and the branch's Compat render p50 is within
+0.001 ms of main's, so this is recorded, not attributed to N1a; the nightly perf run is the
+check.
 
 **Motion history bench** (`cargo bench -p moba-render --bench motion_history`, 9800X3D;
 per frame, every lookup a hit):
