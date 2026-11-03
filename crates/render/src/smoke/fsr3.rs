@@ -91,7 +91,9 @@ const TINY_FULL_BOUND: f32 = 1.5;
 /// frame's (clean runs: 0.79): the accumulation recovers detail one frame lacks.
 const CONVERGENCE: f32 = 0.9;
 /// The same for the moving fine field, which keeps detail only if the reprojection is right
-/// (clean runs: 0.84 to 0.88; motion vectors misscaled: 1.0, ignored: 1.7).
+/// (clean runs: 0.84 to 0.88; motion vectors misscaled: 1.003, ignored: 1.7). Do not loosen
+/// it: RADV's clean 0.88 is about 7 % under it, and above about 1.0 it stops catching
+/// misscaled vectors.
 const MOVING_CONVERGENCE: f32 = 0.95;
 /// RCAS at sharpness 0.25 must raise the converged static field's local contrast by at least
 /// this factor over the unsharpened output (clean runs: 1.24; RCAS skipped: 1.0).

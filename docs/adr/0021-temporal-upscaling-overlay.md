@@ -973,10 +973,12 @@ own; wiring it behind N1a's `TemporalUpscaler` follows N1a. How it is built is i
 - **Interface.** `Fsr3` has §4a's methods. Until it implements N1a's trait, `kind` returns the
   name `"fsr3"` and the inputs and output are local mirrors of `UpscaleInputs` and
   `UpscaleOutput`. `has_sharpening` is true: RCAS runs inside FSR. `record` is an `unsafe fn`
-  with one contract beyond §4a: **at most two frames in flight** (the command buffer of the
-  call two `record`s back has finished, and each is submitted at most once), because the
-  descriptor sets and constants are kept per history parity; the renderer asserts its
-  `FRAMES_IN_FLIGHT` against it at compile time. The descriptors that name the caller's images
+  with two contracts beyond §4a: **every recorded command buffer is submitted exactly once,
+  in `record` order, on one queue** (the first frame's transitions and clears, and each
+  frame's barrier against the previous one, depend on it; `resize` starts over), and **at most
+  two frames in flight** (the command buffer of the call two `record`s back has finished),
+  because the descriptor sets and constants are kept per history parity; the renderer asserts
+  its `FRAMES_IN_FLIGHT` against it at compile time. The descriptors that name the caller's images
   are rewritten every frame, so recreated views (even with reused handle values) are safe.
   `resize` re-creates the images for new maximum sizes and keeps the pipelines. Dropping or
   resizing the context needs the GPU idle on it, as for every pass; stage 2 keeps that when it

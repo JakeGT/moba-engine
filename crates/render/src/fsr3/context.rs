@@ -866,12 +866,18 @@ impl Fsr3 {
     ///
     /// # Safety
     /// - `cmd` is a command buffer of this context's device in the recording state.
+    /// - **Every command buffer recorded here is submitted exactly once, in `record` order,
+    ///   on one queue** (with the poison hook's commands, if any, before the first). The
+    ///   context's state assumes it: after the first record the internal images are taken to
+    ///   be in `GENERAL` and initialised, and each frame's barriers order it only against the
+    ///   previous record's commands earlier on the same queue. Dropping a recorded command
+    ///   buffer unsubmitted (or reordering two) leaves later records reading images that were
+    ///   never transitioned or cleared; to start over, `resize` (which makes the next record
+    ///   a first frame again) or drop the context.
     /// - **At most [`MAX_FRAMES_IN_FLIGHT`] records in flight.** When this is called, the
-    ///   command buffer of the call two `record`s back has finished executing, or will never
-    ///   be submitted. This call rewrites the descriptor sets and the host-visible constant
-    ///   slot of its parity, which that command buffer used: rewriting them while it is
-    ///   pending, or before it is submitted, is undefined behaviour (and invalidates it).
-    /// - Each command buffer recorded here is submitted at most once.
+    ///   command buffer of the call two `record`s back has finished executing. This call
+    ///   rewrites the descriptor sets and the host-visible constant slot of its parity, which
+    ///   that command buffer used: rewriting them while it is pending is undefined behaviour.
     /// - Every image and view in `inputs` and `out` stays alive until this command buffer
     ///   has finished executing.
     #[allow(clippy::too_many_lines)] // The SDK's dispatch, in order.

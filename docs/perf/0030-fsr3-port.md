@@ -108,6 +108,7 @@ ratio below is 1.0 or more.
 | RCAS not run at sharpness 0.25 | FAIL | contrast 1.00×; sharpened output equal to unsharpened |
 | render size in the constants always the maximum | FAIL | whole-image errors up to 762 (sentinels) at every sweep size below the maximum |
 | previous-frame render size stale (= the current one) | PASS | not caught, see below |
+| reconstructed previous depth not cleared each frame | PASS (digest changes) | not caught, see below |
 | new locks not cleared on the first frame (poisoned) | PASS | not observable here, see below |
 | first frame's clears limited to the original port's (poisoned) | PASS | not observable here, see below |
 | no first-frame clears and no first-frame reset (poisoned) | digest changes | NaN history reaches the output; unpoisoned, the two runs differ |
@@ -117,6 +118,15 @@ ratio below is 1.0 or more.
   stay near zero whatever the size. A size-step test on the fine field moved the first frame's
   error by under 0.001. Catching this needs a scene whose shading changes across a size step:
   stage 2's readability scenes, or a later smoke phase.
+- **Reconstructed previous depth not cleared.** Skipping its every-frame clear (to the far
+  plane) changes the output digest but stays inside every bound (reported by the re-review,
+  confirmed on the RTX). The scenes are a constant depth plane, so nothing is disoccluded and
+  the depth reconstruction never decides anything. Stage 2 needs a scene with a depth edge and
+  disocclusion (a moving foreground object over a background) to cover this and the stale size
+  above together.
+- **The moving fine field's bound.** Clean runs give 0.84 (lavapipe, RTX) to 0.88 (RADV) against
+  the 0.95× bound, about 7 % of headroom on RADV; misscaled motion vectors give 1.003. Do not
+  loosen it: any value above about 1.0 stops catching the misscaled vectors.
 - **Uninitialised internal images.** With the first frame a reset, as it always is, the
   passes did not read the poisoned images in a way that reached the output, so the original
   port's narrower first-frame clears were not observably wrong in this scene. The port now

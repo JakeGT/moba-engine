@@ -104,9 +104,12 @@ name the caller's images are rewritten in this frame's parity on every
 `record`, from fixed arrays, so a view the caller recreated is never read through a stale
 descriptor, even one whose handle value was reused.
 
-`record` is an `unsafe fn`. Its safety contract: the command buffer of the call two `record`s
-back has finished executing (or will never be submitted), each recorded command buffer is
-submitted at most once, and the caller's images live until the GPU is done. That is at most
+`record` is an `unsafe fn`. Its safety contract: every recorded command buffer is submitted
+exactly once, in `record` order, on one queue (the context assumes its images were transitioned
+and cleared by the records before, and orders each frame only against the previous one on that
+queue; to start over, `resize` or drop the context); the command buffer of the call two
+`record`s back has finished executing; and the caller's images live until the GPU is done.
+That is at most
 two frames in flight (`MAX_FRAMES_IN_FLIGHT`), which the renderer's `FRAMES_IN_FLIGHT`
 asserts at compile time: `record` rewrites this parity's descriptor sets and constant slot,
 which the frame two back used. `resize` (new maximum sizes: new images, the pipelines kept)
@@ -185,9 +188,14 @@ first frame (`Fsr3::poison`), the second starts from fresh allocations, and ever
 of the two must be bit-identical. Any validation or synchronization-validation message fails
 it. It runs in CI (render-golden) on lavapipe. Each of these faults, injected one at a time,
 fails it: the motion-vector scale wrong or zero, the jitter flipped on x or y alone, RCAS not
-run, a wrong render size in the constants. A stale previous-frame render size does not (it
-feeds only the luma-instability and shading-change masks, which these scenes, with no change
-in shading, leave near zero). The smoke also reports `vram_bytes` at real sizes.
+run, a wrong render size in the constants. Two do not, because the scenes are a constant
+depth plane with no change in shading: a stale previous-frame render size (it feeds only the
+luma-instability and shading-change masks, which stay near zero here) and skipping the
+every-frame clear of the reconstructed previous depth (nothing is disoccluded, so the depth
+reconstruction never matters). Stage 2 needs a scene with a depth edge and disocclusion, and a
+change in shading across a size step, to cover both. Do not loosen the moving fine field's
+0.95× bound: RADV's clean 0.88 sits about 7 % under it, and misscaled motion vectors give 1.003.
+The smoke also reports `vram_bytes` at real sizes.
 Results on lavapipe, an RTX 5070 Ti and a Radeon 610M: [docs/perf/0030](../perf/0030-fsr3-port.md).
 
 ## Updating the SDK
