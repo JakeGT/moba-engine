@@ -905,6 +905,96 @@ The maintainer accepted this ADR with **every recommendation above taken**, Q1 t
 - `independentBlend` is required on the tiered path, checked in every recorded fixture;
 - vendor back ends stay out of the goldens (gate 5 covers them).
 
+### Amendment 1 (2026-11-02, N1b): the FSR 3.1.6 port as built
+
+Recorded in the FSR 3.1 PR (`feat/n1b-fsr3`, #358). Stage 1 builds and proves the port on its
+own; wiring it behind N1a's `TemporalUpscaler` follows N1a. How it is built is in
+[docs/dev/fsr3.md](../dev/fsr3.md), the evidence in [perf/0030](../perf/0030-fsr3-port.md).
+
+- **§4c is settled: one FSR 3.1 context accepts any render size from 1×1 up to its maximum,
+  changing from frame to frame without a reset.** Every pass reads the frame's size (and the
+  previous frame's, for reprojection) from its constants and clamps its samples to that
+  rectangle; only the allocations use the maximum. `fsr3-smoke` checks it on lavapipe, an RTX
+  5070 Ti and a Radeon 610M (RADV): inside one Quality context (192×108 output, 128×72
+  maximum), the render size steps through Balanced, Performance, Ultra Performance, an odd
+  77×43 and back without a reset, with sentinel values outside each frame's rectangle in every
+  input; the first frame after each change and the converged one stay within their bounds,
+  with no error above 0.11 anywhere in the image (a leaked sentinel is 1000), and validation
+  and sync validation silent. 9×5, 2×1 and 1×1 then run finite and in range, and the context
+  recovers. The controller of ADR-0020 §5c can therefore drive FSR 3.1 as it drives TAAU.
+  `render_size_range` reports Ultra Performance's size up to the mode's, as the SDK computes
+  them (truncated), clamped to the context maximum, and a size above the maximum is refused.
+- **Language and compiler.** The vendored HLSL is compiled, unmodified, by the pinned `slangc`
+  (ADR-0020 §4c), not DXC. It needs `-lang slang`: Slang's HLSL front end keeps a `for` loop's
+  variable in scope after the loop, and two FSR headers reuse one in consecutive loops, which
+  DXC accepts. Beyond our modules' flags it also takes the quad-subgroup capability (the SPD
+  passes), DXC-style register shifts that give every binding an explicit number in set 0, and
+  two warnings disabled (an undefined macro in `#if`; unreachable code in `ffx_spd.h`). Every
+  module passes `spirv-val`, and tests hold the reflected and decorated bindings to a table.
+- **What is vendored.** `third_party/fidelityfx/` holds the upscaler's eight pass files and
+  their headers, the SPD and FSR 1 headers they include, and the FidelityFX core GPU headers
+  (`api/internal/gpu/`), which §6a's "the MIT shaders" did not name. All are on the SDK
+  licence's MIT list, checked file by file. The host side (`ffx_fsr3upscaler.cpp` and the
+  parts of the Vulkan back end it drives) is ported to Rust, since the SDK's own build is
+  Windows-only.
+- **One 32-bit permutation.** The SDK picks 16-bit math where the device supports it, and a
+  Lanczos lookup table with wave64 on 32/64-wide AMD GPUs. The port builds a single
+  permutation, `FFX_HALF=0` with the reference Lanczos kernel, on every device: simpler, and
+  identical everywhere. The cost falls on the GPUs the SDK would give the 16-bit path, which
+  are the ones where time is tightest: the Low tier's reference parts (ADR-0020 §5: RTX 2060,
+  Turing, with double-rate FP16; RX 6600, RDNA 2, with packed FP16) and other RDNA parts such
+  as the Radeon 610M, which would also take the lookup table with wave64. The RTX 5070 Ti, where gate 6 and Q1's 0.2 ms comparison with TAAU
+  run, is where FP16 matters least, so a pass there does not show the port is fast enough on
+  the Low tier. **Stage 2 times FP32 against an FP16 build (at least on the 610M) or cites
+  AMD's published deltas**, and a 16-bit permutation is the first follow-up if FSR 3.1 misses
+  a margin by less than it would save.
+- **The jitter sequence length is §1's count.** FSR's shaders take the jitter phase count as a
+  constant. The port passes §1's `ceil(8 r²)` (rounded ratio), the sequence the renderer
+  actually runs, rather than the SDK's truncated count, so 24 instead of 23 at 1.7×. With the
+  SDK's truncated mode sizes the ratios land just above the nominal ones, so at 2560 output
+  Quality (1706) gives 19 phases and Ultra Performance (853) 73, not the 18 and 72 of exact
+  ratios. The SDK's one-step-per-frame smoothing of that constant is kept.
+- **RCAS runs when the sharpness is above 0.** The SDK takes a separate `enableSharpening`
+  flag and maps sharpness 0 to RCAS's lightest setting. §4a has only a sharpness, so 0 means no
+  RCAS (plain accumulate), and above 0 means accumulate-with-sharpening then RCAS at that
+  sharpness.
+- **Every internal image is initialised on the first frame.** The SDK leaves most of them
+  uninitialised and clears only the accumulation and luma pairs. The port clears all of them
+  once (zero, the far plane for the reconstructed depth, the reset value for the frame info),
+  so no pass can read garbage on the first frame (the new locks are written only where a lock
+  forms but read everywhere). The smoke fills every internal image with NaN and all-ones before
+  its first frame and requires output bit-identical to a run from fresh allocations.
+- **Device requirements and fallback.** FSR 3.1 runs only on the tiered path, with quad
+  subgroup operations in compute and the format features its images need, read off the SPIR-V:
+  `STORAGE_WRITE_WITHOUT_FORMAT` on every float storage format, `STORAGE_READ_WITHOUT_FORMAT`
+  on the two it reads back without a format (`RGBA32F`, `R16G16_SFLOAT`), linear filtering on
+  the formats it samples, atomics on `R32_UINT`. Without them, creating the context fails and
+  the caller falls back to TAAU with one log line (§4b).
+- **Interface.** `Fsr3` has §4a's methods. Until it implements N1a's trait, `kind` returns the
+  name `"fsr3"` and the inputs and output are local mirrors of `UpscaleInputs` and
+  `UpscaleOutput`. `has_sharpening` is true: RCAS runs inside FSR. `record` is an `unsafe fn`
+  with two contracts beyond §4a: **every recorded command buffer is submitted exactly once,
+  in `record` order, on one queue** (the first frame's transitions and clears, and each
+  frame's barrier against the previous one, depend on it; `resize` starts over), and **at most
+  two frames in flight** (the command buffer of the call two `record`s back has finished),
+  because the descriptor sets and constants are kept per history parity; the renderer asserts
+  its `FRAMES_IN_FLIGHT` against it at compile time. The descriptors that name the caller's images
+  are rewritten every frame, so recreated views (even with reused handle values) are safe.
+  `resize` re-creates the images for new maximum sizes and keeps the pipelines. Dropping or
+  resizing the context needs the GPU idle on it, as for every pass; stage 2 keeps that when it
+  switches upscalers at run time (or adds deferred deletion).
+- **Memory.** `vram_bytes` at real sizes (perf/0030): about 71–75 MiB at 1080p Quality,
+  126–134 MiB at 1440p Quality, 208–222 MiB at 1440p NativeAA and 218–226 MiB at 4K
+  Performance, by driver. That is FSR's own memory, on top of the shared inputs; at 1440p
+  Quality it is about as much as all of §7's TAAU additions together. **Stage 2 frees TAAU's
+  history (and any other TAAU-only target) while FSR 3.1 runs**, so the two never hold memory
+  at once.
+- **For stage 2: the jitter sign.** The port takes FSR's convention (y down: the sample at
+  pixel `i` shows the scene at `i + 0.5 − jitter`). §1 applies the jitter to the projection as
+  `+2·jx / render_w` and `−2·jy / render_h` (clip y up). The §1 unit test that fixes that sign
+  must also check that the jitter handed to the upscalers is in FSR's convention, so the two
+  agree.
+
 ## Sources
 
 All accessed 2026-10-31.

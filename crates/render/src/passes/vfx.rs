@@ -143,7 +143,7 @@ const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
 );
 
 /// IEEE half-precision bits of `value` (round to nearest, saturating at ±65504).
-fn f16_bits(value: f32) -> u16 {
+pub(crate) fn f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let magnitude = value.abs();
@@ -168,7 +168,7 @@ fn f16_bits(value: f32) -> u16 {
 }
 
 /// `packHalf2x16(vec2(low, high))`.
-fn pack_half2(low: f32, high: f32) -> u32 {
+pub(crate) fn pack_half2(low: f32, high: f32) -> u32 {
     u32::from(f16_bits(low)) | (u32::from(f16_bits(high)) << 16)
 }
 

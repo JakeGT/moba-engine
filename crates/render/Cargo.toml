@@ -22,9 +22,10 @@ workspace = true
 # docs/dev/vendor-sdks.md.
 [features]
 default = ["fsr3"]
-# The MIT FSR 3.1 upscaler, the open build's upscaler. N0 vendors nothing yet: the port of
-# its shaders into third_party/fidelityfx/ lands with N1 (ADR-0020 amendment 6).
-fsr3 = []
+# The MIT FSR 3.1.6 upscaler, the open build's upscaler: its HLSL passes are vendored in
+# third_party/fidelityfx/ and compiled by moba-shaders (ADR-0020 amendment 6, ADR-0021 §4b).
+# Nothing to fetch.
+fsr3 = ["moba-shaders/fsr3"]
 # DLSS super resolution through NGX (static library), NVIDIA RTX only. Linux and Windows.
 dlss = ["dep:bindgen", "dep:toml", "dep:libc"]
 # Streamline (DLSS frame generation's Windows path). N0 only looks for its interposer; it is

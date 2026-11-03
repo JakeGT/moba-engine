@@ -51,6 +51,9 @@ jobs:
               - 'crates/tools/src/tiered_smoke.rs'
               - 'crates/tools/src/bin/bindless-smoke.rs'
               - 'crates/tools/src/bin/rt-smoke.rs'
+              # ADR-0021 §4b (N1b): the FSR 3.1.6 port, its vendored shaders and its smoke.
+              - 'crates/tools/src/bin/fsr3-smoke.rs'
+              - 'third_party/**'
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
       - uses: Swatinem/rust-cache@v2
@@ -81,6 +84,14 @@ jobs:
           ./target/release/vulkan-probe --path tiered
           ./target/release/bindless-smoke
           ./target/release/rt-smoke
+        env:
+          MOBA_RENDER_PATH: tiered
+      # ADR-0021 §4b/§4c (N1b): the FSR 3.1.6 port on synthetic inputs, within error bounds of
+      # the ideal output, across a sweep of render sizes in one context, and bit-identical
+      # across two runs, failing on any validation message.
+      - name: FSR 3.1 smoke with validation + sync validation
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: ./target/release/fsr3-smoke
         env:
           MOBA_RENDER_PATH: tiered
       # ADR-0020 §4c: a driver consumes slangc's SPIR-V (one dispatch of the toolchain smoke
