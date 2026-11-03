@@ -10,6 +10,11 @@
 //! - **foliage**: a patch in a steady wind at the same environment time in both frames (the
 //!   prepass evaluates every blade again at the previous time: the blades bend, and only the
 //!   camera moves them);
+//! - **foliage-pushed**: a second patch with a displacer in frame B only. Its blades bend away
+//!   from it in B, so their motion must differ from camera-only and point back towards the
+//!   displacer. There is no per-blade CPU twin, so this class is checked by direction and
+//!   share ([`PushCheck`]), not to 1/64 px: it fails when the prepass drops the second
+//!   evaluation at the previous displacers (every pushed blade would then be camera-only);
 //! - **reset**: a keyed cube moved with `motion_reset`, **absent-key** a cube with key 0
 //!   moved, **new-key** a cube whose key frame A did not draw: all three camera-only.
 //!
@@ -34,13 +39,13 @@ use moba_assets::{
 use moba_core::math::{Mat4, Vec3, Vec4};
 
 use super::Renderer;
-use crate::environment::{EnvironmentFrame, FoliageData, FoliageInstanceData};
+use crate::environment::{EnvironmentFrame, FoliageData, FoliageDisplacer, FoliageInstanceData};
 use crate::error::{RenderError, RenderResult};
 use crate::frame_graph::FramePlan;
 use crate::graph::ResourceId;
 use crate::resources::{CommandPool, GpuBuffer};
 use crate::scene::{BoneRange, Camera, Scene, UnitInstance};
-use crate::temporal::{jittered, motion_pixels};
+use crate::temporal::{clip_to_pixels, jittered, motion_pixels};
 use crate::{MeshData, TextureData, TextureFormat, VatDescriptor, VatPose, VatSample};
 
 /// The largest difference allowed between a motion vector and its CPU twin, in render
@@ -59,6 +64,17 @@ const CAMERA_ONLY_MOVE: Vec3 = Vec3::new(0.125, 0.0, 0.0);
 /// The environment time of both frames.
 const FOLIAGE_TIME: f32 = 37.25;
 const FOLIAGE_CENTRE: [f32; 2] = [-2.5, 2.5];
+/// The pushed patch, and its displacer (frame B only) at the patch's centre.
+const PUSHED_CENTRE: [f32; 2] = [-2.5, -2.5];
+const PUSH_RADIUS: f32 = 1.5;
+/// A pushed pixel's motion counts as moved when it differs from camera-only by this much.
+const PUSH_MOVED_PX: f32 = 0.25;
+/// Shares of the pushed patch's pixels that must have moved, and of those that must point
+/// towards the displacer. Not every moved pixel does: a pushed blade also flattens, so its
+/// previous (taller) position is partly *up* the screen, and near the displacer's centre the
+/// two directions part (measured on lavapipe: 80 % moved, 81 % of those inward).
+const PUSH_MOVED_SHARE: f32 = 0.3;
+const PUSH_INWARD_SHARE: f32 = 0.7;
 /// Half the side of the square in which a non-terrain, non-cube pixel counts as foliage.
 const FOLIAGE_HALF: f32 = 1.75;
 /// Distance from a cube's box within which a pixel is ambiguous.
@@ -93,6 +109,31 @@ impl MotionCheck {
     }
 }
 
+/// The pushed foliage patch (frame B's displacer): how many of its pixels moved more than
+/// camera-only, and how many of those point back towards the displacer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct PushCheck {
+    /// Pixels of the pushed patch.
+    pub pixels: u32,
+    /// Pixels whose motion differs from camera-only by more than 0.25 px.
+    pub moved: u32,
+    /// Moved pixels whose extra motion points towards the displacer.
+    pub inward: u32,
+    /// The mean extra motion of the moved pixels, render pixels.
+    pub mean_extra: f32,
+}
+
+impl PushCheck {
+    /// Enough pixels, at least 30 % moved and at least 70 % of those inward.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.pixels >= MIN_PIXELS
+            && self.moved as f32 >= PUSH_MOVED_SHARE * self.pixels as f32
+            && self.inward as f32 >= PUSH_INWARD_SHARE * self.moved as f32
+    }
+}
+
 /// The result of [`Renderer::motion_probe`].
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -103,6 +144,8 @@ pub struct MotionProbeReport {
     pub jitter: [f32; 2],
     /// Per class.
     pub checks: Vec<MotionCheck>,
+    /// The pushed foliage patch.
+    pub pushed: PushCheck,
     /// Pixels skipped as ambiguous (a cube's boundary) or unclassified.
     pub skipped: u32,
 }
@@ -111,7 +154,9 @@ impl MotionProbeReport {
     /// Every class passed.
     #[must_use]
     pub fn passed(&self) -> bool {
-        !self.checks.is_empty() && self.checks.iter().all(MotionCheck::passed)
+        !self.checks.is_empty()
+            && self.checks.iter().all(MotionCheck::passed)
+            && self.pushed.passed()
     }
 }
 
@@ -139,6 +184,19 @@ impl fmt::Display for MotionProbeReport {
                 check.mean_motion
             )?;
         }
+        writeln!(
+            f,
+            "  {} foliage-pushed pixels={:<7} moved={} ({:.1} %, need {:.0} %) inward={} ({:.1} %, need {:.0} %) mean_extra={:.3}",
+            if self.pushed.passed() { "ok  " } else { "FAIL" },
+            self.pushed.pixels,
+            self.pushed.moved,
+            100.0 * self.pushed.moved as f32 / self.pushed.pixels.max(1) as f32,
+            100.0 * PUSH_MOVED_SHARE,
+            self.pushed.inward,
+            100.0 * self.pushed.inward as f32 / self.pushed.moved.max(1) as f32,
+            100.0 * PUSH_INWARD_SHARE,
+            self.pushed.mean_extra
+        )?;
         write!(
             f,
             "motion probe: {}",
@@ -168,6 +226,8 @@ const CLASSES: [&str; 8] = [
 ];
 const CAMERA: usize = 0;
 const FOLIAGE: usize = 4;
+/// The pushed patch: not a `CLASSES` entry, checked by [`PushCheck`].
+const PUSHED: usize = usize::MAX;
 
 #[derive(Clone, Copy, Default)]
 struct Tally {
@@ -371,20 +431,22 @@ impl Renderer {
         let (texture, descriptor) = vat_assets(&plain, &positions, &normals)?;
         let vat = self.register_vat_mesh(&plain, &texture, &descriptor)?;
 
-        let mut clumps = Vec::with_capacity(36);
-        for row in 0..6u8 {
-            for column in 0..6u8 {
-                clumps.push(FoliageInstanceData::new(
-                    [
-                        FOLIAGE_CENTRE[0] - 0.875 + 0.35 * f32::from(column),
-                        0.0,
-                        FOLIAGE_CENTRE[1] - 0.875 + 0.35 * f32::from(row),
-                    ],
-                    0.7 * f32::from(row * 6 + column),
-                    0.9,
-                    0,
-                    1.0,
-                ));
+        let mut clumps = Vec::with_capacity(72);
+        for centre in [FOLIAGE_CENTRE, PUSHED_CENTRE] {
+            for row in 0..6u8 {
+                for column in 0..6u8 {
+                    clumps.push(FoliageInstanceData::new(
+                        [
+                            centre[0] - 0.875 + 0.35 * f32::from(column),
+                            0.0,
+                            centre[1] - 0.875 + 0.35 * f32::from(row),
+                        ],
+                        0.7 * f32::from(row * 6 + column),
+                        0.9,
+                        0,
+                        1.0,
+                    ));
+                }
             }
         }
         self.set_foliage(&FoliageData::new(&clumps))?;
@@ -438,9 +500,10 @@ impl Renderer {
         let scene_a = Scene::new(camera_a, &units_a)
             .with_bones(&bones_a)
             .with_environment(EnvironmentFrame::new(FOLIAGE_TIME, &[]));
+        let push = [FoliageDisplacer::new(PUSHED_CENTRE, PUSH_RADIUS, 1.0)];
         let scene_b = Scene::new(camera_b, &units_b)
             .with_bones(&bones_b)
-            .with_environment(EnvironmentFrame::new(FOLIAGE_TIME, &[]));
+            .with_environment(EnvironmentFrame::new(FOLIAGE_TIME, &push));
         // Frame A a few times (the first frames build pipelines and may be skipped), then B.
         let mut drawn = 0;
         for _ in 0..8 {
@@ -505,6 +568,9 @@ impl Renderer {
         let raster = jittered(camera_b.view_proj, jitter, render);
         let unproject = raster.inverse();
         let mut tallies = [Tally::default(); CLASSES.len()];
+        let mut pushed = PushCheck::default();
+        let mut extra_sum = 0.0f64;
+        let displacer_at = Vec3::new(PUSHED_CENTRE[0], 0.0, PUSHED_CENTRE[1]);
         let mut skipped = 0u32;
         let (w, h) = (render.width as usize, render.height as usize);
         for y in 0..h {
@@ -532,12 +598,27 @@ impl Renderer {
                     Some(cube) if distance(cube) <= ON_BOX && world.y > SHELL => {
                         (cube.class, cube.expected)
                     }
+                    // The pushed patch's ground pixels include blade bases that the push
+                    // moves: neither terrain nor reliably foliage.
+                    None if (world.x - PUSHED_CENTRE[0]).abs() < FOLIAGE_HALF
+                        && (world.z - PUSHED_CENTRE[1]).abs() < FOLIAGE_HALF
+                        && world.y.abs() < GROUND =>
+                    {
+                        skipped += 1;
+                        continue;
+                    }
                     None if world.y.abs() < GROUND => (CAMERA, Vec3::ZERO),
                     None if world.y > GROUND
                         && (world.x - FOLIAGE_CENTRE[0]).abs() < FOLIAGE_HALF
                         && (world.z - FOLIAGE_CENTRE[1]).abs() < FOLIAGE_HALF =>
                     {
                         (FOLIAGE, Vec3::ZERO)
+                    }
+                    None if world.y > GROUND
+                        && (world.x - PUSHED_CENTRE[0]).abs() < FOLIAGE_HALF
+                        && (world.z - PUSHED_CENTRE[1]).abs() < FOLIAGE_HALF =>
+                    {
+                        (PUSHED, Vec3::ZERO)
                     }
                     _ => {
                         skipped += 1;
@@ -555,6 +636,27 @@ impl Renderer {
                     continue;
                 };
                 let measured = motion[index];
+                if class == PUSHED {
+                    // Extra motion beyond the camera's, and the direction back to the
+                    // displacer on screen (both render pixels, y down).
+                    let extra = [measured[0] - twin[0], measured[1] - twin[1]];
+                    let here = clip_to_pixels(camera_b.view_proj * world.extend(1.0), render);
+                    let there =
+                        clip_to_pixels(camera_b.view_proj * displacer_at.extend(1.0), render);
+                    pushed.pixels += 1;
+                    let length = extra[0].hypot(extra[1]);
+                    if let (Some(here), Some(there)) = (here, there)
+                        && length > PUSH_MOVED_PX
+                    {
+                        pushed.moved += 1;
+                        extra_sum += f64::from(length);
+                        let towards = [there[0] - here[0], there[1] - here[1]];
+                        if extra[0] * towards[0] + extra[1] * towards[1] > 0.0 {
+                            pushed.inward += 1;
+                        }
+                    }
+                    continue;
+                }
                 let error = (measured[0] - twin[0]).hypot(measured[1] - twin[1]);
                 let tally = &mut tallies[class];
                 tally.pixels += 1;
@@ -577,10 +679,12 @@ impl Renderer {
                 }
             })
             .collect();
+        pushed.mean_extra = (extra_sum / f64::from(pushed.moved.max(1))) as f32;
         Ok(MotionProbeReport {
             render: [render.width, render.height],
             jitter,
             checks,
+            pushed,
             skipped,
         })
     }

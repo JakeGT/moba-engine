@@ -79,7 +79,7 @@ use crate::world::{
 mod ghost_probe;
 mod motion_probe;
 pub use ghost_probe::{GhostFrame, GhostProbeReport};
-pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport};
+pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PushCheck};
 
 const FRAMES_IN_FLIGHT: usize = 2;
 // ADR-0021: the temporal back end's and `exposure_linear`'s descriptor rings are rewritten one
@@ -1119,11 +1119,10 @@ impl Renderer {
                     ", no sharpening until N1c"
                 }
             );
-            Some(TemporalState::new(
-                Box::new(taau),
-                upscale_mode,
-                post_config.sharpness,
-            ))
+            Some(
+                TemporalState::new(Box::new(taau), upscale_mode, post_config.sharpness)
+                    .with_max_lod_bias(device.max_sampler_lod_bias),
+            )
         } else {
             None
         };

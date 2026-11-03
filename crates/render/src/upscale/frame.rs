@@ -36,6 +36,9 @@ pub(crate) struct TemporalState {
     reset_pending: bool,
     /// The latest frame's, for the frame log.
     last_phases: u32,
+    /// `maxSamplerLodBias`: the mip bias is clamped to it, so the terrain's explicit-gradient
+    /// scale and the materials' `texture(.., bias)` (which the device clamps) agree.
+    max_lod_bias: f32,
 }
 
 impl TemporalState {
@@ -52,7 +55,18 @@ impl TemporalState {
             previous: None,
             reset_pending: true,
             last_phases: 0,
+            // The minimum every device guarantees.
+            max_lod_bias: 2.0,
         }
+    }
+
+    /// Clamps the material mip bias to the device's `maxSamplerLodBias`.
+    #[must_use]
+    pub(crate) fn with_max_lod_bias(mut self, max_lod_bias: f32) -> Self {
+        if max_lod_bias.is_finite() && max_lod_bias > 0.0 {
+            self.max_lod_bias = max_lod_bias;
+        }
+        self
     }
 
     /// Forgets every history and restarts the jitter pattern (captures, ADR-0021 §1).
@@ -108,7 +122,8 @@ impl TemporalState {
                 previous,
                 jitter,
                 previous_jitter,
-                mip_bias: mip_bias(MipBiasRule::Standard, render.width, output.width),
+                mip_bias: mip_bias(MipBiasRule::Standard, render.width, output.width)
+                    .clamp(-self.max_lod_bias, self.max_lod_bias),
                 render: [render.width, render.height],
                 live: true,
             },
@@ -177,6 +192,25 @@ mod tests {
 
     fn extent(width: u32, height: u32) -> Extent {
         Extent { width, height }
+    }
+
+    /// ADR-0021 §1: the mip bias is clamped to `maxSamplerLodBias`, as the device clamps a
+    /// `texture(.., bias)`, so the terrain's gradient scale agrees with the materials.
+    #[test]
+    fn the_mip_bias_is_clamped_to_the_device_limit() {
+        let mut temporal = TemporalState::new(Box::new(Stub), UpscaleMode::UltraPerformance, 0.25)
+            .with_max_lod_bias(1.5);
+        let view = moba_core::math::perspective_rh(1.0, 16.0 / 9.0, 0.1, 100.0)
+            * moba_core::math::look_at_rh(Vec3::new(0.0, 10.0, 10.0), Vec3::ZERO, Vec3::Y);
+        let frame = temporal.begin_frame(
+            view,
+            Vec3::new(0.0, 10.0, 10.0),
+            extent(640, 360),
+            extent(1920, 1080),
+            false,
+        );
+        // log2(1/3) - 1 = -2.58, clamped to -1.5.
+        assert_eq!(frame.camera.mip_bias, -1.5);
     }
 
     #[test]
