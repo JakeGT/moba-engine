@@ -253,7 +253,9 @@ impl DeviceContext {
             // ADR-0020 §3a: bindless storage images (checked at admission on Tiered).
             .shader_storage_image_write_without_format(
                 tiered && present("shaderStorageImageWriteWithoutFormat"),
-            );
+            )
+            // ADR-0021 Q7: per-attachment blend states (checked at admission on Tiered).
+            .independent_blend(tiered && present("independentBlend"));
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)

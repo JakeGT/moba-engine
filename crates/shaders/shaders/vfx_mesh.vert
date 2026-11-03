@@ -18,6 +18,12 @@ layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
 layout(location = 2) out float out_view_depth;
 layout(location = 3) flat out uint out_flags;
+#ifdef VFX_TEMPORAL
+// ADR-0021 §2d: the previous position inverts the simulation's step (`position - velocity *
+// dt`), the tumble at `age - dt`.
+layout(location = 14) out vec4 out_motion_current;
+layout(location = 15) out vec4 out_motion_previous;
+#endif
 
 vec3 rotate(vec3 v, vec3 axis, float angle) {
     float c = cos(angle);
@@ -46,4 +52,16 @@ void main() {
     out_uv = vfx_atlas_uv(p, vec2(0.5), t);
     out_view_depth = clip.w;
     out_flags = p.misc.x | VFX_FLAG_HARD;
+#ifdef VFX_TEMPORAL
+    float dt = frame.camera_right.w;
+    float prev_age = max(p.pos_age.w - dt, 0.0);
+    float prev_t = clamp(prev_age / max(p.vel_life.w, 1e-4), 0.0, 1.0);
+    float prev_size = mix(p.size_spin.x, p.size_spin.y, prev_t);
+    float prev_angle = p.seg_rot.w + p.size_spin.z * prev_age;
+    vec3 prev_local = rotate(in_position * prev_size, axis, prev_angle);
+    vec3 world = p.pos_age.xyz + local;
+    vec3 previous = p.pos_age.xyz - p.vel_life.xyz * dt + prev_local;
+    out_motion_current = frame.view_proj_unjittered * vec4(world, 1.0);
+    out_motion_previous = frame.prev_view_proj * vec4(previous, 1.0);
+#endif
 }

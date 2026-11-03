@@ -105,6 +105,9 @@ pub(crate) struct EnvironmentResources {
     /// This frame's visible foliage runs `(first instance, count)` (capacity: every chunk).
     draws: Vec<(u32, u32)>,
     block: EnvironmentBlock,
+    /// Whether `block` holds a prepared frame (its values are the next frame's previous
+    /// ones, ADR-0021 §2b).
+    prepared: bool,
 }
 
 impl EnvironmentResources {
@@ -235,6 +238,7 @@ impl EnvironmentResources {
             water_styles: ([[0.0; 4]; MAX_WATER_BODIES], [[0.0; 4]; MAX_WATER_BODIES]),
             draws: Vec::new(),
             block: EnvironmentBlock::zeroed(),
+            prepared: false,
         };
         resources.write_foliage_sets(device);
         let view = resources.default_image.view();
@@ -441,12 +445,37 @@ impl EnvironmentResources {
 
     /// Fills frame `frame`'s environment block from `scene` and culls the foliage against
     /// its camera. `extent` is the main target's size.
-    pub(crate) fn prepare(&mut self, frame: usize, scene: &Scene<'_>, extent: vk::Extent2D) {
+    ///
+    /// `view_proj` is the matrix the main view rasterises with: the jittered one with temporal
+    /// AA (ADR-0021 §1), whose inverse reconstructs the water's depth. `history_reset` drops
+    /// the previous frame's foliage inputs (the temporal prepass then gives the foliage
+    /// camera motion only).
+    pub(crate) fn prepare(
+        &mut self,
+        frame: usize,
+        scene: &Scene<'_>,
+        extent: vk::Extent2D,
+        view_proj: Mat4,
+        history_reset: bool,
+    ) {
         let config = self.config;
         let environment = scene.environment;
         let look = self.look;
         let block = &mut self.block;
-        let inverse = scene.camera.view_proj.inverse();
+        // ADR-0021 §2b: what the previous frame wrote is this frame's previous state.
+        block.prev_time = [
+            block.time[0],
+            if history_reset || !self.prepared {
+                0.0
+            } else {
+                1.0
+            },
+            block.wind[2],
+            0.0,
+        ];
+        block.prev_displacers = block.displacers;
+        self.prepared = true;
+        let inverse = view_proj.inverse();
         block.inverse_view_proj = if inverse.is_finite() {
             inverse.to_cols_array_2d()
         } else {

@@ -9,6 +9,11 @@
 // The depth prepass (R6, ADR-0015) draws with this shader and no fragment stage; the scene
 // pass then tests LESS_OR_EQUAL against that depth, so both must compute the same position.
 invariant gl_Position;
+#ifdef MOTION_VECTORS
+// ADR-0021 §2b: the terrain is static (motion key 0): camera motion only.
+#define MOTION_VECTORS_VERTEX
+#include "motion.glsl"
+#endif
 
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
@@ -23,4 +28,7 @@ void main() {
     out_world_normal = in_normal;
     out_world_pos = in_position;
     out_occlusion = in_uv.x;
+#ifdef MOTION_VECTORS
+    write_motion(in_position, in_position);
+#endif
 }

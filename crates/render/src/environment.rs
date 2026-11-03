@@ -1018,6 +1018,11 @@ pub(crate) struct EnvironmentBlock {
     pub(crate) water_deep: [[f32; 4]; MAX_WATER_BODIES],
     /// rgb shallow, w foam.
     pub(crate) water_shallow: [[f32; 4]; MAX_WATER_BODIES],
+    /// The previous frame's foliage inputs for the temporal prepass's motion (ADR-0021 §2b):
+    /// x seconds, y 1 = valid (else the foliage has camera motion only), z displacers.
+    pub(crate) prev_time: [f32; 4],
+    /// The previous frame's displacers.
+    pub(crate) prev_displacers: [[f32; 4]; MAX_FOLIAGE_DISPLACERS],
 }
 
 impl EnvironmentBlock {

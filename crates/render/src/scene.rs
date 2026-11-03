@@ -700,9 +700,75 @@ pub(crate) struct CameraUniform {
     baked_ao: [f32; 4],
     contact: [f32; 4],
     outline_palette: [[f32; 4]; OUTLINE_SLOTS],
+    // N1 temporal (ADR-0021 §1, §2): see [`TemporalCamera`].
+    view_proj_unjittered: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    jitter: [f32; 4],
+    temporal: [f32; 4],
+}
+
+/// This frame's temporal camera state (ADR-0021 §1): the jittered matrix the main view
+/// rasterises with, the unjittered one and the previous frame's for motion vectors, the jitter
+/// (current and previous, render pixels) and the material mip bias. [`Self::still`] is the
+/// identity of temporal off and of Compat: both matrices equal the camera's and the rest is 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TemporalCamera {
+    pub(crate) jittered: Mat4,
+    pub(crate) unjittered: Mat4,
+    pub(crate) previous: Mat4,
+    pub(crate) jitter: [f32; 2],
+    pub(crate) previous_jitter: [f32; 2],
+    pub(crate) mip_bias: f32,
+    /// The render size motion vectors are measured in (pixels).
+    pub(crate) render: [u32; 2],
+    pub(crate) live: bool,
+}
+
+impl TemporalCamera {
+    /// No jitter, no motion: what Compat and temporal off upload.
+    pub(crate) const fn still(view_proj: Mat4) -> Self {
+        Self {
+            jittered: view_proj,
+            unjittered: view_proj,
+            previous: view_proj,
+            jitter: [0.0; 2],
+            previous_jitter: [0.0; 2],
+            mip_bias: 0.0,
+            render: [0; 2],
+            live: false,
+        }
+    }
 }
 
 impl CameraUniform {
+    /// Applies `temporal`: `view_proj` and `inv_view_proj` become the jittered matrix and its
+    /// inverse (only when it differs from the camera's, so the still case keeps exactly the
+    /// bytes it had), and the N1 members are filled in.
+    pub(crate) fn with_temporal(mut self, temporal: &TemporalCamera) -> Self {
+        if temporal.jittered != temporal.unjittered {
+            let inverse = temporal.jittered.inverse();
+            if inverse.is_finite() {
+                self.view_proj = temporal.jittered.to_cols_array_2d();
+                self.inv_view_proj = inverse.to_cols_array_2d();
+            }
+        }
+        self.view_proj_unjittered = temporal.unjittered.to_cols_array_2d();
+        self.prev_view_proj = temporal.previous.to_cols_array_2d();
+        self.jitter = [
+            temporal.jitter[0],
+            temporal.jitter[1],
+            temporal.previous_jitter[0],
+            temporal.previous_jitter[1],
+        ];
+        self.temporal = [
+            temporal.mip_bias,
+            temporal.render[0] as f32,
+            temporal.render[1] as f32,
+            if temporal.live { 1.0 } else { 0.0 },
+        ];
+        self
+    }
+
     /// A block holding only what the Slang toolchain smoke reads (`crate::slang_smoke`):
     /// `view_proj`, `camera_pos` and the first `circles` (at most [`VISION_CIRCLES`]).
     pub(crate) fn for_slang_smoke(view_proj: Mat4, camera_pos: Vec4, circles: &[Vec4]) -> Self {
@@ -782,6 +848,10 @@ impl CameraUniform {
             baked_ao: lighting.baked_ao,
             contact: lighting.contact,
             outline_palette: outlines.sanitized(),
+            view_proj_unjittered: camera.view_proj.to_cols_array_2d(),
+            prev_view_proj: camera.view_proj.to_cols_array_2d(),
+            jitter: [0.0; 4],
+            temporal: [0.0; 4],
         }
     }
 }
@@ -864,7 +934,8 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, light_info), 1504);
         assert_eq!(offset_of!(CameraUniform, contact), 1552);
         assert_eq!(offset_of!(CameraUniform, outline_palette), 1568);
-        assert_eq!(size_of::<CameraUniform>(), 1696);
+        assert_eq!(offset_of!(CameraUniform, view_proj_unjittered), 1696);
+        assert_eq!(size_of::<CameraUniform>(), 1856);
     }
 
     /// The Slang name of a field's shape, from its Rust type (compile-checked by the
@@ -968,6 +1039,10 @@ mod tests {
             baked_ao: float4,
             contact: float4,
             outline_palette: float4_array,
+            view_proj_unjittered: float4x4,
+            prev_view_proj: float4x4,
+            jitter: float4,
+            temporal: float4,
         );
         // The list above covers the whole struct: no field missing, no padding.
         assert_eq!(

@@ -328,6 +328,23 @@ fn a_short_bindless_limit_is_compat_never_a_smaller_table() {
     assert_eq!(missing_items(&caps), ["vulkan-1.3"]);
 }
 
+/// ADR-0021 Q7: the tiered path's per-attachment blend states need `independentBlend`, and
+/// every fixture (each recorded device reports it) has it.
+#[test]
+fn independent_blend_is_required_on_tiered() {
+    for name in RECORDED.iter().chain(&SYNTHETIC) {
+        assert!(
+            fixture(name).feature("independentBlend"),
+            "{name} lacks independentBlend"
+        );
+    }
+    let mut caps = fixture("rtx-5070-ti");
+    caps.features
+        .insert(String::from("independentBlend"), false);
+    assert_eq!(missing_items(&caps), ["independentBlend"]);
+    assert_eq!(admit(&caps, on(PathChoice::Auto)).path, RenderPath::Compat);
+}
+
 #[test]
 fn compat_can_be_chosen_on_any_device() {
     let admission = admit(&fixture("rtx-5070-ti"), on(PathChoice::Compat));

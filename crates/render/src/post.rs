@@ -210,6 +210,61 @@ pub const MIN_TEMPORAL_RENDER_SCALE: f32 = 1.0 / 3.0;
 /// Default [`PostConfig::sharpness`]: TAAU's and FSR 3.1's starting point (ADR-0021 §3).
 pub const DEFAULT_SHARPNESS: f32 = 0.25;
 
+/// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): what the temporal pass or the overlay draws instead of
+/// the frame, for inspection. Tiered only; ignored elsewhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TemporalDebugView {
+    /// The frame.
+    #[default]
+    Off,
+    /// Motion vectors (TAAU).
+    Motion,
+    /// The reactive mask (TAAU).
+    Reactive,
+    /// The transparency-and-composition mask (TAAU).
+    TcMask,
+    /// Where TAAU found the history disoccluded.
+    Disocclusion,
+    /// TAAU's upsampling confidence.
+    Confidence,
+    /// The overlay's ID target.
+    OverlayIds,
+}
+
+impl TemporalDebugView {
+    /// Every view, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Off,
+        Self::Motion,
+        Self::Reactive,
+        Self::TcMask,
+        Self::Disocclusion,
+        Self::Confidence,
+        Self::OverlayIds,
+    ];
+
+    /// The `MOBA_DEBUG_VIEW` name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Motion => "motion",
+            Self::Reactive => "reactive",
+            Self::TcMask => "tc",
+            Self::Disocclusion => "disocclusion",
+            Self::Confidence => "confidence",
+            Self::OverlayIds => "overlay-ids",
+        }
+    }
+
+    /// Parses a `MOBA_DEBUG_VIEW` value (case-insensitive, trimmed).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        Self::ALL.iter().copied().find(|view| view.name() == name)
+    }
+}
+
 /// How the render-resolution image is scaled to the swapchain when the render scale is
 /// below 1 or dynamic resolution is on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

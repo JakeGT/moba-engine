@@ -317,6 +317,9 @@ pub const REQUIRED_FEATURES: &[&str] = &[
     "descriptorBindingUpdateUnusedWhilePending",
     // Core 1.0, for bindless storage images (§3a).
     "shaderStorageImageWriteWithoutFormat",
+    // Core 1.0: per-attachment blend state for the prepass's motion and IDs and the
+    // particles' reactive mask (ADR-0021 §2e, Q7).
+    "independentBlend",
 ];
 
 /// The bindless table's capacities (ADR-0020 §3a): samplers, storage images, textures.
@@ -783,6 +786,7 @@ fn probe_features(
             "shaderStorageImageWriteWithoutFormat",
             base.shader_storage_image_write_without_format,
         ),
+        ("independentBlend", base.independent_blend),
         ("dynamicRendering", f13.dynamic_rendering),
         ("synchronization2", f13.synchronization2),
         ("maintenance4", f13.maintenance4),

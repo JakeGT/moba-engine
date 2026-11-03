@@ -21,6 +21,12 @@ invariant gl_Position;
 #ifdef OUTLINE_HULL
 #include "outline.glsl"
 #endif
+#ifdef MOTION_VECTORS
+// ADR-0021 §2b: the temporal prepass's motion (with DEPTH_PREPASS).
+#define MOTION_VECTORS_VERTEX
+#define MOTION_PREV_INSTANCES
+#include "motion.glsl"
+#endif
 
 invariant gl_Position;
 
@@ -60,8 +66,9 @@ layout(location = 3) out vec2 out_uv;
 layout(location = 4) out vec4 out_world_tangent;
 #endif
 
-mat4 bone(uint joint) {
-    uint base = (skin.first_bone + min(joint, skin.joint_count - 1u)) * 3u;
+// The joint matrix of `joint` in the palette starting at `first`.
+mat4 bone_from(uint first, uint joint) {
+    uint base = (first + min(joint, skin.joint_count - 1u)) * 3u;
     vec4 r0 = bones.rows[base];
     vec4 r1 = bones.rows[base + 1u];
     vec4 r2 = bones.rows[base + 2u];
@@ -71,6 +78,30 @@ mat4 bone(uint joint) {
         vec4(r0.y, r1.y, r2.y, 0.0),
         vec4(r0.z, r1.z, r2.z, 0.0),
         vec4(r0.w, r1.w, r2.w, 1.0));
+}
+
+mat4 bone(uint joint) {
+    return bone_from(skin.first_bone, joint);
+}
+
+// The weighted palette of the vertex in the palette starting at `first`.
+mat4 skin_matrix(uint first) {
+    float total = in_weights.x + in_weights.y + in_weights.z + in_weights.w;
+    mat4 skinning = mat4(1.0);
+    if (total > 0.0) {
+        skinning = in_weights.x * bone_from(first, in_joints.x);
+        if (in_weights.y > 0.0) {
+            skinning += in_weights.y * bone_from(first, in_joints.y);
+        }
+        if (in_weights.z > 0.0) {
+            skinning += in_weights.z * bone_from(first, in_joints.z);
+        }
+        if (in_weights.w > 0.0) {
+            skinning += in_weights.w * bone_from(first, in_joints.w);
+        }
+        skinning *= 1.0 / total;
+    }
+    return skinning;
 }
 
 void main() {
@@ -100,6 +131,17 @@ void main() {
 #elif defined(DEPTH_PREPASS)
     gl_Position = camera.view_proj * world;
     out_outline = instance.params.x;
+#ifdef MOTION_VECTORS
+    // `reserved0`: the previous palette's first bone, copied after this frame's (ADR-0021
+    // §2c); `reserved1` 1 when it is there (otherwise this frame's palette).
+    uint index = uint(gl_InstanceIndex);
+    vec3 previous = world.xyz;
+    if (prev_valid(index)) {
+        mat4 prev_skinning = skin.reserved1 != 0u ? skin_matrix(skin.reserved0) : skinning;
+        previous = (prev_model(index) * prev_skinning * vec4(in_position, 1.0)).xyz;
+    }
+    write_motion(world.xyz, previous);
+#endif
 #elif defined(OUTLINE_HULL)
     vec3 normal = transpose(inverse(mat3(model))) * in_normal;
     gl_Position = outline_hull_position(world.xyz, normal, instance.params.x);

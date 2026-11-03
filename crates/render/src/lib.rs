@@ -92,7 +92,8 @@ pub use passes::scene::{bones_truncated, skinned_instances_dropped};
 pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use post::{
     AntiAliasing, DEFAULT_SHARPNESS, MAX_RENDER_SCALE, MIN_RENDER_SCALE, MIN_TEMPORAL_RENDER_SCALE,
-    PostConfig, PostLook, ScreenEffects, UpscaleFilter, UpscaleMode, UpscalerKind,
+    PostConfig, PostLook, ScreenEffects, TemporalDebugView, UpscaleFilter, UpscaleMode,
+    UpscalerKind,
 };
 pub use preset::{
     FeatureState, Phase, PresetFeature, TierPreset, config_tier, total_memory_budget,

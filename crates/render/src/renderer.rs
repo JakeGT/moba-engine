@@ -43,16 +43,20 @@ use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, Textur
 use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
 use crate::passes::fog::FogPass;
+use crate::passes::gameplay_overlay::{GameplayOverlay, OverlayBlock, OverlayImages};
 use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
-    CullSettings, MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve,
-    SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget, WaterTargets,
+    CullSettings, MainFrame, MainViewSpec, OutlineIdTarget, OverlayPrepassTarget, PrepassTarget,
+    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, TcMaskTarget,
+    ViewBudget, WaterTargets,
 };
-use crate::passes::vfx::{DistortionTargets, VfxPass, VfxTargets};
+use crate::passes::vfx::{
+    DistortionTargets, VfxFrameExtras, VfxOverlayTargets, VfxPass, VfxTargets,
+};
 use crate::pipeline_cache::PipelineCacheState;
-use crate::post::{AntiAliasing, PostConfig, PostLook};
+use crate::post::{AntiAliasing, PostConfig, PostLook, TemporalDebugView, UpscaleMode};
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
@@ -62,6 +66,10 @@ use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
 use crate::targets::{self, OffscreenTarget, TargetExtents, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
+use crate::upscale::exposure::ExposureLinearPass;
+use crate::upscale::frame::{TemporalFrame, TemporalState};
+use crate::upscale::taau::{Taau, TaauDebugView};
+use crate::upscale::{UpscaleImage, UpscaleInputs, UpscaleOutput};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 use crate::world::{
     DEFAULT_MAX_VISION_SOURCES, FogOfWarMode, FogShaderMode, TerrainData, TerrainShading,
@@ -186,6 +194,9 @@ pub struct RenderConfig {
     /// ([`Overrides::allow_cpu`](crate::Overrides::allow_cpu)): set only for the
     /// `MOBA_RENDER_PATH=tiered` override. Default `false`.
     pub tiered_cpu_devices: bool,
+    /// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): a temporal or overlay debug view on the tiered
+    /// path. Default [`TemporalDebugView::Off`].
+    pub debug_view: TemporalDebugView,
 }
 
 impl Default for RenderConfig {
@@ -218,6 +229,7 @@ impl Default for RenderConfig {
             environment: None,
             render_path: PathChoice::Auto,
             tiered_cpu_devices: false,
+            debug_view: TemporalDebugView::Off,
         }
     }
 }
@@ -325,6 +337,13 @@ impl RenderConfig {
     #[must_use]
     pub fn with_tiered_cpu_devices(mut self, allow: bool) -> Self {
         self.tiered_cpu_devices = allow;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::debug_view`] set.
+    #[must_use]
+    pub const fn with_debug_view(mut self, view: TemporalDebugView) -> Self {
+        self.debug_view = view;
         self
     }
 
@@ -520,8 +539,18 @@ pub struct Renderer {
     vfx: Option<VfxPass>,
     /// Screen-space contact shadows (R2b); `None` when off.
     contact: Option<ContactPass>,
-    /// Screen-space outlines (R2b); `None` unless outlines are `screen`.
+    /// Screen-space outlines (R2b); `None` unless outlines are `screen` on Compat.
     outline: Option<OutlinePass>,
+    /// Temporal AA's back end and state (ADR-0021); `None` without temporal AA.
+    temporal: Option<TemporalState>,
+    /// The `exposure_linear` pass, with temporal AA.
+    exposure_linear: Option<ExposureLinearPass>,
+    /// The frame being recorded's temporal state.
+    temporal_frame: Option<TemporalFrame>,
+    /// [`Renderer::warm_up_temporal`] ran: the next capture keeps the history it built.
+    capture_warmed: bool,
+    /// The post-upscale gameplay overlay (ADR-0021 §5); `None` on Compat.
+    overlay: Option<GameplayOverlay>,
     /// This frame's outline palette, for the outline pass.
     frame_outlines: OutlinePalette,
     materials: Materials,
@@ -724,6 +753,42 @@ impl Renderer {
             );
         }
         let mut post_config = config.effective_post();
+        // ADR-0021 §4b, §7: temporal AA is the tiered default and MSAA is Compat-only; Compat
+        // has no temporal pass.
+        let tiered = path == RenderPath::Tiered;
+        if tiered {
+            if post_config.anti_aliasing == AntiAliasing::Msaa4 && config.post.is_some() {
+                eprintln!("[render] 4x MSAA is Compat-only (ADR-0021 §7); using temporal");
+            }
+            if post_config.anti_aliasing == AntiAliasing::Msaa4 || config.post.is_none() {
+                post_config = post_config.with_anti_aliasing(AntiAliasing::Temporal);
+            }
+            if post_config.anti_aliasing == AntiAliasing::Temporal && !device.compute_supported {
+                eprintln!("[render] temporal AA needs compute on the graphics queue; using FXAA");
+                post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
+            }
+        } else if post_config.anti_aliasing == AntiAliasing::Temporal {
+            eprintln!("[render] temporal AA is tiered-only (ADR-0021 §7); using FXAA");
+            post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
+        }
+        let temporal = post_config.anti_aliasing == AntiAliasing::Temporal;
+        // ADR-0021 §4b, §4c: the preset mode's scale is the render-scale ceiling (the
+        // setting can lower it) and the allocation's.
+        let upscale_mode = post_config
+            .upscale_mode
+            .unwrap_or_else(|| UpscaleMode::for_tier(requested_tier, swapchain.extent.height));
+        if temporal {
+            let ceiling = post_config.render_scale.min(upscale_mode.scale());
+            post_config = post_config
+                .with_render_scale(ceiling)
+                .with_min_render_scale(post_config.min_render_scale.min(ceiling));
+        }
+        post_config = post_config.sanitized();
+        // ADR-0021 §5: on Tiered the overlay draws the outlines at output resolution; the
+        // render-resolution IDs stay as the heat haze's unit mask.
+        if tiered && lighting_config.outlines == OutlineMode::Hull {
+            lighting_config = lighting_config.with_outlines(OutlineMode::Screen);
+        }
         if post_config.anti_aliasing == AntiAliasing::Msaa4
             && !(device.msaa4 && targets::supports_msaa4(&device, hdr_format, depth_format))
         {
@@ -793,6 +858,8 @@ impl Renderer {
                 depth_format,
                 budget,
                 budget.oit,
+                temporal,
+                tiered.then_some(swapchain.format),
             ) {
                 Ok(mut pass) => {
                     if !config.distortion_draw && budget.distortion {
@@ -836,6 +903,8 @@ impl Renderer {
             upscale: post_config.scaled(),
             water: full_water,
             distortion: vfx.as_ref().is_some_and(VfxPass::has_distortion),
+            temporal,
+            overlay: tiered,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them; see `plan_index`.
@@ -892,12 +961,16 @@ impl Renderer {
             max_instances: OFFSCREEN_MAX_INSTANCES,
             max_bones: OFFSCREEN_MAX_BONES,
             casters: false,
+            temporal: false,
+            overlay: false,
         }; 1 + UI_IMAGE_SLOTS];
         // The main view also builds the shadow caster list (R8) when there is a shadow map.
         views[0] = ViewBudget {
             max_instances: config.max_instances,
             max_bones: config.max_bones,
             casters: shadow.is_some(),
+            temporal,
+            overlay: tiered,
         };
         let (default_shadow_format, shadow_linear) = shadow_format.unwrap_or((depth_format, false));
         let mut lighting = LightingResources::new(
@@ -948,6 +1021,8 @@ impl Renderer {
                 prepass: frame_spec.has_prepass(),
                 outline_ids: frame_spec.outline_ids,
                 hull: lighting_config.outlines == OutlineMode::Hull,
+                temporal,
+                overlay: tiered,
             },
             config.skinning,
             CullSettings {
@@ -964,14 +1039,57 @@ impl Renderer {
             .transpose()?;
         // The outlines draw on the composite's output: the LDR intermediate when FXAA or the
         // upscale reads it, else the swapchain image.
-        let outline_format = if frame_spec.fxaa || frame_spec.upscale {
+        let outline_format = if frame_spec.has_fxaa() || frame_spec.has_upscale() {
             frame_graph::LDR_FORMAT
         } else {
             swapchain.format
         };
         let outline = frame_spec
-            .outline_ids
+            .has_outline_pass()
             .then(|| OutlinePass::new(&device, &shaders, outline_format))
+            .transpose()?;
+        // ADR-0021 §5: the overlay reads this frame slot's decal buffer.
+        let overlay = frame_spec
+            .overlay
+            .then(|| {
+                GameplayOverlay::new(
+                    &device,
+                    &shaders,
+                    swapchain.format,
+                    &lighting.decal_buffers(),
+                )
+            })
+            .transpose()?;
+        // ADR-0021 §3, §4: the back end (TAAU in the open build, Q1) with histories for the
+        // dynamic-resolution ceiling.
+        let temporal_state = if temporal {
+            let kind = crate::upscale::resolve(post_config.upscaler);
+            let taau = Taau::new(
+                &device,
+                &shaders,
+                swapchain.extent,
+                extents.render,
+                TaauDebugView::of(config.debug_view),
+            )?;
+            eprintln!(
+                "[render] anti-aliasing: temporal, upscaler {} ({} mode, render scale {:.3}..{:.3}, \
+                 sharpness {:.2})",
+                kind.name(),
+                upscale_mode.name(),
+                post_config.min_render_scale.min(post_config.render_scale),
+                post_config.render_scale,
+                post_config.sharpness
+            );
+            Some(TemporalState::new(
+                Box::new(taau),
+                upscale_mode,
+                post_config.sharpness,
+            ))
+        } else {
+            None
+        };
+        let exposure_linear = temporal
+            .then(|| ExposureLinearPass::new(&device, &shaders))
             .transpose()?;
         let post = PostPass::new(
             &device,
@@ -1044,6 +1162,11 @@ impl Renderer {
             vfx,
             contact,
             outline,
+            temporal: temporal_state,
+            exposure_linear,
+            temporal_frame: None,
+            capture_warmed: false,
+            overlay,
             frame_outlines: OutlinePalette::NONE,
             materials,
             shaders,
@@ -1324,6 +1447,63 @@ impl Renderer {
     #[must_use]
     pub fn render_extent(&self) -> [u32; 2] {
         [self.render_extent.width, self.render_extent.height]
+    }
+
+    /// The anti-aliasing in use after the device and path checks (ADR-0021 §7: temporal on
+    /// Tiered by default, never MSAA there; never temporal on Compat).
+    #[must_use]
+    pub fn anti_aliasing(&self) -> AntiAliasing {
+        self.post_config.anti_aliasing
+    }
+
+    /// The temporal back end's name for the frame log (`upscaler=`), `"off"` without
+    /// temporal AA (ADR-0021 §4b).
+    #[must_use]
+    pub fn upscaler_name(&self) -> &'static str {
+        self.temporal
+            .as_ref()
+            .map_or("off", |temporal| temporal.upscaler.kind().name())
+    }
+
+    /// The upscaler mode in use, with temporal AA.
+    #[must_use]
+    pub fn upscale_mode(&self) -> Option<UpscaleMode> {
+        self.temporal.as_ref().map(|temporal| temporal.mode)
+    }
+
+    /// Jitter phases of the latest frame (`jitter_phases=`), 0 without temporal AA.
+    #[must_use]
+    pub fn jitter_phases(&self) -> u32 {
+        self.temporal
+            .as_ref()
+            .map_or(0, TemporalState::jitter_phases)
+    }
+
+    /// Device memory the temporal back end owns (its histories), bytes.
+    #[must_use]
+    pub fn upscaler_vram_bytes(&self) -> u64 {
+        self.temporal
+            .as_ref()
+            .map_or(0, |temporal| temporal.upscaler.vram_bytes())
+    }
+
+    /// Forgets every temporal history and restarts the jitter pattern, as a capture does
+    /// (ADR-0021 §1). Nothing without temporal AA.
+    pub fn reset_temporal(&mut self) {
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal.restart();
+        }
+    }
+
+    /// Frames a capture renders before the captured one after [`Self::reset_temporal`]: two
+    /// full jitter cycles at the current sizes (ADR-0021 §1); 0 without temporal AA.
+    #[must_use]
+    pub fn temporal_warmup_frames(&self) -> u32 {
+        self.temporal.as_ref().map_or(0, |temporal| {
+            2 * temporal
+                .upscaler
+                .jitter_phases(self.render_extent, self.swapchain.extent)
+        })
     }
 
     /// Sets the map's image-based lighting (ADR-0011): `desc`'s SH-L2 diffuse irradiance and
@@ -1854,7 +2034,15 @@ impl Renderer {
             .as_ref()
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
+        let overlay = self
+            .overlay
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
         self.scene.install_pipelines(scene);
+        if let (Some(pass), Some(pipeline)) = (self.overlay.as_mut(), overlay) {
+            pass.install_pipeline(pipeline);
+        }
         self.post.install_pipelines(post);
         if let (Some(pass), Some(pipeline)) = (self.contact.as_mut(), contact) {
             pass.install_pipeline(pipeline);
@@ -1971,8 +2159,12 @@ impl Renderer {
                 .map(|slot| transients.image(slot).view())
         };
         let bloom = resources.bloom;
+        // ADR-0021 §5a: with temporal AA the post chain reads the upscaler's output.
+        let post_hdr = resources
+            .temporal
+            .map_or(resources.hdr, |temporal| temporal.hdr_out);
         let views = PostViews {
-            hdr: view(Some(resources.hdr)),
+            hdr: view(Some(post_hdr)),
             depth: view(Some(resources.depth)),
             ao_raw: view(resources.ao.map(|ao| ao.raw)),
             bloom: core::array::from_fn(|level| view(bloom.map(|mips| mips[level]))),
@@ -2009,6 +2201,14 @@ impl Renderer {
         }
         if let (Some(fog), Some(raw)) = (&self.fog, view(resources.fog.map(|fog| fog.raw))) {
             fog.bind_raw(&self.device, raw);
+        }
+        if let (Some(pass), Some(overlay)) = (&self.overlay, resources.overlay) {
+            let images = view(Some(overlay.source))
+                .zip(view(Some(overlay.depth)))
+                .zip(view(Some(overlay.ids)));
+            if let Some(((ldr, depth), ids)) = images {
+                pass.bind(&self.device, OverlayImages { ldr, depth, ids });
+            }
         }
         // R3b: the full water samples the refraction copy and the single-sampled depth.
         if let (Some(refraction), Some(depth)) =
@@ -2178,6 +2378,29 @@ impl Renderer {
             self.extents.render,
             self.render_scale(),
         );
+        // ADR-0021 §1: this frame's jitter and previous view (presentation state only; the
+        // client's `Camera` is read, never changed).
+        let temporal_frame = self.temporal.as_mut().map(|temporal| {
+            temporal.begin_frame(
+                scene.camera.view_proj,
+                scene.camera.position,
+                self.render_extent,
+                self.swapchain.extent,
+                scene.history_reset,
+            )
+        });
+        let temporal_frame = temporal_frame.map(|mut frame| {
+            frame.lens = [scene.camera.near, scene.camera.far, scene.camera.fov_y];
+            frame
+        });
+        let main_frame = MainFrame {
+            temporal: temporal_frame.map(|frame| frame.camera),
+            history_reset: temporal_frame.is_none_or(|frame| frame.reset),
+            output: self.swapchain.extent,
+        };
+        // The matrix the render-resolution depth is rasterised with.
+        let raster_view_proj =
+            temporal_frame.map_or(scene.camera.view_proj, |frame| frame.camera.jittered);
         // Lights are binned into this frame slot's buffers (its fence was waited on above).
         let grid = self.lighting.upload_lights(
             frame_index,
@@ -2204,6 +2427,7 @@ impl Renderer {
             &world_frame,
             self.render_extent,
             self.extents.render.height,
+            Some(&main_frame),
         )?;
         // R3b: this frame's decals (enemy telegraphs first) and the environment block.
         let environment = self.scene.environment().config();
@@ -2219,9 +2443,32 @@ impl Renderer {
             crate::lights::ground_footprint(scene.camera.view_proj),
         );
         self.lighting.write_decals(frame_index, &self.decal_upload);
-        self.scene
-            .environment_mut()
-            .prepare(frame_index, scene, self.render_extent);
+        self.scene.environment_mut().prepare(
+            frame_index,
+            scene,
+            self.render_extent,
+            raster_view_proj,
+            main_frame.history_reset,
+        );
+        // ADR-0021 §5: the overlay's block (unjittered, output resolution).
+        if let Some(overlay) = self.overlay.as_mut() {
+            let outlines = if self.lighting_config.outlines == OutlineMode::Off {
+                OutlinePalette::NONE
+            } else {
+                scene.outlines
+            };
+            overlay.prepare(
+                frame_index,
+                &OverlayBlock::new(
+                    scene.camera.view_proj,
+                    self.swapchain.extent,
+                    crate::passes::composite::is_srgb(self.swapchain.format),
+                    &outlines,
+                    self.config.debug_view == TemporalDebugView::OverlayIds,
+                    environment.decals,
+                ),
+            );
+        }
         if let Some(fog) = self.fog.as_mut() {
             fog.prepare(frame_index, scene.fog_of_war.as_ref());
         }
@@ -2254,13 +2501,33 @@ impl Renderer {
                 &WorldFrame::OFFSCREEN,
                 extent,
                 extent.height,
+                None,
             )?;
         }
         self.ui.prepare(frame_index, ui)?;
         // Last of the uploads: its slot allocations are committed only when the frame is
         // submitted (`VfxPass::submitted`), and rolled back if anything below fails.
         if let Some(vfx) = self.vfx.as_mut() {
-            vfx.prepare(frame_index, scene, self.render_extent);
+            // ADR-0021 §5b: telegraphs leave the scene for the overlay, toned with the
+            // composite's exposure and saturation (no adapted EV, amendment).
+            let overlay = self.overlay.as_ref().map(|_| {
+                [
+                    self.post.linear_exposure().0,
+                    crate::passes::post::TONEMAP_SATURATION,
+                    f32::from(u8::from(crate::passes::composite::is_srgb(
+                        self.swapchain.format,
+                    ))),
+                ]
+            });
+            vfx.prepare(
+                frame_index,
+                scene,
+                self.render_extent,
+                &VfxFrameExtras {
+                    temporal: temporal_frame.map(|frame| frame.camera),
+                    overlay,
+                },
+            );
         }
 
         let command_buffers = self.frames[frame_index].command_buffers;
@@ -2297,12 +2564,27 @@ impl Renderer {
             min_step,
             self.exposure_reset,
         );
+        self.temporal_frame = temporal_frame.map(|mut frame| {
+            frame.dt_ms = dt * 1_000.0;
+            frame
+        });
+        let render = self.render_region();
         let post_frame = PostFrame {
-            render: self.render_region(),
+            render,
+            // ADR-0021 §5a: after the temporal pass the post chain runs on the whole output.
+            post: if self.temporal.is_some() {
+                Region {
+                    actual: self.swapchain.extent,
+                    alloc: self.swapchain.extent,
+                }
+            } else {
+                render
+            },
             swapchain: self.swapchain.extent,
             adaptation,
             effects: scene.effects,
-            view_proj: scene.camera.view_proj,
+            // GTAO reconstructs from the jittered depth (ADR-0021 §1).
+            view_proj: raster_view_proj,
             eye: scene.camera.position,
         };
         self.record_frame(
@@ -2350,6 +2632,9 @@ impl Renderer {
         }
         self.last_frame_at = Some(now);
         self.exposure_reset = false;
+        if let (Some(temporal), Some(frame)) = (self.temporal.as_mut(), temporal_frame) {
+            temporal.end_frame(&frame);
+        }
         if self.capture_pending {
             self.capture_pending = false;
             self.capture_ready = true;
@@ -2417,6 +2702,14 @@ impl Renderer {
         let msaa_depth = view_of(resources.msaa.map(|msaa| msaa.depth));
         let ldr_view = view_of(resources.ldr);
         let ldr2_view = view_of(resources.ldr2);
+        let ldr_out_view = view_of(resources.ldr_out);
+        // ADR-0021: the motion and reactive targets with temporal AA.
+        let temporal_views = resources.temporal.map(|temporal| {
+            (
+                self.transient(temporal.motion).view(),
+                self.transient(temporal.reactive).view(),
+            )
+        });
         let render_extent = self.render_extent;
         let render_scale = self.render_scale();
         let contact_view = view_of(resources.contact);
@@ -2467,6 +2760,8 @@ impl Renderer {
                         depth: msaa_depth.unwrap_or(depth_view),
                         resolve: msaa_depth.map(|_| depth_view),
                         outline_ids,
+                        motion: temporal_views.map(|(motion, _)| motion),
+                        lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },
                 ),
@@ -2631,6 +2926,7 @@ impl Renderer {
                                 depth: depth_view,
                                 extent: render_extent,
                                 region,
+                                reactive: temporal_views.map(|(_, reactive)| reactive),
                             },
                             cap,
                         );
@@ -2688,7 +2984,8 @@ impl Renderer {
                     self.post.record_upscale(
                         &self.device,
                         command_buffer,
-                        swapchain_view,
+                        ldr_out_view.unwrap_or(swapchain_view),
+                        ldr_out_view.is_none(),
                         post_frame,
                     );
                 }
@@ -2712,6 +3009,7 @@ impl Renderer {
                                 accum: view(ids.accum),
                                 reveal: view(ids.reveal),
                                 extent: render_extent,
+                                temporal: temporal_views,
                             },
                             &self.scene,
                         );
@@ -2766,6 +3064,137 @@ impl Renderer {
                         swapchain_view,
                         extent,
                     );
+                }
+                PassKind::MaskClear => {
+                    if let Some(temporal) = resources.temporal {
+                        let clear = vk::ClearColorValue { float32: [0.0; 4] };
+                        let range = [vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1)];
+                        for mask in [temporal.reactive, temporal.tc_mask] {
+                            // SAFETY: the graph moved the mask to TRANSFER_DST_OPTIMAL; the
+                            // whole single-level image is cleared.
+                            unsafe {
+                                self.device.device.cmd_clear_color_image(
+                                    command_buffer,
+                                    self.transient(mask).image(),
+                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                    &clear,
+                                    &range,
+                                );
+                            }
+                        }
+                    }
+                }
+                PassKind::TcMask => {
+                    if let Some(temporal) = resources.temporal {
+                        self.scene.record_tc_mask(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &TcMaskTarget {
+                                mask: self.transient(temporal.tc_mask).view(),
+                                depth: depth_view,
+                                lighting: self.lighting.set(frame_index),
+                                extent: render_extent,
+                            },
+                        );
+                    }
+                }
+                PassKind::ExposureLinear => {
+                    if let Some(temporal) = resources.temporal {
+                        let target = self.transient(temporal.exposure_linear).view();
+                        let (exposure, adapted) = self.post.linear_exposure();
+                        if let Some(pass) = self.exposure_linear.as_mut() {
+                            pass.record(command_buffer, adapted, target, exposure);
+                        }
+                    }
+                }
+                PassKind::Temporal => {
+                    if let (Some(resources), Some(frame)) =
+                        (resources.temporal, self.temporal_frame)
+                    {
+                        let alloc = self.extents.render;
+                        let image = |resource, format, extent| {
+                            let image = self.transient(resource);
+                            UpscaleImage {
+                                image: image.image(),
+                                view: image.view(),
+                                format,
+                                extent,
+                            }
+                        };
+                        let inputs = UpscaleInputs {
+                            color: image(plan.resources.hdr, self.hdr_format, alloc),
+                            depth: image(plan.resources.depth, self.frame_spec.depth_format, alloc),
+                            motion: image(resources.motion, frame_graph::MOTION_FORMAT, alloc),
+                            reactive: image(resources.reactive, frame_graph::MASK_FORMAT, alloc),
+                            transparency: image(resources.tc_mask, frame_graph::MASK_FORMAT, alloc),
+                            exposure: image(
+                                resources.exposure_linear,
+                                frame_graph::EXPOSURE_LINEAR_FORMAT,
+                                vk::Extent2D {
+                                    width: 1,
+                                    height: 1,
+                                },
+                            ),
+                            jitter: frame.camera.jitter,
+                            render_size: render_extent,
+                            dt_ms: frame.dt_ms,
+                            near: frame.lens[0],
+                            far: frame.lens[1],
+                            fov_y: frame.lens[2],
+                            reset: frame.reset,
+                            sharpness: self.temporal.as_ref().map_or(0.0, |state| state.sharpness),
+                        };
+                        let output = UpscaleOutput {
+                            image: image(resources.hdr_out, frame_graph::HDR_OUT_FORMAT, extent),
+                        };
+                        if let Some(state) = self.temporal.as_mut() {
+                            state.upscaler.record(command_buffer, &inputs, &output);
+                        }
+                    }
+                }
+                PassKind::OverlayPrepass => {
+                    if let Some(overlay) = resources.overlay {
+                        self.scene.record_overlay_prepass(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &OverlayPrepassTarget {
+                                depth: self.transient(overlay.depth).view(),
+                                ids: self.transient(overlay.ids).view(),
+                                lighting: self.lighting.set(frame_index),
+                                extent,
+                            },
+                        );
+                    }
+                }
+                PassKind::Overlay => {
+                    if let Some(pass) = &self.overlay {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            swapchain_view,
+                            extent,
+                        );
+                    }
+                }
+                PassKind::OverlayVfx => {
+                    if let (Some(vfx), Some(overlay)) = (&self.vfx, resources.overlay) {
+                        vfx.record_overlay(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &VfxOverlayTargets {
+                                color: swapchain_view,
+                                depth: self.transient(overlay.depth).view(),
+                                extent,
+                            },
+                        );
+                    }
                 }
                 PassKind::Capture => {
                     if let Some(buffer) = capture_buffer {
@@ -2833,6 +3262,22 @@ impl Renderer {
             .chain(resources.bloom.into_iter().flatten())
             .chain(resources.ldr)
             .chain(resources.ldr2)
+            .chain(resources.ldr_out)
+            .chain(resources.temporal.into_iter().flat_map(|temporal| {
+                [
+                    temporal.motion,
+                    temporal.reactive,
+                    temporal.tc_mask,
+                    temporal.exposure_linear,
+                    temporal.hdr_out,
+                ]
+            }))
+            .chain(
+                resources
+                    .overlay
+                    .into_iter()
+                    .flat_map(|overlay| [overlay.depth, overlay.ids]),
+            )
             .chain(resources.contact)
             .chain(
                 resources
@@ -2943,6 +3388,19 @@ impl Renderer {
         self.render_extent =
             dynres::render_extent(swapchain.extent, extents.render, self.render_scale());
         self.swapchain = swapchain;
+        // ADR-0021 §2c: a resize re-creates the back end at the new output and forgets every
+        // history.
+        if let Some(temporal) = self.temporal.as_mut() {
+            let taau = Taau::new(
+                &self.device,
+                &self.shaders,
+                self.swapchain.extent,
+                extents.render,
+                TaauDebugView::of(self.config.debug_view),
+            )?;
+            temporal.upscaler = Box::new(taau);
+            temporal.invalidate();
+        }
         self.bind_transients();
         self.images_in_flight = vec![None; self.swapchain.image_count()];
         self.frame_index = 0;
@@ -3003,12 +3461,51 @@ impl Renderer {
         self.capture_frame_internal(scene, Some(ui), offscreen)
     }
 
+    /// Resets every temporal history and renders [`Self::temporal_warmup_frames`] frames of
+    /// `scene` (its particle spawns only in the first), so the next capture keeps the history
+    /// built here: the two-tick capture of ADR-0021 §7 warms up at tick `n` and captures tick
+    /// `n + 1`. Nothing without temporal AA.
+    ///
+    /// # Errors
+    /// As [`Self::render_with_ui`]; a skipped frame is an error here.
+    pub fn warm_up_temporal(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: Option<&UiDrawList>,
+    ) -> RenderResult<()> {
+        if self.temporal.is_none() {
+            return Ok(());
+        }
+        self.reset_temporal();
+        let mut scene = *scene;
+        for _ in 0..self.temporal_warmup_frames() {
+            if !self.render_internal(&scene, ui, &[])? {
+                return Err(RenderError::NoSuitableDevice(String::from(
+                    "temporal warm-up frame was skipped (swapchain out of date)",
+                )));
+            }
+            scene.vfx.spawns = &[];
+        }
+        self.capture_warmed = true;
+        Ok(())
+    }
+
     fn capture_frame_internal(
         &mut self,
         scene: &Scene<'_>,
         ui: Option<&UiDrawList>,
         offscreen: &[OffscreenRender<'_>],
     ) -> RenderResult<CapturedFrame> {
+        // ADR-0021 §1: a capture resets the jitter and the history, then renders two full
+        // phase cycles of the same scene, so the image is a pure function of the scene and
+        // the settings (unless `warm_up_temporal` just did that at an earlier tick).
+        let mut scene = *scene;
+        if self.temporal.is_some() && !core::mem::take(&mut self.capture_warmed) {
+            self.warm_up_temporal(&scene, ui)?;
+            self.capture_warmed = false;
+            scene.vfx.spawns = &[];
+        }
+        let scene = &scene;
         // The capture plan imports the readback buffer as idle: every capture waits for the
         // device below before reading it, so no earlier submission still touches it.
         self.capture_ready = false;

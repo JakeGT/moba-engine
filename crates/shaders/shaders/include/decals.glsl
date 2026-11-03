@@ -33,7 +33,12 @@ struct DecalRecord {
     vec4 params;    // shape + 8 * seed, flag bits, progress, fade
 };
 
-layout(std430, set = 3, binding = 20) readonly buffer DecalBuffer {
+// The overlay pass (ADR-0021 §5b) binds the same buffer in its own set.
+#ifndef MOBA_DECAL_SET
+#define MOBA_DECAL_SET 3
+#define MOBA_DECAL_BINDING 20
+#endif
+layout(std430, set = MOBA_DECAL_SET, binding = MOBA_DECAL_BINDING) readonly buffer DecalBuffer {
     vec4 rect;    // xz grid corner, cells per metre (x, z)
     uvec4 counts; // decals, grid edge, enemy telegraphs, reserved
     DecalRecord decals[128];
@@ -75,24 +80,27 @@ int decal_cell(vec3 world) {
 // 0.62 ms; perf/0021).
 #define MOBA_DECAL(index) decal_buffer.decals[index]
 
-// Coverage of decal `index` at `world`: x the washed area, y the rim band, z the progress
-// fill, w the halo band just inside the rim. Zero outside. A ring is evaluated as the disc
-// out to its band's outer edge, so its band is the disc's rim, its halo lies just inside
-// the band and its cast timer fills the inside; only its wash (x) is the band alone.
-vec4 decal_coverage(uint index, vec3 world, float aa) {
+// The signed distance of decal `index`'s shape at `world` (negative inside), its progress
+// coordinate (`along`: 0 at the origin, 1 at the far edge) and its rim width. A ring is
+// evaluated as the disc out to its band's outer edge. `false` when `world` is out of the
+// decal's height reach.
+bool decal_shape(uint index, vec3 world, out float sd, out float along, out float rim_width,
+                 out float shape) {
+    sd = 1e9;
+    along = 0.0;
+    rim_width = 0.0;
+    shape = 0.0;
     if (abs(world.y - MOBA_DECAL(index).size.w) > MOBA_DECAL_REACH) {
-        return vec4(0.0);
+        return false;
     }
     vec2 offset = world.xz - MOBA_DECAL(index).placement.xy;
     // Into the decal's frame: +x along the yaw.
     vec2 axis = MOBA_DECAL(index).placement.zw;
     vec2 p = vec2(dot(offset, axis), dot(offset, vec2(-axis.y, axis.x)));
-    float shape = mod(MOBA_DECAL(index).params.x, 8.0);
+    shape = mod(MOBA_DECAL(index).params.x, 8.0);
     float seed = floor(MOBA_DECAL(index).params.x / 8.0);
     float radius = MOBA_DECAL(index).size.x;
-    float rim_width = clamp(radius * 0.08, 0.12, 0.35);
-    float sd;
-    float along; // 0 at the centre (origin), 1 at the far edge: the progress coordinate
+    rim_width = clamp(radius * 0.08, 0.12, 0.35);
     if (shape < 0.5) {
         sd = length(p) - radius;
         along = length(p) / radius;
@@ -127,6 +135,21 @@ vec4 decal_coverage(uint index, vec3 world, float aa) {
             sd = min(sd, length(p - vec2(cos(a), sin(a)) * r) - s);
         }
         along = 1.0;
+    }
+    return true;
+}
+
+// Coverage of decal `index` at `world`: x the washed area, y the rim band, z the progress
+// fill, w the halo band just inside the rim. Zero outside. A ring is evaluated as the disc
+// out to its band's outer edge, so its band is the disc's rim, its halo lies just inside
+// the band and its cast timer fills the inside; only its wash (x) is the band alone.
+vec4 decal_coverage(uint index, vec3 world, float aa) {
+    float sd;
+    float along;
+    float rim_width;
+    float shape;
+    if (!decal_shape(index, world, sd, along, rim_width, shape)) {
+        return vec4(0.0);
     }
     float fill = 1.0 - smoothstep(-aa, aa, sd);
     if (fill <= 0.0) {
@@ -175,7 +198,9 @@ vec3 apply_paint_decals(vec3 albedo, vec3 world, float aa) {
 }
 
 vec3 apply_glow_decals(vec3 color, vec3 world, float aa, inout float mark) {
-#ifdef MOBA_NO_DECALS
+#if defined(MOBA_NO_DECALS) || defined(MOBA_NO_GLOW_DECALS)
+    // `MOBA_NO_GLOW_DECALS`: the tiered scene shaders, whose glow decals the post-upscale
+    // overlay draws instead (ADR-0021 §5b).
     return color;
 #endif
     int cell = decal_cell(world);
@@ -224,6 +249,9 @@ vec3 apply_glow_decals(vec3 color, vec3 world, float aa, inout float mark) {
 // function, so the terrain's `apply_glow_decals` is untouched (register budget, §1).
 vec3 apply_glow_decals_role(vec3 color, vec3 world, float aa, bool enemy, inout float rim_cover,
                             inout float mark) {
+#ifdef MOBA_NO_GLOW_DECALS
+    return color;
+#endif
     int cell = decal_cell(world);
     if (cell < 0) {
         return color;
@@ -262,5 +290,74 @@ vec3 apply_glow_decals_role(vec3 color, vec3 world, float aa, bool enemy, inout 
     }
     return color;
 }
+
+#ifdef MOBA_DECALS_DISPLAY
+// ADR-0021 §5b: the overlay's glow decals, composited in display-referred linear space over
+// the displayed image (`color` in 0..1) after the tonemap, so telegraphs take no bloom, grade
+// or screen effect. The rim rule is the scene's (at least 1.8x the background's luminance plus
+// 0.05, a dark halo at 20 %), evaluated against what is displayed; a fixed soft glow outside
+// enemy rims replaces the bloom they lose (Q4). `touched` is set where any decal drew.
+// `glow_display_reference` in crates/render/src/environment.rs is the CPU twin.
+#define MOBA_DECAL_GLOW_REACH 1.5
+#define MOBA_DECAL_GLOW_STRENGTH 0.35
+
+vec3 apply_display_glow_decals(vec3 color, vec3 world, float aa, inout bool touched) {
+    int cell = decal_cell(world);
+    if (cell < 0) {
+        return color;
+    }
+    uvec4 mask = decal_buffer.cells[cell];
+    for (int word = 3; word >= 0; word--) {
+        uint bits = mask[word];
+        while (bits != 0u) {
+            int bit = findMSB(bits);
+            bits &= ~(1u << uint(bit));
+            uint index = uint(word * 32 + bit);
+            uint flags = uint(MOBA_DECAL(index).params.y);
+            if ((flags & MOBA_DECAL_GLOW) == 0u) {
+                continue;
+            }
+            float alpha = clamp(MOBA_DECAL(index).color.a * MOBA_DECAL(index).params.w, 0.0, 1.0);
+            if (alpha <= 0.0) {
+                continue;
+            }
+            float sd;
+            float along;
+            float rim_width;
+            float shape;
+            if (!decal_shape(index, world, sd, along, rim_width, shape)) {
+                continue;
+            }
+            float band = min(2.0 * alpha, 1.0);
+            vec3 tint = clamp(MOBA_DECAL(index).color.rgb, 0.0, 1.0);
+            bool enemy = (flags & MOBA_DECAL_ENEMY) != 0u;
+            // The fixed soft glow just outside an enemy rim.
+            float reach = MOBA_DECAL_GLOW_REACH * rim_width;
+            if (enemy && sd > -aa && sd < reach + aa) {
+                float glow = (1.0 - smoothstep(0.0, reach, max(sd, 0.0))) * smoothstep(-aa, aa, sd);
+                if (glow > 0.0) {
+                    touched = true;
+                    color = mix(color, tint, MOBA_DECAL_GLOW_STRENGTH * band * glow);
+                }
+            }
+            vec4 coverage = decal_coverage(index, world, aa);
+            if (coverage.x + coverage.z + coverage.w <= 0.0) {
+                continue;
+            }
+            touched = true;
+            color = mix(color, tint, alpha * (0.3 * coverage.x + 0.35 * coverage.z));
+            vec3 rim = tint;
+            if (enemy) {
+                float ground = decal_luma(color);
+                rim = clamp(rim * max(1.0, (1.8 * ground + 0.05) / max(decal_luma(tint), 1e-3)),
+                            0.0, 1.0);
+                color = mix(color, color * 0.2, band * coverage.w);
+            }
+            color = mix(color, rim, band * coverage.y);
+        }
+    }
+    return color;
+}
+#endif
 
 #endif

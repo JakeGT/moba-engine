@@ -49,11 +49,17 @@ use crate::environment::EnvironmentConfig;
 use crate::error::{RenderError, RenderResult};
 use crate::lighting::FrameLighting;
 use crate::mesh::{self, GpuMesh, MAX_LODS};
-use crate::pipeline::{self, DepthOnly, PipelineSpec, SceneBlend, VertexLayout, VertexlessDepth};
+use crate::motion::{DrawnState, MotionHistory};
+use crate::pipeline::{
+    self, ColorTarget, DepthOnly, PipelineSpec, SceneBlend, TargetBlend, TargetsSpec, VertexLayout,
+    VertexlessDepth,
+};
 use crate::resources::{
     DescriptorPool, DescriptorSetLayout, GpuBuffer, GraphicsPipeline, PipelineLayout,
 };
-use crate::scene::{BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Scene};
+use crate::scene::{
+    BoneRange, CameraUniform, ClearRect, GpuInstance, MeshId, Scene, TemporalCamera,
+};
 use crate::shaders::ShaderSource;
 use crate::terrain::{MAX_TERRAIN_CHUNKS, TerrainChunk};
 use crate::vat::{VatMeshes, VatPush};
@@ -103,6 +109,56 @@ struct SkinPush {
 }
 const SKIN_PUSH_SIZE: u32 = core::mem::size_of::<SkinPush>() as u32;
 
+/// One entry of the previous-instance buffer (ADR-0021 §2c; `PrevInstance` in
+/// `include/motion.glsl`), indexed like the camera list's instances: the previous model
+/// matrix as three rows and the previous VAT pose. 64 bytes; only the temporal prepass reads
+/// it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct PrevInstance {
+    rows: [[f32; 4]; 3],
+    /// x from frame | next << 16, y to frame | next << 16, z unorm16 (from t, to t), w unorm16
+    /// blend | [`PREV_VALID`].
+    pose: [u32; 4],
+}
+
+/// `PrevInstance::pose[3]` bit: the instance has a previous state (`MOBA_PREV_VALID`).
+pub(crate) const PREV_VALID: u32 = 0x1_0000;
+
+impl PrevInstance {
+    /// The entry of an instance drawn as `state` last frame; `None`: no previous state (the
+    /// shader then uses the current one: camera motion only).
+    pub(crate) fn new(state: Option<&DrawnState>) -> Self {
+        let Some(state) = state else {
+            return Self::zeroed();
+        };
+        let m = state.transform.to_cols_array_2d();
+        let row = |r: usize| [m[0][r], m[1][r], m[2][r], m[3][r]];
+        let frame = |value: u32| value.min(0xFFFF);
+        let pose = state.vat;
+        Self {
+            rows: [row(0), row(1), row(2)],
+            pose: [
+                frame(pose.from.frame) | (frame(pose.from.next) << 16),
+                frame(pose.to.frame) | (frame(pose.to.next) << 16),
+                unorm16(pose.from.t) | (unorm16(pose.to.t) << 16),
+                unorm16(pose.blend) | PREV_VALID,
+            ],
+        }
+    }
+}
+
+/// `packUnorm2x16`'s quantisation of one value (non-finite as 0).
+pub(crate) fn unorm16(value: f32) -> u32 {
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // Exact: the product is in 0..=65535.
+    (value * 65_535.0).round() as u32
+}
+
 /// One skinned instance: drawn alone so its push constant can select its bones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SkinnedDraw {
@@ -112,6 +168,10 @@ struct SkinnedDraw {
     joint_count: u32,
     /// The mesh level drawn (R8).
     lod: u8,
+    /// The previous palette's first bone in this frame's bone buffer (ADR-0021 §2c), when
+    /// [`Self::has_previous`].
+    previous_bone: u32,
+    has_previous: bool,
 }
 
 /// Per-frame-in-flight scene buffers and their descriptor sets.
@@ -122,6 +182,12 @@ struct SceneFrame {
     bone_buffer: GpuBuffer,
     camera_set: vk::DescriptorSet,
     instance_set: vk::DescriptorSet,
+    /// The previous-instance buffer (set 1, binding 2; ADR-0021 §2c): the main view with
+    /// temporal AA only. Without it binding 2 names the instance buffer, which nothing reads.
+    previous: Option<GpuBuffer>,
+    /// The overlay prepass's camera (ADR-0021 §5c: output resolution, unjittered): the main
+    /// view with the overlay only.
+    overlay_camera: Option<(GpuBuffer, vk::DescriptorSet)>,
 }
 
 /// Single-sample images an MSAA scene resolves into (ADR-0015).
@@ -169,7 +235,39 @@ pub(crate) struct PrepassTarget {
     pub(crate) resolve: Option<vk::ImageView>,
     /// R2b's `R8_UINT` outline ID target (cleared to 0), with screen-space outlines.
     pub(crate) outline_ids: Option<OutlineIdTarget>,
+    /// The temporal prepass's motion target (ADR-0021 §2b; cleared to 0), first attachment.
+    pub(crate) motion: Option<vk::ImageView>,
+    /// The main view's lighting set (the temporal prepass's foliage binds it).
+    pub(crate) lighting: vk::DescriptorSet,
     pub(crate) extent: vk::Extent2D,
+}
+
+/// The `tc_mask` pass's targets (ADR-0021 §2d).
+pub(crate) struct TcMaskTarget {
+    pub(crate) mask: vk::ImageView,
+    /// Read-only (tested and sampled-capable).
+    pub(crate) depth: vk::ImageView,
+    pub(crate) lighting: vk::DescriptorSet,
+    pub(crate) extent: vk::Extent2D,
+}
+
+/// The overlay prepass's targets (ADR-0021 §5c), at output resolution.
+pub(crate) struct OverlayPrepassTarget {
+    pub(crate) depth: vk::ImageView,
+    pub(crate) ids: vk::ImageView,
+    pub(crate) lighting: vk::DescriptorSet,
+    pub(crate) extent: vk::Extent2D,
+}
+
+/// What [`ScenePass::prepare`] needs for the main view on the Tiered path (ADR-0021).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MainFrame {
+    /// The jittered, unjittered and previous matrices; `None` without temporal AA.
+    pub(crate) temporal: Option<TemporalCamera>,
+    /// Forget the motion history (`Scene::history_reset`, a cut, a resize).
+    pub(crate) history_reset: bool,
+    /// The output (swapchain) extent, for the overlay prepass's camera.
+    pub(crate) output: vk::Extent2D,
 }
 
 /// The prepass's outline ID attachment (R2b, ADR-0016).
@@ -202,6 +300,11 @@ pub(crate) struct ViewBudget {
     /// The view also builds a shadow caster list (the main view with shadows, R8): its
     /// instance buffer holds `2 × max_instances`.
     pub(crate) casters: bool,
+    /// The view keeps a motion history and writes previous instances and palettes (the main
+    /// view with temporal AA, ADR-0021 §2c): its bone buffer holds `2 × max_bones`.
+    pub(crate) temporal: bool,
+    /// The view has the overlay prepass's camera (the main view on Tiered, ADR-0021 §5c).
+    pub(crate) overlay: bool,
 }
 
 /// How a scene pass culls and selects levels (R8, ADR-0018), fixed at creation.
@@ -385,6 +488,11 @@ pub(crate) struct ScenePipelines {
     /// Full water with refraction (R3b), single-sampled after any resolve; `None` unless the
     /// full water passes run (built in the single-sample set only).
     water_full: Option<GraphicsPipeline>,
+    /// Water surfaces into the transparency-and-composition mask (ADR-0021 §2d); temporal
+    /// only.
+    tc_mask: Option<GraphicsPipeline>,
+    /// The overlay prepass (ADR-0021 §5c); Tiered only.
+    overlay: Option<OverlayPipelines>,
 }
 
 /// Pipelines of the depth prepass: depth plus, with screen-space outlines, the units' outline
@@ -398,6 +506,20 @@ pub(crate) struct PrepassPipelines {
     skinned: Option<GraphicsPipeline>,
     /// `None` with [`ScenePipelines::vat`] (uses the VAT layout).
     vat: Option<GraphicsPipeline>,
+    /// The foliage (temporal prepass only, ADR-0021 §2b: brush joins the prepass).
+    foliage: Option<GraphicsPipeline>,
+    /// The background's camera motion at the far plane (temporal prepass only).
+    sky: Option<GraphicsPipeline>,
+}
+
+/// The overlay prepass (ADR-0021 §5c): output resolution, unjittered, depth + IDs (terrain
+/// and water `GROUND`, units their slot or `OCCLUDER`).
+pub(crate) struct OverlayPipelines {
+    terrain: GraphicsPipeline,
+    unit: GraphicsPipeline,
+    skinned: Option<GraphicsPipeline>,
+    vat: Option<GraphicsPipeline>,
+    water: GraphicsPipeline,
 }
 
 /// Layouts and mode the R3b pipelines are built for.
@@ -432,6 +554,11 @@ pub(crate) struct SceneSetSpec {
     pub(crate) outline_ids: bool,
     /// Build the inverted-hull outline pipelines (the main view's set, R2b's `hull` mode).
     pub(crate) hull: bool,
+    /// The prepass writes motion (ADR-0021 §2b) and the `tc_mask` pipeline is built.
+    pub(crate) temporal: bool,
+    /// Tiered (ADR-0021 §5): glow decals leave the scene shaders and the overlay prepass is
+    /// built.
+    pub(crate) overlay: bool,
 }
 
 impl ScenePipelines {
@@ -453,6 +580,8 @@ impl ScenePipelines {
             prepass,
             outline_ids,
             hull,
+            temporal,
+            overlay,
         } = set;
         let module = |name| shaders.module(device, name);
         let unit_vertex = module("unit.vert")?;
@@ -460,10 +589,12 @@ impl ScenePipelines {
         let textured_vertex = module("unit_textured.vert")?;
         let textured_fragment = module("unit_textured.frag")?;
         let terrain_vertex = module("terrain.vert")?;
-        let terrain_fragment = module(if environment.decals {
-            "terrain.frag"
-        } else {
-            "terrain_nodecals.frag"
+        // ADR-0021 §5b: on Tiered the glow decals draw in the overlay, so the scene's terrain,
+        // foliage and water compile them out.
+        let terrain_fragment = module(match (environment.decals, overlay) {
+            (false, _) => "terrain_nodecals.frag",
+            (true, false) => "terrain.frag",
+            (true, true) => "terrain_tiered.frag",
         })?;
         let build = |vertex_layout, vertex: vk::ShaderModule, fragment: vk::ShaderModule| {
             pipeline::create(
@@ -614,8 +745,18 @@ impl ScenePipelines {
             _ => None,
         };
         // R3b foliage and water.
-        let foliage_vertex = module("foliage.vert")?;
-        let foliage_fragment = module("foliage.frag")?;
+        // With temporal AA the foliage is in the prepass, so its position is `invariant` to
+        // reproduce that depth (ADR-0021 §2b).
+        let foliage_vertex = module(if temporal {
+            "foliage_tiered.vert"
+        } else {
+            "foliage.vert"
+        })?;
+        let foliage_fragment = module(if overlay {
+            "foliage_tiered.frag"
+        } else {
+            "foliage.frag"
+        })?;
         let foliage = pipeline::create_vertexless(
             device,
             environment.foliage,
@@ -639,7 +780,11 @@ impl ScenePipelines {
             // Water never writes depth (the particles and decals see the bed through it).
             depth_write: false,
         };
-        let water_fragment = module("water.frag")?;
+        let water_fragment = module(if overlay {
+            "water_tiered.frag"
+        } else {
+            "water.frag"
+        })?;
         let water = pipeline::create_blended(
             device,
             &water_spec(water_fragment.handle(), samples),
@@ -648,7 +793,11 @@ impl ScenePipelines {
         .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?;
         // The full water draws after any MSAA resolve: single-sampled, in the base set only.
         let water_full = if environment.full_water && samples == vk::SampleCountFlags::TYPE_1 {
-            let fragment = module("water_refraction.frag")?;
+            let fragment = module(if overlay {
+                "water_refraction_tiered.frag"
+            } else {
+                "water_refraction.frag"
+            })?;
             Some(
                 pipeline::create_blended(
                     device,
@@ -680,7 +829,22 @@ impl ScenePipelines {
             }
             None => (None, None),
         };
-        let prepass = if prepass {
+        let prepass = if !prepass {
+            None
+        } else if temporal {
+            Some(Self::build_motion_prepass(
+                device,
+                shaders,
+                layout,
+                vat_layout,
+                environment.foliage,
+                depth_format,
+                samples,
+                outline_ids,
+                skinned.is_some(),
+                vat.is_some(),
+            )?)
+        } else {
             let id_format = outline_ids.then_some(crate::frame_graph::OUTLINE_ID_FORMAT);
             let id_fragment = if outline_ids {
                 Some(module("prepass.frag")?)
@@ -746,7 +910,47 @@ impl ScenePipelines {
                 unit,
                 skinned,
                 vat: vat_prepass,
+                foliage: None,
+                sky: None,
             })
+        };
+        // ADR-0021 §2d: water surfaces, depth-tested, into the T&C mask (MAX).
+        let tc_mask = if temporal && samples == vk::SampleCountFlags::TYPE_1 {
+            let fragment = module("tc_mask.frag")?;
+            let target = [ColorTarget {
+                format: crate::frame_graph::MASK_FORMAT,
+                write_mask: vk::ColorComponentFlags::R,
+                blend: TargetBlend::Max,
+            }];
+            Some(
+                pipeline::create_targets(
+                    device,
+                    &TargetsSpec {
+                        layout: environment.water,
+                        vertex_layout: Some(VertexLayout::Water),
+                        vertex: water_vertex.handle(),
+                        fragment: Some(fragment.handle()),
+                        colors: &target,
+                        depth_format,
+                        depth_write: false,
+                        samples,
+                    },
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))?,
+            )
+        } else {
+            None
+        };
+        let overlay = if overlay && samples == vk::SampleCountFlags::TYPE_1 {
+            Some(Self::build_overlay(
+                device,
+                shaders,
+                layout,
+                vat_layout,
+                environment.water,
+                skinned.is_some(),
+                vat.is_some(),
+            )?)
         } else {
             None
         };
@@ -823,6 +1027,228 @@ impl ScenePipelines {
             foliage,
             water,
             water_full,
+            tc_mask,
+            overlay,
+        })
+    }
+
+    /// The temporal prepass (ADR-0021 §2b): every opaque main-view draw writes depth and its
+    /// motion (attachment 0, `R16G16_SFLOAT`), the units also their slot into the unit mask
+    /// (attachment 1) when `ids` (the heat haze keeps it). The terrain, the foliage and the
+    /// background leave the mask alone (an empty write mask; `independentBlend`).
+    #[allow(clippy::too_many_arguments)] // One set of pipelines.
+    fn build_motion_prepass(
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+        layout: vk::PipelineLayout,
+        vat_layout: vk::PipelineLayout,
+        foliage_layout: vk::PipelineLayout,
+        depth_format: vk::Format,
+        samples: vk::SampleCountFlags,
+        ids: bool,
+        skinned: bool,
+        vat: bool,
+    ) -> RenderResult<PrepassPipelines> {
+        let module = |name| shaders.module(device, name);
+        let motion_fragment = module("prepass_motion.frag")?;
+        let ids_fragment = module(if ids {
+            "prepass_motion_ids.frag"
+        } else {
+            "prepass_motion.frag"
+        })?;
+        let motion = ColorTarget {
+            format: crate::frame_graph::MOTION_FORMAT,
+            write_mask: vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
+            blend: TargetBlend::None,
+        };
+        let id = |write: bool| ColorTarget {
+            format: crate::frame_graph::OUTLINE_ID_FORMAT,
+            write_mask: if write {
+                vk::ColorComponentFlags::R
+            } else {
+                vk::ColorComponentFlags::empty()
+            },
+            blend: TargetBlend::None,
+        };
+        let count = 1 + usize::from(ids);
+        let plain = [motion, id(false)];
+        let with_ids = [motion, id(true)];
+        let build = |layout,
+                     vertex_layout,
+                     vertex: vk::ShaderModule,
+                     fragment: vk::ShaderModule,
+                     colors: &[ColorTarget],
+                     depth_write| {
+            pipeline::create_targets(
+                device,
+                &TargetsSpec {
+                    layout,
+                    vertex_layout,
+                    vertex,
+                    fragment: Some(fragment),
+                    colors,
+                    depth_format,
+                    depth_write,
+                    samples,
+                },
+            )
+            .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+        };
+        let terrain = build(
+            layout,
+            Some(VertexLayout::Terrain),
+            module("terrain_motion.vert")?.handle(),
+            motion_fragment.handle(),
+            &plain[..count],
+            true,
+        )?;
+        let unit = build(
+            layout,
+            Some(VertexLayout::StaticShadow),
+            module("unit_motion.vert")?.handle(),
+            ids_fragment.handle(),
+            &with_ids[..count],
+            true,
+        )?;
+        let skinned = if skinned {
+            module("skinned_motion.vert")
+                .and_then(|vertex| {
+                    build(
+                        layout,
+                        Some(VertexLayout::SkinnedShadow),
+                        vertex.handle(),
+                        ids_fragment.handle(),
+                        &with_ids[..count],
+                        true,
+                    )
+                })
+                .inspect_err(|error| {
+                    eprintln!("[render] skinned motion prepass pipeline unavailable ({error})");
+                })
+                .ok()
+        } else {
+            None
+        };
+        let vat = if vat {
+            Some(build(
+                vat_layout,
+                Some(VertexLayout::StaticShadow),
+                module("vat_motion.vert")?.handle(),
+                ids_fragment.handle(),
+                &with_ids[..count],
+                true,
+            )?)
+        } else {
+            None
+        };
+        let foliage = build(
+            foliage_layout,
+            None,
+            module("foliage_motion.vert")?.handle(),
+            motion_fragment.handle(),
+            &plain[..count],
+            true,
+        )?;
+        // On the far plane, tested only: where nothing was drawn.
+        let sky = build(
+            layout,
+            None,
+            module("sky.vert")?.handle(),
+            module("sky_motion.frag")?.handle(),
+            &plain[..count],
+            false,
+        )?;
+        Ok(PrepassPipelines {
+            terrain,
+            unit,
+            skinned,
+            vat,
+            foliage: Some(foliage),
+            sky: Some(sky),
+        })
+    }
+
+    /// The overlay prepass (ADR-0021 §5c): the `*_prepass.vert` shaders through the overlay
+    /// camera; the units write their slot (or `OCCLUDER`, 8) with `prepass.frag`, the terrain
+    /// and the water `GROUND` (9) with `overlay_ground.frag`.
+    fn build_overlay(
+        device: &DeviceContext,
+        shaders: &ShaderSource,
+        layout: vk::PipelineLayout,
+        vat_layout: vk::PipelineLayout,
+        water_layout: vk::PipelineLayout,
+        skinned: bool,
+        vat: bool,
+    ) -> RenderResult<OverlayPipelines> {
+        let module = |name| shaders.module(device, name);
+        let ground = module("overlay_ground.frag")?;
+        let unit_fragment = module("prepass.frag")?;
+        let ids = [ColorTarget {
+            format: crate::frame_graph::OUTLINE_ID_FORMAT,
+            write_mask: vk::ColorComponentFlags::R,
+            blend: TargetBlend::None,
+        }];
+        let build =
+            |layout, vertex_layout, vertex: vk::ShaderModule, fragment: vk::ShaderModule| {
+                pipeline::create_targets(
+                    device,
+                    &TargetsSpec {
+                        layout,
+                        vertex_layout: Some(vertex_layout),
+                        vertex,
+                        fragment: Some(fragment),
+                        colors: &ids,
+                        depth_format: crate::frame_graph::OVERLAY_DEPTH_FORMAT,
+                        depth_write: true,
+                        samples: vk::SampleCountFlags::TYPE_1,
+                    },
+                )
+                .map(|handle| GraphicsPipeline::from_raw(device.device.clone(), handle))
+            };
+        let terrain = build(
+            layout,
+            VertexLayout::Terrain,
+            module("terrain.vert")?.handle(),
+            ground.handle(),
+        )?;
+        let unit = build(
+            layout,
+            VertexLayout::StaticShadow,
+            module("unit_prepass.vert")?.handle(),
+            unit_fragment.handle(),
+        )?;
+        let skinned = if skinned {
+            Some(build(
+                layout,
+                VertexLayout::SkinnedShadow,
+                module("skinned_prepass.vert")?.handle(),
+                unit_fragment.handle(),
+            )?)
+        } else {
+            None
+        };
+        let vat = if vat {
+            Some(build(
+                vat_layout,
+                VertexLayout::StaticShadow,
+                module("vat_prepass.vert")?.handle(),
+                unit_fragment.handle(),
+            )?)
+        } else {
+            None
+        };
+        let water = build(
+            water_layout,
+            VertexLayout::Water,
+            module("water.vert")?.handle(),
+            ground.handle(),
+        )?;
+        Ok(OverlayPipelines {
+            terrain,
+            unit,
+            skinned,
+            vat,
+            water,
         })
     }
 }
@@ -884,6 +1310,9 @@ pub(crate) struct ScenePass {
     stats: CullStats,
     /// Foliage and water (R3b).
     environment: EnvironmentResources,
+    /// What each keyed instance drew last frame (ADR-0021 §2c); the main view with temporal
+    /// AA only.
+    motion: Option<MotionHistory>,
 }
 
 /// How the main view is drawn (ADR-0015).
@@ -895,6 +1324,11 @@ pub(crate) struct MainViewSpec {
     pub(crate) outline_ids: bool,
     /// The scene draws R2b's inverted-hull outlines.
     pub(crate) hull: bool,
+    /// Temporal AA (ADR-0021): the prepass writes motion. Never with MSAA (Tiered refuses
+    /// it, §7).
+    pub(crate) temporal: bool,
+    /// The Tiered path's overlay (ADR-0021 §5). Never with MSAA.
+    pub(crate) overlay: bool,
 }
 
 impl MainViewSpec {
@@ -906,6 +1340,8 @@ impl MainViewSpec {
             prepass: self.prepass && !msaa,
             outline_ids: self.outline_ids && !msaa,
             hull: self.hull && !msaa,
+            temporal: self.temporal && !msaa,
+            overlay: self.overlay && !msaa,
         };
         let main = msaa.then_some(SceneSetSpec {
             samples: self.samples,
@@ -913,16 +1349,19 @@ impl MainViewSpec {
             prepass: self.prepass,
             outline_ids: self.outline_ids,
             hull: self.hull,
+            temporal: false,
+            overlay: false,
         });
         (base, main)
     }
 }
 
 /// Bindings of the scene's set 0 (the camera block, vertex + fragment) and set 1 (binding 0
-/// instances, binding 1 joint matrices read only by `skinned.vert`; vertex).
+/// instances, binding 1 joint matrices read only by `skinned.vert`, binding 2 the previous
+/// instances read only by the temporal prepass, ADR-0021 §2c; vertex).
 pub(crate) fn buffer_set_layout_bindings() -> (
     [vk::DescriptorSetLayoutBinding<'static>; 1],
-    [vk::DescriptorSetLayoutBinding<'static>; 2],
+    [vk::DescriptorSetLayoutBinding<'static>; 3],
 ) {
     let camera = [vk::DescriptorSetLayoutBinding::default()
         .binding(0)
@@ -936,7 +1375,7 @@ pub(crate) fn buffer_set_layout_bindings() -> (
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX)
     };
-    (camera, [storage(0), storage(1)])
+    (camera, [storage(0), storage(1), storage(2)])
 }
 
 impl ScenePass {
@@ -1015,16 +1454,22 @@ impl ScenePass {
         let camera_layout = DescriptorSetLayout::new(device.device.clone(), &camera_binding)?;
         let instance_layout = DescriptorSetLayout::new(device.device.clone(), &instance_binding)?;
         let frame_count = u32::try_from(frames * views.len()).expect("frame count fits u32");
+        // ADR-0021 §5c: the overlay prepass's camera, one more uniform set per frame.
+        let overlay_sets = u32::try_from(frames).expect("frame count fits u32")
+            * u32::from(views.iter().any(|view| view.overlay));
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(frame_count),
+                .descriptor_count(frame_count + overlay_sets),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(2 * frame_count),
+                .descriptor_count(3 * frame_count),
         ];
-        let descriptor_pool =
-            DescriptorPool::new(device.device.clone(), &pool_sizes, 2 * frame_count)?;
+        let descriptor_pool = DescriptorPool::new(
+            device.device.clone(),
+            &pool_sizes,
+            2 * frame_count + overlay_sets,
+        )?;
 
         // One layout for every scene pipeline keeps the bound descriptor sets compatible
         // across them: sets 0/1 (camera, instances + bones) and 3 (lighting) are bound once per
@@ -1102,12 +1547,29 @@ impl ScenePass {
         let mut scene_views = Vec::with_capacity(views.len());
         for (view, budget) in views.iter().enumerate() {
             let first_set = view * frames * 2;
+            let overlay_sets = if budget.overlay {
+                let layouts = vec![camera_layout.handle(); frames];
+                descriptor_pool.allocate(&device.device, &layouts)?
+            } else {
+                Vec::new()
+            };
             scene_views.push(SceneView::new(
                 device,
                 *budget,
                 &sets[first_set..first_set + frames * 2],
+                &overlay_sets,
             )?);
         }
+        let max_joints = views
+            .first()
+            .filter(|view| view.temporal)
+            .map_or(0, |view| {
+                scene_views
+                    .first()
+                    .map_or(view.max_bones, |state| state.max_bones)
+            });
+        let motion = (main.temporal && views.first().is_some_and(|view| view.temporal))
+            .then(|| MotionHistory::new(max_joints));
 
         Ok(Self {
             terrain_mesh,
@@ -1138,6 +1600,7 @@ impl ScenePass {
                 ..CullStats::default()
             },
             environment,
+            motion,
         })
     }
 
@@ -1423,6 +1886,7 @@ impl ScenePass {
         world: &WorldFrame,
         extent: vk::Extent2D,
         lod_height: u32,
+        main: Option<&MainFrame>,
     ) -> RenderResult<()> {
         let mesh_count = self.meshes.len();
         let culling = self.culling;
@@ -1434,8 +1898,17 @@ impl ScenePass {
             terrain_chunks,
             terrain_mesh,
             stats,
+            motion,
             ..
         } = self;
+        // ADR-0021 §2c: the main view's history moves on one frame (and forgets on a reset).
+        let history = match (view, motion.as_mut(), main) {
+            (0, Some(history), Some(main)) => {
+                history.begin_frame(main.history_reset);
+                Some(history)
+            }
+            _ => None,
+        };
         let state = &mut views[view];
         let unit_count = scene.units.len();
         let bone_count = scene.bones.len().min(state.max_bones);
@@ -1457,7 +1930,25 @@ impl ScenePass {
             &scene.outlines,
             [extent.width, extent.height],
         );
+        // ADR-0021 §1: the jittered matrix and the motion members (Compat: none of it).
+        let uniform = match main.and_then(|main| main.temporal.as_ref()) {
+            Some(temporal) => uniform.with_temporal(temporal),
+            None => uniform,
+        };
         target.camera_buffer.write_bytes(0, bytes_of(&uniform));
+        // ADR-0021 §5c: the overlay prepass's camera, unjittered at output resolution.
+        if let (Some(main), Some((buffer, _))) = (main, target.overlay_camera.as_mut()) {
+            let overlay = CameraUniform::new(
+                scene.camera,
+                &scene.vision,
+                scene.terrain_tint,
+                lighting,
+                world,
+                &scene.outlines,
+                [main.output.width, main.output.height],
+            );
+            buffer.write_bytes(0, bytes_of(&overlay));
+        }
         if bone_count > 0 {
             let mapped = target
                 .bone_buffer
@@ -1554,6 +2045,30 @@ impl ScenePass {
             };
         }
         let lists = state.casters.as_ref().map_or(1, |_| 2);
+        // ADR-0021 §2c: the camera list's previous instances, and the previous palettes after
+        // this frame's bones (the second half of the bone buffer).
+        let max_bones = state.max_bones;
+        let mut previous = match (&history, target.previous.as_mut()) {
+            (Some(_), Some(buffer)) => {
+                let instances = buffer
+                    .mapped_slice_mut::<PrevInstance>(state.max_instances)
+                    .ok_or_else(|| {
+                        RenderError::NoSuitableDevice(String::from(
+                            "previous-instance buffer is not host visible",
+                        ))
+                    })?;
+                let bones = target
+                    .bone_buffer
+                    .mapped_slice_mut::<JointMatrix>(2 * max_bones)
+                    .ok_or_else(|| {
+                        RenderError::NoSuitableDevice(String::from(
+                            "bone buffer is not host visible",
+                        ))
+                    })?;
+                Some((instances, &mut bones[max_bones..], 0usize))
+            }
+            _ => None,
+        };
         if !state.decisions.is_empty() {
             let mapped = target
                 .instance_buffer
@@ -1582,6 +2097,29 @@ impl ScenePass {
                     };
                     let instance = list.place(unit, bucket);
                     mapped[instance as usize] = gpu;
+                    // The camera list's previous state (ADR-0021 §2c), and where its previous
+                    // palette went.
+                    let mut previous_bone = None;
+                    if bit == IN_CAMERA
+                        && let (Some(history), Some((instances, bones, cursor))) =
+                            (history.as_deref(), previous.as_mut())
+                    {
+                        let drawn =
+                            history.previous(unit.motion_key, unit.motion_reset, &unit.transform);
+                        instances[instance as usize] =
+                            PrevInstance::new(drawn.as_ref().map(|(state, _)| state));
+                        let count = unit.bones.count.min(joints) as usize;
+                        if let Some((_, palette)) = drawn
+                            && joints > 0
+                            && count > 0
+                            && palette.len() >= count
+                            && *cursor + count <= bones.len()
+                        {
+                            bones[*cursor..*cursor + count].copy_from_slice(&palette[..count]);
+                            previous_bone = u32::try_from(max_bones + *cursor).ok();
+                            *cursor += count;
+                        }
+                    }
                     if joints == 0 {
                         continue;
                     }
@@ -1589,7 +2127,12 @@ impl ScenePass {
                     // upload; the capacity check keeps `push` from reallocating.
                     match skinned_draw(unit.bones, joints, uploaded_bones, slot, instance) {
                         Some(draw) if list.skinned.len() < list.skinned.capacity() => {
-                            list.skinned.push(SkinnedDraw { lod, ..draw });
+                            list.skinned.push(SkinnedDraw {
+                                lod,
+                                previous_bone: previous_bone.unwrap_or(0),
+                                has_previous: previous_bone.is_some(),
+                                ..draw
+                            });
                         }
                         // The caster list does not count drops twice.
                         _ if bit == IN_CASTERS => {}
@@ -1600,6 +2143,22 @@ impl ScenePass {
         }
         if view == 0 {
             SKINNED_DROPPED.store(skinned_dropped, Ordering::Relaxed);
+        }
+        // ADR-0021 §2c: what every keyed unit drew this frame, for the next one (all of
+        // them, so a unit entering the view next frame has its history).
+        if let Some(history) = history {
+            for unit in units {
+                if unit.motion_key == 0 {
+                    continue;
+                }
+                let first = unit.bones.first as usize;
+                let joints = scene
+                    .bones
+                    .get(first..first.saturating_add(unit.bones.count as usize))
+                    .filter(|_| first + (unit.bones.count as usize) <= bone_count)
+                    .unwrap_or(&[]);
+                history.record(unit.motion_key, unit.transform, unit.vat, joints);
+            }
         }
         Ok(())
     }
@@ -2017,13 +2576,30 @@ impl ScenePass {
                 None => attachment,
             }
         });
+        // ADR-0021 §2b: motion first, cleared to 0 (no motion), then the unit mask.
+        let motion_attachment = target.motion.map(|view| {
+            vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue { float32: [0.0; 4] },
+                })
+        });
+        let mut color_attachments = [vk::RenderingAttachmentInfo::default(); 2];
+        let mut color_count = 0;
+        for attachment in motion_attachment.into_iter().chain(id_attachment) {
+            color_attachments[color_count] = attachment;
+            color_count += 1;
+        }
         let render_info = vk::RenderingInfo::default()
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: target.extent,
             })
             .layer_count(1)
-            .color_attachments(id_attachment.as_slice())
+            .color_attachments(&color_attachments[..color_count])
             .depth_attachment(&depth_attachment);
         device.cmd_begin_rendering(command_buffer, &render_info);
         super::set_viewport_scissor(
@@ -2065,6 +2641,178 @@ impl ScenePass {
         {
             self.draw_vat(device, command_buffer, list, vat, None, false);
         }
+        // ADR-0021 §2b: the temporal prepass also draws the foliage (with its own layout's
+        // sets 2/3) and, last, the background's camera motion on the far plane.
+        if let Some(foliage) = &prepass.foliage {
+            self.environment.record_foliage(
+                device,
+                command_buffer,
+                frame,
+                foliage.handle(),
+                target.lighting,
+            );
+        }
+        if let Some(sky) = &prepass.sky {
+            bind_pipeline(device, command_buffer, sky);
+            // SAFETY: no vertex input; three vertices form the covering triangle, and its set
+            // (the camera) is bound with the shared layout.
+            unsafe { device.device.cmd_draw(command_buffer, 3, 1, 0, 0) };
+        }
+        device.cmd_end_rendering(command_buffer);
+    }
+
+    /// Records `tc_mask` (ADR-0021 §2d): the water surfaces, depth-tested against the scene,
+    /// into the transparency-and-composition mask with `MAX` (the mask was cleared by
+    /// `mask_clear`).
+    pub(crate) fn record_tc_mask(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        frame: usize,
+        target: &TcMaskTarget,
+    ) {
+        let Some(pipeline) = &self.pipelines.tc_mask else {
+            return;
+        };
+        let color = vk::RenderingAttachmentInfo::default()
+            .image_view(target.mask)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE);
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(target.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::NONE);
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: target.extent,
+            })
+            .layer_count(1)
+            .color_attachments(core::slice::from_ref(&color))
+            .depth_attachment(&depth);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(
+            device,
+            command_buffer,
+            super::flipped_viewport(target.extent),
+            target.extent,
+        );
+        self.bind_view_sets(device, command_buffer, &self.views[0], frame);
+        self.environment.record_water(
+            device,
+            command_buffer,
+            frame,
+            pipeline.handle(),
+            target.lighting,
+            false,
+        );
+        device.cmd_end_rendering(command_buffer);
+    }
+
+    /// Records the overlay prepass (ADR-0021 §5c): at output resolution through the overlay
+    /// camera (unjittered), the terrain and the water as `GROUND`, every camera-list unit as
+    /// its outline slot or `OCCLUDER`, into the overlay depth (cleared to 1) and IDs (cleared
+    /// to 0). The foliage, the particles and the sky are left out.
+    pub(crate) fn record_overlay_prepass(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        frame: usize,
+        target: &OverlayPrepassTarget,
+    ) {
+        let Some(overlay) = &self.pipelines.overlay else {
+            return;
+        };
+        let state = &self.views[0];
+        let Some((_, camera_set)) = &state.frames[frame].overlay_camera else {
+            return;
+        };
+        let ids = vk::RenderingAttachmentInfo::default()
+            .image_view(target.ids)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                color: vk::ClearColorValue { uint32: [0; 4] },
+            });
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(target.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            });
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: target.extent,
+            })
+            .layer_count(1)
+            .color_attachments(core::slice::from_ref(&ids))
+            .depth_attachment(&depth);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(
+            device,
+            command_buffer,
+            super::flipped_viewport(target.extent),
+            target.extent,
+        );
+        let sets = [*camera_set, state.frames[frame].instance_set];
+        // SAFETY: the overlay camera set was allocated with the camera layout, the instance
+        // set with the instance layout; the shared pipeline layout declares them at 0 and 1.
+        unsafe {
+            device.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout.handle(),
+                0,
+                &sets,
+                &[],
+            );
+        }
+        self.draw_terrain(device, command_buffer, state, &overlay.terrain);
+        let list = &state.camera;
+        if list.len > 0 {
+            for textured in [false, true] {
+                self.draw_static(device, command_buffer, list, &overlay.unit, textured, false);
+            }
+        }
+        if !list.skinned.is_empty()
+            && let Some(skinned) = &overlay.skinned
+        {
+            for textured in [false, true] {
+                self.draw_skinned(
+                    device,
+                    command_buffer,
+                    list,
+                    skinned,
+                    textured,
+                    false,
+                    false,
+                );
+            }
+        }
+        if list.len > 0
+            && let Some(vat) = &overlay.vat
+        {
+            self.draw_vat(device, command_buffer, list, vat, None, false);
+        }
+        // The water surfaces are ground too (a telegraph lands on the surface), last: the
+        // water layout re-binds sets 2/3.
+        self.environment.record_water(
+            device,
+            command_buffer,
+            frame,
+            overlay.water.handle(),
+            target.lighting,
+            false,
+        );
         device.cmd_end_rendering(command_buffer);
     }
 
@@ -2360,10 +3108,11 @@ impl ScenePass {
                 // of the bound skinned pipeline.
                 bind_mesh(device, command_buffer, mesh);
             }
+            // ADR-0021 §2c: the previous palette for the temporal prepass (unused elsewhere).
             let push = SkinPush {
                 first_bone: draw.first_bone,
                 joint_count: draw.joint_count,
-                reserved: [0; 2],
+                reserved: [draw.previous_bone, u32::from(draw.has_previous)],
             };
             // SAFETY: the shared pipeline layout declares exactly this 16-byte
             // vertex-stage range at offset 0.
@@ -2405,11 +3154,14 @@ impl SceneView {
         device: &DeviceContext,
         budget: ViewBudget,
         sets: &[vk::DescriptorSet],
+        overlay_sets: &[vk::DescriptorSet],
     ) -> RenderResult<Self> {
         let ViewBudget {
             max_instances,
             max_bones,
             casters,
+            temporal,
+            overlay: _,
         } = budget;
         // The caster list (R8) follows the camera list in the same buffer.
         let lists = if casters { 2 } else { 1 };
@@ -2436,9 +3188,17 @@ impl SceneView {
         } else {
             max_bones
         };
+        // ADR-0021 §2c: with temporal AA the previous palettes follow this frame's, so the
+        // buffer holds twice the budget (each half within the range).
+        let max_bones = if temporal {
+            max_bones.min(bones_that_fit / 2)
+        } else {
+            max_bones
+        };
+        let palettes = if temporal { 2 } else { 1 };
         // At least one joint so the descriptor always names a non-empty buffer.
-        let bone_buffer_size =
-            BONE_STRIDE * u64::try_from(max_bones.max(1)).expect("bounded by the range limit");
+        let bone_buffer_size = BONE_STRIDE
+            * u64::try_from(max_bones.max(1) * palettes).expect("bounded by the range limit");
         let frames = sets.len() / 2;
         let mut scene_frames = Vec::with_capacity(frames);
         for frame in 0..frames {
@@ -2470,6 +3230,26 @@ impl SceneView {
                 )?,
                 camera_set: sets[frame * 2],
                 instance_set: sets[frame * 2 + 1],
+                previous: if temporal {
+                    Some(buffer(
+                        "previous-instances",
+                        (core::mem::size_of::<PrevInstance>() * max_instances.max(1)) as u64,
+                        vk::BufferUsageFlags::STORAGE_BUFFER,
+                    )?)
+                } else {
+                    None
+                },
+                overlay_camera: match overlay_sets.get(frame) {
+                    Some(&set) => Some((
+                        buffer(
+                            "overlay-camera",
+                            CAMERA_UNIFORM_SIZE,
+                            vk::BufferUsageFlags::UNIFORM_BUFFER,
+                        )?,
+                        set,
+                    )),
+                    None => None,
+                },
             };
             write_descriptors(&device.device, &scene_frame);
             scene_frames.push(scene_frame);
@@ -2617,7 +3397,24 @@ fn write_descriptors(device: &ash::Device, frame: &SceneFrame) {
         .buffer(frame.bone_buffer.handle())
         .offset(0)
         .range(vk::WHOLE_SIZE)];
-    let writes = [
+    // Without a previous-instance buffer binding 2 names the instances (nothing reads it).
+    let previous_info = [vk::DescriptorBufferInfo::default()
+        .buffer(
+            frame
+                .previous
+                .as_ref()
+                .unwrap_or(&frame.instance_buffer)
+                .handle(),
+        )
+        .offset(0)
+        .range(vk::WHOLE_SIZE)];
+    let overlay_info = frame.overlay_camera.as_ref().map(|(buffer, _)| {
+        [vk::DescriptorBufferInfo::default()
+            .buffer(buffer.handle())
+            .offset(0)
+            .range(CAMERA_UNIFORM_SIZE)]
+    });
+    let mut writes = vec![
         vk::WriteDescriptorSet::default()
             .dst_set(frame.camera_set)
             .dst_binding(0)
@@ -2636,7 +3433,23 @@ fn write_descriptors(device: &ash::Device, frame: &SceneFrame) {
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
             .buffer_info(&bone_info),
+        vk::WriteDescriptorSet::default()
+            .dst_set(frame.instance_set)
+            .dst_binding(2)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .buffer_info(&previous_info),
     ];
+    if let (Some((_, set)), Some(info)) = (&frame.overlay_camera, &overlay_info) {
+        writes.push(
+            vk::WriteDescriptorSet::default()
+                .dst_set(*set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .buffer_info(info),
+        );
+    }
     // SAFETY: both descriptor sets were allocated from a compatible pool and the buffer info
     // entries reference live buffers.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -2669,6 +3482,8 @@ fn skinned_draw(
         first_bone: bones.first,
         joint_count: bones.count.min(mesh_joints),
         lod: 0,
+        previous_bone: 0,
+        has_previous: false,
     })
 }
 
@@ -2718,6 +3533,8 @@ mod tests {
                 // Never more than the mesh's joints.
                 joint_count: 7,
                 lod: 0,
+                previous_bone: 0,
+                has_previous: false,
             }
         );
         assert_eq!(skinned_draw(BoneRange::NONE, 7, 128, 3, 9), None);

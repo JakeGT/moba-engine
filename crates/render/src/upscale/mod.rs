@@ -16,6 +16,8 @@
 //! dynamic-resolution range and re-created with it on a resize or a settings change, never
 //! mid-match (`locked_pipelines=0`).
 
+pub(crate) mod exposure;
+pub(crate) mod frame;
 pub(crate) mod taau;
 
 use ash::vk;

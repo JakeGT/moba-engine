@@ -237,6 +237,7 @@
     "drawIndirectCount": true,
     "dynamicRendering": true,
     "hostQueryReset": true,
+    "independentBlend": true,
     "maintenance4": true,
     "presentId": true,
     "runtimeDescriptorArray": true,

@@ -31,10 +31,10 @@ void main() {
     vec3 normal = normalize(in_normal);
     Surface surface = default_surface(in_color, normal, in_world_pos, camera.style.w);
 #ifdef MATERIAL_TEXTURED
-    vec4 base = texture(base_color_map, in_uv) * material.base_color_factor;
-    float tint = texture(mask_map, in_uv).r * material.params.w;
+    vec4 base = texture(base_color_map, in_uv, camera.temporal.x) * material.base_color_factor;
+    float tint = texture(mask_map, in_uv, camera.temporal.x).r * material.params.w;
     surface.albedo = base.rgb * mix(vec3(1.0), in_color, tint);
-    vec2 metallic_roughness = texture(metallic_roughness_map, in_uv).rg;
+    vec2 metallic_roughness = texture(metallic_roughness_map, in_uv, camera.temporal.x).rg;
     surface.metallic = clamp(metallic_roughness.r * material.params.x, 0.0, 1.0);
     surface.roughness = clamp(metallic_roughness.g * material.params.y, 0.0, 1.0);
     surface.normal = material_normal(normal, in_tangent, in_uv);

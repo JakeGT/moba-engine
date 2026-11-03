@@ -246,6 +246,7 @@
     "dynamicRenderingLocalRead": true,
     "hostImageCopy": true,
     "hostQueryReset": true,
+    "independentBlend": true,
     "indexTypeUint8": true,
     "maintenance4": true,
     "maintenance5": true,

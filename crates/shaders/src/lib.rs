@@ -176,6 +176,80 @@ pub const WATER_REFRACTION_FRAG: &[u8] =
 pub const TOOLCHAIN_SMOKE_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/toolchain_smoke.slang.spv"));
 
+/// Unit depth pre-pass with motion vectors (`unit.vert` + `DEPTH_PREPASS` + `MOTION_VECTORS`, ADR-0021 §2).
+pub const UNIT_MOTION_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/unit_motion.vert.spv"));
+/// Skinned depth pre-pass with motion vectors (previous bone palette, ADR-0021 §2).
+pub const SKINNED_MOTION_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/skinned_motion.vert.spv"));
+/// VAT depth pre-pass with motion vectors (previous VAT pose, ADR-0021 §2).
+pub const VAT_MOTION_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vat_motion.vert.spv"));
+/// Terrain depth pre-pass with camera motion (ADR-0021 §2).
+pub const TERRAIN_MOTION_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_motion.vert.spv"));
+/// Foliage depth pre-pass with motion from the previous wind time and displacers (ADR-0021 §2).
+pub const FOLIAGE_MOTION_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/foliage_motion.vert.spv"));
+/// Foliage colour pass with an `invariant` position (matches `foliage_motion.vert`'s depth).
+pub const FOLIAGE_TIERED_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/foliage_tiered.vert.spv"));
+/// Pre-pass fragment shader writing motion vectors (ADR-0021 §2a).
+pub const PREPASS_MOTION_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/prepass_motion.frag.spv"));
+/// Pre-pass fragment shader writing motion vectors and the unit mask (`PREPASS_IDS`).
+pub const PREPASS_MOTION_IDS_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/prepass_motion_ids.frag.spv"));
+/// Sky motion vectors (camera rotation only, ADR-0021 §2).
+pub const SKY_MOTION_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sky_motion.frag.spv"));
+/// Water's transparency-and-composition mask (ADR-0021 §2b).
+pub const TC_MASK_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc_mask.frag.spv"));
+/// The post-upscale gameplay overlay (ADR-0021 §5): outlines, rims and telegraphs at output resolution.
+pub const OVERLAY_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay.frag.spv"));
+/// The overlay pre-pass's ground and water IDs (ADR-0021 §5).
+pub const OVERLAY_GROUND_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/overlay_ground.frag.spv"));
+/// The terrain without glow decals (they draw in the overlay, ADR-0021 §5).
+pub const TERRAIN_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/terrain_tiered.frag.spv"));
+/// Foliage without glow decals (ADR-0021 §5).
+pub const FOLIAGE_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/foliage_tiered.frag.spv"));
+/// Water without glow decals (ADR-0021 §5).
+pub const WATER_TIERED_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/water_tiered.frag.spv"));
+/// Refracting water without glow decals (ADR-0021 §5).
+pub const WATER_REFRACTION_TIERED_FRAG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/water_refraction_tiered.frag.spv"
+));
+/// Particles with motion vectors; telegraphs skipped (ADR-0021 §2, §5).
+pub const VFX_TEMPORAL_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_temporal.vert.spv"));
+/// Telegraph particles only, in the overlay (ADR-0021 §5).
+pub const VFX_OVERLAY_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_overlay.vert.spv"));
+/// Particles writing motion and reactive (ADR-0021 §2b).
+pub const VFX_TEMPORAL_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_temporal.frag.spv"));
+/// OIT particles writing motion and reactive (ADR-0021 §2b).
+pub const VFX_OIT_TEMPORAL_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_oit_temporal.frag.spv"));
+/// Telegraph particles tone-mapped in the overlay (ADR-0021 §5).
+pub const VFX_OVERLAY_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_overlay.frag.spv"));
+/// Mesh particles with motion vectors (ADR-0021 §2).
+pub const VFX_MESH_TEMPORAL_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_mesh_temporal.vert.spv"));
+/// Distortion writing the reactive mask (ADR-0021 §2b).
+pub const VFX_DISTORT_TEMPORAL_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/vfx_distort_temporal.frag.spv"));
+/// The linear exposure multiplier the upscaler reads (ADR-0021 §4a), a 1×1 compute pass.
+pub const EXPOSURE_LINEAR_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/exposure_linear.slang.spv"));
+/// The in-house temporal AA and upscaler (ADR-0021 §3) with fused RCAS.
+pub const TEMPORAL_TAAU_SLANG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/temporal_taau.slang.spv"));
+
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
 /// The `slangc -reflection-json` output of the Slang module `name` (for example
@@ -426,6 +500,106 @@ pub const MODULES: &[ShaderModule] = &[
         name: "toolchain_smoke.slang",
         spirv: TOOLCHAIN_SMOKE_SLANG,
     },
+    ShaderModule {
+        name: "unit_motion.vert",
+        spirv: UNIT_MOTION_VERT,
+    },
+    ShaderModule {
+        name: "skinned_motion.vert",
+        spirv: SKINNED_MOTION_VERT,
+    },
+    ShaderModule {
+        name: "vat_motion.vert",
+        spirv: VAT_MOTION_VERT,
+    },
+    ShaderModule {
+        name: "terrain_motion.vert",
+        spirv: TERRAIN_MOTION_VERT,
+    },
+    ShaderModule {
+        name: "foliage_motion.vert",
+        spirv: FOLIAGE_MOTION_VERT,
+    },
+    ShaderModule {
+        name: "foliage_tiered.vert",
+        spirv: FOLIAGE_TIERED_VERT,
+    },
+    ShaderModule {
+        name: "prepass_motion.frag",
+        spirv: PREPASS_MOTION_FRAG,
+    },
+    ShaderModule {
+        name: "prepass_motion_ids.frag",
+        spirv: PREPASS_MOTION_IDS_FRAG,
+    },
+    ShaderModule {
+        name: "sky_motion.frag",
+        spirv: SKY_MOTION_FRAG,
+    },
+    ShaderModule {
+        name: "tc_mask.frag",
+        spirv: TC_MASK_FRAG,
+    },
+    ShaderModule {
+        name: "overlay.frag",
+        spirv: OVERLAY_FRAG,
+    },
+    ShaderModule {
+        name: "overlay_ground.frag",
+        spirv: OVERLAY_GROUND_FRAG,
+    },
+    ShaderModule {
+        name: "terrain_tiered.frag",
+        spirv: TERRAIN_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "foliage_tiered.frag",
+        spirv: FOLIAGE_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "water_tiered.frag",
+        spirv: WATER_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "water_refraction_tiered.frag",
+        spirv: WATER_REFRACTION_TIERED_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_temporal.vert",
+        spirv: VFX_TEMPORAL_VERT,
+    },
+    ShaderModule {
+        name: "vfx_overlay.vert",
+        spirv: VFX_OVERLAY_VERT,
+    },
+    ShaderModule {
+        name: "vfx_temporal.frag",
+        spirv: VFX_TEMPORAL_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_oit_temporal.frag",
+        spirv: VFX_OIT_TEMPORAL_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_overlay.frag",
+        spirv: VFX_OVERLAY_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_mesh_temporal.vert",
+        spirv: VFX_MESH_TEMPORAL_VERT,
+    },
+    ShaderModule {
+        name: "vfx_distort_temporal.frag",
+        spirv: VFX_DISTORT_TEMPORAL_FRAG,
+    },
+    ShaderModule {
+        name: "exposure_linear.slang",
+        spirv: EXPOSURE_LINEAR_SLANG,
+    },
+    ShaderModule {
+        name: "temporal_taau.slang",
+        spirv: TEMPORAL_TAAU_SLANG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -523,27 +697,153 @@ mod tests {
     /// explicit layouts; `slangc` has no flag that rejects implicit bindings, so the
     /// reflected layout must match this table exactly. A new module, resource or binding
     /// change is a deliberate edit here (and in the Rust descriptor layout that mirrors it).
-    const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[(
-        "toolchain_smoke.slang",
-        &[
-            (
-                "camera",
-                Slot::Descriptor {
-                    set: 0,
-                    binding: 0,
-                    ty: Cow::Borrowed("constantBuffer"),
-                },
-            ),
-            (
-                "circles",
-                Slot::Descriptor {
-                    set: 0,
-                    binding: 1,
-                    ty: Cow::Borrowed("structuredBuffer:readWrite"),
-                },
-            ),
-        ],
-    )];
+    const SLANG_BINDINGS: &[(&str, &[(&str, Slot)])] = &[
+        (
+            "toolchain_smoke.slang",
+            &[
+                (
+                    "camera",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("constantBuffer"),
+                    },
+                ),
+                (
+                    "circles",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("structuredBuffer:readWrite"),
+                    },
+                ),
+            ],
+        ),
+        (
+            "exposure_linear.slang",
+            &[
+                (
+                    "adapted_ev",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "exposure_linear",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("texture2D:readWrite"),
+                    },
+                ),
+                ("push", Slot::PushConstants),
+            ],
+        ),
+        (
+            "temporal_taau.slang",
+            &[
+                (
+                    "color",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "depth",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "motion",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 2,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "reactive",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 3,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "tc_mask",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 4,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "exposure",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 5,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "history_in",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 6,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "history_out",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 7,
+                        ty: Cow::Borrowed("texture2D:readWrite"),
+                    },
+                ),
+                (
+                    "output",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 8,
+                        ty: Cow::Borrowed("texture2D:readWrite"),
+                    },
+                ),
+                (
+                    "prev_depth_in",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 9,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "prev_depth_out",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 10,
+                        ty: Cow::Borrowed("texture2D:readWrite"),
+                    },
+                ),
+                (
+                    "linear_clamp",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 11,
+                        ty: Cow::Borrowed("samplerState"),
+                    },
+                ),
+                ("push", Slot::PushConstants),
+            ],
+        ),
+    ];
 
     /// The slot of one reflected parameter, or why it is not allowed.
     fn slot(parameter: &serde_json::Value) -> Result<Slot, String> {

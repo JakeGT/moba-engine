@@ -405,9 +405,11 @@ mod tests {
         assert_eq!(fragment.samplers, 16);
         assert_eq!(fragment.sampled_images, 16);
         assert_eq!(fragment.storage_buffers, 3);
+        // Vertex: instances, bones and N1's previous instances (ADR-0021 §2c, binding 2),
+        // under the minimum of 4.
         assert_eq!(
             stage_totals(&sets, vk::ShaderStageFlags::VERTEX).storage_buffers,
-            2
+            3
         );
         // The VAT layout (R4b) swaps set 2 for one vertex-stage VAT texture.
         let vat = crate::vat::set_layout_bindings();
@@ -431,7 +433,9 @@ mod tests {
             [&scene.0, &scene.1, &foliage, &lighting];
         assert!(check("foliage", &foliage_sets, minimum).is_ok());
         let foliage_vertex = stage_totals(&foliage_sets, vk::ShaderStageFlags::VERTEX);
-        assert_eq!(foliage_vertex.storage_buffers, 3);
+        // Instances, bones, N1's previous instances and the foliage instances: exactly the
+        // Vulkan minimum of 4.
+        assert_eq!(foliage_vertex.storage_buffers, 4);
         assert_eq!(
             stage_totals(&foliage_sets, vk::ShaderStageFlags::FRAGMENT).samplers,
             12
