@@ -36,16 +36,24 @@ Unit tests, run by `scripts/agent-verify.sh`:
 
 | Class | Low: pixels | Low: max error, px | High: pixels | High: max error, px | Mean motion, px |
 |---|---|---|---|---|---|
-| camera (terrain) | 393 043 | 0.0044 | 392 524 | 0.0044 | 4.97 |
+| camera (terrain) | 383 207 | 0.0044 | 382 692 | 0.0044 | 4.98 |
 | static instance | 2 097 | 0.0010 | 2 097 | 0.0010 | 1.92 |
 | skinned (one joint) | 1 709 | 0.0080 | 1 709 | 0.0080 | 9.27 |
 | VAT (frame 0 → 1) | 2 163 | 0.0043 | 2 163 | 0.0043 | 6.52 |
-| foliage | 3 723 | 0.0043 | 4 242 | 0.0043 | 5.72 |
+| foliage | 3 729 | 0.0043 | 4 244 | 0.0043 | 5.72 |
 | `motion_reset` | 1 802 | 0.0041 | 1 802 | 0.0041 | 4.45 |
 | key absent from A | 2 300 | 0.0043 | 2 300 | 0.0043 | 5.72 |
 | key new in B | 2 512 | 0.0044 | 2 512 | 0.0044 | 5.46 |
 
-91 pixels were left unclassified (silhouette pixels within the shell of two objects).
+Pixels within a centimetre of an object's boundary are skipped and counted (7 327 on Low,
+6 979 on High).
+
+**Foliage pushed** (a second patch with a displacer in frame B only; no per-blade twin, so
+checked by share and direction): on Low 2 068 of 2 594 pixels (79.7 %, need 30 %) moved
+0.25 px or more beyond camera-only, and 1 691 of those (81.8 %, need 70 %) point back towards
+the displacer; on High 2 393 of 2 942 (81.3 %) and 1 932 (80.7 %). Mean extra motion 2.4 px.
+With the prepass's second evaluation removed from `foliage.vert` (a mutation) no pushed pixel
+moved and the class failed.
 
 ## Gate 3: readability
 
