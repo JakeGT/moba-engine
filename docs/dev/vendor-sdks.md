@@ -187,7 +187,7 @@ reliable device field, so the FidelityFX API checks it when N1 creates the conte
 which extension the device was **created with** (the tiered path enables
 `VK_NV_low_latency2` only with `presentId`, never both latency extensions; Compat enables
 neither, whatever the device advertises). Since N1d the renderer runs that back end and logs
-one `[latency]` line either way (ADR-0021 §6 and amendment 1). `Renderer::vendor_backends()`
+one `[latency]` line either way (ADR-0021 §6 and amendment 3). `Renderer::vendor_backends()`
 returns the same choice as data. The
 selection is a trait object chosen inside `crates/render/src/vendor/`; no call site outside it
 uses `cfg`.
