@@ -317,6 +317,9 @@ pub const REQUIRED_FEATURES: &[&str] = &[
     "descriptorBindingUpdateUnusedWhilePending",
     // Core 1.0, for bindless storage images (§3a).
     "shaderStorageImageWriteWithoutFormat",
+    // Core 1.0: per-attachment blend state for the prepass's motion and IDs and the
+    // particles' reactive mask (ADR-0021 §2e, Q7).
+    "independentBlend",
 ];
 
 /// The bindless table's capacities (ADR-0020 §3a): samplers, storage images, textures.
@@ -348,6 +351,12 @@ pub const REQUIRED_LIMITS: &[(&str, u64)] = &[
     ),
     ("maxUpdateAfterBindDescriptorsInAllPools", BINDLESS_TOTAL),
     ("maxPerStageUpdateAfterBindResources", BINDLESS_TOTAL),
+    // ADR-0021 Amendment 2 item 15: OIT with the temporal prepass outputs writes five colour
+    // attachments at once (Vulkan only guarantees four); the fragment stage must be able to
+    // output to all five, and they count against its combined output resources.
+    ("maxColorAttachments", 5),
+    ("maxFragmentOutputAttachments", 5),
+    ("maxFragmentCombinedOutputResources", 5),
 ];
 
 /// Vulkan 1.4-promoted features recorded as optional capabilities (ADR-0020 amendment 1).
@@ -783,6 +792,7 @@ fn probe_features(
             "shaderStorageImageWriteWithoutFormat",
             base.shader_storage_image_write_without_format,
         ),
+        ("independentBlend", base.independent_blend),
         ("dynamicRendering", f13.dynamic_rendering),
         ("synchronization2", f13.synchronization2),
         ("maintenance4", f13.maintenance4),
@@ -955,6 +965,14 @@ fn record_limits(
         ),
         ("maxPushConstantsSize", base.max_push_constants_size),
         ("maxColorAttachments", base.max_color_attachments),
+        (
+            "maxFragmentOutputAttachments",
+            base.max_fragment_output_attachments,
+        ),
+        (
+            "maxFragmentCombinedOutputResources",
+            base.max_fragment_combined_output_resources,
+        ),
         ("maxBoundDescriptorSets", base.max_bound_descriptor_sets),
         (
             "maxPerStageDescriptorSamplers",

@@ -270,6 +270,7 @@
     "dynamicRenderingLocalRead": true,
     "hostImageCopy": true,
     "hostQueryReset": true,
+    "independentBlend": true,
     "indexTypeUint8": true,
     "maintenance4": true,
     "maintenance5": true,
@@ -295,6 +296,8 @@
   "limits": {
     "maxBoundDescriptorSets": 32,
     "maxColorAttachments": 8,
+    "maxFragmentCombinedOutputResources": 8388606,
+    "maxFragmentOutputAttachments": 8,
     "maxDescriptorSetUpdateAfterBindSampledImages": 8388606,
     "maxPerStageDescriptorSamplers": 8388606,
     "maxPerStageDescriptorUpdateAfterBindSampledImages": 8388606,

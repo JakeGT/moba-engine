@@ -54,4 +54,9 @@ public struct FrameConstants
     public float4 baked_ao;
     public float4 contact;
     public float4 outline_palette[MOBA_OUTLINE_SLOTS];
+    // N1 temporal (ADR-0021 §1, §2).
+    public float4x4 view_proj_unjittered;
+    public float4x4 prev_view_proj;
+    public float4 jitter;
+    public float4 temporal;
 }

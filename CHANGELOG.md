@@ -140,6 +140,55 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;
+  [perf/0031](docs/perf/0031-n1a-temporal.md)), Tiered path only; Compat is byte-identical:**
+  - **Jitter:** Halton (2, 3) with `ceil(8r²)` phases on the main view's raster matrix only;
+    `Scene::camera`, picking and orders never see it. The index survives a scale step, and
+    captures reset it and warm up two phase cycles (`Renderer::warm_up_temporal` for
+    two-tick captures). Material mip bias follows the back end's rule.
+  - **Motion vectors and masks:** the render-resolution prepass writes unjittered motion for
+    static, skinned, VAT, foliage and terrain draws from a renderer-keyed history
+    (`UnitInstance::with_motion`, `Scene::history_reset`, an 8 m / 15° cut and a 20 m teleport
+    guard); motion keys are `net_id << 16 | part`, and minion corpses get their own keys;
+    the client sets `Scene::history_reset` on a map change and a spectator switch; particles
+    write `reactive` and their dominant fragments' motion; water writes `tc_mask` (no
+    material is flagged animated-UV yet).
+  - **TAAU** (`temporal_taau.slang`): dilated motion, Catmull-Rom history, Blackman-Harris
+    upsampling, YCoCg variance clip, velocity and disocclusion rejection, fused RCAS, behind
+    the `TemporalUpscaler` trait (`UpscaleInputs`/`UpscaleOutput`, the `exposure_linear`
+    pass; `record` is an `unsafe fn` with the submission contract FSR 3.1's port shares, and
+    `resize` recreates only the history images). `auto` picks TAAU; vendor names fall back to
+    it with one log line. Mode sizes round to nearest.
+  - **Settings:** `AntiAliasing::Temporal` (the tiered default), `MOBA_AA=temporal|fxaa|off|msaa4`
+    (`msaa4` is Compat-only: on Tiered it runs temporal, with one log line), `MOBA_UPSCALER`,
+    `MOBA_UPSCALE_MODE`, `MOBA_SHARPNESS`, `MOBA_DEBUG_VIEW` (motion, reactive, tc,
+    disocclusion, confidence, overlay-ids); the upscale mode's scale is the dynamic-resolution
+    ceiling (Performance gets Ultra Performance as its floor). The frame log adds `aa=`, `upscaler=`, `upscale_mode=`, `render_scale=`,
+    `jitter_phases=`, `upscaler_vram_mb=` and the `temporal`, `tc_mask`, `overlay_prepass` and
+    `overlay` GPU lanes.
+  - **The post-upscale overlay:** an unjittered output-resolution prepass of overlay IDs and
+    depth, then one pass drawing outlines and glow telegraphs in display space over the
+    displayed image, and the enemy-telegraph particles; none of it enters a history.
+    Telegraphs lose bloom, the grade and the screen effects and gain a fixed soft halo (Q4).
+    Hull outlines are Compat-only. `glow_display_reference` is the CPU twin.
+  - MSAA leaves the tiered presets; `independentBlend` joins the tiered required features and
+    `maxColorAttachments`, `maxFragmentOutputAttachments` and
+    `maxFragmentCombinedOutputResources` ≥ 5 the required limits.
+  - **perf-gate:** Tiered's absolute per-tier budgets now fail; the new `[tiered.low|high|ultra]`
+    baselines are compared report-only until the last N1 part flips `TIERED_BASELINE_FAILS`.
+    `benches/motion_history.rs` measures the motion history and previous-state upload.
+  - **Probes and goldens:** `MOBA_MOTION_PROBE=1` (`scripts/motion-probe.sh`, motion within
+    1/64 px of a CPU twin, plus a displacer-pushed foliage patch), `MOBA_GHOST_PROBE=1`
+    (`scripts/ghost-probe.sh`: the wake, a striped hero's interior and a particle
+    projectile's core against a no-history reference),
+    `scripts/overlay-invariance.sh`, `scripts/outline-probe.sh` on Tiered and
+    `scripts/tiered-goldens.sh` (TAAU Low, High, native and a two-tick overlay golden,
+    `MOBA_CAPTURE_TWO_TICK=1`, plus 40 frames of High with a history reset every fifth frame,
+    `MOBA_TEMPORAL_RESET_EVERY=5`, under synchronization validation) run in `renderer-gate`.
+  - A history reset's re-initialisation waits on the previous frame's compute (pinned by unit
+    tests on the barriers; synchronization validation does not flag a `NONE` source), and
+    TAAU's and `exposure_linear`'s descriptor sets are keyed by the frame-in-flight slot
+    (`UpscaleInputs::frame_slot`). `scripts/ghost-probe.sh` adds Performance mode.
 - **Capability gate and render paths (ADR-0020 §2, N0.2;
   [perf/0026](docs/perf/0026-capability-gate.md)):**
   - `moba_render::caps` probes each device's extensions, features and limits

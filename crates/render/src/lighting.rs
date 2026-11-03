@@ -1395,6 +1395,11 @@ impl LightingResources {
 
     /// Writes this frame's decals into main-view set `frame`'s buffer. The frame's fence
     /// must have been waited on.
+    /// Each frame slot's decal buffer (the overlay binds them too, ADR-0021 §5b).
+    pub(crate) fn decal_buffers(&self) -> [vk::Buffer; MAIN_SETS] {
+        core::array::from_fn(|frame| self.decals[frame].handle())
+    }
+
     pub(crate) fn write_decals(&mut self, frame: usize, upload: &crate::environment::DecalUpload) {
         self.decals[frame % MAIN_SETS].write_bytes(0, upload.bytes());
     }

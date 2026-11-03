@@ -78,6 +78,9 @@
 //! - `MOBA_MINIMAP_BAKE=off|once|<frames>` (network mode): the minimap shows a top-down
 //!   render of the map baked at every map bind (R7b; default `once`; `<frames>` re-bakes
 //!   periodically for GPU-time measurement). `off` keeps the flat minimap.
+//! - `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=<n>`, ADR-0021 §7): the temporal
+//!   history warms up at tick `n - 1`, then tick `n` is captured with the camera panned by
+//!   a fixed 0.75 m, so the tiered overlay golden has motion.
 //! - `MOBA_CAPTURE_MAPS=<prefix>` (network mode, evidence for #287): after every map change
 //!   (connect, content reload, map rotation), capture `<prefix>-<n>.ppm` once
 //!   `MOBA_CAPTURE_FRAME` frames with snapshots have rendered on it, and keep playing.
@@ -91,6 +94,11 @@
 //!   `MOBA_OUTLINE_PROBE=hidden|open|hit` (render tests) adds an outlined enemy unit behind a
 //!   wall, in the open or under the effect; hidden, the capture must equal one with
 //!   `MOBA_OUTLINES=off`.
+//! - `MOBA_MOTION_PROBE=1` (render tests, ADR-0021 gate 2): once the renderer is up, render
+//!   the motion-vector probe's two scripted frames, print the comparison with its CPU twin
+//!   and exit (0 passed, 1 failed, 2 could not run). Needs temporal AA (the tiered path).
+//!   `MOBA_GHOST_PROBE=1` (gate 3) does the same for the ghost-energy probe: a dashing hero
+//!   and a projectile, history against no-history renders.
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
@@ -182,6 +190,9 @@ struct ClientApp {
     anchors: vfx::Anchors,
     /// This frame's foliage displacers, from the drawn units only (R3b).
     displacers: foliage::Displacers,
+    /// What the temporal history continues across: the bound map and the spectated hero
+    /// (ADR-0021 §2c, `Scene::history_reset`).
+    view_continuity: scene_build::ViewContinuity,
     /// `MOBA_REPLAY`: the recorded inputs the local view plays, and the next frame.
     replay: Option<(moba_sim::Replay, usize)>,
     /// `MOBA_REPLAY_EXIT=1`: exit once the replay's last frame has played (R8).
@@ -445,6 +456,7 @@ impl ClientApp {
             },
             anchors: vfx::Anchors::new(),
             displacers: foliage::Displacers::new(),
+            view_continuity: scene_build::ViewContinuity::default(),
             replay: None,
             replay_exit: std::env::var("MOBA_REPLAY_EXIT").is_ok_and(|value| value.trim() == "1"),
             preview: None,
@@ -560,6 +572,9 @@ impl ClientApp {
                         // Only a capture pins the render tick; otherwise play normally.
                         capture_tick: parse_capture_tick()
                             .filter(|_| std::env::var_os("MOBA_CAPTURE").is_some()),
+                        capture_two_tick: std::env::var_os("MOBA_CAPTURE_TWO_TICK")
+                            .is_some_and(|value| value != "0"),
+                        capture_warmed_up: false,
                         spectator_follow: evidence::spectate_follow_from_env(),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
@@ -731,7 +746,9 @@ impl App for ClientApp {
             .with_world(Some(launch::world_config(self.config_quality)))
             .with_culling(launch::cull_mode())
             .with_mesh_lod(launch::mesh_lod())
-            .with_environment(Some(launch::environment_config(self.config_quality)));
+            .with_environment(Some(launch::environment_config(self.config_quality)))
+            .with_debug_view(launch::debug_view())
+            .with_readback(launch::motion_probe_requested());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -770,6 +787,16 @@ impl App for ClientApp {
                     renderer.config_tier(),
                     renderer.admission().path.name()
                 );
+                if launch::motion_probe_requested() || launch::ghost_probe_requested() {
+                    // ADR-0021 gates 2 and 3: the probes' scripted frames, then exit.
+                    let code = if launch::motion_probe_requested() {
+                        launch::run_motion_probe(&mut renderer)
+                    } else {
+                        launch::run_ghost_probe(&mut renderer)
+                    };
+                    drop(renderer);
+                    std::process::exit(code);
+                }
                 if renderer.admission().path != self.render_target.path {
                     // The configuration was built for the probed path; say so if the
                     // renderer's device (the one that can present) differs.
@@ -951,6 +978,7 @@ impl App for ClientApp {
                 vfx,
                 anchors,
                 displacers,
+                view_continuity,
                 replay,
                 preview,
                 minions,
@@ -974,10 +1002,17 @@ impl App for ClientApp {
                 ..
             } = self;
             if let Some(network) = network {
-                if let Err(error) = network.client.poll() {
+                // A two-tick capture's warm-up blocks this loop for two jitter-phase cycles
+                // (seconds on a software rasteriser) after the capture tick's snapshot, the
+                // loopback server's last, arrived. Nothing more will arrive, so the capture
+                // frame that follows skips the network: polling would only see the silence as
+                // the connection timing out.
+                let capture_pending = network.capture_two_tick && network.capture_warmed_up;
+                if !capture_pending && let Err(error) = network.client.poll() {
                     failure = Some(format!("receive failed: {error}"));
                 }
                 if failure.is_none()
+                    && !capture_pending
                     && let Err(error) = network.client.update()
                 {
                     failure = Some(format!("network update failed: {error}"));
@@ -1343,7 +1378,18 @@ impl App for ClientApp {
                             render_tick / 30.0,
                             displacers.as_slice(),
                         );
+                        // ADR-0021 §2c: a map change or a switch of the spectated hero starts
+                        // a new history (a minimap jump moves the camera past the renderer's
+                        // own 8 m cut).
+                        let history_reset = view_continuity.cut(
+                            map_visuals.generation(),
+                            network
+                                .spectator
+                                .then_some(network.spectator_follow)
+                                .flatten(),
+                        );
                         let mut scene = Scene::with_vision(camera, units, vision)
+                            .with_history_reset(history_reset)
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
                             .with_atmosphere(map_visuals.scene_atmosphere())
@@ -1385,9 +1431,22 @@ impl App for ClientApp {
                             offscreen.push(minimap.render());
                         }
                         let mut submitted = false;
+                        // ADR-0021 §7: a two-tick capture warms the history up first.
+                        let warm_up_due = capture_due && network.two_tick_warm_up_due();
+                        let mut warmed_up = false;
                         if let Some(renderer) = renderer.as_mut() {
                             renderer.latency_marker(LatencyMarker::SimulationEnd);
-                            if capture_due {
+                            if warm_up_due {
+                                match renderer.warm_up_temporal(&scene, Some(ui)) {
+                                    Ok(()) => {
+                                        submitted = true;
+                                        warmed_up = true;
+                                    }
+                                    Err(error) => {
+                                        failure = Some(format!("capture warm-up failed: {error}"));
+                                    }
+                                }
+                            } else if capture_due {
                                 submitted = capture_and_exit(
                                     renderer,
                                     &scene,
@@ -1430,6 +1489,9 @@ impl App for ClientApp {
                         drop(offscreen);
                         portraits.finish(submitted);
                         minimap.finish(submitted);
+                        if warmed_up {
+                            network.capture_warmed_up = true;
+                        }
                     }
                 }
             } else if let Some(simulation) = simulation {
@@ -1603,7 +1665,9 @@ impl App for ClientApp {
                         render_tick / 30.0,
                         displacers.as_slice(),
                     );
+                    let history_reset = view_continuity.cut(map_visuals.generation(), None);
                     let scene = Scene::new(camera, units)
+                        .with_history_reset(history_reset)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
                         .with_atmosphere(map_visuals.scene_atmosphere())
@@ -1628,6 +1692,11 @@ impl App for ClientApp {
                             exit_after_capture = true;
                         } else {
                             render_started = Some(Instant::now());
+                            if let Some(every) = launch::temporal_reset_every()
+                                && *frames % every == every - 1
+                            {
+                                renderer.reset_temporal();
+                            }
                             if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }

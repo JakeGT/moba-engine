@@ -617,8 +617,35 @@ fn decal_hash(n: f32) -> f32 {
 /// width `aa` (metres).
 #[allow(clippy::many_single_char_names)] // The shader's names, so the two read side by side.
 fn decal_coverage(decal: &GpuDecal, world: Vec3, aa: f32) -> Vec4 {
-    if (world.y - decal.size[3]).abs() > DECAL_REACH {
+    let Some((sd, along, rim_width, shape)) = decal_shape(decal, world) else {
         return Vec4::ZERO;
+    };
+    let fill = 1.0 - smoothstep(-aa, aa, sd);
+    if fill <= 0.0 {
+        return Vec4::ZERO;
+    }
+    let rim = fill * (1.0 - smoothstep(rim_width - aa, rim_width + aa, -sd));
+    let halo =
+        fill * (1.0 - rim) * (1.0 - smoothstep(2.0 * rim_width - aa, 2.0 * rim_width + aa, -sd));
+    let mut progress = 0.0;
+    if (decal.params[1] as u32) & FLAG_PROGRESS != 0 {
+        let sweep = decal.params[2];
+        progress = fill * (1.0 - smoothstep(sweep - 0.01, sweep + 0.01, along));
+    }
+    let wash = if shape > 0.5 && shape < 1.5 {
+        rim
+    } else {
+        fill
+    };
+    Vec4::new(wash, rim, progress, halo)
+}
+
+/// The CPU twin of `decals.glsl`'s `decal_shape`: the signed distance to `decal`'s edge at
+/// `world`, the position along it, the rim width and the shape code, or `None` out of reach.
+#[allow(clippy::many_single_char_names)] // The shader's names, so the two read side by side.
+fn decal_shape(decal: &GpuDecal, world: Vec3) -> Option<(f32, f32, f32, f32)> {
+    if (world.y - decal.size[3]).abs() > DECAL_REACH {
+        return None;
     }
     let offset = Vec2::new(world.x - decal.placement[0], world.z - decal.placement[1]);
     let axis = Vec2::new(decal.placement[2], decal.placement[3]);
@@ -671,24 +698,7 @@ fn decal_coverage(decal: &GpuDecal, world: Vec3, aa: f32) -> Vec4 {
         }
         (sd, 1.0)
     };
-    let fill = 1.0 - smoothstep(-aa, aa, sd);
-    if fill <= 0.0 {
-        return Vec4::ZERO;
-    }
-    let rim = fill * (1.0 - smoothstep(rim_width - aa, rim_width + aa, -sd));
-    let halo =
-        fill * (1.0 - rim) * (1.0 - smoothstep(2.0 * rim_width - aa, 2.0 * rim_width + aa, -sd));
-    let mut progress = 0.0;
-    if (decal.params[1] as u32) & FLAG_PROGRESS != 0 {
-        let sweep = decal.params[2];
-        progress = fill * (1.0 - smoothstep(sweep - 0.01, sweep + 0.01, along));
-    }
-    let wash = if shape > 0.5 && shape < 1.5 {
-        rim
-    } else {
-        fill
-    };
-    Vec4::new(wash, rim, progress, halo)
+    Some((sd, along, rim_width, shape))
 }
 
 /// The CPU twin of one step of `decals.glsl`'s `apply_glow_decals`.
@@ -731,6 +741,70 @@ pub fn glow_reference(
         &record,
         decal_coverage(&record, point, pixel.max(1e-4)),
     )
+}
+
+/// `MOBA_DECAL_GLOW_REACH` in `decals.glsl`: the enemy halo's reach outside the rim, in rim
+/// widths (ADR-0021 Q4).
+const GLOW_REACH: f32 = 1.5;
+/// `MOBA_DECAL_GLOW_STRENGTH`: that halo's strength.
+const GLOW_STRENGTH: f32 = 0.35;
+
+/// The CPU twin of the post-upscale overlay's telegraphs (ADR-0021 §5,
+/// `apply_display_glow_decals` in `decals.glsl`) for one glow decal: the display-linear
+/// colour `decal` leaves over the **displayed** background `background` (linear, `0..1`, the
+/// decoded `ldr` value) at `point`, with a pixel `pixel` metres wide and enemy telegraphs'
+/// opacity floored at `floor`. Colours are clamped to the display range, and enemy telegraphs
+/// get the overlay's own soft glow just outside the rim in place of bloom. A paint decal
+/// returns `background`.
+#[must_use]
+pub fn glow_display_reference(
+    background: Vec3,
+    decal: &Decal,
+    floor: f32,
+    point: Vec3,
+    pixel: f32,
+) -> Vec3 {
+    if decal.style != DecalStyle::Glow || !decal.usable() {
+        return background;
+    }
+    let record = gpu_decal(decal, floor.clamp(0.0, 1.0));
+    display_glow_over(background, &record, point, pixel.max(1e-4))
+}
+
+/// The CPU twin of one step of `apply_display_glow_decals`.
+fn display_glow_over(mut color: Vec3, decal: &GpuDecal, world: Vec3, aa: f32) -> Vec3 {
+    let flags = decal.params[1] as u32;
+    let alpha = (decal.color[3] * decal.params[3]).clamp(0.0, 1.0);
+    if flags & FLAG_GLOW == 0 || alpha <= 0.0 {
+        return color;
+    }
+    let Some((sd, _, rim_width, _)) = decal_shape(decal, world) else {
+        return color;
+    };
+    let band = (2.0 * alpha).min(1.0);
+    let tint =
+        Vec3::new(decal.color[0], decal.color[1], decal.color[2]).clamp(Vec3::ZERO, Vec3::ONE);
+    let enemy = flags & FLAG_ENEMY != 0;
+    let reach = GLOW_REACH * rim_width;
+    if enemy && sd > -aa && sd < reach + aa {
+        let glow = (1.0 - smoothstep(0.0, reach, sd.max(0.0))) * smoothstep(-aa, aa, sd);
+        if glow > 0.0 {
+            color = color.lerp(tint, GLOW_STRENGTH * band * glow);
+        }
+    }
+    let coverage = decal_coverage(decal, world, aa);
+    if coverage.x + coverage.z + coverage.w <= 0.0 {
+        return color;
+    }
+    color = color.lerp(tint, alpha * (0.3 * coverage.x + 0.35 * coverage.z));
+    let mut rim = tint;
+    if enemy {
+        let ground = luminance(color);
+        rim = (rim * ((1.8 * ground + 0.05) / luminance(tint).max(1e-3)).max(1.0))
+            .clamp(Vec3::ZERO, Vec3::ONE);
+        color = color.lerp(color * 0.2, band * coverage.w);
+    }
+    color.lerp(rim, band * coverage.y)
 }
 
 /// The CPU twin of the telegraph mark the terrain, foliage and water shaders write for the
@@ -1018,6 +1092,11 @@ pub(crate) struct EnvironmentBlock {
     pub(crate) water_deep: [[f32; 4]; MAX_WATER_BODIES],
     /// rgb shallow, w foam.
     pub(crate) water_shallow: [[f32; 4]; MAX_WATER_BODIES],
+    /// The previous frame's foliage inputs for the temporal prepass's motion (ADR-0021 §2b):
+    /// x seconds, y 1 = valid (else the foliage has camera motion only), z displacers.
+    pub(crate) prev_time: [f32; 4],
+    /// The previous frame's displacers.
+    pub(crate) prev_displacers: [[f32; 4]; MAX_FOLIAGE_DISPLACERS],
 }
 
 impl EnvironmentBlock {
@@ -1327,6 +1406,86 @@ mod tests {
         ];
         assert_eq!(upload.build(&bad, 8, 0.35, None), 0);
         assert_eq!(upload.count(), 0);
+    }
+
+    /// ADR-0021 §5, gate 3 (telegraph contrast): the post-upscale overlay draws telegraphs
+    /// over the displayed image, so the rim rule is checked in display space. `AgX` maps every
+    /// HDR background from black to 16× white into `0..1`; the sweep covers that whole
+    /// display range for three hues. Every enemy telegraph shape at the floor opacity leaves
+    /// a rim band at least 1.5× brighter than the ground or a halo just inside it at most
+    /// 1/1.5 of it; the rim lifts wherever the display has the headroom for its hue (it is
+    /// clamped to the display range); and on any ground bright enough to darken, the halo is
+    /// there.
+    #[test]
+    fn enemy_telegraphs_contrast_in_display_space() {
+        let colours = [
+            Vec3::new(1.0, 0.1, 0.05),
+            Vec3::new(0.02, 0.02, 0.02),
+            Vec3::new(0.9, 0.9, 0.9),
+            Vec3::new(0.1, 0.4, 1.0),
+        ];
+        let centre = Vec3::new(10.0, 0.0, -4.0);
+        let shapes = [
+            (DecalShape::Ring, 7.0, 0.35, 7.0, 7.0 - 0.35),
+            (DecalShape::Ring, 3.0, 0.2, 3.0, 3.0 - 0.2),
+            (DecalShape::Disc, 3.0, 0.5, 3.0 - 0.12, 3.0 - 0.36),
+            (DecalShape::Cone, 6.0, 0.5, 6.0 - 0.17, 6.0 - 0.5),
+            (DecalShape::Line, 8.0, 1.5, 8.0 - 0.11, 8.0 - 0.34),
+        ];
+        for (shape, radius, width, band_at, halo_at) in shapes {
+            for progress in [None, Some(0.3), Some(0.97)] {
+                for colour in colours {
+                    let decal = Decal::new(centre, shape, radius, colour.extend(0.05))
+                        .with_width(width)
+                        .with_angle(1.2)
+                        .with_role(DecalRole::EnemyTelegraph)
+                        .with_progress(progress);
+                    for step in 0..=64 {
+                        let level = step as f32 / 64.0;
+                        for tint in [
+                            Vec3::ONE,
+                            Vec3::new(0.3, 1.0, 0.2),
+                            Vec3::new(1.0, 0.5, 0.1),
+                        ] {
+                            let background = tint * level;
+                            let lb = luminance(background);
+                            let at = |x: f32| {
+                                glow_display_reference(
+                                    background,
+                                    &decal,
+                                    0.35,
+                                    centre + Vec3::X * x,
+                                    0.01,
+                                )
+                            };
+                            let rim = at(band_at);
+                            let halo = at(halo_at);
+                            assert!(rim.max_element() <= 1.0 && halo.min_element() >= 0.0);
+                            let rim_ratio = (luminance(rim) + 0.05) / (lb + 0.05);
+                            let halo_ratio = (lb + 0.05) / (luminance(halo) + 0.05);
+                            let what =
+                                format!("{shape:?} {progress:?} {colour:?} over {background:?}");
+                            assert!(
+                                rim_ratio >= 1.5 || halo_ratio >= 1.5,
+                                "{what}: rim {rim_ratio}, halo {halo_ratio}"
+                            );
+                            // Headroom: the rim's target is below the brightest this hue
+                            // reaches before a channel clips.
+                            let headroom = luminance(colour / colour.max_element());
+                            if 1.8 * lb + 0.05 <= 0.9 * headroom {
+                                assert!(rim_ratio >= 1.2, "{what}: the rim lifts: {rim_ratio}");
+                            }
+                            if lb >= 0.5 {
+                                assert!(
+                                    halo_ratio >= 1.5,
+                                    "{what}: a dark halo inside the band: {halo_ratio}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// ADR-0017 §1: over any background from black to 16× white, every enemy telegraph shape

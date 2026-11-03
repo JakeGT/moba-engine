@@ -89,8 +89,12 @@ vec3 splat_terrain(vec3 geometric) {
         blend = pow(abs(geometric), vec3(4.0));
         blend /= max(dot(blend, vec3(1.0)), 1e-4);
     }
-    vec3 dx = dFdx(in_world_pos);
-    vec3 dy = dFdy(in_world_pos);
+    // The material mip bias of temporal upscaling (ADR-0021 §1; 0 on Compat and with temporal
+    // off, where the scale is exactly 1): the layers sample with explicit gradients, so the
+    // bias scales them.
+    float lod_scale = exp2(camera.temporal.x);
+    vec3 dx = dFdx(in_world_pos) * lod_scale;
+    vec3 dy = dFdy(in_world_pos) * lod_scale;
 
     vec3 albedo = vec3(0.0);
     vec3 normal_sum = vec3(0.0);

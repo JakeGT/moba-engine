@@ -10,8 +10,9 @@
 #
 # Environment: TICKS (default 18000), TIERS (default "low medium high ultra"), BASELINE
 # (default tests/perf/baseline.toml; empty skips the regression check), WINDOW (default
-# 1920x1080), RENDER_PATH (default compat: the gated path until N1, ADR-0020 §5d; "tiered"
-# runs the tiered presets, which perf-gate reports but does not fail), RUN (a command prefix
+# 1920x1080), RENDER_PATH (default compat; "tiered" runs the tiered presets: since N1a their
+# absolute budgets fail perf-gate, while their [tiered.<tier>] baseline regressions are
+# report-only until the last N1 part flips them, ADR-0021 amendment 2), RUN (a command prefix
 # such as "xvfb-run -a"). The replay itself is evidence
 # only and never committed. Needs `cargo build --release -p moba-client -p moba-tools`.
 set -euo pipefail

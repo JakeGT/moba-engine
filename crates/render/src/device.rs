@@ -61,6 +61,8 @@ pub(crate) struct DeviceContext {
     pub(crate) min_uniform_offset_alignment: u64,
     /// `maxImageDimension2D`: bounds the shadow-map resolution.
     pub(crate) max_image_dimension_2d: u32,
+    /// `maxSamplerLodBias`: bounds the temporal material mip bias (ADR-0021 §1).
+    pub(crate) max_sampler_lod_bias: f32,
     /// Colour and depth attachments support 4x MSAA (`framebufferColorSampleCounts` and
     /// `framebufferDepthSampleCounts`, R6).
     pub(crate) msaa4: bool,
@@ -253,7 +255,9 @@ impl DeviceContext {
             // ADR-0020 §3a: bindless storage images (checked at admission on Tiered).
             .shader_storage_image_write_without_format(
                 tiered && present("shaderStorageImageWriteWithoutFormat"),
-            );
+            )
+            // ADR-0021 Q7: per-attachment blend states (checked at admission on Tiered).
+            .independent_blend(tiered && present("independentBlend"));
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
@@ -557,6 +561,7 @@ impl DeviceContext {
                 .min_uniform_buffer_offset_alignment
                 .max(1),
             max_image_dimension_2d: candidate.properties.limits.max_image_dimension2_d,
+            max_sampler_lod_bias: candidate.properties.limits.max_sampler_lod_bias,
             msaa4: candidate
                 .properties
                 .limits

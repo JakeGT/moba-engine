@@ -83,3 +83,7 @@ serde_json.workspace = true
 [[bench]]
 name = "light_binning"
 harness = false
+
+[[bench]]
+name = "motion_history"
+harness = false

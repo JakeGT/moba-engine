@@ -238,6 +238,7 @@
     "drawIndirectCount": true,
     "dynamicRendering": true,
     "hostQueryReset": true,
+    "independentBlend": true,
     "maintenance4": true,
     "presentId": true,
     "runtimeDescriptorArray": true,
@@ -251,6 +252,8 @@
   "limits": {
     "maxBoundDescriptorSets": 32,
     "maxColorAttachments": 8,
+    "maxFragmentCombinedOutputResources": 4294967295,
+    "maxFragmentOutputAttachments": 8,
     "maxDescriptorSetUpdateAfterBindSampledImages": 1048576,
     "maxPerStageDescriptorSamplers": 16,
     "maxPerStageDescriptorUpdateAfterBindSampledImages": 1048576,

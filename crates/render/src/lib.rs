@@ -36,6 +36,7 @@ mod lights;
 mod material;
 mod memory;
 mod mesh;
+mod motion;
 mod passes;
 mod pipeline;
 mod pipeline_cache;
@@ -51,9 +52,11 @@ mod slang_smoke;
 mod smoke;
 mod swapchain;
 mod targets;
+mod temporal;
 mod terrain;
 mod texture;
 mod ui;
+mod upscale;
 mod vat;
 mod vendor;
 mod vfx;
@@ -70,7 +73,7 @@ pub use environment::{
     Decal, DecalRole, DecalShape, DecalStyle, EnvironmentConfig, EnvironmentFrame, FoliageData,
     FoliageDisplacer, FoliageInstanceData, MAX_DECALS, MAX_FOLIAGE_DISPLACERS,
     MAX_FOLIAGE_INSTANCES, MAX_WATER_BODIES, MAX_WATER_VERTICES, WaterData, WaterMode, WaterStyle,
-    WaterVertexData, glow_reference, telegraph_mark,
+    WaterVertexData, glow_display_reference, glow_reference, telegraph_mark,
 };
 pub use error::{RenderError, RenderResult};
 pub use instance::{
@@ -90,8 +93,9 @@ pub use passes::overlay::ui_vertices_truncated;
 pub use passes::scene::{bones_truncated, skinned_instances_dropped};
 pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use post::{
-    AntiAliasing, MAX_RENDER_SCALE, MIN_RENDER_SCALE, PostConfig, PostLook, ScreenEffects,
-    UpscaleFilter,
+    AntiAliasing, DEFAULT_SHARPNESS, MAX_RENDER_SCALE, MIN_RENDER_SCALE, MIN_TEMPORAL_RENDER_SCALE,
+    PostConfig, PostLook, ScreenEffects, TemporalDebugView, UpscaleFilter, UpscaleMode,
+    UpscalerKind,
 };
 pub use preset::{
     FeatureState, Phase, PresetFeature, TierPreset, config_tier, total_memory_budget,
@@ -99,8 +103,9 @@ pub use preset::{
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;
 pub use renderer::{
-    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, MAX_UI_IMAGE_SIZE, PipelineStats,
-    RenderConfig, Renderer,
+    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, GhostFrame, GhostProbeReport,
+    MAX_UI_IMAGE_SIZE, MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PipelineStats,
+    PushCheck, RenderConfig, Renderer,
 };
 pub use scene::{
     BoneRange, Camera, ClearRect, MAX_OUTLINE_WIDTH, MeshId, OFFSCREEN_MAX_BONES,

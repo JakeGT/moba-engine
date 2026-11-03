@@ -149,6 +149,97 @@ const PERMUTATIONS: &[Permutation] = &[
         output: "water_refraction.frag",
         defines: &["WATER_REFRACTION"],
     },
+    // Temporal AA/upscaling and the gameplay overlay (tiered, ADR-0021 §2 and §5).
+    Permutation {
+        source: "unit.vert",
+        output: "unit_motion.vert",
+        defines: &["DEPTH_PREPASS", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "skinned.vert",
+        output: "skinned_motion.vert",
+        defines: &["DEPTH_PREPASS", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "vat.vert",
+        output: "vat_motion.vert",
+        defines: &["DEPTH_PREPASS", "MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "terrain.vert",
+        output: "terrain_motion.vert",
+        defines: &["MOTION_VECTORS"],
+    },
+    Permutation {
+        source: "foliage.vert",
+        output: "foliage_motion.vert",
+        defines: &["MOTION_VECTORS", "FOLIAGE_INVARIANT"],
+    },
+    Permutation {
+        source: "foliage.vert",
+        output: "foliage_tiered.vert",
+        defines: &["FOLIAGE_INVARIANT"],
+    },
+    Permutation {
+        source: "prepass_motion.frag",
+        output: "prepass_motion_ids.frag",
+        defines: &["PREPASS_IDS"],
+    },
+    Permutation {
+        source: "terrain.frag",
+        output: "terrain_tiered.frag",
+        defines: &["MOBA_NO_GLOW_DECALS"],
+    },
+    Permutation {
+        source: "foliage.frag",
+        output: "foliage_tiered.frag",
+        defines: &["MOBA_NO_GLOW_DECALS"],
+    },
+    Permutation {
+        source: "water.frag",
+        output: "water_tiered.frag",
+        defines: &["MOBA_NO_GLOW_DECALS"],
+    },
+    Permutation {
+        source: "water.frag",
+        output: "water_refraction_tiered.frag",
+        defines: &["WATER_REFRACTION", "MOBA_NO_GLOW_DECALS"],
+    },
+    Permutation {
+        source: "vfx.vert",
+        output: "vfx_temporal.vert",
+        defines: &["VFX_TEMPORAL"],
+    },
+    Permutation {
+        source: "vfx.vert",
+        output: "vfx_overlay.vert",
+        defines: &["VFX_OVERLAY"],
+    },
+    Permutation {
+        source: "vfx.frag",
+        output: "vfx_temporal.frag",
+        defines: &["VFX_TEMPORAL"],
+    },
+    Permutation {
+        source: "vfx.frag",
+        output: "vfx_oit_temporal.frag",
+        defines: &["VFX_OIT", "VFX_TEMPORAL"],
+    },
+    Permutation {
+        source: "vfx.frag",
+        output: "vfx_overlay.frag",
+        defines: &["VFX_OVERLAY"],
+    },
+    Permutation {
+        source: "vfx_mesh.vert",
+        output: "vfx_mesh_temporal.vert",
+        defines: &["VFX_TEMPORAL"],
+    },
+    Permutation {
+        source: "vfx_distort.frag",
+        output: "vfx_distort_temporal.frag",
+        defines: &["VFX_TEMPORAL"],
+    },
 ];
 
 /// The pinned Slang version and per-host archive checksums (ADR-0020 §4c).

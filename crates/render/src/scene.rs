@@ -27,6 +27,14 @@ pub struct Camera {
     pub light_intensity: f32,
     /// Hemispheric sky ambient, used without an environment, and the distance-fog colour.
     pub ambient: Vec3,
+    /// Vertical field of view in radians, as built ([`Self::perspective`], [`Self::orbit`]);
+    /// 0 for orthographic views, which never upscale. The temporal upscalers read it
+    /// (ADR-0021 §4a).
+    pub fov_y: f32,
+    /// Near plane distance, as built; 0 for orthographic views.
+    pub near: f32,
+    /// Far plane distance, as built; 0 for orthographic views.
+    pub far: f32,
 }
 
 impl Camera {
@@ -49,6 +57,9 @@ impl Camera {
             light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
             light_intensity: 1.15,
             ambient: Vec3::new(0.32, 0.35, 0.42),
+            fov_y: fov_y_radians,
+            near,
+            far,
         }
     }
 
@@ -82,6 +93,9 @@ impl Camera {
             light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
             light_intensity: 1.15,
             ambient: Vec3::new(0.32, 0.35, 0.42),
+            fov_y: 0.0,
+            near: 0.0,
+            far: 0.0,
         }
     }
 
@@ -170,6 +184,13 @@ pub struct UnitInstance {
     pub outline: u8,
     /// The frame of a vertex-animation-texture mesh to show (R4b; ignored by other meshes).
     pub vat: VatPose,
+    /// Presentation identity for motion vectors (ADR-0021 §2c): the renderer keeps what this
+    /// key drew on the previous presented frame. `0` (the default) is static: no history,
+    /// camera-only motion (map instances). The client uses `net_id << 16 | part`.
+    pub motion_key: u32,
+    /// This frame starts a new history for [`Self::motion_key`] (the unit's first drawn
+    /// frame, a respawn or recall teleport): its motion is camera-only.
+    pub motion_reset: bool,
 }
 
 impl UnitInstance {
@@ -183,7 +204,18 @@ impl UnitInstance {
             bones: BoneRange::NONE,
             outline: 0,
             vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
+            motion_key: 0,
+            motion_reset: false,
         }
+    }
+
+    /// Returns this instance with motion key `key` (`0`: static, no history) and whether this
+    /// frame resets its history (ADR-0021 §2c).
+    #[must_use]
+    pub const fn with_motion(mut self, key: u32, reset: bool) -> Self {
+        self.motion_key = key;
+        self.motion_reset = reset;
+        self
     }
 
     /// Returns this instance outlined with palette slot `slot` (`0` = none).
@@ -230,6 +262,8 @@ impl UnitInstance {
             bones: BoneRange::NONE,
             outline: 0,
             vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
+            motion_key: 0,
+            motion_reset: false,
         }
     }
 }
@@ -333,6 +367,11 @@ pub struct Scene<'a> {
     pub decals: &'a [Decal],
     /// This frame's environment animation time and foliage displacers (R3b).
     pub environment: EnvironmentFrame<'a>,
+    /// Clears the motion history and every temporal history this frame (ADR-0021 §2c):
+    /// spectator switches, minimap camera jumps, map loads and resizes. The renderer also
+    /// resets on its own when the eye moves more than 8 m or the view turns more than 15° in
+    /// one frame. Ignored without temporal anti-aliasing.
+    pub history_reset: bool,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -492,6 +531,7 @@ impl<'a> Scene<'a> {
                 time: 0.0,
                 displacers: &[],
             },
+            history_reset: false,
         }
     }
 
@@ -520,6 +560,7 @@ impl<'a> Scene<'a> {
                 time: 0.0,
                 displacers: &[],
             },
+            history_reset: false,
         }
     }
 
@@ -600,6 +641,13 @@ impl<'a> Scene<'a> {
         self
     }
 
+    /// Sets [`Self::history_reset`].
+    #[must_use]
+    pub const fn with_history_reset(mut self, reset: bool) -> Self {
+        self.history_reset = reset;
+        self
+    }
+
     /// Creates an empty scene with a camera (used for clear-only frames and tests).
     #[must_use]
     pub const fn empty(camera: Camera) -> Self {
@@ -652,9 +700,59 @@ pub(crate) struct CameraUniform {
     baked_ao: [f32; 4],
     contact: [f32; 4],
     outline_palette: [[f32; 4]; OUTLINE_SLOTS],
+    // N1 temporal (ADR-0021 §1, §2): see [`TemporalCamera`].
+    view_proj_unjittered: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    jitter: [f32; 4],
+    temporal: [f32; 4],
+}
+
+/// This frame's temporal camera state (ADR-0021 §1): the jittered matrix the main view
+/// rasterises with, the unjittered one and the previous frame's for motion vectors, the jitter
+/// (current and previous, render pixels) and the material mip bias. Compat and temporal off
+/// upload none of it (the members stay 0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TemporalCamera {
+    pub(crate) jittered: Mat4,
+    pub(crate) unjittered: Mat4,
+    pub(crate) previous: Mat4,
+    pub(crate) jitter: [f32; 2],
+    pub(crate) previous_jitter: [f32; 2],
+    pub(crate) mip_bias: f32,
+    /// The render size motion vectors are measured in (pixels).
+    pub(crate) render: [u32; 2],
+    pub(crate) live: bool,
 }
 
 impl CameraUniform {
+    /// Applies `temporal`: `view_proj` and `inv_view_proj` become the jittered matrix and its
+    /// inverse (only when it differs from the camera's, so the still case keeps exactly the
+    /// bytes it had), and the N1 members are filled in.
+    pub(crate) fn with_temporal(mut self, temporal: &TemporalCamera) -> Self {
+        if temporal.jittered != temporal.unjittered {
+            let inverse = temporal.jittered.inverse();
+            if inverse.is_finite() {
+                self.view_proj = temporal.jittered.to_cols_array_2d();
+                self.inv_view_proj = inverse.to_cols_array_2d();
+            }
+        }
+        self.view_proj_unjittered = temporal.unjittered.to_cols_array_2d();
+        self.prev_view_proj = temporal.previous.to_cols_array_2d();
+        self.jitter = [
+            temporal.jitter[0],
+            temporal.jitter[1],
+            temporal.previous_jitter[0],
+            temporal.previous_jitter[1],
+        ];
+        self.temporal = [
+            temporal.mip_bias,
+            temporal.render[0] as f32,
+            temporal.render[1] as f32,
+            if temporal.live { 1.0 } else { 0.0 },
+        ];
+        self
+    }
+
     /// A block holding only what the Slang toolchain smoke reads (`crate::slang_smoke`):
     /// `view_proj`, `camera_pos` and the first `circles` (at most [`VISION_CIRCLES`]).
     pub(crate) fn for_slang_smoke(view_proj: Mat4, camera_pos: Vec4, circles: &[Vec4]) -> Self {
@@ -734,6 +832,10 @@ impl CameraUniform {
             baked_ao: lighting.baked_ao,
             contact: lighting.contact,
             outline_palette: outlines.sanitized(),
+            view_proj_unjittered: camera.view_proj.to_cols_array_2d(),
+            prev_view_proj: camera.view_proj.to_cols_array_2d(),
+            jitter: [0.0; 4],
+            temporal: [0.0; 4],
         }
     }
 }
@@ -816,7 +918,8 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, light_info), 1504);
         assert_eq!(offset_of!(CameraUniform, contact), 1552);
         assert_eq!(offset_of!(CameraUniform, outline_palette), 1568);
-        assert_eq!(size_of::<CameraUniform>(), 1696);
+        assert_eq!(offset_of!(CameraUniform, view_proj_unjittered), 1696);
+        assert_eq!(size_of::<CameraUniform>(), 1856);
     }
 
     /// The Slang name of a field's shape, from its Rust type (compile-checked by the
@@ -920,6 +1023,10 @@ mod tests {
             baked_ao: float4,
             contact: float4,
             outline_palette: float4_array,
+            view_proj_unjittered: float4x4,
+            prev_view_proj: float4x4,
+            jitter: float4,
+            temporal: float4,
         );
         // The list above covers the whole struct: no field missing, no padding.
         assert_eq!(

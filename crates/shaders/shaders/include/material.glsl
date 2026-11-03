@@ -23,10 +23,13 @@ layout(set = 2, binding = 3) uniform sampler2D metallic_roughness_map;
 // Linear team-colour mask in R (BC4_UNORM or R8_UNORM): 1 = tinted by the unit colour.
 layout(set = 2, binding = 4) uniform sampler2D mask_map;
 
+// Material samples add the temporal mip bias (`camera.temporal.x`, ADR-0021 §1: 0 on Compat
+// and with temporal off). Includers declare the camera block first.
+//
 // Perturbs `normal` (normalised, world space) by the normal map in the vertex tangent frame
 // (glTF / MikkTSpace convention: bitangent = cross(normal, tangent.xyz) * tangent.w).
 vec3 material_normal(vec3 normal, vec4 tangent, vec2 uv) {
-    vec2 xy = (texture(normal_map, uv).rg * 2.0 - 1.0) * material.params.z;
+    vec2 xy = (texture(normal_map, uv, camera.temporal.x).rg * 2.0 - 1.0) * material.params.z;
     vec3 tangent_normal = vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
     vec3 t = tangent.xyz - normal * dot(normal, tangent.xyz);
     float length_squared = dot(t, t);

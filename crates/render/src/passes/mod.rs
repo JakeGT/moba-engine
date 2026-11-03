@@ -6,6 +6,7 @@ pub(crate) mod composite;
 pub(crate) mod contact;
 pub(crate) mod environment;
 pub(crate) mod fog;
+pub(crate) mod gameplay_overlay;
 pub(crate) mod outline;
 pub(crate) mod overlay;
 pub(crate) mod post;
