@@ -7,7 +7,7 @@
 #   scripts/ghost-probe.sh [client binary] [output dir]
 #
 # UPSCALERS picks the back ends (default "taau fsr3"; FSR 3.1 needs the default `fsr3`
-# feature, and a build without it runs TAAU under that name, which the log line shows).
+# feature). Each run must report the back end it asked for: a fallback to TAAU fails.
 #
 # Modes: Quality, Performance and native. Performance is the strongest check of the hero's
 # motion keys (its interior smears 7.30 % without them against a 1.75 % bound, Quality
@@ -15,7 +15,12 @@
 # baseline (perf/0031).
 #
 # CI runs it under lavapipe with validation (render-golden.yml); set RUN="xvfb-run -a" when
-# there is no display.
+# there is no display. Run it on a real GPU too (ADR-0021 amendment 4): lavapipe once
+# passed a particle-motion bug that the RTX 5070 Ti and RADV failed, so CI's run is a
+# tripwire, not the gate.
+#
+# The particle bound is 7.5 % for TAAU and for FSR 3.1 at Quality and native, and 15 % for
+# FSR 3.1 from Performance down (perf/0033).
 set -euo pipefail
 client=${1:-./target/release/moba-client}
 out=${2:-ghost-probe}
@@ -34,6 +39,11 @@ for upscaler in ${UPSCALERS:-taau fsr3}; do
       status=1
     fi
     grep -E "upscaler |ghost probe|^  frame" "$log" || cat "$log"
+    # A back end that fell back to TAAU must not report TAAU's numbers under its own name.
+    if ! grep -q "^ghost probe: upscaler $upscaler," "$log"; then
+      echo "FAIL: the ghost probe did not run $upscaler ($mode)"
+      status=1
+    fi
     if grep -E '^\[vulkan' "$log"; then
       echo "FAIL: validation messages from the ghost probe ($upscaler $mode)"
       status=1

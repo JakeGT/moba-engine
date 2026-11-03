@@ -8,7 +8,7 @@
 // telegraphs, which `VFX_OVERLAY` (the overlay's output-resolution draw, unjittered) draws
 // alone; `VFX_TEMPORAL` also writes each vertex's unjittered current and previous clip
 // position (the previous at `age - dt` and `position - velocity * dt`, which inverts the
-// simulation's position step) for the dominant fragments' motion vectors.
+// simulation's position step) for the motion of the fragments the motion-only draw keeps.
 
 #include "vfx.glsl"
 

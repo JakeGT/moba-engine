@@ -8,8 +8,11 @@
 #
 #   scripts/tiered-goldens.sh [client binary] [image-check binary] [output dir]
 #
-# FSR 3.1 (ADR-0021 amendment 4) captures the same four scenes twice each, which must be
-# byte-identical, but has no committed fingerprint: the committed goldens are TAAU's.
+# FSR 3.1 (ADR-0021 Q8, amendment 4) captures the same four scenes twice each, which must be
+# byte-identical, and compares them with its own fingerprints
+# (tests/golden/render-tiered-fsr3-<name>-fingerprint.rgb). The fingerprints are written from
+# CI's lavapipe (LLVM 21): a newer llvmpipe renders different bytes for TAAU and FSR 3.1
+# alike, within the fingerprint's tolerance (perf/0033).
 #
 # Captures fail on any validation message, and so does a 40-frame run per back end that
 # resets the temporal history every 5th frame with frames in flight. CI runs it under lavapipe with validation and
@@ -54,7 +57,7 @@ for entry in "${cases[@]}"; do
     echo "FAIL: tiered $name: the two runs differ"
     status=1
   fi
-  # FSR 3.1: the same scene, deterministic across two runs, no fingerprint.
+  # FSR 3.1: the same scene, deterministic across two runs, with its own fingerprint (Q8).
   # shellcheck disable=SC2086
   capture "$out/fsr3-$name-1.ppm" MOBA_UPSCALER=fsr3 $settings
   # shellcheck disable=SC2086
@@ -68,13 +71,16 @@ for entry in "${cases[@]}"; do
     echo "FAIL: tiered fsr3 $name: the two runs differ"
     status=1
   fi
-  fingerprint="tests/golden/render-tiered-$name-fingerprint.rgb"
-  if [ "${WRITE:-0}" = 1 ]; then
-    "$check" "$out/$name-1.ppm" --expected "$fingerprint" --write
-  elif ! "$check" "$out/$name-1.ppm" --expected "$fingerprint" --diff "$out/$name-diff.ppm"; then
-    echo "FAIL: tiered $name: fingerprint"
-    status=1
-  fi
+  for capture_name in "$name" "fsr3-$name"; do
+    fingerprint="tests/golden/render-tiered-$capture_name-fingerprint.rgb"
+    if [ "${WRITE:-0}" = 1 ]; then
+      "$check" "$out/$capture_name-1.ppm" --expected "$fingerprint" --write
+    elif ! "$check" "$out/$capture_name-1.ppm" --expected "$fingerprint" \
+      --diff "$out/$capture_name-diff.ppm"; then
+      echo "FAIL: tiered $capture_name: fingerprint"
+      status=1
+    fi
+  done
 done
 # A history reset mid-stream (ADR-0021 amendment 2 item 28): every 5th frame resets the
 # temporal history with the previous frame still in flight, under the same validation. This

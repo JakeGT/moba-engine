@@ -162,7 +162,7 @@ enum Source {
     LinearClamp,
 }
 
-/// The three constant blocks of one parity slot.
+/// The three constant blocks of one frame slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Block {
     Upscaler,
@@ -575,7 +575,7 @@ pub(crate) struct Fsr3 {
     device: ash::Device,
     max_render: vk::Extent2D,
     max_output: vk::Extent2D,
-    /// Host-visible: two parity slots of the three constant blocks.
+    /// Host-visible: the three constant blocks per frame slot ([`SET_RING`] of them).
     uniforms: GpuBuffer,
     /// Bytes from one constant block to the next (aligned for uniform offsets).
     block_stride: u64,
@@ -1025,10 +1025,11 @@ impl Fsr3 {
                 );
             }
             // SAFETY: `cmd` is recording; the layout and the set are live and compatible.
-            // Every descriptor of this parity's set is written: the internal ones at creation
-            // (their images are in GENERAL from this frame's first-frame barrier on) and the
-            // caller's just above, in the layouts this method's preconditions name; the caller
-            // guarantees the GPU is not using this parity's set (the safety contract).
+            // Every descriptor of the set `sets[slot][parity]` is written: the internal ones at
+            // creation (their images are in GENERAL from this frame's first-frame barrier on)
+            // and the caller's just above, in the layouts this method's preconditions name; the
+            // caller guarantees that frame slot `slot`'s last submission has finished, so the
+            // GPU is not using any of its sets (the safety contract).
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
@@ -1258,7 +1259,11 @@ impl TemporalUpscaler for Fsr3 {
         inputs: &UpscaleInputs,
         out: &UpscaleOutput,
     ) {
-        // SAFETY: the trait's contract is `record_frame`'s.
+        // SAFETY: the trait's contract gives `record_frame`'s: each recorded buffer submitted
+        // once, in order, on one queue, and at most FRAMES_IN_FLIGHT pending with
+        // `inputs.frame_slot`'s last submission finished. `record_frame` needs at most
+        // SET_RING pending, which the renderer's `SET_RING >= FRAMES_IN_FLIGHT` assert
+        // (renderer.rs) guarantees.
         unsafe { self.record_frame(cmd, inputs, out) };
     }
 
@@ -1270,7 +1275,7 @@ impl TemporalUpscaler for Fsr3 {
         self.reset_requested = true;
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         device: &DeviceContext,
         output: Extent,
@@ -1496,7 +1501,6 @@ mod tests {
         );
     }
 
-    /// The far plane's bits are the float 1.0's.
     /// A history reset re-initialises images the previous frame's passes and clears may still
     /// use, so the first frame's transition waits for them (ADR-0021 amendment 2, item 28).
     /// Synchronization validation does not catch a `NONE` source on lavapipe, the RTX 5070 Ti
@@ -1530,6 +1534,7 @@ mod tests {
         }
     }
 
+    /// The far plane's bits are the float 1.0's.
     #[test]
     fn far_depth_is_one() {
         // SAFETY: reading the `uint32` member of a value written through it.

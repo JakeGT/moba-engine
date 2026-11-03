@@ -22,8 +22,11 @@
 //!   [`SMEAR_BOUND`].
 //! - **particle smear**: the particle's bright core. Bound [`PARTICLE_BOUND`].
 //!
-//! The bounds are regression tripwires about 25 % above TAAU's measurement on lavapipe,
-//! checked against mutations (motion removed), not perceptual thresholds.
+//! The bounds are regression tripwires above TAAU's measurements, checked against mutations
+//! (motion removed), not perceptual thresholds. **The probe must be run on a real GPU as well
+//! as lavapipe** (ADR-0021 amendment 4): N1a's particle motion relied on a blend that lavapipe
+//! did not apply as the spec says, so lavapipe passed what the RTX 5070 Ti and RADV failed.
+//! CI's lavapipe run is a tripwire; the hardware numbers are in perf/0033.
 //!
 //! Diagnostic only, like the motion probe: run it on a fresh renderer that then exits (the
 //! client's `MOBA_GHOST_PROBE=1`), with fixed exposure (`MOBA_EXPOSURE=fixed`).
@@ -68,19 +71,21 @@ pub(crate) const GHOST_BOUND: f32 = 0.03;
 /// 2.59 % Quality and 7.30 % Performance, which fail; native barely smears either way
 /// (0.14 %), so native does not discriminate.
 pub(crate) const SMEAR_BOUND: f32 = 0.0175;
-/// The largest smeared share of the particle's core on any measured frame: a tripwire about
-/// 25 % above TAAU's worst on lavapipe (1.40 % native, 3.77 % Quality, 5.37 % Balanced,
-/// 5.88 % Performance). With the particles' motion output zeroed it measures 29.96 % at
-/// Quality, which fails.
+/// The largest smeared share of the particle's core on any measured frame: a tripwire above
+/// TAAU's worst on lavapipe, the RTX 5070 Ti and RADV (1.40 % native, 3.77 % Quality, 5.70 %
+/// Balanced, 6.56 % Performance; ADR-0021 amendment 4). With the particles' motion lost it
+/// measures 29.96–32.23 % at Quality and 18.36–20.72 % native on the same three, which fail.
 pub(crate) const PARTICLE_BOUND: f32 = 0.075;
 /// FSR 3.1's particle tripwire at Performance and below (ADR-0021 amendment 4): about 25 %
-/// above its lavapipe measurement at Performance (20.26 %). FSR 3.1 dilates motion vectors by
-/// the nearest depth in each 3×3 neighbourhood, and particles write no depth, so a projectile's
-/// core takes the ground's motion in places; its reactive input lowers the accumulation through
-/// the shading-change term only. It measures 4.19 % native, 6.63 % Quality, 12.80 % Balanced,
-/// 20.26 % Performance and 30.57 % Ultra Performance, so Quality and native keep
-/// [`PARTICLE_BOUND`]. This is why FSR 3.1 does not take `auto`'s slot (Q1).
-pub(crate) const FSR3_PARTICLE_BOUND: f32 = 0.25;
+/// above its worst Performance measurement on the same three devices (12.33 %, RADV). FSR 3.1
+/// smears the particle's core more than TAAU as the ratio grows (Quality 6.63–6.82 %,
+/// Balanced 6.96–7.35 %, Performance 11.51–12.33 %, Ultra Performance 21.78–22.34 %), so
+/// Quality, Balanced and native keep [`PARTICLE_BOUND`]. Why is not known: the review of
+/// amendment 4 found the smear unchanged with FSR's motion-vector dilation reduced to the
+/// centre pixel, and the reactive mask is wired and used (zeroing it smears more). This is
+/// why FSR 3.1 does not take `auto`'s slot (Q1). Losing the particles' motion fails it
+/// (54.41–57.97 % at Performance).
+pub(crate) const FSR3_PARTICLE_BOUND: f32 = 0.15;
 
 /// The particle bound for the back end and mode the probe ran: TAAU's tripwire everywhere,
 /// FSR 3.1's own from Performance (ratio 2) down.
@@ -169,7 +174,7 @@ pub struct GhostProbeReport {
     /// The back end that ran (`MOBA_UPSCALER`'s name).
     pub upscaler: &'static str,
     /// The particle core's bound for that back end and mode (TAAU's 7.5 % tripwire unless
-    /// FSR 3.1 ran at Performance or below, where it is 25 %: ADR-0021 amendment 4).
+    /// FSR 3.1 ran at Performance or below, where it is 15 %: ADR-0021 amendment 4).
     pub particle_bound: f32,
 }
 
@@ -308,8 +313,8 @@ fn movers(frame: usize) -> [(Mat4, Vec4, u32); 4] {
 const PARTICLE_SPAWN: Vec3 = Vec3::new(8.5, 1.5, 3.5);
 
 /// The particle projectile's centre as drawn on frame `frame`, flying [`PROJECTILE_STEP`]
-/// metres a frame (ADR-0021 Q3: dominant particle fragments write their own motion). The
-/// simulation integrates a spawn once before its first draw, hence `frame + 1`.
+/// metres a frame (ADR-0021 Q3: its fragments from 0.1 coverage write their own motion).
+/// The simulation integrates a spawn once before its first draw, hence `frame + 1`.
 fn particle_centre(frame: usize) -> Vec3 {
     PARTICLE_SPAWN - Vec3::X * (PROJECTILE_STEP * (frame + 1) as f32)
 }

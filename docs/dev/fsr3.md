@@ -119,9 +119,10 @@ recorded command buffer unsubmitted calls `reset_history` (the renderer's
 `forget_unsubmitted`), which makes the next record a first frame: every internal image is
 re-initialised, after a barrier that waits for every earlier compute and clear on the queue
 (`first_frame_barrier`, pinned by a unit test, since synchronization validation does not flag a
-`NONE` source). `resize` (new maximum sizes: new images, the pipelines kept) and dropping the
-context both need the GPU to have finished all of its work; the renderer idles the device
-first, as for every pass.
+`NONE` source). `resize` (new maximum sizes: new images, the pipelines kept; an `unsafe fn`
+on the trait) and dropping the context both need the GPU to have finished all of its work; the
+renderer idles the device first, as for every pass. `resize` builds the new images before
+dropping the old ones, so it briefly holds both sets.
 
 `record` follows `fsr3upscalerDispatch`:
 
@@ -227,8 +228,10 @@ also reports `vram_bytes` at real sizes. Results on lavapipe, an RTX 5070 Ti and
 
 In the frame, FSR 3.1 also runs in the readability gates (ADR-0021 gate 3: the ghost probe
 and overlay invariance) and in `scripts/tiered-goldens.sh` (two lavapipe runs byte-identical,
-no committed fingerprint, and a mid-stream reset every fifth frame under synchronization
-validation).
+committed fingerprints written from CI's lavapipe, and a mid-stream reset every fifth frame
+under synchronization validation). Run the ghost probe on a real GPU as well as lavapipe
+(ADR-0021 amendment 4, item 14): its particle bound is 7.5 % at Quality and native and 15 %
+from Performance down.
 
 ## Updating the SDK
 

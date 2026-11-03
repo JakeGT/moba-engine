@@ -1182,8 +1182,8 @@ fn vram_at_real_sizes(gpu: &Headless) -> RenderResult<Vec<String>> {
         let render = mode.render_size(output);
         match fsr.as_mut() {
             None => fsr = Some(Fsr3::new(&gpu.device, render, output)?),
-            // Nothing was recorded, so no GPU work is pending (the device-idle precondition).
-            Some(fsr) => fsr.resize(&gpu.device, output, render)?,
+            // SAFETY: nothing was recorded, so no GPU work is pending (the device is idle).
+            Some(fsr) => unsafe { fsr.resize(&gpu.device, output, render)? },
         }
         let bytes = fsr.as_ref().map_or(0, TemporalUpscaler::vram_bytes);
         notes.push(format!(

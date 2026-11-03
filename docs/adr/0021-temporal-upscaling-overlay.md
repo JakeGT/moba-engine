@@ -276,6 +276,9 @@ takes the attachment over (roadmap §5.2, step 1). Each source works as follows:
     at least 0.5 (projectile cores, opaque mesh particles) writes its own motion into
     `motion`. The blend is `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` with an output alpha of
     `step(0.5, α)`, so the result is an exact replace or an exact keep, with no `discard`.
+    *(Superseded by [amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)
+    item 13: real GPUs gate that blend by the source alpha and lavapipe does not, so a
+    motion-only draw now writes the motion of fragments from opacity 0.1.)*
   - The previous position is `position − velocity·dt`. That inverts the integrator's position
     step; whether the inversion is exact is to be confirmed against `vfx_simulate.comp`, and if
     it is not, the 96-byte record stores the previous position.
@@ -836,7 +839,8 @@ These follow roadmap §10 and ADR-0020's gates, applied to N1.
    - **Ghost energy.** A hero dashes at maximum speed and a projectile crosses the screen.
      Over 20 frames, the area behind the unit that differs from a no-history render by more
      than 4/255 stays under a fixed bound, for TAAU and FSR 3.1 on lavapipe, and for DLSS on
-     the RTX.
+     the RTX. *(Amendment 4 item 14: on a real GPU as well; lavapipe alone once passed a
+     particle-motion bug.)*
    - **Overlay invariance.** The overlay ID target is byte-identical under TAAU, FSR 3.1,
      temporal off and every render scale.
    - **Telegraph contrast** in display space, over backgrounds from black to 16× white.
@@ -1212,7 +1216,9 @@ from the text above, or the text left a choice open, this is what was done and w
   strongest hero-smear check) and native. The particle's core measures 1.40 %
   native, 3.77 % Quality, 5.37 % Balanced and 5.88 % Performance, and 29.96 % at Quality
   with the particles' motion output zeroed. FSR 3.1 runs the probe in N1b and DLSS on the
-  RTX in N1c.
+  RTX in N1c. *(Amendment 4 items 6, 13 and 14: these lavapipe numbers hid a particle-motion
+  bug on real GPUs; the bounds are now derived from lavapipe, the RTX 5070 Ti and RADV
+  together, and the probe is run on hardware too.)*
 - **Gate 3, overlay invariance,** is `scripts/overlay-invariance.sh`: captures of the overlay
   IDs (`MOBA_DEBUG_VIEW=overlay-ids`) are byte-identical under TAAU at Quality, native and
   Performance, FXAA at scale 1.0 and 0.6, and AA off. FSR 3.1 joins in N1b.
@@ -1343,71 +1349,150 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
    every fifth frame runs under synchronization validation in `tiered-goldens.sh`, as TAAU's
    does. The smoke's output is unchanged by it (the same digest as stage 1 before the new
    runs).
-4. **The controller is not clamped to FSR 3.1's reported range.** Item 19 lets a back end with
-   an SDK rule report its own range for the controller to clamp to. FSR 3.1 reports the SDK's
-   truncated sizes (1706 at 2560 Quality), but its context accepts every size from 1×1 to its
-   maximum (amendment 1), and that maximum is the controller's own ceiling (the High preset's
-   1260×709 at 1080p, or 1707 at 2560 Quality). So FSR runs exactly the frames TAAU would, and
-   the range is only logged.
+4. **The controller clamps to FSR 3.1's allocation, not to its reported range.** Item 19 lets
+   a back end with an SDK rule report its own range for the controller to clamp to. FSR 3.1's
+   `render_size_range` reports the SDK's truncated sizes (1706 at 2560 Quality), but it is
+   only logged: the dynamic-resolution controller clamps to the size the back end was
+   allocated for, which for FSR 3.1 is its context's maximum, and that maximum is the
+   controller's own ceiling (the High preset's 1260×709 at 1080p, or 1707 at 2560 Quality).
+   The context accepts every size from 1×1 to it (amendment 1), so FSR runs exactly the
+   frames TAAU would.
 5. **Only one back end holds memory.** The back end is chosen at renderer creation and only it
    is created, so TAAU's history and previous-depth pairs are never allocated while FSR 3.1
-   runs (amendment 1's request): `upscaler_vram_mb` is FSR's own, 75.4 MB at a 1080p output
-   against TAAU's 38.7 MB, and the frame's VRAM peak is 34.2 MB higher than under TAAU on
-   Tiered High and Low.
+   runs (amendment 1's request). `upscaler_vram_mb` is each back end's own allocations,
+   measured the same way for both (TAAU's now sums its images' allocation sizes, as FSR's
+   does; it was the formula's 38.7 MiB): see perf/0033 for the figures. FSR's `resize`
+   builds its new images before dropping the old ones, so a resize briefly holds both sets
+   (about 2 × 75 MiB at 1080p).
 6. **Ghost energy (gate 3): FSR 3.1 has its own particle tripwire from Performance down.**
-   FSR 3.1 passes the wake and the hero's interior at every mode the probe runs, below TAAU's
-   own measurements (wake 0.41 % Quality, 0.84 % Performance, 0.40 % native; hero 0.00 %,
-   0.49 %, 0.00 %), but the particle's core smears more as the ratio grows: 4.19 % native,
-   6.63 % Quality, 12.80 % Balanced, 20.26 % Performance and 30.57 % Ultra Performance, against
-   TAAU's 1.40–5.88 % and its 7.5 % tripwire. FSR 3.1 dilates motion vectors by the nearest
-   depth in each 3×3 neighbourhood, and particles write no depth, so a projectile's core takes
-   the ground's motion in places; and FSR 3.1's reactive input lowers the accumulation only
-   through its shading-change term (binding the reactive mask as the transparency-and-
-   composition mask as well, as a local experiment, left every measured share unchanged). The tripwires are TAAU's regression bounds
-   (amendment 2), not perceptual thresholds, so FSR 3.1 keeps them at Quality and native and
-   gets its own at Performance and below, `FSR3_PARTICLE_BOUND` = 25 % (about 25 % above its
-   Performance measurement, as TAAU's were set). **This is a readability shortfall of FSR 3.1,
-   not a tuning choice,** and it decides Q1 (item 8). Tuning FSR's knobs (reactiveness scale,
-   velocity factor) away from the SDK's defaults, or giving particles depth, are the
-   follow-ups if FSR 3.1 is to take `auto`'s slot.
-   Balanced (12.80 %) is over TAAU's 7.5 % but under the ratio-2 cut-off, so the probe would
-   fail it there; the probe does not run Balanced or Ultra Performance for either back end
-   (TAAU fails Ultra Performance too: wake 4.54 %, hero 4.30 %).
+   After item 13's fix, on lavapipe, the RTX 5070 Ti and RADV (Radeon 610M) alike, FSR 3.1
+   leaves less wake than TAAU and smears the hero's interior no more, but smears the
+   particle projectile's core more, increasingly with the ratio (worst of the three
+   devices): 4.19 % native, 6.82 % Quality, 7.35 % Balanced, 12.33 % Performance and
+   22.34 % Ultra Performance, against TAAU's 1.40 %, 3.77 %, 5.70 %, 6.56 % and 8.80 %.
+   TAAU's 7.5 % tripwire (item 13) holds for FSR 3.1 at Quality and native; from ratio 2
+   (Performance) down FSR 3.1 has its own, `FSR3_PARTICLE_BOUND` = 15 %, about 25 % above
+   its worst Performance measurement. Losing the particles' motion fails both at Quality and
+   Performance (FSR 3.1 54.41–57.97 % at Performance, 29.19–33.84 % at Quality; TAAU
+   29.96–32.23 % at Quality), and TAAU at native (18.36–20.72 %); FSR 3.1 at native does not
+   catch it (4.67–6.17 %, against 3.81–4.19 % with motion).
+   **Why FSR 3.1 smears the particle more is not known.** Two causes are ruled out: the
+   review of this amendment found the smear byte-identical with FSR's motion-vector dilation
+   reduced to the centre pixel (`iMotionVectorPos = iPxPos` in
+   `ffx_fsr3upscaler_prepare_inputs.h`) while the wake and the hero changed, so the nearest-
+   depth dilation is not it; and the reactive mask is wired as §2 says (the particle's
+   opacity, `MAX` blended, clamped to 0.9, scale 1.0) and used: zeroing it smears more, and
+   binding it as the transparency-and-composition mask as well left every share unchanged.
+   This is a readability shortfall of FSR 3.1 against TAAU on this probe, not a tuning
+   choice, and it decides Q1 (item 8). The probe does not gate Balanced or Ultra Performance
+   for either back end (TAAU fails Ultra Performance: wake 4.41 %, hero 4.76 %).
 7. **Overlay invariance and goldens (gates 3 and 4).** The overlay IDs are byte-identical under
-   FSR 3.1 at Quality, native and Performance and under every earlier case. Every Compat golden
-   is byte-identical to `origin/main`, and the four TAAU tiered goldens still match their
-   fingerprints. FSR 3.1's captures of the same four scenes are byte-identical across two
-   lavapipe runs with validation and synchronization validation clean, but are **not
-   committed as fingerprints**: the coordinator's reading of Q8 keeps the committed goldens to
-   TAAU, while Q8's own text says the goldens cover TAAU and FSR 3.1. Their hashes are in
-   perf/0033; committing them is one `WRITE=1` run if Q8's text is meant.
+   FSR 3.1 at Quality, native and Performance and under every earlier case. Every Compat
+   golden is byte-identical to `origin/main`. Q8 ("Goldens cover TAAU and FSR 3.1") and §7
+   include FSR 3.1, so its four tiered captures (low, high, native and overlay; high is
+   Quality at the High preset) now have committed fingerprints
+   (`tests/golden/render-tiered-fsr3-*-fingerprint.rgb`) beside TAAU's, checked by
+   `tiered-goldens.sh` after the two-run byte-identity check. Their raw bytes differ between
+   CI's lavapipe (LLVM 21.1.8) and a newer one (LLVM 23.1.3) for TAAU and FSR 3.1 alike, as
+   llvmpipe's code generation differs; the fingerprints absorb it (FSR 3.1 mean 0.066–0.088,
+   max 1–2; TAAU 0.059–0.074, max 2; the check allows 2.0 and 24). They were written from
+   CI's output, the reference; TAAU's were written from the newer one in N1a and still pass
+   on CI.
 8. **Q1: `auto` stays TAAU.** Q1 gives FSR 3.1 the open build's `auto` slot when its port
    passes the same readability tests and costs within 0.2 ms of TAAU on the RTX 5070 Ti. Its
-   cost is within it: 0.281 ms against TAAU's 0.145 ms in the `temporal` lane (+0.136 ms) and
-   +0.108 ms of GPU total on Tiered High and Low (1080p output, Quality at the 0.656 ceiling,
-   medians of three interleaved rounds), but it does not pass the same particle bound (item 6), so
+   cost is within that (the temporal lane on the RTX 5070 Ti at 1440p, three interleaved
+   rounds: 0.278 ms against TAAU's 0.144 ms at the High preset, p95 0.305 against 0.148, a
+   delta of +0.134 ms median and +0.157 ms p95; at Low 0.279 against 0.147, +0.132 and
+   +0.159), but it smears the particle core more than TAAU at every
+   ratio on all three devices and needs its own tripwire from Performance down (item 6), so
    `AUTO_OPEN_BUILD` stays `Taau`; FSR 3.1 is selectable by name.
-9. **FP32 against FP16 is not measured.** Amendment 1 asked stage 2 to time the 32-bit
-   permutation against a 16-bit one. The SDK's 16-bit permutation (`FFX_HALF=1`) does not
-   compile unmodified with the pinned `slangc` (2026.20): at `FFX_HLSL_SM=62` `asfloat16` is
-   ambiguous in `ffx_core_hlsl.h`, and at `FFX_HLSL_SM=60` the half-precision helpers are
-   defined twice and 36 identifiers are undefined. Building it would mean patching the
-   vendored headers or adding DXC, both outside this stage. So the Low tier's FSR cost
-   (Turing and RDNA 2 parts, where the SDK would take the 16-bit path) is **unverified**, and
-   the FP16 permutation stays the first follow-up should FSR 3.1 need the margin.
+9. **FP32 against FP16, and the Low class.** Amendment 1 asked stage 2 to time the 32-bit
+   permutation against a 16-bit one (at least on the 610M) or cite AMD's published deltas.
+   The SDK's 16-bit permutation (`FFX_HALF=1`) does not compile unmodified with the pinned
+   `slangc` (2026.20): at `FFX_HLSL_SM=62` `asfloat16` is ambiguous in `ffx_core_hlsl.h`, and
+   at `FFX_HLSL_SM=60` the half-precision helpers are defined twice and 36 identifiers are
+   undefined; building it means patching the vendored headers or adding DXC. No AMD figure
+   for the FP16 permutation's saving was found to cite. What was measured instead is the
+   32-bit permutation against TAAU on the Radeon 610M (RDNA 2, where the SDK would take the
+   16-bit path, so an upper bound for it there). At the Low preset, 1080p output and the
+   dynamic-resolution floor (render 960×540) for both, three interleaved rounds, the temporal
+   lane is 13.05 ms for FSR 3.1 against 9.51 ms for TAAU (p95 13.21 against 9.52), **+3.54 ms
+   median and +3.69 ms p95**, the GPU frame 23.49 against 19.96 ms, upscaler memory 74.2
+   against 39.4 MiB. On this two-CU part FSR 3.1 costs about 37 % more than TAAU, which is
+   already half the frame. **FSR 3.1 does not enter `auto` or
+   a Low preset without a measurement on a Low-class part** (the RTX 2060 or an RDNA 2
+   discrete card), with FP16 if it is built by then. The review of this amendment estimates the
+   RTX 2060's lane delta at 0.3–0.5 ms; it was not measured.
 10. **The stage-1 coverage gaps are closed.** `fsr3-smoke` gains two occluder runs (a box at a
     nearer depth crosses the still fine field, motion on the box only). Skipping the
     every-frame clear of the reconstructed previous depth now fails it (the trail the box left
-    over 40 frames ago stays at 0.97× the single-frame error, against ≤ 0.9× and 0.785× clean),
+    over 40 frames ago stays at 0.97× the single-frame error, against ≤ 0.9× and 0.78× clean),
     and so does a stale previous-frame render size (across a Performance-to-Quality step over a
     coarse checkerboard, the background's error drops 11–12 %, against ≤ 5 % and 1.0–1.7 %
     clean), on lavapipe, the RTX 5070 Ti and the Radeon 610M alike, with validation silent.
-11. **The jitter sign** (amendment 1's request): §1's sign test now also checks that the jitter
-    handed to the back ends, unchanged, is in FSR's convention (the sample at pixel centre `c`
-    shows the scene at `c − jitter`).
-12. **The tiered perf-gate baselines are not re-recorded here.** `auto` is still TAAU, so the
-    default tiered frame is the one amendment 2 recorded (perf/0033 measures it against
-    `origin/main`), and the flip of item 16 stays with whichever N1 part merges last.
+    The lavapipe runs (`r1/smoke-faults/lavapipe-*.log` in the evidence): clean, trail
+    0.785× and the step −0.97 % / −1.66 %, pass; no depth clear, trail 0.969× and the step
+    −28.9 % / −27.9 %, fail (three mismatches); the previous size set to the current one,
+    step −10.89 % / −11.92 %, fail (two mismatches). A previous size that is never written
+    (left at zero) is not caught (−1.81 % / −3.41 %): the check catches a size that misses the
+    step, not one the SDK can treat as unknown.
+11. **The jitter hand-over** (amendment 1's request). The renderer hands the back ends
+    (`UpscaleInputs::jitter`) the jitter its jittered matrix applies, unchanged:
+    `the_jitter_handed_on_is_the_one_applied` (`upscale/frame.rs`) checks that the matrix
+    moves points by exactly `camera.jitter` render pixels, x right and y down, which is FSR's
+    convention (its projection offset is `(2 jx / w, −2 jy / h)` in y-up NDC), so no back end
+    flips a sign. (The first version of this item added an assertion to §1's sign test that
+    was algebraically the test's own; it is gone.)
+12. **The tiered perf-gate baselines are not re-recorded here.** `auto` is still TAAU and
+    item 13 changes the default frame only by the particles' motion-only draw (perf/0033
+    measures it against `origin/main`); the flip of amendment 2 item 16 stays with whichever
+    N1 part merges last, which re-records them.
+13. **Particle motion no longer depends on a two-channel blend (changes N1a's §2 rule).** §2
+    had dominant particle fragments write their motion through the `vfx_draw` colour draw,
+    blended `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` with an output alpha of `step(0.5, α)`. Source
+    alpha comes from the shader even for the two-channel `R16G16_SFLOAT` target, so real
+    GPUs kept the prepass's (ground) motion wherever a particle's opacity was under 0.5,
+    which is most of a soft sprite's visible core: on the RTX 5070 Ti the ghost probe's
+    particle smear was 27.55 % Quality, 35.78 % Performance and 19.52 % native under TAAU
+    (FSR 3.1 32.70 %, 39.72 %, 6.61 %), and on RADV 27.75 %, 35.40 %, 18.71 % (FSR 3.1
+    29.13 %, 40.25 %, 6.11 %). lavapipe applied neither the alpha gate nor a zero write
+    mask to that target in a draw with other targets, so it wrote every particle fragment's
+    motion and measured 3.77 %, 5.88 %, 1.40 %: CI passed what both GPUs failed. Now:
+    - the colour draw no longer attaches `motion`;
+    - a second, motion-only draw of the same particles (sprites and mesh particles, same
+      vertex shaders) runs in its own rendering scope with `motion` as its only attachment,
+      blending off, writing red and green;
+    - a fragment writes its own motion where its opacity reaches **0.1** and otherwise
+      clears its sample mask (`gl_SampleMask[0] = 0`, so it writes nothing and keeps the
+      prepass's motion; no `discard`, which a Vulkan 1.3 target compiles to a demote the
+      device need not enable).
+
+    0.1 is the visible core, not the faint rim: on the RTX 5070 Ti the smear is the same at
+    0.1 and 0.02 and 0.004 under TAAU (3.52 %, 6.52 %, 1.23 %), and 8.95 % Quality at 0.25.
+    Q3's answer stands (particles write motion vectors), with the threshold lowered and the
+    mechanism changed. After it the three devices agree (TAAU Quality 3.52 / 3.75 / 3.77 %,
+    Performance 6.52 / 6.56 / 5.88 %, native 1.23 / 1.27 / 1.40 % on the RTX, RADV and
+    lavapipe), so the bounds are re-derived from all three: TAAU's particle tripwire stays
+    7.5 % (14 % above its worst, 6.56 % on RADV at Performance), and losing the motion fails
+    it everywhere (29.96–32.23 % Quality). The cost is a second vertex pass over the live
+    particles (perf/0033). The tiered goldens' scenes are unchanged by it (their fingerprints
+    match exactly).
+14. **The ghost probe is run on a real GPU, not only lavapipe.** Item 13's bug passed CI's
+    lavapipe run, so gate 3's ghost energy is verified on lavapipe **and** on hardware (the
+    RTX 5070 Ti and RADV here) whenever particle, motion or upscaler code changes; CI's
+    lavapipe run is a tripwire only. `scripts/ghost-probe.sh` also fails a run whose log does
+    not name the back end it asked for, so a fallback cannot report TAAU's numbers as FSR's.
+15. **`TemporalUpscaler::resize` is an `unsafe fn`.** It drops the back end's images and
+    rewrites its descriptor sets, which a pending frame may still use; it was safe only
+    because `recreate_swapchain` idles the device first. Its contract is now a `# Safety`
+    section (the device is idle; no recorded frame is pending), for TAAU and FSR 3.1, and
+    each caller says why it holds.
+16. **The tiered probes run in their own CI job.** With FSR 3.1 in the ghost probe, overlay
+    invariance and the tiered goldens, `renderer-gate` took 64 minutes of its 75. ADR-0021's
+    tiered probes and goldens now run in a parallel `tiered-temporal` job in the same
+    workflow; `renderer-gate` keeps its name (a required check) and the Compat goldens.
+    `tiered-temporal` is not a required check until the ruleset adds it (a maintainer
+    setting).
 
 ## Sources
 

@@ -121,8 +121,14 @@ pub(crate) trait TemporalUpscaler {
     fn reset_history(&mut self);
     /// Re-sizes the back end's own images for a new `output` and dynamic-resolution ceiling
     /// `max_render` (a swapchain resize) without building pipelines (`locked_pipelines=0`,
-    /// ADR-0021 amendment 2, item 18). Forgets every history. The device is idle.
-    fn resize(
+    /// ADR-0021 amendment 2, item 18). Forgets every history.
+    ///
+    /// # Safety
+    ///
+    /// The device is idle: no command buffer recorded by [`Self::record`] is pending. The
+    /// back end drops its old images and rewrites its descriptor sets here, which a pending
+    /// frame may still use (ADR-0021 amendment 4).
+    unsafe fn resize(
         &mut self,
         device: &crate::device::DeviceContext,
         output: Extent,

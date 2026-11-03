@@ -3599,12 +3599,21 @@ impl Renderer {
         // (the shadow map) are kept.
         let extents = target_extents(swapchain.extent, self.post_config.render_scale);
         // ADR-0021 §2c: a resize re-sizes the back end's images (no pipeline is built,
-        // amendment 2 item 18) and forgets every history. The device is idle. Done before
-        // the swap below so a failed allocation cannot pair the new extent with old images.
+        // amendment 2 item 18) and forgets every history. Done before the swap below so a
+        // failed allocation cannot pair the new extent with old images. If the transients'
+        // resize below then fails, the error returns before any frame is recorded and the
+        // renderer keeps the old swapchain extent (that swapchain was retired by the new
+        // one's creation), so the next frame resizes again (its extent check, or an
+        // OUT_OF_DATE acquire) before recording: the back end's `accepts` never sees the
+        // targets at another size.
         if let Some(temporal) = self.temporal.as_mut() {
-            temporal
-                .upscaler
-                .resize(&self.device, swapchain.extent, extents.render)?;
+            // SAFETY: the device is idle (waited for at the top of this function), so no
+            // recorded frame is pending.
+            unsafe {
+                temporal
+                    .upscaler
+                    .resize(&self.device, swapchain.extent, extents.render)?;
+            }
             temporal.invalidate();
         }
         self.transients

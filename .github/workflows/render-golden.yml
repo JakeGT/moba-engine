@@ -21,9 +21,9 @@ jobs:
     name: renderer-gate
     runs-on: ubuntu-latest
     # Fifteen lavapipe captures (ADR-0019 added the distortion one and a bloom-off pair),
-    # the outline probe and the R8 culling probe's five extra captures run in sequence, then
-    # ADR-0021's tiered probes and goldens (about twenty more captures); the limit is a
-    # safety margin above that.
+    # the outline probe and the R8 culling probe's five extra captures run in sequence; the
+    # limit is a safety margin above that. ADR-0021's tiered probes and goldens run beside
+    # it in `tiered-temporal` (this job's name is a required check and stays).
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
@@ -429,48 +429,11 @@ jobs:
             --diff render-distortion-haze.ppm >> distortion-fingerprint.log 2>&1 || status=1
           cat distortion-fingerprint.log
           exit $status
-      # ADR-0021 (N1a): the tiered temporal path, all on lavapipe with validation + sync
-      # validation (MOBA_RENDER_PATH=tiered admits the CPU device). Gate 2: motion vectors
-      # against a CPU twin within 1/64 px. Gate 3: ghost energy, overlay invariance and the
-      # outline probe on Tiered. Gate 4: the tiered goldens, two runs byte-identical.
-      - name: Tiered motion-vector probe (ADR-0021 gate 2)
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
-        run: scripts/motion-probe.sh ./target/release/moba-client motion-probe
-        env:
-          RUN: xvfb-run -a
-      - name: Tiered ghost-energy probe (ADR-0021 gate 3)
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
-        run: scripts/ghost-probe.sh ./target/release/moba-client ghost-probe
-        env:
-          RUN: xvfb-run -a
-      - name: Tiered overlay invariance (ADR-0021 gate 3)
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
-        run: scripts/overlay-invariance.sh ./target/release/moba-client overlay-invariance
-        env:
-          RUN: xvfb-run -a
-      - name: Tiered outline occlusion probe (ADR-0021 gate 3)
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
-        run: scripts/outline-probe.sh ./target/release/moba-client outline-probe-tiered
-        env:
-          RUN: xvfb-run -a
-          MOBA_RENDER_PATH: tiered
-      - name: Tiered goldens (ADR-0021 gate 4)
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
-        run: |
-          scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check \
-            tiered-goldens
-        env:
-          RUN: xvfb-run -a
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: render-golden
           path: |
-            motion-probe
-            ghost-probe
-            overlay-invariance
-            outline-probe-tiered
-            tiered-goldens
             render-actual.ppm
             render-diff.ppm
             capture.log
@@ -532,3 +495,110 @@ jobs:
             distortion-nodraw-capture.log
             distortion-fingerprint.log
           if-no-files-found: ignore
+
+  # ADR-0021 (N1a, N1b): the tiered temporal probes and goldens, in parallel with
+  # renderer-gate (together they ran about 64 minutes in one job once FSR 3.1 joined them).
+  tiered-temporal:
+    name: tiered-temporal
+    runs-on: ubuntu-latest
+    # The motion probe, the ghost probe (TAAU and FSR 3.1, three modes each), nine overlay
+    # cases, the tiered outline probe and sixteen tiered captures plus two reset runs.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: changes
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            renderer:
+              - 'crates/render/**'
+              - 'crates/shaders/**'
+              - 'crates/platform/**'
+              - 'crates/client/**'
+              - 'crates/assets/**'
+              # The networked golden also depends on the simulation, wire and content.
+              - 'crates/core/**'
+              - 'crates/game/**'
+              - 'crates/sim/**'
+              - 'crates/net/**'
+              - 'content/**'
+              - 'tests/golden/**'
+              - '.github/workflows/render-golden.yml'
+              - 'scripts/outline-probe.sh'
+              - 'scripts/cull-probe.sh'
+              # ADR-0021: the tiered temporal probes and goldens.
+              - 'scripts/motion-probe.sh'
+              - 'scripts/ghost-probe.sh'
+              - 'scripts/overlay-invariance.sh'
+              - 'scripts/tiered-goldens.sh'
+              # ADR-0020 gate 3: the tiered smoke binaries.
+              - 'crates/tools/src/tiered_smoke.rs'
+              - 'crates/tools/src/bin/bindless-smoke.rs'
+              - 'crates/tools/src/bin/rt-smoke.rs'
+              # ADR-0021 §4b (N1b): the FSR 3.1.6 port, its vendored shaders and its smoke.
+              - 'crates/tools/src/bin/fsr3-smoke.rs'
+              - 'third_party/**'
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+      - uses: ./.github/actions/setup-slang
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+      - name: Install software Vulkan
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan1 \
+            glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
+          ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
+          test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "Using $ICD"
+      - name: Build client and tools
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: cargo build --release --locked -p moba-client -p moba-tools
+      # ADR-0021 (N1a): the tiered temporal path, all on lavapipe with validation + sync
+      # validation (MOBA_RENDER_PATH=tiered admits the CPU device). Gate 2: motion vectors
+      # against a CPU twin within 1/64 px. Gate 3: ghost energy, overlay invariance and the
+      # outline probe on Tiered. Gate 4: the tiered goldens, two runs byte-identical.
+      - name: Tiered motion-vector probe (ADR-0021 gate 2)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/motion-probe.sh ./target/release/moba-client motion-probe
+        env:
+          RUN: xvfb-run -a
+      - name: Tiered ghost-energy probe (ADR-0021 gate 3)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/ghost-probe.sh ./target/release/moba-client ghost-probe
+        env:
+          RUN: xvfb-run -a
+      - name: Tiered overlay invariance (ADR-0021 gate 3)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/overlay-invariance.sh ./target/release/moba-client overlay-invariance
+        env:
+          RUN: xvfb-run -a
+      - name: Tiered outline occlusion probe (ADR-0021 gate 3)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: scripts/outline-probe.sh ./target/release/moba-client outline-probe-tiered
+        env:
+          RUN: xvfb-run -a
+          MOBA_RENDER_PATH: tiered
+      - name: Tiered goldens (ADR-0021 gate 4)
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.renderer == 'true'
+        run: |
+          scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check \
+            tiered-goldens
+        env:
+          RUN: xvfb-run -a
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tiered-temporal
+          path: |
+            motion-probe
+            ghost-probe
+            overlay-invariance
+            outline-probe-tiered
+            tiered-goldens

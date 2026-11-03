@@ -308,15 +308,6 @@ mod tests {
                 (moved[1] - plain[1] - jitter[1]).abs() < 1e-3,
                 "{plain:?} {moved:?}"
             );
-            // The upscalers' convention (FSR's, ADR-0021 amendments 1 and 4), in which the
-            // renderer hands this same jitter to every back end (`UpscaleInputs::jitter`): the
-            // sample at a pixel centre `c` shows the scene at `c - jitter`, here the point's
-            // unjittered position.
-            let shows = [moved[0] - jitter[0], moved[1] - jitter[1]];
-            assert!(
-                (shows[0] - plain[0]).abs() < 1e-3 && (shows[1] - plain[1]).abs() < 1e-3,
-                "{plain:?} {shows:?}"
-            );
         }
         // Depth is untouched.
         let point = Vec3::new(1.0, 0.5, -2.0).extend(1.0);

@@ -15,11 +15,15 @@
 #endif
 
 // Tiered builds (ADR-0021):
-//   VFX_TEMPORAL: two more outputs after the colour ones: motion (`R16G16_SFLOAT`, blended
-//                 SRC_ALPHA / ONE_MINUS_SRC_ALPHA with alpha `step(0.5, opacity)`, so a
-//                 dominant fragment replaces the prepass's motion and any other keeps it,
-//                 exactly) and the reactive mask (`R8_UNORM`, MAX blended: alpha particles
-//                 their opacity, additive ones their luminance, both clamped to 0.9);
+//   VFX_TEMPORAL: the reactive mask after the colour outputs (`R8_UNORM`, MAX blended: alpha
+//                 particles their opacity, additive ones their luminance, both clamped to
+//                 0.9). The motion target is not attached to this draw;
+//   VFX_MOTION:   (with VFX_TEMPORAL) the second, motion-only draw of the same particles,
+//                 with the motion target (`R16G16_SFLOAT`, blending off) as its only
+//                 attachment: a fragment whose opacity reaches VFX_MOTION_COVERAGE replaces
+//                 the prepass's motion and any other clears its sample mask, so it keeps it
+//                 (ADR-0021 amendment 4: lavapipe neither gates a two-channel target's blend
+//                 by the source alpha nor keeps it masked off in a draw with other targets);
 //   VFX_OVERLAY:  enemy telegraphs at output resolution over the displayed image: the
 //                 composite's exposure and AgX in-shader (as the UI's offscreen images),
 //                 premultiplied into the swapchain encoding.
@@ -32,21 +36,31 @@ layout(location = 1) in vec4 in_color;
 layout(location = 2) in float in_view_depth;
 layout(location = 3) flat in uint in_flags;
 
+#if defined(VFX_TEMPORAL) && defined(VFX_MOTION)
+// Coverage from which a particle fragment's own motion replaces what is under it: the
+// visible core of a soft sprite, not its faint rim (ADR-0021 amendment 4).
+const float VFX_MOTION_COVERAGE = 0.1;
+#else
 layout(location = 0) out vec4 out_hdr;
+#endif
 #ifdef VFX_OIT
+#ifndef VFX_MOTION
 layout(location = 1) out vec4 out_accum;
 layout(location = 2) out vec4 out_reveal;
-#define VFX_MOTION_LOCATION 3
-#define VFX_REACTIVE_LOCATION 4
+#endif
+#define VFX_REACTIVE_LOCATION 3
 #else
-#define VFX_MOTION_LOCATION 1
-#define VFX_REACTIVE_LOCATION 2
+#define VFX_REACTIVE_LOCATION 1
 #endif
 #ifdef VFX_TEMPORAL
 layout(location = 14) in vec4 in_motion_current;
 layout(location = 15) in vec4 in_motion_previous;
-layout(location = VFX_MOTION_LOCATION) out vec4 out_motion;
+#ifdef VFX_MOTION
+// The motion-only draw's one attachment.
+layout(location = 0) out vec4 out_motion;
+#else
 layout(location = VFX_REACTIVE_LOCATION) out vec4 out_reactive;
+#endif
 #endif
 
 void main() {
@@ -65,11 +79,16 @@ void main() {
     }
 #endif
     bool additive = (in_flags & VFX_FLAG_ALPHA) == 0u;
-#ifdef VFX_TEMPORAL
+#if defined(VFX_TEMPORAL) && defined(VFX_MOTION)
+    // Below the coverage the fragment's sample mask is cleared, so it writes nothing (no
+    // `discard`, which a Vulkan 1.3 target compiles to a demote the device need not enable).
+    gl_SampleMask[0] = alpha >= VFX_MOTION_COVERAGE ? -1 : 0;
     vec2 ndc_current = in_motion_current.xy / in_motion_current.w;
     vec2 ndc_previous = in_motion_previous.xy / in_motion_previous.w;
     vec2 motion = (ndc_previous - ndc_current) * vec2(0.5, -0.5) * frame.temporal.xy;
-    out_motion = vec4(motion, 0.0, step(0.5, alpha));
+    out_motion = vec4(motion, 0.0, 1.0);
+#else
+#ifdef VFX_TEMPORAL
     float reactive = additive ? dot(rgb * alpha, vec3(0.2126, 0.7152, 0.0722)) : alpha;
     out_reactive = vec4(min(reactive, 0.9), 0.0, 0.0, 0.0);
 #endif
@@ -93,5 +112,6 @@ void main() {
     }
 #else
     out_hdr = additive ? vec4(rgb * alpha, 0.0) : vec4(rgb * alpha, alpha);
+#endif
 #endif
 }
