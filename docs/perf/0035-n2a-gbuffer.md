@@ -83,8 +83,15 @@ validation were clean.
     back ends.
 
   The exact hashes in `tests/golden/render-tiered-hashes.txt` are keyed to CI's lavapipe
-  (Mesa 26.0.8, LLVM 21.1.8). They are regenerated from CI's artifacts for this branch, with
-  CI's device line kept, and are never written locally.
+  (Mesa 26.0.8, LLVM 21.1.8), so they were regenerated from CI rather than locally:
+  - the source is the `render-golden` (TAAU) and `tiered-temporal` (FSR 3.1) artifacts of
+    this PR's first CI run (render golden run 41679033229);
+  - each value is a `sha256sum` of the `-1.ppm` capture, and every capture was byte-identical
+    to its `-2.ppm` on CI;
+  - the device line is unchanged, and `WRITE_HASHES` was not run locally.
+
+  All eight hashes changed (reversed-Z). On CI the 64×36 fingerprints passed unchanged, and so
+  did every other renderer-gate and tiered-temporal step, `gbuffer-smoke` included.
 - **Probes on lavapipe**, all passing:
   - `motion-probe.sh`: every class is within 0.0044 render px, against a bound of 1/64.
   - `ghost-probe.sh` with TAAU and FSR 3.1.
