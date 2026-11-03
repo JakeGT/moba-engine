@@ -635,7 +635,7 @@ impl TemporalUpscaler for DlssUpscaler {
         self.reset = true;
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         device: &crate::device::DeviceContext,
         output: Extent,
@@ -644,6 +644,11 @@ impl TemporalUpscaler for DlssUpscaler {
         // DLSS must be re-created for a new output size (guide §3.2.2).
         self.create(device, output)
             .map_err(crate::error::RenderError::Upscaler)
+    }
+
+    fn sized_by_max_render(&self) -> bool {
+        // Created for the output only; any render size in its range is accepted.
+        false
     }
 
     fn vram_bytes(&self) -> u64 {

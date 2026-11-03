@@ -297,7 +297,7 @@ impl TemporalUpscaler for Sharpened {
         self.inner.reset_history();
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         device: &DeviceContext,
         output: Extent,
@@ -305,7 +305,8 @@ impl TemporalUpscaler for Sharpened {
     ) -> RenderResult<()> {
         // Built before replacing anything, so a failed allocation keeps the old image.
         let image = intermediate(device, output)?;
-        self.inner.resize(device, output, max_render)?;
+        // SAFETY: the caller's contract (the device is idle) is the inner back end's.
+        unsafe { self.inner.resize(device, output, max_render)? };
         self.intermediate = image;
         self.extent = output;
         self.fresh = true;
@@ -314,6 +315,10 @@ impl TemporalUpscaler for Sharpened {
 
     fn vram_bytes(&self) -> u64 {
         self.inner.vram_bytes() + u64::from(self.extent.width) * u64::from(self.extent.height) * 8
+    }
+
+    fn sized_by_max_render(&self) -> bool {
+        self.inner.sized_by_max_render()
     }
 
     fn sdk_bytes(&self) -> u64 {

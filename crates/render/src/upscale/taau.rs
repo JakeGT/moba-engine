@@ -410,7 +410,7 @@ impl TemporalUpscaler for Taau {
         self.reset = true;
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         device: &DeviceContext,
         output: Extent,
@@ -489,9 +489,12 @@ fn images(
         image("taau-prev-depth-0", max_render, PREV_DEPTH_FORMAT)?,
         image("taau-prev-depth-1", max_render, PREV_DEPTH_FORMAT)?,
     ];
-    let vram = 2
-        * (u64::from(output.width) * u64::from(output.height) * 8
-            + u64::from(max_render.width) * u64::from(max_render.height) * 4);
+    // The allocations' sizes, as FSR 3.1 reports its own (alignment and padding included).
+    let vram = history
+        .iter()
+        .chain(&prev_depth)
+        .map(GpuImage::allocated_bytes)
+        .sum();
     Ok((history, prev_depth, vram))
 }
 

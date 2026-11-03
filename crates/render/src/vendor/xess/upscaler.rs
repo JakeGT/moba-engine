@@ -379,7 +379,7 @@ impl TemporalUpscaler for XessUpscaler {
         self.reset = true;
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         _device: &crate::device::DeviceContext,
         output: Extent,
@@ -387,6 +387,11 @@ impl TemporalUpscaler for XessUpscaler {
     ) -> crate::error::RenderResult<()> {
         self.create(output)
             .map_err(crate::error::RenderError::Upscaler)
+    }
+
+    fn sized_by_max_render(&self) -> bool {
+        // Created for the output only; any render size in its range is accepted.
+        false
     }
 
     fn vram_bytes(&self) -> u64 {

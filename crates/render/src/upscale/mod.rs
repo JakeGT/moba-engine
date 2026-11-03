@@ -122,13 +122,26 @@ pub(crate) trait TemporalUpscaler {
     fn reset_history(&mut self);
     /// Re-sizes the back end's own images for a new `output` and dynamic-resolution ceiling
     /// `max_render` (a swapchain resize) without building pipelines (`locked_pipelines=0`,
-    /// ADR-0021 amendment 2, item 18). Forgets every history. The device is idle.
-    fn resize(
+    /// ADR-0021 amendment 2, item 18). Forgets every history.
+    ///
+    /// # Safety
+    ///
+    /// The device is idle: no command buffer recorded by [`Self::record`] is pending. The
+    /// back end drops its old images and rewrites its descriptor sets here, which a pending
+    /// frame may still use (ADR-0021 amendment 4).
+    unsafe fn resize(
         &mut self,
         device: &crate::device::DeviceContext,
         output: Extent,
         max_render: Extent,
     ) -> crate::error::RenderResult<()>;
+    /// Whether [`Self::resize`]'s `max_render` sizes anything: false for a back end that
+    /// accepts any render size up to the output whatever it was created with (DLSS, XeSS), so
+    /// the renderer does not re-create it only to raise its render allocation (ADR-0021
+    /// amendment 5).
+    fn sized_by_max_render(&self) -> bool {
+        true
+    }
     /// Device memory the back end owns (its histories and internal targets).
     fn vram_bytes(&self) -> u64;
     /// The part of [`Self::vram_bytes`] a vendor SDK allocated itself, outside the renderer's
@@ -176,20 +189,27 @@ pub(crate) const VENDOR_OUTPUT_USAGE: ash::vk::ImageUsageFlags =
     };
 
 /// `auto`'s back end in the open build, after the vendor back ends (ADR-0021 §4b and Q1).
+/// FSR 3.1 takes the slot only once its port passes the readability gates and costs within
+/// 0.2 ms of TAAU on the RTX 5070 Ti; the Q1 measurement is in perf/0033 (amendment 4).
 pub(crate) const AUTO_OPEN_BUILD: UpscalerKind = UpscalerKind::Taau;
 
-/// What `MOBA_UPSCALER` asked for among the built-in back ends: `auto` and `taau` resolve to
-/// [`AUTO_OPEN_BUILD`] and TAAU; FSR 3.1 is not wired yet (N1b) and falls back to TAAU with
-/// one log line. The vendor back ends (DLSS, FSR 4, XeSS) are [`create`]'s, through the
-/// vendor selection; when one cannot run, its fallback is TAAU.
+/// What `MOBA_UPSCALER` asked for among the built-in back ends: `auto` resolves to
+/// [`AUTO_OPEN_BUILD`] (TAAU when that is FSR 3.1 and `fsr3` is not compiled in), `taau` to
+/// TAAU, and `fsr3` to FSR 3.1 when the `fsr3` feature is compiled in, else TAAU with one log
+/// line. The vendor back ends (DLSS, FSR 4, XeSS) are [`create`]'s, through the vendor
+/// selection; they resolve to TAAU here, their fallback. Whether the chosen back end can run
+/// on this device is [`create`]'s question.
 #[must_use]
 pub(crate) fn resolve(requested: Option<UpscalerKind>) -> UpscalerKind {
+    let fsr3 = cfg!(feature = "fsr3");
     match requested {
+        None if AUTO_OPEN_BUILD == UpscalerKind::Fsr3 && !fsr3 => UpscalerKind::Taau,
         None => AUTO_OPEN_BUILD,
+        Some(UpscalerKind::Fsr3) if fsr3 => UpscalerKind::Fsr3,
         Some(UpscalerKind::Fsr3) => {
             eprintln!(
-                "[render] upscaler fsr3 is not available in this build until the FSR 3.1 port \
-                 (N1b) lands; using taau"
+                "[render] upscaler fsr3 is not available in this build (the `fsr3` feature is \
+                 not compiled in); using taau"
             );
             UpscalerKind::Taau
         }
@@ -247,7 +267,10 @@ pub(crate) struct Created {
 /// from the vendor selection ([`crate::vendor::Selection::create_upscaler`]); one that is
 /// not compiled in, not supported here or fails to create falls back to TAAU with one log
 /// line, and `auto` takes DLSS or XeSS where [`auto_vendor`] says so, else
-/// [`AUTO_OPEN_BUILD`]. The device is never rejected. A back end without its own sharpening
+/// [`AUTO_OPEN_BUILD`] ([`resolve`]). FSR 3.1 that cannot run on this device (its format
+/// features or quad subgroups, amendment 1) falls back to TAAU with one line too. The device is
+/// never rejected, and only the running back end holds memory (amendment 1). A back end
+/// without its own sharpening
 /// is wrapped in the renderer's `sharpen` pass ([`sharpen::Sharpened`]) when its sharpness
 /// ([`crate::post::PostConfig::sharpness_for`]) is above 0.
 ///
@@ -292,30 +315,45 @@ pub(crate) fn create(setup: &mut Setup<'_>) -> crate::error::RenderResult<Create
         }
         None => None,
     };
+    // A built-in request, or `auto` without a vendor back end: FSR 3.1 when it resolves to it
+    // and can run here (amendment 4), else TAAU. A vendor request that fell back above gets
+    // TAAU.
     let upscaler = if let Some(upscaler) = vendor {
-        if setup.debug != taau::TaauDebugView::None {
-            eprintln!(
-                "[render] MOBA_DEBUG_VIEW {:?} is drawn by taau only; {} shows the frame",
-                setup.debug,
-                upscaler.kind().name()
-            );
-        }
         upscaler
     } else {
-        // A built-in request (FSR 3.1's logs its fallback), or a vendor one that fell back
-        // above.
-        if vendor_kind.is_none() {
-            let built_in = resolve(setup.requested);
-            debug_assert_eq!(built_in, UpscalerKind::Taau);
+        let built_in = if vendor_kind.is_none() {
+            resolve(setup.requested)
+        } else {
+            UpscalerKind::Taau
+        };
+        let fsr3 = if built_in == UpscalerKind::Fsr3 {
+            new_fsr3(setup.device, setup.output, setup.max_render)
+                .inspect_err(|error| {
+                    eprintln!("[render] upscaler fsr3 cannot run here ({error}); using taau");
+                })
+                .ok()
+        } else {
+            None
+        };
+        if let Some(fsr3) = fsr3 {
+            fsr3
+        } else {
+            Box::new(taau::Taau::new(
+                setup.device,
+                setup.shaders,
+                setup.output,
+                setup.max_render,
+                setup.debug,
+            )?)
         }
-        Box::new(taau::Taau::new(
-            setup.device,
-            setup.shaders,
-            setup.output,
-            setup.max_render,
-            setup.debug,
-        )?) as Box<dyn TemporalUpscaler>
     };
+    if setup.debug != taau::TaauDebugView::None && upscaler.kind() != UpscalerKind::Taau {
+        eprintln!(
+            "[render] MOBA_DEBUG_VIEW {:?} is drawn by taau only; {} shows the frame",
+            setup.debug,
+            upscaler.kind().name()
+        );
+    }
     Ok(finish(
         setup.device,
         setup.shaders,
@@ -432,6 +470,39 @@ pub(crate) fn clamp_render(render: Extent, range: (Extent, Extent), alloc: Exten
     }
 }
 
+/// FSR 3.1's context for `output` and render sizes up to `max_render` (at least 1×1, at most
+/// the output).
+#[cfg(feature = "fsr3")]
+fn new_fsr3(
+    device: &crate::device::DeviceContext,
+    output: Extent,
+    max_render: Extent,
+) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
+    let output = Extent {
+        width: output.width.max(1),
+        height: output.height.max(1),
+    };
+    let max_render = Extent {
+        width: max_render.width.clamp(1, output.width),
+        height: max_render.height.clamp(1, output.height),
+    };
+    Ok(Box::new(crate::fsr3::Fsr3::new(
+        device, max_render, output,
+    )?))
+}
+
+/// Never reached: [`resolve`] picks FSR 3.1 only with the `fsr3` feature.
+#[cfg(not(feature = "fsr3"))]
+fn new_fsr3(
+    _device: &crate::device::DeviceContext,
+    _output: Extent,
+    _max_render: Extent,
+) -> crate::error::RenderResult<Box<dyn TemporalUpscaler>> {
+    Err(crate::error::RenderError::Upscaler(String::from(
+        "the `fsr3` feature is not compiled in",
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,9 +579,22 @@ mod tests {
     }
 
     #[test]
-    fn built_in_choices_resolve_to_taau_until_the_fsr3_port_lands() {
-        assert_eq!(resolve(None), AUTO_OPEN_BUILD);
-        for &kind in UpscalerKind::ALL {
+    fn built_in_choices_resolve_to_what_this_build_has() {
+        let fsr3 = if cfg!(feature = "fsr3") {
+            UpscalerKind::Fsr3
+        } else {
+            UpscalerKind::Taau
+        };
+        let auto = if AUTO_OPEN_BUILD == UpscalerKind::Fsr3 {
+            fsr3
+        } else {
+            UpscalerKind::Taau
+        };
+        assert_eq!(resolve(None), auto);
+        assert_eq!(resolve(Some(UpscalerKind::Taau)), UpscalerKind::Taau);
+        assert_eq!(resolve(Some(UpscalerKind::Fsr3)), fsr3);
+        // The vendor back ends are `create`'s; here they resolve to their fallback.
+        for kind in [UpscalerKind::Dlss, UpscalerKind::Fsr4, UpscalerKind::Xess] {
             assert_eq!(resolve(Some(kind)), UpscalerKind::Taau);
         }
     }

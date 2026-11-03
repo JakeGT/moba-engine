@@ -9,10 +9,11 @@ Captured 2026-11-03 for ADR-0021 §4, verification gates 3, 5 and 6, and
   not packaged). Software: lavapipe (Mesa llvmpipe)
 - Display: one 2560×1440 monitor, KDE Plasma on Wayland
 - CPU: AMD Ryzen 7 9800X3D; OS: CachyOS, Linux 7.3.0-5-cachyos; rustc 1.99.1
-- Branch `feat/n1c-vendor-upscalers` on `761beb3`; the cost table and the resize runs are on
-  the review-round-1 code (`42c810f`, the PR's code from then on: later commits change docs
-  only unless this file says otherwise). "main" is a detached `origin/main` at `761beb3`
-  built in its own worktree
+- Branch `feat/n1c-vendor-upscalers` on `761beb3`; the cost table and the first resize runs
+  are on the review-round-1 code (`42c810f`). "main" is a detached `origin/main` at
+  `761beb3` built in its own worktree. **After N1b's stage 2 (#364) merged** the branch
+  merged `origin/main` at `657a7ab`: the ghost probe ([below](#after-n1bs-stage-2-657a7ab)),
+  the trimmed resize smoke and the start-up lines were re-run on that merge
 - Validation: the bundled Khronos layer (`/home/jaket/Projects/MOBA/.tools/validation`) with
   `MOBA_VULKAN_VALIDATION=required`, which also turns on synchronization validation
 
@@ -70,9 +71,14 @@ with no evaluation failure and 0 validation messages over 240 frames.
 ## Resizes
 
 `scripts/resize-smoke.sh` (new; `MOBA_SMOKE_RESIZE` makes the client request window sizes
-mid-run) under X11 (XWayland), validation `required`, AO on, sizes 800×450 → 480×270 →
-640×360 from a 640×360 start; and longer replay runs at 1280×720 → 1600×900 → 960×540 →
-1280×720:
+mid-run) under X11 (XWayland), validation `required`, AO on. The evidence is the smoke's own
+logs: `~/.cache/moba-evidence/n1c/r2/resize-smoke-rtx/` and `r2/resize-smoke-lvp/` on
+`42c810f` (sizes 800×450 → 480×270 → 640×360 from a 640×360 start, the first version of
+the script), and `r3/resize-rtx/` and `r3/resize-lvp/` on the merge with `657a7ab` (the
+trimmed script: 480×270 → 320×180 → 640×360, 100 frames; TAAU, FSR 3.1 with its 8×8 case,
+DLSS with its 8×8 case and Compat, all 0 messages; FSR 3.1 accepts 8×28 and keeps running,
+DLSS falls back as below). (The `r2/x11-*` logs are start-up runs with AO under X11, without
+a resize.)
 
 | Run | GPU | Swapchain recreations | Validation messages |
 |---|---|---|---|
@@ -89,6 +95,10 @@ The fallback line:
 ```
 
 Before the fix, that resize ended the client with a misleading `no suitable GPU found`.
+
+In CI the smoke runs with TAAU and Compat in the required `renderer-gate` and with FSR 3.1 in
+`tiered-temporal` (Amendment 5 item 17); the FXAA case was dropped, as AO is the same code
+under every anti-aliasing mode.
 
 **The resize validation error was a bug on main** (`761beb3`), not DLSS's: lighting rewrote its
 descriptor sets with the destroyed AO view before re-binding it, which gave
@@ -135,15 +145,46 @@ set on lavapipe, where `vfx.frag`'s alpha-gated motion write is ignored (TAAU's 
 smear 1.4–5.9 % there: 3.77 / 5.88 / 1.40 % at Quality / Performance / native on this
 branch). Lavapipe's particle numbers are a tripwire only.
 
-**Gate 3 is pending for DLSS Performance: particle smear 8.44 % against the 7.5 % bound.**
-DLSS has no reactive mask, so its particles rest entirely on their motion vectors, which
-N1b's stage 2 (#364) fixes on real GPUs while re-deriving the bounds. After it merges, this
-PR merges main and re-runs the probe on the RTX for DLSS in all three modes (Amendment 5,
-item 16).
+### After N1b's stage 2 (`657a7ab`)
+
+N1b's stage 2 replaced the alpha-gated particle motion write with a motion-only particle draw
+(ADR-0021 amendment 4 item 13). The same probe on the RTX, on the branch merged with
+`657a7ab`, a `dlss` release build, `UPSCALERS="dlss taau" scripts/ghost-probe.sh`, run twice
+with identical numbers (`~/.cache/moba-evidence/n1c/ghost-657a/`, `ghost-657a-rep/`); DLSS's
+bounds are TAAU's:
+
+| Back end, mode | render | worst wake | hero smear | particle smear | result |
+|---|---|---|---|---|---|
+| DLSS Quality | 853×480 | 0.183 % | 0.40 % | **16.01 %** | **fails** |
+| DLSS Performance | 640×360 | 0.152 % | 0.57 % | 2.81 % | passes |
+| DLSS native (DLAA) | 1280×720 | 0.073 % | 0.12 % | **10.84 %** | **fails** |
+| TAAU Quality | 853×480 | 1.222 % | 0.73 % | 3.52 % | passes |
+| TAAU Performance | 640×360 | 2.031 % | 1.33 % | 6.52 % | passes |
+| TAAU native | 1280×720 | 0.611 % | 0.00 % | 1.23 % | passes |
+
+The fix brings TAAU inside the bound on the RTX and DLSS Performance with it, but **DLSS
+Quality and native now fail.** Per frame (particle core pixels over the threshold, out of
+the core):
+
+| Frame | 4 | 5 | 8 | 9 | 15 | 17 | 20 | 22 |
+|---|---|---|---|---|---|---|---|---|
+| DLSS Quality, before | 43/787 | 3/900 | 8/553 | 0/635 | 4/916 | 2/789 | 3/747 | 0/780 |
+| DLSS Quality, after | **126/787** | 28/900 | 35/553 | 23/635 | 46/916 | 22/789 | **69/747** | 24/780 |
+| DLSS native, before | 31/784 | 4/901 | 0/540 | 3/644 | 0/912 | 0/784 | 3/740 | 0/788 |
+| DLSS native, after | **85/784** | 6/901 | 6/540 | 14/644 | 15/912 | 8/784 | 19/740 | 9/788 |
+
+The worst frame is the first one measured, and the smear is up across the run rather than in
+one frame. DLSS has no reactive mask, so the particle core rests on its motion vectors and
+DLSS's own history handling; why the new motion (written for fragments with coverage from
+0.1) helps DLSS at Performance and hurts it at Quality and native is not known. The wake and
+the hero are unchanged. **No bound was changed;** whether DLSS gets its own particle bound
+(as FSR 3.1 has 15 % from Performance down) or a fix is the coordinator's decision
+(Amendment 5 item 16).
 
 ## Overlay invariance (gate 3)
 
-`VENDOR_UPSCALERS=dlss scripts/overlay-invariance.sh` on the RTX: the overlay ID target is
+`scripts/overlay-invariance.sh` with DLSS added on the RTX (then `VENDOR_UPSCALERS=dlss`,
+now `UPSCALERS="taau dlss"`): the overlay ID target is
 byte-identical under DLSS Quality, Performance and native, TAAU at each render scale, FXAA and
 temporal off. Each vendor case checks the log names the back end it asked for, so a silent
 fallback to TAAU fails the case.
@@ -187,12 +228,17 @@ the load to about 4.
 
 - **The open build matches main.** TAAU's timings are bimodal on this GPU (GPU total about
   0.50 or 0.535 ms on Low, 0.551 or 0.585 ms on High, from run to run in either build:
-  rounds main-high 0.585/0.550/0.551, open-high 0.585/0.552/0.586). The High medians differ only
-  in which level two of the three rounds landed on. Compat is identical.
+  rounds main-high 0.585/0.550/0.551, open-high 0.585/0.552/0.586). The shift is in the whole
+  frame, not only the temporal pass: the temporal lane moves by 0.014 ms (0.130 or 0.144)
+  while GPU total moves by about 0.034 ms, so the scene and bloom passes shift with it. The
+  High medians differ only in which level two of the three rounds landed on. Compat is
+  identical.
 - **DLSS costs about +0.43 ms of GPU** at 1080p Quality on the 5070 Ti: its evaluate is
   0.567 ms against TAAU's 0.130–0.144 ms, the rest of the frame unchanged.
 - **The sharpen pass costs 0.033 ms** (temporal 0.600 against 0.567 ms) and a 15.9 MB
-  output-resolution intermediate (upscaler VRAM 101.6 against 85.7 MB).
+  output-resolution intermediate (upscaler VRAM 101.6 against 85.7 MB). Its barrier against
+  the back end's writes stays `ALL_COMMANDS` (the SDKs do not say which stages they write
+  from); that cost, barrier included, is accepted (Amendment 5 item 3).
 - **VRAM:** NGX's 85.7 MB now counts in the peak (`sdk_mb=` in the `[vram]` line,
   Amendment 5 item 13): DLSS's peak is **44.5 MB above TAAU's** (225.1 against 180.6 MB on
   Low, 286.9 against 242.4 MB on High), NGX's memory less TAAU's 38.7 MB of history and the
@@ -207,5 +253,6 @@ the load to about 4.
 
 - FSR 4 and XeSS at run time (above), including their jitter signs and barriers.
 - DLSS in `windows-vm`.
-- DLSS Performance's particle smear against the bound N1b's stage 2 sets (gate 3, pending).
+- Gate 3 for DLSS: it fails at Quality and native after N1b's stage 2 (above), awaiting the
+  coordinator's decision.
 - DLSS's cost on the Low and Medium reference cards.

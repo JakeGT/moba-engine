@@ -207,7 +207,8 @@ demand if the start-up selection did not pick it, and falls back to TAAU with on
 and XeSS on an Intel GPU, never FSR 4 until it passes on an AMD card. The `[vendor] selected:`
 summary (logged once the upscaler exists) and `Renderer::vendor_backends().upscaler` name the
 upscaler that runs (`builtin` when TAAU runs in the slot's place). A vendor back end that cannot
-follow a window resize (DLSS refuses a few-pixel output) is replaced by TAAU with one line.
+follow a window resize (DLSS refuses a few-pixel output) is replaced by TAAU with one line,
+for the rest of the session.
 The render allocation is raised to the back end's smallest render size for the mode (DLAA's
 is near native), and the memory an SDK allocates itself counts in the `[vram]` totals
 (`sdk_mb=`).
@@ -220,11 +221,12 @@ is near native), and the memory an SDK allocates itself counts in the `[vram]` t
 - **Perf runs pin the upscaler:** `scripts/perf-replay.sh` runs `UPSCALER` (default `taau`),
   and perf-gate refuses to compare a run with a `[tiered.*]` baseline recorded with another
   upscaler. Measure DLSS with `UPSCALER=dlss BASELINE= scripts/perf-replay.sh`.
-- **Resizes:** `VENDOR_UPSCALERS="dlss" scripts/resize-smoke.sh` (X11) resizes the window
-  mid-run for each listed back end, plus a resize to 8x8 that must fall back to TAAU.
-- **Checking each back end's overlay invariance:**
-  `VENDOR_UPSCALERS="dlss" scripts/overlay-invariance.sh` adds a Quality, Performance and
-  native case per listed back end; each case fails if the log does not name the back end it
+- **Resizes:** `UPSCALERS="taau dlss" scripts/resize-smoke.sh` (X11) resizes the window
+  mid-run for each listed back end, plus, for each one but TAAU, a resize to 8x8 that it may
+  refuse (it must then fall back to TAAU, never exit).
+- **Ghost probe and overlay invariance:** `UPSCALERS="taau dlss" scripts/ghost-probe.sh` and
+  `UPSCALERS="taau dlss" scripts/overlay-invariance.sh` add the listed back ends' Quality,
+  Performance and native cases; each case fails if the log does not name the back end it
   asked for.
 
 ## Verification and CI

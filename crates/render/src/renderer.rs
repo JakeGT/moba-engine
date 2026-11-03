@@ -100,9 +100,9 @@ const _: () = assert!(
     crate::passes::fog::FOG_IMAGES == FRAMES_IN_FLIGHT
         && crate::lighting::MAIN_SETS == FRAMES_IN_FLIGHT
 );
-// FSR 3.1 keeps its descriptor sets and constants per history parity (ADR-0021 amendment 1).
+// FSR 3.1 keeps its descriptor sets and constants per frame slot too (ADR-0021 amendment 4).
 #[cfg(feature = "fsr3")]
-const _: () = assert!(FRAMES_IN_FLIGHT <= crate::fsr3::MAX_FRAMES_IN_FLIGHT);
+const _: () = assert!(crate::fsr3::SET_RING >= FRAMES_IN_FLIGHT);
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
 /// Largest side of an offscreen [`UiImage`] (the guaranteed `maxImageDimension2D`).
@@ -1175,19 +1175,56 @@ impl Renderer {
                 post: &post_config,
                 debug: TaauDebugView::of(config.debug_view),
             })?;
-            let mut state = TemporalState::new(created.upscaler, upscale_mode, created.sharpness)
+            let crate::upscale::Created {
+                upscaler,
+                mut sharpness,
+                mut sharpen_pass,
+            } = created;
+            let mut state = TemporalState::new(upscaler, upscale_mode, sharpness)
                 .with_max_lod_bias(device.max_sampler_lod_bias);
             let old_render = extents.render;
-            scale_bounds = fit_temporal(&device, &mut state, &mut extents)?;
+            // SAFETY: nothing has been recorded yet.
+            let fitted = unsafe { fit_temporal(&device, &mut state, &mut extents) };
+            // A back end other than TAAU that cannot take its render allocation falls back to
+            // TAAU, as after a resize (amendment 5).
+            scale_bounds = match fitted {
+                Ok(bounds) => bounds,
+                Err(error) if state.upscaler.kind() != UpscalerKind::Taau => {
+                    eprintln!(
+                        "[render] upscaler {} cannot run at {}x{} ({error}); using taau",
+                        state.upscaler.kind().name(),
+                        swapchain.extent.width,
+                        swapchain.extent.height
+                    );
+                    extents.render = old_render;
+                    let fallback = crate::upscale::taau_fallback(
+                        &device,
+                        &shaders,
+                        swapchain.extent,
+                        extents.render,
+                        TaauDebugView::of(config.debug_view),
+                        &post_config,
+                    )?;
+                    state.upscaler = fallback.upscaler;
+                    state.sharpness = fallback.sharpness;
+                    sharpness = fallback.sharpness;
+                    sharpen_pass = fallback.sharpen_pass;
+                    // SAFETY: as above.
+                    unsafe { fit_temporal(&device, &mut state, &mut extents)? }
+                }
+                Err(error) => return Err(error),
+            };
             if extents.render != old_render {
                 transients.resize(&device, plans[0].graph.slots(), extents)?;
             }
             let upscaler = &state.upscaler;
             let (smallest, largest) = upscaler.render_size_range(swapchain.extent, upscale_mode);
-            // ADR-0021 §4c: a back end with one render size for the mode (DLSS on a mode
-            // without a dynamic range) turns dynamic resolution off.
-            fixed_render = smallest == largest;
             let (low, high) = bounded_scales(&post_config, scale_bounds);
+            // ADR-0021 §4c: a back end with one render size for the mode (DLSS Ultra
+            // Performance), or whose smallest size is the configured ceiling (DLSS
+            // Performance: its floor 0.5 is the mode's scale), pins the controller, so
+            // dynamic resolution is turned off.
+            fixed_render = smallest == largest || low >= high;
             eprintln!(
                 "[render] anti-aliasing: temporal, upscaler {} ({} mode, render scale {:.3}..{:.3}, \
                  back-end range {}x{}..{}x{}, sharpness {:.2}{})",
@@ -1199,12 +1236,12 @@ impl Renderer {
                 smallest.height,
                 largest.width,
                 largest.height,
-                created.sharpness,
+                sharpness,
                 // ADR-0021 §3: a back end without its own sharpening gets the renderer's
                 // `sharpen` pass (when the sharpness is above 0).
-                if created.sharpness <= 0.0 {
+                if sharpness <= 0.0 {
                     ", off"
-                } else if created.sharpen_pass {
+                } else if sharpen_pass {
                     ", sharpen pass"
                 } else {
                     ", fused"
@@ -1235,9 +1272,10 @@ impl Renderer {
         }
         if fixed_render && post_config.dynamic_resolution {
             eprintln!(
-                "[render] dynamic resolution: off (the upscaler has one render size for {} \
-                 mode, ADR-0021 §4c)",
-                upscale_mode.name()
+                "[render] dynamic resolution: off (the upscaler's render scales for {} mode \
+                 meet at {:.3}, ADR-0021 §4c)",
+                upscale_mode.name(),
+                bounded_scales(&post_config, scale_bounds).1
             );
             post_config = post_config.with_dynamic_resolution(false);
         }
@@ -3678,15 +3716,27 @@ impl Renderer {
         // (the shadow map) are kept.
         let mut extents = target_extents(swapchain.extent, self.post_config.render_scale);
         // ADR-0021 §2c: a resize re-sizes the back end's images (no pipeline is built,
-        // amendment 2 item 18) and forgets every history. The device is idle. Done before
-        // the swap below so a failed allocation cannot pair the new extent with old images.
-        // A vendor back end that cannot follow the resize (DLSS refuses a tiny output) is
-        // replaced by TAAU with one line, never fatal (amendment 5).
+        // amendment 2 item 18) and forgets every history. Done before the swap below so a
+        // failed allocation cannot pair the new extent with old images. If the transients'
+        // resize below then fails, the error returns before any frame is recorded and the
+        // renderer keeps the old swapchain extent (that swapchain was retired by the new
+        // one's creation), so the next frame resizes again (its extent check, or an
+        // OUT_OF_DATE acquire) before recording: the back end's `accepts` never sees the
+        // targets at another size. A back end other than TAAU that cannot follow the resize
+        // (DLSS refuses a tiny output) is replaced by TAAU with one line, never fatal, for
+        // the rest of the session (amendment 5).
         if let Some(temporal) = self.temporal.as_mut() {
-            let resized = temporal
-                .upscaler
-                .resize(&self.device, swapchain.extent, extents.render)
-                .and_then(|()| fit_temporal(&self.device, temporal, &mut extents));
+            // SAFETY: the device is idle (waited for at the top of this function), so no
+            // recorded frame is pending.
+            let resized = unsafe {
+                temporal
+                    .upscaler
+                    .resize(&self.device, swapchain.extent, extents.render)
+            };
+            let resized = resized.and_then(|()| {
+                // SAFETY: as above.
+                unsafe { fit_temporal(&self.device, temporal, &mut extents) }
+            });
             self.scale_bounds = match resized {
                 Ok(bounds) => bounds,
                 Err(error) if temporal.upscaler.kind() != UpscalerKind::Taau => {
@@ -3708,7 +3758,8 @@ impl Renderer {
                     temporal.upscaler = created.upscaler;
                     temporal.sharpness = created.sharpness;
                     self.vendor.set_upscaler_in_use("builtin");
-                    fit_temporal(&self.device, temporal, &mut extents)?
+                    // SAFETY: as above.
+                    unsafe { fit_temporal(&self.device, temporal, &mut extents)? }
                 }
                 Err(error) => return Err(error),
             };
@@ -3955,9 +4006,14 @@ impl Drop for Renderer {
 }
 
 /// ADR-0021 §4c, amendment 5: raises the render allocation to the temporal back end's
-/// minimum for its mode (re-sizing the back end's images when it grows) and returns the
-/// render scales the back end accepts. The device must be idle.
-fn fit_temporal(
+/// minimum for its mode (re-sizing the back end's images when it grows, if its images follow
+/// the allocation) and returns the render scales the back end accepts.
+///
+/// # Safety
+///
+/// The device is idle: no frame recorded with the back end is pending
+/// ([`crate::upscale::TemporalUpscaler::resize`]'s contract).
+unsafe fn fit_temporal(
     device: &DeviceContext,
     temporal: &mut TemporalState,
     extents: &mut TargetExtents,
@@ -3978,7 +4034,12 @@ fn fit_temporal(
             output.width,
             output.height
         );
-        temporal.upscaler.resize(device, output, fit.alloc)?;
+        // A back end created for the output alone (DLSS, XeSS) already accepts the new
+        // allocation: re-creating it would only repeat the resize just done.
+        if temporal.upscaler.sized_by_max_render() {
+            // SAFETY: the caller's contract.
+            unsafe { temporal.upscaler.resize(device, output, fit.alloc)? };
+        }
         extents.render = fit.alloc;
     }
     Ok(fit.scale)

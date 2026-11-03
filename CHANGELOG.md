@@ -147,17 +147,20 @@ the semver check):
     it on demand; `auto` picks DLSS where it runs and XeSS on Intel, never FSR 4 until it is
     tested on an AMD card. A back end that cannot run falls back to TAAU with one line.
   - DLSS runs on the RTX 5070 Ti under Linux, validation-clean in every mode: about 0.57 ms
-    at 1080p Quality, ghosting well below TAAU's, overlay IDs byte-identical; gate 3 at
-    Performance (particle smear) is pending N1b's stage 2. FSR 4 and XeSS
+    at 1080p Quality, a ghosting wake well below TAAU's, overlay IDs byte-identical; since
+    N1b's stage 2 its particle core fails gate 3 at Quality and native (16.0 % and 10.8 %
+    against 7.5 %), awaiting a decision (amendment 5 item 16). FSR 4 and XeSS
     are compiled and unit-tested only (their runtimes need Windows; FSR 4 also an AMD card).
-  - Each frame's render size is clamped to the back end's range; a one-size range turns
-    dynamic resolution off. Per-back-end sharpness defaults (0 for DLSS and XeSS) and an RCAS
+  - Each frame's render size is clamped to the back end's range; when its scales meet (a
+    one-size range, or DLSS Performance's floor at 0.5) dynamic resolution is turned off with
+    one line. Per-back-end sharpness defaults (0 for DLSS and XeSS) and an RCAS
     sharpen pass for back ends without their own. Mip bias follows the back end. The tiered
     `hdr_out` target gains `TRANSFER_DST` (NGX clears it).
   - XeSS's required device features are folded into the core feature structures at device
     creation.
-  - A vendor back end that cannot follow a resize falls back to TAAU with one line (never
-    fatal; `RenderError::Upscaler`). The render allocation is raised to the back end's minimum
+  - A back end other than TAAU that cannot follow a resize, or take its render allocation at
+    start-up, falls back to TAAU with one line for the rest of the session (never fatal;
+    `RenderError::Upscaler`). DLSS and XeSS are re-created once per resize, not twice. The render allocation is raised to the back end's minimum
     for the mode (DLAA at a low render scale no longer evaluates out of range), and the
     dynamic-resolution controller and `render_scale()` stay inside the back end's scales.
   - The SDK barriers cover every transfer stage (#366, #367 track NGX's undocumented clear
@@ -165,8 +168,11 @@ the semver check):
     `[vendor] selected:` line names the upscaler that runs.
   - `scripts/perf-replay.sh` pins the upscaler (`UPSCALER`, default `taau`) and each
     `[tiered.*]` baseline names its upscaler, which perf-gate checks; `tiered-goldens.sh`
-    pins TAAU. `MOBA_SMOKE_RESIZE` and `scripts/resize-smoke.sh` (in render-golden) resize
-    the window mid-run.
+    pins each back end it runs. `MOBA_SMOKE_RESIZE` and `scripts/resize-smoke.sh` resize the
+    window mid-run (TAAU and Compat in `renderer-gate`, FSR 3.1 in `tiered-temporal`).
+  - `tiered-goldens.sh`'s `HASHES_FROM`/`HASH_DEVICE` rewrite the exact hashes from CI's
+    artifact under CI's device line (`WRITE_HASHES=1` keys them to the local machine), and
+    both render jobs log the host CPU (model, `avx512f`).
 - **Fixed: `Invalid VkImageView` after a window resize** (and sometimes at an X11 start), with
   AO on, on both paths and every AA mode: lighting wrote its descriptor sets with the
   destroyed AO view before re-binding it. Shadow, contact and AO views are now bound in one

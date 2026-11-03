@@ -181,7 +181,7 @@ mod tests {
         ) {
         }
         fn reset_history(&mut self) {}
-        fn resize(
+        unsafe fn resize(
             &mut self,
             _device: &crate::device::DeviceContext,
             _output: Extent,
@@ -242,6 +242,43 @@ mod tests {
         // The jittered matrix moves the image by the jitter, never the client's matrix.
         assert_eq!(second.camera.unjittered, view);
         assert_ne!(second.camera.jittered, view);
+    }
+
+    /// The jitter handed to the back ends (`UpscaleInputs::jitter` is `camera.jitter`) is the
+    /// one the frame's jittered matrix applies, unchanged: points move by `(+jx, +jy)` render
+    /// pixels, x right and y down. That is FSR 3.1's convention (its projection offset is
+    /// `(2 jx / w, -2 jy / h)` in y-up NDC; ADR-0021 amendments 1 and 4), so no back end
+    /// flips a sign.
+    #[test]
+    fn the_jitter_handed_on_is_the_one_applied() {
+        let mut temporal = TemporalState::new(Box::new(Stub), UpscaleMode::Quality, 0.25);
+        let eye = Vec3::new(3.0, 8.0, 6.0);
+        let view = moba_core::math::perspective_rh(1.0, 16.0 / 9.0, 0.1, 100.0)
+            * moba_core::math::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+        let (render, output) = (extent(1280, 720), extent(1920, 1080));
+        for _ in 0..4 {
+            let frame = temporal.begin_frame(view, eye, render, output, false);
+            let [jx, jy] = frame.camera.jitter;
+            assert!(jx != 0.0 || jy != 0.0);
+            for point in [Vec3::ZERO, Vec3::new(1.0, 0.5, -2.0)] {
+                let plain =
+                    crate::temporal::clip_to_pixels(view * point.extend(1.0), render).unwrap();
+                let moved = crate::temporal::clip_to_pixels(
+                    frame.camera.jittered * point.extend(1.0),
+                    render,
+                )
+                .unwrap();
+                assert!(
+                    (moved[0] - plain[0] - jx).abs() < 1e-3,
+                    "{plain:?} {moved:?}"
+                );
+                assert!(
+                    (moved[1] - plain[1] - jy).abs() < 1e-3,
+                    "{plain:?} {moved:?}"
+                );
+            }
+            temporal.end_frame(&frame);
+        }
     }
 
     #[test]

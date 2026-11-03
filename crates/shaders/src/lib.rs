@@ -234,12 +234,16 @@ pub const VFX_TEMPORAL_VERT: &[u8] =
 /// Telegraph particles only, in the overlay (ADR-0021 §5).
 pub const VFX_OVERLAY_VERT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_overlay.vert.spv"));
-/// Particles writing motion and reactive (ADR-0021 §2b).
+/// Particles writing the reactive mask (ADR-0021 §2b).
 pub const VFX_TEMPORAL_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_temporal.frag.spv"));
-/// OIT particles writing motion and reactive (ADR-0021 §2b).
+/// OIT particles writing the reactive mask (ADR-0021 §2b).
 pub const VFX_OIT_TEMPORAL_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_oit_temporal.frag.spv"));
+/// The particles' motion-only draw: coverage from 0.1 replaces the motion (ADR-0021 §2b,
+/// amendment 4). One module for both blend paths: the draw writes no colour, so `VFX_OIT`
+/// would compile to the same SPIR-V.
+pub const VFX_MOTION_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vfx_motion.frag.spv"));
 /// Telegraph particles tone-mapped in the overlay (ADR-0021 §5).
 pub const VFX_OVERLAY_FRAG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/vfx_overlay.frag.spv"));
@@ -587,6 +591,10 @@ pub const MODULES: &[ShaderModule] = &[
     ShaderModule {
         name: "vfx_oit_temporal.frag",
         spirv: VFX_OIT_TEMPORAL_FRAG,
+    },
+    ShaderModule {
+        name: "vfx_motion.frag",
+        spirv: VFX_MOTION_FRAG,
     },
     ShaderModule {
         name: "vfx_overlay.frag",

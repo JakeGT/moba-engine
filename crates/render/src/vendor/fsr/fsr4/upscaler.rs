@@ -473,7 +473,7 @@ impl TemporalUpscaler for Fsr4Upscaler {
         self.reset = true;
     }
 
-    fn resize(
+    unsafe fn resize(
         &mut self,
         _device: &crate::device::DeviceContext,
         output: Extent,
