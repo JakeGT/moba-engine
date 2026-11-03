@@ -161,7 +161,11 @@ builds pace the same: the ratio's spread between rounds (1.01–1.24) is larger 
 difference between them. The branch's p50 is 0.04 ms longer for the reason in the on/off
 table, so it runs about 1 % fewer frames in the same replay. Over ten minutes the 90 %
 backstop hands 1.5–6 % of the frames back to the platform limiter: frames the driver let
-through in under 90 % of the interval (which frames, and why, is not broken down here). The single-frame maxima (the branch's 90.6 ms
+through in under 90 % of the interval (which frames, and why, is not broken down here). These
+runs timed the backstop from each frame's `SIMULATION_START`; it now runs from one sleep's end
+to the next (amendment 3, item 6), which no longer counts the event-dispatch gap against the
+frame, so this share is an upper bound for the current code (not re-measured over ten
+minutes; a 2,400-frame validation run paces 2,339 of 2,340 logged frames). The single-frame maxima (the branch's 90.6 ms
 in round 1) are one frame each, on both builds; p99 is the gate.
 
 ### First pacing run: four tiers, before the review fixes

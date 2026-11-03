@@ -203,11 +203,20 @@ pub(crate) fn held(slept: bool, since_start: Option<Duration>, max_frame_rate: u
 
 /// The renderer's side of the frame loop around a [`LatencyBackend`]: which frames sleep,
 /// the [`held`] backstop, and one `SIMULATION_START` per present ID.
+///
+/// The backstop's clock runs from one sleep's end to the next: a paced frame starts right
+/// after its sleep, so that span is the frame's whole period, event dispatch included. After a
+/// frame the platform limiter paced (handed back, or not slept), the platform's wait lies
+/// between the sleep's end and the next frame, so the clock restarts at that frame's
+/// `SIMULATION_START` instead: counting the wait would let the next frame through at once, and
+/// a driver that ignores the limit would then alternate long and short frames past the cap.
 #[derive(Debug, Default)]
 pub(crate) struct Pacer {
-    /// When the frame being built started: its `SimulationStart` marker, else the end of the
-    /// previous sleep.
+    /// When the frame being built started, for the backstop (`None`: not yet known).
     frame_start: Option<Instant>,
+    /// The latest frame was not paced by the sleep: the next `SIMULATION_START` restarts the
+    /// clock.
+    platform_paced: bool,
     /// The present ID whose `SimulationStart` was already set (0: none yet).
     started: u64,
 }
@@ -224,28 +233,39 @@ impl Pacer {
         submitted: bool,
         max_frame_rate: u32,
     ) -> bool {
-        if !submitted {
-            return false;
-        }
-        let slept = backend.sleep(swapchain, frame);
-        let now = Instant::now();
+        let slept = submitted && backend.sleep(swapchain, frame);
+        self.slept_at(slept, max_frame_rate, Instant::now())
+    }
+
+    /// [`Self::sleep`] once the back end returned, at `now`.
+    fn slept_at(&mut self, slept: bool, max_frame_rate: u32, now: Instant) -> bool {
         let since = self
             .frame_start
             .map(|start| now.saturating_duration_since(start));
+        let paced = held(slept, since, max_frame_rate);
         self.frame_start = Some(now);
-        held(slept, since, max_frame_rate)
+        self.platform_paced = !paced;
+        paced
     }
 
     /// Whether `marker` for `frame` goes to the back end. A frame skipped before submission
     /// keeps its present ID, so its next attempt would set `SIMULATION_START` again (possibly
-    /// on a new swapchain): only the first one is sent, and it starts the frame's clock.
+    /// on a new swapchain): only the first one is sent.
     pub(crate) fn marker(&mut self, frame: u64, marker: LatencyMarker) -> bool {
+        self.marker_at(frame, marker, Instant::now())
+    }
+
+    /// [`Self::marker`] at `now`.
+    fn marker_at(&mut self, frame: u64, marker: LatencyMarker, now: Instant) -> bool {
         if marker == LatencyMarker::SimulationStart {
             if self.started == frame {
                 return false;
             }
             self.started = frame;
-            self.frame_start = Some(Instant::now());
+            if self.platform_paced {
+                self.frame_start = Some(now);
+                self.platform_paced = false;
+            }
         }
         true
     }
@@ -295,9 +315,12 @@ pub(crate) trait LatencyBackend: Send {
         let _ = swapchain;
         &[]
     }
-    /// Called before the current swapchain is destroyed (recreation, renderer drop), after
-    /// the device is idle: anything the driver still owes on it is waited for, bounded.
-    fn settle(&mut self) {}
+    /// Called before the current swapchain is destroyed (recreation, or the renderer's drop
+    /// when `last`), after the device is idle: anything the driver still owes on it is waited
+    /// for, bounded.
+    fn settle(&mut self, last: bool) {
+        let _ = last;
+    }
 }
 
 /// Whether Reflex sleeps, and what a stopped sleep still owes (ADR-0021 §6b).
@@ -439,7 +462,7 @@ impl LatencyBackend for Reflex {
         }
     }
 
-    fn settle(&mut self) {
+    fn settle(&mut self, last: bool) {
         let Some(value) = self.state.pending else {
             return;
         };
@@ -448,10 +471,20 @@ impl LatencyBackend for Reflex {
             return;
         }
         // The driver may still signal the old semaphore: leak it rather than destroy it under
-        // a pending signal, and start a fresh one (values restart at 0).
+        // a pending signal. On the renderer's drop the device is destroyed next with the
+        // leaked semaphore still alive (`VUID-vkDestroyDevice-device-05137`): accepted, only
+        // after a sleep timed out and its signal then missed 100 ms more, as the lesser
+        // hazard than destroying a semaphore the driver may still signal.
         core::mem::forget(self.semaphore.take());
         self.value = 0;
         self.state.settled();
+        if last {
+            eprintln!(
+                "[latency] reflex: a timed-out sleep never signalled; its semaphore is leaked"
+            );
+            return;
+        }
+        // A fresh semaphore for the next swapchain (values restart at 0).
         // SAFETY: Reflex runs only on the tiered path, whose device enables
         // `timelineSemaphore` (`crate::device`).
         self.semaphore = unsafe { Semaphore::timeline(self.device.clone()) }.ok();
@@ -886,17 +919,41 @@ mod tests {
         // The latest frame was not submitted (a minimised window): no sleep at all.
         assert!(!pacer.sleep(&mut backend, swapchain, 1, false, 1));
         assert_eq!(backend.sleeps, Vec::<u64>::new());
-        // The first sleep has no frame start to measure from: paced.
-        assert!(pacer.sleep(&mut backend, swapchain, 1, true, 1));
         // At 1 fps the next frame "lasted" microseconds: the driver let it through early, so
         // the platform limiter takes it.
-        assert!(!pacer.sleep(&mut backend, swapchain, 2, true, 1));
-        assert_eq!(backend.sleeps, [1, 2]);
+        assert!(!pacer.sleep(&mut backend, swapchain, 1, true, 1));
+        assert_eq!(backend.sleeps, [1]);
         // Uncapped, a sleep that ran always paces.
-        assert!(pacer.sleep(&mut backend, swapchain, 3, true, 0));
+        assert!(pacer.sleep(&mut backend, swapchain, 2, true, 0));
         // A back end that did not sleep (setting off, stopped) never paces.
         backend.slept = false;
-        assert!(!pacer.sleep(&mut backend, swapchain, 4, true, 0));
+        assert!(!pacer.sleep(&mut backend, swapchain, 3, true, 0));
+        assert_eq!(backend.sleeps, [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_backstop_clock_runs_sleep_end_to_sleep_end() {
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut pacer = Pacer::default();
+        // 100 fps: a 10 ms interval, so a frame needs 9 ms. The first sleep has nothing to
+        // measure from: paced.
+        assert!(pacer.slept_at(true, 100, t0));
+        // A paced frame's clock starts at the sleep's end, not at its later
+        // `SIMULATION_START` (event dispatch between them is part of the frame).
+        assert!(pacer.marker_at(1, LatencyMarker::SimulationStart, t0 + ms(2)));
+        assert!(pacer.slept_at(true, 100, t0 + ms(10)));
+        // Let through after 5 ms: handed to the platform limiter.
+        assert!(pacer.marker_at(2, LatencyMarker::SimulationStart, t0 + ms(10)));
+        assert!(!pacer.slept_at(true, 100, t0 + ms(15)));
+        // The platform then waits until 20 ms; that wait is not this frame's, so the clock
+        // restarts at its `SIMULATION_START` and a frame let through early is caught again
+        // (instead of alternating long and short frames past the cap).
+        assert!(pacer.marker_at(3, LatencyMarker::SimulationStart, t0 + ms(20)));
+        assert!(!pacer.slept_at(true, 100, t0 + ms(21)));
+        // A frame that lasts its interval from its start is paced again.
+        assert!(pacer.marker_at(4, LatencyMarker::SimulationStart, t0 + ms(30)));
+        assert!(pacer.slept_at(true, 100, t0 + ms(40)));
     }
 
     #[test]

@@ -1040,16 +1040,20 @@ Recorded in the N1d PR (`feat/n1d-latency`), with the evidence in
    set it before them, and with vsync the render-submit span was the whole 6 ms frame).
 6. **Who paces.** The sleep is skipped, returning `false` so the platform limiter paces, when
    the latest frame was not submitted (a minimised window would otherwise spin). A frame the
-   sleep let through in less than 90 % of the limit's interval (measured from its
-   `SIMULATION_START`) also returns `false`, so the platform limiter waits out the rest: the
-   240 fps cap never rests on the driver honouring `minimumIntervalUs` or `maxFPS` alone.
+   sleep let through in less than 90 % of the limit's interval also returns `false`, so the
+   platform limiter waits out the rest: the 240 fps cap never rests on the driver honouring
+   `minimumIntervalUs` or `maxFPS` alone. The interval runs from one sleep's end to the next;
+   after a frame the platform limiter paced, it restarts at the next `SIMULATION_START`, so
+   the platform's wait is not counted as the next frame's.
    While the app paces, the platform loop still sleeps one interval between redraw requests,
    so a window that draws nothing does not spin.
 7. **A failing sleep.** A Reflex sleep that fails, or whose semaphore does not signal within
    250 ms, stops sleeping with one log line and resumes on the next swapchain, at most three
    times. A timed-out sleep still owes its signal: before the swapchain is replaced or the
    renderer dropped, the renderer waits up to 100 ms for it, and otherwise leaks that
-   semaphore (and makes a new one) rather than destroying it under a pending signal.
+   semaphore (making a new one for the next swapchain) rather than destroying it under a
+   pending signal. On the renderer's drop the device is then destroyed with the leaked
+   semaphore alive (`VUID-vkDestroyDevice-device-05137`), accepted only in that case.
 8. **Timings.** The frame log's `pc_latency_*` is simulation start to the end of the frame's
    GPU work; the extension reports no scan-out time, so the compositor's and the display's
    share is invisible (`VK_KHR_present_wait` timestamps would close that; not done). Every

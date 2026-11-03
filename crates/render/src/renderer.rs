@@ -3055,7 +3055,7 @@ impl Renderer {
         // swapchain or transient images before they are replaced.
         unsafe { self.device.device.device_wait_idle() }?;
         // A timed-out latency sleep may still owe a signal on the swapchain being retired.
-        self.latency.settle();
+        self.latency.settle(false);
         let extent = vk::Extent2D { width, height };
         let swapchain = Swapchain::new(
             &self.instance,
@@ -3247,7 +3247,7 @@ impl Drop for Renderer {
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
         // Before the swapchain and the latency semaphore are dropped (ADR-0021 §6b).
-        self.latency.settle();
+        self.latency.settle(true);
         crate::memory::set_locked(false);
         if let Some(path) = &self.config.pipeline_cache
             && let Err(error) = self.device.save_pipeline_cache(path)
