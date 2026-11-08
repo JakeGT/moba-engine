@@ -71,7 +71,7 @@ raw-window-handle = "0.6"
 # needs libclang; `runtime` loads it with dlopen. libloading is already in the graph via ash.
 bindgen = { version = "0.73", default-features = false, features = ["runtime"] }
 cmake = "0.1"
-libloading = "0.8"
+libloading = "0.9"
 # The NGX data directory's owner check (`geteuid`, `dlss` on Unix). Already in the graph.
 libc = "0.2"
 cpal = "0.18"
