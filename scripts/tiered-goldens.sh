@@ -60,6 +60,20 @@ import json, sys
 d = json.load(sys.stdin)[0]
 print("%s api=%s driver=%s" % (d["name"], d["api_version"], d["driver_info"]))' 2>/dev/null || true)
 expected_device=$(sed -n 's/^device //p' "$hashes" 2>/dev/null || true)
+# The runner's CPU, next to the hashes (diagnostics: llvmpipe JITs for the host CPU).
+cpuinfo() { sed -n "s/^$1[[:space:]]*: //p" /proc/cpuinfo 2>/dev/null | head -1; }
+cpu_flags=" $(cpuinfo flags) "
+cpu_has=
+for flag in avx2 fma f16c avx512f avx512vl avx512bw avx512dq avx512_bf16 avx512_fp16; do
+  [[ "$cpu_flags" == *" $flag "* ]] && cpu_has="$cpu_has $flag"
+done
+cpu_line="vendor=$(cpuinfo vendor_id) family=$(cpuinfo 'cpu family') model=$(cpuinfo model)"
+cpu_line="$cpu_line stepping=$(cpuinfo stepping) nproc=$(nproc) name='$(cpuinfo 'model name')'"
+cpu_line="$cpu_line flags:${cpu_has:- none}"
+echo "cpu: $cpu_line"
+echo "device: ${device:-unknown}"
+manifest="$out/hashes-${UPSCALERS// /-}.txt"
+printf '%s\n%s\n' "device ${device:-unknown}" "cpu $cpu_line" > "$manifest"
 exact=0
 if [ "${WRITE_HASHES:-0}" = 1 ]; then
   test -n "$device" || { echo "FAIL: vulkan-probe named no device"; exit 1; }
@@ -99,6 +113,8 @@ for upscaler in $upscalers; do
     capture "$out/$capture_name-2.ppm" MOBA_UPSCALER="$upscaler" $settings
     grep -E "anti-aliasing" "$out/$capture_name-1.ppm.log" || true
     hash=$(sha256sum < "$out/$capture_name-1.ppm" | cut -d' ' -f1)
+    echo "$capture_name $hash" >> "$manifest"
+    echo "sha256: $capture_name $hash"
     # A back end that fell back would check TAAU's output under another name.
     if ! grep -q "upscaler $upscaler " "$out/$capture_name-1.ppm.log"; then
       echo "FAIL: tiered $capture_name: did not run $upscaler"
@@ -118,6 +134,9 @@ for upscaler in $upscalers; do
         echo "ok: tiered $capture_name: exact hash"
       else
         echo "FAIL: tiered $capture_name: hash ${hash:0:16}, expected ${want:0:16}"
+        echo "  actual   $hash"
+        echo "  expected ${want:-none}"
+        echo "  cpu      $cpu_line"
         status=1
       fi
     fi
