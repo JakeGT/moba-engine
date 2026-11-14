@@ -128,7 +128,7 @@ Each concept also has a **take B** in the review app, so the pick isn't tied to 
   The slab placement is a model-sheet decision, not a prompt one.
 
 **Decided (2026-11-14): new display names; kit IDs unchanged.** Blade, Mage and Ranger stay
-the kit names, so the Kiln Warden plays the `blade` kit. *Considered:* keeping the kit names
+the kit names, so the Kiln Warden plays the `Blade` kit. *Considered:* keeping the kit names
 as display names.
 
 ### Concept detail: the Kiln Warden

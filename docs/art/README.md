@@ -44,7 +44,24 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-10-31 | Also the **Gemini API ("Nano Banana"), paid tier, for concept art and model sheets only**: a reference people model from, never shipped and never fed to a generator (enforced by the A0 provenance gate) | Maintainer |
 | 2026-10-31 | **Nano Banana 2.1 for drafts, Pro for model sheets** (after a side-by-side test) | Maintainer |
 | 2026-10-31 | Whole bible redrawn and rewritten for technology that looks like magic: rounds G3 (factions), G4 (everything else) and G5 (hero model sheets); materials renamed to technology names with measured stand-ins | Agent draft; approved by the maintainer 2026-11-14 (below) |
-| 2026-11-14 | **Art bible v0 approved.** The maintainer's words: "The Art style in the bible is approved - follow the recommended designs. Blender is installed. If you need any other tools installed to create models, ask." Every "Decision needed" in this folder is settled on its recommended option ([list below](#decisions-taken-2026-11-14)). Blender is the modelling tool: models are made by hand from the boards and model sheets ([concept generation](#concept-generation), step 3) | Maintainer |
+| 2026-11-14 | **Art bible v0 approved.** The maintainer's words: "The Art style in the bible is approved - follow the recommended designs. Blender is installed. If you need any other tools installed to create models, ask." Every "Decision needed" in this folder is settled on its recommended option ([list below](#decisions-taken-2026-11-14)). Blender is installed for modelling; models are made by hand from the boards and model sheets, as [concept generation](#concept-generation) step 3 already says | Maintainer |
+| 2026-11-14 | Slice hero: **the Kiln Warden** (Hero M, the `Blade` kit). Oracle and Strider stay A4 candidates | Maintainer (approval above) |
+| 2026-11-14 | Map 1's mood: **Golden Crossing**; no time-of-day or weather variant for the slice | Maintainer (approval above) |
+| 2026-11-14 | Faction readings: **Forge rec** and **Void rec** | Maintainer (approval above) |
+| 2026-11-14 | Bases: **Forge west, Void east** (presentation only) | Maintainer (approval above) |
+| 2026-11-14 | **Heroes are free agents** | Maintainer (approval above) |
+| 2026-11-14 | Ember crystals: **white-gold cores**, non-emissive orange facet rims, off the lanes | Maintainer (approval above) |
+| 2026-11-14 | Void: **dark bodies with mandatory pale elements** (≥ 10 % projected area per unit; heroes luma floor 45 and ≥ 15 % light material) | Maintainer (approval above) |
+| 2026-11-14 | Chroma caps **0.06 ground (PAL-1 kept) / 0.08 elsewhere**, p99; albedo ranges per texel at p1/p99 | Maintainer (approval above) |
+| 2026-11-14 | **`team_tint` 0 on photoreal content**, mask kept for Compat | Maintainer (approval above) |
+| 2026-11-14 | **Ability types coded by shape and motion**, never colour | Maintainer (approval above) |
+| 2026-11-14 | **Rim on allies; outline only on enemies and the hovered unit** | Maintainer (approval above) |
+| 2026-11-14 | **Role-scaled S/M/L heroes** | Maintainer (approval above) |
+| 2026-11-14 | Neutral monsters: **ember scarabs** (slice camp); a Builder warden machine for A4 | Maintainer (approval above) |
+| 2026-11-14 | Names: **working names kept** as internal names (world (b)); new hero display names, kit IDs unchanged; the Builders as ruins and relic machines only | Maintainer (approval above) |
+| 2026-11-14 | Green/blue/red kept as team colours for v0 | Maintainer (approval above) |
+| 2026-11-14 | Material vocabulary: options **(a)** for every item and **(c)** for how dark the Void may go ([§8](material-vocabulary.md#8-decisions)) | Maintainer (approval above) |
+| 2026-11-14 | Lane value step: **lift the lane to luma about 115** (no explicit recommendation: the bible's leading option) | Maintainer (approval above; leading option taken by the agent) |
 
 ## Decisions taken 2026-11-14
 
@@ -53,7 +70,7 @@ are the ones the files used while the items were open, so other documents (ADR-0
 still cite them. Where an item had no explicit recommendation, the bible's leading option was
 taken; those are marked *leading option*.
 
-1. **The slice hero:** the **Kiln Warden** (Hero M, Forge, the `blade` kit). The Still Oracle
+1. **The slice hero:** the **Kiln Warden** (Hero M, Forge, the `Blade` kit). The Still Oracle
    and the Ash Strider stay A4 candidates. See [heroes](heroes-and-minions-v0.md).
 2. **Map 1's lighting mood:** **Golden Crossing**. No time-of-day or weather variant for the
    slice. See [lighting](lighting-mood.md).
@@ -99,10 +116,10 @@ taken; those are marked *leading option*.
 - **Marketing's brief** ([brand-and-key-art.md](brand-and-key-art.md)): the game's name and
   logo, the public faction names, and which key-art direction to develop. Owned by a marketing
   executive and the designer, not yet engaged.
-- **Void luma floor vs two material targets.** The decided floor (luma ≥ 45 on Void heroes)
-  sits above two targets in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void):
-  obsidian metamaterial (42) and Void lacquer (39). Whether those targets rise or stay as
-  structure-only materials needs a maintainer decision.
+- **Void luma floor vs three material targets.** The decided floor (luma ≥ 45 on Void heroes)
+  sits above three rows in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void):
+  obsidian metamaterial, polished (42), obsidian, knapped (facets 42) and Void lacquer (39).
+  Whether those targets rise or are kept off heroes needs a maintainer decision.
 
 ## How to propose a change
 

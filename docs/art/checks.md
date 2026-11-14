@@ -58,20 +58,21 @@ enforced on every asset rather than remembered. No check is built yet.
 | PBR-WEAR-1 | Dust ≤ 20 % on units, lower body only | review renders | materials | approved |
 | PBR-FORGE-1 | Sun-alloy, in-play gilt and sun-glass tint C ≤ 0.07 | content-check | materials §3.1 | approved |
 | PBR-HEAT-1 | In playable space: temper colours straw to purple only (no blue); bronze patina statuary brown-black (no verdigris) | review renders | materials §3.1, §4 | approved |
-| PBR-VOID-1 | Void hero body materials luma ≥ 45; ≥ 15 % of each Void hero's surface in pewter, silver or bone | content-check | materials §3.2 | approved; floor vs two material targets open ([README](README.md#open)) |
+| PBR-VOID-1 | Void hero body materials luma ≥ 45; ≥ 15 % of each Void hero's surface in pewter, silver or bone | content-check | materials §3.2 | approved; floor vs three material targets open ([README](README.md#open)) |
 | PBR-VOID-2 | Void emissive hue: violet 284–345° main, teal 167–211° minor | content-check | materials §3.2 | approved |
 | TINT-1 | `team_tint = 0` on photoreal (Tiered) content; the mask kept for Compat | content-check | materials §1.1 | approved; renderer default flips after CON-2 (ADR-0023 §8c) |
 
-## Order of implementation
+## Order of implementation (proposal)
 
-1. **With A0:** the licence and provenance gate, and `PBR-ALB-*`, `PBR-NRM-*`, PAL-1, PAL-2,
-   PAL-4, LANE-1, PBR-FORGE-1 and TINT-1 on source textures and materials. These are cheap and
-   catch most AI-pipeline mistakes.
+1. **With A0:** the licence and provenance gate, and `PBR-ALB-*`, `PBR-NRM-*`, PAL-1, PAL-2
+   and PAL-4 on source textures. These are cheap and catch most AI-pipeline mistakes.
 2. **With the review renders:** SIL-*, CON-1, CON-4, PAL-3, VOID-1, EMB-1, PBR-HEAT-1 and
    VFX-9, run on every new asset.
 3. **With N1's overlay layer and the readability captures:** VAL-*, CON-2, CON-3, CON-5,
    CB-*, RIM-*, TEL-* and the heatmap debug view.
 4. **With the tier presets:** EXP-* and the ranked locks.
+5. **With the later asset-track `content-check` work:** the remaining `PBR-*` rules, LANE-1,
+   PBR-FORGE-1, PBR-VOID-1, PBR-VOID-2 and TINT-1.
 
 A rule moves from **approved** to **enforced** when its check is built and the first real
 Ember Crossing captures confirm it doesn't fail good art. Changing an approved threshold
