@@ -1,4 +1,8 @@
 [graph]
+# all-features includes moba-render's vendor SDK features (ADR-0020 §6c). Their build-time
+# crates are covered by the allow list below, checked 2026-11-02: bindgen (BSD-3-Clause),
+# clang-sys (Apache-2.0), cexpr, glob, minimal-lexical, nom, rustc-hash and cmake (MIT and/or
+# Apache-2.0), libloading (ISC). The SDKs themselves are not crates and never enter this graph.
 all-features = true
 
 [advisories]
@@ -28,3 +32,9 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# ADR-0020 §1: ash (Vulkan 1.4 headers) and the gpu-allocator branch that builds against it,
+# each pinned to a full revision in Cargo.toml. Nothing else may come from git.
+allow-git = [
+    "https://github.com/ash-rs/ash",
+    "https://github.com/Traverse-Research/gpu-allocator",
+]

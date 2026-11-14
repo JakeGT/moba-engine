@@ -6,8 +6,10 @@ on:
     paths:
       - 'crates/render/**'
       - 'crates/shaders/**'
+      - 'third_party/**'
       - 'crates/platform/**'
       - 'crates/client/**'
+      - 'crates/tools/**'
       - '.github/workflows/macos-vulkan.yml'
 
 permissions:
@@ -26,19 +28,58 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install MoltenVK
         run: |
-          brew install molten-vk vulkan-loader glslang
+          brew install molten-vk vulkan-loader glslang spirv-tools vulkan-validationlayers
           PREFIX=$(brew --prefix molten-vk)
           LOADER=$(brew --prefix vulkan-loader)
           ICD=$(find "$PREFIX/share/vulkan/icd.d" "$PREFIX/etc/vulkan/icd.d" -name 'MoltenVK_icd.json' 2>/dev/null | head -1)
           test -n "$ICD" || { echo "MoltenVK ICD json not found"; find "$PREFIX" -name '*icd*.json'; exit 1; }
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LAYERS=$(brew --prefix vulkan-validationlayers)
+          echo "VK_LAYER_PATH=$LAYERS/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib:$LOADER/lib:$LAYERS/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           ls "$LOADER/lib"
           echo "Using $ICD"
       - name: Build probe
         run: cargo build --release --locked -p moba-tools --bin vulkan-probe
       - name: Probe instance and devices
-        run: ./target/release/vulkan-probe
+        # ADR-0020 gate 2: macOS is Compat only, so the chosen device must report path=compat.
+        # Even forcing the tiered path must stay Compat (vulkan-probe then exits 1).
+        # The tiered run must fail for the right reason (not a loader crash), and the dump must
+        # come from MoltenVK itself (driver ID 14), not only from the macOS host rule.
+        run: |
+          set -euo pipefail
+          ./target/release/vulkan-probe | tee probe.txt
+          grep -q '^chosen: .* path=compat ' probe.txt
+          if ./target/release/vulkan-probe --path tiered 2> tiered.txt; then
+            echo "--path tiered admitted a device on macOS" >&2
+            exit 1
+          fi
+          cat tiered.txt
+          grep -q 'no device is admitted to the tiered path' tiered.txt
+          ./target/release/vulkan-probe --json > capabilities.json
+          python3 -c 'import json, sys; d = json.load(open("capabilities.json")); sys.exit(0 if any(x["driver_id"] == 14 for x in d) else "no MoltenVK device (driver ID 14) in the dump")'
+      # ADR-0020 §4c: MoltenVK consumes slangc's SPIR-V (one dispatch of the toolchain smoke
+      # module, output checked on the CPU) with validation required.
+      - name: Slang toolchain smoke with validation
+        env:
+          MOBA_VULKAN_VALIDATION: required
+        run: |
+          set -o pipefail
+          ./target/release/vulkan-probe --slang-smoke 2>&1 | tee slang-smoke.log
+          if grep -E '^\[vulkan' slang-smoke.log; then
+            echo "validation messages from the Slang smoke"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: moltenvk-capabilities
+          path: |
+            probe.txt
+            tiered.txt
+            capabilities.json
+          if-no-files-found: ignore

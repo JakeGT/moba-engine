@@ -25,7 +25,7 @@ for embedding and extension. This is a **pre-1.0 preview**, not a finished comme
 | Content schema | runtime TOML, hashed; optional Ed25519 attestation | `crates/game/src/content/` (`schema.rs`, `hash.rs`) |
 | Golden state hash | `0x59e062c6037e76ac` | `tests/golden-state-hash.txt` |
 | Golden image | 64×36 fingerprints (default scene, networked skinned capture, VAT minions, R3a map overview and horizon, R6 Ultra MSAA and Low at render scale 0.75, R2b ember close-up, R3b river on the default tier, Low and Ultra (through the reeds), R3b teamfight decals) and the R2b outline occlusion probe, lavapipe, validation required | `.github/workflows/render-golden.yml` |
-| Tests | **855 passed**, 3 ignored | `cargo test --workspace --locked` |
+| Tests | **1003 passed**, 3 ignored | `cargo test --workspace --locked` |
 
 Re-run the commands before quoting these values; update this table when a contract changes.
 
@@ -72,7 +72,8 @@ crates/tools      content-check/sign, replay, match-soak, network soak, fuzz-wir
                   texture-bake, teamfight (the R5 VFX evidence replay), vat-bake (R4b
                   minion VATs), link-proxy (RTT/jitter/loss UDP proxy), grade-bake (LUTs),
                   mesh-bake (R8 meshoptimizer LODs; `--features mesh-bake`),
-                  perf-gate (R8 frame-log budget gate)
+                  perf-gate (R8 frame-log budget gate), bindless-smoke and
+                  rt-smoke (N0.5 tiered-path smokes)
                   (font-bake/: standalone MSDF font baker, own lockfile)
 crates/engine     umbrella crate + embedding examples
 content/          validated example runtime TOML packs (5v5, 1v1, ARAM, abilities, maps, economy)
@@ -135,11 +136,20 @@ Feature/layering checks:
 ```bash
 cargo check -p moba-engine --no-default-features --locked
 cargo check -p moba-engine --no-default-features --features render --locked
-cargo check -p moba-engine --all-features --locked
+cargo check -p moba-engine --features sim,net,render,fsr3 --locked   # not --all-features: vendor SDKs (ADR-0020 §6)
 for k in moba-server moba-sim moba-game moba-nav moba-net; do
   cargo tree -p "$k" -e normal --prefix none --locked |
     grep -E '^(moba-render|moba-platform|ash|winit|gpu-allocator) ' && exit 1
 done
+```
+
+Vendor SDK features (ADR-0020 §6; off by default, never in public releases; see
+[docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md)). The SDKs are fetched, never committed;
+build scripts never download:
+
+```bash
+scripts/fetch-sdks.sh --only dlss,rtxdi        # or --only vendor-sdks; scripts\fetch-sdks.ps1 -Only … on Windows
+cargo build -p moba-client --features dlss,rtxdi   # MOBA_SDK_DIR overrides target/vendor-sdks
 ```
 
 Tools (release recommended for soak/fuzz):
@@ -163,9 +173,12 @@ MOBA_VFX_PREVIEW=nova cargo run -p moba-client        # live-reload effect previ
 scripts/terrain-decal-check.sh                          # terrain decal-cost guard: timing + registers (after decals.glsl/terrain.frag changes; real GPU)
 cargo run -p moba-tools --bin image-check -- actual.ppm --expected tests/golden/render-fingerprint.rgb
 cargo run -p moba-tools --bin vulkan-probe
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin bindless-smoke   # tiered path; MOBA_RENDER_PATH=tiered on lavapipe
+MOBA_VULKAN_VALIDATION=required cargo run --release -p moba-tools --bin rt-smoke         # BLAS/TLAS + ray query, exact readback
 scripts/bake-mesh-lods.sh                             # regenerate content/models/*.lod (R8)
 scripts/cull-probe.sh                                 # culling on == off, byte for byte (R8)
 scripts/perf-replay.sh                                # 10-minute replay per tier + perf-gate (R8, real GPU)
+scripts/dynres-check.sh                               # forced dynres target holds on the teamfight replay (ADR-0020 §5c, real GPU)
 ```
 
 Fuzz and model checking:
@@ -198,6 +211,11 @@ cargo run -p moba-engine --example custom_content
 ## Fresh checkout / GPU
 
 - Rust **1.88+** (workspace MSRV) and a `glslc`/`glslangValidator` for shader builds.
+- The pinned `slangc` for the Slang modules (ADR-0020 §4): run `scripts/fetch-slang.sh`
+  (Windows: `scripts/fetch-slang.ps1`) once. It downloads and checksums the version in
+  `crates/shaders/slang-version.txt` into `target/tools/`; re-run it after `cargo clean`.
+  `spirv-val` (SPIRV-Tools) must be on `PATH`: it is mandatory for Slang modules. See
+  [`docs/dev/slang.md`](docs/dev/slang.md).
 - Vulkan 1.3+ driver on Linux and Windows; macOS uses MoltenVK through the windowing stack.
 - CI goldens use lavapipe; local software Vulkan setup is in
   [`docs/dev/software-vulkan.md`](docs/dev/software-vulkan.md).

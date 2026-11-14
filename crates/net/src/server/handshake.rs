@@ -265,11 +265,13 @@ impl NetServer {
             ack: 0,
             ack_bits: 0,
         };
-        self.transport.send_plaintext(addr, &header, &payload)?;
+        // Install the session key before sending: if this send fails, the client's retried
+        // hello is answered from the cached payload above, which never installs a key, so a
+        // key installed only after a successful send could be lost for good.
         if let Some(crypto) = crypto {
             self.transport.set_peer_key(addr, crypto);
         }
-        Ok(())
+        self.transport.send_plaintext(addr, &header, &payload)
     }
 
     pub(super) fn free_slot(&self) -> Option<usize> {

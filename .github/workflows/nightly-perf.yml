@@ -10,6 +10,8 @@ name: nightly perf
 # skipped rather than queued forever. The baseline is bound to the GPU it was recorded on
 # (`gpu = "..."`), so a runner with another GPU fails until it has its own: run
 # scripts/perf-replay.sh with BASELINE= on it and commit its gpu name and p95 values.
+# The runner also needs glslc and spirv-val (SPIRV-Tools) on PATH: spirv-val is mandatory for
+# the Slang modules (ADR-0020 §4c). The pinned slangc is fetched and cached below.
 
 on:
   workflow_dispatch:
@@ -39,6 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-slang
       - name: Build client and tools
         run: cargo build --release --locked -p moba-client -p moba-tools
       # Short validation-required runs first: a perf number from a frame with validation
@@ -49,6 +52,7 @@ jobs:
           for tier in low medium high ultra; do
             for cull in cpu off; do
               MOBA_VULKAN_VALIDATION=required MOBA_QUALITY=$tier MOBA_GPU_CULL=$cull \
+                MOBA_RENDER_PATH=compat \
                 MOBA_REPLAY=tests/replays/teamfight-5v5.mbr MOBA_WARMUP_TICKS=330 \
                 MOBA_SMOKE_FRAMES=300 MOBA_VSYNC=0 \
                 timeout 300 ./target/release/moba-client > "validation-$tier-$cull.log" 2>&1 \

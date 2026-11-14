@@ -1,6 +1,15 @@
 ui_scale = 1.0
-# Rendering quality tier: low, medium, high or ultra (MOBA_QUALITY overrides it).
-quality = "high"
+# The settings format. A file without it predates the tiered path (ADR-0020), so its quality
+# tier is re-detected on the tiered path.
+settings_version = 1
+# Rendering quality tier: auto, low, medium, high, ultra or overdrive (MOBA_QUALITY overrides
+# it). auto picks the tier from the GPU on the tiered path, and is high on the compat path.
+quality = "auto"
+# Render path: auto, tiered or compat (MOBA_RENDER_PATH overrides it).
+render_path = "auto"
+# Latency reduction where the GPU has it (Reflex or Anti-Lag, tiered path): off, on or boost
+# (MOBA_LATENCY overrides it). While on, its sleep replaces the frame limiter.
+latency = "on"
 audio_volume = 0.7
 audio_mute = false
 camera_sensitivity = 1.0
@@ -12,7 +21,7 @@ team_palette = "standard"
 vfx = true
 ally_vfx_opacity = 1.0
 # Render resolution relative to the window, 0.5..1 (the HUD stays native). MOBA_RENDER_SCALE
-# overrides it; dynamic resolution (Low by default, MOBA_DYNRES) lowers it under load.
+# overrides it; dynamic resolution (compat Low by default, MOBA_DYNRES) lowers it under load.
 render_scale = 1.0
 # Accessibility: gameplay screen effects (R6). MOBA_SCREEN_EFFECTS=off turns all three off.
 death_desaturation = true   # fade partly to grey while your hero is dead

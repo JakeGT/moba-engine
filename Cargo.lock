@@ -128,9 +128,8 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "ash"
-version = "0.38.0+1.3.281"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
+version = "0.38.0+1.4.352"
+source = "git+https://github.com/ash-rs/ash?rev=8844f6b4eefb16d08cd73c8f3d340e1ac12deb16#8844f6b4eefb16d08cd73c8f3d340e1ac12deb16"
 dependencies = [
  "libloading",
 ]
@@ -138,8 +137,7 @@ dependencies = [
 [[package]]
 name = "ash-window"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52bca67b61cb81e5553babde81b8211f713cb6db79766f80168f3e5f40ea6c82"
+source = "git+https://github.com/ash-rs/ash?rev=8844f6b4eefb16d08cd73c8f3d340e1ac12deb16#8844f6b4eefb16d08cd73c8f3d340e1ac12deb16"
 dependencies = [
  "ash",
  "raw-window-handle",
@@ -163,6 +161,23 @@ name = "bcdec_rs"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d521509f38a9ab0fce76656a0416161ee5d42c1eab6672b958391e2ac7a0e31"
+
+[[package]]
+name = "bindgen"
+version = "0.73.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
+dependencies = [
+ "bitflags 2.13.2",
+ "cexpr",
+ "clang-sys",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 3.0.9",
+]
 
 [[package]]
 name = "bitflags"
@@ -292,6 +307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -367,6 +391,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clang-sys"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -390,6 +425,15 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
+
+[[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "cmov"
@@ -940,6 +984,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "gltf"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -978,17 +1028,12 @@ dependencies = [
 [[package]]
 name = "gpu-allocator"
 version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51255ea7cfaadb6c5f1528d43e92a82acb2b96c43365989a28b2d44ee38f8795"
+source = "git+https://github.com/Traverse-Research/gpu-allocator?rev=6a68a5b4c233361c07dfa8865043a16ade7512db#6a68a5b4c233361c07dfa8865043a16ade7512db"
 dependencies = [
  "ash",
  "log",
- "objc2 0.6.5",
- "objc2-foundation 0.3.2",
- "objc2-metal 0.3.2",
  "presser",
  "thiserror 2.0.21",
- "windows",
 ]
 
 [[package]]
@@ -1277,6 +1322,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1424,14 +1475,21 @@ version = "0.4.0"
 dependencies = [
  "ash",
  "ash-window",
+ "bindgen",
  "bytemuck",
+ "cmake",
  "criterion",
  "gpu-allocator",
+ "libc",
+ "libloading",
  "moba-assets",
  "moba-core",
  "moba-platform",
  "moba-shaders",
  "raw-window-handle",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -1449,6 +1507,9 @@ dependencies = [
 [[package]]
 name = "moba-shaders"
 version = "0.4.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "moba-sim"
@@ -1479,6 +1540,7 @@ dependencies = [
  "moba-render",
  "moba-sim",
  "png",
+ "serde_json",
 ]
 
 [[package]]
@@ -1521,6 +1583,16 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -1731,7 +1803,7 @@ dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
  "objc2-foundation 0.2.2",
- "objc2-metal 0.2.2",
+ "objc2-metal",
 ]
 
 [[package]]
@@ -1803,17 +1875,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-metal"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
-dependencies = [
- "bitflags 2.13.2",
- "objc2 0.6.5",
- "objc2-foundation 0.3.2",
-]
-
-[[package]]
 name = "objc2-quartz-core"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1823,7 +1884,7 @@ dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
  "objc2-foundation 0.2.2",
- "objc2-metal 0.2.2",
+ "objc2-metal",
 ]
 
 [[package]]
@@ -2118,6 +2179,12 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_version"

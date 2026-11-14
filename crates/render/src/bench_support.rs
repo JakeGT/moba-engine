@@ -53,3 +53,70 @@ impl Default for LightBinning {
         Self::new()
     }
 }
+
+/// The CPU half of the temporal path's per-unit motion work (ADR-0021 §2c): each frame, for
+/// every keyed unit, the previous drawn state is looked up (`MotionHistory::previous`), its
+/// previous-instance entry built and its previous joint palette copied out, and then what it
+/// drew is recorded (`MotionHistory::record`). The destinations are heap buffers shaped like
+/// the mapped previous-instance and previous-bone buffers.
+pub struct MotionUpload {
+    history: crate::motion::MotionHistory,
+    instances: Vec<crate::passes::scene::PrevInstance>,
+    bones: Vec<moba_assets::JointMatrix>,
+}
+
+impl core::fmt::Debug for MotionUpload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MotionUpload")
+            .field("instances", &self.instances.len())
+            .field("bones", &self.bones.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One keyed unit as the scene hands it over: key, transform and joint palette.
+#[derive(Clone, Debug)]
+pub struct MotionUnit {
+    /// The motion key (non-zero).
+    pub key: u32,
+    /// Its transform this frame.
+    pub transform: Mat4,
+    /// Its joint matrices this frame (empty when unskinned).
+    pub joints: Vec<moba_assets::JointMatrix>,
+}
+
+impl MotionUpload {
+    /// Room for `units` instances and `max_joints` joint matrices per frame.
+    #[must_use]
+    pub fn new(units: usize, max_joints: usize) -> Self {
+        Self {
+            history: crate::motion::MotionHistory::new(max_joints),
+            instances: vec![crate::passes::scene::PrevInstance::new(None); units],
+            bones: vec![[[0.0; 4]; 3]; max_joints],
+        }
+    }
+
+    /// One frame: look up and upload every unit's previous state, then record this frame's.
+    /// Returns how many units had a previous state.
+    pub fn frame(&mut self, units: &[MotionUnit]) -> usize {
+        self.history.begin_frame(false);
+        let mut cursor = 0;
+        let mut found = 0;
+        for (instance, unit) in self.instances.iter_mut().zip(units) {
+            let drawn = self.history.previous(unit.key, false, &unit.transform);
+            *instance = crate::passes::scene::PrevInstance::new(drawn.as_ref().map(|(s, _)| s));
+            if let Some((_, palette)) = drawn {
+                found += 1;
+                let count = palette.len().min(self.bones.len() - cursor);
+                self.bones[cursor..cursor + count].copy_from_slice(&palette[..count]);
+                cursor += count;
+            }
+        }
+        let pose = moba_assets::VatPose::single(moba_assets::VatSample::new(0, 0, 0.0));
+        for unit in units {
+            self.history
+                .record(unit.key, unit.transform, pose, &unit.joints);
+        }
+        found
+    }
+}

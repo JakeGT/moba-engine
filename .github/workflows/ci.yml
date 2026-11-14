@@ -28,6 +28,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Exclude workspace from Windows Defender
         if: runner.os == 'Windows'
         shell: pwsh
@@ -39,10 +40,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - name: Install shader compiler (macOS)
         if: runner.os == 'macOS'
-        run: brew install glslang
+        run: brew install glslang spirv-tools
       - name: Install shader compiler (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -54,6 +55,8 @@ jobs:
             Select-Object -First 1
           if (-not $glslc) { throw "glslc.exe not found under $roots" }
           "GLSLC=$($glslc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # The SDK's Bin also holds spirv-val.exe, mandatory for the Slang modules.
+          $glslc.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append
           Write-Host "Using $($glslc.FullName)"
       # Server/sim tests need no GPU; renderer tests use lavapipe in a later stage.
       - run: just ci-core
@@ -65,11 +68,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - uses: taiki-e/install-action@v2
         with:
           tool: just
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev
       - run: just ci-tools
 
   release-tests:
@@ -79,8 +83,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev
       - run: cargo test --workspace --release --locked
       - run: cargo test --workspace --doc --locked
 
@@ -91,9 +96,229 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev
       - run: cargo check --workspace --locked
+
+  # ADR-0020 §6 gate 5: fetch the pinned proprietary SDKs (both hashes verified by the fetch
+  # script), then build and link every vendor feature. The SDKs are never committed; only the
+  # downloaded archives are cached, keyed on the manifest, and re-verified on every run. GPU
+  # run-time evidence comes from the self-hosted runner and the Windows VM, not from here.
+  vendor-sdks:
+    name: vendor-sdks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # The DXC that NRD's ShaderMake uses (SHADERMAKE_FIND_DXC_VK) comes from the Vulkan SDK.
+      VULKAN_SDK_VERSION: 1.4.321.1
+      # LunarG's published SHA-256 of vulkansdk-linux-x86_64-1.4.321.1.tar.xz, from
+      # https://sdk.lunarg.com/sdk/sha/1.4.321.1/linux/vulkansdk-linux-x86_64-1.4.321.1.tar.xz.txt
+      # (fetched 2026-11-02). Update both together.
+      VULKAN_SDK_SHA256: f22a3625bd4d7a32e7a0d926ace16d5278c149e938dac63cecc00537626cbf73
+      # Chocolatey's vulkan-sdk package on Windows, pinned (its latest on 2026-11-02).
+      VULKAN_SDK_CHOCO_VERSION: 1.4.363
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vendor-sdks
+          # Keep the dependency build when a later step fails: the Windows job compiles for
+          # about five minutes before it reaches the vendor code.
+          cache-on-failure: true
+      # slangc for the shaders crate's Slang modules (ADR-0020 §4c); spirv-val comes from
+      # spirv-tools (Linux) or the cached SDK subset (Windows) below.
+      - uses: ./.github/actions/setup-slang
+      - name: Exclude workspace from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+      # Each cache below is restored here and saved straight after the step that fills it, so
+      # a later failure (clippy, a test) does not throw the work away. The runner image is part
+      # of the NRD key, since its compiler builds NRD.
+      - name: Runner image
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      # Only dxc (and its libdxcompiler) is used from the Vulkan SDK; that subset is cached,
+      # keyed on the archive's hash and the subset's version (bump `subset2` when its file list
+      # changes), so the SDK is downloaded only when the pin changes.
+      - name: Restore the Vulkan SDK's dxc (Linux)
+        if: runner.os == 'Linux'
+        id: dxc-linux
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/vulkansdk
+          key: vulkan-sdk-dxc-subset2-linux-${{ env.VULKAN_SDK_SHA256 }}
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        env:
+          DXC_CACHED: ${{ steps.dxc-linux.outputs.cache-hit }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libwayland-dev libclang-dev
+          cmake --version
+          if [ "$DXC_CACHED" != "true" ]; then
+            curl -fsSLo vulkansdk.tar.xz \
+              "https://sdk.lunarg.com/sdk/download/$VULKAN_SDK_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_SDK_VERSION.tar.xz"
+            # Verified before anything is unpacked: a mismatch fails the job.
+            echo "$VULKAN_SDK_SHA256  vulkansdk.tar.xz" | sha256sum -c -
+            mkdir -p "$RUNNER_TEMP/vulkansdk"
+            tar -xJf vulkansdk.tar.xz -C "$RUNNER_TEMP/vulkansdk" --strip-components=1 \
+              --wildcards '*/x86_64/bin/dxc*' '*/x86_64/lib/libdxcompiler*'
+            rm vulkansdk.tar.xz
+          fi
+          sdk="$RUNNER_TEMP/vulkansdk/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          # dxc loads libdxcompiler.so from the SDK's lib directory.
+          echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$sdk/lib" "$sdk/bin/dxc" --version
+          spirv-val --version
+      - name: Save the Vulkan SDK's dxc (Linux)
+        if: runner.os == 'Linux' && steps.dxc-linux.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/vulkansdk
+          key: ${{ steps.dxc-linux.outputs.cache-primary-key }}
+      # The same on Windows: dxc and its DLLs, glslc, and spirv-val (mandatory for the Slang
+      # modules), cached on the pinned package.
+      - name: Restore the Vulkan SDK's dxc (Windows)
+        if: runner.os == 'Windows'
+        id: dxc-windows
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}\vulkansdk
+          key: vulkan-sdk-dxc-subset2-windows-${{ env.VULKAN_SDK_CHOCO_VERSION }}
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DXC_CACHED: ${{ steps.dxc-windows.outputs.cache-hit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = Join-Path $env:RUNNER_TEMP 'vulkansdk'
+          $required = 'glslc.exe', 'dxc.exe', 'dxcompiler.dll', 'spirv-val.exe'
+          if ($env:DXC_CACHED -ne 'true') {
+            choco install vulkan-sdk --version=$env:VULKAN_SDK_CHOCO_VERSION -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install vulkan-sdk failed ($LASTEXITCODE)" }
+            $roots = @($env:VULKAN_SDK, 'C:\VulkanSDK', "$env:ProgramFiles\VulkanSDK") |
+              Where-Object { $_ -and (Test-Path $_) }
+            $glslc = Get-ChildItem $roots -Recurse -Filter glslc.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $glslc) { throw "glslc.exe not found under $roots" }
+            $bin = $glslc.Directory.FullName
+            New-Item -ItemType Directory -Force -Path "$sdk\Bin" | Out-Null
+            # dxil.dll only signs DXIL; it is copied when the SDK has it.
+            foreach ($file in $required + 'dxil.dll') {
+              if (Test-Path "$bin\$file") { Copy-Item "$bin\$file" "$sdk\Bin" }
+            }
+          }
+          foreach ($file in $required) {
+            if (-not (Test-Path "$sdk\Bin\$file")) { throw "$file not found in $sdk\Bin" }
+          }
+          & "$sdk\Bin\dxc.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "dxc.exe does not run" }
+          & "$sdk\Bin\spirv-val.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "spirv-val.exe does not run" }
+          "GLSLC=$sdk\Bin\glslc.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # bindgen's libclang: the runner image ships LLVM.
+          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          cmake --version
+      - name: Save the Vulkan SDK's dxc (Windows)
+        if: runner.os == 'Windows' && steps.dxc-windows.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}\vulkansdk
+          key: ${{ steps.dxc-windows.outputs.cache-primary-key }}
+      # The archives are the same bytes on both OSes: one cache entry serves both.
+      - name: Restore SDK archives
+        id: sdk-archives
+        uses: actions/cache/restore@v6
+        with:
+          path: target/vendor-sdks/downloads
+          key: vendor-sdks-${{ hashFiles('vendor-sdks.toml') }}
+          enableCrossOsArchive: true
+      - name: Fetch and verify SDKs (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/fetch-sdks.sh --only vendor-sdks,dlss-fg
+      - name: Fetch and verify SDKs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/fetch-sdks.ps1 -Only vendor-sdks,dlss-fg
+      - name: Save SDK archives
+        if: steps.sdk-archives.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/vendor-sdks/downloads
+          key: ${{ steps.sdk-archives.outputs.cache-primary-key }}
+          enableCrossOsArchive: true
+      # NRD's CMake build: build/vendor.rs builds it once per pin, recipe and toolchain in
+      # <build-dir>/<profile>/vendor-build/nrd and keeps only the libraries and its stamp.
+      # rust-cache does not keep it, so it is cached on its own; the stamp still decides
+      # whether a restored build is reused.
+      - name: Restore the NRD build
+        id: nrd-build
+        uses: actions/cache/restore@v6
+        with:
+          path: target/debug/vendor-build
+          key: vendor-nrd-${{ runner.os }}-${{ steps.image.outputs.id }}-${{ hashFiles('vendor-sdks.toml', 'crates/render/build/vendor.rs') }}-${{ env.VULKAN_SDK_SHA256 }}-${{ env.VULKAN_SDK_CHOCO_VERSION }}
+      # The same feature set as the steps below: they share its moba-render build-script run,
+      # NRD's build and the compiled dependencies (clippy still checks moba-render itself).
+      - name: Build and link --features vendor-sdks,dlss-fg
+        run: cargo build -p moba-client --features vendor-sdks,dlss-fg --locked
+      - name: Save the NRD build
+        if: steps.nrd-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/debug/vendor-build
+          key: ${{ steps.nrd-build.outputs.cache-primary-key }}
+      # bash on every OS, with -e: under pwsh only the last command's exit code would count.
+      - name: Clippy and selection tests (vendor-sdks + dlss-fg)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy -p moba-render --all-targets --features vendor-sdks,dlss-fg --locked -- -D warnings
+          cargo test -p moba-render --lib --features vendor-sdks,dlss-fg --locked vendor
+          cargo check -p moba-engine --features render,vendor-sdks,dlss-fg --locked
+      # Each feature on its own: their cfg-gated code must also be warning-free alone. Linux
+      # only, clippy only (the full set is built and tested above on both OSes).
+      - name: Clippy, one vendor feature at a time (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for feature in dlss streamline nrd rtxdi sharc fsr4 xess; do
+            echo "::group::clippy --features $feature"
+            cargo clippy -p moba-render --all-targets --features "$feature" --locked -- -D warnings
+            echo "::endgroup::"
+          done
+      # With the vendor features on across the workspace (the layering check in the gates job
+      # runs with default features): no server crate may reach moba-render or the vendor build
+      # and loading crates. Each inverted tree lists everything that depends on the crate.
+      - name: Server crates stay free of the vendor features
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=moba-render/vendor-sdks,moba-render/dlss-fg
+          for dep in moba-render bindgen libloading cmake; do
+            dependents=$(cargo tree --workspace --features "$features" -e normal,build \
+              -i "$dep" --prefix none --locked | awk '{ print $1 }' | sort -u)
+            for krate in moba-server moba-sim moba-game moba-nav moba-net; do
+              if grep -qx "$krate" <<<"$dependents"; then
+                echo "layering violation: $krate reaches $dep with the vendor features on" >&2
+                exit 1
+              fi
+            done
+          done
 
   deny:
     runs-on: ubuntu-latest
@@ -119,11 +344,12 @@ jobs:
           fetch-depth: 0 # the baseline is a release tag
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
       - name: Install shader compiler
-        run: sudo apt-get update && sudo apt-get install -y glslang-tools libasound2-dev libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libwayland-dev
       - name: cargo semver-checks against the latest release tag
         id: check
         continue-on-error: true

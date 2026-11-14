@@ -1,0 +1,18 @@
+# The pinned Slang compiler (ADR-0020 §4c). `crates/shaders/build.rs` requires `slangc` to
+# report exactly this version; `scripts/fetch-slang.sh` / `scripts/fetch-slang.ps1` download
+# the host's archive from the official release
+# (https://github.com/shader-slang/slang/releases/tag/v<version>) into
+# `target/tools/slang-<version>/` and check it against the SHA-256 below.
+#
+# Upstream publishes no checksum files. The values below were recorded from the downloaded
+# archives and cross-checked against the `digest` field the GitHub release API reports for
+# each asset (`gh api repos/shader-slang/slang/releases/tags/v<version>`). A PR that changes
+# the pin repeats that cross-check.
+#
+# Format: one `version=<x>` line, then `<host> <archive> <sha256>` lines.
+version=2026.20
+linux-x86_64 slang-2026.20-linux-x86_64.tar.gz e863e568c204810d6e8bc31852f056aef6763c55ea9925db2db7affa060347c9
+linux-aarch64 slang-2026.20-linux-aarch64.tar.gz b0345743e2153d8c2bd33f56fb5696bcef63fc03513f054a1ae1b8d3dd0152a9
+windows-x86_64 slang-2026.20-windows-x86_64.zip e6dd32bbddf1720ebb4e679d55e9635ce792865a5bd84f3d2cd9af28647c0174
+macos-aarch64 slang-2026.20-macos-aarch64.tar.gz 07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4
+macos-x86_64 slang-2026.20-macos-x86_64.tar.gz b4f01f615dc625f60c593d7d0a4bbd38e05dfa2a34bfd3973017c309d866feaa

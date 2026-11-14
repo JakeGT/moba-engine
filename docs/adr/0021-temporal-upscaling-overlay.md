@@ -1,0 +1,1581 @@
+# ADR-0021: Temporal foundation, upscaling, the gameplay overlay layer and latency (N1)
+
+**Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
+[Open questions](#open-questions-for-the-maintainer) taken (see
+[Maintainer answers](#maintainer-answers-2026-11-02)). N1a is built
+([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), and FSR 3.1
+runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)). Proposed 2026-10-31. This is phase N1 of the
+[next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
+step 3), written before the code.
+- **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
+  capability gate, the `Tiered`/`Compat` paths, Slang, bindless, the tier budgets and
+  budget-driven dynamic resolution, and the vendor-SDK cargo features. This ADR uses all of
+  them and does not re-decide them.
+- **Amends, for the Tiered path only:**
+  - [ADR-0015](0015-post-processing.md) §1, §4 and §6: the post chain moves after a temporal
+    upscaler, and MSAA and FXAA leave the tiered presets;
+  - [ADR-0016](0016-lights-outlines-ao.md) §2: outlines move to output resolution, and hull
+    outlines become Compat-only;
+  - [ADR-0017](0017-decals-foliage-water.md) §1: `Glow` decals (telegraphs and zones) move to
+    the overlay layer;
+  - [ADR-0013](0013-vfx-runtime.md): enemy-telegraph particles move to the overlay layer, and
+    particles write the reactive mask;
+  - [ADR-0020](0020-next-gen-foundations.md) §1e: `independentBlend` joins the tiered
+    required set (§2e).
+- **Compat is unchanged.** It keeps FXAA, MSAA 4× on Compat Ultra, hull outlines, decal
+  telegraphs and today's frame (ADR-0020 §2d).
+
+Vendor, version and licence claims were re-checked on 2026-10-31 against the sources in
+[Sources](#sources). Facts that ADR-0020 already verified that day are cited as
+"ADR-0020 [Sn]" and not re-derived. Where a claim could not be confirmed it says
+**unverified**.
+
+## Context
+
+Roadmap §8 gives N1 six items:
+- jitter and motion vectors for everything;
+- TAA/TAAU;
+- one upscaler interface over FSR 3.1.6, DLSS SR (NGX), FSR 4 and XeSS;
+- the **post-upscale gameplay overlay layer** (outlines, telegraphs, the HUD);
+- Reflex and Anti-Lag;
+- retiring MSAA.
+
+Readability (§4) is the hard constraint. Temporal reconstruction is the largest readability
+hazard in the roadmap (§11, "ghosting from TAA, DLSS or FG on fast units"). So every decision
+below is judged by whether a fast hero, a projectile or an enemy telegraph stays sharp and
+in place.
+
+What the code does today (`origin/docs/adr-0020-n0`, which is `main` plus ADR-0020):
+
+- **No temporal state.**
+  - Nothing is jittered, and nothing writes motion vectors.
+  - No pass reads the previous frame's colour, except the fog-of-war ping-pong (R3a) and
+    auto exposure (R6).
+  - `FRAMES_IN_FLIGHT = 2` (`renderer.rs`).
+- **Camera and picking.**
+  - `moba_render::Camera` holds one `view_proj` (`scene.rs`), built by the client.
+  - `input::cursor_ground` and `hovered_unit` (`crates/client/src/input.rs`) unproject the
+    cursor through **that same matrix** onto `y = 0` and convert the hit to `FixVec2`.
+  - That hit becomes `WireCommand::MoveTo`/`CastAbility` coordinates. The server applies them
+    and records them in the replay (`moba-sim` `replay.rs` stores post-resolution inputs).
+  - The renderer copies `view_proj` and its inverse into `CameraUniform` (`scene.rs`; the
+    GLSL side is `CameraBlock` in `include/camera.glsl`). The VFX and distortion passes get
+    their own copy in `VfxUniform::view_proj` (`passes/vfx.rs`), water reconstructs depth
+    from `EnvironmentBlock::inverse_view_proj` (`environment.rs`), and GTAO builds its view
+    rays from `PostFrame::view_proj` (`passes/post.rs`).
+- **Instances have no identity.**
+  - `UnitInstance` is a transform, a colour, a mesh, a `BoneRange` into this frame's
+    `Scene::bones`, an outline slot and a `VatPose`.
+  - The client rebuilds the list every frame (`scene_build.rs`). Positions come from
+    `Interpolator::position(net_id, render_tick)` at a fractional render tick between the
+    30 Hz snapshots. The own hero is predicted ahead, and teleports are flagged by
+    `teleported_between`.
+- **Animated geometry.**
+  - Skinned meshes read this frame's joint palette.
+  - VAT minions sample a `VatPose` (R4b).
+  - Foliage bends with `environment.time` (two sine gusts) and up to 32 displacers built from
+    the drawn units (`foliage.vert`).
+  - Water normals scroll procedurally (`water.frag`).
+  - Distortion offsets are procedural noise scrolled by `distortion_speed` (ADR-0019).
+  - Particles are simulated on the GPU from position and velocity (`vfx_simulate.comp`), and
+    they never write depth.
+- **The frame** (`frame_graph.rs`), in order:
+  - `prepass` (depth, plus `R8_UINT` outline IDs) at render resolution;
+  - `scene`, which shades and composites `Glow` decals inside the terrain, water and foliage
+    shaders (`apply_glow_decals`);
+  - water, distortion and VFX;
+  - bloom and exposure;
+  - `composite`, then `outline` on the tonemapped `ldr` image **at render resolution**;
+  - `fxaa`, then `upscale` (bilinear or bicubic) to the swapchain;
+  - `ui` at native resolution.
+
+  So today outlines and telegraphs are upscaled with the scene. The HUD (`ui`), health bars
+  included, is already at output resolution.
+- **Two telegraph forms.** `DecalRole::EnemyTelegraph` decals (`Glow` style, two-tone rim)
+  and `ParticleRole::EnemyTelegraph` ring particles (ADR-0013's opacity floor).
+- **Frame loop** (`crates/platform/src/app.rs`).
+  - winit delivers the input events, then `RedrawRequested` calls `App::on_frame`.
+  - That one call runs input, the `FixedStep` ticks, prediction, the scene build, and
+    `Renderer::render_*` (acquire, record, submit, present).
+  - A `max_frame_rate` limiter (default 240) sets `ControlFlow::WaitUntil`. `MOBA_VSYNC`
+    picks FIFO, or else MAILBOX/IMMEDIATE (`swapchain.rs`).
+- **Graph limits.** `MAX_PASSES = 40`, and `MAX_RESOURCES = 48` under a `u64` resource mask
+  (`graph.rs`).
+
+Constraints:
+- **Presentation only.**
+  - No change to `PROTOCOL_VERSION` (v42), replay `VERSION` (v5), `SIM_LOGIC_VERSION` (v9),
+    content hashes or `tests/golden-state-hash.txt`.
+  - Jitter must never reach picking, orders or any value that goes on the wire.
+- **The R8 rules hold:** no per-frame allocation, `locked_uploads=0` and `locked_pipelines=0`.
+  Upscaler contexts are created with the renderer, never mid-match.
+- **The open build stays whole** (ADR-0020 §6c). With default features, Linux and Windows get
+  a complete temporal path.
+- **Determinism of captures.** Two lavapipe runs of a golden must stay byte-identical.
+
+## Decision
+
+### 1. Jitter
+
+- **The sequence.** Halton (2, 3), index starting at 1, with offsets in render pixels in
+  `[-0.5, 0.5)`.
+  - **Phase count** = `ceil(8 × r²)`, where `r` is output ÷ render per axis, rounded to three
+    decimals first (so 2560 ÷ 1707 counts as 1.5), recomputed every frame from the current
+    render size. That gives 8 at native, 18 at 1.5×, **24** at 1.7× and at DLSS's 1.724×, 32 at
+    2× and 72 at 3×.
+  - **Rounding up is deliberate.** DLSS's table gives these values as minimums, 24 for
+    Balanced [S1]. FSR's manual states `ceil(8n²)` for custom ratios but lists 23 at 1.7×,
+    which is the truncated value [S2]. One extra phase is harmless to FSR and meets DLSS's
+    minimum. XeSS asks for a Halton sequence whose length grows with the ratio [S5].
+  - The index runs continuously and is taken modulo the current count, so a dynamic-resolution
+    step does not restart the pattern.
+- **Where it is applied.** Only inside `moba-render`, as a clip-space translation of the
+  projection used for rasterisation: `+2·jx / render_w` and `−2·jy / render_h`, with the sign
+  fixed by a unit test against the Vulkan y-down convention.
+- **The rule for each matrix.** The render-resolution depth is jittered, so anything that
+  rasterises into it, or reconstructs a position from it, uses the **jittered** matrix or its
+  inverse. The unjittered matrices are used only to compute motion, by the output-resolution
+  overlay (§5), and on the CPU.
+
+| Consumer | Today | From N1 on Tiered |
+|---|---|---|
+| `CameraUniform` (Rust, `scene.rs`) / `CameraBlock` (GLSL, `include/camera.glsl`): `view_proj`, `inv_view_proj` | client matrix | jittered, and the inverse of the jittered matrix (scene, prepass, contact shadows, fog and decal reconstruction) |
+| `CameraUniform`, new members | — | `view_proj_unjittered` and `prev_view_proj` (motion), `jitter` (current and previous, in pixels), `mip_bias` (below) |
+| `VfxUniform::view_proj` (`passes/vfx.rs`: sprites, mesh particles, distortion sprites) | client matrix | jittered; gains `view_proj_unjittered` and `prev_view_proj` for particle motion (§2d). The billboard basis (`camera_right`, `camera_up`) stays unjittered |
+| `EnvironmentBlock::inverse_view_proj` (`environment.rs`: water depth reconstruction) | inverse client matrix | inverse of the jittered matrix |
+| GTAO's view rays (`PostFrame::view_proj`, `passes/post.rs`) | client matrix | jittered |
+| Overlay prepass and overlay (§5) | — | unjittered, at output resolution, with its own depth |
+| CPU: culling, decal and light binning, the distortion region (`distortion.rs`) | client matrix | unjittered (jitter is under one render pixel) |
+
+- **Compat.** The jitter is zero and both matrices are equal. The members are new, so
+  `camera.glsl` (shared with Compat) changes layout; Compat's **pixels** stay identical, and
+  its goldens check that.
+- **What jitter never touches:**
+  - **`Camera` itself.** The client's `Camera::view_proj` is never jittered and never mutated
+    by the renderer.
+  - **Picking.** `cursor_ground`, `hovered_unit`, the HUD's world anchors (`hud/geometry.rs`)
+    and the VFX billboard basis keep reading the unjittered client matrix.
+  - **CPU culling** (`cull.rs`, `lights::ground_footprint`), which uses the unjittered matrix.
+    Jitter is under one render pixel, and the bounding spheres already have more slack than
+    that.
+  - **Offscreen views** (portraits, minimap). They are not jittered and not temporal.
+- **The jitter index is a presentation counter,** advanced once per presented main-view frame.
+  It is never derived from the tick or the wall clock.
+- **Captures.** `MOBA_CAPTURE` resets the index and the history, then renders a fixed
+  warm-up: two full phase cycles at the pinned tick before the captured frame. The image is
+  therefore a pure function of the scene and the settings.
+- **Texture LOD bias.** Material texture samples on the Tiered path add a per-frame shader
+  bias, `CameraBlock::mip_bias`. Its formula is set **per back end**, as each SDK documents:
+  - **DLSS, FSR 3.1, FSR 4 and TAAU:** `log2(render_w / output_w) − 1`, which gives −1.58 at
+    1.5×, −2 at 2× and −2.58 at 3× [S1][S2]. FSR 4 is assumed to follow FSR 3.1
+    (**unverified**).
+  - **XeSS:** `log2(render_w / output_w)`, with no −1: −1 at 2×, −1.202 at 2.3× and −1.585 at
+    3× [S5].
+  - **Temporal off:** 0.
+  - It is per frame because dynamic resolution changes the ratio, and the DLSS and XeSS
+    guides both say the bias must follow it [S1][S5].
+  - The bindless sampler palette (ADR-0020 §3a) stays fixed. The bias is a `texture(…, bias)`
+    argument.
+  - Spec clamping to `maxSamplerLodBias` (at least 2) limits Ultra Performance to −2 on
+    minimum devices.
+  - LUTs, VAT, UI, data textures and every post pass take no bias.
+
+### 2. Motion vectors and masks
+
+**2a. Format and resolution.**
+- `motion` is `R16G16_SFLOAT` at **render resolution**, in the render sub-rectangle.
+- Each value is a screen-space offset **in render pixels from the current sample to its
+  position in the previous frame**, without jitter. Every back end takes that directly, with
+  a **scale of (1, 1)**:
+  - **FSR 3.1** expects screen-space vectors in the range `±(width, height)`.
+    `motionVectorScale` exists to convert other spaces; its render-size example is for NDC
+    vectors [S2].
+  - **XeSS** takes low-resolution vectors in pixels, R16G16_FLOAT, and dilates them itself
+    [S5].
+  - **DLSS** takes low-resolution vectors pointing to the previous frame, with
+    `InMVScaleX/Y` = 1.0 when no conversion is needed [S1].
+- FSR's manual notes that 16-bit precision is what its internals use anyway [S2].
+- Each back end receives the same image, with its scale and flags set in its adapter (§4b).
+- No back end gets jittered or display-resolution motion vectors. The FSR and XeSS flags for
+  those stay off.
+- **Depth** is today's `D32_SFLOAT`, non-inverted and with a finite far plane. Every back end
+  has flags for inverted depth [S1][S2][S5]. Reversed Z is left to N2, whose G-buffer
+  rewrite touches every depth consumer anyway.
+
+**2b. Who writes motion vectors.** The render-resolution `prepass`, which every tiered
+preset already has (tiered Low runs today's High configuration, which has the prepass;
+ADR-0020 §5e), gains the `motion` colour attachment. Every opaque main-view draw goes through
+it, and the scene pass keeps loading its depth with `LESS_OR_EQUAL`. N2's G-buffer pass
+takes the attachment over (roadmap §5.2, step 1). Each source works as follows:
+
+| Source | Previous position |
+|---|---|
+| Terrain, walls, props, structures (motion key 0) | `prev_view_proj × model × p`: camera motion only |
+| Units and static meshes with a key | the previous model matrix from the motion history (§2c) |
+| Skinned | previous joint palette × previous model matrix (§2c) |
+| VAT minions | the previous `VatPose` sampled in the same vertex shader. The prepass's VAT permutation fetches twice; the scene's does not |
+| Foliage | `foliage.vert` evaluated a second time at `time − dt` with the previous frame's displacers. The foliage uniform keeps both. **Foliage joins the prepass**, so GTAO and contact shadows now see brush (a tiered-only visual change) |
+| Sky and background (depth = 1) | a final fullscreen draw in the prepass at the far plane: the view direction through `prev_view_proj`, which gives camera rotation only |
+| Particles | see §2d |
+| Water, distortion, `Paint` decals | static geometry, so no motion of their own. Their changing shading goes into the masks (§2d) |
+| `Glow` decals, outlines | not in the scene; drawn post-upscale (§5) |
+
+**2c. Previous transforms: motion keys and the history.**
+- **The key.** `UnitInstance` gains `motion_key: u32` (0 means static, with no history) and
+  `motion_reset: bool`.
+  - The client sets `key = net_id << 8 | part` for every unit part.
+  - It sets key 0 for map instances.
+  - It sets `motion_reset` on the first frame a unit is drawn, and when
+    `teleported_between(net_id, previous_render_tick, render_tick)` is true. That query covers
+    respawns and recall completions only (`is_teleport`, `crates/net/src/interpolation.rs`).
+    Blinks and dashes are interpolated like any movement, so they get exact motion vectors and
+    need no reset.
+  - **The client keeps one new value for this:** the previous frame's `render_tick` (one
+    `f32`).
+  - **A renderer-side guard** also treats a key as reset when its drawn position moved more
+    than 20 m since the previous frame. No interpolated move can do that, so it only catches
+    teleports the client missed.
+- **The history.** The renderer keeps a fixed-capacity `MotionHistory` (open addressing,
+  4,096 entries, allocated at creation). Each entry maps a key to the **transform, joint
+  matrices and VAT pose the renderer drew on the previous presented frame**.
+  - An entry not seen this frame is dropped.
+  - A key that is missing, or has `motion_reset`, uses its current state as its previous
+    state.
+- **What the history holds is what was displayed,** not a re-query of the interpolator at
+  `render_tick − dt`. The 30 Hz snapshots are interpolated (and the own hero predicted) per
+  presented frame, so the drawn path is piecewise-linear between snapshots and bends at
+  prediction corrections. The motion that the reprojection needs is exactly that drawn path,
+  so the history captures it whatever the frame rate or the tick phase. Apart from the
+  previous render tick above, the client needs no new state.
+- **Upload.**
+  - `GpuInstance` stays **128 bytes** (pinned by `instances_are_128_bytes_with_the_outline_slot_last`).
+    The previous state goes into a parallel per-frame **previous-instance buffer**, indexed
+    like the instances: a 3×4 previous model matrix and the previous VAT samples (64 bytes).
+    Only the prepass's vertex shaders read it.
+  - This frame's bone buffer gets the previous palettes **copied in by the CPU**, next to the
+    current ones.
+  - Reading last frame's slot instead would race: with two frames in flight, frame N+1
+    rewrites the slot that frame N, still on the GPU, reads as "previous".
+  - The copy costs one more palette upload per skinned unit (about 30 KB for ten heroes).
+- **Reset of everything.** `Scene::history_reset` (set by the client on spectator switches,
+  minimap camera jumps, map loads and resizes) clears the motion history and every temporal
+  history. The renderer also resets automatically when the eye moves more than 8 m, or the
+  view turns more than 15°, in one frame.
+
+**2d. Reactive and transparency masks.**
+- **The targets.** `reactive` and `tc_mask` (transparency and composition) are `R8_UNORM` at
+  render resolution, cleared each frame. That matches FSR 3.1's masks; DLSS and XeSS take
+  the equivalents, or ignore them (§4b) [S1][S2][S5].
+- **Particles.**
+  - `vfx_draw` writes `reactive` with `MAX` blending:
+    - alpha particles write their alpha;
+    - additive particles write `min(1, luminance × k)`.
+
+    Both are clamped to 0.9, as FSR advises; XeSS clamps at 0.8 itself [S2][S5].
+  - **Dominant particle fragments also write motion vectors.** A fragment whose opacity is
+    at least 0.5 (projectile cores, opaque mesh particles) writes its own motion into
+    `motion`. The blend is `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` with an output alpha of
+    `step(0.5, α)`, so the result is an exact replace or an exact keep, with no `discard`.
+    *(Superseded by [amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)
+    item 13: real GPUs gate that blend by the source alpha and lavapipe does not, so a
+    motion-only draw now writes the motion of fragments from opacity 0.1.)*
+  - The previous position is `position − velocity·dt`. That inverts the integrator's position
+    step; whether the inversion is exact is to be confirmed against `vfx_simulate.comp`, and if
+    it is not, the 96-byte record stores the previous position.
+  - **Why this matters:** DLSS's reactive-mask equivalent (`BiasCurrentColor`) "should not be
+    used" with its current models [S1]. So for DLSS, motion vectors are the only defence
+    against particle ghosting.
+- **Distortion** (ADR-0019) writes `reactive` from `|offset| / cap`.
+- **`tc_mask`.** A small `tc_mask` raster pass after the VFX draws two kinds of surface
+  depth-tested into the mask (`MAX` blending): water surfaces (flow-scrolled normals and
+  refraction) and any material flagged `animated_uv`.
+- **Required feature.** The extra attachments blend differently from the HDR and OIT targets,
+  so the Tiered path **requires `independentBlend`** (§2e).
+- **Disocclusion** is detected by each back end. TAAU (§3) keeps the previous frame's linear
+  depth for it. The application supplies no disocclusion mask, since none of the back ends
+  asks for one.
+
+**2e. Amendment to ADR-0020 §1e.** The tiered required set gains `independentBlend` (a core
+feature). It is expected on every RT-capable desktop driver, but that is unverified per
+device until the reference fixtures (ADR-0020 §2b) record it. A device without it is Compat.
+
+### 3. In-house TAA/TAAU: the baseline on every tier
+
+- **Where it runs.** `temporal_taau.slang`, one compute pass at **output** resolution after
+  `vfx_resolve` and `tc_mask` and before bloom. It runs on every tiered tier and is never
+  used on Compat. As "TAA" it runs at native resolution (ratio 1.0); as "TAAU" it runs at
+  any ratio from 1.0 to 3.0.
+- **The algorithm.** Karis 2014 (SIGGRAPH Advances) with Playdead's INSIDE TAA as reference.
+  Playdead's TAA is MIT [S10]; it is a reference only and no code is copied.
+  1. **Dilated motion.** The motion vector of the nearest-depth pixel in a 3×3 cross keeps
+     the edges of moving units attached to the unit.
+  2. **History fetch.** A 5-tap Catmull-Rom of the output-resolution history at the
+     reprojected position.
+  3. **Upsampled current sample.** The render samples around the output pixel are weighted by
+     a Blackman-Harris kernel of their *jittered* distance. The total weight is also the
+     pixel's confidence.
+  4. **Neighbourhood clip.** A variance clip in YCoCg (γ 1.0, or 1.25 on static pixels),
+     clipping toward the mean.
+  5. **Blend.** Luminance-weighted (`1/(1+L)`) to stop flicker from fireflies.
+- **History.**
+  - `RGBA16F` at output resolution, a persistent ping-pong pair indexed by frame parity, plus
+    the previous linear depth (`R32F`, render resolution, ping-pong) for disocclusion.
+  - Both are imported persistent resources, like the fog-of-war images.
+  - A reset (§2c), a resize or the first frame writes the upsampled current colour with
+    weight 1.
+- **Ghosting rules,** tuned for fast MOBA units and VFX:
+  - **Base history weight:** 0.9 at native, rising with the ratio to 0.95 at 2×. The current
+    sample's confidence lowers it.
+  - **Velocity weighting.** The weight falls linearly to 0.8 at 8 output pixels per frame of
+    motion. A hero dashing 10 m in 0.2 s at 1440p and 120 fps moves about 11 px per frame.
+  - **Disocclusion.** Where the reprojected previous depth differs by more than 1 %
+    (relative), the history is rejected and the pixel restarts from the current sample.
+  - **Reactive pixels.** The current sample's weight is at least the reactive value.
+  - **`tc_mask` pixels.** The clip box narrows: γ is lowered by `0.5 × mask`.
+  - **Telegraphs and outlines never enter the history** (§5), so none of these rules is what
+    keeps them readable.
+- **Sharpening.**
+  - RCAS (MIT, FidelityFX) runs on the output in a reversible tonemapped space. For TAAU it
+    is fused into the same pass.
+  - One `sharpness` setting (0–1) is shared by every back end:
+    - FSR 3.1 uses its built-in RCAS [S2];
+    - DLSS and XeSS get our separate `sharpen` pass, since DLSS's own sharpening is
+      deprecated [S1].
+  - Defaults: 0.25 for TAAU and FSR 3.1, 0 for DLSS and XeSS. These are starting points; the
+    readability review tunes them.
+- **Debug views:** `MOBA_DEBUG_VIEW=motion|reactive|tc|disocclusion|confidence|overlay-ids`,
+  shipped with N1 (roadmap §4, rule 8).
+
+### 4. The upscaler interface
+
+**4a. One trait.** All back ends sit behind one trait in `crates/render/src/upscale/`,
+chosen at renderer creation. Vendor code stays behind `vendor/` (ADR-0020 §6a), and call
+sites never `cfg`.
+
+```rust
+pub(crate) trait TemporalUpscaler {
+    fn kind(&self) -> UpscalerKind;               // Taau, Fsr3, Dlss, Fsr4, Xess
+    fn render_size_range(&self, output: Extent, mode: UpscaleMode) -> (Extent, Extent);
+    fn jitter_phases(&self, render: Extent, output: Extent) -> u32;
+    fn has_sharpening(&self) -> bool;
+    fn record(&mut self, cmd: vk::CommandBuffer, inputs: &UpscaleInputs, out: &UpscaleOutput);
+    fn reset_history(&mut self);
+    fn vram_bytes(&self) -> u64;
+}
+```
+
+- **`UpscaleInputs`** carries, all at render resolution in the sub-rectangle:
+  - the jittered linear HDR colour;
+  - depth;
+  - `motion`, `reactive` and `tc_mask`;
+  - a 1×1 `R32_SFLOAT` **linear exposure multiplier**. Today's 1×1 image holds the adapted
+    **EV** (log2), possibly as `R16_SFLOAT` (`frame_graph.rs`), and the composite applies
+    `push.exposure × exp2(EV)` (`composite.frag`). So a new one-texel `exposure_linear`
+    compute pass, just before `temporal`, writes that product into a separate `R32_SFLOAT`
+    image (or `push.exposure` alone when auto exposure is off);
+  - the jitter in render pixels;
+  - the render size this frame;
+  - `dt` in milliseconds;
+  - the camera's near and far planes and vertical field of view. `Camera` holds only
+    `view_proj` today, and `Camera::orbit` hard-codes 60°, 0.1 and 1,000 (`scene.rs`). So
+    `Camera` gains `fov_y`, `near` and `far`, set by `perspective` and `orbit` (0 for the
+    orthographic offscreen views, which never upscale);
+  - the reset flag;
+  - the sharpness.
+- **`UpscaleOutput`** is the `hdr_out` storage image (`RGBA16F`, output resolution).
+- **The exposure lags by one frame under auto exposure.** The exposure pass meters bloom's
+  last mip, which is built from `hdr_out`, so it runs after `temporal`. The multiplier the
+  upscaler sees is therefore the previous frame's adapted value, while the composite uses
+  this frame's.
+  - The difference is one adaptation step, `k = 1 − exp(−dt · adaptation)` of the gap (ADR-0015
+    §2), which is small at gameplay frame rates.
+  - It is **zero with fixed exposure**, which is the gameplay default (roadmap §4, rule 5:
+    exposure locked or limited in play).
+  - DLSS wants the current frame's value [S1]. Its presets L and M auto-expose anyway (L
+    verified, M **unverified**: the guide names only L) [S1].
+- **Inside the render graph,** the upscaler is one pass. The graph moves each input to
+  shader-read and the output to general before it, as the SDKs require [S1][S2]. The back
+  end records only its own dispatches.
+- **Creation.** Contexts are created with the renderer at the **maximum** render size of the
+  dynamic-resolution range. They are re-created with it on resize or a settings change,
+  never mid-match.
+  - DLSS presets L and M allocate for the creation size, and reallocate with "severe frame
+    time spikes" if an input exceeds it [S1].
+
+**4b. Back ends.**
+
+| Back end | Feature | Platforms | Inputs used | Modes (render ÷ output per axis) | Notes |
+|---|---|---|---|---|---|
+| **TAAU** (in-house, Slang) | always built | Linux, Windows, every tiered device | colour, depth, motion, reactive, tc, exposure | any, 1.0–3.0 | The baseline and the final fallback. Used in goldens |
+| **FSR 3.1.6** | `fsr3` (default on) | Linux, Windows; any vendor | colour, depth, motion (scale 1, 1), reactive, T&C, exposure | NativeAA 1.0, Quality 1.5, Balanced 1.7, Performance 2.0, Ultra Performance 3.0 [S2] | Our port of the MIT shaders under `third_party/fidelityfx/` (ADR-0020 §6a, Q9). The SDK build itself is Windows-only. Its manual puts tonemapping and bloom after FSR [S2] |
+| **DLSS SR** (NGX direct) | `dlss` | Linux `.so`, Windows `.dll`; NVIDIA RTX (ADR-0020 [S16]) | colour, depth, motion (`InMVScale` 1, 1), jitter, exposure (presets J/K only; preset L always auto-exposes; M not stated, so **unverified**) [S1] | Ultra Performance 3.0, Performance 2.0, Balanced 1.724, Quality 1.5, DLAA 1.0 [S1] | No reactive mask: `BiasCurrentColor` must not be used with the current models [S1]. Default presets per the 310.6.0 guide: K (DLAA, Quality, Balanced), M (Performance), L (Ultra Performance) [S1]. Must run before tonemapping [S1]. Streamline is not used for SR |
+| **FSR 4.1.2** | `fsr4` | **Windows only**; RX 6000+ (ADR-0020 [S22]) | as FSR 3.1, through the FidelityFX API | as FSR 3.1 | The signed DLL is loaded with `libloading`. The FidelityFX API picks an effect version at context creation (`ffxQueryDescGetVersions`) [S3]. That FSR 4 is reached through the same Vulkan upscale descriptors as FSR 3.1 is consistent with the v2.4.0 notes [S4] but **unverified** line by line. Licence ambiguous: development-only (ADR-0020 Q6) |
+| **XeSS SR 3.0.2** | `xess` | **Windows only** (the guide lists Windows 10/11 only [S5]); Intel, plus DP4a elsewhere | colour, motion (low-res, R16G16_FLOAT), depth, exposure, responsive mask (clamped at 0.8) [S5] | XeSS 1.3+ names: Native AA 1.0, Ultra Quality Plus 1.3, Ultra Quality 1.5, Quality 1.7, Balanced 2.0, Performance 2.3, Ultra Performance 3.0 [S5] | `xessVK*` needs Vulkan 1.1, `shaderStorageImageWriteWithoutFormat` and `mutableDescriptorType` [S5]. Its instance and device extensions are declared before device creation (ADR-0020 §1e) |
+
+- **One naming scheme.** The menu always shows our five modes by **ratio**: Native 1.0,
+  Quality 1.5, Balanced 1.7, Performance 2.0, Ultra Performance 3.0. FSR's manual asks for
+  consistent naming [S2].
+  - XeSS gets its preset with the same ratio: our Quality is XeSS "Ultra Quality". Each
+    frame it is also given the explicit input size, which XeSS accepts within its min–max
+    range [S5].
+  - DLSS gets the nearest NGX mode; its optimal-settings query returns the render-size range.
+- **Per-tier defaults** follow ADR-0020 §5b:
+  - Quality on Low, Medium and High;
+  - Ultra: Quality at 1440p, Performance at 4K;
+  - Overdrive: Performance (Ray Reconstruction arrives in N9).
+- **Back-end order under `auto`.** It takes the first back end that is compiled in and
+  supported by the device:
+  1. DLSS on NVIDIA RTX;
+  2. FSR 4 on RDNA 2+ under Windows, once it has been verified on AMD hardware ([verification gate 5](#verification-and-evidence-gates)) and
+     its licence is settled (ADR-0020 Q6);
+  3. XeSS on Intel Arc;
+  4. **TAAU** (see Q1 for when FSR 3.1 takes this slot).
+
+  FSR 3.1 is always selectable.
+- **Fallbacks.** A back end that fails to load (a missing DLL, an NGX init error, an
+  unsupported mode) falls to the next one with one log line. The device is never rejected,
+  and the frame never runs without temporal AA unless the player turned it off.
+- **The AA switch.** `MOBA_AA` accepts `temporal|fxaa|off|msaa4`. Today's parser
+  (`AntiAliasing::from_name`, used by `crates/client/src/app/launch.rs`) accepts
+  `off|fxaa|msaa4`; `temporal` is added with `AntiAliasing::Temporal`.
+  - **`temporal`** is the tiered default.
+  - **`fxaa` and `off`** are the off switch on Tiered: no jitter, no history, and today's
+    render-resolution chain (composite → `ldr`, FXAA when chosen, bicubic `upscale`). The
+    overlay still runs at output resolution, after the upscale (§5a).
+  - **`msaa4`** is Compat-only. On Tiered it is refused with one log line (§7).
+- **Settings and logs.**
+  - `MOBA_AA=temporal|fxaa|off|msaa4` (above);
+  - `MOBA_UPSCALER=auto|taau|fsr3|dlss|fsr4|xess`;
+  - `MOBA_UPSCALE_MODE=native|quality|balanced|performance|ultra-performance`;
+  - `MOBA_SHARPNESS=0..1`;
+  - frame logs gain `upscaler=`, `render_scale=` and `jitter_phases=`.
+
+**4c. Dynamic resolution** (ADR-0020 §5c).
+- The controller and its range are unchanged from ADR-0020 §5c, and this ADR does not amend
+  them:
+  - the ceiling is the preset mode's scale;
+  - where the ceiling is Quality (0.67), the floor is Performance (0.50), two modes down,
+    skipping Balanced;
+  - where the ceiling is already Performance (Ultra at 4K, Overdrive), the floor is Ultra
+    Performance (0.33), one mode down.
+- Each frame's render size goes to the back end. Jitter phases and `mip_bias` follow it.
+- **DLSS.** The controller's floor is clamped to the minimum that NGX reports. If NGX
+  reports no dynamic-resolution support (minimum = maximum) for a mode, dynamic resolution is
+  off while DLSS runs, and the frame log says so [S1].
+- **XeSS** accepts any input size between the minimum and maximum given at init [S5].
+- **FSR 3.1.** That its dispatch accepts any render size up to the context maximum is
+  **unverified** (the manual pages read do not cover it); the port settles it.
+- **Aspect ratio.** The render aspect ratio always equals the output's. DLSS requires it, and
+  XeSS recommends it [S1][S5]. The controller scales both axes together.
+
+### 5. The post-upscale gameplay overlay layer
+
+Roadmap §4 rule 1: outlines, team rims, telegraphs, range indicators, selection and the HUD
+are drawn **after upscaling, at output resolution**, and never enter any history.
+
+**5a. The tiered frame from N1:**
+
+```text
+(portraits, minimap) → (fow) → vfx_simulate → (shadow)
+→ prepass         render res, jittered: depth + motion (+ unit mask when distortion is on)
+                  terrain, units, skinned, VAT, foliage; far-plane background-motion draw
+→ (contact_shadows, ao, ao_blur)
+→ scene           render res, jittered; no Glow decals, no hull outlines
+→ (water_copy → water) → (distortion_copy → distortion [+ reactive])
+→ vfx_draw [+ reactive, + dominant-particle motion; telegraph particles excluded] → (vfx_resolve)
+→ tc_mask         water surfaces and animated-UV materials → tc_mask
+→ temporal        TAAU | FSR 3.1 | DLSS | FSR 4 | XeSS → hdr_out (output res) [→ sharpen]
+→ bloom_d*, exposure, bloom_u*   from hdr_out
+→ composite       AgX, grading, screen effects → ldr (output res)
+→ overlay_prepass output res, unjittered: terrain, water surfaces, walls, props, units
+                  → overlay depth (D32) + overlay IDs (R8_UINT)
+→ overlay         ldr + overlay depth/IDs + decal bins + outline palette → swapchain:
+                  Glow decals (telegraphs, zones, range indicators), outlines, selection
+→ overlay_vfx     enemy-telegraph particles, depth-tested against the overlay depth
+→ ui → (capture)
+```
+
+With temporal off (`MOBA_AA=fxaa|off`), the middle of the frame is today's chain: `scene` …
+`vfx_resolve`, then bloom and exposure at render resolution, `composite` → `ldr`, `fxaa` and
+`upscale` → an output-resolution `ldr_out`. The overlay passes then read `ldr_out` and write
+the swapchain exactly as above, so the overlay never depends on the AA mode.
+
+- **Composite moves to output resolution.** Bloom, exposure and composite now run on
+  `hdr_out`. FSR places tonemapping and bloom after the upscaler [S2], and DLSS must run
+  before tonemapping [S1].
+- **Team rims stay in the lighting** (rule 2, N2). They are lighting, and they reconstruct
+  with the scene.
+- **The overlay prepass has no data dependency on the scene,** so the graph may schedule it
+  anywhere after the shadow pass.
+
+**5b. What moves, and from where.**
+
+| Item | Today | From N1 on Tiered |
+|---|---|---|
+| Enemy and ally telegraph decals, zones, future range indicators (`DecalStyle::Glow`) | composited in the terrain, water and foliage shaders, in HDR before the tonemap | the `overlay` fullscreen pass. Each output pixel's ground position comes from the overlay depth. Decals are evaluated with the same 32×32 ground bins and `decals.glsl` shape code. The scene shaders' `apply_glow_decals` is compiled out of the tiered permutations |
+| Enemy-telegraph ring particles (`ParticleRole::EnemyTelegraph`) | `vfx_draw` into HDR | `vfx_simulate` compacts them into their own list, which `overlay_vfx` draws at output resolution with the composite's exposure and AgX applied in-shader (as the UI's `MODE_IMAGE` does), so they look the same |
+| Team, hover and selection outlines (slots 1–6) | `outline` at render resolution before FXAA and the upscale; hull outlines on Low and Medium | the `overlay` pass dilates the **overlay IDs** at output resolution. Widths are output pixels, with no render-scale factor. Hull outlines are Compat-only |
+| Health bars, HUD, minimap, portraits | `ui` at native resolution | unchanged |
+| `Paint` decals (scorch, splats) | in the albedo | unchanged: surface detail, not readability |
+
+**5c. Depth for the overlay: a full-resolution, unjittered overlay prepass.**
+- **What it draws.** A depth pass at output resolution with the **unjittered** matrix,
+  writing `D32_SFLOAT` plus an `R8_UINT` class/ID, for:
+  - the terrain, as class `GROUND`;
+  - the water surfaces, as class `GROUND`, so a telegraph lands on the surface as it does
+    today;
+  - walls, props and structures, as `OCCLUDER`;
+  - every unit: its outline slot, or `OCCLUDER` when it has none.
+- **What it leaves out.** Foliage (decorative; brush is at most 1.4 m and the simulation has
+  none), particles and the sky.
+- **Telegraphs** draw only on `GROUND` pixels. So a unit standing in a telegraph still covers
+  it, as "units never take decals" requires today (ADR-0017 §1).
+- **Outlines** draw only the exterior of a slot's silhouette, as today.
+- **Hidden information.** The ID is depth-tested against walls and terrain, so a unit fully
+  behind a wall has no ID pixels and no outline (ADR-0016 §2). `scripts/outline-probe.sh`
+  gains a tiered run.
+- **Telegraph contrast moves to display space.**
+  - The rim rule (luminance at least 1.8× the background's plus 0.05, a dark halo at 20 %,
+    ADR-0017 §1) is evaluated against `ldr`, the exact displayed background.
+  - `glow_reference`'s CPU twin and its tests are re-derived for display-referred input.
+  - Telegraphs no longer take bloom, the grade or the screen effects (death desaturation, the
+    vignette). Losing bloom is a visible change. The overlay draws its own fixed soft halo
+    instead (Q4).
+- **The overlay IDs depend only on geometry and the unjittered camera.** That makes
+  **overlay coverage identical whichever back end runs**, which is what the readability test
+  checks ([verification gate 3](#verification-and-evidence-gates)).
+- **Distortion's unit mask** (ADR-0019 §3) stays at render resolution. The jittered prepass
+  keeps a 1-bit unit mask when distortion is on, because the distortion pass is jittered too.
+
+### 6. Latency: Reflex and Anti-Lag
+
+**6a. Back ends.** A `LatencyBackend` trait (roadmap §7) has three implementations. Both
+extensions are default-build items (ADR-0020 §6a), and both are on by default when present.
+
+- **NVIDIA: `VK_NV_low_latency2`** (revision 3, last modified 2026-08-12) [S6].
+  - It needs Vulkan 1.2 or `VK_KHR_timeline_semaphore`, and `VK_KHR_present_id` or
+    `VK_KHR_present_id2` [S6].
+  - The swapchain is created with `VkSwapchainLatencyCreateInfoNV`. Every submit chains
+    `VkLatencySubmissionPresentIdNV`, which only revision 3 respects [S6].
+  - `vkSetLatencySleepModeNV` sets `lowLatencyMode`, `lowLatencyBoost` and
+    `minimumIntervalUs`. `vkLatencySleepNV` enforces `minimumIntervalUs` even when low-latency
+    mode is off [S6].
+  - All of these exist in `ash` 0.38. The structures were checked in its generated
+    `definitions.rs`.
+- **AMD: `VK_AMD_anti_lag`** (revision 1, 2024-06-06) [S7].
+  - It provides `vkAntiLagUpdateAMD` with `VkAntiLagDataAMD { mode, maxFPS,
+    pPresentationInfo { stage, frameIndex } }`. The modes are
+    `DRIVER_CONTROL/ON/OFF` and the stages `INPUT/PRESENT` [S7].
+  - It needs the `ash` git pin (ADR-0020 §1b).
+- **Null:** no latency extension.
+- **When both are present, NVIDIA's wins.** On this machine Mesa 26.2's
+  `VK_LAYER_MESA_anti_lag` implicit layer also advertises `VK_AMD_anti_lag` on the NVIDIA
+  device (local `vulkaninfo`).
+- **Mesa 26.3 deletes that layer.** Its MR !42048 ("radv: VK_AMD_anti_lag", merged
+  2026-10-08) adds a shared `vk_frame_pacer` framework, implements `VK_AMD_anti_lag` natively
+  in RADV, and includes the commit "vulkan: delete anti-lag layer" (`b99595dedb85`). That
+  commit is on the `26.3` branch and in tags `mesa-26.3.0-rc2` and `rc3` [S8].
+  - So from Mesa 26.3, `VK_AMD_anti_lag` exists only on Mesa drivers that implement it (RADV
+    first), and the NVIDIA proprietary driver offers only `VK_NV_low_latency2`.
+  - The selection rule above covers both cases. The back end never depends on the layer.
+
+**6b. Frame pacing and the frame loop.**
+- **The sleep.** It must happen before input is gathered, and exactly once between presents
+  [S6][S7].
+  - winit delivers input events before `RedrawRequested`, so the sleep cannot sit at the top
+    of `on_frame`: the events would already be stale.
+  - Instead `moba-platform`'s `Runner::update` calls a new `App::pace()` hook **after**
+    `on_frame` returns, so after this frame's present.
+  - The client implements it with `Renderer::latency_sleep()`:
+    - Reflex: `vkLatencySleepNV`, then `vkWaitSemaphores` on its timeline semaphore;
+    - Anti-Lag: `vkAntiLagUpdateAMD` at stage `INPUT`.
+  - The OS queues the events that arrive during the sleep, and winit delivers them before
+    the next `RedrawRequested`. The next frame therefore samples the freshest input.
+  - `moba-platform` stays Vulkan-free; the hook is a plain trait method.
+- **Markers.** For Reflex, using the frame's present ID (one `u64` counter owned by the
+  renderer):
+  - `SIMULATION_START` and `INPUT_SAMPLE` at the top of `on_frame`;
+  - `TRIGGER_FLASH` on a left click;
+  - `SIMULATION_END` after the scene build;
+  - `RENDERSUBMIT_START` and `RENDERSUBMIT_END` inside `Renderer::render_*`, around
+    recording and `vkQueueSubmit2`;
+  - `PRESENT_START` and `PRESENT_END` around `vkQueuePresentKHR` [S6].
+
+  Anti-Lag gets its `PRESENT` stage call before the present, with the same frame index [S7].
+- **The 30 Hz simulation is unaffected.**
+  - `FixedStep` still turns wall-clock deltas into whole ticks, so the sleep only moves
+    *when* a frame starts.
+  - Network receive and send stay in `on_frame`. The sleep is bounded by one frame interval,
+    so a snapshot waits at most that long, as it does under today's frame limiter.
+  - The gain is the render queue: the cursor, the camera, the predicted own hero and the
+    click feedback reach the screen sooner. Server round trips do not change.
+- **One limiter, not two.** With Reflex or Anti-Lag active, the platform's `WaitUntil`
+  limiter is disabled. Today nothing can do that: `Runner::new` fixes `frame_interval` from
+  `WindowConfig::max_frame_rate` (`crates/platform/src/app.rs`).
+  - So `App::pace()` returns a `Pacing` value: `Platform` keeps the `WaitUntil` limiter, and
+    `External` means the app paced the frame itself, so the next frame is due at once.
+  - The default implementation returns `Platform`, so other apps are unchanged. `max_frame_rate` becomes `minimumIntervalUs = 10⁶ / max_frame_rate`
+  (Reflex) or `maxFPS` (Anti-Lag) [S6][S7].
+- **Settings and evidence.**
+  - `MOBA_LATENCY=off|on|boost`. Boost sets `lowLatencyBoost` and is off by default.
+  - Frame logs record `vkGetLatencyTimingsNV` (simulation, render-submit, present, GPU and
+    total) where available, as roadmap §3's latency reporting needs.
+- **Frame generation is N9.** There, Reflex moves to `sl.reflex` on Windows (roadmap §7).
+
+### 7. Retiring MSAA
+
+- **When.** In the N1 change that makes the temporal pass the tiered default, not before
+  (ADR-0020 §5e). Until then tiered Medium and up keep MSAA 4×.
+- **What replaces it:**
+
+| Path | Low | Medium | High | Ultra | Overdrive |
+|---|---|---|---|---|---|
+| Tiered | TAAU or vendor, Quality | same | same | same; Performance at 4K | Performance (+ RR in N9) |
+| Tiered, temporal off | FXAA + bicubic | same | same | same | same |
+| Compat (frozen) | FXAA fast | FXAA | FXAA | **MSAA 4×** (unchanged) | clamps to Compat Ultra |
+
+- **The code.**
+  - On the Tiered path, `AntiAliasing::Msaa4` is refused with one log line (temporal is used
+    instead), and `AntiAliasing` gains `Temporal`.
+  - The tiered renderer creates no multisample pipelines and no 4× attachments.
+  - The MSAA code stays because Compat uses it.
+  - Compat's MSAA and hull-outline paths freeze with Compat after C1.
+- **Goldens.**
+  - Every Compat golden, the MSAA-on Ultra one included, is captured with
+    `MOBA_RENDER_PATH=compat` and stays **byte-identical**. N1 changes no Compat pixel. The
+    `mip_bias` and jitter fields are zero there; any difference fails the PR.
+  - New tiered goldens on lavapipe, at small resolution with the §1 warm-up:
+    - TAAU at Low (Quality) and at High;
+    - TAAU at native;
+    - FSR 3.1 at Quality;
+    - the overlay over moving and occluded units. A single pinned tick has no motion, so this
+      golden pins **two** ticks: the warm-up runs at tick `n`, then the captured frame is at
+      tick `n + 1`, with the interpolation and animation pinned to each. This extends today's
+      single-tick capture mode (`app.rs`) to a two-tick script. Units move by one tick's step, and the camera
+      pans by a scripted fixed offset between the two.
+  - Vendor back ends are not in goldens: they are not on lavapipe, and DLSS models update
+    over the air (ADR-0020 §6a).
+- **The perf gate.**
+  - Tiered budgets **start failing `perf-gate` when N1 merges**, as ADR-0020 §5d planned.
+  - Tiered baselines are re-recorded per `(gpu, path, tier)`, with the upscaler named in the
+    log.
+  - Compat budgets and baselines are unchanged.
+- **VRAM** (estimates, to be replaced by `docs/perf/` measurements):
+  - **Removed:** MSAA 4× colour and depth, about 180 MB at native 1440p (ADR-0015).
+  - **Added at 1440p Quality** (render 1707×960), about 130 MB in all:
+    - the history pair (59 MB);
+    - `hdr_out` (29.5 MB);
+    - the overlay depth and IDs (18.4 MB);
+    - the previous-depth pair (13 MB);
+    - `motion` (6.6 MB);
+    - the two masks (3.3 MB).
+  - The vendor back ends' own memory is reported by `vram_bytes()`.
+
+### 8. Determinism and the invariant
+
+- Rendering still never touches the simulation, the wire, replays or the state hash.
+- **Jitter, motion keys and histories are presentation state inside `moba-render`.** Motion
+  keys are derived from `net_id`s the client already has, read-only.
+- **Picking is jitter-free by construction:**
+  - jitter lives only in the renderer's GPU uniforms (`CameraUniform`, `VfxUniform`,
+    `EnvironmentBlock` and GTAO's push block, §1);
+  - the client's `Camera` has no jitter field;
+  - `cursor_ground` and `hovered_unit` read only the client's matrix.
+
+  So a cursor position produces the same `FixVec2`, the same `WireCommand` bytes and the same
+  replay frame whatever the AA, upscaler or render scale
+  ([verification gate 1](#verification-and-evidence-gates)).
+- **Overlay IDs never widen what a player sees.** They come from `Scene::units` only, which
+  holds only what the server sent, and they are depth-tested (ADR-0016's hidden-information
+  rule).
+- The latency sleep changes when a frame starts, never what the frame contains or what the
+  client sends.
+
+## Departures from the roadmap
+
+| Roadmap says | This ADR decides | Why |
+|---|---|---|
+| §5.3: exact motion vectors for particles (previous position) | Only fragments with opacity ≥ 0.5 write motion. All particles write the reactive mask (§2d) | Most particles are translucent layers without depth. For those, a reactive mask is what every SDK asks for; a single motion vector would be wrong for the layers behind it |
+| §5.3: water and scrolling materials in "reactive masks" | The separate transparency-and-composition mask (§2d) | FSR distinguishes the two: T&C keeps history while removing locks, reactive reduces history [S2]. Water would flicker under a reactive mask |
+| §5.2: "MSAA 4× is retired … on every tier" | Retired on the five tiered tiers. **Compat Ultra keeps MSAA 4×** (§7) | Compat is frozen and has no temporal path (ADR-0020 §2d) |
+| §4 rule 1 lists the overlay contents | Also moves `ParticleRole::EnemyTelegraph` particles and every `Glow` decal, not only "decal telegraphs" (§5b) | Particle telegraphs carry the same readability rule (ADR-0013). Zones and ranges are gameplay information |
+
+## Corrections to the roadmap
+
+These were re-checked on 2026-10-31. Only a link from roadmap §12 is added here; the
+maintainer may fold these in when this ADR is accepted.
+
+- **§5.3, the FSR 3.1.6 row, "Godot ships a GLSL port".** Godot vendors **FSR 2.2.1** (MIT,
+  `thirdparty/amd-fsr2`) and FSR 1.0.2. It has no FSR 3.x entry [S9]. Our FSR 3.1 port is
+  our own work, from SDK v2.4.0's MIT HLSL, with FSR 3.1.4's GLSL from SDK v1.1.4 as the
+  fallback (ADR-0020 §6a). ADR-0020 Q9's "as Godot did" means the approach, not a port we
+  can reuse.
+- **§5.3 and §7, DLSS SR** [S1]:
+  - Exposure input is honoured only by presets J and K; preset L always auto-exposes.
+  - The `BiasCurrentColor` (reactive) mask must not be used with the current models.
+  - DLSS's own sharpening is deprecated; NVIDIA points to NIS.
+  - The default presets (guide 310.6.0) are K for DLAA, Quality and Balanced, M for
+    Performance and L for Ultra Performance.
+  - DLSS must run before tonemapping.
+  - With L and M, dynamic resolution costs as much as the maximum size it was created with.
+- **§7, XeSS.**
+  - The ratios changed in XeSS 1.3: "Quality" is 1.7× and "Ultra Quality" 1.5×, so the
+    roadmap's "Quality (~720p)" at 1080p is XeSS Ultra Quality [S5].
+  - Windows-only is confirmed by the guide's requirements [S5].
+- **§7, Reflex.** `VK_NV_low_latency2` is now at revision 3 (2026-04-20, frame attribution
+  clarified; `VkLatencySubmissionPresentIdNV` only respected from revision 3) [S6].
+- **Confirmed unchanged:**
+  - FSR 3.1's inputs, its 1.5/1.7/2.0/3.0 ratios, and tonemapping and bloom after the
+    upscaler [S2];
+  - FidelityFX SDK v2.4.0 with FSR 3.1.6 and FSR 4.1.2 (Vulkan) [S4];
+  - Anti-Lag's API [S7];
+  - Mesa 26.3 bringing native RADV Anti-Lag, still unreleased (rc3 tagged 2026-10-30). It
+    also deletes Mesa's anti-lag layer [S8].
+
+## Alternatives considered
+
+- **Keep MSAA under TAA.** About 180 MB at 1440p, every scene pipeline doubled, and no
+  upscaling benefit. The vendor upscalers expect single-sample input. Rejected.
+- **The overlay at render resolution, kept out of history through the reactive mask.** It
+  would still be upscaled, and so softened, and every back end treats the mask differently
+  (DLSS ignores it). It fails §4 rule 1. Rejected.
+- **Overlay depth from the upsampled render depth** (nearest sample, with the jitter removed)
+  instead of the overlay prepass. It saves one output-resolution geometry pass, but the
+  silhouette edges are quantised to `1/scale` output pixels, which is 1.5 px at Quality, and
+  outlines step and crawl. It is kept as the measured fallback for Low if the overlay
+  prepass misses its cost gate (Q2).
+- **Analytic heightfield intersection for telegraphs** (no overlay depth). It is exact for
+  the ground, but it still needs a unit mask at output resolution, so a prepass is needed
+  anyway. Rejected.
+- **The client supplies the previous transforms.** That would need new client state per
+  `net_id` for transforms, palettes and VAT poses. The renderer's history keyed by the client
+  records exactly what was drawn, with no new client state. Rejected.
+- **Motion vectors from the scene pass** instead of the prepass. They would be written under
+  shading, with no benefit before N2's G-buffer. Rejected.
+- **Motion vectors in NDC or UV units.** Every SDK accepts a scale, but pixels match XeSS's
+  default and FSR's documented range without conversion [S2][S5]. Rejected.
+- **DLSS SR through Streamline.** Streamline is Windows-only, and NGX-direct covers Linux and
+  Windows (roadmap §5.3). Streamline arrives with frame generation in N9.
+- **The Reflex SDK instead of the extension.** It is a closed SDK under the RTX licence, for
+  no functional gain over `VK_NV_low_latency2` (ADR-0020 §6a). Rejected.
+- **FSR 1 or a spatial upscaler as the tiered baseline.** It has no temporal stability, and
+  the roadmap's tiers assume temporal reconstruction. It stays as the "temporal off" bicubic
+  path.
+- **Reversed-Z now.** Every back end supports it, but it touches every depth consumer, and
+  N2 rewrites those anyway. Deferred to N2.
+
+## Consequences
+
+- **Wire, replays and determinism: no change.** No version or hash moves.
+- **Frame shape.**
+  - The tiered post chain runs at output resolution (bloom, exposure, composite), which costs
+    more at 4K than today's render-resolution chain.
+  - FXAA and `upscale` leave the tiered default.
+  - The graph gains `tc_mask`, `temporal`, `sharpen`, `overlay_prepass`, `overlay` and
+    `overlay_vfx`, and loses `outline`, `fxaa` and `upscale` on Tiered.
+  - `MAX_RESOURCES` (48) is near the `u64` mask's 64. If the largest tiered topology needs
+    more, the mask widens to `u128` in the same PR. The topology test compiles every variant
+    against the limits.
+- **Shaders.**
+  - Every new pass is Slang: `temporal_taau`, the masks, the overlay, the overlay prepass and
+    `sharpen`.
+  - The tiered permutations of today's GLSL scene shaders gain the `motion` output (prepass),
+    the `mip_bias` argument and a compiled-out `apply_glow_decals`.
+  - `include/camera.glsl` and `include/vfx.glsl` are shared, so Compat's GLSL gains the new
+    members too. That is a **layout change only**: Compat writes zero jitter and equal
+    matrices, and its pixels stay byte-identical (checked by its goldens).
+- **Instance and upload data.**
+  - `GpuInstance` stays 128 bytes. A parallel 64-byte-per-instance previous-instance buffer
+    holds the previous model matrix and VAT samples (§2c).
+  - The bone upload carries the previous palettes too.
+  - A one-texel `exposure_linear` pass is added (§4a).
+  - `MotionHistory` holds a fixed 4,096 entries.
+- **Readability changes that can be seen:**
+  - telegraphs lose bloom and the grade;
+  - brush enters GTAO;
+  - outlines become crisp at output resolution on every tier, and hull outlines are gone from
+    Tiered.
+- **Public API** (additive, `#[non_exhaustive]`):
+  - `UnitInstance::{motion_key, motion_reset}`;
+  - `Scene::history_reset`;
+  - `AntiAliasing::Temporal`;
+  - `UpscalerKind`, `UpscaleMode`, `PostConfig::{upscaler, upscale_mode, sharpness}`;
+  - `LatencyMode`;
+  - `Renderer::{latency_sleep, latency_marker, latency_report}`;
+  - `Camera::{fov_y, near, far}`, set by the constructors (§4a);
+  - `moba_platform::App::pace() -> Pacing` and `moba_platform::Pacing { Platform, External }`.
+    The default does nothing and returns `Platform`.
+- **Work estimate.** This is the roadmap's **L**. It lands as four PRs on the critical path:
+  1. N1a: jitter, motion vectors and masks, TAAU, the overlay layer, MSAA retired;
+  2. N1b: the FSR 3.1 port;
+  3. N1c: DLSS, FSR 4 and XeSS;
+  4. N1d: latency.
+
+  N1a alone closes the readability requirements. For `perf-gate`, N1a makes Tiered's absolute
+  per-tier budgets fail and commits report-only `[tiered.<tier>]` baselines; the last N1 part
+  to merge makes the baseline regression check fail (amendment 2, item 16).
+
+## Verification and evidence gates
+
+These follow roadmap §10 and ADR-0020's gates, applied to N1.
+
+1. **Jitter and picking.**
+   - Unit tests: the Halton values, the phase counts (8, 18, 24 at 1.7× and at 1.724×, 32,
+     72) under the `ceil` rule of §1, the sign convention,
+     and the index surviving a scale step.
+   - A client test: the same cursor gives byte-identical `WireCommand`s with
+     `MOBA_AA=temporal`, `fxaa` and `off` (§4b), and at render scales 0.5 and 1.0.
+   - A renderer test: `Scene::camera` is unchanged after `render`.
+2. **Motion vectors.**
+   - A CPU twin computes the expected motion for:
+     - a translating static instance;
+     - a skinned instance;
+     - a VAT instance across a pose change;
+     - foliage;
+     - the camera.
+   - A lavapipe frame pair must match it within 1/64 render pixel.
+   - `motion_reset` and absent keys give camera-only motion.
+3. **Readability (merge-gating):**
+   - **Ghost energy.** A hero dashes at maximum speed and a projectile crosses the screen.
+     Over 20 frames, the area behind the unit that differs from a no-history render by more
+     than 4/255 stays under a fixed bound, for TAAU and FSR 3.1 on lavapipe, and for DLSS on
+     the RTX. *(Amendment 4 item 14: on a real GPU as well; lavapipe alone once passed a
+     particle-motion bug.)*
+   - **Overlay invariance.** The overlay ID target is byte-identical under TAAU, FSR 3.1,
+     temporal off and every render scale.
+   - **Telegraph contrast** in display space, over backgrounds from black to 16× white.
+   - **`outline-probe.sh` on Tiered.**
+4. **Goldens.**
+   - Every Compat golden is byte-identical.
+   - The new tiered goldens (§7) are byte-identical across two lavapipe runs, with
+     validation and sync validation clean.
+5. **Back ends.**
+   - DLSS SR on the RTX 5070 Ti (Linux) and in `windows-vm`.
+   - XeSS (DP4a) in `windows-vm`.
+   - FSR 4 only on an AMD card. Until one is on hand it is **unverified** at run time and
+     not enabled by `auto`.
+   - With each binary removed, the client starts and falls back with one log line.
+   - Validation is clean around each vendor dispatch. Any message inside an SDK is recorded
+     and reported upstream, never filtered silently.
+6. **Performance.**
+   - Tiered budgets fail `perf-gate` from N1. Medians of 3 interleaved rounds.
+   - Per-pass lanes for `prepass`, `temporal`, `overlay_prepass`, `overlay` and `tc_mask`.
+   - The overlay prepass must cost **≤ 0.4 ms at 1080p on the Low reference class**. It is
+     estimated from the 5070 Ti until an RTX 2060 is on hand, and estimates never close a
+     target.
+   - `locked_uploads=0` and `locked_pipelines=0` hold with every back end.
+   - VRAM is reported against the MSAA it replaced.
+7. **Latency.**
+   - Reflex timings in the frame log on the RTX: PC latency with Reflex on and off, over the
+     teamfight replay.
+   - Anti-Lag: a functional smoke test on RADV with **native** `VK_AMD_anti_lag` (Mesa 26.3,
+     a release candidate until it ships; the 26.2 layer is not a target, since 26.3 deletes it),
+     and numbers on an AMD card.
+   - Pacing (p99 ÷ p50 ≤ 1.5, R8) holds with the platform limiter replaced.
+
+## Open questions for the maintainer
+
+1. **Which back end should `auto` fall back to in the open build: in-house TAAU or FSR 3.1?**
+   *Recommendation:* TAAU first. It ships in N1a and is ours to tune for the ghosting tests.
+   FSR 3.1 takes the slot when its port passes the same readability tests and costs within
+   0.2 ms of TAAU on the 5070 Ti. Both stay selectable.
+2. **Is the overlay prepass's cost acceptable on Low?** *Recommendation:* yes, with the
+   ≤ 0.4 ms gate (verification gate 6). If Low misses it, Low alone uses upsampled depth, and the other tiers
+   keep the prepass.
+3. **Should dominant particle fragments write motion vectors, or should every particle use
+   only the reactive mask?** *Recommendation:* write them. DLSS has no usable reactive mask,
+   so without motion vectors projectiles ghost under DLSS.
+4. **Telegraphs lose bloom, the grade and the screen effects. Is that acceptable?**
+   *Recommendation:* accept it. Display-space contrast is the stronger readability guarantee,
+   and the overlay's own fixed halo replaces the glow.
+5. **Should Reflex and Anti-Lag be on by default, with boost off, and should they replace the
+   platform's frame limiter when active?** *Recommendation:* yes to all three.
+6. **Should the motion history be keyed in the renderer from `motion_key` (this ADR), or
+   should the client pass previous transforms?** *Recommendation:* keyed in the renderer.
+   It needs no new client state, and it records what was drawn.
+7. **Should `independentBlend` be required on the tiered path?** *Recommendation:* yes. Check
+   it in every recorded fixture as the dumps arrive.
+8. **Should vendor back ends be in goldens?** *Recommendation:* no. Goldens cover TAAU and
+   FSR 3.1, and the vendor back ends are covered by verification gate 5.
+
+### Maintainer answers (2026-11-02)
+
+The maintainer accepted this ADR with **every recommendation above taken**, Q1 to Q8:
+- in-house TAAU is `auto`'s open-build fallback, with FSR 3.1 taking the slot once its port
+  passes the same readability tests within 0.2 ms of TAAU on the 5070 Ti, both selectable;
+- the overlay prepass on every tier, gated at ≤ 0.4 ms on Low (gate 6), with Low alone falling
+  back to upsampled depth if it misses;
+- dominant particle fragments write motion vectors;
+- telegraphs lose bloom, the grade and the screen effects;
+- Reflex and Anti-Lag on by default, boost off, replacing the platform's frame limiter while
+  active;
+- the motion history is keyed in the renderer from `motion_key`;
+- `independentBlend` is required on the tiered path, checked in every recorded fixture;
+- vendor back ends stay out of the goldens (gate 5 covers them).
+
+### Amendment 1 (2026-11-02, N1b): the FSR 3.1.6 port as built
+
+Recorded in the FSR 3.1 PR (`feat/n1b-fsr3`, #358). Stage 1 builds and proves the port on its
+own; wiring it behind N1a's `TemporalUpscaler` follows N1a. How it is built is in
+[docs/dev/fsr3.md](../dev/fsr3.md), the evidence in [perf/0030](../perf/0030-fsr3-port.md).
+
+- **§4c is settled: one FSR 3.1 context accepts any render size from 1×1 up to its maximum,
+  changing from frame to frame without a reset.** Every pass reads the frame's size (and the
+  previous frame's, for reprojection) from its constants and clamps its samples to that
+  rectangle; only the allocations use the maximum. `fsr3-smoke` checks it on lavapipe, an RTX
+  5070 Ti and a Radeon 610M (RADV): inside one Quality context (192×108 output, 128×72
+  maximum), the render size steps through Balanced, Performance, Ultra Performance, an odd
+  77×43 and back without a reset, with sentinel values outside each frame's rectangle in every
+  input; the first frame after each change and the converged one stay within their bounds,
+  with no error above 0.11 anywhere in the image (a leaked sentinel is 1000), and validation
+  and sync validation silent. 9×5, 2×1 and 1×1 then run finite and in range, and the context
+  recovers. The controller of ADR-0020 §5c can therefore drive FSR 3.1 as it drives TAAU.
+  `render_size_range` reports Ultra Performance's size up to the mode's, as the SDK computes
+  them (truncated), clamped to the context maximum, and a size above the maximum is refused.
+- **Language and compiler.** The vendored HLSL is compiled, unmodified, by the pinned `slangc`
+  (ADR-0020 §4c), not DXC. It needs `-lang slang`: Slang's HLSL front end keeps a `for` loop's
+  variable in scope after the loop, and two FSR headers reuse one in consecutive loops, which
+  DXC accepts. Beyond our modules' flags it also takes the quad-subgroup capability (the SPD
+  passes), DXC-style register shifts that give every binding an explicit number in set 0, and
+  two warnings disabled (an undefined macro in `#if`; unreachable code in `ffx_spd.h`). Every
+  module passes `spirv-val`, and tests hold the reflected and decorated bindings to a table.
+- **What is vendored.** `third_party/fidelityfx/` holds the upscaler's eight pass files and
+  their headers, the SPD and FSR 1 headers they include, and the FidelityFX core GPU headers
+  (`api/internal/gpu/`), which §6a's "the MIT shaders" did not name. All are on the SDK
+  licence's MIT list, checked file by file. The host side (`ffx_fsr3upscaler.cpp` and the
+  parts of the Vulkan back end it drives) is ported to Rust, since the SDK's own build is
+  Windows-only.
+- **One 32-bit permutation.** The SDK picks 16-bit math where the device supports it, and a
+  Lanczos lookup table with wave64 on 32/64-wide AMD GPUs. The port builds a single
+  permutation, `FFX_HALF=0` with the reference Lanczos kernel, on every device: simpler, and
+  identical everywhere. The cost falls on the GPUs the SDK would give the 16-bit path, which
+  are the ones where time is tightest: the Low tier's reference parts (ADR-0020 §5: RTX 2060,
+  Turing, with double-rate FP16; RX 6600, RDNA 2, with packed FP16) and other RDNA parts such
+  as the Radeon 610M, which would also take the lookup table with wave64. The RTX 5070 Ti, where gate 6 and Q1's 0.2 ms comparison with TAAU
+  run, is where FP16 matters least, so a pass there does not show the port is fast enough on
+  the Low tier. **Stage 2 times FP32 against an FP16 build (at least on the 610M) or cites
+  AMD's published deltas**, and a 16-bit permutation is the first follow-up if FSR 3.1 misses
+  a margin by less than it would save.
+- **The jitter sequence length is §1's count.** FSR's shaders take the jitter phase count as a
+  constant. The port passes §1's `ceil(8 r²)` (rounded ratio), the sequence the renderer
+  actually runs, rather than the SDK's truncated count, so 24 instead of 23 at 1.7×. With the
+  SDK's truncated mode sizes the ratios land just above the nominal ones, so at 2560 output
+  Quality (1706) gives 19 phases and Ultra Performance (853) 73, not the 18 and 72 of exact
+  ratios. The SDK's one-step-per-frame smoothing of that constant is kept.
+- **RCAS runs when the sharpness is above 0.** The SDK takes a separate `enableSharpening`
+  flag and maps sharpness 0 to RCAS's lightest setting. §4a has only a sharpness, so 0 means no
+  RCAS (plain accumulate), and above 0 means accumulate-with-sharpening then RCAS at that
+  sharpness.
+- **Every internal image is initialised on the first frame.** The SDK leaves most of them
+  uninitialised and clears only the accumulation and luma pairs. The port clears all of them
+  once (zero, the far plane for the reconstructed depth, the reset value for the frame info),
+  so no pass can read garbage on the first frame (the new locks are written only where a lock
+  forms but read everywhere). The smoke fills every internal image with NaN and all-ones before
+  its first frame and requires output bit-identical to a run from fresh allocations.
+- **Device requirements and fallback.** FSR 3.1 runs only on the tiered path, with quad
+  subgroup operations in compute and the format features its images need, read off the SPIR-V:
+  `STORAGE_WRITE_WITHOUT_FORMAT` on every float storage format, `STORAGE_READ_WITHOUT_FORMAT`
+  on the two it reads back without a format (`RGBA32F`, `R16G16_SFLOAT`), linear filtering on
+  the formats it samples, atomics on `R32_UINT`. Without them, creating the context fails and
+  the caller falls back to TAAU with one log line (§4b).
+- **Interface.** `Fsr3` has §4a's methods. Until it implements N1a's trait, `kind` returns the
+  name `"fsr3"` and the inputs and output are local mirrors of `UpscaleInputs` and
+  `UpscaleOutput`. `has_sharpening` is true: RCAS runs inside FSR. `record` is an `unsafe fn`
+  with two contracts beyond §4a: **every recorded command buffer is submitted exactly once,
+  in `record` order, on one queue** (the first frame's transitions and clears, and each
+  frame's barrier against the previous one, depend on it; `resize` starts over), and **at most
+  two frames in flight** (the command buffer of the call two `record`s back has finished),
+  because the descriptor sets and constants are kept per history parity; the renderer asserts
+  its `FRAMES_IN_FLIGHT` against it at compile time. The descriptors that name the caller's images
+  are rewritten every frame, so recreated views (even with reused handle values) are safe.
+  `resize` re-creates the images for new maximum sizes and keeps the pipelines. Dropping or
+  resizing the context needs the GPU idle on it, as for every pass; stage 2 keeps that when it
+  switches upscalers at run time (or adds deferred deletion).
+- **Memory.** `vram_bytes` at real sizes (perf/0030): about 71–75 MiB at 1080p Quality,
+  126–134 MiB at 1440p Quality, 208–222 MiB at 1440p NativeAA and 218–226 MiB at 4K
+  Performance, by driver. That is FSR's own memory, on top of the shared inputs; at 1440p
+  Quality it is about as much as all of §7's TAAU additions together. **Stage 2 frees TAAU's
+  history (and any other TAAU-only target) while FSR 3.1 runs**, so the two never hold memory
+  at once.
+- **For stage 2: the jitter sign.** The port takes FSR's convention (y down: the sample at
+  pixel `i` shows the scene at `i + 0.5 − jitter`). §1 applies the jitter to the projection as
+  `+2·jx / render_w` and `−2·jy / render_h` (clip y up). The §1 unit test that fixes that sign
+  must also check that the jitter handed to the upscalers is in FSR's convention, so the two
+  agree.
+
+### Amendment 2 (2026-11-03, N1a): the temporal foundation as built
+
+Recorded in the N1a PR (`feat/n1a-temporal`): jitter, motion vectors and masks, TAAU, the
+`TemporalUpscaler` interface, the overlay layer and MSAA's retirement on the tiered path. The
+§4a trait is built as specified, with `record` made `unsafe` and `resize` and
+`reload_shaders` added (items 17–18); N1b and N1c port against it. Where the code departs
+from the text above, or the text left a choice open, this is what was done and why.
+
+1. **TAAU owns its history (§3).** The output-resolution history pair and the previous linear
+   depth pair are created and kept by the TAAU back end, in `GENERAL`, with its own barriers
+   (first use from `UNDEFINED`, then a compute-to-compute memory barrier), not imported into
+   the render graph. Every back end owns its state behind the trait (`reset_history`,
+   `vram_bytes`); FSR 3.1 and the vendor SDKs keep theirs inside their contexts, so the graph
+   stays the same whichever back end runs.
+2. **The overlay and mask shaders are GLSL**, not Slang as the Shaders bullet above says:
+   `overlay.frag`, the overlay prepass and the overlay particle permutation, `tc_mask.frag`
+   and `prepass_motion.frag`. The overlay reuses `decals.glsl` and the outline dilation that
+   the scene shaders compile, and one copy of the shape code is the point (§5: "the same
+   32×32 ground bins and `decals.glsl` shape code"); the masks and the motion prepass are
+   permutations of the GLSL scene shaders and share their includes (`motion.glsl`,
+   `camera.glsl`). They move to Slang with the decal library and the scene shaders. Only
+   `temporal_taau` and `exposure_linear` are Slang.
+3. **Telegraph particles reach the overlay by a vertex-stage role filter.** The overlay draw
+   re-draws the particle buffer with a `VFX_OVERLAY` permutation that keeps only enemy-telegraph
+   roles (the scene's VFX draw skips them), instead of compacting them into a second list.
+   Mesh-particle telegraphs stay in the scene pass.
+4. **`overlay_vfx` exposure** is the base exposure times the look's EV, without the adapted EV:
+   the overlay is display-referred and telegraphs must not pump with eye adaptation (Q4).
+5. **The two masks are cleared by a transfer pass** (`mask_clear`) at the start of the frame:
+   `reactive` and `tc_mask` are written with `MAX` blending by several passes.
+6. **Temporal off on Tiered** keeps the scale ceiling at 1.0 with a 0.5 floor and dynamic
+   resolution off, as before N1 (the §7 table's "FXAA + bicubic"); `MOBA_DYNRES=on` runs it.
+7. **Hull outlines on Tiered become screen outlines** (`OutlineMode::Hull` is Compat-only, §5).
+   On Tiered the render-resolution ID target serves only distortion's unit mask; the overlay
+   draws every outline at output resolution.
+8. **No separate `sharpen` pass yet.** TAAU fuses RCAS (§3) and FSR 3.1 has its own, so the
+   pass arrives with the DLSS and XeSS back ends (N1c).
+9. **Capture warm-up.** A capture renders two phase cycles of the same scene; particle spawns
+   are kept only in the first warm-up frame. `Renderer::warm_up_temporal` is the two-tick API:
+   the client's `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=n`) warms up at tick
+   `n − 1`, then captures tick `n` with the camera panned by a fixed 0.75 m. The warm-up
+   blocks the client's loop for seconds on a software rasteriser after tick `n`'s snapshot,
+   the loopback server's last, has arrived, so the capture frame after it skips the network
+   (polling would only see that silence as the 5 s connection timeout). A run with lavapipe
+   on one thread (`LP_NUM_THREADS=1`, a 10.5 s warm-up) captures the same bytes.
+10. **Motion keys** are `net_id << 16 | part`, parts numbered from 1 so no unit part has key 0
+    (the static key). A living unit's parts stop at `0x7FFF` (any further instance shares the
+    last key); a dying minion's corpse is keyed `net_id << 16 | 0x8000 | slot`, so a corpse
+    never shares a key with a living unit that reuses its `net_id` (before, corpses had key
+    0 and drew camera-only motion). A unit's first drawn frame needs no `motion_reset`: its
+    key has no entry yet, which is the same camera-only path (§2c's missing key).
+11. **`independentBlend`** was added to every capability fixture by hand: `vulkan-probe --json`
+    reports it on all three recorded devices, and the synthetic fixtures inherit it from the
+    RTX dump (Q7; `caps/fixtures/README.md`).
+12. **Foliage's vertex stage** now uses four storage buffers (the previous-instance buffer
+    joined), exactly the guaranteed minimum; the descriptor-budget test pins it.
+13. **Readback usage.** The `depth` and `motion` transients carry `TRANSFER_SRC` only when
+    the renderer is created with `RenderConfig::with_readback` (the client sets it for
+    `MOBA_MOTION_PROBE=1`); a game frame's descriptions are as without it. Compat's are
+    unchanged either way.
+14. **Per-pass lanes** (gate 6): `temporal`, `tc_mask`, `overlay_prepass` and `overlay` join the
+    frame log (`prepass` was already there). Like the fog-of-war lanes they are left out when
+    they never ran, so Compat logs are unchanged.
+15. **`maxColorAttachments`, `maxFragmentOutputAttachments` and
+    `maxFragmentCombinedOutputResources` ≥ 5** join the tiered admission limits. OIT on the
+    temporal path writes HDR, its two accumulation targets, motion and the reactive mask in
+    one pass, one more colour output than Vulkan guarantees (4); the combined limit also
+    counts the pass's storage resources, and the guaranteed 4 would not hold the five
+    outputs. Every capability fixture reports 8 colour attachments and 8 fragment outputs;
+    the combined limit is 4,294,967,295 on the RTX, 8,388,606 on the Radeon 610M and 104 on
+    lavapipe.
+16. **`perf-gate` on Tiered after N1a: budgets fail, baselines report.** §7 and gate 6 have
+    tiered budgets fail "from N1", with baselines re-recorded per `(gpu, path, tier)` and the
+    upscaler named. N1a is one of four N1 parts and each changes what a tiered frame runs
+    (N1b stage 1 and N1d merged before it; N1b stage 2 and N1c follow), so the gate is
+    split. **Absolute per-tier budget breaches fail now** (§7's `gpu_total_p95_ms` and the
+    VRAM peak, on every tier; there is no absolute render-p95 budget, and `render_p95_ms`
+    is only a baseline comparison). The `[tiered.low]`,
+    `[tiered.high]` and `[tiered.ultra]` regression baselines in `tests/perf/baseline.toml`
+    are committed now from N1a's RTX medians (perf/0031) and compared **report-only**
+    (`TIERED_BASELINE_FAILS` in `perf-gate`). Each later N1 part re-records them; whichever
+    N1 part merges last flips the regression check to failing, after a rerun on a quiet
+    machine (perf/0031's frame-time note). `docs/status.md` names that owner.
+17. **`TemporalUpscaler::record` is an `unsafe fn`**, with the same contract as N1b's
+    `Fsr3::record`: every recorded command buffer is submitted exactly once, in record order,
+    on one queue, or the caller treats a failure to submit as fatal or calls
+    `reset_history`/`resize` before the next record; at most `FRAMES_IN_FLIGHT` records are
+    pending (the command buffer of the record that many calls back has finished); the inputs
+    and the output are alive and in the stated layouts until that command buffer finishes.
+    The back ends commit state at record time: TAAU flips its history parity, clears
+    `fresh` (the first-use transitions are recorded) and `reset`; `exposure_linear` marks
+    its placeholder initialised. Their descriptor sets are keyed by the frame-in-flight
+    slot, not by a ring that advances per record: `UpscaleInputs` gains `frame_slot` (a
+    departure from §4a's input list) and `exposure_linear::record` takes it too. Each holds
+    one set per slot, which the renderer asserts at compile time (`SET_RING >=
+    FRAMES_IN_FLIGHT`), and the renderer waits on a slot's fence before recording into it,
+    so a set is never rewritten while a pending frame reads it, however many frames are
+    dropped between records. A record
+    whose command buffer is never submitted would leave that state ahead of the GPU, so the
+    renderer calls `forget_unsubmitted` (which sets `fresh` and `reset` again) on every error
+    path between recording and submission.
+18. **`resize` never builds a pipeline.** `TemporalUpscaler::resize(output, max_render)`
+    recreates only the history images and starts a fresh history (`fresh`, `reset`). A
+    swapchain recreation calls it; `exposure_linear` has no size-dependent images and is not
+    rebuilt. Debug builds' shader hot reload (`MOBA_SHADER_DIR`) rebuilds TAAU's and
+    `exposure_linear`'s pipelines (`reload_shaders`, a default no-op for back ends without
+    shaders of ours).
+19. **Render sizes round to nearest, and the §4a trait is authoritative for N1b stage 2.**
+    TAAU's mode sizes round to nearest, the same rule as the dynamic-resolution controller,
+    so its ceiling is a size the controller produces (Quality at 2560 is 1707). FSR 3.1's
+    SDK truncates (1706); a back end with an SDK rule reports its own range and the
+    controller clamps to it. N1b stage 1 shipped `Fsr3` with local types; stage 2 adapts it
+    to this trait: `kind()` returns `UpscalerKind::Fsr3` (not the name `"fsr3"`), the
+    client's `UpscaleMode` maps onto `Fsr3Mode` (`Native` ↔ `NativeAa`, the rest by name),
+    `UpscaleInputs`/`UpscaleOutput` replace the local mirrors, and its `render_size_range`
+    stays the SDK's (1706). The two contracts above (17) already agree.
+20. **The overlay prepass's depth uses the main depth format** (`FrameSpec::depth_format`
+    and aspect, D32 or D32S8 by device), not a hard-coded D32.
+21. **`Scene::history_reset` is wired in the client**: set on a map load or rotation (a new
+    map-visuals generation) and when the followed hero changes (spectating), in the
+    networked game, which replays use too, and in the local preview. Other camera cuts (none
+    today) must set it too.
+22. **`MOBA_AA=msaa4` on Tiered** runs the tiered default (temporal) with a log line: MSAA is
+    Compat-only (§7). **`MOBA_UPSCALE_MODE=performance`** at a preset whose floor is
+    already Performance's scale gets Ultra Performance (1/3) as its floor, one mode down, so
+    dynamic resolution keeps a range instead of floor = ceiling.
+23. **The terrain mip bias is clamped** to the device's `maxSamplerLodBias`
+    (`FrameTemporal::with_max_lod_bias`, read from the device at creation). §1's formula
+    reaches −2.58 at 3×, past Vulkan's guaranteed 2; the RTX 5070 Ti reports 15 and the
+    Radeon 610M 16, so the clamp only binds on a device at the minimum.
+24. **TAAU's confidence is the largest weight, not the total** (§3 says the total). The 3×3
+    reconstruction weights its samples by `exp(−2.29·d²)` of their jittered distance (a
+    Gaussian fit of Blackman-Harris) and normalises by their sum; the confidence that lowers
+    the history weight is the largest single weight, the nearest sample's closeness. The
+    total depends on the jitter phase even where a sample lands exactly on the pixel; the
+    largest does not.
+25. **`animated_uv` is not handled.** §2d's `tc_mask` draws water and "any material flagged
+    `animated_uv`"; no material has that flag, so only water draws. A material with
+    scrolling UVs would get motion for its geometry only and its texture would reproject as
+    if still; it joins `tc_mask` when one exists.
+26. **Motion history load.** The 4,096-slot table takes at most 3,072 keys a frame (3/4
+    load), so a probe (hit or miss) is a short run; further keys get camera-only motion.
+    Recording and reading back 1,000 units of 40 joints costs about 66 µs of CPU a frame on
+    the 9800X3D (`benches/motion_history.rs`, perf/0031).
+27. **Gate 1's client test** checks the client's mapping from settings to the renderer's
+    configuration (tiers, modes, floors and the warnings), which is close to restating the
+    code; what jitter, motion and TAAU do with that configuration is checked by the renderer's
+    tests and gates 2–3.
+28. **A history reset waits for the frame in flight.** A `reset_history` mid-stream (a map
+    load, a rotation, a resize) makes the next record transition the history images from
+    `UNDEFINED` to `GENERAL`. That transition is a write, and the previous frame's TAAU
+    dispatch may still be reading or writing those images, so the barrier's source is
+    `COMPUTE_SHADER` with `SHADER_STORAGE_WRITE` (not `NONE`); `exposure_linear`'s
+    placeholder transition likewise waits on `COMPUTE_SHADER`. `scripts/tiered-goldens.sh`
+    runs 40 frames of Tiered High with `MOBA_TEMPORAL_RESET_EVERY=5` (a reset every fifth
+    frame, with the previous frame in flight) under synchronization validation and fails on
+    any message. **That run is a validation smoke, not a regression check for this barrier.**
+    Synchronization validation (VVL 1.4.363) stays clean with the source mutated back to
+    `NONE`/`NONE` on lavapipe, on the RTX 5070 Ti (NVIDIA 615.78.08) and on RADV (the
+    Radeon 610M), for 40 and 400 frames with a reset every fifth frame and 1,000 frames with
+    vsync off and a reset every second frame; it was also clean with the per-frame barrier
+    removed. The source is pinned instead by unit tests on the barriers themselves
+    (`fresh_barrier_waits_for_earlier_compute` in `upscale/taau.rs`,
+    `placeholder_barrier_waits_for_earlier_compute` in `upscale/exposure.rs`); the first
+    fails on the `NONE` mutant.
+
+**How the gates were made concrete:**
+
+- **Gate 2** is `Renderer::motion_probe` (`MOBA_MOTION_PROBE=1`, `scripts/motion-probe.sh`).
+  Two frames on lavapipe: a camera pan, a keyed static cube translated, a one-joint skinned
+  cube whose joint moves, a VAT cube going from frame 0 to frame 1, foliage, a `motion_reset`
+  cube, a key-0 cube and a key absent from frame A. Frame B's motion and depth are read back;
+  the twin rebuilds each pixel's world position from depth through the jittered matrix and
+  projects it through the unjittered ones, and every classified pixel must match within
+  1/64 render pixel. The foliage is in a steady wind at the same environment time in both
+  frames, so the prepass's second evaluation at the previous time is exercised; wind
+  *animation* between frames is not twinned. A second foliage patch has a displacer in frame
+  B only (**foliage-pushed**): with no per-blade twin it is checked by direction and share,
+  at least 30 % of its pixels moving 0.25 px or more beyond camera-only and at least 70 % of
+  those pointing back towards the displacer (blades flatten as well as bend). Dropping the
+  prepass's second evaluation makes every pushed blade camera-only, and the class fails
+  (checked by mutation). Particle motion is not in the gate's list here; gate 3's particle
+  projectile measures it.
+- **Gate 3, ghost energy,** is `Renderer::ghost_probe` (`MOBA_GHOST_PROBE=1`,
+  `scripts/ghost-probe.sh`). A hero-sized box dashes at 10 m per 0.2 s at 120 fps; a small box
+  projectile and a particle projectile cross the screen at 0.7 m per frame. The hero is three
+  slabs, dark, light, dark, over mid-tone tiles, so its neighbourhood spans the backdrop's
+  colours and the clip cannot hide a wrong history fetch on it. The 24-frame sequence is
+  rendered with history and again with every frame a history reset (the no-history
+  reference), from the same jitter phase, and the last 20 frames are measured three ways
+  (a pixel counts when a channel differs from the reference by more than 4/255):
+  - **Wake:** every pixel a mover covered in the previous 12 frames and more than 2 px from
+    where it is now. Antialiasing is left out and counted: pixels on an edge of the still
+    scene (a 3×3 neighbourhood spanning more than 8/255) and pixels where the same sequence
+    without the movers already differs from its reference. **Bound 3 % on every frame.**
+  - **Hero smear:** the hero's interior, off its silhouette and stripe edges. **Bound 1.75 %.**
+  - **Particle smear:** the particle's bright core. **Bound 7.5 %.**
+
+  **The bounds are regression tripwires, not perceptual thresholds**, each set about 25 %
+  above TAAU's lavapipe measurement. The wake's 3 % was set over the first version's 2.39 %
+  at Quality (1.20 % native); with the striped hero and the projectiles TAAU measures 0.57 %
+  native, 1.14 % Quality, 1.33 % Balanced and 1.98 % Performance. Its residue is the
+  trailing edge of the hero's moving shadow (a shadow has no motion of its own, and a still
+  pixel's clip box is the wider γ 1.25) and faint grid lines re-converging after a
+  disocclusion. The wake does **not** see a missing motion vector: with the hero's motion
+  keys removed it is unchanged (1.13 % at Quality), because the clip and the disocclusion
+  test rescue the trail. The on-object measures do. The hero's interior measures 0.00 %
+  native, 0.73 % Quality, 1.02 % Balanced and 1.37 % Performance, and 2.59 % (Quality) and
+  7.30 % (Performance) without its motion keys, which fail; at native it barely smears either
+  way (0.14 %), so native does not discriminate; the script runs Quality, Performance (the
+  strongest hero-smear check) and native. The particle's core measures 1.40 %
+  native, 3.77 % Quality, 5.37 % Balanced and 5.88 % Performance, and 29.96 % at Quality
+  with the particles' motion output zeroed. FSR 3.1 runs the probe in N1b and DLSS on the
+  RTX in N1c. *(Amendment 4 items 6, 13 and 14: these lavapipe numbers hid a particle-motion
+  bug on real GPUs; the bounds are now derived from lavapipe, the RTX 5070 Ti and RADV
+  together, and the probe is run on hardware too.)*
+- **Gate 3, overlay invariance,** is `scripts/overlay-invariance.sh`: captures of the overlay
+  IDs (`MOBA_DEBUG_VIEW=overlay-ids`) are byte-identical under TAAU at Quality, native and
+  Performance, FXAA at scale 1.0 and 0.6, and AA off. FSR 3.1 joins in N1b.
+- **Gate 3, telegraph contrast,** is `glow_display_reference`, the CPU twin of the overlay's
+  display-space telegraphs, and its test. `AgX` maps black to 16× white into the display
+  range, so the test sweeps that whole range (display-linear 0 to 1) in three hues: the rim
+  is at least 1.5× brighter than the ground or the halo at most 1/1.5 of it, everywhere; the
+  rim lifts by at least 1.2× wherever the display has headroom for its hue (it is clamped to
+  the display range); and the halo is there on any ground at luminance 0.5 or more.
+- **Gate 4.** Every Compat golden was captured on `origin/main` and on the branch and compared
+  byte for byte. The tiered goldens (`scripts/tiered-goldens.sh`) are at 640×360 with the HUD
+  at half scale: TAAU at Low (Quality), at High and at native, and the overlay golden, a
+  two-tick network capture. Each must be byte-identical across two lavapipe runs, with
+  validation and sync validation clean, and match its fingerprint in `tests/golden/`.
+
+### Amendment 3 (2026-11-02, N1d): latency as built
+
+Recorded in the N1d PR (`feat/n1d-latency`), with the evidence in
+[perf/0032](../perf/0032-latency.md). §6 holds, with these departures and clarifications:
+
+1. **The setting is `LatencySetting`, not `LatencyMode`.** N0.6 had already made
+   `LatencyMode { Reflex, AntiLag, None }` public as the enabled back end
+   (`VendorBackends::latency`, which now reports the back end that runs), so the player's
+   choice is a new `LatencySetting { Off, On (default), Boost }`. The API under
+   [Consequences](#consequences) also gains what its three methods need:
+   `LatencyMarker` (the four app-side markers; the renderer sets the render-submit and present
+   ones itself), `LatencyFrame` (one frame of `vkGetLatencyTimingsNV`, in microseconds) and
+   `RenderConfig::{latency, frame_rate_limit}` (`frame_rate_limit` defaults to 240, the
+   platform's default, so a latency back end never runs uncapped by accident).
+   `Renderer::latency_sleep` returns `bool` (whether it paced the frame), which the client maps
+   to `Pacing::External`; `moba-render` does not name `moba_platform::Pacing`. The client has a
+   `latency` setting (`off`/`on`/`boost`, default `on`) that `MOBA_LATENCY` overrides, and
+   `MOBA_MAX_FPS=<n>` (default 240, 0 uncapped) sets the limit for measurements.
+2. **Only one latency extension is enabled.** The §1e table (ADR-0020) has declared both
+   extensions before `vkCreateDevice` since N0.2, so N1d adds no request of its own; it adds
+   the rule that a device offering `VK_NV_low_latency2` never also enables `VK_AMD_anti_lag`
+   (§6a's "NVIDIA's wins", now applied at creation rather than only at selection). On this
+   machine the Radeon's Mesa 26.2 offers `VK_AMD_anti_lag` only through the implicit
+   `VK_LAYER_MESA_anti_lag`, which stays off unless `ENABLE_LAYER_MESA_ANTI_LAG=1` is set, so
+   by default the Radeon enables no latency extension and logs `[latency] unavailable`; the
+   back end does not depend on the layer (item 10). Compat still enables neither extension.
+3. **What `off` means.** Reflex off keeps the swapchain's latency mode, the markers and the
+   timings (with `lowLatencyMode` false and no sleep), so the frame log can compare off with
+   on; the platform limiter paces the frames. Anti-Lag off calls `vkAntiLagUpdateAMD` with
+   mode `OFF` once per frame, so a driver default cannot turn it on. Boost sets
+   `lowLatencyBoost`; Anti-Lag has no boost and treats it as on.
+4. **Frame IDs.** The ID of the frame being built is one more than the last presented one's.
+   A frame skipped before submission (a minimised window, an out-of-date swapchain) reuses
+   it, and its `SIMULATION_START` is sent only once; the ID advances with every
+   `vkQueuePresentKHR` call, failed or not, so present IDs always grow. `VkPresentIdKHR` is
+   chained only when Reflex runs, not on every tiered device. Anti-Lag sends its `PRESENT`
+   stage only for a frame whose `INPUT` stage it sent.
+5. **Submits and markers.** The renderer submits frames with `vkQueueSubmit` (not
+   `vkQueueSubmit2`), in two batches; both carry `VkLatencySubmissionPresentIdNV`. The one-shot
+   upload submits run at load time, outside any frame (the R8 upload lock), and carry none.
+   `RENDERSUBMIT_START` is set after the frame-slot fence, the acquire and the image's fence,
+   so a frame blocked on the swapchain does not count as render-thread work (the first draft
+   set it before them, and with vsync the render-submit span was the whole 6 ms frame).
+6. **Who paces.** The sleep is skipped, returning `false` so the platform limiter paces, when
+   the latest frame was not submitted (a minimised window would otherwise spin). A frame the
+   sleep let through in less than 90 % of the limit's interval also returns `false`, so the
+   platform limiter waits out the rest: the 240 fps cap never rests on the driver honouring
+   `minimumIntervalUs` or `maxFPS` alone. The interval runs from one sleep's end to the next;
+   after a frame the platform limiter paced, it restarts at the next `SIMULATION_START`, so
+   the platform's wait is not counted as the next frame's.
+   While the app paces, the platform loop still sleeps one interval between redraw requests,
+   so a window that draws nothing does not spin.
+7. **A failing sleep.** A Reflex sleep that fails, or whose semaphore does not signal within
+   250 ms, stops sleeping with one log line and resumes on the next swapchain, at most three
+   times. A timed-out sleep still owes its signal: before the swapchain is replaced or the
+   renderer dropped, the renderer waits up to 100 ms for it, and otherwise leaks that
+   semaphore (making a new one for the next swapchain) rather than destroying it under a
+   pending signal. On the renderer's drop the device is then destroyed with the leaked
+   semaphore alive (`VUID-vkDestroyDevice-device-05137`), accepted only in that case.
+8. **Timings.** The frame log's `pc_latency_*` is simulation start to the end of the frame's
+   GPU work; the extension reports no scan-out time, so the compositor's and the display's
+   share is invisible (`VK_KHR_present_wait` timestamps would close that; not done). Every
+   `vkGetLatencyTimingsNV` call starts from fresh structures: NVIDIA 615.78.08 writes them back
+   whole, and passing them again failed `VUID-VkLatencyTimingsFrameReportNV-sType-sType`. A
+   frame whose report never completes (retried on a new swapchain) is skipped rather than
+   holding back the frames after it. Only frames past the frame log's warm-up are logged.
+9. **Measured gain: none on this machine (gate 7).** On the RTX 5070 Ti under KDE Wayland,
+   PC latency over the teamfight replay is the same with Reflex on and off, with vsync off
+   (5.11 vs 5.07 ms p50), with vsync on (12.88 vs 12.89 ms), and uncapped and GPU-bound at
+   2560×1380 (GPU about 88 % busy: 4.21 vs 4.27 ms, inside the round-to-round spread). The driver's
+   sleep enforces `minimumIntervalUs` and otherwise returns at once, also after the
+   render-submit marker moved (item 5). The render call still blocks for nearly the whole
+   frame before its submit (with vsync, in `vkAcquireNextImageKHR`; GPU-bound, in the fence
+   and swapchain waits, not split further), and the frame's GPU work waits on the image's
+   acquire semaphore: queueing in the swapchain, which the extension does not manage. So §6b's expected gain ("the render queue") is **not demonstrated**, and
+   on-by-default rests on the maintainer's Q5 answer, not on a measured benefit. The follow-up
+   is an X11 or direct-scan-out session and the swapchain's own queueing (image count, present
+   mode, present wait). Pacing holds with the platform limiter replaced (perf/0032).
+10. **Anti-Lag is not run-time tested.** Native `VK_AMD_anti_lag` needs Mesa 26.3 (RADV); the
+    machine's Radeon 610M runs Mesa 26.2.5, which only has the layer, so gate 7's Anti-Lag
+    smoke is **blocked** on a Mesa 26.3 install (and its numbers on an AMD card). With the
+    layer forced on (`ENABLE_LAYER_MESA_ANTI_LAG=1`) the Anti-Lag back end runs on the Radeon
+    (selected, 299 of 300 frames paced by `vkAntiLagUpdateAMD`), but validation then reports
+    `VUID-vkCmdWriteTimestamp-None-00830` on the layer's own timestamp queries (not the
+    renderer's), so that run is a smoke of the code path, not the gate.
+
+### Amendment 4 (2026-11-03, N1b stage 2): FSR 3.1 in the frame
+
+Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
+`TemporalUpscaler` (`MOBA_UPSCALER=fsr3`); the evidence is in
+[perf/0033](../perf/0033-fsr3-in-frame.md), the port in [docs/dev/fsr3.md](../dev/fsr3.md).
+
+1. **The adaptation is amendment 2 item 19's.** `Fsr3` implements the trait: `kind()` is
+   `UpscalerKind::Fsr3`, the client's `UpscaleMode` maps onto `Fsr3Mode` by ratio (`Native` ↔
+   `NativeAa`), and the trait's `UpscaleInputs`/`UpscaleOutput` replace stage 1's local
+   mirrors. `upscale::create` builds the back end `MOBA_UPSCALER` resolves to; one that cannot
+   run on the device (FSR 3.1 without its format features or quad subgroups, amendment 1) falls
+   back to TAAU with one log line (§4b). `MOBA_DEBUG_VIEW`'s temporal views are TAAU's own
+   and are not drawn under FSR 3.1 (one log line).
+2. **Descriptor sets and constants are per frame slot** (amendment 2, item 17), replacing
+   amendment 1's per-parity contract (the record two calls back finished): each pass holds a
+   set per frame-in-flight slot and history parity (`SET_RING` × 2) and the constants a block
+   per slot, chosen by `UpscaleInputs::frame_slot`, so dropped records can never make a
+   rewrite land on a set a pending frame reads. The renderer asserts `fsr3::SET_RING >=
+   FRAMES_IN_FLIGHT`.
+3. **`reset_history` makes the next record a first frame.** Stage 1's reset only restarted
+   the accumulation; the trait needs a reset to leave nothing assumed after a record that was
+   never submitted (`forget_unsubmitted`). The next record therefore transitions and
+   re-initialises every internal image, and that barrier waits for every earlier compute and
+   clear on the queue with their writes (`COMPUTE_SHADER | CLEAR`, `SHADER_STORAGE_WRITE |
+   TRANSFER_WRITE`), never `NONE` (item 28's rule; `first_frame_barrier_waits_for_earlier_work`
+   pins it, since synchronization validation does not flag a `NONE` source). A mid-stream reset
+   every fifth frame runs under synchronization validation in `tiered-goldens.sh`, as TAAU's
+   does. The smoke's output is unchanged by it (the same digest as stage 1 before the new
+   runs).
+4. **The controller clamps to FSR 3.1's allocation, not to its reported range.** Item 19 lets
+   a back end with an SDK rule report its own range for the controller to clamp to. FSR 3.1's
+   `render_size_range` reports the SDK's truncated sizes (1706 at 2560 Quality), but it is
+   only logged: the dynamic-resolution controller clamps to the size the back end was
+   allocated for, which for FSR 3.1 is its context's maximum, and that maximum is the
+   controller's own ceiling (the High preset's 1260×709 at 1080p, or 1707 at 2560 Quality).
+   The context accepts every size from 1×1 to it (amendment 1), so FSR runs exactly the
+   frames TAAU would.
+5. **Only one back end holds memory.** The back end is chosen at renderer creation and only it
+   is created, so TAAU's history and previous-depth pairs are never allocated while FSR 3.1
+   runs (amendment 1's request). `upscaler_vram_mb` is each back end's own allocations,
+   measured the same way for both (TAAU's now sums its images' allocation sizes, as FSR's
+   does; it was the formula's 38.7 MiB): see perf/0033 for the figures. FSR's `resize`
+   builds its new images before dropping the old ones, so a resize briefly holds both sets
+   (about 2 × 75 MiB at 1080p).
+6. **Ghost energy (gate 3): FSR 3.1 has its own particle tripwire from Performance down.**
+   After item 13's fix, on lavapipe, the RTX 5070 Ti and RADV (Radeon 610M) alike, FSR 3.1
+   leaves less wake than TAAU and smears the hero's interior no more, but smears the
+   particle projectile's core more, increasingly with the ratio (worst of the three
+   devices): 4.19 % native, 6.82 % Quality, 7.35 % Balanced, 12.33 % Performance and
+   22.34 % Ultra Performance, against TAAU's 1.40 %, 3.77 %, 5.70 %, 6.56 % and 8.80 %.
+   TAAU's 7.5 % tripwire (item 13) holds for FSR 3.1 at Quality and native; from ratio 2
+   (Performance) down FSR 3.1 has its own, `FSR3_PARTICLE_BOUND` = 15 %, about 25 % above
+   its worst Performance measurement. Losing the particles' motion fails both at Quality and
+   Performance (FSR 3.1 54.41–57.97 % at Performance, 29.19–33.84 % at Quality; TAAU
+   29.96–32.23 % at Quality), and TAAU at native (18.36–20.72 %); FSR 3.1 at native does not
+   catch it (4.67–6.17 %, against 3.81–4.19 % with motion).
+   **Why FSR 3.1 smears the particle more is not known.** Two causes are ruled out: the
+   review of this amendment found the smear byte-identical with FSR's motion-vector dilation
+   reduced to the centre pixel (`iMotionVectorPos = iPxPos` in
+   `ffx_fsr3upscaler_prepare_inputs.h`) while the wake and the hero changed, so the nearest-
+   depth dilation is not it; and the reactive mask is wired as §2 says (the particle's
+   opacity, `MAX` blended, clamped to 0.9, scale 1.0) and used: zeroing it smears more, and
+   binding it as the transparency-and-composition mask as well left every share unchanged.
+   This is a readability shortfall of FSR 3.1 against TAAU on this probe, not a tuning
+   choice, and it decides Q1 (item 8). The probe does not gate Balanced or Ultra Performance
+   for either back end (TAAU fails Ultra Performance: wake 4.41 %, hero 4.76 %).
+7. **Overlay invariance and goldens (gates 3 and 4).** The overlay IDs are byte-identical under
+   FSR 3.1 at Quality, native and Performance and under every earlier case. Every Compat
+   golden is byte-identical to `origin/main`. Q8 ("Goldens cover TAAU and FSR 3.1") and §7
+   include FSR 3.1, so its four tiered captures (low, high, native and overlay; high is
+   Quality at the High preset) are checked by `tiered-goldens.sh` in three ways:
+   - the two runs must be byte-identical;
+   - **an exact SHA-256 per capture** (`tests/golden/render-tiered-hashes.txt`, TAAU's too),
+     checked only on the lavapipe that generated the file: CI's, keyed by its device name,
+     Vulkan version and driver info (Mesa and LLVM versions, from `vulkan-probe --json`), on
+     a pinned runner image (`ubuntu-26.04`). llvmpipe's code generation differs between
+     versions, so another one (LLVM 23.1.3 here) renders other bytes for TAAU and FSR 3.1
+     alike; on CI the hashes were the same across runs of different code (`c0ff307`,
+     `d9c2d6a`, `6261189`). On another device the script skips them with a log line, except
+     on CI for FSR 3.1: there a mismatch (or no device from `vulkan-probe`) fails
+     `tiered-temporal` with a message to regenerate the file with `WRITE_HASHES=1` from the
+     run's artifact, because it is FSR 3.1's only regression check. TAAU, in the required
+     `renderer-gate`, warns and keeps its fingerprints, so a runner change cannot make the
+     required gate flaky;
+   - the 64×36 fingerprints (`render-tiered-fsr3-*-fingerprint.rgb`, written from CI's
+     output). **They do not catch an FSR 3.1 regression:** at mean ≤ 2.0 and max ≤ 24 they
+     cannot tell FSR 3.1 from TAAU (mean 0.22–0.38, max 3–6 apart, per the round-2 review),
+     and a flipped jitter sign, accumulation at 1 instead of 1/3 and a flipped motion-vector
+     sign all pass them. They catch a broken frame on any lavapipe; the exact hashes are the
+     regression check, on CI (perf/0033 has the mutations against both).
+
+   What the scenes cover: the low, high and native scenes are nearly static, so motion
+   vectors are covered by the two-tick panned `overlay` capture (the review found that a
+   flipped motion-vector sign changes only 2–3 pixels in high and none in native). FSR 3.1's
+   use of its history is covered: disabling it changes about 218,000 pixels (per the
+   review).
+8. **Q1: `auto` stays TAAU.** Q1 gives FSR 3.1 the open build's `auto` slot when its port
+   passes the same readability tests and costs within 0.2 ms of TAAU on the RTX 5070 Ti. Its
+   cost is within that (the temporal lane on the RTX 5070 Ti at 1440p, three interleaved
+   rounds: 0.278 ms against TAAU's 0.144 ms at the High preset, p95 0.305 against 0.148, a
+   delta of +0.134 ms median and +0.157 ms p95; at Low 0.279 against 0.147, +0.132 and
+   +0.159), but it smears the particle core more than TAAU at every
+   ratio on all three devices and needs its own tripwire from Performance down (item 6), so
+   `AUTO_OPEN_BUILD` stays `Taau`; FSR 3.1 is selectable by name.
+9. **FP32 against FP16, and the Low class.** Amendment 1 asked stage 2 to time the 32-bit
+   permutation against a 16-bit one (at least on the 610M) or cite AMD's published deltas.
+   The SDK's 16-bit permutation (`FFX_HALF=1`) does not compile unmodified with the pinned
+   `slangc` (2026.20): at `FFX_HLSL_SM=62` `asfloat16` is ambiguous in `ffx_core_hlsl.h`, and
+   at `FFX_HLSL_SM=60` the half-precision helpers are defined twice and 36 identifiers are
+   undefined; building it means patching the vendored headers or adding DXC. No AMD figure
+   for the FP16 permutation's saving was found to cite. What was measured instead is the
+   32-bit permutation against TAAU on the Radeon 610M (RDNA 2, where the SDK would take the
+   16-bit path, so an upper bound for it there). At the Low preset, 1080p output and the
+   dynamic-resolution floor (render 960×540) for both, three interleaved rounds, the temporal
+   lane is 13.05 ms for FSR 3.1 against 9.51 ms for TAAU (p95 13.21 against 9.52), **+3.54 ms
+   median and +3.69 ms p95**, the GPU frame 23.49 against 19.96 ms, upscaler memory 74.2
+   against 39.4 MiB. On this two-CU part FSR 3.1 costs about 37 % more than TAAU, which is
+   already half the frame. **FSR 3.1 does not enter `auto` or
+   a Low preset without a measurement on a Low-class part** (the RTX 2060 or an RDNA 2
+   discrete card), with FP16 if it is built by then. The round-1 perf review estimates the RTX
+   2060's lane delta at 0.3–0.5 ms (an estimate, unmeasured). FSR 3.1 costs 1.37× TAAU's
+   lane on the 610M against 1.93× on the RTX 5070 Ti (High), so neither part predicts the
+   Low class.
+10. **The stage-1 coverage gaps are closed.** `fsr3-smoke` gains two occluder runs (a box at a
+    nearer depth crosses the still fine field, motion on the box only). Skipping the
+    every-frame clear of the reconstructed previous depth now fails it (the trail the box left
+    over 40 frames ago stays at 0.97× the single-frame error, against ≤ 0.9× and 0.78× clean),
+    and so does a stale previous-frame render size (across a Performance-to-Quality step over a
+    coarse checkerboard, the background's error drops 11–12 %, against ≤ 5 % and 1.0–1.7 %
+    clean), on lavapipe, the RTX 5070 Ti and the Radeon 610M alike, with validation silent.
+    The lavapipe runs (`r1/smoke-faults/lavapipe-*.log` in the evidence): clean, trail
+    0.785× and the step −0.97 % / −1.66 %, pass; no depth clear, trail 0.969× and the step
+    −28.9 % / −27.9 %, fail (three mismatches); the previous size set to the current one,
+    step −10.89 % / −11.92 %, fail (two mismatches). A previous size that is never written
+    (left at zero) is not caught (−1.81 % / −3.41 %): the check catches a size that misses the
+    step, not one the SDK can treat as unknown.
+11. **The jitter hand-over** (amendment 1's request). The renderer hands the back ends
+    (`UpscaleInputs::jitter`) the jitter its jittered matrix applies, unchanged:
+    `the_jitter_handed_on_is_the_one_applied` (`upscale/frame.rs`) checks that the matrix
+    moves points by exactly `camera.jitter` render pixels, x right and y down, which is FSR's
+    convention (its projection offset is `(2 jx / w, −2 jy / h)` in y-up NDC), so no back end
+    flips a sign. (The first version of this item added an assertion to §1's sign test that
+    was algebraically the test's own; it is gone.)
+12. **The tiered perf-gate baselines are not re-recorded here.** `auto` is still TAAU and
+    item 13 changes the default frame only by the particles' motion-only draw (perf/0033
+    measures it against `origin/main`); the flip of amendment 2 item 16 stays with whichever
+    N1 part merges last, which re-records them.
+13. **Particle motion no longer depends on a two-channel blend (changes N1a's §2 rule).** §2
+    had dominant particle fragments write their motion through the `vfx_draw` colour draw,
+    blended `SRC_ALPHA`/`ONE_MINUS_SRC_ALPHA` with an output alpha of `step(0.5, α)`. Source
+    alpha comes from the shader even for the two-channel `R16G16_SFLOAT` target, so real
+    GPUs kept the prepass's (ground) motion wherever a particle's opacity was under 0.5,
+    which is most of a soft sprite's visible core: on the RTX 5070 Ti the ghost probe's
+    particle smear was 27.55 % Quality, 35.78 % Performance and 19.52 % native under TAAU
+    (FSR 3.1 32.70 %, 39.72 %, 6.61 %), and on RADV 27.75 %, 35.40 %, 18.71 % (FSR 3.1
+    29.13 %, 40.25 %, 6.11 %). lavapipe applied neither the alpha gate nor a zero write
+    mask to that target in a draw with other targets, so it wrote every particle fragment's
+    motion and measured 3.77 %, 5.88 %, 1.40 %: CI passed what both GPUs failed. Now:
+    - the colour draw no longer attaches `motion`;
+    - a second, motion-only draw of the same particles (sprites and mesh particles, same
+      vertex shaders) runs in its own rendering scope with `motion` as its only attachment,
+      blending off, writing red and green;
+    - a fragment writes its own motion where its opacity reaches **0.1** and otherwise
+      clears its sample mask (`gl_SampleMask[0] = 0`, so it writes nothing and keeps the
+      prepass's motion; no `discard`, which a Vulkan 1.3 target compiles to a demote the
+      device need not enable).
+
+    0.1 is the visible core, not the faint rim: on the RTX 5070 Ti the smear is the same at
+    0.1 and 0.02 and 0.004 under TAAU (3.52 %, 6.52 %, 1.23 %), and 8.95 % Quality at 0.25.
+    Q3's answer stands (particles write motion vectors), with the threshold lowered and the
+    mechanism changed. After it the three devices agree (TAAU Quality 3.52 / 3.75 / 3.77 %,
+    Performance 6.52 / 6.56 / 5.88 %, native 1.23 / 1.27 / 1.40 % on the RTX, RADV and
+    lavapipe), so the bounds are re-derived from all three: TAAU's particle tripwire stays
+    7.5 % (14 % above its worst, 6.56 % on RADV at Performance), and losing the motion fails
+    it everywhere (29.96–32.23 % Quality). The cost is a second vertex **and fragment** pass over the live
+    particles: the motion fragment shader still samples the atlas and the scene depth for the
+    opacity, and the sample mask stops only the write. Under perf/0016's stress (`MOBA_VFX_SCALE`
+    8 and 16, about 2,800 and 5,300 live particles, overdraw up to 3.3) `vfx_draw` is no higher
+    than main's, whose colour draw blended into the motion target (perf/0033). The tiered
+    goldens' scenes are unchanged by it (their hashes match exactly).
+
+    **The trade-off: translucent layers over moving units.** At 0.1 a translucent particle
+    (smoke) replaces the motion of the unit under it with its own. The round-2 review put
+    seven static 2.5 m smoke sprites over the probe's hero path (RTX 5070 Ti, Quality): TAAU's
+    hero smear was 1.81 % at opacity 0.2 and 1.90 % at 0.4, against 1.44 % and 1.65 % without
+    particle motion and the 1.75 % bound; FSR 3.1 measured 0.27 % at both opacities
+    (0.09 % and 0.64 % without particle motion). **TAAU can exceed the hero bound under
+    translucent smoke.** The probe does not cover the case yet; #368 tracks
+    adding it and choosing a rule (a per-effect flag, a higher threshold for alpha-blended
+    particles, or a wider bound).
+14. **The ghost probe is run on a real GPU, not only lavapipe.** Item 13's bug passed CI's
+    lavapipe run, so gate 3's ghost energy is verified on lavapipe **and** on hardware (the
+    RTX 5070 Ti and RADV here) whenever particle, motion or upscaler code changes; CI's
+    lavapipe run is a tripwire only. `scripts/ghost-probe.sh` also fails a run whose log does
+    not name the back end it asked for, so a fallback cannot report TAAU's numbers as FSR's.
+15. **`TemporalUpscaler::resize` is an `unsafe fn`.** It drops the back end's images and
+    rewrites its descriptor sets, which a pending frame may still use; it was safe only
+    because `recreate_swapchain` idles the device first. Its contract is now a `# Safety`
+    section (the device is idle; no recorded frame is pending), for TAAU and FSR 3.1, and
+    each caller says why it holds.
+16. **FSR 3.1's CI cases run in their own job.** With FSR 3.1 in the ghost probe, overlay
+    invariance and the tiered goldens, `renderer-gate` took 64 minutes of its 75. FSR 3.1's
+    cases now run in a parallel `tiered-temporal` job in the same workflow (the scripts take
+    `UPSCALERS`); TAAU's (the motion probe, the TAAU ghost probe, TAAU overlay invariance,
+    the tiered outline probe, the TAAU tiered goldens and their mid-stream reset) stay in the
+    required `renderer-gate`, because they guard the default frame. **`tiered-temporal`
+    should become a required check**, which is a repository ruleset change for the
+    maintainer; until then FSR 3.1's CI cases do not block a merge.
+
+## Sources
+
+All accessed 2026-10-31.
+
+- [S1] NVIDIA DLSS Programming Guide (`doc/DLSS_Programming_Guide_Release.pdf`, revision
+  310.6.0, dated 31 March 2026): pipeline placement §3.1, dynamic resolution §3.2.2, mip bias
+  §3.5, jitter phases §3.7, exposure §3.9, sharpening §3.11, presets §3.12,
+  `BiasCurrentColor` §3.15:
+  <https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf>. The SDK
+  version (v310.9.16), licence and platforms are ADR-0020 [S16].
+- [S2] AMD FSR 3.1 upscaler manual (the page documents 3.1.4; SDK v2.4.0 ships 3.1.6):
+  <https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-upscaler/>
+- [S3] FidelityFX API, version override:
+  <https://gpuopen.com/manuals/fidelityfx_sdk/getting-started/ffx-api/>
+- [S4] FidelityFX SDK v2.4.0 release notes (ADR-0020 [S22]):
+  <https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v2.4.0>
+- [S5] Intel XeSS-SR developer guide:
+  <https://github.com/intel/xess/blob/main/doc/xess_sr_developer_guide_english.md>. The SDK
+  version (3.0.2) and licence are ADR-0020 [S24].
+- [S6] `VK_NV_low_latency2`:
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_low_latency2.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VkLatencyMarkerNV.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VkLatencySleepModeInfoNV.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/vkLatencySleepNV.html>,
+  <https://github.com/KhronosGroup/Vulkan-Docs/blob/main/appendices/VK_NV_low_latency2.adoc>
+- [S7] `VK_AMD_anti_lag`:
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VK_AMD_anti_lag.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VkAntiLagDataAMD.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/vkAntiLagUpdateAMD.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VkAntiLagStageAMD.html>,
+  <https://docs.vulkan.org/refpages/latest/refpages/source/VkAntiLagModeAMD.html>
+- [S8] Mesa 26.3 RADV Anti-Lag: <https://www.phoronix.com/news/Mesa-26.3-RADV-VK_AMD_anti_lag>
+  (ADR-0020 [S23]). The layer's deletion was checked through the GitLab API: MR
+  <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/42048> (merged 2026-10-08) and
+  commit `b99595dedb85` "vulkan: delete anti-lag layer", which is on the `26.3` branch and in
+  `mesa-26.3.0-rc2` and `rc3`.
+- [S9] Godot third-party components:
+  <https://github.com/godotengine/godot/blob/master/thirdparty/README.md>
+- [S10] Playdead INSIDE TAA (MIT): <https://github.com/playdeadgames/temporal>
+- **Literature (not vendor claims, not re-checked):** B. Karis, "High Quality Temporal
+  Supersampling", SIGGRAPH 2014 Advances in Real-Time Rendering; M. Salvi, "An Excursion in
+  Temporal Supersampling", GDC 2016; J. Jimenez, "Filmic SMAA", SIGGRAPH 2016.
+- **Local evidence (2026-10-31, this machine):**
+  - `vulkaninfo`: the RTX 5070 Ti (driver 615.78.08) exposes `VK_NV_low_latency2` revision 3.
+    Both it and the Radeon 610M (Mesa 26.2.5) expose `VK_KHR_present_id`/`present_id2` and
+    `VK_KHR_present_wait`/`present_wait2`, and `VK_AMD_anti_lag` revision 1 through
+    `VK_LAYER_MESA_anti_lag`.
+  - `ash` 0.38.0's `definitions.rs` contains `SwapchainLatencyCreateInfoNV`,
+    `LatencySleepInfoNV`, `LatencySleepModeInfoNV`, `SetLatencyMarkerInfoNV` and
+    `LatencySubmissionPresentIdNV`.

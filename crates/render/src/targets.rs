@@ -1,6 +1,7 @@
 //! Physical images behind the render graph's transient slots, and target format choice.
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 
 use crate::device::DeviceContext;
 use crate::error::{RenderError, RenderResult};
@@ -22,7 +23,7 @@ impl TargetExtents {
     /// The size of a slot of `size`.
     pub(crate) fn of(self, size: ImageSize) -> vk::Extent2D {
         match size {
-            ImageSize::Swapchain => self.swapchain,
+            ImageSize::Output { shift } => shifted(self.swapchain, shift),
             ImageSize::Render { shift } => shifted(self.render, shift),
             ImageSize::Fixed { width, height } => vk::Extent2D { width, height },
         }
@@ -69,7 +70,7 @@ impl TransientPool {
         let mut fresh = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
             fresh.push(match slot.desc.size {
-                ImageSize::Swapchain | ImageSize::Render { .. } => {
+                ImageSize::Output { .. } | ImageSize::Render { .. } => {
                     Some(create_slot(device, index, slot, extents)?)
                 }
                 ImageSize::Fixed { .. } => None,
@@ -391,9 +392,12 @@ pub(crate) fn choose_exposure_format(device: &DeviceContext) -> vk::Format {
 
 /// `VkFormatProperties3::optimalTilingFeatures` (Vulkan 1.3 core), which also reports depth
 /// comparison support.
-fn optimal_features_2(device: &DeviceContext, format: vk::Format) -> vk::FormatFeatureFlags2 {
+pub(crate) fn optimal_features_2(
+    device: &DeviceContext,
+    format: vk::Format,
+) -> vk::FormatFeatureFlags2 {
     let mut properties_3 = vk::FormatProperties3::default();
-    let mut properties = vk::FormatProperties2::default().push_next(&mut properties_3);
+    let mut properties = vk::FormatProperties2::default().push(&mut properties_3);
     // SAFETY: the physical device belongs to the instance the device context was made from,
     // and the output chain is valid for the call.
     unsafe {

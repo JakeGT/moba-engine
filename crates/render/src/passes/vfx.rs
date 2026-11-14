@@ -37,6 +37,7 @@
 //! copies `args` to this frame's readback buffer.
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use bytemuck::{Pod, Zeroable, bytes_of};
 use gpu_allocator::MemoryLocation;
 use moba_core::math::{Mat4, Vec3, Vec4};
@@ -97,10 +98,11 @@ pub(crate) struct GpuParticle {
     misc: [u32; 4],
 }
 
-/// The per-frame block (std140, 192 bytes). Must match `VfxFrame` in `include/vfx.glsl`.
+/// The per-frame block (std140, 352 bytes). Must match `VfxFrame` in `include/vfx.glsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct VfxUniform {
+    /// Jittered with temporal AA (ADR-0021 §1).
     view_proj: [[f32; 4]; 4],
     camera_right: [f32; 4],
     camera_up: [f32; 4],
@@ -108,8 +110,30 @@ struct VfxUniform {
     viewport: [f32; 4],
     depth: [f32; 4],
     light: [f32; 4],
+    /// Capacity, spawn count, mesh region capacity, flags ([`FRAME_NO_TELEGRAPHS`]).
     counts: [u32; 4],
     mesh_indices: [u32; 4],
+    /// ADR-0021: particle motion and the overlay's telegraph particles.
+    view_proj_unjittered: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    /// xy the render size (motion in render pixels).
+    temporal: [f32; 4],
+    /// x the composite's base exposure (linear), y the look's saturation, z 1 = sRGB target.
+    overlay: [f32; 4],
+}
+
+/// `VfxUniform::counts[3]` bit: the scene's particle draw leaves enemy telegraphs to the
+/// overlay (`VFX_FRAME_NO_TELEGRAPHS`, ADR-0021 §5b).
+const FRAME_NO_TELEGRAPHS: u32 = 1;
+
+/// What the Tiered path adds to a frame's particle block (ADR-0021).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VfxFrameExtras {
+    /// The jittered, unjittered and previous matrices; `None` without temporal AA.
+    pub(crate) temporal: Option<crate::scene::TemporalCamera>,
+    /// The overlay's `(exposure, saturation, srgb)`: telegraphs leave the scene's draw for
+    /// `overlay_vfx`. `None` on Compat.
+    pub(crate) overlay: Option<[f32; 3]>,
 }
 
 /// Push constants of the compute and mesh shaders (8 bytes, compute + vertex).
@@ -142,7 +166,7 @@ const PUSH_STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::from_raw(
 );
 
 /// IEEE half-precision bits of `value` (round to nearest, saturating at ±65504).
-fn f16_bits(value: f32) -> u16 {
+pub(crate) fn f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let magnitude = value.abs();
@@ -167,7 +191,7 @@ fn f16_bits(value: f32) -> u16 {
 }
 
 /// `packHalf2x16(vec2(low, high))`.
-fn pack_half2(low: f32, high: f32) -> u32 {
+pub(crate) fn pack_half2(low: f32, high: f32) -> u32 {
     u32::from(f16_bits(low)) | (u32::from(f16_bits(high)) << 16)
 }
 
@@ -388,6 +412,8 @@ impl SlotAllocator {
 /// Views and region the distortion pass renders into this frame (ADR-0019).
 pub(crate) struct DistortionTargets {
     pub(crate) hdr: vk::ImageView,
+    /// The reactive mask (ADR-0021 §2d), with temporal AA.
+    pub(crate) reactive: Option<vk::ImageView>,
     pub(crate) depth: vk::ImageView,
     /// The render sub-rectangle (top-left corner of the render-sized targets).
     pub(crate) extent: vk::Extent2D,
@@ -410,6 +436,16 @@ pub(crate) struct VfxTargets {
     pub(crate) depth: vk::ImageView,
     pub(crate) accum: Option<vk::ImageView>,
     pub(crate) reveal: Option<vk::ImageView>,
+    /// Motion and the reactive mask (ADR-0021 §2d), with temporal AA.
+    pub(crate) temporal: Option<(vk::ImageView, vk::ImageView)>,
+    pub(crate) extent: vk::Extent2D,
+}
+
+/// The overlay's particle targets (ADR-0021 §5b), at output resolution.
+pub(crate) struct VfxOverlayTargets {
+    pub(crate) color: vk::ImageView,
+    /// The overlay depth, read-only.
+    pub(crate) depth: vk::ImageView,
     pub(crate) extent: vk::Extent2D,
 }
 
@@ -430,9 +466,14 @@ pub(crate) struct VfxPipelines {
     simulate: GraphicsPipeline,
     sprite: GraphicsPipeline,
     mesh: Option<GraphicsPipeline>,
+    /// With temporal AA, the motion-only draws of the sprites and the mesh particles
+    /// (ADR-0021 §2b, amendment 4).
+    motion: Option<(GraphicsPipeline, Option<GraphicsPipeline>)>,
     resolve: Option<GraphicsPipeline>,
     /// The heat-haze pipeline (ADR-0019); `None` without distortion.
     distortion: Option<GraphicsPipeline>,
+    /// Enemy telegraphs in the overlay (ADR-0021 §5b); Tiered only.
+    overlay: Option<GraphicsPipeline>,
 }
 
 /// The VFX passes' buffers, descriptor sets and pipelines.
@@ -471,6 +512,11 @@ pub(crate) struct VfxPass {
     mesh_region: u32,
     hdr_format: vk::Format,
     depth_format: vk::Format,
+    /// The colour draws also write the reactive mask, and a second, motion-only draw writes
+    /// the particles' motion (ADR-0021 §2d, amendment 4 item 13).
+    temporal: bool,
+    /// The overlay's target format (Tiered, ADR-0021 §5b).
+    overlay_format: Option<vk::Format>,
     latest: Option<VfxStats>,
     next_sequence: u64,
 }
@@ -492,7 +538,7 @@ impl VfxPass {
     /// pipelines. `oit` selects the weighted blended OIT draw (and the resolve pass);
     /// `budget.distortion` the heat-haze pipeline and its set (ADR-0019), whose layout is
     /// checked against the device's per-stage descriptor limits.
-    #[allow(clippy::too_many_lines)] // One linear set-up sequence.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One linear set-up.
     pub(crate) fn new(
         device: &DeviceContext,
         shaders: &ShaderSource,
@@ -501,6 +547,8 @@ impl VfxPass {
         depth_format: vk::Format,
         budget: VfxBudget,
         oit: bool,
+        temporal: bool,
+        overlay_format: Option<vk::Format>,
     ) -> RenderResult<Self> {
         let capacity = budget.max_particles.max(WORKGROUP);
         let mesh_region = (capacity / 8).max(1);
@@ -707,8 +755,12 @@ impl VfxPass {
                     .as_ref()
                     .map(PipelineLayout::handle),
             },
-            hdr_format,
-            depth_format,
+            &TargetFormats {
+                hdr: hdr_format,
+                depth: depth_format,
+                temporal,
+                overlay: overlay_format,
+            },
             oit,
             budget.mesh_particles,
         )?;
@@ -764,6 +816,8 @@ impl VfxPass {
             mesh_region,
             hdr_format,
             depth_format,
+            temporal,
+            overlay_format,
             latest: None,
             next_sequence: 0,
         };
@@ -793,8 +847,12 @@ impl VfxPass {
                     .as_ref()
                     .map(|distortion| distortion.pipeline_layout.handle()),
             },
-            self.hdr_format,
-            self.depth_format,
+            &TargetFormats {
+                hdr: self.hdr_format,
+                depth: self.depth_format,
+                temporal: self.temporal,
+                overlay: self.overlay_format,
+            },
             self.oit,
             self.budget.mesh_particles,
         )
@@ -1008,7 +1066,14 @@ impl VfxPass {
 
     /// Allocates slots for this frame's spawns and writes the spawn upload and the uniform
     /// block. The frame's fence must have been waited on. Allocation-free.
-    pub(crate) fn prepare(&mut self, frame: usize, scene: &Scene<'_>, extent: vk::Extent2D) {
+    #[allow(clippy::too_many_lines)] // Spawns, then every member of the block.
+    pub(crate) fn prepare(
+        &mut self,
+        frame: usize,
+        scene: &Scene<'_>,
+        extent: vk::Extent2D,
+        extras: &VfxFrameExtras,
+    ) {
         let vfx = scene.vfx;
         let dt = if vfx.dt.is_finite() {
             vfx.dt.clamp(0.0, MAX_DT)
@@ -1089,8 +1154,13 @@ impl VfxPass {
         });
         let width = extent.width.max(1) as f32;
         let height = extent.height.max(1) as f32;
+        let temporal = extras.temporal;
         let uniform = VfxUniform {
-            view_proj: camera.view_proj.to_cols_array_2d(),
+            // ADR-0021 §1: rasterised with the jittered matrix; the billboard basis above
+            // stays the client's.
+            view_proj: temporal
+                .map_or(camera.view_proj, |temporal| temporal.jittered)
+                .to_cols_array_2d(),
             camera_right: right.extend(dt).to_array(),
             camera_up: up.extend(self.allocator.clock as f32).to_array(),
             eye: camera
@@ -1104,8 +1174,27 @@ impl VfxPass {
                 .normalize_or_zero()
                 .extend(0.4)
                 .to_array(),
-            counts: [self.capacity, buffers.spawn_count, self.mesh_region, 0],
+            counts: [
+                self.capacity,
+                buffers.spawn_count,
+                self.mesh_region,
+                if extras.overlay.is_some() {
+                    FRAME_NO_TELEGRAPHS
+                } else {
+                    0
+                },
+            ],
             mesh_indices,
+            view_proj_unjittered: camera.view_proj.to_cols_array_2d(),
+            prev_view_proj: temporal
+                .map_or(camera.view_proj, |temporal| temporal.previous)
+                .to_cols_array_2d(),
+            temporal: [width, height, 0.0, 0.0],
+            overlay: extras
+                .overlay
+                .map_or([0.0; 4], |[exposure, saturation, srgb]| {
+                    [exposure, saturation, srgb, 0.0]
+                }),
         };
         buffers.uniform.write_bytes(0, bytes_of(&uniform));
     }
@@ -1201,6 +1290,7 @@ impl VfxPass {
     }
 
     /// Records the particle draw into the HDR target (and the OIT targets).
+    #[allow(clippy::too_many_lines)] // Attachments, then the sprite and mesh draws.
     pub(crate) fn record_draw(
         &self,
         device: &DeviceContext,
@@ -1214,7 +1304,7 @@ impl VfxPass {
             .image_view(targets.hdr)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::LOAD)
-            .store_op(vk::AttachmentStoreOp::STORE); 3];
+            .store_op(vk::AttachmentStoreOp::STORE); 5];
         let mut count = 1;
         if self.oit
             && let (Some(accum), Some(reveal)) = (targets.accum, targets.reveal)
@@ -1231,6 +1321,21 @@ impl VfxPass {
                 count += 1;
             }
         }
+        // ADR-0021 §2d: the cleared reactive mask, loaded. The prepass's motion is the
+        // motion-only draw's own attachment, below (amendment 4).
+        let motion = if self.temporal
+            && let Some((motion, reactive)) = targets.temporal
+        {
+            colors[count] = vk::RenderingAttachmentInfo::default()
+                .image_view(reactive)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            count += 1;
+            Some(motion)
+        } else {
+            None
+        };
         // Read-only depth: tested, never written (STORE_OP_NONE), and sampled for soft
         // particles in the same pass.
         let depth = vk::RenderingAttachmentInfo::default()
@@ -1266,7 +1371,41 @@ impl VfxPass {
                 &[],
             );
         }
-        bind_graphics(device, command_buffer, &self.pipelines.sprite);
+        self.draw_particles(
+            device,
+            command_buffer,
+            scene,
+            &self.pipelines.sprite,
+            self.pipelines.mesh.as_ref(),
+        );
+        device.cmd_end_rendering(command_buffer);
+        // ADR-0021 §2b, amendment 4: the same particles again in a scope of their own, with
+        // the prepass's motion as the only colour attachment, writing their motion where
+        // their coverage reaches the core. The sets, viewport and scissor stay bound.
+        if let (Some(view), Some((sprite, mesh))) = (motion, &self.pipelines.motion) {
+            let motion = [vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE)];
+            let render_info = render_info.color_attachments(&motion);
+            device.cmd_begin_rendering(command_buffer, &render_info);
+            self.draw_particles(device, command_buffer, scene, sprite, mesh.as_ref());
+            device.cmd_end_rendering(command_buffer);
+        }
+    }
+
+    /// Records the sprite draw and every mesh slot's draw with `sprite` and `mesh`, inside
+    /// the particle pass's rendering scope with its sets bound.
+    fn draw_particles(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        scene: &ScenePass,
+        sprite: &GraphicsPipeline,
+        mesh: Option<&GraphicsPipeline>,
+    ) {
+        bind_graphics(device, command_buffer, sprite);
         self.push(device, command_buffer, 0, 0);
         // SAFETY: the args buffer holds a VkDrawIndirectCommand at offset 0 whose instance
         // count the simulation clamped to the sprite list's capacity, and was created with
@@ -1276,7 +1415,7 @@ impl VfxPass {
                 .device
                 .cmd_draw_indirect(command_buffer, self.args.handle(), 0, 1, 16);
         }
-        if let Some(pipeline) = &self.pipelines.mesh {
+        if let Some(pipeline) = mesh {
             let mut bound = false;
             for (slot, entry) in self.mesh_slots.iter().enumerate() {
                 let Some(mesh) = entry.and_then(|(id, _)| scene.mesh(id)) else {
@@ -1321,6 +1460,68 @@ impl VfxPass {
                     );
                 }
             }
+        }
+    }
+
+    /// Records `overlay_vfx` (ADR-0021 §5b): the enemy-telegraph particles (the sprite
+    /// list's, which the scene's draw skipped) over the overlay's output, unjittered at output
+    /// resolution, depth-tested read-only against the overlay depth, tone-mapped in-shader.
+    pub(crate) fn record_overlay(
+        &self,
+        device: &DeviceContext,
+        command_buffer: vk::CommandBuffer,
+        frame: usize,
+        targets: &VfxOverlayTargets,
+    ) {
+        let Some(pipeline) = &self.pipelines.overlay else {
+            return;
+        };
+        let color = vk::RenderingAttachmentInfo::default()
+            .image_view(targets.color)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE);
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(targets.depth)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::NONE);
+        let render_info = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: targets.extent,
+            })
+            .layer_count(1)
+            .color_attachments(core::slice::from_ref(&color))
+            .depth_attachment(&depth);
+        device.cmd_begin_rendering(command_buffer, &render_info);
+        super::set_viewport_scissor(
+            device,
+            command_buffer,
+            super::flipped_viewport(targets.extent),
+            targets.extent,
+        );
+        let sets = [self.frames[frame].set, self.texture_set];
+        // SAFETY: both sets match the particle layout (sets 0 and 1) and name live
+        // resources; the overlay shader reads only the atlas from set 1.
+        unsafe {
+            device.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout.handle(),
+                0,
+                &sets,
+                &[],
+            );
+        }
+        bind_graphics(device, command_buffer, pipeline);
+        self.push(device, command_buffer, 0, 0);
+        // SAFETY: as the sprite draw in `record_draw`: the args buffer holds the sprite
+        // list's VkDrawIndirectCommand at offset 0.
+        unsafe {
+            device
+                .device
+                .cmd_draw_indirect(command_buffer, self.args.handle(), 0, 1, 16);
         }
         device.cmd_end_rendering(command_buffer);
     }
@@ -1381,11 +1582,19 @@ impl VfxPass {
             return;
         };
         let extent = targets.extent;
-        let colors = [vk::RenderingAttachmentInfo::default()
-            .image_view(targets.hdr)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::LOAD)
-            .store_op(vk::AttachmentStoreOp::STORE)];
+        let attachment = |view| {
+            vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE)
+        };
+        // ADR-0021 §2d: the haze adds `|offset| / cap` to the reactive mask.
+        let colors = [
+            attachment(targets.hdr),
+            attachment(targets.reactive.unwrap_or(targets.hdr)),
+        ];
+        let colors = &colors[..=usize::from(self.temporal && targets.reactive.is_some())];
         // Read-only depth: tested, never written, and sampled in the same pass.
         let depth = vk::RenderingAttachmentInfo::default()
             .image_view(targets.depth)
@@ -1398,7 +1607,7 @@ impl VfxPass {
                 extent,
             })
             .layer_count(1)
-            .color_attachments(&colors)
+            .color_attachments(colors)
             .depth_attachment(&depth);
         device.cmd_begin_rendering(command_buffer, &render_info);
         super::set_viewport_scissor(
@@ -1643,15 +1852,27 @@ struct PipelineLayouts {
     distortion: Option<vk::PipelineLayout>,
 }
 
+/// The formats the VFX pipelines render into.
+struct TargetFormats {
+    hdr: vk::Format,
+    depth: vk::Format,
+    /// The colour draws add the reactive mask; the motion-only draw is built too (ADR-0021
+    /// §2d, amendment 4 item 13).
+    temporal: bool,
+    /// The overlay's target (ADR-0021 §5b).
+    overlay: Option<vk::Format>,
+}
+
+#[allow(clippy::too_many_lines)] // One pipeline per pass and permutation.
 fn build_pipelines(
     device: &DeviceContext,
     shaders: &ShaderSource,
     layouts: &PipelineLayouts,
-    hdr_format: vk::Format,
-    depth_format: vk::Format,
+    targets: &TargetFormats,
     oit: bool,
     meshes: bool,
 ) -> RenderResult<VfxPipelines> {
+    let (hdr_format, depth_format, temporal) = (targets.hdr, targets.depth, targets.temporal);
     let (layout, resolve_layout) = (layouts.particles, layouts.resolve);
     let module = |name| shaders.module(device, name);
     let compute = module("vfx_simulate.comp")?;
@@ -1665,42 +1886,90 @@ fn build_pipelines(
             .layout(layout),
     )?;
     let simulate = GraphicsPipeline::from_raw(device.device.clone(), simulate);
-    let fragment = module(if oit { "vfx_oit.frag" } else { "vfx.frag" })?;
+    let fragment = module(match (oit, temporal) {
+        (false, false) => "vfx.frag",
+        (true, false) => "vfx_oit.frag",
+        (false, true) => "vfx_temporal.frag",
+        (true, true) => "vfx_oit_temporal.frag",
+    })?;
     let (accum, reveal) = oit_formats();
-    let formats = [hdr_format, accum, reveal];
-    let formats = if oit { &formats[..] } else { &formats[..1] };
     let blend = if oit {
         Blend::Add
     } else {
         Blend::Premultiplied
     };
-    let sprite_vertex = module("vfx.vert")?;
+    // ADR-0021 §2d: the reactive mask (MAX) follows the colour targets. Motion is the
+    // motion-only draw's own target (amendment 4).
+    let mut formats = [vk::Format::UNDEFINED; 5];
+    let mut blends = [blend; 5];
+    let mut count = 0;
+    for format in [hdr_format, accum, reveal]
+        .into_iter()
+        .take(if oit { 3 } else { 1 })
+    {
+        formats[count] = format;
+        count += 1;
+    }
+    if temporal {
+        formats[count] = crate::frame_graph::MASK_FORMAT;
+        blends[count] = Blend::Max;
+        count += 1;
+    }
+    let (sprite_vertex, mesh_vertex) = if temporal {
+        ("vfx_temporal.vert", "vfx_mesh_temporal.vert")
+    } else {
+        ("vfx.vert", "vfx_mesh.vert")
+    };
+    let sprite_vertex = module(sprite_vertex)?;
     let sprite = particle_pipeline(
         device,
         &ParticleSpec {
             layout,
             vertex: sprite_vertex.handle(),
             fragment: fragment.handle(),
-            formats,
+            formats: &formats[..count],
+            blends: &blends[..count],
             depth_format,
-            blend,
             mesh_input: false,
         },
     )?;
     let mesh = if meshes {
-        let vertex = module("vfx_mesh.vert")?;
+        let vertex = module(mesh_vertex)?;
         Some(particle_pipeline(
             device,
             &ParticleSpec {
                 layout,
                 vertex: vertex.handle(),
                 fragment: fragment.handle(),
-                formats,
+                formats: &formats[..count],
+                blends: &blends[..count],
                 depth_format,
-                blend,
                 mesh_input: true,
             },
         )?)
+    } else {
+        None
+    };
+    let motion = if temporal {
+        // Both blend paths: the draw writes no colour (`vfx_motion.frag`).
+        let fragment = module("vfx_motion.frag")?;
+        let spec = |vertex: vk::ShaderModule, mesh_input| ParticleSpec {
+            layout,
+            vertex,
+            fragment: fragment.handle(),
+            formats: &[crate::frame_graph::MOTION_FORMAT],
+            blends: &[Blend::Motion],
+            depth_format,
+            mesh_input,
+        };
+        let sprite = particle_pipeline(device, &spec(sprite_vertex.handle(), false))?;
+        let mesh = if meshes {
+            let vertex = module(mesh_vertex)?;
+            Some(particle_pipeline(device, &spec(vertex.handle(), true))?)
+        } else {
+            None
+        };
+        Some((sprite, mesh))
     } else {
         None
     };
@@ -1714,8 +1983,8 @@ fn build_pipelines(
                 vertex: vertex.handle(),
                 fragment: fragment.handle(),
                 formats: &[hdr_format],
+                blends: &[Blend::Over],
                 depth_format: vk::Format::UNDEFINED,
-                blend: Blend::Over,
                 mesh_input: false,
             },
         )?)
@@ -1725,16 +1994,43 @@ fn build_pipelines(
     let distortion = match layouts.distortion {
         Some(layout) => {
             let vertex = module("vfx_distort.vert")?;
-            let fragment = module("vfx_distort.frag")?;
+            let fragment = module(if temporal {
+                "vfx_distort_temporal.frag"
+            } else {
+                "vfx_distort.frag"
+            })?;
+            let formats = [hdr_format, crate::frame_graph::MASK_FORMAT];
+            let blends = [Blend::Refract, Blend::Max];
+            let count = 1 + usize::from(temporal);
             Some(particle_pipeline(
                 device,
                 &ParticleSpec {
                     layout,
                     vertex: vertex.handle(),
                     fragment: fragment.handle(),
-                    formats: &[hdr_format],
+                    formats: &formats[..count],
+                    blends: &blends[..count],
                     depth_format,
-                    blend: Blend::Refract,
+                    mesh_input: false,
+                },
+            )?)
+        }
+        None => None,
+    };
+    let overlay = match targets.overlay {
+        Some(format) => {
+            let vertex = module("vfx_overlay.vert")?;
+            let fragment = module("vfx_overlay.frag")?;
+            Some(particle_pipeline(
+                device,
+                &ParticleSpec {
+                    layout,
+                    vertex: vertex.handle(),
+                    fragment: fragment.handle(),
+                    formats: &[format],
+                    blends: &[Blend::Premultiplied],
+                    // The overlay depth has the main depth's format.
+                    depth_format,
                     mesh_input: false,
                 },
             )?)
@@ -1745,8 +2041,10 @@ fn build_pipelines(
         simulate,
         sprite,
         mesh,
+        motion,
         resolve,
         distortion,
+        overlay,
     })
 }
 
@@ -1761,6 +2059,14 @@ enum Blend {
     /// `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` on colour, destination alpha kept: the heat haze
     /// cross-fades overlapping sprites (ADR-0019).
     Refract,
+    /// Motion vectors (ADR-0021 §2d, amendment 4): no blending, red and green written, the
+    /// only target of the motion-only draw, which clears the sample mask of the fragments
+    /// that keep what is under them. Nothing depends on how a two-channel target takes a
+    /// source alpha or a write mask beside other targets (lavapipe does neither as the spec
+    /// says).
+    Motion,
+    /// `MAX` on red only: the reactive mask (ADR-0021 §2d).
+    Max,
 }
 
 struct ParticleSpec<'a> {
@@ -1768,11 +2074,54 @@ struct ParticleSpec<'a> {
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
     formats: &'a [vk::Format],
+    /// One per format (different states need `independentBlend`, which the Tiered path
+    /// requires, ADR-0021 §2e; Compat's are all equal).
+    blends: &'a [Blend],
     /// `UNDEFINED` for no depth attachment (the resolve).
     depth_format: vk::Format,
-    blend: Blend,
     /// Static mesh vertices (position, normal) at binding 0.
     mesh_input: bool,
+}
+
+/// One attachment's blend state.
+fn blend_state(blend: Blend) -> vk::PipelineColorBlendAttachmentState {
+    if blend == Blend::Motion {
+        return vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(false)
+            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G);
+    }
+    let (src, dst) = match blend {
+        Blend::Add | Blend::Max => (vk::BlendFactor::ONE, vk::BlendFactor::ONE),
+        Blend::Premultiplied => (vk::BlendFactor::ONE, vk::BlendFactor::ONE_MINUS_SRC_ALPHA),
+        Blend::Motion => unreachable!("returned above"),
+        Blend::Over | Blend::Refract => (
+            vk::BlendFactor::SRC_ALPHA,
+            vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        ),
+    };
+    let (src_alpha, dst_alpha) = if blend == Blend::Refract {
+        (vk::BlendFactor::ZERO, vk::BlendFactor::ONE)
+    } else {
+        (src, dst)
+    };
+    let op = if blend == Blend::Max {
+        vk::BlendOp::MAX
+    } else {
+        vk::BlendOp::ADD
+    };
+    let mask = match blend {
+        Blend::Max => vk::ColorComponentFlags::R,
+        _ => vk::ColorComponentFlags::RGBA,
+    };
+    vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(true)
+        .src_color_blend_factor(src)
+        .dst_color_blend_factor(dst)
+        .color_blend_op(op)
+        .src_alpha_blend_factor(src_alpha)
+        .dst_alpha_blend_factor(dst_alpha)
+        .alpha_blend_op(op)
+        .color_write_mask(mask)
 }
 
 fn particle_pipeline(
@@ -1834,30 +2183,15 @@ fn particle_pipeline(
         } else {
             vk::CompareOp::ALWAYS
         });
-    let (src, dst) = match spec.blend {
-        Blend::Add => (vk::BlendFactor::ONE, vk::BlendFactor::ONE),
-        Blend::Premultiplied => (vk::BlendFactor::ONE, vk::BlendFactor::ONE_MINUS_SRC_ALPHA),
-        Blend::Over | Blend::Refract => (
-            vk::BlendFactor::SRC_ALPHA,
-            vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
-        ),
-    };
-    let (src_alpha, dst_alpha) = if spec.blend == Blend::Refract {
-        (vk::BlendFactor::ZERO, vk::BlendFactor::ONE)
-    } else {
-        (src, dst)
-    };
-    // Every attachment uses the same state, so `independentBlend` is not required.
-    let attachment = vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(true)
-        .src_color_blend_factor(src)
-        .dst_color_blend_factor(dst)
-        .color_blend_op(vk::BlendOp::ADD)
-        .src_alpha_blend_factor(src_alpha)
-        .dst_alpha_blend_factor(dst_alpha)
-        .alpha_blend_op(vk::BlendOp::ADD)
-        .color_write_mask(vk::ColorComponentFlags::RGBA);
-    let attachments = [attachment; 3];
+    assert_eq!(
+        spec.blends.len(),
+        spec.formats.len(),
+        "one blend per target"
+    );
+    let mut attachments = [vk::PipelineColorBlendAttachmentState::default(); 5];
+    for (attachment, &blend) in attachments.iter_mut().zip(spec.blends) {
+        *attachment = blend_state(blend);
+    }
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
         .attachments(&attachments[..spec.formats.len()]);
@@ -1877,7 +2211,7 @@ fn particle_pipeline(
         .color_blend_state(&color_blend)
         .dynamic_state(&dynamic)
         .layout(spec.layout)
-        .push_next(&mut rendering);
+        .push(&mut rendering);
     // Every referenced struct outlives the call; the layout matches the shaders.
     let handle = device.create_graphics_pipeline(&create_info)?;
     Ok(GraphicsPipeline::from_raw(device.device.clone(), handle))
@@ -1891,7 +2225,7 @@ mod tests {
     #[test]
     fn gpu_layouts_match_the_shader_blocks() {
         assert_eq!(core::mem::size_of::<GpuParticle>(), 96);
-        assert_eq!(core::mem::size_of::<VfxUniform>(), 192);
+        assert_eq!(core::mem::size_of::<VfxUniform>(), 352);
         assert_eq!(core::mem::size_of::<VfxPush>(), 8);
         assert_eq!(core::mem::size_of::<DistortionPush>(), 48);
         assert_eq!(ARGS_WORDS, 40);

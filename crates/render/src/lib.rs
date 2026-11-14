@@ -14,6 +14,8 @@
 
 #[doc(hidden)]
 pub mod bench_support;
+mod bindless;
+mod caps;
 mod cull;
 mod descriptor_budget;
 mod device;
@@ -25,6 +27,8 @@ mod font;
 mod font_data;
 mod font_metrics;
 mod frame_graph;
+#[cfg(feature = "fsr3")]
+mod fsr3;
 mod graph;
 mod instance;
 mod lighting;
@@ -32,34 +36,49 @@ mod lights;
 mod material;
 mod memory;
 mod mesh;
+mod motion;
 mod passes;
 mod pipeline;
 mod pipeline_cache;
 mod post;
+mod preset;
 mod profiler;
 mod quality;
 mod renderer;
 mod resources;
 mod scene;
 mod shaders;
+mod slang_smoke;
+mod smoke;
 mod swapchain;
 mod targets;
+mod temporal;
 mod terrain;
 mod texture;
 mod ui;
+mod upscale;
 mod vat;
+mod vendor;
 mod vfx;
 mod world;
 
+pub use caps::{
+    Admission, AdmissionReason, BINDLESS_SAMPLED_IMAGES, BINDLESS_SAMPLERS,
+    BINDLESS_STORAGE_IMAGES, DeviceCapabilities, DeviceKind, EXTENSIONS, ExtensionSpec, Overrides,
+    PathChoice, REQUIRED_FEATURES, REQUIRED_LIMITS, RenderPath, Requirement, VULKAN14_OPTIONAL,
+    admit, default_tier, max_tier, missing_items,
+};
 pub use cull::{CullMode, CullStats, LodConfig};
 pub use environment::{
     Decal, DecalRole, DecalShape, DecalStyle, EnvironmentConfig, EnvironmentFrame, FoliageData,
     FoliageDisplacer, FoliageInstanceData, MAX_DECALS, MAX_FOLIAGE_DISPLACERS,
     MAX_FOLIAGE_INSTANCES, MAX_WATER_BODIES, MAX_WATER_VERTICES, WaterData, WaterMode, WaterStyle,
-    WaterVertexData, glow_reference, telegraph_mark,
+    WaterVertexData, glow_display_reference, glow_reference, telegraph_mark,
 };
 pub use error::{RenderError, RenderResult};
-pub use instance::{ValidationMode, VulkanProbe, probe_vulkan};
+pub use instance::{
+    ProbedDevice, ValidationMode, VulkanProbe, choose_device, probe_devices, probe_vulkan,
+};
 pub use lighting::{
     BakedAo, LightingConfig, MAX_CONTACT_SHADOW_STEPS, MAX_SHADOW_RESOLUTION,
     MIN_SHADOW_RESOLUTION, OutlineMode, SceneLighting, ShadowFilter,
@@ -74,20 +93,27 @@ pub use passes::overlay::ui_vertices_truncated;
 pub use passes::scene::{bones_truncated, skinned_instances_dropped};
 pub use pipeline_cache::{PipelineCacheRejection, PipelineCacheState};
 pub use post::{
-    AntiAliasing, MAX_RENDER_SCALE, MIN_RENDER_SCALE, PostConfig, PostLook, ScreenEffects,
-    UpscaleFilter,
+    AntiAliasing, DEFAULT_SHARPNESS, MAX_RENDER_SCALE, MIN_RENDER_SCALE, MIN_TEMPORAL_RENDER_SCALE,
+    PostConfig, PostLook, ScreenEffects, TemporalDebugView, UpscaleFilter, UpscaleMode,
+    UpscalerKind,
+};
+pub use preset::{
+    FeatureState, Phase, PresetFeature, TierPreset, config_tier, total_memory_budget,
 };
 pub use profiler::{GpuTimings, PassTiming};
 pub use quality::QualityTier;
 pub use renderer::{
-    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, MAX_UI_IMAGE_SIZE, PipelineStats,
-    RenderConfig, Renderer,
+    CapturedFrame, DEFAULT_MAX_BONES, DEFAULT_UI_IMAGE_SIZES, GhostFrame, GhostProbeReport,
+    MAX_UI_IMAGE_SIZE, MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PipelineStats,
+    PushCheck, RenderConfig, Renderer,
 };
 pub use scene::{
     BoneRange, Camera, ClearRect, MAX_OUTLINE_WIDTH, MeshId, OFFSCREEN_MAX_BONES,
     OFFSCREEN_MAX_INSTANCES, OUTLINE_SLOTS, OffscreenRender, OutlinePalette, Scene, UnitInstance,
     VISION_CIRCLES, VISION_WALLS, VisionCircles,
 };
+pub use slang_smoke::{SlangSmoke, slang_smoke};
+pub use smoke::{SmokeReport, bindless_smoke, fsr3_smoke, rt_smoke};
 
 /// Environment descriptor (SH-L2 diffuse, intensity) accepted by [`Renderer::set_environment`].
 pub use moba_assets::EnvironmentDesc;
@@ -109,6 +135,7 @@ pub use ui::{
     build_atlas, pack_rgba8,
 };
 pub use vat::MAX_VAT_MESHES;
+pub use vendor::{LatencyFrame, LatencyMarker, LatencyMode, LatencySetting, VendorBackends};
 pub use vfx::{
     ParticleBlend, ParticleRole, ParticleShape, ParticleSpawn, VFX_MESH_SLOTS, VfxBudget, VfxFrame,
     VfxStats,

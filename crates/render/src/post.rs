@@ -14,7 +14,8 @@ pub const MIN_RENDER_SCALE: f32 = 0.5;
 /// Largest accepted render scale (native resolution).
 pub const MAX_RENDER_SCALE: f32 = 1.0;
 
-/// Anti-aliasing of the scene (ADR-0015 §4). The HUD is never anti-aliased by these.
+/// Anti-aliasing of the scene (ADR-0015 §4, ADR-0021 §4b). The HUD is never anti-aliased by
+/// these.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AntiAliasing {
@@ -24,12 +25,18 @@ pub enum AntiAliasing {
     #[default]
     Fxaa,
     /// 4× MSAA on the scene (and the AO prepass), resolved before the VFX and post passes.
+    /// Compat only: the tiered path refuses it with one log line and runs
+    /// [`Self::Temporal`] (ADR-0021 §7).
     Msaa4,
+    /// Temporal anti-aliasing and upscaling (ADR-0021 §3, §4): a jittered render-resolution
+    /// scene reconstructed at output resolution by the [`UpscalerKind`] back end. The tiered
+    /// default; Compat has no temporal path and refuses it with one log line (FXAA).
+    Temporal,
 }
 
 impl AntiAliasing {
     /// Every mode.
-    pub const ALL: &'static [Self] = &[Self::Off, Self::Fxaa, Self::Msaa4];
+    pub const ALL: &'static [Self] = &[Self::Off, Self::Fxaa, Self::Msaa4, Self::Temporal];
 
     /// Lower-case name, as accepted by [`Self::from_name`] (`MOBA_AA`).
     #[must_use]
@@ -38,10 +45,12 @@ impl AntiAliasing {
             Self::Off => "off",
             Self::Fxaa => "fxaa",
             Self::Msaa4 => "msaa4",
+            Self::Temporal => "temporal",
         }
     }
 
-    /// Parses `off`, `fxaa` or `msaa4`, ignoring ASCII case and surrounding whitespace.
+    /// Parses `off`, `fxaa`, `msaa4` or `temporal`, ignoring ASCII case and surrounding
+    /// whitespace.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         let name = name.trim();
@@ -55,6 +64,205 @@ impl AntiAliasing {
 impl core::fmt::Display for AntiAliasing {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.name())
+    }
+}
+
+/// The temporal upscaler back ends behind one interface (ADR-0021 §4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UpscalerKind {
+    /// The in-house TAA/TAAU (Slang): the baseline on every tiered device and the final
+    /// fallback (ADR-0021 §3).
+    Taau,
+    /// AMD FSR 3.1 (the `fsr3` port, N1b).
+    Fsr3,
+    /// NVIDIA DLSS Super Resolution through NGX (the `dlss` feature, N1c).
+    Dlss,
+    /// AMD FSR 4 (the `fsr4` feature, Windows, N1c).
+    Fsr4,
+    /// Intel XeSS (the `xess` feature, Windows, N1c).
+    Xess,
+}
+
+impl UpscalerKind {
+    /// Every back end.
+    pub const ALL: &'static [Self] = &[Self::Taau, Self::Fsr3, Self::Dlss, Self::Fsr4, Self::Xess];
+
+    /// Lower-case name (`MOBA_UPSCALER`, the frame log's `upscaler=`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Taau => "taau",
+            Self::Fsr3 => "fsr3",
+            Self::Dlss => "dlss",
+            Self::Fsr4 => "fsr4",
+            Self::Xess => "xess",
+        }
+    }
+
+    /// Parses a back-end name, ignoring ASCII case and surrounding whitespace. `auto` is not a
+    /// back end: [`PostConfig::upscaler`] is `None` for it.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.name().eq_ignore_ascii_case(name))
+    }
+}
+
+impl core::fmt::Display for UpscalerKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The upscaler mode, by output ÷ render ratio per axis (ADR-0021 §4b): one naming scheme
+/// for every back end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UpscaleMode {
+    /// 1.0: temporal anti-aliasing at native resolution.
+    Native,
+    /// 1.5.
+    Quality,
+    /// 1.7.
+    Balanced,
+    /// 2.0.
+    Performance,
+    /// 3.0.
+    UltraPerformance,
+}
+
+impl UpscaleMode {
+    /// Every mode, from native down.
+    pub const ALL: &'static [Self] = &[
+        Self::Native,
+        Self::Quality,
+        Self::Balanced,
+        Self::Performance,
+        Self::UltraPerformance,
+    ];
+
+    /// Lower-case name (`MOBA_UPSCALE_MODE`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Quality => "quality",
+            Self::Balanced => "balanced",
+            Self::Performance => "performance",
+            Self::UltraPerformance => "ultra-performance",
+        }
+    }
+
+    /// Parses a mode name, ignoring ASCII case and surrounding whitespace.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|mode| mode.name().eq_ignore_ascii_case(name))
+    }
+
+    /// Output ÷ render per axis.
+    #[must_use]
+    pub const fn ratio(self) -> f32 {
+        match self {
+            Self::Native => 1.0,
+            Self::Quality => 1.5,
+            Self::Balanced => 1.7,
+            Self::Performance => 2.0,
+            Self::UltraPerformance => 3.0,
+        }
+    }
+
+    /// The render scale, `1 / ratio`.
+    #[must_use]
+    pub fn scale(self) -> f32 {
+        1.0 / self.ratio()
+    }
+
+    /// The tier's default mode at an output `height` pixels tall (ADR-0021 §4b, ADR-0020
+    /// §5b): Quality on Low, Medium and High; Ultra Quality at 1440p and Performance at 4K;
+    /// Overdrive Performance.
+    #[must_use]
+    pub const fn for_tier(tier: QualityTier, height: u32) -> Self {
+        match tier {
+            QualityTier::Ultra if height >= 2160 => Self::Performance,
+            QualityTier::Overdrive => Self::Performance,
+            QualityTier::Low | QualityTier::Medium | QualityTier::High | QualityTier::Ultra => {
+                Self::Quality
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for UpscaleMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Smallest render scale the temporal path accepts (Ultra Performance, 3×).
+pub const MIN_TEMPORAL_RENDER_SCALE: f32 = 1.0 / 3.0;
+/// Default [`PostConfig::sharpness`]: TAAU's and FSR 3.1's starting point (ADR-0021 §3).
+pub const DEFAULT_SHARPNESS: f32 = 0.25;
+
+/// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): what the temporal pass or the overlay draws instead of
+/// the frame, for inspection. Tiered only; ignored elsewhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TemporalDebugView {
+    /// The frame.
+    #[default]
+    Off,
+    /// Motion vectors (TAAU).
+    Motion,
+    /// The reactive mask (TAAU).
+    Reactive,
+    /// The transparency-and-composition mask (TAAU).
+    TcMask,
+    /// Where TAAU found the history disoccluded.
+    Disocclusion,
+    /// TAAU's upsampling confidence.
+    Confidence,
+    /// The overlay's ID target.
+    OverlayIds,
+}
+
+impl TemporalDebugView {
+    /// Every view, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Off,
+        Self::Motion,
+        Self::Reactive,
+        Self::TcMask,
+        Self::Disocclusion,
+        Self::Confidence,
+        Self::OverlayIds,
+    ];
+
+    /// The `MOBA_DEBUG_VIEW` name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Motion => "motion",
+            Self::Reactive => "reactive",
+            Self::TcMask => "tc",
+            Self::Disocclusion => "disocclusion",
+            Self::Confidence => "confidence",
+            Self::OverlayIds => "overlay-ids",
+        }
+    }
+
+    /// Parses a `MOBA_DEBUG_VIEW` value (case-insensitive, trimmed).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        Self::ALL.iter().copied().find(|view| view.name() == name)
     }
 }
 
@@ -130,12 +338,24 @@ pub struct PostConfig {
     pub dynamic_resolution: bool,
     /// Dynamic resolution's floor, `0.5..=render_scale`.
     pub min_render_scale: f32,
-    /// Dynamic resolution's GPU-time target per frame, milliseconds.
+    /// Dynamic resolution's GPU-time target per frame, milliseconds, `0.1..=100` (low enough
+    /// for a forced target to bite on a fast GPU, ADR-0020 gate 4).
     pub dynamic_target_ms: f32,
     /// The upscale filter when the image is scaled (`MOBA_UPSCALE`).
     pub upscale: UpscaleFilter,
     /// Apply [`ScreenEffects`] (`MOBA_SCREEN_EFFECTS`).
     pub screen_effects: bool,
+    /// The temporal back end (`MOBA_UPSCALER`); `None` is `auto` (ADR-0021 §4b: DLSS, FSR 4,
+    /// XeSS where compiled in and supported, else TAAU). Only with
+    /// [`AntiAliasing::Temporal`].
+    pub upscaler: Option<UpscalerKind>,
+    /// The temporal mode (`MOBA_UPSCALE_MODE`); `None` is the tier's default at the output
+    /// height ([`UpscaleMode::for_tier`]). Its scale is the render-scale ceiling under
+    /// [`AntiAliasing::Temporal`] (with [`Self::render_scale`] able to lower it).
+    pub upscale_mode: Option<UpscaleMode>,
+    /// Sharpening after the temporal pass, `0..=1` (`MOBA_SHARPNESS`), shared by every back
+    /// end ([`DEFAULT_SHARPNESS`]).
+    pub sharpness: f32,
 }
 
 impl PostConfig {
@@ -168,7 +388,7 @@ impl PostConfig {
                     false,
                     UpscaleFilter::Bicubic,
                 ),
-                QualityTier::Ultra => (
+                QualityTier::Ultra | QualityTier::Overdrive => (
                     true,
                     AntiAliasing::Msaa4,
                     true,
@@ -193,6 +413,9 @@ impl PostConfig {
             dynamic_target_ms: 14.0,
             upscale,
             screen_effects: true,
+            upscaler: None,
+            upscale_mode: None,
+            sharpness: DEFAULT_SHARPNESS,
         }
     }
 
@@ -214,6 +437,9 @@ impl PostConfig {
             dynamic_target_ms: 14.0,
             upscale: UpscaleFilter::Bilinear,
             screen_effects: false,
+            upscaler: None,
+            upscale_mode: None,
+            sharpness: DEFAULT_SHARPNESS,
         }
     }
 
@@ -288,6 +514,27 @@ impl PostConfig {
         self
     }
 
+    /// Returns this config with [`Self::upscaler`] set (`None`: `auto`).
+    #[must_use]
+    pub const fn with_upscaler(mut self, upscaler: Option<UpscalerKind>) -> Self {
+        self.upscaler = upscaler;
+        self
+    }
+
+    /// Returns this config with [`Self::upscale_mode`] set (`None`: the tier's).
+    #[must_use]
+    pub const fn with_upscale_mode(mut self, mode: Option<UpscaleMode>) -> Self {
+        self.upscale_mode = mode;
+        self
+    }
+
+    /// Returns this config with [`Self::sharpness`] set (clamped by [`Self::sanitized`]).
+    #[must_use]
+    pub const fn with_sharpness(mut self, sharpness: f32) -> Self {
+        self.sharpness = sharpness;
+        self
+    }
+
     /// Returns this config with [`Self::screen_effects`] set.
     #[must_use]
     pub const fn with_screen_effects(mut self, screen_effects: bool) -> Self {
@@ -296,19 +543,25 @@ impl PostConfig {
     }
 
     /// The config with every number clamped to its range (non-finite values take the
-    /// defaults): render scales into `0.5..=1` with the floor at most the ceiling, slices
-    /// `2..=4`, a radius `0.25..=8` m and a target `1..=100` ms.
+    /// defaults): render scales into `0.5..=1` (`1/3..=1` under [`AntiAliasing::Temporal`],
+    /// down to Ultra Performance) with the floor at most the ceiling, slices `2..=4`, a
+    /// radius `0.25..=8` m, a target `0.1..=100` ms and the sharpness `0..=1`.
     #[must_use]
     pub fn sanitized(mut self) -> Self {
         let finite = |value: f32, default: f32| if value.is_finite() { value } else { default };
-        self.render_scale =
-            finite(self.render_scale, 1.0).clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE);
+        let min_scale = if self.anti_aliasing == AntiAliasing::Temporal {
+            MIN_TEMPORAL_RENDER_SCALE
+        } else {
+            MIN_RENDER_SCALE
+        };
+        self.render_scale = finite(self.render_scale, 1.0).clamp(min_scale, MAX_RENDER_SCALE);
         self.min_render_scale = finite(self.min_render_scale, 0.6)
-            .clamp(MIN_RENDER_SCALE, MAX_RENDER_SCALE)
+            .clamp(min_scale, MAX_RENDER_SCALE)
             .min(self.render_scale);
+        self.sharpness = finite(self.sharpness, DEFAULT_SHARPNESS).clamp(0.0, 1.0);
         self.ao_slices = self.ao_slices.clamp(2, 4);
         self.ao_radius = finite(self.ao_radius, 1.5).clamp(0.25, 8.0);
-        self.dynamic_target_ms = finite(self.dynamic_target_ms, 14.0).clamp(1.0, 100.0);
+        self.dynamic_target_ms = finite(self.dynamic_target_ms, 14.0).clamp(0.1, 100.0);
         self
     }
 
@@ -652,7 +905,7 @@ mod tests {
             .sanitized();
         assert_eq!(config.render_scale, 1.0);
         assert_eq!(config.min_render_scale, MIN_RENDER_SCALE);
-        assert_eq!(config.dynamic_target_ms, 1.0);
+        assert_eq!(config.dynamic_target_ms, 0.1);
         let scaled = PostConfig::default()
             .with_render_scale(0.7)
             .with_min_render_scale(0.9)

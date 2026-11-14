@@ -52,9 +52,18 @@ layout(std140, set = 0, binding = 0) uniform VfxFrame {
     vec4 viewport;       // width, height, 1/width, 1/height
     vec4 depth;          // P22, P23 (linear depth = P23 / (d + P22)), ally opacity, telegraph floor
     vec4 light;          // xyz towards the light, w = ambient
-    uvec4 counts;        // capacity, spawn count, mesh region capacity, unused
+    uvec4 counts;        // capacity, spawn count, mesh region capacity, w flags (VFX_FRAME_*)
     uvec4 mesh_indices;  // index count per mesh slot (0 = unbound)
+    // ADR-0021: `view_proj` above is jittered on the tiered path with temporal AA.
+    mat4 view_proj_unjittered; // particle motion and the overlay's telegraph particles
+    mat4 prev_view_proj;       // the previous frame's unjittered matrix
+    vec4 temporal;             // xy render size (motion in render pixels), zw reserved
+    vec4 overlay;              // x exposure (linear), y AgX look saturation, z 1 = sRGB target
 } frame;
+
+// `frame.counts.w`: the scene's particle draw leaves enemy telegraphs to the overlay
+// (ADR-0021 §5b).
+#define VFX_FRAME_NO_TELEGRAPHS 1u
 
 #ifdef VFX_COMPUTE
 layout(std430, set = 0, binding = 1) buffer Particles { Particle particles[]; };

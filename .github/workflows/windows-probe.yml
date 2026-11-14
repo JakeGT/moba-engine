@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-slang
       - name: Install Vulkan SDK and shader compiler
         run: choco install vulkan-sdk -y --no-progress
       - name: Add Vulkan SDK to PATH

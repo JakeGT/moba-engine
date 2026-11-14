@@ -1,7 +1,9 @@
 //! Vulkan instance, validation layer and debug messenger.
 
+use ash::vk::TaggedStructure as _;
 use ash::{Entry, Instance, vk};
 use core::ffi::{CStr, c_char};
+use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{RenderError, RenderResult};
@@ -37,7 +39,7 @@ pub struct VulkanProbe {
 /// # Errors
 /// Returns the same instance/extension errors as the renderer initialisation path.
 pub fn probe_vulkan() -> RenderResult<VulkanProbe> {
-    let context = InstanceContext::new(&[], ValidationMode::Off)?;
+    let context = InstanceContext::new(&[], &[], ValidationMode::Off)?;
     // SAFETY: the instance is live and the entry point belongs to it.
     let devices = unsafe { context.instance.enumerate_physical_devices() }?;
     Ok(VulkanProbe {
@@ -47,9 +49,77 @@ pub fn probe_vulkan() -> RenderResult<VulkanProbe> {
     })
 }
 
+/// One physical device as `vulkan-probe` reports it (ADR-0020 §2b).
+#[derive(Clone, Debug)]
+pub struct ProbedDevice {
+    /// The probed capabilities (`vulkan-probe --json` writes these).
+    pub capabilities: crate::caps::DeviceCapabilities,
+    /// The device's own admission under the given choice.
+    pub admission: crate::caps::Admission,
+    /// The device-selection score, without the queue-sharing bonus a surface would decide.
+    pub score: u32,
+}
+
+/// Creates an instance without a surface, then probes and admits every physical device under
+/// `choice` (with `allow_cpu`, [`Overrides::allow_cpu`](crate::Overrides::allow_cpu)), in
+/// enumeration order. Devices the renderer would reject whatever the surface (Vulkan below
+/// 1.3, no graphics queue, no swapchain) are left out, as device selection leaves them out. The renderer would pick the highest `score` (ties keep the
+/// earlier device); with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only devices
+/// whose admission is Tiered are candidates.
+///
+/// # Errors
+/// Returns the same instance and enumeration errors as [`probe_vulkan`].
+pub fn probe_devices(
+    choice: crate::caps::PathChoice,
+    allow_cpu: bool,
+) -> RenderResult<Vec<ProbedDevice>> {
+    let context = InstanceContext::new(&[], &[], ValidationMode::Off)?;
+    // SAFETY: the instance is live and the entry point belongs to it.
+    let devices = unsafe { context.instance.enumerate_physical_devices() }?;
+    let mut probed = Vec::with_capacity(devices.len());
+    for physical in devices {
+        if crate::device::unsuitable(&context.instance, physical)?.is_some() {
+            continue;
+        }
+        let capabilities = crate::caps::probe(&context.instance, physical)?;
+        let admission = crate::caps::admit(
+            &capabilities,
+            crate::caps::Overrides::new(choice).with_cpu_devices(allow_cpu),
+        );
+        let score = crate::caps::rank(capabilities.kind, &admission, false);
+        probed.push(ProbedDevice {
+            capabilities,
+            admission,
+            score,
+        });
+    }
+    Ok(probed)
+}
+
+/// The device the renderer would pick from `devices` under `choice`: the highest score, the
+/// earlier device on a tie; with [`PathChoice::Tiered`](crate::caps::PathChoice::Tiered) only
+/// devices admitted to Tiered are candidates. `None` when nothing qualifies.
+#[must_use]
+pub fn choose_device(
+    devices: &[ProbedDevice],
+    choice: crate::caps::PathChoice,
+) -> Option<&ProbedDevice> {
+    devices
+        .iter()
+        .filter(|device| {
+            choice != crate::caps::PathChoice::Tiered
+                || device.admission.path == crate::caps::RenderPath::Tiered
+        })
+        .fold(None::<&ProbedDevice>, |best, device| match best {
+            Some(best) if best.score >= device.score => Some(best),
+            _ => Some(device),
+        })
+}
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const PORTABILITY_ENUMERATION: &CStr = c"VK_KHR_portability_enumeration";
 static VALIDATION_ERRORS: AtomicU64 = AtomicU64::new(0);
+static VALIDATION_WARNINGS: AtomicU64 = AtomicU64::new(0);
 
 /// Owns the Vulkan entry point and instance.
 pub(crate) struct InstanceContext {
@@ -57,15 +127,21 @@ pub(crate) struct InstanceContext {
     pub(crate) instance: Instance,
     pub(crate) entry: Entry,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
+    /// Every instance extension enabled at `vkCreateInstance` (the vendor probes read this).
+    pub(crate) enabled_extensions: Vec<String>,
     validation_enabled: bool,
     portability: bool,
     instance_version: u32,
 }
 
 impl InstanceContext {
+    /// Creates the instance with `required_extensions` (missing ones fail) and each of
+    /// `optional_extensions` the loader advertises (the vendor back ends' requests, ADR-0020
+    /// §1e; missing ones are skipped and reported by the back end's probe).
     #[allow(clippy::too_many_lines)] // Instance setup is one explicit ordered sequence.
     pub(crate) fn new(
         required_extensions: &[&CStr],
+        optional_extensions: &[CString],
         validation: ValidationMode,
     ) -> RenderResult<Self> {
         // SAFETY: loading the platform Vulkan loader is the entry point of the process's
@@ -92,16 +168,13 @@ impl InstanceContext {
 
         // SAFETY: the loader is initialised; passing null asks for global extensions.
         let available_extensions = unsafe { entry.enumerate_instance_extension_properties(None) }?;
-        let mut extensions: Vec<*const c_char> = required_extensions
-            .iter()
-            .map(|name| name.as_ptr())
-            .collect();
+        let mut names: Vec<&CStr> = required_extensions.to_vec();
         let mut create_flags = vk::InstanceCreateFlags::empty();
         let portability = extension_supported(&available_extensions, PORTABILITY_ENUMERATION);
         if portability {
             create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
             if !required_extensions.contains(&PORTABILITY_ENUMERATION) {
-                extensions.push(PORTABILITY_ENUMERATION.as_ptr());
+                names.push(PORTABILITY_ENUMERATION);
             }
         }
         for name in required_extensions {
@@ -111,6 +184,13 @@ impl InstanceContext {
                 ));
             }
         }
+        // `optional_extensions` outlives `create_instance` below.
+        for name in optional_extensions {
+            if !names.contains(&name.as_c_str()) && extension_supported(&available_extensions, name)
+            {
+                names.push(name);
+            }
+        }
         let debug_utils = c"VK_EXT_debug_utils";
         if validation_enabled {
             if !extension_supported(&available_extensions, debug_utils) {
@@ -118,9 +198,12 @@ impl InstanceContext {
                     "VK_EXT_debug_utils",
                 )));
             }
-            extensions.push(debug_utils.as_ptr());
+            if !names.contains(&debug_utils) {
+                names.push(debug_utils);
+            }
         }
 
+        let extensions: Vec<*const c_char> = names.iter().map(|name| name.as_ptr()).collect();
         let mut layers: Vec<*const c_char> = Vec::new();
         if validation_enabled {
             layers.push(VALIDATION_LAYER.as_ptr());
@@ -155,9 +238,13 @@ impl InstanceContext {
                 vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
             ]);
         if validation_enabled && validation == ValidationMode::Required {
-            create_info = create_info.push_next(&mut synchronization_validation);
+            create_info = create_info.push(&mut synchronization_validation);
         }
 
+        let enabled_extensions: Vec<String> = names
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
         // SAFETY: `create_info` points at live arrays for the duration of the call, and
         // every extension/layer was checked against the loader's list.
         let instance = unsafe { entry.create_instance(&create_info, None) }?;
@@ -174,7 +261,7 @@ impl InstanceContext {
                         | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
                 )
                 .pfn_user_callback(Some(debug_callback));
-            let debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
+            let debug_utils = ash::ext::debug_utils::Instance::load(&entry, &instance);
             // SAFETY: the instance is live and owns the debug-utils entry points that the
             // callback info references.
             Some(unsafe { debug_utils.create_debug_utils_messenger(&callback_info, None) }?)
@@ -186,6 +273,7 @@ impl InstanceContext {
             instance,
             entry,
             debug_messenger,
+            enabled_extensions,
             validation_enabled,
             portability,
             instance_version,
@@ -199,12 +287,18 @@ impl InstanceContext {
     pub(crate) fn validation_error_count() -> u64 {
         VALIDATION_ERRORS.load(Ordering::Relaxed)
     }
+
+    /// Validation warnings reported so far (the tiered smoke tests fail on any, ADR-0020
+    /// gate 3; the renderer itself only counts errors).
+    pub(crate) fn validation_warning_count() -> u64 {
+        VALIDATION_WARNINGS.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for InstanceContext {
     fn drop(&mut self) {
         if let Some(messenger) = self.debug_messenger.take() {
-            let debug_utils = ash::ext::debug_utils::Instance::new(&self.entry, &self.instance);
+            let debug_utils = ash::ext::debug_utils::Instance::load(&self.entry, &self.instance);
             // SAFETY: the messenger was created from this instance and is destroyed once.
             unsafe { debug_utils.destroy_debug_utils_messenger(messenger, None) };
         }
@@ -248,6 +342,8 @@ unsafe extern "system" fn debug_callback(
     };
     if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
+    } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
+        VALIDATION_WARNINGS.fetch_add(1, Ordering::Relaxed);
     }
     eprintln!("[vulkan {severity:?} {message_type:?}] {message}");
     vk::FALSE

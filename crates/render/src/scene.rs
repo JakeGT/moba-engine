@@ -27,6 +27,14 @@ pub struct Camera {
     pub light_intensity: f32,
     /// Hemispheric sky ambient, used without an environment, and the distance-fog colour.
     pub ambient: Vec3,
+    /// Vertical field of view in radians, as built ([`Self::perspective`], [`Self::orbit`]);
+    /// 0 for orthographic views, which never upscale. The temporal upscalers read it
+    /// (ADR-0021 §4a).
+    pub fov_y: f32,
+    /// Near plane distance, as built; 0 for orthographic views.
+    pub near: f32,
+    /// Far plane distance, as built; 0 for orthographic views.
+    pub far: f32,
 }
 
 impl Camera {
@@ -49,6 +57,9 @@ impl Camera {
             light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
             light_intensity: 1.15,
             ambient: Vec3::new(0.32, 0.35, 0.42),
+            fov_y: fov_y_radians,
+            near,
+            far,
         }
     }
 
@@ -82,6 +93,9 @@ impl Camera {
             light_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
             light_intensity: 1.15,
             ambient: Vec3::new(0.32, 0.35, 0.42),
+            fov_y: 0.0,
+            near: 0.0,
+            far: 0.0,
         }
     }
 
@@ -170,6 +184,13 @@ pub struct UnitInstance {
     pub outline: u8,
     /// The frame of a vertex-animation-texture mesh to show (R4b; ignored by other meshes).
     pub vat: VatPose,
+    /// Presentation identity for motion vectors (ADR-0021 §2c): the renderer keeps what this
+    /// key drew on the previous presented frame. `0` (the default) is static: no history,
+    /// camera-only motion (map instances). The client uses `net_id << 16 | part`.
+    pub motion_key: u32,
+    /// This frame starts a new history for [`Self::motion_key`] (the unit's first drawn
+    /// frame, a respawn or recall teleport): its motion is camera-only.
+    pub motion_reset: bool,
 }
 
 impl UnitInstance {
@@ -183,7 +204,18 @@ impl UnitInstance {
             bones: BoneRange::NONE,
             outline: 0,
             vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
+            motion_key: 0,
+            motion_reset: false,
         }
+    }
+
+    /// Returns this instance with motion key `key` (`0`: static, no history) and whether this
+    /// frame resets its history (ADR-0021 §2c).
+    #[must_use]
+    pub const fn with_motion(mut self, key: u32, reset: bool) -> Self {
+        self.motion_key = key;
+        self.motion_reset = reset;
+        self
     }
 
     /// Returns this instance outlined with palette slot `slot` (`0` = none).
@@ -230,6 +262,8 @@ impl UnitInstance {
             bones: BoneRange::NONE,
             outline: 0,
             vat: VatPose::single(moba_assets::VatSample::new(0, 0, 0.0)),
+            motion_key: 0,
+            motion_reset: false,
         }
     }
 }
@@ -333,6 +367,11 @@ pub struct Scene<'a> {
     pub decals: &'a [Decal],
     /// This frame's environment animation time and foliage displacers (R3b).
     pub environment: EnvironmentFrame<'a>,
+    /// Clears the motion history and every temporal history this frame (ADR-0021 §2c):
+    /// spectator switches, minimap camera jumps, map loads and resizes. The renderer also
+    /// resets on its own when the eye moves more than 8 m or the view turns more than 15° in
+    /// one frame. Ignored without temporal anti-aliasing.
+    pub history_reset: bool,
 }
 
 /// A rectangle of an offscreen image cleared to its own colour before anything is drawn
@@ -492,6 +531,7 @@ impl<'a> Scene<'a> {
                 time: 0.0,
                 displacers: &[],
             },
+            history_reset: false,
         }
     }
 
@@ -520,6 +560,7 @@ impl<'a> Scene<'a> {
                 time: 0.0,
                 displacers: &[],
             },
+            history_reset: false,
         }
     }
 
@@ -600,6 +641,13 @@ impl<'a> Scene<'a> {
         self
     }
 
+    /// Sets [`Self::history_reset`].
+    #[must_use]
+    pub const fn with_history_reset(mut self, reset: bool) -> Self {
+        self.history_reset = reset;
+        self
+    }
+
     /// Creates an empty scene with a camera (used for clear-only frames and tests).
     #[must_use]
     pub const fn empty(camera: Camera) -> Self {
@@ -608,7 +656,8 @@ impl<'a> Scene<'a> {
 }
 
 /// GPU layout of the per-frame camera uniform. Must match `include/camera.glsl` (std140:
-/// every member is a `vec4`, `uvec4` or `mat4`, so there is no padding).
+/// every member is a `vec4`, `uvec4` or `mat4`, so there is no padding) and its Slang mirror
+/// `slang/lib/frame_constants.slang` (checked against `slangc`'s reflection in a test).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct CameraUniform {
@@ -651,9 +700,73 @@ pub(crate) struct CameraUniform {
     baked_ao: [f32; 4],
     contact: [f32; 4],
     outline_palette: [[f32; 4]; OUTLINE_SLOTS],
+    // N1 temporal (ADR-0021 §1, §2): see [`TemporalCamera`].
+    view_proj_unjittered: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    jitter: [f32; 4],
+    temporal: [f32; 4],
+}
+
+/// This frame's temporal camera state (ADR-0021 §1): the jittered matrix the main view
+/// rasterises with, the unjittered one and the previous frame's for motion vectors, the jitter
+/// (current and previous, render pixels) and the material mip bias. Compat and temporal off
+/// upload none of it (the members stay 0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TemporalCamera {
+    pub(crate) jittered: Mat4,
+    pub(crate) unjittered: Mat4,
+    pub(crate) previous: Mat4,
+    pub(crate) jitter: [f32; 2],
+    pub(crate) previous_jitter: [f32; 2],
+    pub(crate) mip_bias: f32,
+    /// The render size motion vectors are measured in (pixels).
+    pub(crate) render: [u32; 2],
+    pub(crate) live: bool,
 }
 
 impl CameraUniform {
+    /// Applies `temporal`: `view_proj` and `inv_view_proj` become the jittered matrix and its
+    /// inverse (only when it differs from the camera's, so the still case keeps exactly the
+    /// bytes it had), and the N1 members are filled in.
+    pub(crate) fn with_temporal(mut self, temporal: &TemporalCamera) -> Self {
+        if temporal.jittered != temporal.unjittered {
+            let inverse = temporal.jittered.inverse();
+            if inverse.is_finite() {
+                self.view_proj = temporal.jittered.to_cols_array_2d();
+                self.inv_view_proj = inverse.to_cols_array_2d();
+            }
+        }
+        self.view_proj_unjittered = temporal.unjittered.to_cols_array_2d();
+        self.prev_view_proj = temporal.previous.to_cols_array_2d();
+        self.jitter = [
+            temporal.jitter[0],
+            temporal.jitter[1],
+            temporal.previous_jitter[0],
+            temporal.previous_jitter[1],
+        ];
+        self.temporal = [
+            temporal.mip_bias,
+            temporal.render[0] as f32,
+            temporal.render[1] as f32,
+            if temporal.live { 1.0 } else { 0.0 },
+        ];
+        self
+    }
+
+    /// A block holding only what the Slang toolchain smoke reads (`crate::slang_smoke`):
+    /// `view_proj`, `camera_pos` and the first `circles` (at most [`VISION_CIRCLES`]).
+    pub(crate) fn for_slang_smoke(view_proj: Mat4, camera_pos: Vec4, circles: &[Vec4]) -> Self {
+        let mut uniform: Self = Zeroable::zeroed();
+        uniform.view_proj = view_proj.to_cols_array_2d();
+        uniform.camera_pos = camera_pos.to_array();
+        for (destination, source) in uniform.vision_circles.iter_mut().zip(circles) {
+            *destination = source.to_array();
+        }
+        let count = circles.len().min(VISION_CIRCLES);
+        uniform.vision_count = [u32::try_from(count).unwrap_or(u32::MAX), 0, 0, 0];
+        uniform
+    }
+
     /// The camera block of a view `extent` pixels large, with this frame's `lighting`
     /// (shadows, IBL, lights, occlusion) and `outlines`.
     pub(crate) fn new(
@@ -719,6 +832,10 @@ impl CameraUniform {
             baked_ao: lighting.baked_ao,
             contact: lighting.contact,
             outline_palette: outlines.sanitized(),
+            view_proj_unjittered: camera.view_proj.to_cols_array_2d(),
+            prev_view_proj: camera.view_proj.to_cols_array_2d(),
+            jitter: [0.0; 4],
+            temporal: [0.0; 4],
         }
     }
 }
@@ -801,7 +918,157 @@ mod tests {
         assert_eq!(offset_of!(CameraUniform, light_info), 1504);
         assert_eq!(offset_of!(CameraUniform, contact), 1552);
         assert_eq!(offset_of!(CameraUniform, outline_palette), 1568);
-        assert_eq!(size_of::<CameraUniform>(), 1696);
+        assert_eq!(offset_of!(CameraUniform, view_proj_unjittered), 1696);
+        assert_eq!(size_of::<CameraUniform>(), 1856);
+    }
+
+    /// The Slang name of a field's shape, from its Rust type (compile-checked by the
+    /// helpers below: a `float4x4` must be `[[f32; 4]; 4]`, and so on).
+    fn float4x4(_: &[[f32; 4]; 4]) -> String {
+        String::from("float32 4x4")
+    }
+    fn float4(_: &[f32; 4]) -> String {
+        String::from("float32 1x4")
+    }
+    fn uint4(_: &[u32; 4]) -> String {
+        String::from("uint32 1x4")
+    }
+    fn float4_array<const N: usize>(_: &[[f32; 4]; N]) -> String {
+        format!("float32 1x4 [{N}]")
+    }
+
+    /// The same shape string from a reflected Slang type: scalar type, rows x columns
+    /// (vectors are one row), then the array length if any.
+    fn slang_shape(kind: &serde_json::Value) -> String {
+        let scalar = |element: &serde_json::Value| {
+            element["scalarType"]
+                .as_str()
+                .expect("scalar type")
+                .to_owned()
+        };
+        match kind["kind"].as_str() {
+            Some("matrix") => format!(
+                "{} {}x{}",
+                scalar(&kind["elementType"]),
+                kind["rowCount"],
+                kind["columnCount"]
+            ),
+            Some("vector") => format!(
+                "{} 1x{}",
+                scalar(&kind["elementType"]),
+                kind["elementCount"]
+            ),
+            Some("array") => format!(
+                "{} [{}]",
+                slang_shape(&kind["elementType"]),
+                kind["elementCount"]
+            ),
+            other => panic!("unexpected Slang field type {other:?}"),
+        }
+    }
+
+    /// ADR-0020 §4c's layout check: the Slang mirror of the frame constants
+    /// (`slang/lib/frame_constants.slang`, set 0, binding 0 of the toolchain smoke module)
+    /// has exactly `CameraUniform`'s fields, in order, with the same scalar type, shape
+    /// (rows x columns, array length), offset and size, as `slangc -reflection-json`
+    /// reports them. Matrix *orientation* is not in the reflection: `moba-shaders` checks
+    /// the SPIR-V decorations and `slang_smoke` checks `mul(M, v)` on a GPU.
+    #[test]
+    fn slang_frame_constants_match_camera_uniform() {
+        macro_rules! rust_fields {
+            ($($field:ident: $shape:ident),* $(,)?) => {{
+                let zeroed: CameraUniform = bytemuck::Zeroable::zeroed();
+                vec![$((
+                    stringify!($field).to_owned(),
+                    $shape(&zeroed.$field),
+                    offset_of!(CameraUniform, $field) as u64,
+                    core::mem::size_of_val(&zeroed.$field) as u64,
+                )),*]
+            }};
+        }
+        let rust = rust_fields!(
+            view_proj: float4x4,
+            camera_pos: float4,
+            light_direction: float4,
+            ambient: float4,
+            terrain: float4,
+            vision_circles: float4_array,
+            vision_count: uint4,
+            vision_walls: float4_array,
+            wall_count: uint4,
+            light_view_proj: float4x4,
+            sun_color: float4,
+            shadow_params: float4,
+            shadow_extra: float4,
+            ibl_params: float4,
+            style: float4,
+            rim_color: float4,
+            specular_tint: float4,
+            ambient_ground: float4,
+            sh: float4_array,
+            fog_rect: float4,
+            fog_color: float4,
+            fog_params: float4,
+            haze_color: float4,
+            haze_params: float4,
+            sky_zenith: float4,
+            sky_horizon: float4,
+            post_params: float4,
+            post_clamp: float4,
+            inv_view_proj: float4x4,
+            viewport: float4,
+            light_grid: float4,
+            light_info: uint4,
+            occlusion: float4,
+            baked_ao: float4,
+            contact: float4,
+            outline_palette: float4_array,
+            view_proj_unjittered: float4x4,
+            prev_view_proj: float4x4,
+            jitter: float4,
+            temporal: float4,
+        );
+        // The list above covers the whole struct: no field missing, no padding.
+        assert_eq!(
+            rust.iter().map(|(_, _, _, size)| size).sum::<u64>(),
+            size_of::<CameraUniform>() as u64
+        );
+
+        let json = moba_shaders::reflection("toolchain_smoke.slang").expect("smoke reflection");
+        let reflection: serde_json::Value =
+            serde_json::from_str(json).expect("slangc reflection JSON");
+        let camera = reflection["parameters"]
+            .as_array()
+            .expect("reflection parameters")
+            .iter()
+            .find(|parameter| parameter["name"] == "camera")
+            .expect("the smoke module reflects `camera`");
+        // Set 0 (`space` is omitted when 0), binding 0: the GLSL camera block's slot.
+        assert_eq!(camera["binding"]["kind"], "descriptorTableSlot");
+        assert_eq!(camera["binding"]["index"], 0);
+        assert_eq!(camera["binding"]["space"].as_u64().unwrap_or(0), 0);
+        assert_eq!(camera["type"]["kind"], "constantBuffer");
+        let element = &camera["type"]["elementType"];
+        assert_eq!(element["name"], "FrameConstants");
+        let size = camera["type"]["elementVarLayout"]["binding"]["size"].as_u64();
+        assert_eq!(size, Some(size_of::<CameraUniform>() as u64));
+
+        let slang: Vec<(String, String, u64, u64)> = element["fields"]
+            .as_array()
+            .expect("FrameConstants fields")
+            .iter()
+            .map(|field| {
+                let binding = &field["binding"];
+                assert_eq!(binding["kind"], "uniform", "{field}");
+                (
+                    field["name"].as_str().expect("field name").to_owned(),
+                    slang_shape(&field["type"]),
+                    binding["offset"].as_u64().expect("field offset"),
+                    binding["size"].as_u64().expect("field size"),
+                )
+            })
+            .collect();
+        assert_eq!(slang, rust, "Slang FrameConstants vs Rust CameraUniform");
     }
 
     #[test]

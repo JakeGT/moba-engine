@@ -88,6 +88,32 @@ the semver check):
 - `tokio` 1.54.0 → 1.54.1 (RUSTSEC-2026-0384, yanked; only reached via `winit`'s wasm path).
 
 ### Build
+- **Slang toolchain (N0, ADR-0020 §4).** `crates/shaders/build.rs` now also compiles
+  `shaders/slang/*.slang` with a pinned, checksummed `slangc` (v2026.20, in
+  `crates/shaders/slang-version.txt`), with an exact version check (`MOBA_SLANG_ANY_VERSION=1`
+  relaxes it) and a mandatory `spirv-val`. Fetch it once with `scripts/fetch-slang.sh` or
+  `.ps1` ([docs/dev/slang.md](docs/dev/slang.md)). The first module is
+  `toolchain_smoke.slang`, which the renderer does not create. `vulkan-probe --slang-smoke`
+  dispatches it once and checks the output, including the matrix convention. CI runs it on
+  lavapipe and on MoltenVK, with validation required. Tests compare the Slang
+  frame-constants layout from `slangc -reflection-json` with `CameraUniform` (name, type,
+  shape, offset, size) and every module's reflected bindings with an explicit table. CI fetches and
+  caches the compiler through `.github/actions/setup-slang`, and installs `spirv-tools`. The
+  RTXDI-through-`slangc` spike passes for DI and GI and fails for PT
+  ([docs/dev/rtxdi-slang-spike.md](docs/dev/rtxdi-slang-spike.md)).
+- **Vulkan bindings on a pinned `ash` revision (ADR-0020 §1, N0.1;
+  [perf/0025](docs/perf/0025-n0-ash-pin.md)).**
+  - `ash` and `ash-window` come from `ash-rs/ash` master at `8844f6b` (Vulkan 1.4.352
+    headers) through a workspace `[patch.crates-io]` entry, and `ash` enables `provisional`.
+    `gpu-allocator` moves to upstream's `ash-next` revision `6a68a5b4`, with only the
+    `vulkan` and `std` features. `deny.toml` allows exactly those two git sources.
+  - Nothing changes in behaviour: the goldens are byte-identical and the RTX timings are
+    within noise. The tiered path stays on Vulkan 1.3 (ADR-0020 amendment 1).
+  - **Embedders of `moba-render`** (or `moba-engine` with `render`) outside this workspace
+    must copy the two `[patch.crates-io]` lines into their own workspace root. Cargo applies
+    patches only at the root. See
+    [building-on-moba](docs/building-on-moba.md#the-renderer-and-the-ash-pin). Headless
+    embedders are unaffected. Publishing to crates.io (#21) waits for `ash` 0.39.
 - Removed unused internal dependency edges (`sim`/`server`/`client` → `moba-jobs`; `server` → `moba-core`/`moba-ecs`; `client`/`game` → `moba-ecs`; `jobs` → `moba-core`). `moba-test-support` (a counting allocator) is now a dev-dependency only of `moba-net`. `cpal` and `loom` moved to workspace dependencies.
 
 ### Documentation
@@ -114,6 +140,200 @@ the semver check):
   performance targets, ADRs to write and art-production requirements.
 
 ### Rendering and assets
+- **Temporal foundation, TAAU and the gameplay overlay (ADR-0021 N1a and amendment 2;
+  [perf/0031](docs/perf/0031-n1a-temporal.md)), Tiered path only; Compat is byte-identical:**
+  - **Jitter:** Halton (2, 3) with `ceil(8r²)` phases on the main view's raster matrix only;
+    `Scene::camera`, picking and orders never see it. The index survives a scale step, and
+    captures reset it and warm up two phase cycles (`Renderer::warm_up_temporal` for
+    two-tick captures). Material mip bias follows the back end's rule.
+  - **Motion vectors and masks:** the render-resolution prepass writes unjittered motion for
+    static, skinned, VAT, foliage and terrain draws from a renderer-keyed history
+    (`UnitInstance::with_motion`, `Scene::history_reset`, an 8 m / 15° cut and a 20 m teleport
+    guard); motion keys are `net_id << 16 | part`, and minion corpses get their own keys;
+    the client sets `Scene::history_reset` on a map change and a spectator switch; particles
+    write `reactive` and their dominant fragments' motion; water writes `tc_mask` (no
+    material is flagged animated-UV yet).
+  - **TAAU** (`temporal_taau.slang`): dilated motion, Catmull-Rom history, Blackman-Harris
+    upsampling, YCoCg variance clip, velocity and disocclusion rejection, fused RCAS, behind
+    the `TemporalUpscaler` trait (`UpscaleInputs`/`UpscaleOutput`, the `exposure_linear`
+    pass; `record` is an `unsafe fn` with the submission contract FSR 3.1's port shares, and
+    `resize` recreates only the history images). `auto` picks TAAU; vendor names fall back to
+    it with one log line. Mode sizes round to nearest.
+  - **Settings:** `AntiAliasing::Temporal` (the tiered default), `MOBA_AA=temporal|fxaa|off|msaa4`
+    (`msaa4` is Compat-only: on Tiered it runs temporal, with one log line), `MOBA_UPSCALER`,
+    `MOBA_UPSCALE_MODE`, `MOBA_SHARPNESS`, `MOBA_DEBUG_VIEW` (motion, reactive, tc,
+    disocclusion, confidence, overlay-ids); the upscale mode's scale is the dynamic-resolution
+    ceiling (Performance gets Ultra Performance as its floor). The frame log adds `aa=`, `upscaler=`, `upscale_mode=`, `render_scale=`,
+    `jitter_phases=`, `upscaler_vram_mb=` and the `temporal`, `tc_mask`, `overlay_prepass` and
+    `overlay` GPU lanes.
+  - **The post-upscale overlay:** an unjittered output-resolution prepass of overlay IDs and
+    depth, then one pass drawing outlines and glow telegraphs in display space over the
+    displayed image, and the enemy-telegraph particles; none of it enters a history.
+    Telegraphs lose bloom, the grade and the screen effects and gain a fixed soft halo (Q4).
+    Hull outlines are Compat-only. `glow_display_reference` is the CPU twin.
+  - MSAA leaves the tiered presets; `independentBlend` joins the tiered required features and
+    `maxColorAttachments`, `maxFragmentOutputAttachments` and
+    `maxFragmentCombinedOutputResources` ≥ 5 the required limits.
+  - **perf-gate:** Tiered's absolute per-tier budgets now fail; the new `[tiered.low|high|ultra]`
+    baselines are compared report-only until the last N1 part flips `TIERED_BASELINE_FAILS`.
+    `benches/motion_history.rs` measures the motion history and previous-state upload.
+  - **Probes and goldens:** `MOBA_MOTION_PROBE=1` (`scripts/motion-probe.sh`, motion within
+    1/64 px of a CPU twin, plus a displacer-pushed foliage patch), `MOBA_GHOST_PROBE=1`
+    (`scripts/ghost-probe.sh`: the wake, a striped hero's interior and a particle
+    projectile's core against a no-history reference),
+    `scripts/overlay-invariance.sh`, `scripts/outline-probe.sh` on Tiered and
+    `scripts/tiered-goldens.sh` (TAAU Low, High, native and a two-tick overlay golden,
+    `MOBA_CAPTURE_TWO_TICK=1`, plus 40 frames of High with a history reset every fifth frame,
+    `MOBA_TEMPORAL_RESET_EVERY=5`, under synchronization validation) run in `renderer-gate`.
+  - A history reset's re-initialisation waits on the previous frame's compute (pinned by unit
+    tests on the barriers; synchronization validation does not flag a `NONE` source), and
+    TAAU's and `exposure_linear`'s descriptor sets are keyed by the frame-in-flight slot
+    (`UpscaleInputs::frame_slot`). `scripts/ghost-probe.sh` adds Performance mode.
+- **Capability gate and render paths (ADR-0020 §2, N0.2;
+  [perf/0026](docs/perf/0026-capability-gate.md)):**
+  - `moba_render::caps` probes each device's extensions, features and limits
+    (`DeviceCapabilities`, serialisable) and `caps::admit` decides its `RenderPath`: `Tiered`
+    needs hardware ray tracing (ray query and acceleration structures), the bindless limits and
+    the 1.3 feature set; everything else, and every CPU device, runs `Compat`, today's renderer.
+    The 1.4-promoted features are optional capabilities, read through their KHR/EXT structures
+    (ADR-0020 amendment 1).
+  - The `render_path` setting (`auto`/`tiered`/`compat`, default `auto`) and
+    `MOBA_RENDER_PATH` pick the path. `MOBA_RENDER_PATH=tiered` (not the settings entry)
+    also admits CPU devices such as lavapipe. `tiered` fails
+    with a per-device list of what is missing when nothing qualifies.
+  - The `[render]` start-up line and the frame log name the path (`path=`, `max_tier=`,
+    `missing=`, `admission=`).
+  - `vulkan-probe --json` dumps the capabilities and `--path` checks a path; recorded fixtures
+    (RTX 5070 Ti, Radeon 610M, lavapipe) and six synthetic ones drive the admission tests.
+  - The macOS MoltenVK workflow asserts that the device runs `path=compat` and uploads its
+    capability dump.
+  - The goldens and the perf gate pin `MOBA_RENDER_PATH=compat`. `compat` ranks devices like
+    `auto`, so an A/B between the paths stays on one GPU. The caps types are
+    `#[non_exhaustive]`.
+- **Latency: Reflex and Anti-Lag (ADR-0021 §6 and amendment 3, N1d;
+  [perf/0032](docs/perf/0032-latency.md)):**
+  - On a tiered device with `VK_NV_low_latency2` (Reflex) or native `VK_AMD_anti_lag`, the
+    renderer runs a latency back end: Reflex creates its swapchains for low latency, sets the
+    sleep mode, chains present IDs on the frame's submits and present, sets the frame markers
+    and reads `vkGetLatencyTimingsNV`; Anti-Lag calls `vkAntiLagUpdateAMD` at its `INPUT` and
+    `PRESENT` stages. Only one of the two is ever enabled (Reflex first). A device with
+    neither, and every Compat device, logs one `[latency] unavailable` line and is unchanged.
+  - `moba_platform::App::pace() -> Pacing` (`Platform`, the default, or `External`) runs after
+    each frame's present and before the next frame's input. The client sleeps there through
+    `Renderer::latency_sleep`; while the sleep paces the frames it replaces the platform's
+    frame limiter (240 fps becomes Reflex's `minimumIntervalUs` or Anti-Lag's `maxFPS`). A
+    frame the driver lets through in under 90 % of the interval goes back to the platform
+    limiter, so the cap never rests on the driver alone. A failed or stuck Reflex sleep stops
+    with one line and resumes on the next swapchain (at most three times).
+  - New public API: `Pacing`, `App::pace`, `LatencySetting`, `LatencyMarker`, `LatencyFrame`,
+    `Renderer::{latency_sleep, latency_marker, latency_report}` and
+    `RenderConfig::{latency, frame_rate_limit}` (all additive; the types are
+    `#[non_exhaustive]`).
+  - The `latency` setting and `MOBA_LATENCY=off|on|boost`: on by default, boost off. The frame
+    log adds `latency=`, `latency_setting=`, `paced_frames=` and, with Reflex, the
+    `latency_sim/submit/present/gpu` and `pc_latency` percentiles. `MOBA_MAX_FPS=<n>` sets the
+    frame limit (default 240, 0 uncapped).
+  - Measured on the RTX 5070 Ti: validation-clean, the pacing gate holds (the driver's interval
+    runs about 1 % longer than the platform limiter's), and no PC-latency gain on that desktop,
+    capped, vsync-on or uncapped and GPU-bound (amendment 3, item 9): on by default follows the
+    maintainer's answer, not a measured benefit. Anti-Lag is untested at run time until Mesa
+    26.3 (blocked).
+- **Vendor SDK cargo features (ADR-0020 §6 and amendment 6, N0.6;
+  [perf/0029](docs/perf/0029-vendor-sdks.md), [dev/vendor-sdks.md](docs/dev/vendor-sdks.md)):**
+  - New `moba-render` features, forwarded by `moba-client` and `moba-engine`: `dlss`,
+    `streamline`, `nrd`, `rtxdi`, `sharc`, `fsr4` and `xess` (off), the aggregates `nvidia`,
+    `vendor-sdks` and `dlss-fg`, and `fsr3` (on by default; it vendors nothing until N1). The
+    default build needs no proprietary SDK and is unchanged.
+  - `vendor-sdks.toml` pins each SDK archive (and RTXDI's library, NRD's ShaderMake and
+    MathLib) by SHA-256, with the SHA-256 of its licence file. `scripts/fetch-sdks.sh`
+    (`.ps1` on Windows) downloads into `target/vendor-sdks/`, verifies both hashes and fails
+    on a changed licence; `build.rs` reads `MOBA_SDK_DIR`, never downloads, and generates the
+    FFI declarations with `bindgen` into `OUT_DIR`. NRD is built with CMake (fully
+    disconnected), NGX links statically, and FSR 4 and XeSS load with `libloading` from
+    beside the executable only (on Windows with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`) and stay loaded for the life of the process.
+  - NGX declares its Vulkan extensions before the instance and the device are created
+    (ADR-0020 §1e); the instance and the tiered device enable what is advertised, and the
+    DLSS probe rejects when something it needs is not enabled. XeSS requests nothing until
+    N1 merges its device features; its probe always rejects in N0. Only the renderer's device
+    requests vendor extensions; the headless smokes' devices are the open build's in every
+    build. DLSS and
+    Streamline need NVIDIA's own driver (not NVK), FSR 4 AMD's (not RADV). Streamline is only
+    looked for in N0: it must be initialised before the instance, which comes with N9. NGX's
+    data directory is a private per-user cache directory (owned by the effective user; a
+    non-UTF-8 path is refused), not the shared temporary one.
+  - A vendor device extension is enabled only when `vkCreateDevice` stays valid: a name
+    promoted to Vulkan 1.2 gets its feature bit (or is dropped when unsupported), a name whose
+    known dependencies are not enabled is dropped, and a failed `vkCreateDevice` with vendor
+    names is retried once without them (one `[vendor]` line). FSR 4 is tiered-only like DLSS
+    and XeSS. XeSS is never selected in N0: its required device features are merged before
+    `vkCreateDevice` in N1, so its probe rejects with one line.
+  - NRD links ShaderMake's `ShaderMakeBlob` beside its static library, and CMake configures a
+    copy of NRD (its configure step writes into the source tree). NRD is built once per pin,
+    target, profile and toolchain in `<build-dir>/<profile>/vendor-build/nrd` and reused by
+    every feature set and by clippy; CI caches it, the SDK archives (one entry for both OSes)
+    and the Vulkan SDK's `dxc`, and pins Chocolatey's `vulkan-sdk`. A relative
+    `MOBA_SDK_DIR` is relative to the workspace root in `build.rs` and the fetch scripts; the
+    fetch scripts reject unknown `--only`/`-Only` names, and unpack zips with `unzip` or
+    `bsdtar` (Windows: `%SystemRoot%\System32\tar.exe`).
+  - At start-up each slot (upscaler, denoiser, direct lighting, radiance cache, frame
+    generation) takes the first compiled-in back end the device supports; each unavailable one
+    logs one `[vendor] … falls back to …` line, then a `[vendor] selected:` summary. The open
+    build logs nothing. New `Renderer::vendor_backends()`, `VendorBackends` and `LatencyMode`
+    (Reflex or Anti-Lag from the extensions the device was created with). Nothing reaches the
+    frame in N0.
+- **Bindless table and tiered smokes (ADR-0020 §3, amendment 5, N0.5;
+  [perf/0028](docs/perf/0028-bindless.md), [dev/bindless.md](docs/dev/bindless.md)):**
+  - `BindlessTable` (`moba-render`, tiered path only): one update-after-bind set with 32
+    samplers (a fixed 12-entry palette), 1,024 storage images and 16,384 sampled images
+    (variable count), all partially bound. Typed `u32` handles come from free lists; every slot
+    starts on a fallback (magenta, white, flat normal; a zero storage image; valid for 2D
+    float reads); released slots return after their last frame retires, under an `unsafe`
+    release/retire contract (recording a released handle is a caller bug). Writes happen at
+    load time only, never per frame.
+    Descriptor-indexing features, `bufferDeviceAddress` memory and the update-after-bind limit
+    check (`descriptor_budget::check_tiered`) are enabled only on the tiered path. No
+    production pass uses the table yet, and Compat is unchanged (goldens byte-identical).
+  - `bindless-smoke` and `rt-smoke` (`moba-tools`): one 64×64 headless frame each, read back
+    and compared exactly with a CPU expectation. The first samples divergent `nonuniformEXT`
+    handles from a device-address buffer in a fragment and a compute pass, including reused
+    and recycled slots, at a coordinate where every palette sampler (and, in the compute
+    pass, every comparison sampler on a depth texture) reads a different exact value, and
+    writes descriptors into the bound set while its frame is pending (update after bind); the
+    second traces a BLAS/TLAS with `GL_EXT_ray_query`. Both pass with validation and
+    synchronization validation on lavapipe, RADV and an RTX 5070 Ti, and run in the
+    `renderer-gate` job on lavapipe; a run without validation fails unless
+    `MOBA_VULKAN_VALIDATION=off` was given. `bindless.glsl` holds the shader declarations and
+    the `BINDLESS_SAMPLER2D_NONUNIFORM` and `BINDLESS_SAMPLER2DSHADOW_NONUNIFORM` macros.
+- **Quality tiers and budgets (ADR-0020 §2c and §5, N0.3;
+  [perf/0027](docs/perf/0027-tiers-budgets.md)):**
+  - New `QualityTier::Overdrive`, the tiered path's top tier. Until its own phases land it
+    configures the frame like Ultra; on Compat it runs as Ultra (`QualityTier::compat`).
+    `QualityTier::ALL` has five tiers and `QualityTier::COMPAT` today's four.
+  - `moba_render::default_tier` picks a tier from a PCI reference table (pci.ids
+    2026.10.01), capped at the device's `max_tier`; Compat devices get Medium. The `quality`
+    setting defaults to `auto`. On the tiered path the client detects it on every interactive
+    start (nothing is saved); on Compat `auto` stays today's High. Automated runs keep High,
+    and an explicit tier is capped at the device's `max_tier`. `vulkan-probe` prints
+    `default_tier=`.
+  - New `settings_version` key (1). A file without it predates the tiered path: its tier is
+    re-detected on the tiered path and kept on Compat. `Renderer::quality_tier()` is the
+    requested tier and the new `Renderer::config_tier()` the one configured;
+    `moba_render::choose_device` picks from `probe_devices` like the renderer.
+  - `moba_render::preset`: the `TierPreset` feature matrix (built, `Planned(phase)`, or not
+    offered) and `config_tier`, the configuration a tier runs until its phases land (§5e:
+    tiered Low runs today's High, tiered Medium and up today's Ultra with MSAA 4×).
+  - Tiered VRAM budgets (4/6/6/12/12 GiB) and `moba_assets::GPU_BUDGETS` (12/6/7.5/9/15 ms with
+    the dynamic-resolution scale ranges), unit-tested to be ordered and to match the roadmap.
+  - On the tiered path dynamic resolution aims at the tier's budget, from full scale down to
+    a 0.5 floor. Until N1 it is off unless `MOBA_DYNRES` turns it on, and the preset's
+    upscaler-mode ceiling (0.67 or 0.5) applies from N1, when an upscaler fills the gap.
+  - The frame log gains `config_tier=` and `scale_first/final/min/max` and `scale_changes_late`;
+    `scripts/dynres-check.sh` checks that a forced target holds. `PostConfig`'s dynamic
+    target may now go down to 0.1 ms (was 1 ms), so a forced target bites on a fast GPU.
+  - `perf-gate` reads `path=`: tiered logs are checked against `GPU_BUDGETS` and
+    `[tiered.<tier>]` baseline tables but only report until N1; Compat is gated as before.
+    `perf-replay.sh` and the nightly validation runs pin `RENDER_PATH=compat`.
 - **Recall in the client (AAA roadmap R4 exit, ADR-0012 amendment;
   [perf/0024](docs/perf/0024-recall.md)):**
   - **Controls:** **B** recalls (`controls.recall`); the shop moves to **P** (`controls.shop`).
@@ -1076,6 +1296,15 @@ the semver check):
   no behaviour, API or state-hash change.
 
 ### CI
+- New `vendor-sdks` job (Linux and Windows): fetches and verifies the pinned SDKs, then builds
+  and links `moba-client --features vendor-sdks` and runs clippy and the selection tests with
+  `vendor-sdks,dlss-fg` (N0.6). `scripts/agent-verify.sh --full`, `just features` and AGENTS.md
+  check `moba-engine --features sim,net,render,fsr3` instead of `--all-features`; `--full`
+  also checks every vendor feature whose SDK is fetched, alone and together. The job runs its
+  multi-command steps under `bash`, clippy with each vendor feature alone (Linux), the
+  server-crate check with the vendor features on, and verifies the LunarG Vulkan SDK against
+  LunarG's published SHA-256. `scripts/semver-check.sh` checks `moba-render` and
+  `moba-engine` with default features (plus `render`), so the vendor features stay off.
 - Added the informational `semver (informational)` CI job and `scripts/semver-check.sh` (`just semver`) (WP-7.1): `cargo-semver-checks` diffs the library crates against the latest release tag. It currently reports the `moba-net` struct-field additions since v0.4.0, so the next release must be 0.5.0.
 
 ## [0.4.1] — 2026-10-27

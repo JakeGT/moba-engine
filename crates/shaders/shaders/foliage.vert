@@ -12,6 +12,17 @@
 #include "camera.glsl"
 #include "environment.glsl"
 
+// Tiered builds (ADR-0021): `FOLIAGE_INVARIANT` makes the position invariant, so the scene's
+// foliage reproduces the temporal prepass's depth exactly; `MOTION_VECTORS` (the prepass)
+// evaluates every blade a second time at the previous frame's time and displacers.
+#ifdef FOLIAGE_INVARIANT
+invariant gl_Position;
+#endif
+#ifdef MOTION_VECTORS
+#define MOTION_VECTORS_VERTEX
+#include "motion.glsl"
+#endif
+
 // Set 2 binding 1: the map's instances (xyz position bits, packed yaw/height/kind/tint).
 layout(std430, set = 2, binding = 1) readonly buffer FoliageInstances {
     uvec4 instances[];
@@ -36,8 +47,12 @@ const vec2 BLADE[9] = vec2[9](
     vec2(-1.0, 0.5), vec2(1.0, 0.5), vec2(0.0, 1.0)
 );
 
-void main() {
-    uvec4 record = foliage.instances[gl_InstanceIndex];
+// One vertex of the clump: its world position, normal, height along the blade and albedo, at
+// time `seconds` with the displacers of `previous` (the prior frame's, for motion vectors) or
+// this frame's. `false` for a culled blade (every output then the root).
+bool blade_vertex(uvec4 record, uint instance, uint vertex, float seconds, bool previous,
+                  out vec3 out_position, out vec3 out_normal_value, out float out_t,
+                  out vec3 out_albedo_value) {
     vec3 root = uintBitsToFloat(record.xyz);
     uint word = record.w;
     float yaw = float(word & 255u) / 256.0 * 6.2831853;
@@ -45,8 +60,8 @@ void main() {
     uint kind = (word >> 18u) & 3u;
     float tint = 0.5 + float((word >> 20u) & 255u) / 255.0;
 
-    uint blade = uint(gl_VertexIndex) / 9u;
-    vec2 corner = BLADE[uint(gl_VertexIndex) % 9u];
+    uint blade = vertex / 9u;
+    vec2 corner = BLADE[vertex % 9u];
 
     // Distance LOD: fewer blades far away, and the whole clump shrinks over the last 20 %.
     // Measured from the eye or the camera's focus on the ground, whichever is nearer, as the
@@ -59,16 +74,14 @@ void main() {
     float live_blades = max(1.0, floor(blades * (1.0 - 0.65 * lod) + 0.5));
     float shrink = 1.0 - smoothstep(0.8, 1.0, lod);
     if (float(blade) >= live_blades || shrink <= 0.0 || height <= 0.0) {
-        // Degenerate: every vertex of the blade at one point outside the view.
-        gl_Position = vec4(0.0, 0.0, -1.0, 1.0);
-        out_world_pos = root;
-        out_normal = vec3(0.0, 1.0, 0.0);
-        out_height = 0.0;
-        out_albedo = vec3(0.0);
-        return;
+        out_position = root;
+        out_normal_value = vec3(0.0, 1.0, 0.0);
+        out_t = 0.0;
+        out_albedo_value = vec3(0.0);
+        return false;
     }
 
-    uint seed = uint(gl_InstanceIndex) * 8u + blade;
+    uint seed = instance * 8u + blade;
     float r0 = hash(seed * 3u + 1u);
     float r1 = hash(seed * 3u + 2u);
     float r2 = hash(seed * 3u + 3u);
@@ -99,18 +112,26 @@ void main() {
     float wind_strength = length(wind);
     vec2 wind_dir = wind_strength > 1e-4 ? wind / wind_strength : vec2(1.0, 0.0);
     float phase = dot(base_xz, wind_dir) * 0.12 + r0 * 6.2831853;
-    float t_seconds = environment.time.x * environment.time.y;
+    float t_seconds = seconds * environment.time.y;
     float gust = 0.55 + 0.35 * sin(t_seconds * 2.1 + phase) + 0.15 * sin(t_seconds * 5.3 + phase * 1.7);
     vec2 bend = wind * gust * 0.18 * stiffness;
 
     // Displacement by nearby drawn units.
     float flatten = 0.0;
+#ifdef MOTION_VECTORS
+    int count = int(previous ? environment.prev_time.z : environment.wind.z);
+#else
     int count = int(environment.wind.z);
+#endif
     for (int i = 0; i < MOBA_FOLIAGE_DISPLACERS; i++) {
         if (i >= count) {
             break;
         }
+#ifdef MOTION_VECTORS
+        vec4 displacer = previous ? environment.prev_displacers[i] : environment.displacers[i];
+#else
         vec4 displacer = environment.displacers[i];
+#endif
         vec2 away = base_xz - displacer.xy;
         float d = length(away);
         if (d < displacer.z && displacer.z > 0.0) {
@@ -151,9 +172,49 @@ void main() {
         albedo = environment.flower_color.rgb * tint;
     }
 
+    out_position = position;
+    out_normal_value = normal;
+    out_t = t;
+    out_albedo_value = albedo;
+    return true;
+}
+
+void main() {
+    uvec4 record = foliage.instances[gl_InstanceIndex];
+    uint instance = uint(gl_InstanceIndex);
+    uint vertex = uint(gl_VertexIndex);
+    vec3 position;
+    vec3 normal;
+    float t;
+    vec3 albedo;
+    if (!blade_vertex(record, instance, vertex, environment.time.x, false, position, normal, t,
+                      albedo)) {
+        // Degenerate: every vertex of the blade at one point outside the view.
+        gl_Position = vec4(0.0, 0.0, -1.0, 1.0);
+        out_world_pos = position;
+        out_normal = normal;
+        out_height = 0.0;
+        out_albedo = vec3(0.0);
+#ifdef MOTION_VECTORS
+        write_motion(position, position);
+#endif
+        return;
+    }
     out_world_pos = position;
     out_normal = normal;
     out_height = t;
     out_albedo = albedo;
     gl_Position = camera.view_proj * vec4(position, 1.0);
+#ifdef MOTION_VECTORS
+    // ADR-0021 §2b: the same blade at the previous frame's time and displacers.
+    vec3 previous = position;
+    if (environment.prev_time.y > 0.5) {
+        vec3 prev_normal;
+        float prev_t;
+        vec3 prev_albedo;
+        blade_vertex(record, instance, vertex, environment.prev_time.x, true, previous,
+                     prev_normal, prev_t, prev_albedo);
+    }
+    write_motion(position, previous);
+#endif
 }

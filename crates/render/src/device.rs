@@ -7,9 +7,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ash::vk::TaggedStructure as _;
 use ash::{Instance, vk};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 
+use crate::caps::{self, Admission, DeviceCapabilities, Overrides, PathChoice, RenderPath};
+use crate::descriptor_budget::UpdateAfterBindLimits;
 use crate::error::{RenderError, RenderResult};
 use crate::instance::InstanceContext;
 use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheState};
@@ -58,6 +61,8 @@ pub(crate) struct DeviceContext {
     pub(crate) min_uniform_offset_alignment: u64,
     /// `maxImageDimension2D`: bounds the shadow-map resolution.
     pub(crate) max_image_dimension_2d: u32,
+    /// `maxSamplerLodBias`: bounds the temporal material mip bias (ADR-0021 §1).
+    pub(crate) max_sampler_lod_bias: f32,
     /// Colour and depth attachments support 4x MSAA (`framebufferColorSampleCounts` and
     /// `framebufferDepthSampleCounts`, R6).
     pub(crate) msaa4: bool,
@@ -79,6 +84,17 @@ pub(crate) struct DeviceContext {
     pipeline_cache: vk::PipelineCache,
     /// Pipelines built so far and the time spent in `vkCreateGraphicsPipelines`.
     pipeline_builds: Cell<(u32, Duration)>,
+    /// The render-path gate's decision for this device (ADR-0020 §2).
+    pub(crate) admission: Admission,
+    /// The probed capabilities the decision was made from.
+    pub(crate) capabilities: DeviceCapabilities,
+    /// Every device extension enabled at `vkCreateDevice` (the vendor probes and the latency
+    /// mode read this, not what the device advertises).
+    pub(crate) enabled_extensions: Vec<String>,
+    /// The update-after-bind descriptor limits that bound tiered pipeline layouts (ADR-0020
+    /// §3b, [`crate::descriptor_budget::check_tiered`]); all zero on Compat, which never
+    /// creates an update-after-bind layout.
+    pub(crate) update_after_bind: UpdateAfterBindLimits,
 }
 
 struct Candidate {
@@ -88,17 +104,29 @@ struct Candidate {
     present_family: u32,
     score: u32,
     extensions: Vec<&'static CStr>,
+    capabilities: DeviceCapabilities,
+    admission: Admission,
 }
 
 impl DeviceContext {
+    /// Picks and creates the device. With `surface`, a device needs a queue family that can
+    /// present to it; without one (the headless tiered smoke tests, ADR-0020 gate 3) the
+    /// graphics family stands in for the present family. The instance must enable
+    /// `VK_KHR_surface` either way, because the device enables `VK_KHR_swapchain`. With
+    /// `request_vendor`, the compiled-in vendor back ends' device extensions are requested (the
+    /// renderer's device, whose instance was created with their instance extensions); the
+    /// headless smokes pass `false` and get the open build's device in every build.
     #[allow(clippy::too_many_lines)] // Device selection is one auditable decision table.
     pub(crate) fn new(
         context: &InstanceContext,
-        surface: vk::SurfaceKHR,
+        surface: Option<vk::SurfaceKHR>,
         pipeline_stats: bool,
+        choice: PathChoice,
+        allow_cpu: bool,
+        request_vendor: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
-        let surface_loader = ash::khr::surface::Instance::new(&context.entry, instance);
+        let surface_loader = ash::khr::surface::Instance::load(&context.entry, instance);
         // SAFETY: the instance is live; enumeration returns owned handles.
         let devices = unsafe { instance.enumerate_physical_devices() }?;
         if devices.is_empty() {
@@ -113,48 +141,30 @@ impl DeviceContext {
             // SAFETY: `physical` came from this instance.
             let properties = unsafe { instance.get_physical_device_properties(physical) };
             let name = device_name(&properties);
-            if properties.api_version < vk::API_VERSION_1_3 {
-                let version = properties.api_version;
-                let _ = writeln!(
-                    reasons,
-                    "{name}: Vulkan {}.{} < 1.3; ",
-                    vk::api_version_major(version),
-                    vk::api_version_minor(version)
-                );
+            if let Some(reason) = unsuitable(instance, physical)? {
+                let _ = writeln!(reasons, "{name}: {reason}; ");
                 continue;
             }
             // SAFETY: `physical` came from this instance.
             let families =
                 unsafe { instance.get_physical_device_queue_family_properties(physical) };
-            // Prefer a graphics family that also runs compute (the VFX simulation records on
-            // the graphics queue); Vulkan guarantees one exists on some device.
-            let both = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
-            let Some(graphics_family) = families
-                .iter()
-                .position(|family| family.queue_flags.contains(both))
-                .or_else(|| {
-                    families
-                        .iter()
-                        .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-                })
-            else {
-                let _ = writeln!(reasons, "{name}: no graphics queue; ");
-                continue;
+            let graphics_family = graphics_family(&families).expect("checked by `unsuitable`");
+            let present_family = match surface {
+                None => Some(graphics_family),
+                Some(surface) => families.iter().enumerate().find_map(|(index, _)| {
+                    // SAFETY: the surface and physical device belong to this instance.
+                    match unsafe {
+                        surface_loader.get_physical_device_surface_support(
+                            physical,
+                            u32::try_from(index).expect("queue family fits u32"),
+                            surface,
+                        )
+                    } {
+                        Ok(true) => Some(u32::try_from(index).expect("queue family fits u32")),
+                        _ => None,
+                    }
+                }),
             };
-            let graphics_family = u32::try_from(graphics_family).expect("queue family fits u32");
-            let present_family = families.iter().enumerate().find_map(|(index, _)| {
-                // SAFETY: the surface and physical device belong to this instance.
-                match unsafe {
-                    surface_loader.get_physical_device_surface_support(
-                        physical,
-                        u32::try_from(index).expect("queue family fits u32"),
-                        surface,
-                    )
-                } {
-                    Ok(true) => Some(u32::try_from(index).expect("queue family fits u32")),
-                    _ => None,
-                }
-            });
             let Some(present_family) = present_family else {
                 let _ = writeln!(reasons, "{name}: no present queue; ");
                 continue;
@@ -162,19 +172,6 @@ impl DeviceContext {
 
             // SAFETY: `physical` came from this instance.
             let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;
-            if !extension_supported(&available, SWAPCHAIN) {
-                let _ = writeln!(reasons, "{name}: no swapchain extension; ");
-                continue;
-            }
-
-            // Both features are mandatory in Vulkan 1.3; they are still checked because
-            // portability drivers (MoltenVK) are not fully conformant.
-            let features_13 = query_vulkan13(instance, physical);
-            if features_13.dynamic_rendering != vk::TRUE || features_13.synchronization2 != vk::TRUE
-            {
-                let _ = writeln!(reasons, "{name}: no dynamic rendering/synchronization2; ");
-                continue;
-            }
             let mut extensions = vec![SWAPCHAIN];
             if extension_supported(&available, PORTABILITY_SUBSET) {
                 extensions.push(PORTABILITY_SUBSET);
@@ -183,16 +180,30 @@ impl DeviceContext {
                 extensions.push(PIPELINE_EXECUTABLE_PROPERTIES);
             }
 
-            let mut score = match properties.device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU => 1000,
-                vk::PhysicalDeviceType::INTEGRATED_GPU => 500,
-                vk::PhysicalDeviceType::VIRTUAL_GPU => 200,
-                vk::PhysicalDeviceType::CPU => 100,
-                _ => 10,
-            };
-            if graphics_family == present_family {
-                score += 10;
+            // ADR-0020 §2b: probe, admit, then rank by device type, path and queue sharing.
+            let capabilities = caps::probe(instance, physical)?;
+            let admission = caps::admit(
+                &capabilities,
+                Overrides::new(choice).with_cpu_devices(allow_cpu),
+            );
+            if choice == PathChoice::Tiered && admission.path != RenderPath::Tiered {
+                let _ = writeln!(
+                    reasons,
+                    "{name}: not admitted to the tiered path (reason: {}; lacks {}); ",
+                    admission.reason.name(),
+                    if admission.missing.is_empty() {
+                        String::from("nothing")
+                    } else {
+                        admission.missing.join(", ")
+                    }
+                );
+                continue;
             }
+            let score = caps::rank(
+                capabilities.kind,
+                &admission,
+                graphics_family == present_family,
+            );
 
             let candidate = Candidate {
                 physical,
@@ -201,6 +212,8 @@ impl DeviceContext {
                 present_family,
                 score,
                 extensions,
+                capabilities,
+                admission,
             };
             if best
                 .as_ref()
@@ -213,7 +226,7 @@ impl DeviceContext {
         let Some(candidate) = best else {
             return Err(RenderError::NoSuitableDevice(reasons));
         };
-        Self::create(context, surface_loader, &candidate)
+        Self::create(context, surface_loader, &candidate, request_vendor)
     }
 
     #[allow(clippy::too_many_lines)] // Queues, features, allocator and limits, in order.
@@ -221,6 +234,7 @@ impl DeviceContext {
         context: &InstanceContext,
         surface: ash::khr::surface::Instance,
         candidate: &Candidate,
+        request_vendor: bool,
     ) -> RenderResult<Self> {
         let instance = &context.instance;
         let physical = candidate.physical;
@@ -232,20 +246,103 @@ impl DeviceContext {
         let texture_compression_bc = supported.texture_compression_bc == vk::TRUE;
         let sampler_anisotropy = supported.sampler_anisotropy == vk::TRUE;
         let depth_clamp = supported.depth_clamp == vk::TRUE;
+        let tiered = candidate.admission.path == RenderPath::Tiered;
+        let present = |name: &str| candidate.capabilities.feature(name);
         let base_features = vk::PhysicalDeviceFeatures::default()
             .texture_compression_bc(texture_compression_bc)
             .sampler_anisotropy(sampler_anisotropy)
-            .depth_clamp(depth_clamp);
+            .depth_clamp(depth_clamp)
+            // ADR-0020 §3a: bindless storage images (checked at admission on Tiered).
+            .shader_storage_image_write_without_format(
+                tiered && present("shaderStorageImageWriteWithoutFormat"),
+            )
+            // ADR-0021 Q7: per-attachment blend states (checked at admission on Tiered).
+            .independent_blend(tiered && present("independentBlend"));
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
-            .synchronization2(true);
+            .synchronization2(true)
+            .maintenance4(tiered);
+        // The tiered required set (ADR-0020 §1e, §3b). Admission checked every bit, so on a
+        // tiered device each one is supported; Compat enables none of them, as before.
+        let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(tiered)
+            .descriptor_indexing(tiered)
+            .runtime_descriptor_array(tiered)
+            .scalar_block_layout(tiered)
+            .timeline_semaphore(tiered)
+            .draw_indirect_count(tiered)
+            .host_query_reset(tiered)
+            .shader_sampled_image_array_non_uniform_indexing(tiered)
+            .shader_storage_image_array_non_uniform_indexing(tiered)
+            .descriptor_binding_sampled_image_update_after_bind(tiered)
+            .descriptor_binding_storage_image_update_after_bind(tiered)
+            .descriptor_binding_partially_bound(tiered)
+            .descriptor_binding_variable_descriptor_count(tiered)
+            .descriptor_binding_update_unused_while_pending(tiered);
+        // Extension features, each enabled only when its extension is enabled below.
+        let enabled = TieredExtensions::of(&candidate.capabilities, candidate.admission.path);
+        // ADR-0020 §1e: what the compiled-in vendor back ends ask for, before creation (none
+        // in the open build, and none on Compat). Each one the device can take is enabled,
+        // with the Vulkan 1.2 bit a core-promoted name needs; a back end whose needs are not
+        // met is disabled by its probe, never the device.
+        let base: Vec<&CStr> = candidate
+            .extensions
+            .iter()
+            .copied()
+            .chain(enabled.names.iter().map(std::ffi::CString::as_c_str))
+            .collect();
+        let requested = if request_vendor {
+            crate::vendor::device_extensions(&crate::vendor::DeviceQuery {
+                instance,
+                physical,
+                capabilities: &candidate.capabilities,
+                path: candidate.admission.path,
+            })
+        } else {
+            Vec::new()
+        };
+        let vendor = vendor_extensions(
+            requested,
+            &candidate.capabilities,
+            &base,
+            if tiered {
+                Promoted12::supported(&query_vulkan12(instance, physical))
+            } else {
+                Promoted12::default()
+            },
+        );
+        // Only ever set on the tiered path, where `features_12` is chained (requests come
+        // only there).
+        features_12.sampler_mirror_clamp_to_edge =
+            vk::Bool32::from(vendor.features.sampler_mirror_clamp_to_edge);
+        features_12.sampler_filter_minmax = vk::Bool32::from(vendor.features.sampler_filter_minmax);
+        features_12.shader_output_viewport_index =
+            vk::Bool32::from(vendor.features.shader_output_viewport_index);
+        features_12.shader_output_layer = vk::Bool32::from(vendor.features.shader_output_layer);
+        let mut acceleration = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
+        let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut ray_pipeline =
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
+        let mut ray_maintenance = vk::PhysicalDeviceRayTracingMaintenance1FeaturesKHR::default()
+            .ray_tracing_maintenance1(true);
+        let mut position_fetch = vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default()
+            .ray_tracing_position_fetch(true);
+        let mut mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+            .mesh_shader(true)
+            .task_shader(true);
+        let mut shading_rate = vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default()
+            .pipeline_fragment_shading_rate(true);
+        let mut reorder = vk::PhysicalDeviceRayTracingInvocationReorderFeaturesEXT::default()
+            .ray_tracing_invocation_reorder(true);
+        let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+        let mut anti_lag = vk::PhysicalDeviceAntiLagFeaturesAMD::default().anti_lag(true);
         // Portability drivers (MoltenVK) may not support comparison samplers; query and
         // enable `mutableComparisonSamplers`, which the shadow map's hardware PCF needs.
         let portability = candidate.extensions.contains(&PORTABILITY_SUBSET);
         let mut portability_features = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
         if portability {
-            let mut query =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut portability_features);
+            let mut query = vk::PhysicalDeviceFeatures2::default().push(&mut portability_features);
             // SAFETY: the physical device belongs to this instance, it exposes the
             // portability-subset extension, and the chain is valid for the call.
             unsafe { instance.get_physical_device_features2(physical, &mut query) };
@@ -259,8 +356,7 @@ impl DeviceContext {
             .extensions
             .contains(&PIPELINE_EXECUTABLE_PROPERTIES)
         {
-            let mut query =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut executable_features);
+            let mut query = vk::PhysicalDeviceFeatures2::default().push(&mut executable_features);
             // SAFETY: the physical device belongs to this instance, it exposes the extension,
             // and the chain is valid for the call.
             unsafe { instance.get_physical_device_features2(physical, &mut query) };
@@ -268,12 +364,45 @@ impl DeviceContext {
         let pipeline_stats = executable_features.pipeline_executable_info == vk::TRUE;
         let mut features_2 = vk::PhysicalDeviceFeatures2::default()
             .features(base_features)
-            .push_next(&mut features_13);
+            .push(&mut features_13);
         if portability {
-            features_2 = features_2.push_next(&mut portability_features);
+            features_2 = features_2.push(&mut portability_features);
         }
         if pipeline_stats {
-            features_2 = features_2.push_next(&mut executable_features);
+            features_2 = features_2.push(&mut executable_features);
+        }
+        if tiered {
+            features_2 = features_2.push(&mut features_12);
+        }
+        if enabled.has("VK_KHR_acceleration_structure") {
+            features_2 = features_2.push(&mut acceleration);
+        }
+        if enabled.has("VK_KHR_ray_query") {
+            features_2 = features_2.push(&mut ray_query);
+        }
+        if enabled.has("VK_KHR_ray_tracing_pipeline") {
+            features_2 = features_2.push(&mut ray_pipeline);
+        }
+        if enabled.has("VK_KHR_ray_tracing_maintenance1") {
+            features_2 = features_2.push(&mut ray_maintenance);
+        }
+        if enabled.has("VK_KHR_ray_tracing_position_fetch") {
+            features_2 = features_2.push(&mut position_fetch);
+        }
+        if enabled.has("VK_EXT_mesh_shader") {
+            features_2 = features_2.push(&mut mesh);
+        }
+        if enabled.has("VK_KHR_fragment_shading_rate") {
+            features_2 = features_2.push(&mut shading_rate);
+        }
+        if enabled.has("VK_EXT_ray_tracing_invocation_reorder") {
+            features_2 = features_2.push(&mut reorder);
+        }
+        if enabled.has("VK_KHR_present_id") {
+            features_2 = features_2.push(&mut present_id);
+        }
+        if enabled.has("VK_AMD_anti_lag") {
+            features_2 = features_2.push(&mut anti_lag);
         }
 
         let priorities = [1.0f32];
@@ -290,21 +419,77 @@ impl DeviceContext {
             );
         }
 
-        let extension_names: Vec<*const c_char> = candidate
-            .extensions
-            .iter()
-            .filter(|name| pipeline_stats || **name != PIPELINE_EXECUTABLE_PROPERTIES)
-            .map(|name| name.as_ptr())
-            .collect();
+        // `enabled.names` and `vendor.names` outlive `create_device` below.
+        let names_with = |vendor_names| {
+            let mut names: Vec<&CStr> = candidate
+                .extensions
+                .iter()
+                .copied()
+                .filter(|name| pipeline_stats || *name != PIPELINE_EXECUTABLE_PROPERTIES)
+                .collect();
+            for name in enabled
+                .names
+                .iter()
+                .chain::<&[std::ffi::CString]>(vendor_names)
+            {
+                if !names.contains(&name.as_c_str()) {
+                    names.push(name);
+                }
+            }
+            names
+        };
+        let mut names = names_with(&vendor.names[..]);
+        let extension_names: Vec<*const c_char> = names.iter().map(|name| name.as_ptr()).collect();
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .enabled_extension_names(&extension_names)
-            .push_next(&mut features_2);
+            .enabled_extension_names(&extension_names);
+        // SAFETY: `features_2` heads a chain built above with `push`: every `p_next` in it
+        // points to a live feature structure, and its tail (the last structure pushed, whose
+        // own `p_next` is still null) is writable. Each link is a `&mut` borrow held by
+        // `features_2`, which `create_info` borrows in turn, so all of them outlive
+        // `create_device` below.
+        let create_info = unsafe { create_info.extend(&mut features_2) };
 
         // SAFETY: the physical device was enumerated from this instance, all requested
         // extensions/features were checked above, and the pointers in `create_info` are
         // valid for the duration of the call.
-        let device = unsafe { instance.create_device(physical, &create_info, None) }?;
+        let device = match unsafe { instance.create_device(physical, &create_info, None) } {
+            Ok(device) => device,
+            // A vendor request the checks above did not catch must not cost the renderer:
+            // retry once without the vendor names (their probes then reject, one line each).
+            // The Vulkan 1.2 bits set for them stay on; each is supported, so that is valid.
+            Err(error) if !vendor.names.is_empty() => {
+                eprintln!(
+                    "[vendor] vkCreateDevice failed with the vendor extensions ({}): {error}; \
+                     retrying without them",
+                    vendor
+                        .names
+                        .iter()
+                        .map(|name| name.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                // No unit seam reaches this branch (it needs a driver that rejects the first
+                // call); checked by reading: the list is the base names alone.
+                names = names_with(&vendor.names[..0]);
+                let extension_names: Vec<*const c_char> =
+                    names.iter().map(|name| name.as_ptr()).collect();
+                let create_info = vk::DeviceCreateInfo::default()
+                    .queue_create_infos(&queue_infos)
+                    .enabled_extension_names(&extension_names);
+                // SAFETY: as for the first attempt: the same chain, whose borrows outlive the
+                // call. The first `create_info` is no longer used, and `extend` again links
+                // the chain's tail to this `create_info`'s (null) `p_next`.
+                let create_info = unsafe { create_info.extend(&mut features_2) };
+                // SAFETY: as for the first attempt, with a subset of its extensions.
+                unsafe { instance.create_device(physical, &create_info, None) }?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let enabled_extensions: Vec<String> = names
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
 
         // SAFETY: `physical` came from this instance.
         let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
@@ -323,14 +508,21 @@ impl DeviceContext {
         // `AllocatorDebugSettings` is `#[non_exhaustive]` since gpu-allocator 0.28.
         let mut debug_settings = gpu_allocator::AllocatorDebugSettings::default();
         debug_settings.log_leaks_on_shutdown = false;
+        // ADR-0020 §3a: tiered buffers are passed by device address, so tiered memory blocks
+        // are allocated with `DEVICE_ADDRESS` (the feature is enabled above). Compat as before.
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
             physical_device: physical,
             debug_settings,
-            buffer_device_address: false,
+            buffer_device_address: tiered,
             allocation_sizes: gpu_allocator::AllocationSizes::default(),
         })?;
+        let update_after_bind = if tiered {
+            query_update_after_bind(instance, physical)
+        } else {
+            UpdateAfterBindLimits::default()
+        };
 
         Ok(Self {
             device,
@@ -369,6 +561,7 @@ impl DeviceContext {
                 .min_uniform_buffer_offset_alignment
                 .max(1),
             max_image_dimension_2d: candidate.properties.limits.max_image_dimension2_d,
+            max_sampler_lod_bias: candidate.properties.limits.max_sampler_lod_bias,
             msaa4: candidate
                 .properties
                 .limits
@@ -385,6 +578,10 @@ impl DeviceContext {
             cache_identity: CacheIdentity::of(&candidate.properties),
             pipeline_cache: vk::PipelineCache::null(),
             pipeline_builds: Cell::new((0, Duration::ZERO)),
+            admission: candidate.admission.clone(),
+            capabilities: candidate.capabilities.clone(),
+            enabled_extensions,
+            update_after_bind,
         })
     }
 
@@ -479,30 +676,39 @@ impl DeviceContext {
     }
 
     /// The driver's compiled statistics of `pipeline` (built with
-    /// `CAPTURE_STATISTICS_KHR`), one line per executable: its name and every statistic as
-    /// `name=value`. Empty without [`Self::pipeline_stats`] or when the driver reports none.
+    /// `CAPTURE_STATISTICS_KHR`), one line per executable that reports statistics: its name
+    /// and every statistic as `name=value`. Empty without [`Self::pipeline_stats`] or when the driver reports none.
     pub(crate) fn pipeline_statistics(&self, pipeline: vk::Pipeline) -> Vec<String> {
         if !self.pipeline_stats {
             return Vec::new();
         }
         let loader =
-            ash::khr::pipeline_executable_properties::Device::new(&self.instance, &self.device);
+            ash::khr::pipeline_executable_properties::Device::load(&self.instance, &self.device);
+        let fp = loader.fp();
+        let handle = self.device.handle();
         let info = vk::PipelineInfoKHR::default().pipeline(pipeline);
-        // SAFETY: the extension and its feature are enabled, and the pipeline is live and
-        // belongs to this device.
-        let Ok(executables) = (unsafe { loader.get_pipeline_executable_properties(&info) }) else {
-            return Vec::new();
-        };
+        let executables = enumerate_two_call(|count, out| {
+            // SAFETY: the extension and its feature are enabled, the pipeline is live and
+            // belongs to this device, and `out` is null or holds `*count` default elements.
+            unsafe {
+                (fp.get_pipeline_executable_properties_khr)(handle, &raw const info, count, out)
+            }
+        });
         let mut lines = Vec::with_capacity(executables.len());
         for (index, executable) in executables.iter().enumerate() {
             let info = vk::PipelineExecutableInfoKHR::default()
                 .pipeline(pipeline)
                 .executable_index(index as u32);
-            // SAFETY: as above; `index` is within the executables just enumerated.
-            let Ok(statistics) = (unsafe { loader.get_pipeline_executable_statistics(&info) })
-            else {
+            let statistics = enumerate_two_call(|count, out| {
+                // SAFETY: as above; `index` is within the executables just enumerated.
+                unsafe {
+                    (fp.get_pipeline_executable_statistics_khr)(handle, &raw const info, count, out)
+                }
+            });
+            if statistics.is_empty() {
+                // A failed query (or one with no statistics) prints no line.
                 continue;
-            };
+            }
             let name = executable.name_as_c_str().map_or_else(
                 |_| String::from("?"),
                 |name| name.to_string_lossy().into_owned(),
@@ -645,11 +851,255 @@ impl Drop for DeviceContext {
     }
 }
 
+/// The tiered extensions a device enables: on a tiered device, every required one plus each
+/// optional or tier-gated one that is present with its features (ADR-0020 §1e). Empty on
+/// Compat. Of the two latency extensions only one is enabled, Reflex first (ADR-0021 §6a):
+/// a device that offers both (Mesa 26.2's anti-lag layer also advertises `VK_AMD_anti_lag`
+/// on NVIDIA's driver) runs `VK_NV_low_latency2`, and the other is never enabled.
+pub(crate) struct TieredExtensions {
+    pub(crate) names: Vec<std::ffi::CString>,
+}
+
+impl TieredExtensions {
+    pub(crate) fn of(capabilities: &DeviceCapabilities, path: RenderPath) -> Self {
+        let names = if path == RenderPath::Tiered {
+            let present: Vec<&caps::ExtensionSpec> = caps::EXTENSIONS
+                .iter()
+                .filter(|extension| caps::extension_present(capabilities, extension))
+                .collect();
+            let reflex = present
+                .iter()
+                .any(|extension| extension.name == "VK_NV_low_latency2");
+            present
+                .into_iter()
+                .filter(|extension| !(reflex && extension.name == "VK_AMD_anti_lag"))
+                .map(|extension| {
+                    std::ffi::CString::new(extension.name).expect("extension names have no NUL")
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self { names }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.names
+            .iter()
+            .any(|enabled| enabled.as_bytes() == name.as_bytes())
+    }
+}
+
+/// The Vulkan 1.2 feature bits that a core-promoted extension needs when it is enabled by
+/// name beside `VkPhysicalDeviceVulkan12Features`
+/// (`VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02832`, `-02834`, `-02835`). The tiered
+/// path already enables `drawIndirectCount` and `descriptorIndexing` (`-02831`, `-02833`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one bit per Vulkan feature, mirroring VkPhysicalDeviceVulkan12Features"
+)]
+pub(crate) struct Promoted12 {
+    pub(crate) sampler_mirror_clamp_to_edge: bool,
+    pub(crate) sampler_filter_minmax: bool,
+    pub(crate) shader_output_viewport_index: bool,
+    pub(crate) shader_output_layer: bool,
+}
+
+impl Promoted12 {
+    /// The bits `features` reports supported.
+    pub(crate) fn supported(features: &vk::PhysicalDeviceVulkan12Features<'_>) -> Self {
+        Self {
+            sampler_mirror_clamp_to_edge: features.sampler_mirror_clamp_to_edge == vk::TRUE,
+            sampler_filter_minmax: features.sampler_filter_minmax == vk::TRUE,
+            shader_output_viewport_index: features.shader_output_viewport_index == vk::TRUE,
+            shader_output_layer: features.shader_output_layer == vk::TRUE,
+        }
+    }
+}
+
+/// The device dependencies of the extensions a vendor back end may ask for that core Vulkan
+/// 1.3 does not already satisfy (`vk.xml` `depends`; `VUID-vkCreateDevice-ppEnabledExtensionNames-01387`).
+/// A name not listed here is taken to have none; if that is wrong, the driver's rejection is
+/// caught by the retry in [`DeviceContext::create`].
+const VENDOR_DEPENDENCIES: &[(&str, &[&str])] = &[
+    (
+        "VK_KHR_acceleration_structure",
+        &["VK_KHR_deferred_host_operations"],
+    ),
+    ("VK_KHR_ray_query", &["VK_KHR_acceleration_structure"]),
+    (
+        "VK_KHR_ray_tracing_pipeline",
+        &["VK_KHR_acceleration_structure"],
+    ),
+    (
+        "VK_KHR_ray_tracing_maintenance1",
+        &["VK_KHR_acceleration_structure"],
+    ),
+    (
+        "VK_KHR_ray_tracing_position_fetch",
+        &["VK_KHR_acceleration_structure"],
+    ),
+    (
+        "VK_EXT_ray_tracing_invocation_reorder",
+        &["VK_KHR_ray_tracing_pipeline"],
+    ),
+    (
+        "VK_EXT_opacity_micromap",
+        &["VK_KHR_acceleration_structure"],
+    ),
+    ("VK_KHR_present_id", &["VK_KHR_swapchain"]),
+    (
+        "VK_KHR_present_wait",
+        &["VK_KHR_swapchain", "VK_KHR_present_id"],
+    ),
+    ("VK_EXT_swapchain_maintenance1", &["VK_KHR_swapchain"]),
+    (
+        "VK_EXT_graphics_pipeline_library",
+        &["VK_KHR_pipeline_library"],
+    ),
+    ("VK_NV_cooperative_matrix2", &["VK_KHR_cooperative_matrix"]),
+];
+
+/// The vendor back ends' requests (ADR-0020 §1e) the device can take, and the Vulkan 1.2 bits
+/// they need.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct VendorExtensions {
+    pub(crate) names: Vec<std::ffi::CString>,
+    pub(crate) features: Promoted12,
+}
+
+/// Which of the `requested` vendor extensions the device can take beside the `base` names it
+/// is created with anyway. A name is dropped (its back end's probe then rejects) when:
+/// - it is `VK_EXT_buffer_device_address`: requests come only on the tiered path, which
+///   enables core `bufferDeviceAddress`, and the two must not be enabled together
+///   (`VUID-VkDeviceCreateInfo-pNext-04748`); the probes count the core feature in its place;
+/// - the device does not advertise it;
+/// - it is promoted to Vulkan 1.2 and its [`Promoted12`] bits are not `supported` (otherwise
+///   they are set);
+/// - a dependency in [`VENDOR_DEPENDENCIES`] is neither in `base` nor kept.
+pub(crate) fn vendor_extensions(
+    requested: Vec<std::ffi::CString>,
+    capabilities: &DeviceCapabilities,
+    base: &[&CStr],
+    supported: Promoted12,
+) -> VendorExtensions {
+    let mut features = Promoted12::default();
+    let mut names: Vec<std::ffi::CString> = requested
+        .into_iter()
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            if name == "VK_EXT_buffer_device_address" || !capabilities.has_extension(&name) {
+                return false;
+            }
+            match &*name {
+                "VK_KHR_sampler_mirror_clamp_to_edge" => {
+                    features.sampler_mirror_clamp_to_edge = supported.sampler_mirror_clamp_to_edge;
+                    supported.sampler_mirror_clamp_to_edge
+                }
+                "VK_EXT_sampler_filter_minmax" => {
+                    features.sampler_filter_minmax = supported.sampler_filter_minmax;
+                    supported.sampler_filter_minmax
+                }
+                "VK_EXT_shader_viewport_index_layer" => {
+                    let both =
+                        supported.shader_output_viewport_index && supported.shader_output_layer;
+                    features.shader_output_viewport_index |= both;
+                    features.shader_output_layer |= both;
+                    both
+                }
+                _ => true,
+            }
+        })
+        .collect();
+    // Drop names whose dependencies are missing, until nothing more drops (a dropped name
+    // can be another's dependency).
+    loop {
+        let present = |dependency: &str| {
+            base.iter()
+                .any(|name| name.to_bytes() == dependency.as_bytes())
+                || names
+                    .iter()
+                    .any(|name| name.as_bytes() == dependency.as_bytes())
+        };
+        let missing = names.iter().position(|name| {
+            VENDOR_DEPENDENCIES
+                .iter()
+                .find(|(extension, _)| extension.as_bytes() == name.as_bytes())
+                .is_some_and(|(_, dependencies)| {
+                    !dependencies.iter().all(|dependency| present(dependency))
+                })
+        });
+        match missing {
+            Some(index) => {
+                names.remove(index);
+            }
+            None => break,
+        }
+    }
+    VendorExtensions { names, features }
+}
+
 fn device_name(properties: &vk::PhysicalDeviceProperties) -> String {
     // SAFETY: `deviceName` is a NUL-terminated array owned by the properties struct.
     unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Why `physical` cannot run the renderer whatever the surface, or `None` when it can: Vulkan
+/// 1.3, a graphics queue, `VK_KHR_swapchain`, dynamic rendering and synchronization2. Device
+/// selection and the client's surface-free probe ([`crate::probe_devices`]) share it, so the
+/// probe skips the same devices; only present support needs the window.
+///
+/// # Errors
+/// Fails only if extension enumeration fails.
+pub(crate) fn unsuitable(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+) -> RenderResult<Option<String>> {
+    // SAFETY: `physical` came from this instance.
+    let properties = unsafe { instance.get_physical_device_properties(physical) };
+    if properties.api_version < vk::API_VERSION_1_3 {
+        let version = properties.api_version;
+        return Ok(Some(format!(
+            "Vulkan {}.{} < 1.3",
+            vk::api_version_major(version),
+            vk::api_version_minor(version)
+        )));
+    }
+    // SAFETY: `physical` came from this instance.
+    let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+    if graphics_family(&families).is_none() {
+        return Ok(Some(String::from("no graphics queue")));
+    }
+    // SAFETY: `physical` came from this instance.
+    let available = unsafe { instance.enumerate_device_extension_properties(physical) }?;
+    if !extension_supported(&available, SWAPCHAIN) {
+        return Ok(Some(String::from("no swapchain extension")));
+    }
+    // Both features are mandatory in Vulkan 1.3; they are still checked because portability
+    // drivers (MoltenVK) are not fully conformant.
+    let features_13 = query_vulkan13(instance, physical);
+    if features_13.dynamic_rendering != vk::TRUE || features_13.synchronization2 != vk::TRUE {
+        return Ok(Some(String::from("no dynamic rendering/synchronization2")));
+    }
+    Ok(None)
+}
+
+/// The graphics family to use: one that also runs compute when there is one (the VFX
+/// simulation records on the graphics queue; Vulkan guarantees one exists on some device).
+fn graphics_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
+    let both = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
+    families
+        .iter()
+        .position(|family| family.queue_flags.contains(both))
+        .or_else(|| {
+            families
+                .iter()
+                .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        })
+        .map(|index| u32::try_from(index).expect("queue family fits u32"))
 }
 
 fn extension_supported(available: &[vk::ExtensionProperties], name: &CStr) -> bool {
@@ -660,16 +1110,79 @@ fn extension_supported(available: &[vk::ExtensionProperties], name: &CStr) -> bo
     })
 }
 
+fn query_vulkan12(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+) -> vk::PhysicalDeviceVulkan12Features<'static> {
+    let mut features = vk::PhysicalDeviceVulkan12Features::default();
+    {
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push(&mut features);
+        // SAFETY: the physical device belongs to this instance (a Vulkan 1.3 device, so the
+        // 1.2 structure is valid in the chain) and the chain is valid for the call.
+        unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
+    }
+    features
+}
+
+/// The update-after-bind descriptor limits (core Vulkan 1.2 properties).
+fn query_update_after_bind(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+) -> UpdateAfterBindLimits {
+    let mut properties_12 = vk::PhysicalDeviceVulkan12Properties::default();
+    {
+        let mut properties = vk::PhysicalDeviceProperties2::default().push(&mut properties_12);
+        // SAFETY: the physical device belongs to this instance, which is Vulkan 1.3, and the
+        // chain is valid for the duration of the call.
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    }
+    let p = &properties_12;
+    UpdateAfterBindLimits {
+        per_stage_samplers: p.max_per_stage_descriptor_update_after_bind_samplers,
+        per_stage_sampled_images: p.max_per_stage_descriptor_update_after_bind_sampled_images,
+        per_stage_storage_images: p.max_per_stage_descriptor_update_after_bind_storage_images,
+        per_stage_resources: p.max_per_stage_update_after_bind_resources,
+        set_samplers: p.max_descriptor_set_update_after_bind_samplers,
+        set_sampled_images: p.max_descriptor_set_update_after_bind_sampled_images,
+        set_storage_images: p.max_descriptor_set_update_after_bind_storage_images,
+    }
+}
+
 fn query_vulkan13(
     instance: &Instance,
     physical: vk::PhysicalDevice,
 ) -> vk::PhysicalDeviceVulkan13Features<'static> {
     let mut features = vk::PhysicalDeviceVulkan13Features::default();
     {
-        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+        let mut features_2 = vk::PhysicalDeviceFeatures2::default().push(&mut features);
         // SAFETY: the physical device belongs to this instance and the feature chain is
         // valid for the duration of the call.
         unsafe { instance.get_physical_device_features2(physical, &mut features_2) };
     }
     features
+}
+
+/// One Vulkan two-call enumeration through `call(count, out)`, keeping what the driver wrote.
+/// `INCOMPLETE` (the count grew between the calls) retries, as ash's own enumerations do; a
+/// count that shrank truncates. ash's fill wrappers instead assert that the count is stable,
+/// which would abort the process on a misbehaving driver. Any error gives an empty result.
+fn enumerate_two_call<T: Default + Clone>(
+    mut call: impl FnMut(&mut u32, *mut T) -> vk::Result,
+) -> Vec<T> {
+    for _ in 0..4 {
+        let mut count = 0;
+        if call(&mut count, core::ptr::null_mut()) != vk::Result::SUCCESS {
+            return Vec::new();
+        }
+        let mut out = vec![T::default(); count as usize];
+        match call(&mut count, out.as_mut_ptr()) {
+            vk::Result::SUCCESS => {
+                out.truncate(count as usize);
+                return out;
+            }
+            vk::Result::INCOMPLETE => {}
+            _ => return Vec::new(),
+        }
+    }
+    Vec::new()
 }

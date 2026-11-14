@@ -13,9 +13,20 @@
 //! Every log must also have dropped no frames (`frames_dropped=0`: the frame log had room for
 //! the whole run) and kept its VRAM peak inside the tier's budget.
 //!
-//! Each frame log names its tier (`quality=`) and GPU (`gpu=`). The baseline names the GPU it
-//! was measured on (top-level `gpu = "..."`) and holds one `[tier]` table per tier, each with
-//! exactly `gpu_total_p95_ms` and `render_p95_ms`; unknown tables or keys are an error. With
+//! Each frame log names its tier (`quality=`), render path (`path=`, ADR-0020 §5d; a log
+//! without it is Compat) and GPU (`gpu=`). Compat logs are checked against today's budgets
+//! (`moba_assets::COMPAT_GPU_BUDGETS`); a breach fails. Tiered logs are checked against
+//! `moba_assets::GPU_BUDGETS` and their own `[tiered.<tier>]` baselines. Since N1a (ADR-0020
+//! §5d, ADR-0021 amendment 2 item 16) a Tiered **budget** breach fails; Tiered **baseline**
+//! breaches (regressions, a missing table, another GPU) stay report-only until the last N1
+//! part merges and flips them (`TIERED_BASELINE_FAILS`; the owner is tracked in
+//! `docs/status.md`): they print as `report-only` lines. The pacing and run-integrity checks
+//! fail on both paths.
+//!
+//! The baseline names the GPU it was measured on (top-level `gpu = "..."`) and holds one
+//! table per path and tier: `[low]` … `[ultra]` for Compat and `[tiered.low]` …
+//! `[tiered.overdrive]` for Tiered, each with exactly `gpu_total_p95_ms` and
+//! `render_p95_ms`; unknown tables or keys are an error. With
 //! `--baseline`, a log whose tier has no table, or that ran on another GPU, fails: a baseline
 //! only means something on the GPU that recorded it, so a new runner records its own
 //! (`BASELINE= scripts/perf-replay.sh`). Without `--baseline` only the budgets are checked.
@@ -25,13 +36,20 @@
 
 use std::process::ExitCode;
 
-/// The roadmap's §7 GPU budgets (ms, p95), per tier.
-const GPU_BUDGET_MS: [(&str, f64); 4] = [
-    ("low", 14.0),
-    ("medium", 6.0),
-    ("high", 6.0),
-    ("ultra", 7.5),
-];
+/// Whether `table` names a baseline table: a Compat tier, or `tiered.` and a tiered tier.
+fn known_table(table: &str) -> bool {
+    match table.strip_prefix("tiered.") {
+        Some(tier) => moba_assets::gpu_budget(tier).is_some_and(|budget| budget.name == tier),
+        None => moba_assets::COMPAT_GPU_BUDGETS
+            .iter()
+            .any(|(tier, _)| *tier == table),
+    }
+}
+
+/// Whether a Tiered baseline breach fails (`false`: report-only). Each N1 part re-records the
+/// `[tiered.*]` baselines; the last one to merge sets this to `true` (ADR-0021 amendment 2,
+/// item 16; the owner is in `docs/status.md`).
+const TIERED_BASELINE_FAILS: bool = false;
 
 /// Allowed growth over the baseline before the gate fails.
 const DEFAULT_MAX_REGRESSION: f64 = 0.25;
@@ -126,7 +144,7 @@ impl Baseline {
                 .and_then(|line| line.strip_suffix(']'))
             {
                 let name = name.trim();
-                if !GPU_BUDGET_MS.iter().any(|(tier, _)| *tier == name) {
+                if !known_table(name) {
                     return Err(at(format!("unknown tier table [{name}]")));
                 }
                 if tables.iter().any(|(table, _)| table == name) {
@@ -209,16 +227,16 @@ fn check(
 ) -> (Vec<String>, Vec<String>) {
     let mut failures = Vec::new();
     let mut notes = Vec::new();
-    let tier = log
-        .get("quality")
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    let Some(&(_, budget)) = GPU_BUDGET_MS.iter().find(|(name, _)| *name == tier) else {
-        failures.push(format!(
-            "the frame log names no known tier (quality={tier:?})"
-        ));
-        return (failures, notes);
+    let (tiered, tier, budget) = match tier_budget(log) {
+        Ok(found) => found,
+        Err(failure) => {
+            failures.push(failure);
+            return (failures, notes);
+        }
     };
+    // Budget breaches fail on both paths; baseline breaches on Tiered report only until the
+    // last N1 part flips `TIERED_BASELINE_FAILS`.
+    let mut breaches = Vec::new();
     let need = |key: &str, failures: &mut Vec<String>| {
         let value = log.number(key);
         if value.is_none() {
@@ -226,26 +244,7 @@ fn check(
         }
         value
     };
-    // A baseline only applies on its own GPU, and must cover every tier it is asked about.
-    let baseline = match baseline {
-        Some(reference) => {
-            let gpu = log.get("gpu").unwrap_or("not reported");
-            if gpu != reference.gpu {
-                failures.push(format!(
-                    "{tier}: the baseline is for {:?}, this run is on {gpu:?}: record a baseline \
-                     on this GPU (BASELINE= scripts/perf-replay.sh)",
-                    reference.gpu
-                ));
-                None
-            } else if !reference.has_table(&tier) {
-                failures.push(format!("{tier}: the baseline has no [{tier}] table"));
-                None
-            } else {
-                Some(reference)
-            }
-        }
-        None => None,
-    };
+    let baseline = baseline.and_then(|reference| applicable(reference, log, &tier, &mut breaches));
     // §7 GPU budget.
     if let Some(gpu_p95) = need("gpu_total_p95_ms", &mut failures) {
         notes.push(format!(
@@ -264,7 +263,7 @@ fn check(
                 "{tier}: baseline gpu_total_p95 {reference:.3} ms, allowed {allowed:.3} ms"
             ));
             if gpu_p95 > allowed {
-                failures.push(format!(
+                breaches.push(format!(
                     "{tier}: GPU p95 {gpu_p95:.3} ms regressed past {allowed:.3} ms (baseline \
                      {reference:.3} ms + {:.0} %)",
                     limits.max_regression * 100.0
@@ -278,7 +277,7 @@ fn check(
     ) {
         let allowed = reference.max(NOISE_FLOOR_MS) * (1.0 + limits.max_regression);
         if render > allowed {
-            failures.push(format!(
+            breaches.push(format!(
                 "{tier}: CPU render p95 {render:.3} ms regressed past {allowed:.3} ms"
             ));
         }
@@ -296,8 +295,70 @@ fn check(
             ));
         }
     }
+    if tiered && !TIERED_BASELINE_FAILS {
+        notes.extend(breaches.into_iter().map(|breach| {
+            format!("report-only (Tiered baseline, until the last N1 part merges): {breach}")
+        }));
+    } else {
+        failures.extend(breaches);
+    }
     check_run(log, &tier, limits, &mut failures, &mut notes);
     (failures, notes)
+}
+
+/// The log's path, baseline table name (`ultra`, or `tiered.ultra` on the tiered path) and GPU
+/// budget in ms. Compat runs Overdrive as Ultra (ADR-0020 §5a).
+fn tier_budget(log: &FrameLog) -> Result<(bool, String, f64), String> {
+    let quality = log
+        .get("quality")
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let tiered = log.get("path") == Some("tiered");
+    let (tier, budget) = if tiered {
+        (
+            format!("tiered.{quality}"),
+            moba_assets::gpu_budget(&quality)
+                .filter(|budget| budget.name == quality)
+                .map(|budget| f64::from(budget.budget_ms)),
+        )
+    } else {
+        let compat = if quality == "overdrive" {
+            "ultra"
+        } else {
+            quality.as_str()
+        };
+        (
+            compat.to_owned(),
+            moba_assets::compat_gpu_budget_ms(compat).map(f64::from),
+        )
+    };
+    budget
+        .map(|budget| (tiered, tier, budget))
+        .ok_or_else(|| format!("the frame log names no known tier (quality={quality:?})"))
+}
+
+/// The baseline, when it applies: it was recorded on this GPU and has a table for this tier.
+/// Otherwise the mismatch is a breach.
+fn applicable<'a>(
+    reference: &'a Baseline,
+    log: &FrameLog,
+    tier: &str,
+    breaches: &mut Vec<String>,
+) -> Option<&'a Baseline> {
+    let gpu = log.get("gpu").unwrap_or("not reported");
+    if gpu != reference.gpu {
+        breaches.push(format!(
+            "{tier}: the baseline is for {:?}, this run is on {gpu:?}: record a baseline on \
+             this GPU (BASELINE= scripts/perf-replay.sh)",
+            reference.gpu
+        ));
+        None
+    } else if !reference.has_table(tier) {
+        breaches.push(format!("{tier}: the baseline has no [{tier}] table"));
+        None
+    } else {
+        Some(reference)
+    }
 }
 
 /// The run-integrity checks: a warm cache (when asked), no dropped frames, VRAM within the
@@ -453,11 +514,12 @@ mod tests {
         warm_cache: false,
     };
 
+    /// A frame log line; `fields` come last, so they override the defaults.
     fn log(fields: &str) -> FrameLog {
         FrameLog::parse(&format!(
             "frames=100 frames_dropped=0 p50_ms=4.0 p95_ms=4.4 p99_ms=5.0 render_p95_ms=0.2 \
-             vram_budget_mb=6144 vram_peak_mb=269.1 {fields} locked_uploads=0 \
-             locked_pipelines=0 quality=ultra hdr=X gpu=\"NVIDIA GeForce RTX 5070 Ti\"\n"
+             vram_budget_mb=6144 vram_peak_mb=269.1 locked_uploads=0 locked_pipelines=0 \
+             quality=ultra hdr=X gpu=\"NVIDIA GeForce RTX 5070 Ti\" {fields}\n"
         ))
     }
 
@@ -534,6 +596,98 @@ mod tests {
         assert!(
             failures.iter().any(|failure| failure.contains("VRAM peak")),
             "{failures:?}"
+        );
+    }
+
+    /// ADR-0020 §5d and ADR-0021 amendment 2 item 16: a tiered log's budget breach fails;
+    /// its `[tiered.<tier>]` baseline breaches report only until the last N1 part flips them;
+    /// its integrity checks fail.
+    #[test]
+    fn tiered_logs_fail_budgets_report_baselines_and_fail_integrity() {
+        // Over Ultra's 9 ms: a failure. No tiered baseline table: a report-only note.
+        let baseline = Baseline::parse(&baseline_for("0.5")).expect("baseline");
+        let over = log("path=tiered gpu_total_p95_ms=12.0");
+        let (failures, notes) = check(&over, Some(&baseline), LIMITS);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("over the §7 budget of 9 ms")),
+            "{failures:?}"
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("budget 9 ms")),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.starts_with("report-only")
+                    && note.contains("no [tiered.ultra] table")),
+            "{notes:?}"
+        );
+        // Inside the budget, the missing table alone does not fail.
+        let (failures, _) = check(
+            &log("path=tiered gpu_total_p95_ms=1.0"),
+            Some(&baseline),
+            LIMITS,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        // The same numbers on Compat fail, as today.
+        let (failures, _) = check(&log("path=compat gpu_total_p95_ms=12.0"), None, LIMITS);
+        assert!(failures.iter().any(|failure| failure.contains("budget")));
+        // A tiered baseline table parses and is compared, still report-only
+        // (`TIERED_BASELINE_FAILS` is false until the last N1 part).
+        let tiered = Baseline::parse(
+            "gpu = \"NVIDIA GeForce RTX 5070 Ti\"\n[tiered.ultra]\ngpu_total_p95_ms = 0.5\n\
+             render_p95_ms = 0.2\n",
+        )
+        .expect("a tiered baseline");
+        let (failures, notes) = check(
+            &log("path=tiered gpu_total_p95_ms=0.9"),
+            Some(&tiered),
+            LIMITS,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            notes.iter().any(|note| note.contains("regressed")),
+            "{notes:?}"
+        );
+        // Integrity still fails on Tiered.
+        let (failures, _) = check(
+            &log("path=tiered gpu_total_p95_ms=1.0 locked_uploads=3"),
+            None,
+            LIMITS,
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("locked_uploads"))
+        );
+        // Overdrive is a tiered tier; on Compat it runs (and is budgeted) as Ultra.
+        let (failures, notes) = check(
+            &log("path=tiered quality=overdrive gpu_total_p95_ms=1.0"),
+            None,
+            LIMITS,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            notes.iter().any(|note| note.contains("budget 15 ms")),
+            "{notes:?}"
+        );
+        let (failures, notes) = check(
+            &log("path=compat quality=overdrive gpu_total_p95_ms=1.0"),
+            None,
+            LIMITS,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            notes.iter().any(|note| note.contains("budget 7.5 ms")),
+            "{notes:?}"
+        );
+        assert!(Baseline::parse("gpu = \"x\"\n[tiered.epic]\n").is_err());
+        assert!(
+            Baseline::parse("gpu = \"x\"\n[overdrive]\n").is_err(),
+            "Compat has no Overdrive"
         );
     }
 

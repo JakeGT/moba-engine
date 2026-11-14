@@ -91,6 +91,11 @@ pub(crate) enum Access {
     /// Presentation (swapchain images only; final access). Ordered before the submit's
     /// semaphore signal, which the present operation waits on.
     Present,
+    /// Sampled from a compute shader (the temporal pass's inputs, ADR-0021 §4a).
+    SampledCompute,
+    /// Storage image written by a compute shader, previous contents discarded (`GENERAL`;
+    /// the temporal pass's `hdr_out`, the one-texel exposure multiplier).
+    StorageImageWrite,
 }
 
 /// Synchronisation facts for one [`Access`].
@@ -268,6 +273,22 @@ impl Access {
                 true,
                 U::empty(),
             ),
+            Self::SampledCompute => (
+                S::COMPUTE_SHADER,
+                A::SHADER_SAMPLED_READ,
+                A::NONE,
+                L::SHADER_READ_ONLY_OPTIMAL,
+                true,
+                U::SAMPLED,
+            ),
+            Self::StorageImageWrite => (
+                S::COMPUTE_SHADER,
+                A::SHADER_STORAGE_WRITE,
+                A::SHADER_STORAGE_WRITE,
+                L::GENERAL,
+                false,
+                U::STORAGE,
+            ),
         };
         AccessInfo {
             stage,
@@ -307,11 +328,10 @@ impl Access {
 /// Size of a transient image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageSize {
-    /// The swapchain extent. The R6 frame has no swapchain-sized transient (the scene and
-    /// post images are render-sized and the swapchain itself is imported); kept for passes
-    /// that work at native resolution.
-    #[allow(dead_code)]
-    Swapchain,
+    /// The swapchain (output) extent divided by `2^shift` (at least 1×1): the tiered path's
+    /// output-resolution images after the temporal pass (`hdr_out`, the post chain, `ldr`,
+    /// the overlay targets; ADR-0021 §5a).
+    Output { shift: u8 },
     /// The render allocation (the swapchain extent times the maximum render scale,
     /// ADR-0015) divided by `2^shift` (at least 1×1): the scene targets (`shift` 0), bloom
     /// mips and half-resolution AO.

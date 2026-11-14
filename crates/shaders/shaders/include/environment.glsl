@@ -19,6 +19,9 @@ layout(set = 2, binding = 0) uniform EnvironmentBlock {
     vec4 displacers[MOBA_FOLIAGE_DISPLACERS]; // xz, radius, strength
     vec4 water_deep[MOBA_WATER_BODIES];       // rgb deep colour, w clarity (m)
     vec4 water_shallow[MOBA_WATER_BODIES];    // rgb shallow colour, w foam
+    // ADR-0021 §2b: the previous frame's foliage inputs, for the temporal prepass's motion.
+    vec4 prev_time;     // x seconds, y 1 = valid (else no foliage motion), z displacers
+    vec4 prev_displacers[MOBA_FOLIAGE_DISPLACERS];
 } environment;
 
 #endif

@@ -271,6 +271,8 @@ impl Slot {
 /// A dead minion playing its death clip where it died.
 #[derive(Clone, Copy, Debug)]
 struct Corpse {
+    /// The dead minion's `net_id`, for its motion key (ADR-0021 §2c).
+    net_id: u16,
     player: VatPlayer,
     kind: UnitKind,
     team: u8,
@@ -424,6 +426,7 @@ impl MinionDriver {
                     });
                     player.die(&visual.animation, view);
                     self.corpses[self.next_corpse] = Some(Corpse {
+                        net_id: event.target,
                         player,
                         kind,
                         team: event.team,
@@ -508,7 +511,7 @@ impl MinionDriver {
         color: impl Fn(UnitKind, u8) -> Vec4,
     ) {
         let quality = library.quality();
-        for entry in &mut self.corpses {
+        for (slot, entry) in self.corpses.iter_mut().enumerate() {
             let Some(corpse) = entry.as_mut() else {
                 continue;
             };
@@ -536,7 +539,17 @@ impl MinionDriver {
                     color(corpse.kind, corpse.team),
                 )
                 .with_mesh(visual.mesh)
-                .with_vat(pose),
+                .with_vat(pose)
+                // Its own key, so the death animation writes object motion; the first corpse
+                // frame has no history for it and draws camera-only motion (§2c).
+                .with_motion(
+                    super::scene_build::motion_key(
+                        corpse.net_id,
+                        super::scene_build::CORPSE_PARTS
+                            | u16::try_from(slot).unwrap_or(super::scene_build::MAX_UNIT_PARTS),
+                    ),
+                    false,
+                ),
             );
         }
     }

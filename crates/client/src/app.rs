@@ -78,6 +78,9 @@
 //! - `MOBA_MINIMAP_BAKE=off|once|<frames>` (network mode): the minimap shows a top-down
 //!   render of the map baked at every map bind (R7b; default `once`; `<frames>` re-bakes
 //!   periodically for GPU-time measurement). `off` keeps the flat minimap.
+//! - `MOBA_CAPTURE_TWO_TICK=1` (with `MOBA_CAPTURE_TICK=<n>`, ADR-0021 §7): the temporal
+//!   history warms up at tick `n - 1`, then tick `n` is captured with the camera panned by
+//!   a fixed 0.75 m, so the tiered overlay golden has motion.
 //! - `MOBA_CAPTURE_MAPS=<prefix>` (network mode, evidence for #287): after every map change
 //!   (connect, content reload, map rotation), capture `<prefix>-<n>.ppm` once
 //!   `MOBA_CAPTURE_FRAME` frames with snapshots have rendered on it, and keep playing.
@@ -91,6 +94,11 @@
 //!   `MOBA_OUTLINE_PROBE=hidden|open|hit` (render tests) adds an outlined enemy unit behind a
 //!   wall, in the open or under the effect; hidden, the capture must equal one with
 //!   `MOBA_OUTLINES=off`.
+//! - `MOBA_MOTION_PROBE=1` (render tests, ADR-0021 gate 2): once the renderer is up, render
+//!   the motion-vector probe's two scripted frames, print the comparison with its CPU twin
+//!   and exit (0 passed, 1 failed, 2 could not run). Needs temporal AA (the tiered path).
+//!   `MOBA_GHOST_PROBE=1` (gate 3) does the same for the ghost-energy probe: a dashing hero
+//!   and a projectile, history against no-history renders.
 //! - `MOBA_REPLAY=<file.mbr>`: the local view plays a recorded match (its content pack from
 //!   `MOBA_CONTENT`, default content otherwise) instead of a bot match, with the camera
 //!   following the heroes (`MOBA_CAMERA_DISTANCE`, default 46). `MOBA_WARMUP_TICKS` skips
@@ -101,6 +109,12 @@
 //!   `MOBA_FRAME_LOG_FRAMES=<n>` (frame-log samples, default 10,000). The frame log and the
 //!   startup `[vram]` line report memory against the tier's budgets and any upload or
 //!   pipeline build after the match started (`locked_uploads`, `locked_pipelines`).
+//! - `MOBA_LATENCY=off|on|boost` (the `latency` setting; ADR-0021 §6): Reflex
+//!   (`VK_NV_low_latency2`) or Anti-Lag (`VK_AMD_anti_lag`) on a tiered device that has one.
+//!   On by default, boost off; while on, the latency sleep replaces the frame limiter. The
+//!   frame log reports the mode, who paced the frames and Reflex's timings (`pc_latency_*`).
+//! - `MOBA_MAX_FPS=<n>`: the frame limiter's rate (default 240; 0 uncaps the loop, for
+//!   latency and GPU-bound measurements).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
@@ -112,10 +126,10 @@ use moba_core::Fix;
 use moba_core::math::Vec3;
 use moba_net::protocol::{MatchPhase, SnapshotState, WireCommand, quantize_position};
 use moba_net::{ClientEvent, Interpolator, PredictionState};
-use moba_platform::{App, Frame, FrameOutcome, Key, Window};
+use moba_platform::{App, Frame, FrameOutcome, Key, MouseButton, Pacing, Window};
 use moba_render::{
-    Camera, OffscreenRender, RenderConfig, Renderer, Scene, UiDrawList, UiImage, UnitInstance,
-    ValidationMode,
+    Camera, LatencyMarker, LatencySetting, OffscreenRender, RenderConfig, Renderer, Scene,
+    UiDrawList, UiImage, UnitInstance, ValidationMode,
 };
 use moba_sim::{SimConfig, Simulation};
 use std::collections::VecDeque;
@@ -176,6 +190,9 @@ struct ClientApp {
     anchors: vfx::Anchors,
     /// This frame's foliage displacers, from the drawn units only (R3b).
     displacers: foliage::Displacers,
+    /// What the temporal history continues across: the bound map and the spectated hero
+    /// (ADR-0021 §2c, `Scene::history_reset`).
+    view_continuity: scene_build::ViewContinuity,
     /// `MOBA_REPLAY`: the recorded inputs the local view plays, and the next frame.
     replay: Option<(moba_sim::Replay, usize)>,
     /// `MOBA_REPLAY_EXIT=1`: exit once the replay's last frame has played (R8).
@@ -218,7 +235,12 @@ struct ClientApp {
     frame_ms: f32,
     fps: f32,
     ui_scale: f32,
+    /// The tier asked for (`MOBA_QUALITY`, the settings or the detected default).
     quality: moba_render::QualityTier,
+    /// The tier whose switches the frame runs on the probed path (ADR-0020 §5e).
+    config_quality: moba_render::QualityTier,
+    /// The probed render path and the renderer's path choice.
+    render_target: launch::RenderTarget,
     bindings: crate::settings::Bindings,
     camera_sensitivity: f32,
     /// `MOBA_PREVIEW_CAMERA`: a fixed local-preview orbit `[yaw, pitch, distance, x, z]`.
@@ -229,9 +251,10 @@ struct ClientApp {
     /// the first one), for the hot-reload poll.
     shader_stamp: Option<launch::ShaderStamp>,
     frame_log: Option<Vec<f32>>,
-    /// Per-frame `[cpu_ms, render_ms]` while logging: time from frame start to the render
-    /// call, and time inside it (fence wait, acquire, recording, submit, present).
-    work_log: Option<Vec<[f32; 2]>>,
+    /// Per-frame `[cpu_ms, render_ms, render_scale]` while logging: time from frame start
+    /// to the render call, time inside it (fence wait, acquire, recording, submit, present),
+    /// and the dynamic-resolution scale the frame rendered at (ADR-0020 §5c).
+    work_log: Option<Vec<[f32; 3]>>,
     /// Per-frame GPU times in [`launch::GPU_LANES`] order (`shadow` … `vfx_resolve`) plus the
     /// particle stats `[alive, overdraw]` while logging, from the renderer's timestamp
     /// queries (empty on devices without timestamp support; `0` for a pass that did not run:
@@ -241,6 +264,19 @@ struct ClientApp {
     gpu_log: Option<Vec<[f32; launch::GPU_LANES.len()]>>,
     /// Frame number of the last logged GPU sample ([`moba_render::GpuTimings::frame`]).
     gpu_logged_frame: Option<u64>,
+    /// Per-frame Reflex timings `[simulation, render_submit, present, gpu, total]` in ms
+    /// while logging ([`moba_render::Renderer::latency_report`]); empty without Reflex.
+    latency_log: Option<Vec<[f32; 5]>>,
+    /// The latency setting (`MOBA_LATENCY`, else the settings' `latency`; ADR-0021 §6b).
+    latency: LatencySetting,
+    /// Logged frames (measured, past the frame log's warm-up) the latency sleep paced
+    /// (`App::pace` returned `External`).
+    paced_frames: u64,
+    /// Measured frames past the frame log's warm-up ([`launch::FRAME_LOG_WARMUP`]): the
+    /// `paced_frames` denominator.
+    logged_frames: u64,
+    /// The frame number (`frames`) of the latest of `logged_frames` (0: none yet).
+    logged_frame: u64,
     frame_log_path: Option<PathBuf>,
     /// Network-mode warm-up (`MOBA_WARMUP_TICKS`): measure only from this match tick on.
     network_warmup: Option<u32>,
@@ -314,15 +350,42 @@ impl ClientApp {
         let gpu_log = frame_log_path
             .as_ref()
             .map(|_| Vec::with_capacity(frame_log_frames));
-        let quality = std::env::var("MOBA_QUALITY").ok().map_or_else(
-            || settings.quality_tier(),
-            |name| {
-                moba_render::QualityTier::from_name(&name).unwrap_or_else(|| {
-                    eprintln!("MOBA_QUALITY={name:?} is not low/medium/high/ultra; using settings");
-                    settings.quality_tier()
-                })
-            },
+        let latency_log = frame_log_path
+            .as_ref()
+            .map(|_| Vec::with_capacity(frame_log_frames));
+        let latency = launch::latency_setting(
+            std::env::var("MOBA_LATENCY").ok().as_deref(),
+            settings.latency(),
         );
+        // An empty value is unset, as for `MOBA_QUALITY`.
+        let render_path = std::env::var("MOBA_RENDER_PATH")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .map_or_else(
+                || settings.render_path(),
+                |name| {
+                    moba_render::PathChoice::parse(&name).unwrap_or_else(|| {
+                        eprintln!(
+                            "MOBA_RENDER_PATH={name:?} is not auto/tiered/compat; using settings"
+                        );
+                        settings.render_path()
+                    })
+                },
+            );
+        // ADR-0020 §2b, §5e: the path decides what each tier configures, so it is probed
+        // once before anything is built from the tier.
+        // Only `MOBA_RENDER_PATH=tiered`, never the settings entry, may run on a CPU device
+        // such as lavapipe (ADR-0020 amendment 2).
+        let allow_cpu = std::env::var("MOBA_RENDER_PATH")
+            .ok()
+            .and_then(|name| moba_render::PathChoice::parse(&name))
+            == Some(moba_render::PathChoice::Tiered);
+        let render_target = launch::RenderTarget::probe(render_path, allow_cpu);
+        let automated =
+            quit_after_frames != u64::MAX || capture_path.is_some() || map_capture.is_some();
+        let quality = launch::resolve_quality(&settings, &render_target, automated);
+        // The tier whose switches this path runs; every client system below keys off it.
+        let config_quality = moba_render::config_tier(render_target.path, quality);
         let team_palette = std::env::var("MOBA_TEAM_PALETTE").ok().map_or_else(
             || settings.team_palette(),
             |name| {
@@ -354,7 +417,7 @@ impl ClientApp {
             ),
             models: {
                 let mut models = models::ModelLibrary::from_env();
-                models.set_bone_lod(bone_lod::BoneLod::from_env(quality).enabled());
+                models.set_bone_lod(bone_lod::BoneLod::from_env(config_quality).enabled());
                 models
             },
             map_visuals: map_visuals::MapLibrary::new(models::asset_root_from_env())
@@ -370,8 +433,8 @@ impl ClientApp {
                         .flatten(),
                 ),
             minions: minions::MinionDriver::new(30),
-            minion_library: minions::MinionLibrary::from_env(quality),
-            bone_lod: bone_lod::BoneLod::from_env(quality),
+            minion_library: minions::MinionLibrary::from_env(config_quality),
+            bone_lod: bone_lod::BoneLod::from_env(config_quality),
             local_feed: local_feed::LocalFeed::new(),
             stress: stress::StressScene::from_env(),
             vfx: {
@@ -384,7 +447,7 @@ impl ClientApp {
                 };
                 let mut system = vfx::VfxSystem::new(
                     library,
-                    quality.vfx_budget(),
+                    config_quality.vfx_budget(),
                     vfx::vfx_enabled_from_env(vfx_setting),
                 );
                 system.set_ally_opacity(ally_vfx_opacity);
@@ -393,6 +456,7 @@ impl ClientApp {
             },
             anchors: vfx::Anchors::new(),
             displacers: foliage::Displacers::new(),
+            view_continuity: scene_build::ViewContinuity::default(),
             replay: None,
             replay_exit: std::env::var("MOBA_REPLAY_EXIT").is_ok_and(|value| value.trim() == "1"),
             preview: None,
@@ -401,7 +465,9 @@ impl ClientApp {
             shop_visible: std::env::var_os("MOBA_SHOP").is_some(),
             hit_rects: HitList::new(),
             hud_fx: HudFx::new(team_palette),
-            portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(quality)),
+            portraits: offscreen::PortraitStudio::new(offscreen::PortraitMode::from_env(
+                config_quality,
+            )),
             minimap: offscreen::MinimapBaker::new(offscreen::MinimapMode::from_env()),
             screen_fx: screen_fx::ScreenFx::new(screen_fx_settings, screen_fx_preview),
             render_scale: settings.render_scale,
@@ -419,6 +485,8 @@ impl ClientApp {
                 .unwrap_or(settings.ui_scale)
                 .clamp(crate::settings::UI_SCALE_MIN, crate::settings::UI_SCALE_MAX),
             quality,
+            config_quality,
+            render_target,
             bindings,
             camera_sensitivity,
             preview_camera: launch::parse_preview_camera(
@@ -430,6 +498,11 @@ impl ClientApp {
             work_log,
             gpu_log,
             gpu_logged_frame: None,
+            latency_log,
+            latency,
+            paced_frames: 0,
+            logged_frames: 0,
+            logged_frame: 0,
             frame_log_path,
             // The local preview applies `MOBA_WARMUP_TICKS` before the first frame instead.
             network_warmup: std::env::var("MOBA_SERVER")
@@ -499,6 +572,9 @@ impl ClientApp {
                         // Only a capture pins the render tick; otherwise play normally.
                         capture_tick: parse_capture_tick()
                             .filter(|_| std::env::var_os("MOBA_CAPTURE").is_some()),
+                        capture_two_tick: std::env::var_os("MOBA_CAPTURE_TWO_TICK")
+                            .is_some_and(|value| value != "0"),
+                        capture_warmed_up: false,
                         spectator_follow: evidence::spectate_follow_from_env(),
                         kill_feed: VecDeque::with_capacity(6),
                         projectiles: Vec::with_capacity(32),
@@ -645,25 +721,34 @@ impl App for ClientApp {
             .with_vsync(std::env::var("MOBA_VSYNC").map_or(true, |value| value != "0"))
             .with_ui_scale(self.ui_scale)
             .with_quality_tier(self.quality)
+            .with_render_path(self.render_target.choice)
+            .with_tiered_cpu_devices(self.render_target.allow_cpu)
+            .with_latency(self.latency)
+            .with_frame_rate_limit(launch::frame_rate_limit(
+                std::env::var("MOBA_MAX_FPS").ok().as_deref(),
+            ))
             .with_max_bones(moba_render::DEFAULT_MAX_BONES)
             .with_skinning(self.models.skinning())
             .with_pipeline_cache(launch::pipeline_cache_path())
             .with_shader_dir(self.shader_dir.clone())
             .with_pipeline_stats(std::env::var_os("MOBA_PIPELINE_STATS").is_some_and(|v| v == "1"))
             .with_compressed_textures(launch::compressed_textures())
-            .with_lighting(Some(launch::lighting_config(self.quality)))
+            .with_lighting(Some(launch::lighting_config(self.config_quality)))
             .with_vfx(self.vfx.enabled())
             .with_distortion(launch::distortion_switch().0)
             .with_distortion_draw(launch::distortion_switch().1)
             .with_post(Some(launch::post_config(
-                self.quality,
+                self.config_quality,
                 self.render_scale,
                 self.capture_path.is_some() || self.map_capture.is_some(),
+                launch::tiered_scale(self.render_target.path, self.quality, window.size()[1]),
             )))
-            .with_world(Some(launch::world_config(self.quality)))
+            .with_world(Some(launch::world_config(self.config_quality)))
             .with_culling(launch::cull_mode())
             .with_mesh_lod(launch::mesh_lod())
-            .with_environment(Some(launch::environment_config(self.quality)));
+            .with_environment(Some(launch::environment_config(self.config_quality)))
+            .with_debug_view(launch::debug_view())
+            .with_readback(launch::motion_probe_requested());
         // A switched-off offscreen image takes a 1x1 target instead of its full size.
         let config = if self.portraits.mode() == offscreen::PortraitMode::Off {
             config.with_ui_image_size(UiImage::PORTRAITS, [1, 1])
@@ -684,7 +769,7 @@ impl App for ClientApp {
                 let pipelines = renderer.pipeline_stats();
                 eprintln!(
                     "[render] {} pipelines built in {:.1} ms (pipeline cache {}), renderer ready in \
-                     {:.1} ms; BC textures {}",
+                     {:.1} ms; BC textures {}; {}",
                     pipelines.pipelines,
                     pipelines.build_ms,
                     pipelines.cache,
@@ -693,8 +778,34 @@ impl App for ClientApp {
                         "native"
                     } else {
                         "CPU-decoded"
-                    }
+                    },
+                    renderer.admission().log_fields()
                 );
+                eprintln!(
+                    "[render] quality {} runs the {} configuration on the {} path",
+                    renderer.quality_tier(),
+                    renderer.config_tier(),
+                    renderer.admission().path.name()
+                );
+                if launch::motion_probe_requested() || launch::ghost_probe_requested() {
+                    // ADR-0021 gates 2 and 3: the probes' scripted frames, then exit.
+                    let code = if launch::motion_probe_requested() {
+                        launch::run_motion_probe(&mut renderer)
+                    } else {
+                        launch::run_ghost_probe(&mut renderer)
+                    };
+                    drop(renderer);
+                    std::process::exit(code);
+                }
+                if renderer.admission().path != self.render_target.path {
+                    // The configuration was built for the probed path; say so if the
+                    // renderer's device (the one that can present) differs.
+                    eprintln!(
+                        "[render] warning: configured for the {} path, but the renderer runs {}",
+                        self.render_target.path.name(),
+                        renderer.admission().path.name()
+                    );
+                }
                 // `on_start` may run again after a resume with a fresh mesh table.
                 self.models.renderer_recreated();
                 self.map_visuals.renderer_recreated();
@@ -767,8 +878,30 @@ impl App for ClientApp {
         }
     }
 
+    /// ADR-0021 §6b: Reflex or Anti-Lag sleeps here, after this frame's present and before
+    /// the next frame's input; while it does, it replaces the platform's frame limiter.
+    fn pace(&mut self) -> Pacing {
+        let slept = self
+            .renderer
+            .as_mut()
+            .is_some_and(moba_render::Renderer::latency_sleep);
+        if slept && self.logged_frame == self.frames {
+            self.paced_frames += 1;
+        }
+        launch::pacing(slept)
+    }
+
     #[allow(clippy::too_many_lines)] // The frame is one explicit presentation sequence.
     fn on_frame(&mut self, frame: &mut Frame<'_>) -> FrameOutcome {
+        // ADR-0021 §6b: the frame starts and samples its input here (the latency sleep
+        // already ran, in `pace`, before this frame's input was gathered).
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.latency_marker(LatencyMarker::SimulationStart);
+            renderer.latency_marker(LatencyMarker::InputSample);
+            if frame.input().was_mouse_pressed(MouseButton::Left) {
+                renderer.latency_marker(LatencyMarker::TriggerFlash);
+            }
+        }
         if frame.input().was_key_pressed(Key::M)
             && let Some(network) = self.network.as_mut()
         {
@@ -791,6 +924,10 @@ impl App for ClientApp {
                 network.phase == MatchPhase::Playing && network.last_tick >= warmup
             })
         });
+        if measuring && self.measured_frames >= launch::FRAME_LOG_WARMUP {
+            self.logged_frames += 1;
+            self.logged_frame = self.frames;
+        }
         if measuring {
             self.measured_frames += 1;
             if let Some(samples) = self.frame_log.as_mut() {
@@ -841,6 +978,7 @@ impl App for ClientApp {
                 vfx,
                 anchors,
                 displacers,
+                view_continuity,
                 replay,
                 preview,
                 minions,
@@ -864,10 +1002,17 @@ impl App for ClientApp {
                 ..
             } = self;
             if let Some(network) = network {
-                if let Err(error) = network.client.poll() {
+                // A two-tick capture's warm-up blocks this loop for two jitter-phase cycles
+                // (seconds on a software rasteriser) after the capture tick's snapshot, the
+                // loopback server's last, arrived. Nothing more will arrive, so the capture
+                // frame that follows skips the network: polling would only see the silence as
+                // the connection timing out.
+                let capture_pending = network.capture_two_tick && network.capture_warmed_up;
+                if !capture_pending && let Err(error) = network.client.poll() {
                     failure = Some(format!("receive failed: {error}"));
                 }
                 if failure.is_none()
+                    && !capture_pending
                     && let Err(error) = network.client.update()
                 {
                     failure = Some(format!("network update failed: {error}"));
@@ -1133,7 +1278,7 @@ impl App for ClientApp {
                             minions,
                             minion_library,
                             bone_lod: *bone_lod,
-                            far_attachments: self.quality != moba_render::QualityTier::Low,
+                            far_attachments: self.config_quality != moba_render::QualityTier::Low,
                         },
                         anchors,
                         !vfx.enabled(),
@@ -1233,7 +1378,18 @@ impl App for ClientApp {
                             render_tick / 30.0,
                             displacers.as_slice(),
                         );
+                        // ADR-0021 §2c: a map change or a switch of the spectated hero starts
+                        // a new history (a minimap jump moves the camera past the renderer's
+                        // own 8 m cut).
+                        let history_reset = view_continuity.cut(
+                            map_visuals.generation(),
+                            network
+                                .spectator
+                                .then_some(network.spectator_follow)
+                                .flatten(),
+                        );
                         let mut scene = Scene::with_vision(camera, units, vision)
+                            .with_history_reset(history_reset)
                             .with_terrain_tint(map_visuals.terrain_tint())
                             .with_lighting(map_visuals.scene_lighting())
                             .with_atmosphere(map_visuals.scene_atmosphere())
@@ -1275,8 +1431,22 @@ impl App for ClientApp {
                             offscreen.push(minimap.render());
                         }
                         let mut submitted = false;
+                        // ADR-0021 §7: a two-tick capture warms the history up first.
+                        let warm_up_due = capture_due && network.two_tick_warm_up_due();
+                        let mut warmed_up = false;
                         if let Some(renderer) = renderer.as_mut() {
-                            if capture_due {
+                            renderer.latency_marker(LatencyMarker::SimulationEnd);
+                            if warm_up_due {
+                                match renderer.warm_up_temporal(&scene, Some(ui)) {
+                                    Ok(()) => {
+                                        submitted = true;
+                                        warmed_up = true;
+                                    }
+                                    Err(error) => {
+                                        failure = Some(format!("capture warm-up failed: {error}"));
+                                    }
+                                }
+                            } else if capture_due {
                                 submitted = capture_and_exit(
                                     renderer,
                                     &scene,
@@ -1319,6 +1489,9 @@ impl App for ClientApp {
                         drop(offscreen);
                         portraits.finish(submitted);
                         minimap.finish(submitted);
+                        if warmed_up {
+                            network.capture_warmed_up = true;
+                        }
                     }
                 }
             } else if let Some(simulation) = simulation {
@@ -1427,7 +1600,7 @@ impl App for ClientApp {
                             minions,
                             minion_library,
                             bone_lod: *bone_lod,
-                            far_attachments: self.quality != moba_render::QualityTier::Low,
+                            far_attachments: self.config_quality != moba_render::QualityTier::Low,
                         },
                         anchors,
                         center,
@@ -1492,7 +1665,9 @@ impl App for ClientApp {
                         render_tick / 30.0,
                         displacers.as_slice(),
                     );
+                    let history_reset = view_continuity.cut(map_visuals.generation(), None);
                     let scene = Scene::new(camera, units)
+                        .with_history_reset(history_reset)
                         .with_terrain_tint(map_visuals.terrain_tint())
                         .with_lighting(map_visuals.scene_lighting())
                         .with_atmosphere(map_visuals.scene_atmosphere())
@@ -1504,6 +1679,7 @@ impl App for ClientApp {
                         .with_environment(environment)
                         .with_effects(screen_fx.update(frame_ms / 1_000.0));
                     if let Some(renderer) = renderer.as_mut() {
+                        renderer.latency_marker(LatencyMarker::SimulationEnd);
                         if frames_is_capture(*frames, *capture_frame, capture_path.as_deref()) {
                             capture_and_exit(
                                 renderer,
@@ -1516,6 +1692,11 @@ impl App for ClientApp {
                             exit_after_capture = true;
                         } else {
                             render_started = Some(Instant::now());
+                            if let Some(every) = launch::temporal_reset_every()
+                                && *frames % every == every - 1
+                            {
+                                renderer.reset_temporal();
+                            }
                             if let Err(error) = renderer.render_with_ui(&scene, ui) {
                                 failure = Some(format!("render failed: {error}"));
                             }
@@ -1548,7 +1729,11 @@ impl App for ClientApp {
         {
             let cpu_ms = started.duration_since(now).as_secs_f32() * 1_000.0;
             let render_ms = started.elapsed().as_secs_f32() * 1_000.0;
-            work.push([cpu_ms, render_ms]);
+            let scale = self
+                .renderer
+                .as_ref()
+                .map_or(1.0, moba_render::Renderer::render_scale);
+            work.push([cpu_ms, render_ms, scale]);
             if let (Some(gpu), Some(timings)) = (
                 self.gpu_log.as_mut(),
                 self.renderer
@@ -1570,6 +1755,17 @@ impl App for ClientApp {
                     .as_ref()
                     .map_or(0.0, |renderer| renderer.light_stats().binned as f32);
                 gpu.push(launch::gpu_sample(&timings, stats, lights));
+            }
+        }
+        // Reflex's timings for the frames that completed since the last call (it keeps 64):
+        // drained every frame, kept only for logged frames (warm-up frames are dropped).
+        if let (Some(log), Some(renderer)) = (self.latency_log.as_mut(), self.renderer.as_mut()) {
+            let frame_logged = self.logged_frame == self.frames;
+            for timing in renderer.latency_report() {
+                if !frame_logged || log.len() == log.capacity() {
+                    break;
+                }
+                log.push(launch::latency_sample(timing));
             }
         }
         if let Some(message) = failure {

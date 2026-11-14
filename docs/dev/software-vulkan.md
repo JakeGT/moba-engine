@@ -86,11 +86,42 @@ hazard" variable (checked 2026-10-27), and the golden capture runs with validati
 validation and fails on **any** validation message. It is green (latest run 39644967954). If
 the hazard reappears on a runner image, fix or document it here rather than filtering it.
 
-## macOS MoltenVK probe
+## Render path on lavapipe
+
+The capability gate ([ADR-0020](../adr/0020-next-gen-foundations.md) §2) chooses a render
+path per device: `tiered` or `compat`. The bundled lavapipe (Mesa, LLVM 23) has the whole
+tiered required set, ray query included, but it is a CPU device, so `auto` admits it as
+`compat` (`admission=cpu-device`, the line still says `missing=none`). Set
+`MOBA_RENDER_PATH=tiered` to run the tiered path on it; the tiered smoke tests (N0.5) run that way, and the default
+goldens stay on `compat`. Only the environment variable admits a CPU device: `render_path =
+"tiered"` in the settings file does not, so a player's setting never runs the game on a
+software rasteriser. With the environment above:
+
+```bash
+MOBA_RENDER_PATH=tiered cargo run --release -p moba-tools --bin bindless-smoke
+MOBA_RENDER_PATH=tiered cargo run --release -p moba-tools --bin rt-smoke
+```
+
+Each prints `PASS` or `FAIL` with the values checked and the validation messages counted;
+see [bindless.md](bindless.md). The client's `[render]` start-up line and every
+frame-log line carry `path=`, `max_tier=` and `missing=`.
+
+## `vulkan-probe` and the macOS MoltenVK probe
 
 `cargo run --release -p moba-tools --bin vulkan-probe` creates an instance (without a surface)
-and enumerates physical devices. It reports whether `VK_KHR_portability_enumeration` was
-available, exercising the macOS path. The `macos vulkan probe` workflow installs MoltenVK via
-Homebrew and runs it on `macos-latest`; trigger manually or label a PR `macos-vulkan`. It also
-runs in the nightly workflow. Latest green dispatch:
+and enumerates physical devices. It prints whether `VK_KHR_portability_enumeration` was
+available, then one line per device with its admission (`path=`, `max_tier=`, `missing=`)
+and the highest-ranked device. The renderer also drops devices below Vulkan 1.3 or without a
+graphics queue, swapchain or dynamic rendering, and favours a shared graphics and present
+family, so its choice can differ when such a device is present. `--path auto|tiered|compat` evaluates another choice
+(default `MOBA_RENDER_PATH`); `--path tiered` exits 1 when no device is admitted. `--json`
+prints each device's capabilities instead: the format of the recorded fixtures in
+`crates/render/src/caps/fixtures/`, which the admission unit tests read. To record a new
+device, commit its dump there with `"source": "recorded"`.
+
+The `macos vulkan probe` workflow installs MoltenVK via Homebrew and runs the probe on
+`macos-latest`; trigger manually or label a PR `macos-vulkan`. It fails unless the chosen
+device reports `path=compat` and `--path tiered` admits nothing (macOS is Compat only), and it
+uploads the JSON dump as the `moltenvk-capabilities` artifact. The nightly workflow runs the
+plain probe on MoltenVK too, without these assertions. Latest green dispatch before the gate:
 `vulkan probe: api=1.3.0 devices=1 portability=true` (run 39153270394).

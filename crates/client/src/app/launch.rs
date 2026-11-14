@@ -52,6 +52,46 @@ pub(crate) fn capture_and_exit(
     }
 }
 
+/// `MOBA_MOTION_PROBE=1` (ADR-0021 gate 2): run [`Renderer::motion_probe`] once the renderer
+/// is up, print its report and exit (0 passed, 1 failed, 2 could not run).
+pub(crate) fn motion_probe_requested() -> bool {
+    std::env::var_os("MOBA_MOTION_PROBE").is_some_and(|value| value != "0")
+}
+
+/// `MOBA_GHOST_PROBE=1` (ADR-0021 gate 3): run [`Renderer::ghost_probe`] once the renderer
+/// is up, print its report and exit (0 passed, 1 failed, 2 could not run).
+pub(crate) fn ghost_probe_requested() -> bool {
+    std::env::var_os("MOBA_GHOST_PROBE").is_some_and(|value| value != "0")
+}
+
+/// Runs the ghost probe and returns the process exit code.
+pub(crate) fn run_ghost_probe(renderer: &mut Renderer) -> i32 {
+    match renderer.ghost_probe() {
+        Ok(report) => {
+            eprintln!("{report}");
+            i32::from(!report.passed())
+        }
+        Err(error) => {
+            eprintln!("ghost probe could not run: {error}");
+            2
+        }
+    }
+}
+
+/// Runs the motion probe and returns the process exit code.
+pub(crate) fn run_motion_probe(renderer: &mut Renderer) -> i32 {
+    match renderer.motion_probe() {
+        Ok(report) => {
+            eprintln!("{report}");
+            i32::from(!report.passed())
+        }
+        Err(error) => {
+            eprintln!("motion probe could not run: {error}");
+            2
+        }
+    }
+}
+
 /// Where the renderer keeps its `VkPipelineCache`: `MOBA_PIPELINE_CACHE` (a file path, or
 /// `off`), else a per-user cache file: `$XDG_CACHE_HOME` or `~/.cache` on Linux/BSD,
 /// `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows, each under
@@ -90,6 +130,118 @@ pub(crate) fn shader_dir() -> Option<PathBuf> {
         eprintln!("[render] MOBA_SHADER_DIR is a debug-build feature; ignored");
         None
     }
+}
+
+/// The frame limiter's default rate (the platform's `max_frame_rate`). While Reflex or
+/// Anti-Lag paces the frames it replaces the platform limiter and enforces this rate itself
+/// (ADR-0021 §6b).
+pub(crate) const FRAME_RATE_LIMIT: u32 = 240;
+
+/// The frame limiter's rate: `MOBA_MAX_FPS=<n>` (0: uncapped, for latency and GPU-bound
+/// measurements), else [`FRAME_RATE_LIMIT`]. An empty or invalid value is the default.
+pub(crate) fn frame_rate_limit(value: Option<&str>) -> u32 {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            value.parse().ok().or_else(|| {
+                eprintln!("MOBA_MAX_FPS={value:?} is not a frame rate; using {FRAME_RATE_LIMIT}");
+                None
+            })
+        })
+        .unwrap_or(FRAME_RATE_LIMIT)
+}
+
+/// Who paced the frame for the platform: the latency sleep (`slept`, which also enforced the
+/// frame-rate limit) replaces the platform limiter, otherwise the limiter runs.
+pub(crate) fn pacing(slept: bool) -> moba_platform::Pacing {
+    if slept {
+        moba_platform::Pacing::External
+    } else {
+        moba_platform::Pacing::Platform
+    }
+}
+
+/// Measured frames the frame log leaves out at the start (pipeline and cache warm-up).
+pub(crate) const FRAME_LOG_WARMUP: u64 = 60;
+
+/// The latency setting: `MOBA_LATENCY` when it names one (`off`, `on`, `boost`), else the
+/// settings' (an unknown value says so once). An empty value is unset.
+pub(crate) fn latency_setting(
+    value: Option<&str>,
+    settings: moba_render::LatencySetting,
+) -> moba_render::LatencySetting {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => settings,
+        Some(name) => moba_render::LatencySetting::parse(name).unwrap_or_else(|| {
+            eprintln!("MOBA_LATENCY={name:?} is not off/on/boost; using settings");
+            settings
+        }),
+    }
+}
+
+/// One frame-log sample of Reflex's timings, `[simulation, render_submit, present, gpu,
+/// total]` in milliseconds.
+pub(crate) fn latency_sample(frame: &moba_render::LatencyFrame) -> [f32; 5] {
+    let ms = |us: u64| us as f32 / 1_000.0;
+    [
+        ms(frame.simulation_us),
+        ms(frame.render_submit_us),
+        ms(frame.present_us),
+        ms(frame.gpu_us),
+        ms(frame.total_us),
+    ]
+}
+
+/// The frame log's latency columns: the back end, the setting, how many of the logged frames
+/// its sleep paced, and Reflex's timings (`latency_frames=0` when Reflex runs but no frame
+/// completed in the log; `latency_timing=unavailable` without Reflex).
+pub(crate) fn latency_report(
+    mode: moba_render::LatencyMode,
+    setting: moba_render::LatencySetting,
+    paced: u64,
+    frames: u64,
+    samples: &[[f32; 5]],
+) -> String {
+    use core::fmt::Write as _;
+    let mut columns = format!(
+        "latency={} latency_setting={} paced_frames={paced}/{frames} ",
+        mode.name(),
+        setting.name()
+    );
+    if samples.is_empty() {
+        columns.push_str(if mode == moba_render::LatencyMode::Reflex {
+            "latency_frames=0 "
+        } else {
+            "latency_timing=unavailable "
+        });
+        return columns;
+    }
+    let _ = write!(columns, "latency_frames={} ", samples.len());
+    for (lane, name) in [
+        "latency_sim",
+        "latency_submit",
+        "latency_present",
+        "latency_gpu",
+        "pc_latency",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut values: Vec<f32> = samples.iter().map(|sample| sample[lane]).collect();
+        values.sort_by(f32::total_cmp);
+        let at = |fraction: f32| values[((values.len() - 1) as f32 * fraction).round() as usize];
+        let _ = write!(
+            columns,
+            "{name}_p50_ms={:.3} {name}_p95_ms={:.3} ",
+            at(0.50),
+            at(0.95)
+        );
+        if lane == 4 {
+            let _ = write!(columns, "{name}_p99_ms={:.3} ", at(0.99));
+        }
+    }
+    columns
 }
 
 /// `MOBA_COMPRESSED_TEXTURES=0` decodes BC textures on the CPU even where the GPU samples
@@ -190,6 +342,109 @@ pub(crate) fn compressed_textures() -> bool {
 /// and the R2b switches (ADR-0016): `MOBA_LIGHTS=off|<global cap>`,
 /// `MOBA_OUTLINES=off|hull|screen`, `MOBA_BAKED_AO=off` and
 /// `MOBA_CONTACT_SHADOWS=off|<ray-march steps>`.
+/// The render path the client builds its configuration for (ADR-0020 §2b, §5e), probed once
+/// at start with the renderer's own device ranking.
+#[derive(Clone, Debug)]
+pub(crate) struct RenderTarget {
+    /// The path the chosen device is admitted to.
+    pub(crate) path: moba_render::RenderPath,
+    /// The player's choice, passed on to the renderer unchanged. The probe skips the devices
+    /// the renderer would skip without a surface, so both pick the same device unless that
+    /// device cannot present to the window; the renderer then falls back to another device
+    /// (with a warning if its path differs) rather than failing to start.
+    pub(crate) choice: moba_render::PathChoice,
+    /// `Tiered` may admit CPU devices: only `MOBA_RENDER_PATH=tiered` sets it (ADR-0020
+    /// amendment 2), and the renderer gets the same flag.
+    pub(crate) allow_cpu: bool,
+    /// The chosen device's default tier ([`moba_render::default_tier`]).
+    pub(crate) default_tier: moba_render::QualityTier,
+    /// The highest tier the chosen device admits (`None` on Compat or without a probe).
+    pub(crate) max_tier: Option<moba_render::QualityTier>,
+    /// The chosen device's name, for the detection log.
+    pub(crate) device: String,
+}
+
+impl RenderTarget {
+    /// Probes every device under `choice` (an instance without a surface) and keeps the one
+    /// the renderer would choose. Without Vulkan or a device it is Compat; the renderer then
+    /// reports the failure itself.
+    pub(crate) fn probe(choice: moba_render::PathChoice, allow_cpu: bool) -> Self {
+        let fallback = Self {
+            path: moba_render::RenderPath::Compat,
+            choice,
+            allow_cpu,
+            default_tier: moba_render::QualityTier::Medium,
+            max_tier: None,
+            device: String::from("?"),
+        };
+        let devices = match moba_render::probe_devices(choice, allow_cpu) {
+            Ok(devices) => devices,
+            Err(error) => {
+                eprintln!("[render] device probe failed ({error}); configuring for compat");
+                return fallback;
+            }
+        };
+        let Some(device) = moba_render::choose_device(&devices, choice) else {
+            return fallback;
+        };
+        let path = device.admission.path;
+        Self {
+            path,
+            choice,
+            allow_cpu,
+            default_tier: moba_render::default_tier(&device.capabilities, &device.admission),
+            max_tier: device.admission.max_tier,
+            device: device.capabilities.name.clone(),
+        }
+    }
+}
+
+/// The tier to run: `MOBA_QUALITY`, else the settings, detecting the device's default for a
+/// player ([`crate::settings::Settings::resolve_quality`]), capped at the device's
+/// `max_tier` on the tiered path. Nothing is saved.
+pub(crate) fn resolve_quality(
+    settings: &crate::settings::Settings,
+    target: &RenderTarget,
+    automated: bool,
+) -> moba_render::QualityTier {
+    if let Ok(name) = std::env::var("MOBA_QUALITY") {
+        match moba_render::QualityTier::from_name(&name) {
+            Some(tier) => return cap_tier(tier, target),
+            None => eprintln!(
+                "MOBA_QUALITY={name:?} is not low/medium/high/ultra/overdrive; using settings"
+            ),
+        }
+    }
+    let (tier, detected) = settings.resolve_quality(
+        target.default_tier,
+        target.path == moba_render::RenderPath::Compat,
+        automated,
+    );
+    if detected {
+        eprintln!(
+            "[render] quality {tier} detected for {:?} on the {} path",
+            target.device,
+            target.path.name()
+        );
+    }
+    cap_tier(tier, target)
+}
+
+/// `tier` capped at what the device admits (ADR-0020 §2b: a device without the RT pipeline
+/// tops out at Ultra). Compat runs Overdrive as Ultra already (`config_tier`).
+fn cap_tier(tier: moba_render::QualityTier, target: &RenderTarget) -> moba_render::QualityTier {
+    match target.max_tier {
+        Some(max) if target.path == moba_render::RenderPath::Tiered && tier > max => {
+            eprintln!(
+                "[render] quality {tier} needs more than {:?} admits; running {max}",
+                target.device
+            );
+            max
+        }
+        _ => tier,
+    }
+}
+
 pub(crate) fn lighting_config(tier: moba_render::QualityTier) -> moba_render::LightingConfig {
     lighting_config_from(tier, |name| std::env::var(name).ok())
 }
@@ -254,21 +509,147 @@ fn lighting_config_from(
 /// passes; an EV is a map-look override), `MOBA_UPSCALE=bilinear|bicubic` and
 /// `MOBA_SCREEN_EFFECTS=off`. With `capture` (`MOBA_CAPTURE`), auto exposure and dynamic
 /// resolution are pinned off unless set explicitly, so captures stay byte-identical.
+///
+/// On the tiered path, `tiered` (from [`tiered_scale`]) makes temporal AA the default
+/// (ADR-0021 §4b) and gives dynamic resolution the tier's GPU budget as its target and the
+/// tier's scale range (ADR-0020 §5c, ADR-0021 §4c): the upscaler mode's scale is the ceiling
+/// (the settings' scale can lower it, not raise it) and dynamic resolution is on. With
+/// `MOBA_AA=fxaa|off` (temporal off) the tiered path keeps today's chain: full scale, a 0.5
+/// floor and dynamic resolution off unless `MOBA_DYNRES` asks. `MOBA_UPSCALER`,
+/// `MOBA_UPSCALE_MODE` and `MOBA_SHARPNESS` choose the back end, the mode and the sharpening.
 pub(crate) fn post_config(
     tier: moba_render::QualityTier,
     render_scale: f32,
     capture: bool,
+    tiered: Option<TieredScale>,
 ) -> moba_render::PostConfig {
-    post_config_from(tier, render_scale, capture, |name| std::env::var(name).ok())
+    post_config_from(tier, render_scale, capture, tiered, |name| {
+        std::env::var(name).ok()
+    })
 }
 
+/// `MOBA_DEBUG_VIEW=motion|reactive|tc|disocclusion|confidence|overlay-ids` (ADR-0021 §3, §5):
+/// a tiered debug view instead of the frame. Read once at startup.
+pub(crate) fn debug_view() -> moba_render::TemporalDebugView {
+    let Ok(value) = std::env::var("MOBA_DEBUG_VIEW") else {
+        return moba_render::TemporalDebugView::Off;
+    };
+    moba_render::TemporalDebugView::from_name(&value).unwrap_or_else(|| {
+        eprintln!(
+            "MOBA_DEBUG_VIEW={value:?} is not \
+             off/motion/reactive/tc/disocclusion/confidence/overlay-ids; off"
+        );
+        moba_render::TemporalDebugView::Off
+    })
+}
+
+/// Dynamic resolution's defaults on the tiered path (ADR-0020 §5c).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TieredScale {
+    /// The tier's GPU budget, ms (`moba_assets::GPU_BUDGETS`).
+    pub(crate) target_ms: f32,
+    /// The scale range's floor ([`moba_assets::GpuBudget::scale_range_at`]), at least the
+    /// temporal path's 1/3.
+    pub(crate) floor: f32,
+    /// The scale ceiling under temporal AA: the preset's upscaler mode (ADR-0021 §4c).
+    pub(crate) ceiling: f32,
+}
+
+/// The tiered defaults of `tier` at an output `height` pixels tall; `None` on Compat, whose
+/// presets keep today's numbers.
+pub(crate) fn tiered_scale(
+    path: moba_render::RenderPath,
+    tier: moba_render::QualityTier,
+    height: u32,
+) -> Option<TieredScale> {
+    if path != moba_render::RenderPath::Tiered {
+        return None;
+    }
+    let budget = moba_assets::gpu_budget(tier.name())?;
+    let (floor, ceiling) = budget.scale_range_at(height);
+    Some(TieredScale {
+        target_ms: budget.budget_ms,
+        floor: floor.max(moba_render::MIN_TEMPORAL_RENDER_SCALE),
+        ceiling,
+    })
+}
+
+#[allow(clippy::too_many_lines)] // One override per environment variable, in order.
 fn post_config_from(
     tier: moba_render::QualityTier,
     render_scale: f32,
     capture: bool,
+    tiered: Option<TieredScale>,
     var: impl Fn(&str) -> Option<String>,
 ) -> moba_render::PostConfig {
     let mut config = moba_render::PostConfig::for_tier(tier).with_render_scale(render_scale);
+    if tiered.is_some() {
+        config = config.with_anti_aliasing(moba_render::AntiAliasing::Temporal);
+    }
+    if let Some(value) = var("MOBA_AA") {
+        match moba_render::AntiAliasing::from_name(&value) {
+            Some(mode) => config = config.with_anti_aliasing(mode),
+            None => eprintln!("MOBA_AA={value:?} is not temporal/fxaa/off/msaa4; using the tier's"),
+        }
+    }
+    if let Some(value) = var("MOBA_UPSCALER") {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => config = config.with_upscaler(None),
+            _ => match moba_render::UpscalerKind::from_name(&value) {
+                Some(kind) => config = config.with_upscaler(Some(kind)),
+                None => eprintln!(
+                    "MOBA_UPSCALER={value:?} is not auto/taau/fsr3/dlss/fsr4/xess; using auto"
+                ),
+            },
+        }
+    }
+    if let Some(value) = var("MOBA_UPSCALE_MODE") {
+        match moba_render::UpscaleMode::from_name(&value) {
+            Some(mode) => config = config.with_upscale_mode(Some(mode)),
+            None => eprintln!(
+                "MOBA_UPSCALE_MODE={value:?} is not \
+                 native/quality/balanced/performance/ultra-performance; using the tier's"
+            ),
+        }
+    }
+    if let Some(value) = var("MOBA_SHARPNESS") {
+        match value.trim().parse::<f32>() {
+            Ok(sharpness) if sharpness.is_finite() => config = config.with_sharpness(sharpness),
+            _ => eprintln!("MOBA_SHARPNESS={value:?} is not a number in 0..1; using the default"),
+        }
+    }
+    if let Some(tiered) = tiered {
+        // MSAA is Compat-only (ADR-0021 §7): on Tiered `msaa4` runs the tiered default,
+        // temporal AA with its dynamic-resolution range, not a temporal-off chain.
+        if config.anti_aliasing == moba_render::AntiAliasing::Msaa4 {
+            eprintln!("[render] MOBA_AA=msaa4 is Compat-only; the tiered path runs temporal");
+            config = config.with_anti_aliasing(moba_render::AntiAliasing::Temporal);
+        }
+        let temporal = config.anti_aliasing == moba_render::AntiAliasing::Temporal;
+        let (ceiling, floor) = if temporal {
+            // ADR-0021 §4c: the mode's scale is the ceiling and the preset's floor sits below
+            // it; a mode already at or under the preset's floor (Performance) gets Ultra
+            // Performance (0.33) as its floor, one mode down.
+            let ceiling = config
+                .upscale_mode
+                .map_or(tiered.ceiling, moba_render::UpscaleMode::scale);
+            let floor = if ceiling <= tiered.floor {
+                moba_render::MIN_TEMPORAL_RENDER_SCALE.min(ceiling)
+            } else {
+                tiered.floor
+            };
+            (ceiling, floor)
+        } else {
+            (1.0, tiered.floor.max(moba_render::MIN_RENDER_SCALE))
+        };
+        // Temporal off keeps today's default: at full scale the upscale pass would cost a
+        // full-screen resample every frame for nothing. `MOBA_DYNRES=on` runs it.
+        config = config
+            .with_dynamic_target_ms(tiered.target_ms)
+            .with_render_scale(render_scale.min(ceiling))
+            .with_min_render_scale(floor)
+            .with_dynamic_resolution(temporal);
+    }
     let switch = |name: &str| {
         let value = var(name)?;
         match value.trim().to_ascii_lowercase().as_str() {
@@ -291,12 +672,6 @@ fn post_config_from(
     }
     if let Some(on) = switch("MOBA_SCREEN_EFFECTS") {
         config = config.with_screen_effects(on);
-    }
-    if let Some(value) = var("MOBA_AA") {
-        match moba_render::AntiAliasing::from_name(&value) {
-            Some(mode) => config = config.with_anti_aliasing(mode),
-            None => eprintln!("MOBA_AA={value:?} is not off/fxaa/msaa4; using the tier's"),
-        }
     }
     if let Some(value) = var("MOBA_UPSCALE") {
         match moba_render::UpscaleFilter::from_name(&value) {
@@ -798,6 +1173,19 @@ pub(crate) fn parse_identity_seed() -> Result<Option<[u8; 32]>, String> {
     hex32_env("MOBA_CLIENT_IDENTITY")
 }
 
+/// `MOBA_TEMPORAL_RESET_EVERY=<n>` (a validation smoke, ADR-0021 amendment 2 item 28):
+/// the local preview resets every temporal history before every `n`th frame, with earlier
+/// frames still in flight, so sync validation sees the history re-initialised mid-stream.
+pub(crate) fn temporal_reset_every() -> Option<u64> {
+    static EVERY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("MOBA_TEMPORAL_RESET_EVERY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|&every: &u64| every > 0)
+    })
+}
+
 pub(crate) fn connect_network(spec: &str) -> Result<NetClient, String> {
     let secret = parse_secret()?;
     let server_public = parse_server_public()?;
@@ -872,7 +1260,9 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&error),
     );
     let (width, height) = parse_window_size(std::env::var("MOBA_WINDOW_SIZE").ok().as_deref());
-    let config = WindowConfig::new("MOBA", width, height);
+    let config = WindowConfig::new("MOBA", width, height).with_max_frame_rate(frame_rate_limit(
+        std::env::var("MOBA_MAX_FPS").ok().as_deref(),
+    ));
     run_window(config, app)?;
     if let Some(message) = error.lock().ok().and_then(|mut slot| slot.take()) {
         return Err(message.into());
@@ -901,7 +1291,9 @@ impl Drop for ClientApp {
         else {
             return;
         };
-        let warmup = samples.len().min(60);
+        let warmup = samples
+            .len()
+            .min(usize::try_from(FRAME_LOG_WARMUP).unwrap_or(usize::MAX));
         let mut samples = samples.split_off(warmup);
         if samples.is_empty() {
             return;
@@ -939,6 +1331,8 @@ impl Drop for ClientApp {
         };
         let (cpu_p50, cpu_p95) = split(0);
         let (render_p50, render_p95) = split(1);
+        let scales: Vec<f32> = work.iter().map(|sample| sample[2]).collect();
+        let scale = scale_report(&scales);
         // GPU pass times from timestamp queries, same warm-up skipped.
         let gpu_samples = self.gpu_log.take().unwrap_or_default();
         let gpu_columns = if gpu_samples.len() > warmup {
@@ -950,6 +1344,11 @@ impl Drop for ClientApp {
             .renderer
             .as_ref()
             .map_or_else(|| String::from("?"), quality_summary);
+        // ADR-0020 §2b: evidence always names the path it ran on.
+        let admission = self.renderer.as_ref().map_or_else(
+            || String::from("path=? max_tier=? missing=? admission=?"),
+            |renderer| renderer.admission().log_fields(),
+        );
         // R8: memory, mid-match uploads and the main view's culling in the last frame.
         let memory = self.renderer.as_ref().map_or_else(String::new, |renderer| {
             let cull = renderer.cull_stats();
@@ -972,6 +1371,19 @@ impl Drop for ClientApp {
                 cull.terrain_chunks,
             )
         });
+        // ADR-0021 §6b: the latency back end, who paced the frames, and Reflex's timings.
+        let latency_samples = self.latency_log.take().unwrap_or_default();
+        let latency = latency_report(
+            self.renderer
+                .as_ref()
+                .map_or(moba_render::LatencyMode::None, |renderer| {
+                    renderer.vendor_backends().latency
+                }),
+            self.latency,
+            self.paced_frames,
+            self.logged_frames,
+            &latency_samples,
+        );
         let stress = self
             .stress
             .as_ref()
@@ -987,8 +1399,8 @@ impl Drop for ClientApp {
         let report = format!(
             "frames={} frames_dropped={} mean_ms={mean:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} \
              cpu_p50_ms={cpu_p50:.3} cpu_p95_ms={cpu_p95:.3} \
-             render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} \
-             {gpu_columns}{stress}{memory}quality={quality} extent={extent} gpu=\"{gpu}\"\n",
+             render_p50_ms={render_p50:.3} render_p95_ms={render_p95:.3} {scale}\
+             {gpu_columns}{latency}{stress}{memory}quality={quality} {admission} extent={extent} gpu=\"{gpu}\"\n",
             samples.len(),
             self.frames_dropped,
             percentile(0.50),
@@ -1010,16 +1422,25 @@ fn quality_summary(renderer: &moba_render::Renderer) -> String {
     let environment = renderer.environment_config();
     let [render_width, render_height] = renderer.render_extent();
     format!(
-        "{} hdr={} shadows={} shadow_size={} aa={} bloom={} ao={} \
+        "{} config_tier={} hdr={} shadows={} shadow_size={} aa={} upscaler={} upscale_mode={} \
+             render_scale={:.3} jitter_phases={} upscaler_vram_mb={:.1} bloom={} ao={} \
              auto_exposure={} grading={} render={render_width}x{render_height} \
              dynres={} ibl={} specular_ibl={} vat_meshes={} terrain={} fow={} fow_size={} \
              fog={} sky={} decals={} foliage={} water={} pipelines={} pipeline_build_ms={:.3} \
              pipeline_cache={} startup_ms={:.1}",
         renderer.quality_tier(),
+        renderer.config_tier(),
         renderer.hdr_format_name(),
         lighting.shadows,
         lighting.shadow_resolution,
-        post.anti_aliasing,
+        renderer.anti_aliasing(),
+        renderer.upscaler_name(),
+        renderer
+            .upscale_mode()
+            .map_or("none", moba_render::UpscaleMode::name),
+        renderer.render_scale(),
+        renderer.jitter_phases(),
+        renderer.upscaler_vram_bytes() as f64 / (1024.0 * 1024.0),
         on_off(post.bloom),
         on_off(post.ambient_occlusion),
         on_off(post.auto_exposure && renderer.post_look().auto_exposure),
@@ -1060,7 +1481,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 /// GPU lanes of the frame log, in sample order (see [`gpu_sample`]).
-pub(crate) const GPU_LANES: [&str; 29] = [
+pub(crate) const GPU_LANES: [&str; 33] = [
     "shadow",
     "scene",
     "composite",
@@ -1090,6 +1511,12 @@ pub(crate) const GPU_LANES: [&str; 29] = [
     "water",
     "distortion_copy",
     "distortion",
+    // ADR-0021 gate 6: the temporal path's passes (0 on Compat and with temporal off, and
+    // then left out of the report like the fog-of-war lanes).
+    "temporal",
+    "tc_mask",
+    "overlay_prepass",
+    "overlay",
 ];
 /// First lane of a pass that only some configurations have (R6 post, ADR-0015; R2b's contact
 /// shadows and outlines, ADR-0016).
@@ -1144,6 +1571,10 @@ pub(crate) fn gpu_sample(
         pass("water"),
         pass("distortion_copy"),
         pass("distortion"),
+        pass("temporal"),
+        pass("tc_mask"),
+        pass("overlay_prepass"),
+        pass("overlay"),
     ]
 }
 
@@ -1159,6 +1590,29 @@ pub(crate) fn gpu_sample(
 /// fog-of-war passes (R3a, `fow_raster`, `fow_resolve`) only with the texture, so their
 /// percentiles cover just those frames, and `gpu_<pass>_runs` counts them; with no run the
 /// columns are left out.
+/// The dynamic-resolution columns of the frame log (ADR-0020 §5c gate 4): the scale of the
+/// first and last measured frames, its range, and how often it changed in the second half,
+/// where a settled controller holds it. Empty without samples.
+fn scale_report(scales: &[f32]) -> String {
+    let (Some(&first), Some(&last)) = (scales.first(), scales.last()) else {
+        return String::new();
+    };
+    let (min, max) = scales
+        .iter()
+        .fold((f32::INFINITY, 0.0_f32), |(min, max), &scale| {
+            (min.min(scale), max.max(scale))
+        });
+    let late = &scales[scales.len() / 2..];
+    let changes = late
+        .windows(2)
+        .filter(|pair| (pair[0] - pair[1]).abs() > f32::EPSILON)
+        .count();
+    format!(
+        "scale_first={first:.3} scale_final={last:.3} scale_min={min:.3} scale_max={max:.3} \
+         scale_changes_late={changes} "
+    )
+}
+
 fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
     use core::fmt::Write as _;
     let mut columns = String::new();
@@ -1211,6 +1665,75 @@ fn gpu_report(samples: &[[f32; GPU_LANES.len()]]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_frame_rate_limit_defaults_to_240_and_zero_uncaps() {
+        use super::frame_rate_limit;
+        assert_eq!(frame_rate_limit(None), 240);
+        assert_eq!(frame_rate_limit(Some("")), 240);
+        assert_eq!(frame_rate_limit(Some(" 0 ")), 0);
+        assert_eq!(frame_rate_limit(Some("144")), 144);
+        assert_eq!(frame_rate_limit(Some("fast")), 240);
+    }
+
+    #[test]
+    fn a_frame_the_latency_sleep_paced_replaces_the_platform_limiter() {
+        use super::pacing;
+        assert_eq!(pacing(true), moba_platform::Pacing::External);
+        assert_eq!(pacing(false), moba_platform::Pacing::Platform);
+    }
+
+    #[test]
+    fn latency_setting_takes_the_environment_over_settings() {
+        use super::latency_setting;
+        use moba_render::LatencySetting::{Boost, Off, On};
+        assert_eq!(latency_setting(None, On), On);
+        assert_eq!(latency_setting(Some(""), Boost), Boost);
+        assert_eq!(latency_setting(Some("off"), On), Off);
+        assert_eq!(latency_setting(Some("BOOST"), Off), Boost);
+        assert_eq!(latency_setting(Some("fast"), Off), Off);
+    }
+
+    #[test]
+    fn latency_report_lists_reflex_timings_or_says_unavailable() {
+        use super::latency_report;
+        use moba_render::{LatencyMode, LatencySetting};
+        assert_eq!(
+            latency_report(LatencyMode::None, LatencySetting::On, 0, 10, &[]),
+            "latency=none latency_setting=on paced_frames=0/10 latency_timing=unavailable "
+        );
+        // Reflex ran, but no frame's timings landed in the log (a short run).
+        assert_eq!(
+            latency_report(LatencyMode::Reflex, LatencySetting::On, 3, 3, &[]),
+            "latency=reflex latency_setting=on paced_frames=3/3 latency_frames=0 "
+        );
+        let samples: Vec<[f32; 5]> = (1..=100)
+            .map(|index| {
+                let ms = index as f32 / 10.0;
+                [0.1, 0.2, 0.05, 0.6, ms]
+            })
+            .collect();
+        let report = latency_report(
+            LatencyMode::Reflex,
+            LatencySetting::Boost,
+            99,
+            100,
+            &samples,
+        );
+        assert!(
+            report.starts_with(
+                "latency=reflex latency_setting=boost paced_frames=99/100 latency_frames=100 \
+                 latency_sim_p50_ms=0.100 latency_sim_p95_ms=0.100 "
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "pc_latency_p50_ms=5.100 pc_latency_p95_ms=9.500 pc_latency_p99_ms=9.900 "
+            ),
+            "{report}"
+        );
+    }
 
     #[test]
     fn demo_orders_parse_in_tick_order() {
@@ -1385,13 +1908,14 @@ mod tests {
         };
         let high = PostConfig::for_tier(QualityTier::High);
         assert_eq!(
-            post_config_from(QualityTier::High, 1.0, false, env(&[])),
+            post_config_from(QualityTier::High, 1.0, false, None, env(&[])),
             high
         );
         let off = post_config_from(
             QualityTier::High,
             1.0,
             false,
+            None,
             env(&[
                 ("MOBA_BLOOM", "off"),
                 ("MOBA_AA", "OFF"),
@@ -1408,6 +1932,7 @@ mod tests {
             QualityTier::Medium,
             0.9,
             false,
+            None,
             env(&[
                 ("MOBA_RENDER_SCALE", "0.6"),
                 ("MOBA_DYNRES", "8.5"),
@@ -1422,17 +1947,18 @@ mod tests {
         assert_eq!(scaled.anti_aliasing, AntiAliasing::Msaa4);
         // The settings' scale applies without an override, clamped.
         assert_eq!(
-            post_config_from(QualityTier::High, 0.1, false, env(&[])).render_scale,
+            post_config_from(QualityTier::High, 0.1, false, None, env(&[])).render_scale,
             0.5
         );
         // Captures: Low's dynamic resolution and Medium's auto exposure are pinned off...
-        let capture = post_config_from(QualityTier::Low, 1.0, true, env(&[]));
+        let capture = post_config_from(QualityTier::Low, 1.0, true, None, env(&[]));
         assert!(!capture.dynamic_resolution && !capture.auto_exposure);
         assert!(
             !post_config_from(
                 QualityTier::High,
                 1.0,
                 true,
+                None,
                 env(&[("MOBA_EXPOSURE", "1.5")])
             )
             .auto_exposure
@@ -1442,6 +1968,7 @@ mod tests {
             QualityTier::Low,
             1.0,
             true,
+            None,
             env(&[("MOBA_DYNRES", "on"), ("MOBA_EXPOSURE", "auto")]),
         );
         assert!(explicit.dynamic_resolution && explicit.auto_exposure);
@@ -1450,6 +1977,7 @@ mod tests {
             QualityTier::Ultra,
             1.0,
             false,
+            None,
             env(&[
                 ("MOBA_AA", "taa"),
                 ("MOBA_BLOOM", "maybe"),
@@ -1459,6 +1987,198 @@ mod tests {
             ]),
         );
         assert_eq!(bad, PostConfig::for_tier(QualityTier::Ultra));
+    }
+
+    /// ADR-0021 gate 1: picking is jitter-free by construction. The same cursor gives
+    /// byte-identical `WireCommand`s under temporal AA, FXAA and AA off, at render scales 0.5
+    /// and 1.0. This is a regression guard, not a measurement: `cursor_ground` reads only the
+    /// client's camera and the window size, so today it cannot differ; the test fails if a
+    /// later change routes the post settings or render size into picking. The structural half
+    /// is in `moba-render` (`Scene::camera` is never jittered: the renderer's frame state keeps
+    /// the client's matrix as `unjittered` and rasterises with a copy).
+    #[test]
+    fn the_same_cursor_sends_the_same_command_under_every_aa_and_scale() {
+        use moba_core::math::{Vec2, Vec3};
+        use moba_net::protocol::{InputMessage, WireCommand, encode_input, quantize_position};
+        use moba_render::{AntiAliasing, Camera, QualityTier};
+        let camera = Camera::perspective(
+            Vec3::new(10.0, 30.0, 25.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::Y,
+            0.8,
+            16.0 / 9.0,
+            0.5,
+            400.0,
+        );
+        let tiered = super::tiered_scale(moba_render::RenderPath::Tiered, QualityTier::High, 720);
+        let mut sent = Vec::new();
+        for aa in ["temporal", "fxaa", "off"] {
+            for scale in [0.5_f32, 1.0] {
+                let scale_text = if scale < 1.0 { "0.5" } else { "1.0" };
+                let pairs: Vec<(&str, String)> = vec![
+                    ("MOBA_AA", aa.to_owned()),
+                    ("MOBA_RENDER_SCALE", scale_text.to_owned()),
+                ];
+                let post = post_config_from(QualityTier::High, 1.0, false, tiered, |name| {
+                    pairs
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.clone())
+                });
+                assert_eq!(post.anti_aliasing, AntiAliasing::from_name(aa).expect("aa"));
+                assert_eq!(post.render_scale, scale.max(1.0 / 3.0));
+                let before = camera;
+                let ground = crate::input::cursor_ground(
+                    &camera,
+                    Vec2::new(812.5, 377.25),
+                    1280,
+                    720,
+                    100.0,
+                )
+                .expect("the cursor hits the ground");
+                assert_eq!(
+                    camera.view_proj, before.view_proj,
+                    "the camera is never jittered"
+                );
+                let (x, y) = quantize_position(ground);
+                sent.push(encode_input(&InputMessage {
+                    client_tick: 120,
+                    input_seq: 7,
+                    command: WireCommand::MoveTo { x, y },
+                }));
+            }
+        }
+        assert!(sent.windows(2).all(|pair| pair[0] == pair[1]), "{sent:?}");
+    }
+
+    /// `MOBA_AA=msaa4` is Compat-only (ADR-0021 §7): on Tiered it runs exactly the temporal
+    /// default, dynamic-resolution range included.
+    #[test]
+    fn msaa_on_tiered_runs_the_temporal_default() {
+        use super::tiered_scale;
+        use moba_render::{AntiAliasing, QualityTier};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        let tiered = tiered_scale(moba_render::RenderPath::Tiered, QualityTier::Ultra, 1440);
+        let msaa = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[("MOBA_AA", "msaa4")]),
+        );
+        let default = post_config_from(QualityTier::Ultra, 1.0, false, tiered, env(&[]));
+        assert_eq!(msaa.anti_aliasing, AntiAliasing::Temporal);
+        assert_eq!(
+            (
+                msaa.render_scale,
+                msaa.min_render_scale,
+                msaa.dynamic_resolution
+            ),
+            (
+                default.render_scale,
+                default.min_render_scale,
+                default.dynamic_resolution
+            )
+        );
+    }
+
+    #[test]
+    fn tiered_presets_turn_dynamic_resolution_on_with_the_budget() {
+        use super::{TieredScale, tiered_scale};
+        use moba_render::{AntiAliasing, QualityTier, UpscaleMode, UpscalerKind};
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        // The tiered path (ADR-0021 §4b, §4c): temporal AA, the tier's budget, the preset's
+        // Quality ceiling and Performance floor, dynamic resolution on.
+        let tiered = tiered_scale(moba_render::RenderPath::Tiered, QualityTier::Ultra, 1440);
+        assert_eq!(
+            tiered,
+            Some(TieredScale {
+                target_ms: 9.0,
+                floor: 0.5,
+                ceiling: 0.67
+            })
+        );
+        let ultra = post_config_from(QualityTier::Ultra, 1.0, false, tiered, env(&[]));
+        assert_eq!(ultra.anti_aliasing, AntiAliasing::Temporal);
+        assert!(ultra.dynamic_resolution);
+        assert_eq!((ultra.render_scale, ultra.min_render_scale), (0.67, 0.5));
+        assert_eq!(ultra.dynamic_target_ms, 9.0);
+        // The settings' scale is kept below the ceiling; the ceiling only lowers it.
+        let lowered = post_config_from(QualityTier::Ultra, 0.6, false, tiered, env(&[]));
+        assert_eq!(lowered.render_scale, 0.6);
+        // An explicit mode moves the ceiling; Performance (at the preset's floor) gets Ultra
+        // Performance as its floor, one mode down (§4c), so dynamic resolution keeps a range.
+        let performance = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[
+                ("MOBA_UPSCALE_MODE", "Performance"),
+                ("MOBA_UPSCALER", "fsr3"),
+                ("MOBA_SHARPNESS", "0.6"),
+            ]),
+        );
+        assert_eq!(performance.upscale_mode, Some(UpscaleMode::Performance));
+        assert_eq!(performance.upscaler, Some(UpscalerKind::Fsr3));
+        assert_eq!(performance.sharpness, 0.6);
+        assert_eq!(
+            (performance.render_scale, performance.min_render_scale),
+            (0.5, 1.0 / 3.0)
+        );
+        assert!(performance.dynamic_resolution);
+        // Temporal off keeps today's tiered chain: full scale, dynamic resolution off unless
+        // `MOBA_DYNRES` asks.
+        let fxaa = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[("MOBA_AA", "fxaa")]),
+        );
+        assert_eq!(fxaa.anti_aliasing, AntiAliasing::Fxaa);
+        assert!(!fxaa.dynamic_resolution && !fxaa.scaled());
+        assert_eq!((fxaa.render_scale, fxaa.min_render_scale), (1.0, 0.5));
+        let on = post_config_from(
+            QualityTier::Ultra,
+            1.0,
+            false,
+            tiered,
+            env(&[("MOBA_AA", "off"), ("MOBA_DYNRES", "on")]),
+        );
+        assert!(on.dynamic_resolution);
+        assert_eq!(on.dynamic_target_ms, 9.0);
+        // Overdrive: Performance ceiling, Ultra Performance floor (1/3).
+        let overdrive = tiered_scale(
+            moba_render::RenderPath::Tiered,
+            QualityTier::Overdrive,
+            1080,
+        );
+        assert_eq!(
+            overdrive.map(|scale| (scale.floor, scale.ceiling)),
+            Some((moba_render::MIN_TEMPORAL_RENDER_SCALE, 0.5))
+        );
+        let capture = post_config_from(QualityTier::Ultra, 1.0, true, tiered, env(&[]));
+        assert!(!capture.dynamic_resolution);
+        assert_eq!(capture.render_scale, 0.67);
+        assert_eq!(
+            tiered_scale(moba_render::RenderPath::Compat, QualityTier::Ultra, 1440),
+            None
+        );
     }
 
     #[test]
@@ -1533,6 +2253,21 @@ mod tests {
     }
 
     #[test]
+    fn scale_report_shows_the_range_and_late_changes() {
+        assert_eq!(super::scale_report(&[]), "");
+        // Steps down twice early, then holds: settled.
+        let scales = [1.0, 1.0, 0.8, 0.8, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75];
+        assert_eq!(
+            super::scale_report(&scales),
+            "scale_first=1.000 scale_final=0.750 scale_min=0.750 scale_max=1.000 \
+             scale_changes_late=0 "
+        );
+        // Oscillating in the second half.
+        let scales = [1.0, 0.9, 1.0, 0.9, 1.0, 0.9];
+        assert!(super::scale_report(&scales).ends_with("scale_changes_late=2 "));
+    }
+
+    #[test]
     fn gpu_report_lists_each_pass_percentile() {
         let samples: Vec<[f32; super::GPU_LANES.len()]> = (0..=100)
             .map(|index| {
@@ -1572,14 +2307,27 @@ mod tests {
                     // ADR-0019: the heat haze ran in every other frame.
                     if index % 2 == 0 { 0.01 } else { 0.0 },
                     if index % 2 == 0 { 0.04 } else { 0.0 },
+                    // ADR-0021: the temporal passes ran in every frame.
+                    0.3,
+                    0.02,
+                    0.05,
+                    0.04,
                 ]
             })
             .collect();
         let report = gpu_report(&samples);
         assert!(report.contains("gpu_distortion_copy_runs=51 gpu_distortion_copy_p50_ms=0.010 "));
-        assert!(report.ends_with(
+        assert!(report.contains(
             "gpu_distortion_runs=51 gpu_distortion_p50_ms=0.040 gpu_distortion_p95_ms=0.040 "
         ));
+        assert!(report.contains("gpu_temporal_runs=101 gpu_temporal_p50_ms=0.300 "));
+        assert!(report.contains("gpu_tc_mask_runs=101 gpu_tc_mask_p50_ms=0.020 "));
+        assert!(report.contains("gpu_overlay_prepass_runs=101 gpu_overlay_prepass_p50_ms=0.050 "));
+        assert!(
+            report.ends_with(
+                "gpu_overlay_runs=101 gpu_overlay_p50_ms=0.040 gpu_overlay_p95_ms=0.040 "
+            )
+        );
         assert!(report.starts_with("gpu_shadow_p50_ms=0.250 gpu_shadow_p95_ms=0.475 "));
         assert!(report.contains("gpu_scene_p50_ms=0.500 gpu_scene_p95_ms=0.950 "));
         assert!(report.contains("gpu_composite_p95_ms=1.900 "));

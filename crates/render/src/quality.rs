@@ -12,7 +12,7 @@ use crate::vfx::VfxBudget;
 /// material sampler's anisotropy, the shadow filter, shadow-map size and specular IBL
 /// ([`LightingConfig::for_tier`](crate::LightingConfig::for_tier), ADR-0011) and the VFX
 /// budgets ([`Self::vfx_budget`], ADR-0013). Later phases (post-processing) add to it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum QualityTier {
     /// Min-spec (Intel UHD 620 / Apple M1 class) at 1080p/60.
@@ -24,12 +24,34 @@ pub enum QualityTier {
     High,
     /// RTX 4070+ class at 4K.
     Ultra,
+    /// The tiered path's top tier (ADR-0020 §5a): RTX 4080 / 5080 class and up. Until the
+    /// phases that give it its own features land, it configures the frame like `Ultra`; on the
+    /// Compat path it clamps to Compat Ultra ([`Self::compat`]).
+    Overdrive,
 }
 
 impl QualityTier {
     /// Every tier, lowest first. A slice rather than an array so a later tier is not a
     /// breaking change for this `#[non_exhaustive]` enum.
-    pub const ALL: &'static [Self] = &[Self::Low, Self::Medium, Self::High, Self::Ultra];
+    pub const ALL: &'static [Self] = &[
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Ultra,
+        Self::Overdrive,
+    ];
+
+    /// The tiers the Compat path offers, today's four (ADR-0020 §2d).
+    pub const COMPAT: &'static [Self] = &[Self::Low, Self::Medium, Self::High, Self::Ultra];
+
+    /// This tier on the Compat path: `Overdrive` clamps to `Ultra`, the rest are unchanged.
+    #[must_use]
+    pub const fn compat(self) -> Self {
+        match self {
+            Self::Overdrive => Self::Ultra,
+            other => other,
+        }
+    }
 
     /// Lower-case name, as accepted by [`Self::from_name`] (`"low"`, `"medium"`, ...).
     #[must_use]
@@ -39,6 +61,7 @@ impl QualityTier {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Ultra => "ultra",
+            Self::Overdrive => "overdrive",
         }
     }
 
@@ -59,7 +82,7 @@ impl QualityTier {
             Self::Low => None,
             Self::Medium => Some(4.0),
             Self::High => Some(8.0),
-            Self::Ultra => Some(16.0),
+            Self::Ultra | Self::Overdrive => Some(16.0),
         }
     }
 
@@ -72,14 +95,14 @@ impl QualityTier {
             Self::Low => (4_096, 512, 1.5, 90.0),
             Self::Medium => (12_288, 1_024, 3.0, 130.0),
             Self::High => (24_576, 2_048, 5.0, 170.0),
-            Self::Ultra => (49_152, 4_096, 8.0, 240.0),
+            Self::Ultra | Self::Overdrive => (49_152, 4_096, 8.0, 240.0),
         };
         let full = !matches!(self, Self::Low);
         // Heat haze (ADR-0019): High and up; the cap at a 1080-pixel render height.
         let distortion_pixels = match self {
             Self::Low | Self::Medium => 0.0,
             Self::High => 6.0,
-            Self::Ultra => 8.0,
+            Self::Ultra | Self::Overdrive => 8.0,
         };
         VfxBudget {
             max_particles,
@@ -104,7 +127,7 @@ impl QualityTier {
             Self::Low => 0,
             Self::Medium => 1,
             Self::High => 2,
-            Self::Ultra => 3,
+            Self::Ultra | Self::Overdrive => 3,
         };
         &moba_assets::TIER_BUDGETS[index]
     }
@@ -113,7 +136,9 @@ impl QualityTier {
     pub(crate) const fn hdr_format(self) -> vk::Format {
         match self {
             Self::Low => vk::Format::B10G11R11_UFLOAT_PACK32,
-            Self::Medium | Self::High | Self::Ultra => vk::Format::R16G16B16A16_SFLOAT,
+            Self::Medium | Self::High | Self::Ultra | Self::Overdrive => {
+                vk::Format::R16G16B16A16_SFLOAT
+            }
         }
     }
 }
@@ -137,13 +162,25 @@ mod tests {
         assert_eq!(QualityTier::from_name(" ULTRA "), Some(QualityTier::Ultra));
         assert_eq!(QualityTier::from_name("epic"), None);
         assert_eq!(QualityTier::default(), QualityTier::High);
-        for &tier in QualityTier::ALL {
+        for &tier in QualityTier::COMPAT {
             assert_eq!(
                 tier.budget().name,
                 tier.name(),
                 "budgets are indexed by tier"
             );
         }
+        // Overdrive configures like Ultra until its own features land, and clamps on Compat.
+        assert_eq!(QualityTier::Overdrive.compat(), QualityTier::Ultra);
+        assert_eq!(
+            QualityTier::from_name("Overdrive"),
+            Some(QualityTier::Overdrive)
+        );
+        assert_eq!(QualityTier::Overdrive.budget(), QualityTier::Ultra.budget());
+        assert_eq!(
+            QualityTier::Overdrive.vfx_budget(),
+            QualityTier::Ultra.vfx_budget()
+        );
+        assert!(QualityTier::ALL.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             QualityTier::Low.hdr_format(),
             vk::Format::B10G11R11_UFLOAT_PACK32
@@ -159,7 +196,7 @@ mod tests {
         let low = QualityTier::Low.vfx_budget();
         assert!(!low.oit && !low.soft_particles && !low.mesh_particles);
         let mut previous = 0;
-        for &tier in QualityTier::ALL {
+        for &tier in QualityTier::COMPAT {
             let budget = tier.vfx_budget();
             assert!(budget.max_particles > previous);
             assert!(budget.max_spawns_per_frame <= budget.max_particles / 8);
@@ -174,7 +211,10 @@ mod tests {
             let budget = tier.vfx_budget();
             assert_eq!(
                 budget.distortion,
-                matches!(tier, QualityTier::High | QualityTier::Ultra)
+                matches!(
+                    tier,
+                    QualityTier::High | QualityTier::Ultra | QualityTier::Overdrive
+                )
             );
             assert_eq!(budget.distortion, budget.distortion_pixels > 0.0);
             assert!(!budget.distortion || budget.oit);

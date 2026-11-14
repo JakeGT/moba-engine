@@ -196,11 +196,68 @@ ao_blur,fxaa,upscale}.frag`) are this repository's own implementations of publis
 algorithms — the 13-tap bloom filter and Karis average (Jimenez, SIGGRAPH 2014), GTAO
 (Jimenez et al. 2016), specular occlusion (Lagarde & de Rousiers 2014), FXAA 3.11's
 edge search (Lottes 2011) and Catmull-Rom filtering — not copies of any reference source, and
-carry the repository's licence. AMD FidelityFX FSR is **not** included
-([ADR-0015](docs/adr/0015-post-processing.md)).
+carry the repository's licence. They include no AMD FidelityFX code
+([ADR-0015](docs/adr/0015-post-processing.md)); the FSR 3.1 upscaler port is listed below.
 
 The texture loader's CPU fallback and the baker's quality check decode BC blocks with
 `bcdec_rs` (MIT), a Rust port of `bcdec`; the baker reads and writes PNG with `png`
 (MIT OR Apache-2.0). See [ADR-0010](docs/adr/0010-texture-pipeline.md).
+
+## AMD FidelityFX FSR 3.1.6 upscaler (`fsr3`, on by default)
+
+`third_party/fidelityfx/` holds the GPU sources of the FSR 3.1.6 upscaler from the AMD
+FidelityFX SDK v2.4.0 (tag `v2.4.0`, commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`),
+unmodified, with the SDK's `Kits/FidelityFX/docs/license.md` beside them and a SHA-256 manifest
+([README](third_party/fidelityfx/README.md)). They are compiled into the open build's SPIR-V
+(`moba-shaders`, feature `fsr3`), and `crates/render/src/fsr3/` is a Rust port of the SDK's
+upscaler host code (`upscalers/fsr3/internal/ffx_fsr3upscaler.cpp`) and of the parts of its
+Vulkan back end it uses (`backend/vk/ffx_vk.cpp`). The SDK licence's default terms are
+binary-only, but it lists every one of these files under the MIT licence below, and that is
+the licence they are used under ([ADR-0021](docs/adr/0021-temporal-upscaling-overlay.md)
+amendment 1, [docs/dev/fsr3.md](docs/dev/fsr3.md)). Frame generation is not included.
+
+```text
+Copyright (C) Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+and associated documentation files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## Vendor SDKs (optional cargo features, off by default)
+
+Nothing in this section is in the repository or in the open build (default features). Each
+SDK is fetched by `scripts/fetch-sdks.sh` into `target/vendor-sdks/` and pinned with its
+licence file's SHA-256 in `vendor-sdks.toml`; FFI declarations are generated into `OUT_DIR` at
+build time. A build that enables a feature carries that SDK's obligations, summarised here
+from the pinned licence (the licence file itself is authoritative; [ADR-0020](docs/adr/0020-next-gen-foundations.md)
+§6 and [docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md)). Public releases ship the open
+build only ([RELEASE.md](RELEASE.md) step 8).
+
+| Feature | SDK (pinned) | Licence file in the archive | Obligations when compiled in |
+|---|---|---|---|
+| `fsr3` (default) | none fetched: FSR 3.1.6's MIT sources are vendored in `third_party/fidelityfx/` (section above) | `third_party/fidelityfx/Kits/FidelityFX/docs/license.md` | the MIT notice above |
+| `dlss` | NVIDIA DLSS SDK 310.9.16 | `LICENSE.txt` (NVIDIA RTX SDKs License) | object code only; NVIDIA GPUs only; **notify NVIDIA before any commercial release**; attribution and NVIDIA marks in the credits, splash screen and about box (supplement §7.1(b)), with NVIDIA's prior approval of the marks (§7.2(c)); NVIDIA may update or disable the feature over the air |
+| `streamline` (`dlss-fg`) | NVIDIA Streamline 2.14.16 | `license.txt` (MIT) | MIT notice; `sl_nvperf` files fall under the Nsight Perf SDK License and are not shipped; the DLSS-G binaries it loads fall under the RTX SDKs License as for `dlss` |
+| `nrd` | NVIDIA NRD 4.18.0 (with ShaderMake and MathLib, MIT) | `LICENSE.txt` (NVIDIA RTX SDKs License) | attribution in the credits (supplement §7.1(c)); stay interoperable with NVIDIA hardware; MIT notices for ShaderMake and MathLib |
+| `rtxdi` | NVIDIA RTXDI 3.1.0 (RTXDI-Library) | `LICENSE.txt` (NVIDIA RTX SDKs License) | as for `nrd` |
+| `sharc` | NVIDIA SHaRC 1.8.3 | `License.md` (NVIDIA RTX SDKs License) | as for `nrd` |
+| `fsr4` | AMD FidelityFX SDK 2.4.0 (FSR 4) | `Kits/FidelityFX/docs/license.md` | **development-only**: binary-only redistribution without reverse engineering by default, though the signed DLLs are also listed under MIT; no distributed build enables it until ADR-0020 Q6 is settled |
+| `xess` | Intel XeSS SDK 3.0.2 | `LICENSE.txt` (Intel Simplified Software License) | redistribute the binaries unmodified, with the notice; no reverse engineering, including at run time; the headers are under the same Intel licence (not MIT as ADR-0020 §6a says; amendment 6) |
+
+The in-game credits do not exist yet; when a credits screen is added, it must show the notices
+and marks above for every feature compiled in (tracked as a follow-up in
+[docs/dev/vendor-sdks.md](docs/dev/vendor-sdks.md#notices-and-credits)).
 
 The full repository license is dual MIT/Apache-2.0; see `LICENSE-MIT` and `LICENSE-APACHE`.

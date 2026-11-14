@@ -17,11 +17,14 @@ use core::ffi::CStr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use ash::vk::TaggedStructure as _;
 use ash::{khr, vk};
 use gpu_allocator::MemoryLocation;
 use moba_platform::Window;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::bindless::BindlessTable;
+use crate::caps::{Admission, DeviceCapabilities, PathChoice, RenderPath};
 use crate::cull::{CullMode, CullStats, LodConfig};
 use crate::device::DeviceContext;
 use crate::dynres::{self, DynamicResolution};
@@ -41,16 +44,20 @@ use crate::material::{MaterialData, MaterialId, MaterialStats, Materials, Textur
 use crate::memory::MemoryStats;
 use crate::passes::contact::ContactPass;
 use crate::passes::fog::FogPass;
+use crate::passes::gameplay_overlay::{GameplayOverlay, OverlayBlock, OverlayImages};
 use crate::passes::outline::OutlinePass;
 use crate::passes::overlay::{UiImages, UiPass};
 use crate::passes::post::{PostFrame, PostPass, PostViews, Region};
 use crate::passes::scene::{
-    CullSettings, MainViewSpec, OutlineIdTarget, PrepassTarget, ScenePass, SceneResolve,
-    SceneTargets, ShadowPipelineSpec, ShadowTarget, ViewBudget, WaterTargets,
+    CullSettings, MainFrame, MainViewSpec, OutlineIdTarget, OverlayPrepassTarget, PrepassTarget,
+    ScenePass, SceneResolve, SceneTargets, ShadowPipelineSpec, ShadowTarget, TcMaskTarget,
+    ViewBudget, WaterTargets,
 };
-use crate::passes::vfx::{DistortionTargets, VfxPass, VfxTargets};
+use crate::passes::vfx::{
+    DistortionTargets, VfxFrameExtras, VfxOverlayTargets, VfxPass, VfxTargets,
+};
 use crate::pipeline_cache::PipelineCacheState;
-use crate::post::{AntiAliasing, PostConfig, PostLook};
+use crate::post::{AntiAliasing, PostConfig, PostLook, TemporalDebugView, UpscaleMode};
 use crate::profiler::{GpuProfiler, GpuTimings};
 use crate::quality::QualityTier;
 use crate::resources::{CommandPool, Fence, GpuBuffer, GpuImage, Semaphore};
@@ -60,13 +67,29 @@ use crate::shaders::ShaderSource;
 use crate::swapchain::Swapchain;
 use crate::targets::{self, OffscreenTarget, TargetExtents, TransientPool};
 use crate::ui::{UI_IMAGE_SLOTS, UiDrawList, UiImage};
+use crate::upscale::exposure::ExposureLinearPass;
+use crate::upscale::frame::{TemporalFrame, TemporalState};
+use crate::upscale::taau::TaauDebugView;
+use crate::upscale::{UpscaleImage, UpscaleInputs, UpscaleOutput};
+use crate::vendor::latency::{self, LatencyBackend, LatencyFrame, LatencyMarker, LatencySetting};
 use crate::vfx::{VFX_MESH_SLOTS, VfxBudget, VfxStats};
 use crate::world::{
     DEFAULT_MAX_VISION_SOURCES, FogOfWarMode, FogShaderMode, TerrainData, TerrainShading,
     WorldConfig, WorldFrame,
 };
 
+mod ghost_probe;
+mod motion_probe;
+pub use ghost_probe::{GhostFrame, GhostProbeReport};
+pub use motion_probe::{MOTION_PROBE_TOLERANCE_PX, MotionCheck, MotionProbeReport, PushCheck};
+
 const FRAMES_IN_FLIGHT: usize = 2;
+// ADR-0021 (amendment 2 item 17): the temporal back end and `exposure_linear` keep one
+// descriptor set per frame-in-flight slot, rewritten only after that slot's fence.
+const _: () = assert!(
+    crate::upscale::taau::SET_RING >= FRAMES_IN_FLIGHT
+        && crate::upscale::exposure::SET_RING >= FRAMES_IN_FLIGHT
+);
 // The fog-of-war ping-pong (image `f` written in frame slot `f`, the other read as history)
 // and the lighting set per frame slot that names image `f` assume exactly this many frames in
 // flight (R3a review).
@@ -74,6 +97,9 @@ const _: () = assert!(
     crate::passes::fog::FOG_IMAGES == FRAMES_IN_FLIGHT
         && crate::lighting::MAIN_SETS == FRAMES_IN_FLIGHT
 );
+// FSR 3.1 keeps its descriptor sets and constants per frame slot too (ADR-0021 amendment 4).
+#[cfg(feature = "fsr3")]
+const _: () = assert!(crate::fsr3::SET_RING >= FRAMES_IN_FLIGHT);
 /// Default per-frame bone budget: 16 skinned instances × 64 joints (48 KiB per frame).
 pub const DEFAULT_MAX_BONES: usize = 16 * 64;
 /// Largest side of an offscreen [`UiImage`] (the guaranteed `maxImageDimension2D`).
@@ -177,6 +203,29 @@ pub struct RenderConfig {
     /// Decal, foliage and water features (ADR-0017). `None` (the default) uses
     /// [`EnvironmentConfig::for_tier`] of [`RenderConfig::quality_tier`].
     pub environment: Option<EnvironmentConfig>,
+    /// Which render path to use (`MOBA_RENDER_PATH`, ADR-0020 §2b). Default
+    /// [`PathChoice::Auto`]: rank the devices, then the chosen one's own admission.
+    pub render_path: PathChoice,
+    /// [`PathChoice::Tiered`] may admit CPU devices such as lavapipe
+    /// ([`Overrides::allow_cpu`](crate::Overrides::allow_cpu)): set only for the
+    /// `MOBA_RENDER_PATH=tiered` override. Default `false`.
+    pub tiered_cpu_devices: bool,
+    /// `MOBA_DEBUG_VIEW` (ADR-0021 §3, §5): a temporal or overlay debug view on the tiered
+    /// path. Default [`TemporalDebugView::Off`].
+    pub debug_view: TemporalDebugView,
+    /// Adds `TRANSFER_SRC` to the temporal path's depth and motion targets so the motion
+    /// probe can read them back (ADR-0021 gate 2). Off for every normal run, so production
+    /// frames keep their usage minimal (some drivers drop compression for copy sources).
+    pub readback: bool,
+    /// Reflex or Anti-Lag (ADR-0021 §6), when the device enables one: default
+    /// [`LatencySetting::On`]. A device without either ignores it.
+    pub latency: LatencySetting,
+    /// The platform's frame-rate limit (`moba_platform::WindowConfig::max_frame_rate`; 0:
+    /// uncapped). While a latency back end paces the frames it replaces that limiter, and
+    /// enforces this rate itself (Reflex's `minimumIntervalUs`, Anti-Lag's `maxFPS`), with
+    /// the platform limiter as a backstop for a frame the driver let through early.
+    /// Default 240, `WindowConfig`'s default.
+    pub frame_rate_limit: u32,
 }
 
 impl Default for RenderConfig {
@@ -207,6 +256,12 @@ impl Default for RenderConfig {
             culling: CullMode::Cpu,
             mesh_lod: None,
             environment: None,
+            render_path: PathChoice::Auto,
+            tiered_cpu_devices: false,
+            debug_view: TemporalDebugView::Off,
+            readback: false,
+            latency: LatencySetting::On,
+            frame_rate_limit: 240,
         }
     }
 }
@@ -300,6 +355,48 @@ impl RenderConfig {
     #[must_use]
     pub fn with_pipeline_stats(mut self, enabled: bool) -> Self {
         self.pipeline_stats = enabled;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::render_path`] set.
+    #[must_use]
+    pub fn with_render_path(mut self, choice: PathChoice) -> Self {
+        self.render_path = choice;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::tiered_cpu_devices`] set.
+    #[must_use]
+    pub fn with_tiered_cpu_devices(mut self, allow: bool) -> Self {
+        self.tiered_cpu_devices = allow;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::readback`] set.
+    #[must_use]
+    pub const fn with_readback(mut self, readback: bool) -> Self {
+        self.readback = readback;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::debug_view`] set.
+    #[must_use]
+    pub const fn with_debug_view(mut self, view: TemporalDebugView) -> Self {
+        self.debug_view = view;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::latency`] set.
+    #[must_use]
+    pub const fn with_latency(mut self, latency: LatencySetting) -> Self {
+        self.latency = latency;
+        self
+    }
+
+    /// Returns this config with [`RenderConfig::frame_rate_limit`] set.
+    #[must_use]
+    pub const fn with_frame_rate_limit(mut self, frames_per_second: u32) -> Self {
+        self.frame_rate_limit = frames_per_second;
         self
     }
 
@@ -495,8 +592,18 @@ pub struct Renderer {
     vfx: Option<VfxPass>,
     /// Screen-space contact shadows (R2b); `None` when off.
     contact: Option<ContactPass>,
-    /// Screen-space outlines (R2b); `None` unless outlines are `screen`.
+    /// Screen-space outlines (R2b); `None` unless outlines are `screen` on Compat.
     outline: Option<OutlinePass>,
+    /// Temporal AA's back end and state (ADR-0021); `None` without temporal AA.
+    temporal: Option<TemporalState>,
+    /// The `exposure_linear` pass, with temporal AA.
+    exposure_linear: Option<ExposureLinearPass>,
+    /// The frame being recorded's temporal state.
+    temporal_frame: Option<TemporalFrame>,
+    /// [`Renderer::warm_up_temporal`] ran: the next capture keeps the history it built.
+    capture_warmed: bool,
+    /// The post-upscale gameplay overlay (ADR-0021 §5); `None` on Compat.
+    overlay: Option<GameplayOverlay>,
     /// This frame's outline palette, for the outline pass.
     frame_outlines: OutlinePalette,
     materials: Materials,
@@ -547,10 +654,30 @@ pub struct Renderer {
     decal_upload: Box<DecalUpload>,
     /// Usable decals the latest frame could not bind.
     decals_dropped: u32,
+    /// The vendor SDK back ends chosen for this device (ADR-0020 §6c). Declared before
+    /// `device`: a back end such as DLSS shuts its SDK session down on the live device.
+    vendor: crate::vendor::Selection,
+    /// Reflex, Anti-Lag or nothing (ADR-0021 §6); owns a semaphore, so it is dropped before
+    /// the device.
+    latency: Box<dyn LatencyBackend>,
+    /// The present ID of the frame being built: one more than the last presented frame's.
+    /// Reflex's markers, its submit and present chains and Anti-Lag's frame index use it.
+    latency_frame: u64,
+    /// Which frames sleep, the frame-rate backstop and one `SIMULATION_START` per frame.
+    latency_pacer: latency::Pacer,
+    /// The tiered path's bindless table (ADR-0020 §3); `None` on Compat, which keeps plain
+    /// descriptor sets. N0 creates it and no pass reads it yet. Dropped before the device.
+    #[allow(dead_code)] // Held for its lifetime until the N1+ tiered passes bind it.
+    bindless: Option<BindlessTable>,
     device: DeviceContext,
     surface: Surface,
     instance: InstanceContext,
+    /// Its `quality_tier` is the configuration tier ([`crate::config_tier`]).
     config: RenderConfig,
+    /// The tier asked for in [`RenderConfig::quality_tier`].
+    requested_tier: QualityTier,
+    /// Device memory budget of the requested tier on this path.
+    memory_budget: u64,
     // Declared last so the window outlives the surface/instance during drop.
     window: Window,
 }
@@ -580,27 +707,83 @@ impl Renderer {
             })
             .collect();
 
-        let instance = InstanceContext::new(&required, config.validation)?;
-        let loader = khr::surface::Instance::new(&instance.entry, &instance.instance);
-        // SAFETY: the instance was created with exactly these surface extensions for this
-        // display/window handle pair.
-        let surface_handle = unsafe {
-            ash_window::create_surface(
-                &instance.entry,
-                &instance.instance,
-                display_handle,
-                window_handle,
-                None,
-            )
-        }?;
+        // ADR-0020 §1e: the compiled-in vendor back ends declare their instance extensions
+        // before creation (none in the open build).
+        let vendor_instance = crate::vendor::instance_extensions();
+        let instance = InstanceContext::new(&required, &vendor_instance, config.validation)?;
+        let loader = khr::surface::Instance::load(&instance.entry, &instance.instance);
+        let factory =
+            ash_window::SurfaceFactory::new(&instance.entry, &instance.instance, display_handle)?;
+        // SAFETY: the instance was created with at least these surface extensions for this
+        // display handle, and the factory was loaded for the same display. The window handle is
+        // valid now. The window outlives the surface because `Renderer` keeps its own handle to
+        // it in `window`, its last field; the display connection belongs to the caller's event
+        // loop, which outlives the renderer.
+        let surface_handle = unsafe { factory.create_surface(window_handle, None) }?;
         let surface = Surface {
             loader,
             handle: surface_handle,
         };
 
-        let mut device = DeviceContext::new(&instance, surface_handle, config.pipeline_stats)?;
+        let mut device = DeviceContext::new(
+            &instance,
+            Some(surface_handle),
+            config.pipeline_stats,
+            config.render_path,
+            config.tiered_cpu_devices,
+            true,
+        )?;
+        // ADR-0020 §5e: the requested tier runs the configuration of its Compat tier on this
+        // path (tiered Low is today's High, tiered Medium and up today's Ultra), with the
+        // path's memory budget.
+        let requested_tier = config.quality_tier;
+        let path = device.admission.path;
+        config.quality_tier = crate::preset::config_tier(path, requested_tier);
+        let memory_budget = crate::preset::total_memory_budget(path, requested_tier);
+        crate::memory::begin_renderer(memory_budget);
+        // ADR-0021 §6: the latency back end the enabled extensions allow, with one log line
+        // either way.
+        let (mut latency, latency_line) = latency::create(&latency::LatencyContext {
+            instance: &instance.instance,
+            physical: device.physical,
+            device: &device.device,
+            path,
+            enabled: &device.enabled_extensions,
+            setting: config.latency,
+            max_frame_rate: config.frame_rate_limit,
+        });
+        eprintln!("{latency_line}");
+        // ADR-0020 §6c: probe the compiled-in vendor back ends against this device; each one
+        // that is unavailable logs one line naming its fallback (nothing in the open build).
+        let vendor = crate::vendor::select(
+            &crate::vendor::ProbeContext {
+                entry: &instance.entry,
+                instance: &instance.instance,
+                physical: device.physical,
+                device: &device.device,
+                capabilities: &device.capabilities,
+                path,
+                instance_extensions: &instance.enabled_extensions,
+                device_extensions: &device.enabled_extensions,
+            },
+            latency.mode(),
+        );
         // Every pipeline below is built through this cache, at creation only.
         let cache = device.init_pipeline_cache(config.pipeline_cache.as_deref())?;
+        let bindless = if path == RenderPath::Tiered {
+            let table = BindlessTable::new(&device)?;
+            eprintln!(
+                "[render] bindless table: {} samplers, {} storage images, {} textures; {} \
+                 descriptors written at creation",
+                crate::bindless::SAMPLER_SLOTS,
+                crate::bindless::STORAGE_IMAGE_SLOTS,
+                crate::bindless::TEXTURE_SLOTS,
+                table.writes()
+            );
+            Some(table)
+        } else {
+            None
+        };
         let shaders = ShaderSource::new(config.shader_dir.clone());
         let size = window.size();
         if size[0] == 0 || size[1] == 0 {
@@ -617,7 +800,9 @@ impl Renderer {
             extent,
             config.vsync,
             None,
+            latency.reflex(),
         )?;
+        latency.swapchain_created(swapchain.handle());
 
         let hdr_format = targets::choose_hdr_format(&device, config.quality_tier);
         let (depth_format, depth_aspect) = targets::choose_depth_format(&device)?;
@@ -646,6 +831,42 @@ impl Renderer {
             );
         }
         let mut post_config = config.effective_post();
+        // ADR-0021 §4b, §7: temporal AA is the tiered default and MSAA is Compat-only; Compat
+        // has no temporal pass.
+        let tiered = path == RenderPath::Tiered;
+        if tiered {
+            if post_config.anti_aliasing == AntiAliasing::Msaa4 && config.post.is_some() {
+                eprintln!("[render] 4x MSAA is Compat-only (ADR-0021 §7); using temporal");
+            }
+            if post_config.anti_aliasing == AntiAliasing::Msaa4 || config.post.is_none() {
+                post_config = post_config.with_anti_aliasing(AntiAliasing::Temporal);
+            }
+            if post_config.anti_aliasing == AntiAliasing::Temporal && !device.compute_supported {
+                eprintln!("[render] temporal AA needs compute on the graphics queue; using FXAA");
+                post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
+            }
+        } else if post_config.anti_aliasing == AntiAliasing::Temporal {
+            eprintln!("[render] temporal AA is tiered-only (ADR-0021 §7); using FXAA");
+            post_config = post_config.with_anti_aliasing(AntiAliasing::Fxaa);
+        }
+        let temporal = post_config.anti_aliasing == AntiAliasing::Temporal;
+        // ADR-0021 §4b, §4c: the preset mode's scale is the render-scale ceiling (the
+        // setting can lower it) and the allocation's.
+        let upscale_mode = post_config
+            .upscale_mode
+            .unwrap_or_else(|| UpscaleMode::for_tier(requested_tier, swapchain.extent.height));
+        if temporal {
+            let ceiling = post_config.render_scale.min(upscale_mode.scale());
+            post_config = post_config
+                .with_render_scale(ceiling)
+                .with_min_render_scale(post_config.min_render_scale.min(ceiling));
+        }
+        post_config = post_config.sanitized();
+        // ADR-0021 §5: on Tiered the overlay draws the outlines at output resolution; the
+        // render-resolution IDs stay as the heat haze's unit mask.
+        if tiered && lighting_config.outlines == OutlineMode::Hull {
+            lighting_config = lighting_config.with_outlines(OutlineMode::Screen);
+        }
         if post_config.anti_aliasing == AntiAliasing::Msaa4
             && !(device.msaa4 && targets::supports_msaa4(&device, hdr_format, depth_format))
         {
@@ -715,6 +936,8 @@ impl Renderer {
                 depth_format,
                 budget,
                 budget.oit,
+                temporal,
+                tiered.then_some(swapchain.format),
             ) {
                 Ok(mut pass) => {
                     if !config.distortion_draw && budget.distortion {
@@ -758,6 +981,9 @@ impl Renderer {
             upscale: post_config.scaled(),
             water: full_water,
             distortion: vfx.as_ref().is_some_and(VfxPass::has_distortion),
+            temporal,
+            readback: temporal && config.readback,
+            overlay: tiered,
         };
         // Hazeless variants first (ADR-0019: the haze's passes only reserved), then the ones
         // that run them; see `plan_index`.
@@ -814,12 +1040,16 @@ impl Renderer {
             max_instances: OFFSCREEN_MAX_INSTANCES,
             max_bones: OFFSCREEN_MAX_BONES,
             casters: false,
+            temporal: false,
+            overlay: false,
         }; 1 + UI_IMAGE_SLOTS];
         // The main view also builds the shadow caster list (R8) when there is a shadow map.
         views[0] = ViewBudget {
             max_instances: config.max_instances,
             max_bones: config.max_bones,
             casters: shadow.is_some(),
+            temporal,
+            overlay: tiered,
         };
         let (default_shadow_format, shadow_linear) = shadow_format.unwrap_or((depth_format, false));
         let mut lighting = LightingResources::new(
@@ -870,6 +1100,8 @@ impl Renderer {
                 prepass: frame_spec.has_prepass(),
                 outline_ids: frame_spec.outline_ids,
                 hull: lighting_config.outlines == OutlineMode::Hull,
+                temporal,
+                overlay: tiered,
             },
             config.skinning,
             CullSettings {
@@ -886,14 +1118,69 @@ impl Renderer {
             .transpose()?;
         // The outlines draw on the composite's output: the LDR intermediate when FXAA or the
         // upscale reads it, else the swapchain image.
-        let outline_format = if frame_spec.fxaa || frame_spec.upscale {
+        let outline_format = if frame_spec.has_fxaa() || frame_spec.has_upscale() {
             frame_graph::LDR_FORMAT
         } else {
             swapchain.format
         };
         let outline = frame_spec
-            .outline_ids
+            .has_outline_pass()
             .then(|| OutlinePass::new(&device, &shaders, outline_format))
+            .transpose()?;
+        // ADR-0021 §5: the overlay reads this frame slot's decal buffer.
+        let overlay = frame_spec
+            .overlay
+            .then(|| {
+                GameplayOverlay::new(
+                    &device,
+                    &shaders,
+                    swapchain.format,
+                    &lighting.decal_buffers(),
+                )
+            })
+            .transpose()?;
+        // ADR-0021 §3, §4: the back end (`MOBA_UPSCALER`; `auto` is TAAU in the open build,
+        // Q1) with its state sized for the dynamic-resolution ceiling. A back end that cannot
+        // run here falls back to TAAU with one log line.
+        let temporal_state = if temporal {
+            let upscaler = crate::upscale::create(
+                &device,
+                &shaders,
+                post_config.upscaler,
+                swapchain.extent,
+                extents.render,
+                TaauDebugView::of(config.debug_view),
+            )?;
+            let (smallest, largest) = upscaler.render_size_range(swapchain.extent, upscale_mode);
+            eprintln!(
+                "[render] anti-aliasing: temporal, upscaler {} ({} mode, render scale {:.3}..{:.3}, \
+                 back-end range {}x{}..{}x{}, sharpness {:.2}{})",
+                upscaler.kind().name(),
+                upscale_mode.name(),
+                post_config.min_render_scale.min(post_config.render_scale),
+                post_config.render_scale,
+                smallest.width,
+                smallest.height,
+                largest.width,
+                largest.height,
+                post_config.sharpness,
+                // ADR-0021 §3: a back end without its own sharpening needs the renderer's
+                // `sharpen` pass, which arrives with the vendor back ends (N1c).
+                if upscaler.has_sharpening() {
+                    ", fused"
+                } else {
+                    ", no sharpening until N1c"
+                }
+            );
+            Some(
+                TemporalState::new(upscaler, upscale_mode, post_config.sharpness)
+                    .with_max_lod_bias(device.max_sampler_lod_bias),
+            )
+        } else {
+            None
+        };
+        let exposure_linear = temporal
+            .then(|| ExposureLinearPass::new(&device, &shaders))
             .transpose()?;
         let post = PostPass::new(
             &device,
@@ -966,6 +1253,11 @@ impl Renderer {
             vfx,
             contact,
             outline,
+            temporal: temporal_state,
+            exposure_linear,
+            temporal_frame: None,
+            capture_warmed: false,
+            overlay,
             frame_outlines: OutlinePalette::NONE,
             materials,
             shaders,
@@ -1003,10 +1295,17 @@ impl Renderer {
             world_config,
             decal_upload: DecalUpload::boxed(),
             decals_dropped: 0,
+            vendor,
+            latency,
+            latency_frame: 1,
+            latency_pacer: latency::Pacer::default(),
+            bindless,
             device,
             surface,
             instance,
             config,
+            requested_tier,
+            memory_budget,
         };
         renderer.bind_transients();
         Ok(renderer)
@@ -1244,6 +1543,63 @@ impl Renderer {
         [self.render_extent.width, self.render_extent.height]
     }
 
+    /// The anti-aliasing in use after the device and path checks (ADR-0021 §7: temporal on
+    /// Tiered by default, never MSAA there; never temporal on Compat).
+    #[must_use]
+    pub fn anti_aliasing(&self) -> AntiAliasing {
+        self.post_config.anti_aliasing
+    }
+
+    /// The temporal back end's name for the frame log (`upscaler=`), `"off"` without
+    /// temporal AA (ADR-0021 §4b).
+    #[must_use]
+    pub fn upscaler_name(&self) -> &'static str {
+        self.temporal
+            .as_ref()
+            .map_or("off", |temporal| temporal.upscaler.kind().name())
+    }
+
+    /// The upscaler mode in use, with temporal AA.
+    #[must_use]
+    pub fn upscale_mode(&self) -> Option<UpscaleMode> {
+        self.temporal.as_ref().map(|temporal| temporal.mode)
+    }
+
+    /// Jitter phases of the latest frame (`jitter_phases=`), 0 without temporal AA.
+    #[must_use]
+    pub fn jitter_phases(&self) -> u32 {
+        self.temporal
+            .as_ref()
+            .map_or(0, TemporalState::jitter_phases)
+    }
+
+    /// Device memory the temporal back end owns (its histories), bytes.
+    #[must_use]
+    pub fn upscaler_vram_bytes(&self) -> u64 {
+        self.temporal
+            .as_ref()
+            .map_or(0, |temporal| temporal.upscaler.vram_bytes())
+    }
+
+    /// Forgets every temporal history and restarts the jitter pattern, as a capture does
+    /// (ADR-0021 §1). Nothing without temporal AA.
+    pub fn reset_temporal(&mut self) {
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal.restart();
+        }
+    }
+
+    /// Frames a capture renders before the captured one after [`Self::reset_temporal`]: two
+    /// full jitter cycles at the current sizes (ADR-0021 §1); 0 without temporal AA.
+    #[must_use]
+    pub fn temporal_warmup_frames(&self) -> u32 {
+        self.temporal.as_ref().map_or(0, |temporal| {
+            2 * temporal
+                .upscaler
+                .jitter_phases(self.render_extent, self.swapchain.extent)
+        })
+    }
+
     /// Sets the map's image-based lighting (ADR-0011): `desc`'s SH-L2 diffuse irradiance and
     /// intensity, and `specular`, its prefiltered specular cube (linear, e.g. `rgba16f` from
     /// `moba-tools env-bake`; mip `m` of `M` holds roughness `m / (M - 1)`). The cube is
@@ -1399,6 +1755,76 @@ impl Renderer {
         &self.device.name
     }
 
+    /// The render-path gate's decision for the selected GPU (ADR-0020 §2): its path, highest
+    /// tier and what it lacks. Logged as `path=` / `max_tier=` / `missing=`.
+    #[must_use]
+    pub fn admission(&self) -> &Admission {
+        &self.device.admission
+    }
+
+    /// The vendor SDK back ends selected for this device (ADR-0020 §6c): `builtin` (or `none`,
+    /// `off`) in every slot of the open build. N0 selects them only; none is in the frame yet.
+    /// It copies the `compiled` list, so read it once (start-up, a settings screen), not per
+    /// frame.
+    #[must_use]
+    pub fn vendor_backends(&self) -> crate::VendorBackends {
+        self.vendor.backends()
+    }
+
+    /// The latency sleep (ADR-0021 §6b): call it once per frame, after the frame's present
+    /// and before the next frame's input is gathered (`moba_platform::App::pace`). Reflex
+    /// sleeps in `vkLatencySleepNV` until the driver says the next frame should start;
+    /// Anti-Lag in `vkAntiLagUpdateAMD` at stage `INPUT`.
+    ///
+    /// Returns `true` when it paced the frame: the back end then also enforced
+    /// [`RenderConfig::frame_rate_limit`], so the caller's own frame limiter should stand down
+    /// (`moba_platform::Pacing::External`). Returns `false`, without sleeping, when the device
+    /// has neither extension, the setting is [`LatencySetting::Off`], or the latest frame was
+    /// not presented (a minimised window). Also `false`, after sleeping, when the frame
+    /// (from its [`LatencyMarker::SimulationStart`], else the previous sleep) lasted less than
+    /// 90 % of the limit's interval: the driver let it through early, so the caller's limiter
+    /// waits out the rest.
+    pub fn latency_sleep(&mut self) -> bool {
+        self.latency_pacer.sleep(
+            &mut *self.latency,
+            self.swapchain.handle(),
+            self.latency_frame,
+            self.last_submitted,
+            self.config.frame_rate_limit,
+        )
+    }
+
+    /// Reports a point of the app's frame loop for the frame being built (Reflex's markers,
+    /// ADR-0021 §6b): [`LatencyMarker::SimulationStart`] and [`LatencyMarker::InputSample`]
+    /// at the top of the frame, [`LatencyMarker::TriggerFlash`] on a click,
+    /// [`LatencyMarker::SimulationEnd`] once the scene is built. The renderer sets the
+    /// render-submit and present markers itself. `SimulationStart` also starts the frame's
+    /// clock for the [`Renderer::latency_sleep`] backstop, once per frame: a frame retried
+    /// after a skipped submission keeps its first start. Otherwise a no-op without Reflex.
+    pub fn latency_marker(&mut self, marker: LatencyMarker) {
+        if self.latency_pacer.marker(self.latency_frame, marker) {
+            self.set_latency_marker(marker.nv());
+        }
+    }
+
+    /// The frames whose Reflex timings (`vkGetLatencyTimingsNV`) completed since the last
+    /// call, oldest first: at most the driver's 64, so call it at least every 64 frames to
+    /// see every frame. Empty without Reflex. It does not allocate.
+    pub fn latency_report(&mut self) -> &[LatencyFrame] {
+        self.latency.report(self.swapchain.handle())
+    }
+
+    fn set_latency_marker(&self, marker: vk::LatencyMarkerNV) {
+        self.latency
+            .marker(self.swapchain.handle(), self.latency_frame, marker);
+    }
+
+    /// The selected GPU's probed capabilities (ADR-0020 §1e).
+    #[must_use]
+    pub fn capabilities(&self) -> &DeviceCapabilities {
+        &self.device.capabilities
+    }
+
     /// Whether the Khronos validation layer is active.
     #[must_use]
     pub fn validation_enabled(&self) -> bool {
@@ -1411,9 +1837,17 @@ impl Renderer {
         InstanceContext::validation_error_count()
     }
 
-    /// The configured quality tier.
+    /// The quality tier asked for in [`RenderConfig::quality_tier`]. On the Compat path
+    /// `Overdrive` runs as Ultra; [`Self::config_tier`] is the configuration actually used.
     #[must_use]
     pub fn quality_tier(&self) -> QualityTier {
+        self.requested_tier
+    }
+
+    /// The Compat tier whose configuration the frame runs ([`crate::config_tier`] of the
+    /// requested tier on this path, ADR-0020 §5e).
+    #[must_use]
+    pub fn config_tier(&self) -> QualityTier {
         self.config.quality_tier
     }
 
@@ -1680,7 +2114,11 @@ impl Renderer {
             .allocator()
             .lock()
             .map_or(0, |allocator| allocator.capacity());
-        crate::memory::stats(self.config.quality_tier.budget(), reserved)
+        crate::memory::stats(
+            self.config.quality_tier.budget().texture_bytes,
+            self.memory_budget,
+            reserved,
+        )
     }
 
     /// Whether uploads are locked now (cheap: no allocator query, unlike
@@ -1738,7 +2176,29 @@ impl Renderer {
             .as_ref()
             .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
             .transpose()?;
+        let overlay = self
+            .overlay
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
+        let exposure_linear = self
+            .exposure_linear
+            .as_ref()
+            .map(|pass| pass.build_pipeline(&self.device, &self.shaders))
+            .transpose()?;
+        // Last of the builds: the back end replaces its own pipeline only on success.
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal
+                .upscaler
+                .reload_shaders(&self.device, &self.shaders)?;
+        }
         self.scene.install_pipelines(scene);
+        if let (Some(pass), Some(pipeline)) = (self.exposure_linear.as_mut(), exposure_linear) {
+            pass.install_pipeline(pipeline);
+        }
+        if let (Some(pass), Some(pipeline)) = (self.overlay.as_mut(), overlay) {
+            pass.install_pipeline(pipeline);
+        }
         self.post.install_pipelines(post);
         if let (Some(pass), Some(pipeline)) = (self.contact.as_mut(), contact) {
             pass.install_pipeline(pipeline);
@@ -1837,6 +2297,18 @@ impl Renderer {
         self.last_submitted
     }
 
+    /// A frame recorded but not submitted (an error between the two): the temporal back end
+    /// and `exposure_linear` advanced state at record time (the upscaler's `record` contract,
+    /// ADR-0021 amendment 2 item 17), so both start over as first frames.
+    fn forget_unsubmitted(&mut self) {
+        if let Some(temporal) = self.temporal.as_mut() {
+            temporal.invalidate();
+        }
+        if let Some(pass) = self.exposure_linear.as_mut() {
+            pass.forget();
+        }
+    }
+
     /// The plan variant for a capture flag, an offscreen mask and whether heat haze is in
     /// view (ADR-0019: without it the haze's passes are only reserved, so the frame records
     /// neither them nor their barriers).
@@ -1855,8 +2327,12 @@ impl Renderer {
                 .map(|slot| transients.image(slot).view())
         };
         let bloom = resources.bloom;
+        // ADR-0021 §5a: with temporal AA the post chain reads the upscaler's output.
+        let post_hdr = resources
+            .temporal
+            .map_or(resources.hdr, |temporal| temporal.hdr_out);
         let views = PostViews {
-            hdr: view(Some(resources.hdr)),
+            hdr: view(Some(post_hdr)),
             depth: view(Some(resources.depth)),
             ao_raw: view(resources.ao.map(|ao| ao.raw)),
             bloom: core::array::from_fn(|level| view(bloom.map(|mips| mips[level]))),
@@ -1893,6 +2369,14 @@ impl Renderer {
         }
         if let (Some(fog), Some(raw)) = (&self.fog, view(resources.fog.map(|fog| fog.raw))) {
             fog.bind_raw(&self.device, raw);
+        }
+        if let (Some(pass), Some(overlay)) = (&self.overlay, resources.overlay) {
+            let images = view(Some(overlay.source))
+                .zip(view(Some(overlay.depth)))
+                .zip(view(Some(overlay.ids)));
+            if let Some(((ldr, depth), ids)) = images {
+                pass.bind(&self.device, OverlayImages { ldr, depth, ids });
+            }
         }
         // R3b: the full water samples the refraction copy and the single-sampled depth.
         if let (Some(refraction), Some(depth)) =
@@ -2051,6 +2535,10 @@ impl Renderer {
             }?;
         }
         self.images_in_flight[image_index as usize] = Some(frame_index);
+        // ADR-0021 §6b: recording and submission, up to `vkQueueSubmit`. Set after the
+        // frame-slot fence, the acquire and the image's fence, so a frame blocked on the
+        // swapchain (vsync) does not count as render-thread work.
+        self.set_latency_marker(vk::LatencyMarkerNV::RENDERSUBMIT_START);
 
         if let Some(dynres) = self.dynres.as_mut()
             && let Some(timings) = self.profiler.latest()
@@ -2062,6 +2550,29 @@ impl Renderer {
             self.extents.render,
             self.render_scale(),
         );
+        // ADR-0021 §1: this frame's jitter and previous view (presentation state only; the
+        // client's `Camera` is read, never changed).
+        let temporal_frame = self.temporal.as_mut().map(|temporal| {
+            temporal.begin_frame(
+                scene.camera.view_proj,
+                scene.camera.position,
+                self.render_extent,
+                self.swapchain.extent,
+                scene.history_reset,
+            )
+        });
+        let temporal_frame = temporal_frame.map(|mut frame| {
+            frame.lens = [scene.camera.near, scene.camera.far, scene.camera.fov_y];
+            frame
+        });
+        let main_frame = MainFrame {
+            temporal: temporal_frame.map(|frame| frame.camera),
+            history_reset: temporal_frame.is_none_or(|frame| frame.reset),
+            output: self.swapchain.extent,
+        };
+        // The matrix the render-resolution depth is rasterised with.
+        let raster_view_proj =
+            temporal_frame.map_or(scene.camera.view_proj, |frame| frame.camera.jittered);
         // Lights are binned into this frame slot's buffers (its fence was waited on above).
         let grid = self.lighting.upload_lights(
             frame_index,
@@ -2088,6 +2599,7 @@ impl Renderer {
             &world_frame,
             self.render_extent,
             self.extents.render.height,
+            Some(&main_frame),
         )?;
         // R3b: this frame's decals (enemy telegraphs first) and the environment block.
         let environment = self.scene.environment().config();
@@ -2103,9 +2615,32 @@ impl Renderer {
             crate::lights::ground_footprint(scene.camera.view_proj),
         );
         self.lighting.write_decals(frame_index, &self.decal_upload);
-        self.scene
-            .environment_mut()
-            .prepare(frame_index, scene, self.render_extent);
+        self.scene.environment_mut().prepare(
+            frame_index,
+            scene,
+            self.render_extent,
+            raster_view_proj,
+            main_frame.history_reset,
+        );
+        // ADR-0021 §5: the overlay's block (unjittered, output resolution).
+        if let Some(overlay) = self.overlay.as_mut() {
+            let outlines = if self.lighting_config.outlines == OutlineMode::Off {
+                OutlinePalette::NONE
+            } else {
+                scene.outlines
+            };
+            overlay.prepare(
+                frame_index,
+                &OverlayBlock::new(
+                    scene.camera.view_proj,
+                    self.swapchain.extent,
+                    crate::passes::composite::is_srgb(self.swapchain.format),
+                    &outlines,
+                    self.config.debug_view == TemporalDebugView::OverlayIds,
+                    environment.decals,
+                ),
+            );
+        }
         if let Some(fog) = self.fog.as_mut() {
             fog.prepare(frame_index, scene.fog_of_war.as_ref());
         }
@@ -2138,13 +2673,33 @@ impl Renderer {
                 &WorldFrame::OFFSCREEN,
                 extent,
                 extent.height,
+                None,
             )?;
         }
         self.ui.prepare(frame_index, ui)?;
         // Last of the uploads: its slot allocations are committed only when the frame is
         // submitted (`VfxPass::submitted`), and rolled back if anything below fails.
         if let Some(vfx) = self.vfx.as_mut() {
-            vfx.prepare(frame_index, scene, self.render_extent);
+            // ADR-0021 §5b: telegraphs leave the scene for the overlay, toned with the
+            // composite's exposure and saturation (no adapted EV, amendment).
+            let overlay = self.overlay.as_ref().map(|_| {
+                [
+                    self.post.linear_exposure().0,
+                    crate::passes::post::TONEMAP_SATURATION,
+                    f32::from(u8::from(crate::passes::composite::is_srgb(
+                        self.swapchain.format,
+                    ))),
+                ]
+            });
+            vfx.prepare(
+                frame_index,
+                scene,
+                self.render_extent,
+                &VfxFrameExtras {
+                    temporal: temporal_frame.map(|frame| frame.camera),
+                    overlay,
+                },
+            );
         }
 
         let command_buffers = self.frames[frame_index].command_buffers;
@@ -2181,24 +2736,45 @@ impl Renderer {
             min_step,
             self.exposure_reset,
         );
+        self.temporal_frame = temporal_frame.map(|mut frame| {
+            frame.dt_ms = dt * 1_000.0;
+            frame
+        });
+        let render = self.render_region();
         let post_frame = PostFrame {
-            render: self.render_region(),
+            render,
+            // ADR-0021 §5a: after the temporal pass the post chain runs on the whole output.
+            post: if self.temporal.is_some() {
+                Region {
+                    actual: self.swapchain.extent,
+                    alloc: self.swapchain.extent,
+                }
+            } else {
+                render
+            },
             swapchain: self.swapchain.extent,
             adaptation,
             effects: scene.effects,
-            view_proj: scene.camera.view_proj,
+            // GTAO reconstructs from the jittered depth (ADR-0021 §1).
+            view_proj: raster_view_proj,
             eye: scene.camera.position,
         };
-        self.record_frame(
+        if let Err(error) = self.record_frame(
             command_buffers,
             frame_index,
             image_index,
             (offscreen_mask, offscreen),
             &post_frame,
-        )?;
+        ) {
+            self.forget_unsubmitted();
+            return Err(error);
+        }
         for &command_buffer in &command_buffers {
             // SAFETY: the command buffer is recording and is ended exactly once.
-            unsafe { self.device.device.end_command_buffer(command_buffer) }?;
+            if let Err(error) = unsafe { self.device.device.end_command_buffer(command_buffer) } {
+                self.forget_unsubmitted();
+                return Err(error.into());
+            }
         }
 
         let render_finished = self.swapchain.render_finished[image_index as usize].handle();
@@ -2208,7 +2784,13 @@ impl Renderer {
         // Batch 1: passes before the first swapchain access, with no wait. Batch 2: the rest,
         // waiting for the acquired image at the stage its first barrier chains from. Graph
         // barriers order the batches (submission order on one queue).
-        let submits = [
+        // Reflex attributes both batches to this frame's present ID (ADR-0021 §6a).
+        let mut frame_ids = [
+            vk::LatencySubmissionPresentIdNV::default().present_id(self.latency_frame),
+            vk::LatencySubmissionPresentIdNV::default().present_id(self.latency_frame),
+        ];
+        let [first_id, second_id] = &mut frame_ids;
+        let mut submits = [
             vk::SubmitInfo::default().command_buffers(&command_buffers[..1]),
             vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
@@ -2216,17 +2798,29 @@ impl Renderer {
                 .command_buffers(&command_buffers[1..])
                 .signal_semaphores(&signal_semaphores),
         ];
+        if self.latency.reflex() {
+            let [first, second] = submits;
+            submits = [first.push(first_id), second.push(second_id)];
+        }
         // Reset as late as possible: every fallible recording step is complete, so a
         // failure before this point cannot leave an unsignalled fence for the next wait.
         // SAFETY: the fence was waited on above and is not in use by a submit.
-        unsafe { self.device.device.reset_fences(&[fence]) }?;
-        // SAFETY: both command buffers are executable and the semaphores are live. One
+        if let Err(error) = unsafe { self.device.device.reset_fences(&[fence]) } {
+            self.forget_unsubmitted();
+            return Err(error.into());
+        }
+        // SAFETY: both command buffers are executable and the semaphores are live; the
+        // present-ID structures chained for Reflex (`frame_ids`) outlive the call. One
         // submission command, so the fence signal covers both batches.
-        unsafe {
+        if let Err(error) = unsafe {
             self.device
                 .device
                 .queue_submit(self.device.graphics_queue, &submits, fence)
-        }?;
+        } {
+            self.forget_unsubmitted();
+            return Err(error.into());
+        }
+        self.set_latency_marker(vk::LatencyMarkerNV::RENDERSUBMIT_END);
         self.profiler.submitted(frame_index);
         self.last_submitted = true;
         if let Some(vfx) = self.vfx.as_mut() {
@@ -2234,14 +2828,25 @@ impl Renderer {
         }
         self.last_frame_at = Some(now);
         self.exposure_reset = false;
+        if let (Some(temporal), Some(frame)) = (self.temporal.as_mut(), temporal_frame) {
+            temporal.end_frame(&frame);
+        }
         if self.capture_pending {
             self.capture_pending = false;
             self.capture_ready = true;
         }
 
-        let present_result =
-            self.swapchain
-                .present(self.device.present_queue, image_index, render_finished);
+        // Anti-Lag's `PRESENT` stage goes with Reflex's `PRESENT_START`.
+        self.set_latency_marker(vk::LatencyMarkerNV::PRESENT_START);
+        let present_result = self.swapchain.present(
+            self.device.present_queue,
+            image_index,
+            render_finished,
+            self.latency.reflex().then_some(self.latency_frame),
+        );
+        self.set_latency_marker(vk::LatencyMarkerNV::PRESENT_END);
+        // Present IDs must grow with every present, including one that failed.
+        self.latency_frame += 1;
         self.frame_index = (frame_index + 1) % FRAMES_IN_FLIGHT;
 
         // The frame was submitted: its offscreen renders ran even if presenting did not.
@@ -2301,6 +2906,14 @@ impl Renderer {
         let msaa_depth = view_of(resources.msaa.map(|msaa| msaa.depth));
         let ldr_view = view_of(resources.ldr);
         let ldr2_view = view_of(resources.ldr2);
+        let ldr_out_view = view_of(resources.ldr_out);
+        // ADR-0021: the motion and reactive targets with temporal AA.
+        let temporal_views = resources.temporal.map(|temporal| {
+            (
+                self.transient(temporal.motion).view(),
+                self.transient(temporal.reactive).view(),
+            )
+        });
         let render_extent = self.render_extent;
         let render_scale = self.render_scale();
         let contact_view = view_of(resources.contact);
@@ -2351,6 +2964,8 @@ impl Renderer {
                         depth: msaa_depth.unwrap_or(depth_view),
                         resolve: msaa_depth.map(|_| depth_view),
                         outline_ids,
+                        motion: temporal_views.map(|(motion, _)| motion),
+                        lighting: self.lighting.set(frame_index),
                         extent: render_extent,
                     },
                 ),
@@ -2515,6 +3130,7 @@ impl Renderer {
                                 depth: depth_view,
                                 extent: render_extent,
                                 region,
+                                reactive: temporal_views.map(|(_, reactive)| reactive),
                             },
                             cap,
                         );
@@ -2572,7 +3188,8 @@ impl Renderer {
                     self.post.record_upscale(
                         &self.device,
                         command_buffer,
-                        swapchain_view,
+                        ldr_out_view.unwrap_or(swapchain_view),
+                        ldr_out_view.is_none(),
                         post_frame,
                     );
                 }
@@ -2596,6 +3213,7 @@ impl Renderer {
                                 accum: view(ids.accum),
                                 reveal: view(ids.reveal),
                                 extent: render_extent,
+                                temporal: temporal_views,
                             },
                             &self.scene,
                         );
@@ -2650,6 +3268,145 @@ impl Renderer {
                         swapchain_view,
                         extent,
                     );
+                }
+                PassKind::MaskClear => {
+                    if let Some(temporal) = resources.temporal {
+                        let clear = vk::ClearColorValue { float32: [0.0; 4] };
+                        let range = [vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1)];
+                        for mask in [temporal.reactive, temporal.tc_mask] {
+                            // SAFETY: the graph moved the mask to TRANSFER_DST_OPTIMAL; the
+                            // whole single-level image is cleared.
+                            unsafe {
+                                self.device.device.cmd_clear_color_image(
+                                    command_buffer,
+                                    self.transient(mask).image(),
+                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                    &clear,
+                                    &range,
+                                );
+                            }
+                        }
+                    }
+                }
+                PassKind::TcMask => {
+                    if let Some(temporal) = resources.temporal {
+                        self.scene.record_tc_mask(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &TcMaskTarget {
+                                mask: self.transient(temporal.tc_mask).view(),
+                                depth: depth_view,
+                                lighting: self.lighting.set(frame_index),
+                                extent: render_extent,
+                            },
+                        );
+                    }
+                }
+                PassKind::ExposureLinear => {
+                    if let Some(temporal) = resources.temporal {
+                        let target = self.transient(temporal.exposure_linear).view();
+                        let (exposure, adapted) = self.post.linear_exposure();
+                        if let Some(pass) = self.exposure_linear.as_mut() {
+                            pass.record(command_buffer, frame_index, adapted, target, exposure);
+                        }
+                    }
+                }
+                PassKind::Temporal => {
+                    if let (Some(resources), Some(frame)) =
+                        (resources.temporal, self.temporal_frame)
+                    {
+                        let alloc = self.extents.render;
+                        let image = |resource, format, extent| {
+                            let image = self.transient(resource);
+                            UpscaleImage {
+                                image: image.image(),
+                                view: image.view(),
+                                format,
+                                extent,
+                            }
+                        };
+                        let inputs = UpscaleInputs {
+                            color: image(plan.resources.hdr, self.hdr_format, alloc),
+                            depth: image(plan.resources.depth, self.frame_spec.depth_format, alloc),
+                            motion: image(resources.motion, frame_graph::MOTION_FORMAT, alloc),
+                            reactive: image(resources.reactive, frame_graph::MASK_FORMAT, alloc),
+                            transparency: image(resources.tc_mask, frame_graph::MASK_FORMAT, alloc),
+                            exposure: image(
+                                resources.exposure_linear,
+                                frame_graph::EXPOSURE_LINEAR_FORMAT,
+                                vk::Extent2D {
+                                    width: 1,
+                                    height: 1,
+                                },
+                            ),
+                            jitter: frame.camera.jitter,
+                            render_size: render_extent,
+                            dt_ms: frame.dt_ms,
+                            near: frame.lens[0],
+                            far: frame.lens[1],
+                            fov_y: frame.lens[2],
+                            reset: frame.reset,
+                            sharpness: self.temporal.as_ref().map_or(0.0, |state| state.sharpness),
+                            frame_slot: frame_index,
+                        };
+                        let output = UpscaleOutput {
+                            image: image(resources.hdr_out, frame_graph::HDR_OUT_FORMAT, extent),
+                        };
+                        if let Some(state) = self.temporal.as_mut() {
+                            // SAFETY: `command_buffer` is recording on this device; the frame
+                            // submits it exactly once, after the previous frame's and before
+                            // the next, on the graphics queue, and a failure before the submit
+                            // calls `forget_unsubmitted` (which resets the back end's
+                            // history). The frame fence keeps at most FRAMES_IN_FLIGHT
+                            // pending. The inputs and output are this frame's transients,
+                            // alive until the frame's fence, in the layouts the graph set.
+                            unsafe { state.upscaler.record(command_buffer, &inputs, &output) };
+                        }
+                    }
+                }
+                PassKind::OverlayPrepass => {
+                    if let Some(overlay) = resources.overlay {
+                        self.scene.record_overlay_prepass(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &OverlayPrepassTarget {
+                                depth: self.transient(overlay.depth).view(),
+                                ids: self.transient(overlay.ids).view(),
+                                lighting: self.lighting.set(frame_index),
+                                extent,
+                            },
+                        );
+                    }
+                }
+                PassKind::Overlay => {
+                    if let Some(pass) = &self.overlay {
+                        pass.record(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            swapchain_view,
+                            extent,
+                        );
+                    }
+                }
+                PassKind::OverlayVfx => {
+                    if let (Some(vfx), Some(overlay)) = (&self.vfx, resources.overlay) {
+                        vfx.record_overlay(
+                            &self.device,
+                            command_buffer,
+                            frame_index,
+                            &VfxOverlayTargets {
+                                color: swapchain_view,
+                                depth: self.transient(overlay.depth).view(),
+                                extent,
+                            },
+                        );
+                    }
                 }
                 PassKind::Capture => {
                     if let Some(buffer) = capture_buffer {
@@ -2717,6 +3474,22 @@ impl Renderer {
             .chain(resources.bloom.into_iter().flatten())
             .chain(resources.ldr)
             .chain(resources.ldr2)
+            .chain(resources.ldr_out)
+            .chain(resources.temporal.into_iter().flat_map(|temporal| {
+                [
+                    temporal.motion,
+                    temporal.reactive,
+                    temporal.tc_mask,
+                    temporal.exposure_linear,
+                    temporal.hdr_out,
+                ]
+            }))
+            .chain(
+                resources
+                    .overlay
+                    .into_iter()
+                    .flat_map(|overlay| [overlay.depth, overlay.ids]),
+            )
             .chain(resources.contact)
             .chain(
                 resources
@@ -2808,6 +3581,8 @@ impl Renderer {
         // SAFETY: waiting for the device to idle guarantees no frame is still using the old
         // swapchain or transient images before they are replaced.
         unsafe { self.device.device.device_wait_idle() }?;
+        // A timed-out latency sleep may still owe a signal on the swapchain being retired.
+        self.latency.settle(false);
         let extent = vk::Extent2D { width, height };
         let swapchain = Swapchain::new(
             &self.instance,
@@ -2816,11 +3591,31 @@ impl Renderer {
             extent,
             self.config.vsync,
             Some(self.swapchain.handle()),
+            self.latency.reflex(),
         )?;
+        self.latency.swapchain_created(swapchain.handle());
         // Build the new swapchain-sized targets before replacing anything, so a failed
         // allocation cannot pair the new extent with old-size transients. Fixed-size slots
         // (the shadow map) are kept.
         let extents = target_extents(swapchain.extent, self.post_config.render_scale);
+        // ADR-0021 §2c: a resize re-sizes the back end's images (no pipeline is built,
+        // amendment 2 item 18) and forgets every history. Done before the swap below so a
+        // failed allocation cannot pair the new extent with old images. If the transients'
+        // resize below then fails, the error returns before any frame is recorded and the
+        // renderer keeps the old swapchain extent (that swapchain was retired by the new
+        // one's creation), so the next frame resizes again (its extent check, or an
+        // OUT_OF_DATE acquire) before recording: the back end's `accepts` never sees the
+        // targets at another size.
+        if let Some(temporal) = self.temporal.as_mut() {
+            // SAFETY: the device is idle (waited for at the top of this function), so no
+            // recorded frame is pending.
+            unsafe {
+                temporal
+                    .upscaler
+                    .resize(&self.device, swapchain.extent, extents.render)?;
+            }
+            temporal.invalidate();
+        }
         self.transients
             .resize(&self.device, self.plans[0].graph.slots(), extents)?;
         self.extents = extents;
@@ -2887,12 +3682,51 @@ impl Renderer {
         self.capture_frame_internal(scene, Some(ui), offscreen)
     }
 
+    /// Resets every temporal history and renders [`Self::temporal_warmup_frames`] frames of
+    /// `scene` (its particle spawns only in the first), so the next capture keeps the history
+    /// built here: the two-tick capture of ADR-0021 §7 warms up at tick `n` and captures tick
+    /// `n + 1`. Nothing without temporal AA.
+    ///
+    /// # Errors
+    /// As [`Self::render_with_ui`]; a skipped frame is an error here.
+    pub fn warm_up_temporal(
+        &mut self,
+        scene: &Scene<'_>,
+        ui: Option<&UiDrawList>,
+    ) -> RenderResult<()> {
+        if self.temporal.is_none() {
+            return Ok(());
+        }
+        self.reset_temporal();
+        let mut scene = *scene;
+        for _ in 0..self.temporal_warmup_frames() {
+            if !self.render_internal(&scene, ui, &[])? {
+                return Err(RenderError::NoSuitableDevice(String::from(
+                    "temporal warm-up frame was skipped (swapchain out of date)",
+                )));
+            }
+            scene.vfx.spawns = &[];
+        }
+        self.capture_warmed = true;
+        Ok(())
+    }
+
     fn capture_frame_internal(
         &mut self,
         scene: &Scene<'_>,
         ui: Option<&UiDrawList>,
         offscreen: &[OffscreenRender<'_>],
     ) -> RenderResult<CapturedFrame> {
+        // ADR-0021 §1: a capture resets the jitter and the history, then renders two full
+        // phase cycles of the same scene, so the image is a pure function of the scene and
+        // the settings (unless `warm_up_temporal` just did that at an earlier tick).
+        let mut scene = *scene;
+        if self.temporal.is_some() && !core::mem::take(&mut self.capture_warmed) {
+            self.warm_up_temporal(&scene, ui)?;
+            self.capture_warmed = false;
+            scene.vfx.spawns = &[];
+        }
+        let scene = &scene;
         // The capture plan imports the readback buffer as idle: every capture waits for the
         // device below before reading it, so no earlier submission still touches it.
         self.capture_ready = false;
@@ -2996,6 +3830,8 @@ impl Drop for Renderer {
         // SAFETY: no other thread submits work; waiting here makes the subsequent field
         // drops safe.
         let _ = unsafe { self.device.device.device_wait_idle() };
+        // Before the swapchain and the latency semaphore are dropped (ADR-0021 §6b).
+        self.latency.settle(true);
         crate::memory::set_locked(false);
         if let Some(path) = &self.config.pipeline_cache
             && let Err(error) = self.device.save_pipeline_cache(path)
@@ -3018,4 +3854,24 @@ fn target_extents(swapchain: vk::Extent2D, render_scale: f32) -> TargetExtents {
 
 fn duration_ms(duration: Duration) -> f32 {
     duration.as_secs_f32() * 1_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CapturedFrame, RenderResult, Renderer, Scene};
+    use crate::scene::Camera;
+
+    /// ADR-0021 gate 1: `Scene::camera` is unchanged after a frame. Every frame entry point
+    /// borrows the scene immutably and `Camera` is plain `Copy` data with no interior
+    /// mutability, so the renderer cannot write the client's matrix; the jittered matrix
+    /// exists only in its own uniforms (`TemporalState::begin_frame` takes the client's
+    /// matrix by value and returns it unchanged as `unjittered`, `upscale::frame` tests).
+    #[test]
+    fn frames_borrow_the_scene_and_its_camera_immutably() {
+        fn plain_data<T: Copy + Send + Sync + core::panic::RefUnwindSafe + 'static>() {}
+        let _: fn(&mut Renderer, &Scene<'_>) -> RenderResult<()> = Renderer::render;
+        let _: fn(&mut Renderer, &Scene<'_>) -> RenderResult<CapturedFrame> =
+            Renderer::capture_frame;
+        plain_data::<Camera>();
+    }
 }
