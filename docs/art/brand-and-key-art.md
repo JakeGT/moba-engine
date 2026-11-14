@@ -1,8 +1,9 @@
 # Brand and key art: brief for marketing and the graphic designer
 
-**Status:** v0 brief, 2026-10-31. **Leads:** marketing executive and graphic designer. This is
-a short brief: agents recorded the constraints and the material that already exists. The
-brand decisions are theirs.
+**Status:** v0 brief, 2026-10-31; **open**. **Leads:** marketing executive and graphic
+designer, not yet engaged. This is a short brief: agents recorded the constraints and the
+material that already exists. The brand decisions are theirs; the maintainer's approval of the
+rest of the bible (2026-11-14) does not settle them.
 
 ## Fixed points
 
@@ -10,7 +11,8 @@ brand decisions are theirs.
   listed as such. They are the only art in the repo that isn't CC0 or CC-BY (roadmap §9.6).
 - **Fidelity:** full photoreal (Cyberpunk-2077-class fidelity, not a cyberpunk setting).
 - **Setting:** science fantasy; tone **epic, weathered**; two factions, **the Solar Forge** and
-  **the Void** (working names: see [world-and-factions.md](world-and-factions.md)).
+  **the Void** (internal working names, kept; the public names are the brand's call: see
+  [world-and-factions.md](world-and-factions.md)).
 - **Camera investment:** the engine plans zoomed views, spectator cinematics and a hero
   **showcase** (champion select, victory) with showcase LODs, strand hair, path-traced skin
   and depth of field (roadmap §3). Key art and trailers can be rendered **in engine** with
@@ -54,7 +56,7 @@ brand decisions are theirs.
   palette should come from the faction palettes ([palette-and-value.md](palette-and-value.md) §5):
   Forge gold-bronze, cream ceramic and white-gold against Void black, silver and violet-white.
 
-> **Decision needed (marketing): the name and logo brief.** Nothing in the repo commits to a
+> **Open (marketing): the name and logo brief.** Nothing in the repo commits to a
 > name yet: the workspace and crates are named `moba-*`.
 
-> **Decision needed (marketing + designer): which key-art direction to develop.**
+> **Open (marketing + designer): which key-art direction to develop.**

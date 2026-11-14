@@ -1,6 +1,6 @@
 # VFX language
 
-**Status:** v0 draft, 2026-10-31. **Leads:** maintainer and graphic designer. Agents drafted
+**Status:** v0 approved 2026-11-14. **Leads:** maintainer and graphic designer. Agents drafted
 this, building on the R5 readability rules ([ADR-0013](../adr/0013-vfx-runtime.md)), which
 carry over unchanged (roadmap §4.7).
 
@@ -22,7 +22,7 @@ from a distance it reads as a spell; up close it has a visible source (an emitte
 lens, a lattice, a seam). Nothing burns, smokes or exhausts: Forge heat is contained fusion,
 Void force is gravity, Ashen force is pressure and hard light from scavenged Builder devices.
 
-| | **Solar Forge** | **Void** | **Ashen** (neutral, placeholder) |
+| | **Solar Forge** | **Void** | **Ashen** (neutral, working name) |
 |---|---|---|---|
 | Element | Fusion light and heat | Gravity and absence | Pressure, ash and hard light |
 | Visible source | Fusion lenses, lattice grilles, collector fins | Gravity rings, lensing cores, seams of floating parts | Scavenged Builder charms, hard-light bowstrings |
@@ -33,13 +33,19 @@ Void force is gravity, Ashen force is pressure and hard light from scavenged Bui
 | Motion | Fast start, heavy fall-off: hammer blows | Slow wind-up, sudden collapse: a held breath | Swirls and gusts |
 | Impact | Near-white flash, a pale gold shockwave ring, then sparks and a scorch decal | Inward pull, then a soundless pop and a crater ring | Dust burst; a hard-light arrow pins a shard |
 
-> **Decision needed (maintainer + designer): ability-type coding.** The team colours take
-> most of the hue wheel, so ability types can't be colour-coded the usual way. Options:
-> (a) **code type by shape and motion (recommended):** damage = sharp and fast, crowd control
-> = rings, chains and ground bindings, protection = domes and plates, mobility = streaks and
-> trails, healing = rising motes. Colour stays faction-only. (b) A small secondary palette
-> inside the free hue bands (teal for healing, violet for control). It conflicts with the
-> Void's violet.
+**Decided (2026-11-14): ability types are coded by shape and motion** (VFX-9), because the
+team colours take most of the hue wheel:
+
+| Type | Shape and motion |
+|---|---|
+| Damage | Sharp and fast |
+| Crowd control | Rings, chains and ground bindings |
+| Protection | Domes and plates |
+| Mobility | Streaks and trails |
+| Healing | Rising motes |
+
+Colour stays faction-only. *Considered:* a small secondary palette inside the free hue bands
+(teal for healing, violet for control), which conflicts with the Void's violet.
 
 ### What the concept images showed
 
@@ -88,7 +94,7 @@ R5 rules stay: enemy telegraphs are exempt from every cull and budget and keep a
 | Persistent zone | Edge only, slow pulse (≤ 1 Hz), fill ≤ 15 % |
 | Range indicator (own) | Thin circle, self colour, 40 % opacity |
 
-| Rule | What | Proposed threshold |
+| Rule | What | Threshold |
 |---|---|---|
 | **TEL-1** | Telegraph contrast | CON-3 in [palette-and-value.md](palette-and-value.md), on every terrain layer and mood, every tier |
 | **TEL-2** | No distortion, bloom or DLSS history on telegraphs | Overlay layer only (roadmap §4.1) |
@@ -96,9 +102,9 @@ R5 rules stay: enemy telegraphs are exempt from every cull and budget and keep a
 
 ## Budgets and rules for effect bodies
 
-| Rule | What | Proposed threshold |
+| Rule | What | Threshold |
 |---|---|---|
-| **VFX-1** | Body colours obey PAL-4 and PAL-5 | Emissive C ≤ 0.06 inside team hue zones; ≤ 0.13 outside |
+| **VFX-1** | Body colours obey PAL-4 and PAL-5 | Emissive C ≤ 0.06 inside team hue zones; ≤ 0.12 outside |
 | **VFX-2** | VFX light (RT or clustered) doesn't blow the board | Ground lit by ability light stays L ≤ **0.85** (VAL-4) after **0.3 s** |
 | **VFX-3** | Ally effects dimmed | R5 allied-VFX opacity setting; alpha ≤ **75 %** |
 | **VFX-4** | Overdraw and particle budgets | R5 per-tier budgets (Low 1.5 … Ultra 8 screens) unchanged |
@@ -106,6 +112,7 @@ R5 rules stay: enemy telegraphs are exempt from every cull and budget and keep a
 | **VFX-6** | Camera effects | No screen shake in ranked except own death and the core's destruction |
 | **VFX-7** | Distortion (Void lensing, heat haze) | Never inside an enemy telegraph; strength capped so CON-1 holds through it |
 | **VFX-8** | Motion vectors and reactive masks | Every effect writes them (roadmap §4.8) so DLSS/FSR don't ghost it |
+| **VFX-9** | Ability type reads without colour | Each ability's effect body uses its type's shape and motion (the table above); hue carries faction only |
 
 ## Status effects on units
 
@@ -126,6 +133,5 @@ unit they are **shape-coded** so they read without colour:
 
 Today's `content/vfx/*.toml` effects (arc bolt, nova, cinder zone, ember curse, frost field,
 judgement, …) were authored for the stylised look. In A3 the slice hero's effects are rebuilt
-to this language first. The rest follow with A4. Two must change whichever mood is picked,
-because they use saturated orange or red bodies that fall in the enemy hue zones:
+to this language first. The rest follow with A4. Two must change in any mood, because they use saturated orange or red bodies that fall in the enemy hue zones:
 `cinder-zone` and `ember-curse` (PAL-4).

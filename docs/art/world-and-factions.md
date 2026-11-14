@@ -1,8 +1,9 @@
 # World and factions
 
-**Status:** v0 draft, 2026-10-31. **Lead:** maintainer. Agents drafted this from the
-maintainer's decisions of 2026-10-30. Names and lore are working placeholders unless a line
-says *Decided*.
+**Status:** v0 approved 2026-11-14. **Lead:** maintainer. Agents drafted this from the
+maintainer's decisions of 2026-10-30; the maintainer approved it, with every recommendation,
+on 2026-11-14. Names and lore are working names (kept as internal names; the public names
+come from the brand pass).
 
 ## Decided
 
@@ -16,6 +17,11 @@ says *Decided*.
 | The pair | **The Solar Forge vs the Void.** |
 | Team identity | **Factions by shape and material; teams by rim.** Ally/enemy is told only by rims, outlines, health bars and the HUD, and stays player-relative and colour-blind safe ([palette-and-value.md](palette-and-value.md)). |
 | Map 1 | **Ember Crossing.** |
+| Names (2026-11-14) | "Solar Forge", "Void", "the Builders" and "the Ashen" stay as **internal working names**; the brand pass (marketing) picks the public ones. |
+| The Builders (2026-11-14) | Seen only as **ruins and relic machines**, never as figures. |
+| Faction readings (2026-11-14) | **Forge rec** and **Void rec**: see [faction readings](#faction-readings). |
+| Bases (2026-11-14) | **Forge west, Void east** on Ember Crossing: see [who stands where](#ember-crossing-who-stands-where). |
+| Heroes (2026-11-14) | **Free agents**: any hero plays on either side. |
 
 ## Technology that looks like magic
 
@@ -109,16 +115,14 @@ Why this premise works for the game:
   scorched ground, the ember crystals and the low warm light.
 - The factions are **light vs gravity**, not good vs evil. Neither is the villain.
 
-> **Decision needed (maintainer): the world's name and the faction names.** "Solar Forge"
-> and "Void" are working names. Options: (a) keep them as is; (b) keep them as internal
-> names and give each an in-world name later (e.g. *the Kiln Dominion* / *the Still Choir*);
-> (c) rename now. **Recommendation: (b).** The working names are clear for the team, and
-> the brand pass (marketing) picks the public ones.
+**Decided (2026-11-14): names.** "Solar Forge" and "Void" stay as internal names; each gets
+an in-world name later (e.g. *the Kiln Dominion* / *the Still Choir*), picked by the brand
+pass (marketing). The working names are clear for the team. *Considered:* keeping them as the
+public names, or renaming now.
 
-> **Decision needed (maintainer): the Builders.** Should the Builders ever appear (ruins,
-> relic machines, a neutral boss) or stay off-screen? **Recommendation:** ruins and relic
-> machines only, no Builder figures, so the mystery stays and no third character style is
-> needed in v0.
+**Decided (2026-11-14): the Builders** appear only as ruins and relic machines, never as
+figures, so the mystery stays and no third character style is needed in v0. *Considered:* a
+Builder figure or neutral boss.
 
 ## How the factions differ (identity in one line each)
 
@@ -215,23 +219,18 @@ These rules are written so the review renders can check them ([silhouettes-and-s
 Today's map puts the blue spawn in the west (`[32, 128]`) and the red spawn in the east
 (`[224, 128]`), and the low sun comes from the west (`sun_dir = [-0.6, 0.35, 0.45]`).
 
-> **Decision needed (maintainer): which faction holds which base.**
-> - (a) **Forge west, Void east (recommended).** The Forge sits with the low sun behind it;
->   the Void holds the side where the long shadows fall, which suits it. Good key-art framing:
->   sunlit brass against dark floating stone across the crossing.
-> - (b) Void west, Forge east: the Forge faces into the sunset, with a strong rim on its
->   structures but harsher contrast on the playable east side.
-> - (c) Mirror the art per player, so each player sees their own base as one fixed faction.
->   That is costly and breaks spectator consistency. Not recommended.
->
-> Either way the sim's Blue and Red stay as they are; this is presentation only.
+**Decided (2026-11-14): Forge west, Void east.** The Forge sits with the low sun behind it;
+the Void holds the side where the long shadows fall, which suits it. Good key-art framing:
+sunlit brass against dark floating stone across the crossing. The sim's Blue and Red stay as
+they are; this is presentation only. *Considered:* Void west (the Forge faces into the
+sunset, with harsher contrast on the playable east side), and mirroring the art per player
+(costly, and it breaks spectator consistency).
 
-> **Decision needed (maintainer): are heroes bound to a faction?**
-> - (a) **Heroes are free agents (recommended):** any hero can play on either side. Heroes
->   carry their own faction look (Forge, Void or Ashen) and the bases carry the side's. That
->   is standard for the genre, keeps picks open, and the rim and HUD carry team identity anyway.
-> - (b) Faction-locked rosters: stronger identity, but the pick pool halves and every hero
->   needs two skins to mirror.
+**Decided (2026-11-14): heroes are free agents.** Any hero can play on either side. Heroes
+carry their own faction look (Forge, Void or Ashen) and the bases carry the side's. That is
+standard for the genre, keeps picks open, and the rim and HUD carry team identity anyway.
+*Considered:* faction-locked rosters (stronger identity, but the pick pool halves and every
+hero needs two skins to mirror).
 
 ## What v0 must enable
 
@@ -239,12 +238,15 @@ Roadmap §9.6: v0 is enough to build **one map section, one hero and the minions
 vertical slice (A3). For world and factions that means:
 - one Forge base section (tower, base wall segment and the core) and its Void opposite, at
   least as blockouts;
-- the slice hero (picked from the three concepts in
-  [heroes-and-minions-v0.md](heroes-and-minions-v0.md));
+- the slice hero, the **Kiln Warden** ([heroes-and-minions-v0.md](heroes-and-minions-v0.md));
 - both minion families;
 - the neutral Crossing set dressing: basalt terraces, ember shards and one Builder rib.
 
-## Interpretations for review
+## Faction readings
+
+**Decided (2026-11-14): Forge rec** (B with A's emblems and C's machinery) and **Void rec**
+(B with A's ornament). Round G4's structures and minions were drawn with these two as style
+references. The other readings below are the record of what was considered.
 
 Each faction has three readings of the same identity, plus the mixes the earlier rounds
 suggested. All of them keep the shape rules and the [technology rule](#technology-that-looks-like-magic);
@@ -256,11 +258,11 @@ technology (round G3), as an establishing shot, a tower, a soldier and a materia
 | Forge A | Foundry Theocracy | Temple-foundries of heat-shield ceramic and gold-bronze around contained fusion furnaces; sun-disc collector emblems; white-gold light through lattices | Busy ornament; collector emblems drawn as dishes |
 | Forge B | Sun-Kiln Empire | Ziggurats that are solar megastructures: crazed cream and ochre heat-shield terraces, colossal collector mirrors, radiator colonnades | Mirrors dominate and read as satellite dishes |
 | Forge C | Iron Dawn | Colossal fusion engines and kinetic presses in basalt cliffs; banded drum reactors; lens towers | Industrial: beams and heat haze everywhere; darkest Forge |
-| **Forge rec** | **B + A emblems + C machinery** (recommended) | Sun-Kiln ziggurats, at most one collector disc per building, Iron Dawn machinery on towers and gates | Needs the "flat finned disc" rule |
+| **Forge rec** | **B + A emblems + C machinery** (decided) | Sun-Kiln ziggurats, at most one collector disc per building, Iron Dawn machinery on towers and gates | Needs the "flat finned disc" rule |
 | Void A | Observatory Order | Black composite monoliths that are gravity sensors, hovering rings round open domes, engraved star maps | Static; literal stars creep in |
 | Void B | Gravity Monastery | Terraces whose upper courses float with clear gaps, orbiting blocks, lensing ring gates, dust drifting up | Floating masses cost RT/BLAS refits if they move (static is fine) |
 | Void C | Obsidian Court | Mirror-smooth black metamaterial, tarnished silver, plum banners, floating crescents, bone-white masks | Highly reflective black (VAL-1); reads as a villain's court |
-| **Void rec** | **B + A ornament** (recommended) | The Gravity Monastery with the Observatory's hovering rings and fine engraved star maps | Violet seams drifting towards neon |
+| **Void rec** | **B + A ornament** (decided) | The Gravity Monastery with the Observatory's hovering rings and fine engraved star maps | Violet seams drifting towards neon |
 
 **What round G3 showed** (72 images on Nano Banana Pro, review app *Factions*):
 
@@ -305,11 +307,6 @@ before this revision ([boards/faction-mixes.jpg](boards/faction-mixes.jpg)). It 
 - **The 46 m base mock-ups are far too busy for a play surface** in both factions: gilt,
   domes and machinery everywhere. Ornament belongs on structures' upper thirds and the
   out-of-bounds skyline, not on the walkable base floor (VAL-2/VAL-4).
-
-> **Decision needed (maintainer): faction readings.** Pick one reading per faction, or a mix.
-> **Recommended (unchanged by the advanced-tech rounds): Forge rec** (B with A's emblems and
-> C's machinery) and **Void rec** (B with A's ornament). Rounds G4's structures and minions
-> were drawn with these two as style references.
 
 ## Concept boards
 

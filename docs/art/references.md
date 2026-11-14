@@ -1,7 +1,8 @@
 # References: named CC0 candidates
 
-**Version:** v0 draft, 2026-10-31. **Status:** for review. Agent-researched; the maintainer
-picks. Part of the [art bible](README.md).
+**Version:** v0, 2026-10-31. **Status:** approved 2026-11-14 as the candidate list.
+Agent-researched; the maintainer still picks each asset before it is fetched. Part of the
+[art bible](README.md).
 
 **What this is:** a list of **named candidate assets per need**: the HDRIs, textures, models
 and museum objects that match Ember Crossing and the two factions. **It is not a download
@@ -64,7 +65,7 @@ mood can be compared across times of day over the same terrain.
 
 | ID | Source | Licence | Max res. | What it's for | Thumb |
 |---|---|---|---|---|---|
-| [`rogland_sunset`](https://polyhaven.com/a/rogland_sunset) | Poly Haven | CC0 | 24K | Rocky arid Namaqualand desert at sunset, clear sky, low warm sun: the closest match to Golden Crossing (mood A, recommended). | y |
+| [`rogland_sunset`](https://polyhaven.com/a/rogland_sunset) | Poly Haven | CC0 | 24K | Rocky arid Namaqualand desert at sunset, clear sky, low warm sun: the closest match to Golden Crossing (mood A, decided). | y |
 | [`the_lost_city`](https://polyhaven.com/a/the_lost_city) | Poly Haven | CC0 | 24K | Low golden-hour sun raking across rocky formations, high contrast, partly cloudy; strong long shadows for cliff terraces. | y |
 | [`quarry_01`](https://polyhaven.com/a/quarry_01) | Poly Haven | CC0 | 16K | Sandy quarry at golden hour, warm low sun, long shadows; bare ground with no vegetation to colour the bounce light. | y |
 | [`kiara_8_sunset`](https://polyhaven.com/a/kiara_8_sunset) | Poly Haven | CC0 | 16K | Clear, high-contrast golden sunset over rocky ridges; useful for a hotter, more saturated variant. | y |

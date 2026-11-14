@@ -1,7 +1,8 @@
 # Silhouettes and scale
 
-**Status:** v0 draft, 2026-10-31. **Lead:** maintainer. Agents drafted the size classes and
-numeric rules; the review renders (roadmap §9.4) will check them.
+**Status:** v0 approved 2026-11-14. **Lead:** maintainer. Agents drafted the size classes and
+numeric rules; the maintainer approved them on 2026-11-14, and the review renders (roadmap
+§9.4) will check them.
 
 ## The camera sets the rules
 
@@ -37,16 +38,16 @@ not in faces or belts (those are for the 8 m zoom and showcase cameras).
 
 [boards/scale.jpg](boards/scale.jpg) draws every class at its true pixel size (view it at 100 %).
 
-> **Decision needed (maintainer): one hero scale or role-scaled heroes?** (a) **Role-scaled
-> S/M/L (recommended):** the size itself tells the role; (b) one height for all heroes, with
-> role carried by shape only. (b) is fairer for hit-box perception; (a) reads faster.
+**Decided (2026-11-14): role-scaled heroes.** Every hero is Hero S, M or L by role (the table
+above), so the size itself tells the role. *Considered:* one height for all heroes, with role
+carried by shape only (fairer for hit-box perception, but slower to read).
 
 ## Silhouette rules
 
 Tested by the review renders on a **flat single-value silhouette** at 1080p and 1440p, from
 the gameplay camera, at eight yaw angles.
 
-| Rule | What | Proposed threshold |
+| Rule | What | Threshold |
 |---|---|---|
 | **SIL-1** | Height is within the unit's class range | as the table |
 | **SIL-2** | Minions are clearly smaller than heroes | Minion height ≤ **0.8×** the smallest hero; no capes, halos or orbiting parts on minions |
@@ -62,7 +63,7 @@ the gameplay camera, at eight yaw angles.
 
 **Decided:** team identity on units is rim plus outline, never the unit's own colours.
 
-| Rule | What | Proposed |
+| Rule | What | Threshold |
 |---|---|---|
 | **RIM-1** | Rim in the lighting pass (roadmap §4.2), tinted by the player-relative team colour | Fresnel-based, width ≈ **1.5–2.5 px** at output resolution |
 | **RIM-2** | The rim survives darkness, fog and GI | Added after fog; doesn't scale with scene exposure below a floor |
@@ -70,10 +71,13 @@ the gameplay camera, at eight yaw angles.
 | **RIM-4** | No material, emissive or VFX makes a rim-like bright edge in a team hue | PAL-4 and PAL-5, checked on review renders |
 | **RIM-5** | The outline (overlay layer, after upscaling) follows the same colours | as `crates/client/src/app/outlines.rs` today |
 | **RIM-6** | It passes CON-2 in [palette-and-value.md](palette-and-value.md) | |
+| **RIM-7** | Allies get the rim but no outline; the outline is for enemies and the hovered unit | Default once RIM-6 passes (ADR-0023 §8c `team_layer_allies = rim`) |
 
-> **Decision needed (maintainer + designer): rim vs outline on allies.** Today outlines carry
-> the team colour. Options: (a) **rim on everyone, outline only on enemies and the hovered
-> unit (recommended):** less clutter in teamfights; (b) both on everyone; (c) outline only.
+**Decided (2026-11-14): rim on everyone; outline only on enemies and the hovered unit**
+(RIM-7), for less clutter in teamfights. Today outlines carry the team colour on every unit.
+The renderer keeps `rim+outline` on allies as its default until the rims pass CON-2, then
+switches to `rim` ([ADR-0023](../adr/0023-frame-architecture-materials.md) §8c).
+*Considered:* both on everyone, or outline only.
 
 ## Scale reference
 

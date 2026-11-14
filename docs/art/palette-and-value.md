@@ -1,8 +1,9 @@
 # Palette and value
 
-**Status:** v0 draft, 2026-10-31. **Leads:** maintainer and graphic designer. Agents drafted
-the numbers. Every threshold marked *proposed* waits for the maintainer and designer, and
-becomes a check ([checks.md](checks.md)).
+**Status:** v0 approved 2026-11-14. **Leads:** maintainer and graphic designer. Agents drafted
+the numbers; the maintainer approved every threshold here on 2026-11-14. Each becomes a check
+([checks.md](checks.md)); a threshold changes only by a later maintainer decision (for
+example after the first Ember Crossing captures).
 
 These swatches are **display colours** for boards and the review app. The authored PBR values
 (albedo as luma, roughness, metalness) and their per-class checks are in
@@ -29,9 +30,9 @@ as they are (`crates/client/src/hud/theme.rs`):
 | Team ally (colour-blind) | `#56B4E9` | 0.73 | 0.117 | 236 | 0.405 |
 | Team enemy (colour-blind) | `#E69F00` | 0.75 | 0.158 | 77 | 0.416 |
 
-> **Decision needed (designer + maintainer): keep green/blue/red?** It is the genre
-> convention and players expect it. **Recommendation: keep it for v0.** Revisit in the UI pass
-> ([ui-hud-typography.md](ui-hud-typography.md)), not here.
+**Decided (2026-11-14): green/blue/red stay for v0.** It is the genre convention and players
+expect it. The designer may propose a change in the UI pass
+([ui-hud-typography.md](ui-hud-typography.md)); that would be a new maintainer decision.
 
 ### Reserved team-colour zones
 
@@ -44,7 +45,7 @@ So the warm desert and the Forge's brass sit **inside** the zones. That's fine b
 are low-chroma: brass is C 0.08 against the colour-blind enemy's 0.16 at the same hue. The
 rule is a **chroma budget**, not a hue ban.
 
-| Rule | Proposed threshold |
+| Rule | Threshold |
 |---|---|
 | **PAL-1** Ground in playable space (terrain layers, ground decals) | C ≤ **0.06** (p99 of texels) |
 | **PAL-2** Every other surface: units, structures, props | C ≤ **0.08** (p99). The least saturated team colour (colour-blind sky, C 0.117) keeps a ≥ 1.45× gap |
@@ -60,7 +61,7 @@ These apply to authored albedo and emissive (`content-check`) and to the rendere
 Units must read against the ground in a flat-lit, single-value silhouette (roadmap §4). So
 the ground is kept in a narrow mid band, and units are allowed to go lighter or darker than it.
 
-| Rule | What | Proposed threshold |
+| Rule | What | Threshold |
 |---|---|---|
 | **VAL-1** | Terrain-layer albedo (authored) in playable space | OKLCH L **0.32–0.62** (about sRGB 55–150 on a grey) |
 | **VAL-2** | Rendered ground luminance in playable space, after grading, on every tier | Mean OKLab L **0.30–0.58**; 5th–95th percentile range ≤ **0.30** |
@@ -76,7 +77,7 @@ PAL-1 to PAL-5 in playable space.
 Measured by the headless readability captures (roadmap §4.4) on standard scenes: a hero, a
 minion wave and a tower on each terrain layer, under each lighting mood, on every tier.
 
-| Rule | What | Proposed threshold |
+| Rule | What | Threshold |
 |---|---|---|
 | **CON-1** | Hero silhouette vs the surrounding ring (3× its bounding box), **without rims** | \|ΔL\| ≥ **0.10** (mean OKLab L) |
 | **CON-2** | The same **with team rims** | \|ΔL\| ≥ **0.15**, and the rim pixels reach C ≥ **0.10** within ±15° of the team hue |
@@ -86,7 +87,7 @@ minion wave and a tower on each terrain layer, under each lighting mood, on ever
 
 ## 4. Colour-blind safety
 
-| Rule | What | Proposed threshold |
+| Rule | What | Threshold |
 |---|---|---|
 | **CB-1** | Team pairs (self/ally/enemy) under simulated protanopia, deuteranopia and tritanopia (Machado 2009), in both palettes | ΔE_OK ≥ **0.15** between every pair |
 | **CB-2** | No faction or environment accent may become confusable with a team colour under simulation | ΔE_OK ≥ **0.10** from every simulated team colour, for accents with C > 0.08 |
@@ -94,7 +95,7 @@ minion wave and a tower on each terrain layer, under each lighting mood, on ever
 
 The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the same thing.
 
-## 5. Faction palettes (draft)
+## 5. Faction palettes
 
 ### Solar Forge: warm metals, cream stone, white-gold light
 
@@ -122,11 +123,13 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 | Void-glass core (emissive) | `#D9CCFF` | 0.87 | 0.071 | 297 | Light sources |
 | Void-glass edge (emissive) | `#A08CD0` | 0.68 | 0.100 | 297 | Thin rims and cracks only (PAL-5) |
 
-> **Decision needed (maintainer + designer): how dark may the Void get?** Its bodies are
-> L 0.25–0.30, below the ground band (VAL-1), which keeps it distinct from the Forge. The
-> risk is a dark blob on dark basalt. Options: (a) **dark bodies plus a mandatory bone or
-> silver element on every Void unit, ≥ 10 % of its projected area (recommended)**; (b) lift
-> the Void to mid-grey ceramics (safer, less identity); (c) leave it to CON-1 alone.
+**Decided (2026-11-14): dark bodies plus mandatory pale elements.** Void bodies stay at
+L 0.25–0.30, below the ground band (VAL-1), which keeps them distinct from the Forge. Against
+the risk of a dark blob on dark basalt, **every Void unit carries a bone or silver element of
+≥ 10 % of its projected area** (VOID-1 in [checks.md](checks.md)). Void heroes also meet the
+material rule in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void) (luma
+floor 45, ≥ 15 % light material). *Considered:* lifting the Void to mid-grey ceramics (safer,
+less identity), or leaving it to CON-1 alone.
 
 ## 6. Ember Crossing palette (map 1)
 
@@ -134,16 +137,19 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 |---|---|---|---|---|---|
 | Basalt | `#3E3B38` | 0.35 | 0.007 | 68 | Cliffs, terraces, rampart bases |
 | Ash ground | `#5B4C44` | 0.43 | 0.024 | 50 | Base terrain layer |
-| Lane grit | `#7E5A47` | 0.50 | 0.056 | 49 | Trodden lanes |
+| Lane grit | `#906B58` | 0.56 | 0.055 | 48 | Trodden lanes: lifted to luma about 115, a value step above the ash ground (LANE-1) |
 | Desert sand | `#B39A7C` | 0.70 | 0.051 | 72 | Drifts, off-lane, high ground |
 | Ember crystal, today | `#FF6B1A` | 0.70 | **0.198** | 43 | Breaks PAL-4: sits between the enemy red and the colour-blind enemy orange |
-| Ember crystal, proposed | `#FFD9A8` | 0.91 | 0.076 | 74 | White-gold core; colour comes from a thin orange **rim** in the crystal facets (≤ 3 % area) |
+| Ember crystal core (emissive) | `#FFE6BE` | 0.94 | 0.059 | 80 | White-gold core, within PAL-4; the same emissive as the material vocabulary's ember crystal |
 
-> **Decision needed (maintainer): the ember crystals.** The orange crystals are the map's
-> signature, but at C 0.20 they look like enemy colour, which is the exact mistake §4 exists
-> to stop. Options: (a) **white-gold cores with small orange facet rims, kept off the lanes
-> (recommended)**; (b) keep the orange but only on props more than 12 m from any lane;
-> (c) shift the crystals to the free teal band (C ≤ 0.13): very readable, but it loses "ember".
+**Decided (2026-11-14): white-gold ember cores.** The orange crystals were the map's
+signature, but at C 0.20 they look like enemy colour, which is the exact mistake §4 exists to
+stop. The core is white-gold (PAL-4, ≤ +1 EV); orange survives only as a thin,
+**non-emissive** facet rim, ≤ 3 % of the crystal's area and within PAL-3; and the crystals
+are kept off the lanes (EMB-1 in [checks.md](checks.md)). The earlier display swatch for the
+whole crystal, `#FFD9A8` (C 0.076), sat above PAL-4 and is replaced by the core above.
+*Considered:* orange kept on props more than 12 m from any lane, and crystals in the free
+teal band (very readable, but it loses "ember").
 
 ## 7. Grading
 

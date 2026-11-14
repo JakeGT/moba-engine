@@ -1,7 +1,9 @@
 # Lighting mood: Ember Crossing (map 1)
 
-**Status:** v0 draft, 2026-10-31. **Lead:** maintainer. Agents drafted the options as
-concrete bake inputs so each one can be baked, rendered and compared.
+**Status:** v0 approved 2026-11-14. **Lead:** maintainer. Agents drafted the options as
+concrete bake inputs so each one can be baked, rendered and compared. **Decided
+(2026-11-14):** map 1's gameplay mood is **A, Golden Crossing**, with no time-of-day or
+weather variant for the slice.
 
 **Fixed constraints (roadmap §1, §4, §6.1):**
 - Lighting is **fixed per map and baked**: GPU path-traced GI on every tier. Ray tracing adds
@@ -36,11 +38,11 @@ cargo run -q --release -p moba-tools --bin env-bake -- bake --preset ember --siz
 
 ## The options
 
-| | **A. Golden Crossing** (recommended) | **B. Ember Dusk** (today) | **C. Hazy Noon** | **D. Dust Veil** |
+| | **A. Golden Crossing** (decided) | **B. Ember Dusk** (today) | **C. Hazy Noon** | **D. Dust Veil** |
 |---|---|---|---|---|
 | Idea | Late afternoon. A low, warm but not red sun; long readable shadows; a dusty blue sky | Today's look: the sun near setting, a red-orange world | High sun through heat haze; bleached and harsh | A diffuse overcast of suspended dust and ash |
 | Sun elevation | **28°** | 25° | 60° | ~35° (soft) |
-| Sun azimuth | West-south-west (behind the Forge base, if the Forge holds the west) | West-south-west | West, high | West, diffuse |
+| Sun azimuth | West-south-west (behind the Forge base, which holds the west) | West-south-west | West, high | West, diffuse |
 | `sun_dir` | `-0.885, 0.532, 0.465` | `-0.6, 0.35, 0.45` | `-0.35, 0.87, 0.35` | `-0.70, 0.50, 0.50` |
 | `sun_color` (linear) | `2.6, 1.55, 0.85` | `2.4, 0.9, 0.3` | `2.2, 2.0, 1.75` | `0.9, 0.75, 0.55` |
 | `zenith` | `0.16, 0.22, 0.36` | `0.20, 0.07, 0.05` | `0.30, 0.40, 0.55` | `0.55, 0.45, 0.35` |
@@ -62,15 +64,13 @@ cargo run -q --release -p moba-tools --bin env-bake -- bake --preset ember --siz
 | **Readability risk** | Low–medium: long tower shadows need the VAL-3 floor | **High:** the red-orange light pushes the board's chroma towards the enemy hues (PAL-1) and tints rims | **Low:** best contrast, least drama, flattest form | **High:** low contrast and fog; needs the ranked caps |
 | **Photoreal payoff** | High: raking light shows material, GI bounce off sand | High but monotone | Medium: harsh speculars | Medium: soft, moody |
 
-**Recommendation: A, Golden Crossing,** as map 1's gameplay mood. Keep B as a reference and
-cinematic grade, C as the readability baseline in tests, and D as an optional casual weather
-variant (roadmap §6.5) with ranked caps.
+**Decided (2026-11-14): A, Golden Crossing,** is map 1's gameplay mood. B stays as a
+reference and cinematic grade, and C as the readability baseline in tests.
 
-> **Decision needed (maintainer): map 1's gameplay mood** — A (recommended), B, C or D.
-
-> **Decision needed (maintainer): is there a time-of-day or weather variant?** Lighting is
-> baked and fixed per map, so a variant is a second bake of the same map, not a dynamic
-> cycle. **Recommendation:** none for the slice; consider D as a casual-only variant after A4.
+**Decided (2026-11-14): no time-of-day or weather variant for the slice.** Lighting is baked
+and fixed per map, so a variant is a second bake of the same map, not a dynamic cycle. D (Dust
+Veil) may be proposed as a casual-only variant (roadmap §6.5), with the ranked caps above,
+after A4; that would be a new maintainer decision.
 
 ## First measurements (Compat renderer, 2026-10-31)
 
@@ -88,8 +88,8 @@ Values are OKLab over the playable ground at the screen centre (HUD and tower ex
 | D. Dust Veil | 0.54 | 0.45–0.71 | 0.27 | 0.067 | 0.101 |
 
 What this says:
-- **Value (VAL-2):** every mood's mean sits in the proposed 0.30–0.58 band. Hazy Noon's
-  spread (0.34) is over the proposed 0.30, from its bright sunlit patches.
+- **Value (VAL-2):** every mood's mean sits in the 0.30–0.58 band. Hazy Noon's
+  spread (0.34) is over the 0.30 limit, from its bright sunlit patches.
 - **Chroma (PAL-1, C ≤ 0.06 on the ground):** **today's Ember ground fails in every mood**
   (p99 0.08–0.12). The cause is the stylised content (an orange-tinted terrain, the rust lane
   layer and an orange grading LUT), not the sky. Mood A is no worse than today (B), and it
@@ -101,20 +101,20 @@ What this says:
 **Concept images agree:** AI aerials of the same four moods
 ([boards/ember-concepts.jpg](boards/ember-concepts.jpg)) all paint the lane a saturated rust
 red. Measured on three of them, the lane's median chroma is **C 0.10–0.11 at hue 15–55°**:
-inside the enemy-red zone and about twice the proposed lane grit (`#7E5A47`, C 0.056). The
+inside the enemy-red zone and about twice the draft lane grit (`#7E5A47`, C 0.056). The
 ground p99 is 0.115–0.132. The lane is the part of the board most likely to break PAL-1, in
 concept art and in today's content alike, so the photoreal lane material must be specified
 desaturated from the start. **Round 3** prompted the same mood with "a muted grey-brown
 road, not red". The ground's median chroma fell to **0.027** and its p99 to **0.070–0.098**.
 That is close to the cap, and it shows a calm lane still reads as a lane.
 
-> **Decision needed (maintainer): the ground chroma cap.** Keep PAL-1 at 0.06 and treat
-> today's Ember content as needing the photoreal rework (recommended); or set the cap from
-> these measurements (≈ 0.10 p99) and accept a warmer, more saturated board.
+**Decided (2026-11-14): PAL-1 stays at C ≤ 0.06.** Today's Ember content needs the photoreal
+rework (CC0 ground materials and a neutral grade) to pass it. *Considered:* setting the cap
+from these measurements (≈ 0.10 p99) and accepting a warmer, more saturated board.
 
 ## Exposure lock
 
-| Rule | Proposed |
+| Rule | Threshold |
 |---|---|
 | **EXP-1** Ranked and tournament | `auto_exposure = false`; fixed EV per mood |
 | **EXP-2** Casual | Auto exposure allowed, clamped to **±0.5 EV** (today ±1.0) |
