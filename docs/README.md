@@ -30,6 +30,7 @@
   [next-gen foundations (N0)](adr/0020-next-gen-foundations.md),
   [temporal foundation, upscaling and overlay layer (N1)](adr/0021-temporal-upscaling-overlay.md)
   and [frame architecture and materials (N2)](adr/0023-frame-architecture-materials.md).
+  Proposed: [baked lighting (N3)](adr/0026-baked-lighting.md).
 - [Development notes](dev/) — software Vulkan setup and local workflow.
 - [Agent instructions](../AGENTS.md), [agentic coding runbook](agents.md) and
   [local agent environment](../agents.local.example.md).
