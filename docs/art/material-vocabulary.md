@@ -75,15 +75,15 @@ that only reads through its micro-detail is the wrong material for gameplay spac
 
 **`L_ref`, the reference luminance.** Under ADR-0011's units a white Lambert surface facing the
 sun shows `albedo × sun`. `L_ref` is the map's lane material in direct sun:
-`L_ref = lane albedo (linear) × sun_intensity × sin(sun elevation)`. For Ember Crossing with a
-lane albedo of linear 0.11 and Golden Crossing's sun at 28° elevation,
-`L_ref ≈ 0.052 × sun_intensity`, so a faction accent may emit at most about
-`0.10 × sun_intensity` (linear). (The lifted lane target in §3.3, linear about 0.17, raises
-`L_ref` in proportion; the check computes it from the shipped lane material.) A low sun dims
-the ground, so the same emissive reads brighter on a low-sun map; checking against every
-shipped map's `[lighting]` table covers that. As an illustration only: with a physical sun of
-about 100,000 lux at normal incidence (about 47,000 lux on flat ground at 28°) the sunlit lane
-is about 1,600 cd/m², so +1 EV is about 3,300 cd/m².
+`L_ref = lane albedo (linear) × sun_intensity × sin(sun elevation)`. For Ember Crossing with the
+decided lane target below (`#906B58`, linear about 0.17) and Golden Crossing's sun at 28°
+elevation, `L_ref ≈ 0.080 × sun_intensity`, so a faction accent may emit at most about
+`0.16 × sun_intensity` (linear). (With the draft lane, linear 0.11, it was about 0.052: lifting
+the lane raised every emissive cap by about 55 %.) A low sun dims the ground, so the same
+emissive reads brighter on a low-sun map; checking against every shipped map's `[lighting]`
+table covers that. As an illustration only: with a physical sun of about 100,000 lux at
+normal incidence (about 47,000 lux on flat ground at 28°) the sunlit lane is about
+2,600 cd/m², so +1 EV is about 5,100 cd/m².
 
 **Decided (2026-11-14): albedo ranges are measured per texel as luma, at the p1/p99
 percentiles.** *Considered:* every channel of every texel (rejects measured brass and gold),
@@ -261,9 +261,10 @@ silver, bone inlay) (PBR-VOID-1). Every Void unit also carries the palette's pal
 (≥ 10 % of projected area: VOID-1, [palette §5](palette-and-value.md#5-faction-palettes)).
 Body materials sit at luma 39–58, near the G1 floor, and in the shade of an Ember Crossing
 cliff a Void hero could otherwise merge with basalt (`71`). Shape and material should
-separate the factions without leaning entirely on team rims. **Open:** two targets in the
-table above sit below the floor, obsidian metamaterial (`42`) and Void lacquer (`39`); whether
-they rise to 45 or are kept off heroes is for the maintainer ([README](README.md#open)).
+separate the factions without leaning entirely on team rims. **Open:** three rows in the
+table above sit below the floor: obsidian metamaterial, polished (`42`), obsidian, knapped
+(facets `42`) and Void lacquer (`39`). Whether they rise to 45 or are kept off heroes is for
+the maintainer ([README](README.md#open)).
 
 ### 3.3 Environment: Ember Crossing
 
@@ -510,7 +511,7 @@ The numbering is kept because other documents cite it.
 | 9 | Forge emissive colour | §3.1 | White-gold, C ≤ 0.06 |
 | 10 | Heat tint and the blue band | §3.1 | Straw to purple only in play |
 | 11 | Void emissive hue | §3.2 | Violet main, teal secondary |
-| 12 | How dark the Void may go | §3.2 | (c): rims and outlines, plus luma floor 45 and ≥ 15 % light material per hero (floor vs two targets open) |
+| 12 | How dark the Void may go | §3.2 | (c): rims and outlines, plus luma floor 45 and ≥ 15 % light material per hero (floor vs three targets open) |
 | 13 | Lane redness | §3.3 | C ≤ 0.06, h 44–55°, lane lifted to luma about 115 (the leading option for the value step) |
 | 14 | Ember crystals | §3.3 | Dark body, white-gold core ≤ +1 EV (a gameplay state may reach +2 EV) |
 | 15 | Bronze patina colour | §4 | Statuary brown-black in play |
