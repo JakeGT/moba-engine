@@ -227,9 +227,15 @@ scripts/tiered-goldens.sh`.
 code (run 43623389792 on `db68822`, docs and hashes only since `7bdff2e`) matched all four
 FSR 3.1 hashes (`tiered-temporal`) and TAAU's four (`renderer-gate`). In run 41667430134
 `tiered-temporal` ran on an AMD EPYC 9V45 and `renderer-gate` on an EPYC 9V74 (both
-`avx512f`: yes); in run 43623389792 both ran on an AMD EPYC 7763 (`avx512f`: no). On this
-code, then, llvmpipe's output did not depend on the runner's CPU. (#369 saw hashes change
-between runs on its own code; that is tracked separately and not reproduced here.) A local lavapipe frame log on the
+`avx512f`: yes); in run 43623389792 both ran on an AMD EPYC 7763 (`avx512f`: no), so across
+these AMD models, with and without AVX-512, llvmpipe's output did not change. **An Intel
+runner renders other bytes:** run 43638594476 on `f5e1d4c` (the same render code) put
+`tiered-temporal` on an Intel Xeon Platinum 8370C (`avx512f`: yes). Every capture was still
+byte-identical across its two runs, but all four FSR 3.1 hashes differed (fsr3-low
+`fce460e8…`, fsr3-high `ec1b092b…`, fsr3-native `516da6eb…`, fsr3-overlay `56126ac6…`), so
+the job failed. The hash file keys on lavapipe's device line only; per-CPU-class hashes
+(AMD and Intel) are ADR-0021 amendment 6's (#374), and this PR's FSR 3.1 Quality hashes are
+regenerated for both classes under it once it merges. A local lavapipe frame log on the
 branch confirms the cause: FSR 3.1 Quality at 640×360 renders `render=426x240` at scale
 0.667, where `657a7ab`'s `dynres::render_extent` rounds to 427×240.
 
