@@ -4,7 +4,9 @@
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-02)). N1a is built
 ([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), and FSR 3.1
-runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)). Proposed 2026-10-31. This is phase N1 of the
+runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)); the
+tiered goldens' exact hashes are per CPU class
+([Amendment 6](#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class)). Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
 - **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
@@ -848,7 +850,8 @@ These follow roadmap §10 and ADR-0020's gates, applied to N1.
 4. **Goldens.**
    - Every Compat golden is byte-identical.
    - The new tiered goldens (§7) are byte-identical across two lavapipe runs, with
-     validation and sync validation clean.
+     validation and sync validation clean. *(Amendment 6: their exact hashes on CI are per
+     CPU class, AMD or Intel.)*
 5. **Back ends.**
    - DLSS SR on the RTX 5070 Ti (Linux) and in `windows-vm`.
    - XeSS (DP4a) in `windows-vm`.
@@ -1403,7 +1406,11 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
      `tiered-temporal` with a message to regenerate the file with `WRITE_HASHES=1` from the
      run's artifact, because it is FSR 3.1's only regression check. TAAU, in the required
      `renderer-gate`, warns and keeps its fingerprints, so a runner change cannot make the
-     required gate flaky;
+     required gate flaky. *(Superseded in part by
+     [amendment 6](#amendment-6-2026-11-14-the-tiered-exact-hashes-per-cpu-class): the same
+     lavapipe renders other bytes on Intel than on AMD runners, so the file is keyed on the CPU
+     class as well, and a missing class fails every back end; regenerate per amendment 6
+     item 5.)*;
    - the 64×36 fingerprints (`render-tiered-fsr3-*-fingerprint.rgb`, written from CI's
      output). **They do not catch an FSR 3.1 regression:** at mean ≤ 2.0 and max ≤ 24 they
      cannot tell FSR 3.1 from TAAU (mean 0.22–0.38, max 3–6 apart, per the round-2 review),
@@ -1528,6 +1535,104 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
     required `renderer-gate`, because they guard the default frame. **`tiered-temporal`
     should become a required check**, which is a repository ruleset change for the
     maintainer; until then FSR 3.1's CI cases do not block a merge.
+
+### Amendment 6 (2026-11-14): the tiered exact hashes per CPU class
+
+*Numbering: amendment 5 is reserved for #365 (N1c, vendor upscalers), which is open. When it
+lands it inserts its amendment above this one and updates the status line at the top.*
+
+Recorded in `test/tiered-golden-cpu` (#374). Amendment 4 item 7 keyed the exact SHA-256s of
+the tiered goldens on CI's lavapipe (device name, Vulkan version, Mesa and LLVM versions) and
+assumed one lavapipe renders one set of bytes. It does not: on the same pinned image and
+device string, CI renders **one set of bytes on AMD runners and another on Intel runners**.
+#369's runs flipped between two values per capture (TAAU low `64e7f21c…` or `02f3c849…`,
+FSR 3.1 low `7028ce84…` or `90364321…`), always byte-identical within a run, which failed
+the required `renderer-gate` on some attempts and passed it on others.
+
+1. **The evidence.** `scripts/tiered-goldens.sh` now prints the runner's CPU (vendor,
+   family/model, AVX2/FMA/AVX-512 flags, `nproc`) next to every capture's full SHA-256. Main's
+   render code (`657a7ab`) on CI's `ubuntu-26.04` lavapipe, `llvmpipe (LLVM 21.1.8, 256 bits)
+   api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)`, 4 vCPUs on every runner:
+
+   | Runner CPU | Family/model | AVX-512 | Runs | TAAU low | FSR 3.1 low | Set |
+   |---|---|---|---|---|---|---|
+   | AMD EPYC 7763 (Zen 3) | 25 / 1 | no | 4 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
+   | AMD EPYC 9V74 (Zen 4) | 25 / 17 | yes | 5 sampler | `31b525c6…` | `3a0c1b01…` | AMD |
+   | AMD EPYC 9V45 (Zen 5) | 26 / 2 | yes | 1 sampler, 2 `tiered-temporal` (FSR), 1 `renderer-gate` (TAAU) | `31b525c6…` | `3a0c1b01…` | AMD |
+   | Intel Xeon 6975P-C (Granite Rapids) | 6 / 173 | yes (+FP16) | 2 sampler, 1 `renderer-gate` (TAAU) | `5efbb97d…` | `49f1afa0…` | Intel |
+   | not logged (#373's `renderer-gate`, job 132542577022) | – | – | 1 (TAAU) | `5efbb97d…` | – | Intel |
+
+   Runs 43627278470 and 43630461431. #373 changed no render code, so its failure was main's
+   own Intel bytes. The AMD set is amendment 4's hashes (the file's only set until now).
+   "Sampler" is a temporary six-runner matrix job in #374's draft (TAAU and FSR 3.1 on the
+   same runner), removed before merge; item 5's dispatch-only `tiered-hash-sample` replaces
+   it. In run 43630461431 (`a454ea1`, the class-keyed checker; later commits only add failure
+   paths and messages) every runner passed its own section exactly, Intel and AMD, and the
+   same runners failed loudly with their own section removed from the file.
+
+   Every other capture (high, native, overlay, for both back ends) follows its low capture's
+   set, and the two captures of each pair were byte-identical in every run. **AVX-512 does
+   not explain the AMD/Intel split**: the EPYC 7763 (Zen 3, without it) matches Zen 4 and
+   Zen 5 (with it). Supporting only: with Mesa's `GALLIUM_OVERRIDE_CPU_CAPS=avx` (which clears
+   llvmpipe's `has_avx512f`; the caps were dumped without the override, `has_avx512f = 1`, not
+   with it), each of run 43627278470's six sampler runners rendered the same FSR 3.1 bytes as
+   without it. **Only one Intel model has been seen** (the 6975P-C), so another Intel model
+   could still prove to be its own class.
+2. **Why (most likely).** llvmpipe's JIT uses x86's approximate reciprocal square root
+   (`llvm.x86.avx.rsqrt.ps.256` and `llvm.x86.sse.rsqrt.ps` are in the bundled local
+   `libvulkan_lvp.so`; CI's Mesa 26.0.8 build was not inspected). RSQRTPS is specified only to
+   a relative error of 1.5 × 2⁻¹², and Intel and AMD implement it with different tables, so
+   its bits, and every pixel downstream of a normalize or a reciprocal square root, depend on
+   the vendor. This is deterministic per vendor: it is not a race, uninitialised memory, a
+   missing barrier or threading (`LP_NUM_THREADS` is untouched). The mechanism is inferred
+   from the evidence above, not traced instruction by instruction.
+3. **The hashes are keyed on device and CPU class.** `tests/golden/render-tiered-hashes.txt`
+   has one section per key, a `device <device> cpu=<class>` line followed by
+   `<capture> <sha256>` lines. The class is the vendor from `/proc/cpuinfo` (`amd`,
+   `intel`; another vendor is its own class). The script checks the section matching the
+   runner. Both sections were filled from #374's CI artifacts (sha256 of the downloaded
+   captures), the AMD one equal to amendment 4's hashes, so main's own render code is checked
+   exactly on both classes.
+4. **What fails, and what only warns.** On CI, `tiered-goldens.sh` fails **every back end**,
+   TAAU in the required `renderer-gate` included, with an `::error::` that names the cause:
+   - `vulkan-probe` named no device;
+   - the hash file is missing or has no `device` section;
+   - the device is in the file but this runner's CPU class has no section (the error names
+     the class, the recorded ones and the section to add). A new CPU vendor on GitHub's
+     runners therefore fails the required gate until its section is added;
+   - the file is in the old format (a `device` line without `cpu=`), so a merge that keeps an
+     old file cannot silently drop the check. `WRITE_HASHES=1` refuses such a file too.
+
+   A **real device change** (the image's Mesa or LLVM moved, so the device line is not in the
+   file) is unchanged from amendment 4 item 7: every class needs regenerating, FSR 3.1 fails
+   (its only regression check) and TAAU warns and keeps its fingerprints. Off CI, another
+   device or a failed probe is skipped with a log line. A mismatch on a **recorded** class is
+   a code change, or a sign that the vendor key is too coarse (the log's CPU line says
+   which): refine the key rather than overwrite the section.
+5. **Regenerating** (any change that alters tiered pixels on purpose, such as #365 or #369).
+   **A pixel-changing PR does not merge until both sections are filled from its own code.**
+   1. Push the change. Each of `renderer-gate` (TAAU) and `tiered-temporal` (FSR 3.1)
+      prints `cpu: … (class amd|intel)` and `sha256: <capture> <hash>` for every capture, and
+      its artifact (`render-golden`, `tiered-temporal`) holds `tiered-goldens/hashes-taau.txt`
+      or `hashes-fsr3.txt`: the run's section (its `device … cpu=<class>` line and hashes,
+      with failed captures as `# FAILED`). **A mismatching run's artifact already holds that
+      class's section**; no rerun is needed for it.
+   2. For the class the PR's runs did not land on (usually Intel), dispatch the sampler once:
+      `gh workflow run render-golden.yml --ref <branch> -f cpu_sample=true`. It runs only the
+      tiered goldens, TAAU and FSR 3.1, on eight runners, and its `tiered-hash-sections` job
+      merges them into one section per class (artifact `tiered-hash-sections`, also in the run
+      summary), failing if two runners of one class disagree. If a class is still missing,
+      dispatch again. Rerunning a job until it lands on the other class also works but costs
+      far more.
+   3. Paste each class's lines into its section of `tests/golden/render-tiered-hashes.txt`
+      (sorted, `LC_ALL=C`), checking them against `sha256sum tiered-goldens/*-1.ppm` of the
+      downloaded artifact if in doubt.
+   4. Push; both jobs must print `ok: tiered <capture>: exact hash`. Never fill a section from
+      a local run: no local lavapipe is CI's. `WRITE_HASHES=1` runs only on CI (or with
+      `ALLOW_LOCAL_HASHES=1` against a scratch `TIERED_HASHES` file) and rewrites only that
+      runner's section.
+6. **Unchanged:** the 64×36 fingerprints, the two-run byte-identity, the Compat goldens (byte
+   for byte), and the simulation, wire, replays and state hash.
 
 ## Sources
 

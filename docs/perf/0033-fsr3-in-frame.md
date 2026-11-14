@@ -100,22 +100,25 @@ and no AA): nine captures, one hash (`4adde3f7af91db8c`). Each FSR case checks i
   end, then checks:
   - **an exact SHA-256** per capture against `tests/golden/render-tiered-hashes.txt`, generated
     from CI's artifact for `d9c2d6a` (the same hashes as `c0ff307`'s, so stable across runs
-    on CI). It applies only on the lavapipe named in the file (device name, Vulkan version and
+    on CI runners of the same CPU vendor; ADR-0021 amendment 6). It applies only on the lavapipe named in the file (device name, Vulkan version and
     driver info, read with `vulkan-probe --json`: `llvmpipe (LLVM 21.1.8, 256 bits)
     api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)` on the pinned `ubuntu-26.04`
     image). Elsewhere the script prints "exact hashes: skipped", except on CI for FSR 3.1,
     where a mismatch fails `tiered-temporal` with a message to regenerate the file (TAAU, in
-    the required `renderer-gate`, warns instead);
+    the required `renderer-gate`, warns instead). *(ADR-0021 amendment 6: CI's lavapipe
+    renders other bytes on Intel runners than on AMD ones; these are the AMD hashes, and the
+    file now has an AMD and an Intel section. On the pinned lavapipe, a CPU class without a
+    section fails every back end, TAAU included.)*;
   - the 64×36 fingerprint, on any lavapipe. It does not catch an FSR 3.1 regression (below).
 - **Why CI's bytes differ from a local run.** SHA-256 prefixes of the captures:
 
-  | Scene | CI (lavapipe, LLVM 21.1.8) | Local (lavapipe, LLVM 23.1.3) |
-  |---|---|---|
-  | FSR 3.1 low | `3a0c1b01…` | `7a7bd71f…` |
-  | FSR 3.1 high | `41d3f992…` | `f2afb134…` |
-  | FSR 3.1 native | `80729430…` | `09723141…` |
-  | FSR 3.1 overlay | `bf074c91…` | `65662194…` |
-  | TAAU low | `31b525c6…` | `91f51690…` |
+  | Scene | CI AMD (lavapipe, LLVM 21.1.8) | CI Intel (same, amendment 6) | Local (lavapipe, LLVM 23.1.3) |
+  |---|---|---|---|
+  | FSR 3.1 low | `3a0c1b01…` | `49f1afa0…` | `7a7bd71f…` |
+  | FSR 3.1 high | `41d3f992…` | `3a11501e…` | `f2afb134…` |
+  | FSR 3.1 native | `80729430…` | `516da6eb…` | `09723141…` |
+  | FSR 3.1 overlay | `bf074c91…` | `47d1131b…` | `65662194…` |
+  | TAAU low | `31b525c6…` | `5efbb97d…` | `91f51690…` |
 
   llvmpipe compiles shaders with LLVM, and the two versions generate different code, so the
   raw bytes differ for TAAU as much as for FSR 3.1; both are byte-identical run to run on

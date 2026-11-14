@@ -1,5 +1,9 @@
-# SHA-256 of the tiered captures (scripts/tiered-goldens.sh) on this device only.
-device llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8)
+# SHA-256 of the tiered captures (scripts/tiered-goldens.sh), one section per lavapipe device
+# and CPU class (ADR-0021 amendment 6): CI's lavapipe renders different bytes on Intel and on
+# AMD runners (most likely llvmpipe's RSQRTPS, whose bits are the vendor's own). Fill a
+# section from a CI run on that class only (its artifact's hashes-*.txt, or sha256sum of its
+# *-1.ppm captures); never from a local run or local WRITE_HASHES=1.
+device llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8) cpu=amd
 fsr3-high 41d3f99269d5947ec25d19713728fdb04501f9014ea1807e01f3a28910314cb4
 fsr3-low 3a0c1b01aefdb549e3139c1bd100e32cea0ad9633cc170060f60cbd6e4fc54ee
 fsr3-native 8072943038e49b3732d4d698e78b8c273e4e5d13c522b97a379d55bd2b5b57bd
@@ -8,3 +12,12 @@ high e5134ca77106b3cae3a39dcbd102c4432835d551a0b65751aa7856c10ebbc507
 low 31b525c61195300aaafc6877bd76941cf362696baba19cf097d6cf5e1c30ac56
 native 730c513ac7d8cb8fb82b4601ed958df2476a21c7e1b2712666931d07c00af543
 overlay a9fb00f0fe4b4dce06d5311e511363d751fe74921189ccb20e5a9b6e082288d7
+device llvmpipe (LLVM 21.1.8, 256 bits) api=1.4.335 driver=Mesa 26.0.8-1ubuntu0.3 (LLVM 21.1.8) cpu=intel
+fsr3-high 3a11501ed7c0e347beaff5ffca4d948f019f07776c035de9b3dde0a709a318d6
+fsr3-low 49f1afa0d81205a5268432dcf336b32e0442d7afda0a7295146ff3c24a55ef89
+fsr3-native 516da6eb38b0b2ceb033bb1c9add596f7c2a41fc8a390bcf25e970c8ba5fa1da
+fsr3-overlay 47d1131bd01a02255e753bdd931305d18ae5853f2d37ac2a001fc89a985f47ee
+high 0f635184549a2264dd27e4768c1e917ccf2101112d5595b24aff58dad0189807
+low 5efbb97d8bc4a7046647d9eafcadb9a1a0ba06ce0ff9170d4500dea67035cb32
+native 3a06d29485fd3638dbea6952d2445598bc2e86c8e77c764976c6dca855516bd8
+overlay 3a4714710ff6f9a003bce1e3de484d6202ff400a5220e3e1510c80eee042d2c3
