@@ -923,21 +923,24 @@ fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    {
+    let file = {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(|error| {
-        // `O_NOFOLLOW` on a symlink fails with `ELOOP` (Linux, macOS) or `EMLINK` (FreeBSD).
-        #[cfg(unix)]
-        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::EMLINK)) {
-            return std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "is a symlink; only a plain file is read",
-            );
-        }
-        error
-    })?;
+        options.open(path).map_err(|error| {
+            // `O_NOFOLLOW` on a symlink fails with `ELOOP` (Linux, macOS) or `EMLINK`
+            // (FreeBSD).
+            if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::EMLINK)) {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "is a symlink; only a plain file is read",
+                )
+            } else {
+                error
+            }
+        })?
+    };
+    #[cfg(not(unix))]
+    let file = options.open(path)?;
     if !file.metadata()?.file_type().is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
