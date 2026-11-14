@@ -53,8 +53,8 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-11-14 | **Heroes are free agents** | Maintainer (approval above) |
 | 2026-11-14 | Ember crystals: **white-gold cores** with small orange facet rims, kept off the lanes | Maintainer (approval above) |
 | 2026-11-14 | The ember facet rim is **non-emissive** (PAL-3 accent ≤ 3 %); the core swatch is `#FFE6BE` | (derived by the agent; for the maintainer to confirm) |
-| 2026-11-14 | Void: **dark bodies with mandatory pale elements** (bone or silver ≥ 10 % of every Void unit's projected area), plus the material rule: Void body materials at albedo luma ≥ 45 and ≥ 15 % of each Void hero's projected area in a light material | Maintainer (approval above) |
-| 2026-11-14 | Three Void materials and two display swatches lifted to luma 45 at the same hue and chroma | (derived by the agent; for the maintainer to confirm) |
+| 2026-11-14 | Void: **dark bodies with mandatory pale elements** (bone or silver ≥ 10 % of every Void unit's projected area), plus the material rule: Void body materials at albedo luma ≥ 45 and ≥ 15 % of each Void hero's area in a light material (area read as projected area: derived) | Maintainer (approval above) |
+| 2026-11-14 | Four Void materials lifted to luma 46–48 (obsidian polished and knapped 46, composite 47, lacquer 48) at the same hue and chroma, and the palette's Void swatches to luma 46–47 | (derived by the agent; for the maintainer to confirm) |
 | 2026-11-14 | Chroma caps **0.06 ground (PAL-1 kept) / 0.08 elsewhere**, p99; albedo ranges per texel at p1/p99 | Maintainer (approval above) |
 | 2026-11-14 | **`team_tint` 0 on photoreal content**, mask kept for Compat: on Tiered the renderer ignores the tint (ADR-0023 §8c `team_tint_policy = zero`) once the rims pass CON-2; Compat keeps it | Maintainer (approval above) |
 | 2026-11-14 | **Ability types coded by shape and motion**, never colour | Maintainer (approval above) |
@@ -89,7 +89,7 @@ the lane's value step, took the draft's first-named option, also marked derived.
    derived), kept off the lanes. See [palette](palette-and-value.md#6-ember-crossing-palette-map-1).
 7. **How dark the Void may go:** **dark bodies plus mandatory pale elements** (bone or silver,
    ≥ 10 % of every Void unit's projected area), and Void body materials at albedo luma ≥ 45
-   with ≥ 15 % of each Void hero's projected area in a light material. See
+   with ≥ 15 % of each Void hero's area in a light material (read as projected area: derived). See
    [palette](palette-and-value.md#5-faction-palettes).
 8. **The chroma caps and measurement method:** C ≤ 0.06 on the ground (PAL-1, kept at 0.06)
    and ≤ 0.08 elsewhere (p99 of texels); albedo ranges measured per texel as luma
@@ -184,7 +184,8 @@ force for v0 but are not the maintainer's words:
 2. If it changes a numeric rule, update [checks.md](checks.md) in the same PR.
 3. The part's lead approves (table above) and the approval is recorded in the decision log.
    Agents draft and open PRs and never merge changes to this folder, except a PR that
-   records a decision the maintainer stated, quoted verbatim in the log. Values an agent
+   records a decision the maintainer stated, quoted verbatim in the log, and makes no other
+   change. Values an agent
    derives while applying it stay marked "for the maintainer to confirm" until the maintainer
    confirms them.
 4. Record approved decisions in the decision log, with the date.

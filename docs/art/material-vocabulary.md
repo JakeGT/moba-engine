@@ -265,7 +265,7 @@ from the CB sky. *Considered:* teal main, or one hue only.
 The Void keeps its dark bodies and relies on rims and outlines, **and** every Void body
 material has an albedo floor of **luma 45**, with **at least 15 % of each Void hero's area
 in a light material** (pewter, silver, bone inlay) (PBR-VOID-1). The floor applies to a
-material's median luma, with p1 allowed down to about 40 for weathering (§4 rule 2), and the
+material's median luma, with p1 ≥ 40 for weathering (tighter than §4 rule 2's −25 %, which would allow about 35), and the
 15 % is read as projected area (both derived by the agent; for the maintainer to confirm). Every Void
 unit also carries the palette's pale element (≥ 10 % of projected area: VOID-1,
 [palette §5](palette-and-value.md#5-faction-palettes)). Body materials now sit at luma 46–58
@@ -425,7 +425,7 @@ encoding) unless it says "capture". Every threshold was approved on 2026-11-14; 
 | `PBR-VOCAB-1` | Every material names a vocabulary entry from §3 | listed entry | approved |
 | `PBR-FORGE-1` | Chroma of sun-alloy; gilt (in play); sun-glass tint | sun-alloy C ≤ 0.075 (p99; measured brass is 0.072); gilt and sun-glass C ≤ 0.07 (p99) | approved (the 0.075 check derived) |
 | `PBR-HEAT-1` | Temper and patina colours in playable space | straw to purple only (no blue temper); statuary brown-black patina (no verdigris) | approved |
-| `PBR-VOID-1` | Void body materials; light-material share per Void hero | median albedo luma ≥ 45, p1 ≥ about 40; ≥ 15 % of projected area in pewter, silver or bone | approved (median/p1 reading and projected area derived) |
+| `PBR-VOID-1` | Void body materials; light-material share per Void hero | median albedo luma ≥ 45, p1 ≥ 40; ≥ 15 % of projected area in pewter, silver or bone | approved (median/p1 reading and projected area derived) |
 | `PBR-VOID-2` | Void emissive hue | violet 284–345° main; teal 167–211° minor | approved |
 | `LANE-1` | Lane grit albedo | C ≤ 0.06 (p99), h 44–55°, luma 112–119 | approved (luma band derived) |
 | `EMB-1` | Ember crystal | white-gold core (PAL-4), ≤ +1 EV; orange only as a facet rim ≤ 3 % of area (PAL-3), non-emissive (derived); off the lanes | approved |
