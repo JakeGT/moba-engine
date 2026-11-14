@@ -189,6 +189,18 @@ byte-identical under DLSS Quality, Performance and native, TAAU at each render s
 temporal off. Each vendor case checks the log names the back end it asked for, so a silent
 fallback to TAAU fails the case.
 
+## Tiered goldens (gate 4)
+
+TAAU's four exact hashes are unchanged on CI. FSR 3.1's Quality captures (low, high and
+overlay) changed after the merge with `657a7ab`, and FSR 3.1 native did not. The cause is the
+per-frame clamp to the back end's range (Amendment 5 item 4). FSR 3.1 reports Quality's
+size truncated, as its SDK computes it (426×240 at 640×360), while the frame before N1c used
+the allocation's rounded size (427×240), so FSR 3.1 Quality now renders one column narrower.
+The fingerprints moved by mean 0.09–0.18 and max 2–4. The new hashes come from CI's own
+captures: run 41667430134 on `7bdff2e`, each capture byte-identical across its two runs,
+applied with `HASHES_FROM=<artifact> HASH_DEVICE=<CI's device line>
+scripts/tiered-goldens.sh`.
+
 ## Fallbacks (gate 5)
 
 | Build, case | Log |

@@ -1585,7 +1585,13 @@ its own PR.) §4 holds, with these departures and clarifications:
 4. **Render size, allocation and the controller** (§4c). The ADR's rule ("the controller's
    floor is clamped to NGX's minimum") is what the code does, for every back end:
    - Each frame's render size is clamped to the back end's `render_size_range` for the mode
-     and to the allocation.
+     and to the allocation. This changes FSR 3.1's frame at Quality: its range reports the
+     SDK's truncated size (426×240 at 640×360), while the allocation and the frame before
+     N1c rounded to nearest (427×240), so FSR 3.1 Quality now renders one column narrower
+     and its three Quality tiered captures (low, high, overlay) changed. Their exact hashes
+     were regenerated from CI's own captures (`HASHES_FROM`, item 17; run 41667430134 on
+     `7bdff2e`, each capture byte-identical across its two runs); FSR 3.1 native and every
+     TAAU capture are unchanged (TAAU's range rounds to nearest, 427×240).
    - **The allocation covers the back end's minimum.** After creation and after every
      resize, the render allocation is raised on each side to the range's minimum (never above
      the output), with one line. Without it, DLAA (range 1267×713..1280×720 at 720p) under
