@@ -3,8 +3,10 @@
 **Status:** accepted 2026-11-02 by the maintainer, with every recommendation under
 [Open questions](#open-questions-for-the-maintainer) taken (see
 [Maintainer answers](#maintainer-answers-2026-11-02)). N1a is built
-([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), and FSR 3.1
-runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)). Proposed 2026-10-31. This is phase N1 of the
+([Amendment 2](#amendment-2-2026-11-03-n1a-the-temporal-foundation-as-built)), FSR 3.1
+runs in the frame ([Amendment 4](#amendment-4-2026-11-03-n1b-stage-2-fsr-31-in-the-frame)),
+and N1c's vendor upscalers
+([Amendment 5](#amendment-5-2026-11-03-n1c-the-vendor-upscalers-as-built)). Proposed 2026-10-31. This is phase N1 of the
 [next-gen graphics roadmap](../plans/next-gen-graphics-roadmap.md) (§4, §5.3, §7, §8 and §12
 step 3), written before the code.
 - **Builds on:** [ADR-0020](0020-next-gen-foundations.md) (N0, accepted 2026-11-01). That ADR settles the
@@ -1400,8 +1402,11 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
      alike; on CI the hashes were the same across runs of different code (`c0ff307`,
      `d9c2d6a`, `6261189`). On another device the script skips them with a log line, except
      on CI for FSR 3.1: there a mismatch (or no device from `vulkan-probe`) fails
-     `tiered-temporal` with a message to regenerate the file with `WRITE_HASHES=1` from the
-     run's artifact, because it is FSR 3.1's only regression check. TAAU, in the required
+     `tiered-temporal` with a message to regenerate the file from the run's artifact,
+     because it is FSR 3.1's only regression check. *(Corrected in N1c, amendment 5 item 17:
+     `WRITE_HASHES=1` keys the file to the machine it runs on, so it cannot regenerate CI's
+     hashes elsewhere; `HASHES_FROM=<artifact dir> HASH_DEVICE='<CI's device line>'` hashes
+     CI's own captures under CI's device line.)* TAAU, in the required
      `renderer-gate`, warns and keeps its fingerprints, so a runner change cannot make the
      required gate flaky;
    - the 64×36 fingerprints (`render-tiered-fsr3-*-fingerprint.rgb`, written from CI's
@@ -1528,6 +1533,213 @@ Recorded in the N1b stage 2 PR (`feat/n1b-fsr3-stage2`). FSR 3.1 now runs behind
     required `renderer-gate`, because they guard the default frame. **`tiered-temporal`
     should become a required check**, which is a repository ruleset change for the
     maintainer; until then FSR 3.1's CI cases do not block a merge.
+
+### Amendment 5 (2026-11-03, N1c): the vendor upscalers as built
+
+Recorded in the N1c PR (#365, `feat/n1c-vendor-upscalers`), with the evidence in
+[perf/0034](../perf/0034-vendor-upscalers.md). (Amendment 4 is N1b's stage 2, recorded in
+its own PR.) §4 holds, with these departures and clarifications:
+
+1. **Creation.** `upscale::create` builds the temporal pass's upscaler from the request.
+   `Selection::create_upscaler(name, …)` uses the back end the start-up selection chose if it
+   is that one; otherwise one it already probed on demand; otherwise it returns the reason
+   recorded when the selection rejected it; otherwise it probes it now; and a back end that is
+   not compiled in reports "the `{name}` feature is not compiled in". So an explicit
+   `MOBA_UPSCALER=xess` on a machine where DLSS won the slot still gets XeSS when XeSS can
+   run. A back end that cannot run falls back to TAAU with one line. What is logged:
+   - the selection's `[vendor] X unavailable: …` line for each compiled-in back end whose
+     probe failed (as in N0), whatever was asked for;
+   - `[render] upscaler X cannot run here (why); using taau` when a back end that was asked
+     for (or that `auto` chose) fails its probe on demand or its creation, for instance DLSS
+     whose probe passed but whose feature cannot be created;
+   - `[render] X is auto's choice on Intel GPUs only …; auto uses taau` when `auto` passes
+     over the slot's back end (item 2);
+   - then the `[vendor] selected:` summary, which names the upscaler that **runs**
+     (`builtin` when TAAU runs in the slot's place), as does
+     `Renderer::vendor_backends().upscaler`.
+2. **What `auto` picks** (§4b, unchanged in intent): DLSS wherever its probe passed; XeSS only
+   on an Intel GPU (vendor `0x8086`, any Intel GPU, not only Arc); FSR 4 never until it passes
+   gate 5 on an AMD card, with one line saying so; otherwise TAAU (`AUTO_OPEN_BUILD`, which
+   stays TAAU after N1b's stage 2, Q1). **DLSS's place first** rests on §4b's order and on
+   gate 3's quality: on the RTX its ghosting wake is 7–13× smaller than TAAU's in every mode
+   (perf/0034), though since N1b's stage 2 its particle core smears more than TAAU's at
+   Quality and native (item 16, open). It costs more: the temporal lane is 0.567 ms against TAAU's 0.130–0.144 ms
+   at 1080p Quality on the RTX 5070 Ti (about +0.43 ms of GPU total), with 85.7 MB of
+   NGX-owned VRAM. Q1's 0.2 ms rule compares FSR 3.1 with TAAU only and does not apply.
+   DLSS's cost on the Low and Medium reference classes (RTX 2060 and 3060) is **not
+   measured**; gate 6 says estimates never close a target, so it stays open until one of
+   those cards runs it.
+3. **Sharpening.** The vendor back ends are created with their own sharpening off except FSR 4
+   (`has_sharpening` true, RCAS inside its dispatch). When a back end does not sharpen and the
+   sharpness is above 0, a `Sharpened` wrapper runs one RCAS compute pass
+   (`sharpen.slang`) on the upscaler's output inside the temporal pass, through an
+   output-resolution intermediate. Defaults: 0.25 for TAAU, FSR 3.1 and FSR 4; **0 for DLSS
+   and XeSS**, whose vendors advise against adding sharpening (DLSS's own sharpening is
+   deprecated, [S1] §3.11). An explicit `MOBA_SHARPNESS` (`PostConfig::with_sharpness`)
+   overrides any default. A `sharpen` pass that cannot be created leaves the back end
+   unsharpened with one line rather than failing the renderer. The start-up line reports
+   `sharpness 0.xx, off|sharpen pass|fused`. The pass's barrier against the back end's
+   writes stays `ALL_COMMANDS` (the SDKs do not say which stages they write from): with it,
+   DLSS with the pass costs +0.033 ms of temporal lane on the RTX at 1080p (0.600 against
+   0.567 ms), which is accepted.
+4. **Render size, allocation and the controller** (§4c). The ADR's rule ("the controller's
+   floor is clamped to NGX's minimum") is what the code does, for every back end:
+   - Each frame's render size is clamped to the back end's `render_size_range` for the mode
+     and to the allocation. This changes FSR 3.1's frame at Quality: its range reports the
+     SDK's truncated size (426×240 at 640×360), while the allocation and the frame before
+     N1c rounded to nearest (427×240), so FSR 3.1 Quality now renders one column narrower
+     and its three Quality tiered captures (low, high, overlay) changed. Their exact hashes
+     were regenerated from CI's own captures (`HASHES_FROM`, item 17; run 41667430134 on
+     `7bdff2e`, each capture byte-identical across its two runs); FSR 3.1 native and every
+     TAAU capture are unchanged (TAAU's range rounds to nearest, 427×240).
+   - **The allocation covers the back end's minimum.** After creation and after every
+     resize, the render allocation is raised on each side to the range's minimum (never above
+     the output), with one line. Without it, DLAA (range 1267×713..1280×720 at 720p) under
+     `MOBA_RENDER_SCALE=0.6` rendered at 768×432, outside DLSS's range: every evaluate
+     failed with `InvalidParameter` and the output was never written.
+   - **The controller's floor and ceiling** are the configured ones clamped into the scales
+     the back end accepts (the range over the output), set again after every resize, and
+     `Renderer::render_scale()` (the frame log's `render_scale=`) reports the scale inside
+     them. When the floor and ceiling meet (a one-size range, as DLSS Ultra Performance, or
+     a back-end floor at the mode's own scale, as DLSS Performance at 0.5) the controller is
+     pinned: at start-up dynamic resolution is turned off with one line
+     (`dynamic resolution: off (the upscaler's render scales for performance mode meet at
+     0.500 …)`); after a resize the pinned bounds hold it.
+   - A back end created for the output alone (DLSS, XeSS: `sized_by_max_render` false) is
+     not re-created only to raise its allocation, so a resize re-creates it once. A back end
+     other than TAAU that cannot take its allocation at start-up falls back to TAAU as after
+     a resize (item 5), rather than failing the renderer (not seen in practice: DLSS and
+     XeSS never re-create there).
+   - Measured on the RTX 5070 Ti (DLSS 310.9.16, driver 615.78.08): at 1280×720, Quality
+     and Performance both report 640×360..1280×720 and DLAA 1267×713..1280×720; at
+     1920×1080 Quality, Balanced and Performance, 960×540..1920×1080, DLAA
+     1901×1069..1920×1080 and Ultra Performance 640×360 only. So DLSS's floor is 0.5 in
+     Quality, Balanced and Performance (Ultra-at-4K/Overdrive's one-mode-down floor of 0.33
+     is raised to it), 0.99 in DLAA, and Ultra Performance is a single size (1/3) that pins
+     the controller.
+   - **Balanced:** our ratio is 1.7, DLSS's 1.724 (§4b). DLSS is created at its own optimal
+     size for Balanced and accepts any size in its range, so our ceiling (1/1.7, slightly
+     above that optimal size) is a size DLSS renders.
+5. **Resizes never fail the renderer on a back end other than TAAU.** A vendor back end, or
+   FSR 3.1, that cannot follow a resize (DLSS refuses an output of a few pixels: `creating
+   the DLSS feature (performance mode, 4x14 to 8x28) failed
+   (NVSDK_NGX_Result_InvalidParameter)`) is replaced by TAAU with one `[render] upscaler X
+   cannot run at WxH (why); using taau` line. **The fallback is permanent for the session:**
+   the window growing back to a size the back end accepts does not bring it back
+   (re-creating it then is a follow-up). Its error is the new `RenderError::Upscaler`, not
+   `NoSuitableDevice`. Each swapchain recreation logs one line with the new sizes. The
+   vendor back ends and the `sharpen` wrapper take amendment 4 item 15's `unsafe` `resize`
+   contract, as does the renderer's allocation fit, which may resize.
+6. **Mip bias per kind.** `MipBiasRule::for_kind`: XeSS uses its guide's rule (`Xess`), the
+   others the standard `log2(render/output) − 1` rule.
+7. **DLSS through NGX directly.** `NVSDK_NGX_VULKAN_CreateFeature1` at the optimal size of
+   the mode, flags `IsHDR | MVLowRes`, from a one-shot command buffer; modes map Native→DLAA,
+   Quality→MaxQuality, Balanced→Balanced, Performance→MaxPerf,
+   UltraPerformance→UltraPerformance. The feature is recreated on resize, and released (with
+   `FreeMemOnReleaseFeature`) before the new one is made, also when the creation's submit
+   fails. VRAM comes from NGX's stats callback. A failing evaluate is logged at most three
+   times; that frame's output is not written and the next evaluate starts without history
+   (falling back to TAAU after repeated failures is a follow-up). Resource pointers set in
+   NGX's parameter map are cleared again right after the evaluate. **Jitter sign** is
+   `(+x, +y)`, as FSR's, measured: PSNR against a native render, Performance, static scene,
+   40.70 dB with `(+,+)` against 34.5–36.6 dB for the three other signs.
+8. **The SDKs' own GPU work needs our barriers** (found with synchronization validation on the
+   RTX, 615.78.08; `vendor/barriers.rs`, shared by DLSS and XeSS):
+   - NGX clears the output with `vkCmdClearColorImage` inside its evaluate (not documented
+     in the guide we read): in a build with a vendor upscaler the tiered `hdr_out` target and
+     the sharpen intermediate gain `TRANSFER_DST` (the open build's are unchanged), and the
+     output's barriers before and after the evaluate cover **every transfer stage** and the
+     compute stage, so a copy or blit an SDK records (XeSS's runtime is unobserved) is
+     ordered as well. Tracked in #367.
+   - In Performance mode NGX fills its internal buffers with `vkCmdFillBuffer` every frame,
+     without a barrier against the previous frame's evaluate. A global memory barrier
+     (compute and transfer against both) goes before each evaluate. Tracked in #366.
+   - After the evaluate, a global barrier chains the SDK's compute and transfer work into
+     the compute stage that the graph's next barriers on the inputs start from (a
+     write-after-read on an input the SDK copied, otherwise).
+   With the barriers removed, the RTX reports 10 messages in 60 frames for each hazard (the
+   issues have the messages); with them, validation is clean in every mode. #366 and #367
+   track the upstream reports, which go to NVIDIA at the maintainer's discretion.
+9. **An unsubmitted record.** A vendor SDK advances its own internal state when it records
+   into our command buffer. `reset_history` covers the history, but a caller that drops a
+   recorded command buffer unsubmitted must treat it as the `record` contract's fatal case
+   and drop the back end (the renderer submits every recorded frame).
+10. **Reflex and DLSS SR** need no interaction: Reflex's markers are per frame (Amendment 3)
+    and DLSS SR has no latency path of its own (frame generation is N9).
+11. **XeSS device features.** `xessVKGetRequiredDeviceFeatures` returns a feature chain; the
+    device folds it into its core bits (base, Vulkan 1.1, 1.2 and 1.3, plus promoted
+    standalone structures) through `vendor::features::FeatureBits`, so no promoted structure
+    is chained beside its core one (`VUID-VkDeviceCreateInfo-pNext-02830`).
+    `mutableDescriptorType` is the exception: it is chained, with its extension, only when
+    XeSS asks for it and the device supports both. The probe then checks the requested
+    features against what the device was created with (`ProbeContext::enabled_features`,
+    which counts only the structures actually chained).
+12. **FSR 4 goes through the FidelityFX API.** `ffxCreateContext` with the upscale
+    description and the Vulkan backend description, `ffxDispatch` per frame, and queries for
+    the render resolution and the GPU memory. The description type IDs are spelled by hand
+    (bindgen cannot evaluate the macros) and unit-tested, and Vulkan formats map through a
+    port of the SDK's C++-only `ffxApiGetSurfaceFormatVK` (Low's packed `B10G11R11` colour
+    included). A 3.x provider (FSR 3.1 picked up from the same DLL) or one of unknown version
+    is refused; otherwise the provider's version is logged.
+13. **VRAM the SDKs own** (`TemporalUpscaler::sdk_bytes`: NGX's stats, FSR 4's memory query,
+    XeSS's temporary heaps from `xessGetProperties`) is added to the renderer's memory totals
+    and peak (`sdk_mb=` in the `[vram]` line), so `vram_peak_mb` no longer shows DLSS as
+    saving memory it does not.
+14. **Perf baselines name their upscaler** (§7). `scripts/perf-replay.sh` pins
+    `MOBA_UPSCALER` (`UPSCALER`, default `taau`, `auto`'s open-build choice, amendment 4);
+    every `[tiered.*]` table in `tests/perf/baseline.toml` names its `upscaler`, and
+    perf-gate treats a run with another one as a baseline breach, so a `dlss` build is never
+    compared with, or recorded as, the open build's numbers. `scripts/tiered-goldens.sh`
+    pins each back end it runs (`UPSCALERS`, amendment 4).
+15. **What runs where (gate 5).**
+    - **DLSS** runs on the RTX 5070 Ti under Linux, validation-clean in every mode, across
+      resizes under X11 and Wayland (perf/0034), also after N1b's stage 2 merged. Its
+      `windows-vm` run (gate 5 asks for both) is **pending** the maintainer's VM.
+    - **FSR 4** and **XeSS** are **compiled and unit-tested only**: FSR 4 needs AMD's Windows
+      driver and an RDNA card, and XeSS's Vulkan runtime ships for Windows only; both wait on
+      `windows-vm` (and an AMD card for FSR 4). Their jitter signs, barriers and ranges are
+      **unverified** at run time. With either compiled in, the client falls back to TAAU with
+      the lines of item 1 (perf/0034).
+16. **Gate 3 (merge-gating) for DLSS fails at Quality and native after N1b's stage 2;
+    the coordinator decides.** DLSS's bound is TAAU's (particle 7.5 %, wake 3.0 %, hero
+    1.75 %). On the RTX at 1280×720 (`scripts/ghost-probe.sh` with `UPSCALERS="dlss taau"`):
+
+    | Mode | Before #364 (wake / hero / particle) | After #364 (`657a7ab`) |
+    |---|---|---|
+    | DLSS Quality | 0.183 / 0.40 / 5.46 % | 0.183 / 0.40 / **16.01 %** |
+    | DLSS Performance | 0.166 / 0.71 / **8.44 %** | 0.152 / 0.57 / 2.81 % |
+    | DLSS native | 0.073 / 0.12 / 3.95 % | 0.073 / 0.12 / **10.84 %** |
+    | TAAU Quality | 1.202 / 0.73 / 27.55 % | 1.222 / 0.73 / 3.52 % |
+    | TAAU Performance | 1.989 / 1.33 / 35.78 % | 2.031 / 1.33 / 6.52 % |
+    | TAAU native | 0.611 / 0.00 / 19.52 % | 0.611 / 0.00 / 1.23 % |
+
+    The motion-only particle draw (amendment 4 item 13) fixes TAAU on the RTX and DLSS
+    Performance, but DLSS Quality and native now smear the particle core more: the worst
+    frame is the first measured one (frame 4: 126 of 787 core pixels at Quality, 85 of 784
+    at native), and Quality's later frames sit at 0–9 % (frame 20: 9.24 %) where they were
+    at 0–1.6 %. The wake and the hero are unchanged and far inside their bounds. Repeated
+    runs give the same numbers. DLSS has no reactive mask, so the particle's core rests on
+    the motion vectors and DLSS's own history handling. **Re-run 2026-11-14** on driver
+    620.70.06 (DLSS 310.9.16, the same render code), twice with identical numbers: Quality
+    0.183 / 0.40 / **16.14 %** (fails), Performance 0.142 / 0.59 / 3.12 % (passes), native
+    0.073 / 0.12 / **10.84 %** (fails) (perf/0034). So Performance, the mode the gate waited
+    on, now passes, and Quality and native fail; Quality's 16.14 % is over FSR 3.1's
+    Performance bound of 15 % as well. **No bound was changed;** the maintainer decides
+    between: a fix, not yet found (DLSS's reactive-mask equivalent, `BiasCurrentColor`, must
+    not be used with the current models, [S1]; another preset for Quality and DLAA, or a
+    change to the particles' motion, are untried); a maintainer exception (a DLSS
+    particle bound for Quality and native, recorded as a further amendment); or keeping
+    DLSS out of `auto` (item 2) until it passes, with `MOBA_UPSCALER=dlss` still available.
+17. **CI.** `scripts/resize-smoke.sh` runs in the required `renderer-gate` with TAAU and
+    Compat only (`UPSCALERS=taau`, 100 frames, sizes 480×270 → 320×180 → 640×360; AO, which
+    the smoke guards, is shared by every anti-aliasing mode, so the FXAA case was dropped)
+    and with FSR 3.1, including the 8×8 resize, in `tiered-temporal`. Both render jobs log
+    the host CPU (`lscpu`'s model name and whether `avx512f` is present), because llvmpipe
+    compiles for the host CPU and GitHub's x64 runners mix models, so an exact-hash mismatch
+    can be traced to a CPU change. `tiered-goldens.sh` gains `HASHES_FROM`/`HASH_DEVICE`,
+    which rewrites the hash file from CI's artifact captures under CI's device line
+    (correcting amendment 4 item 7's `WRITE_HASHES=1` advice, which keys the file to the
+    machine it runs on).
 
 ## Sources
 

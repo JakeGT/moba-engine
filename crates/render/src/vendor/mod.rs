@@ -32,6 +32,8 @@ use ash::vk;
 
 use crate::caps::{DeviceCapabilities, RenderPath};
 
+pub(crate) mod barriers;
+pub(crate) mod features;
 #[cfg(any(feature = "fsr3", feature = "fsr4"))]
 mod fsr;
 pub(crate) mod latency;
@@ -99,13 +101,51 @@ impl Slot {
     }
 }
 
-/// A selected vendor back end. N1 and later phases add the per-frame entry points; in N0 a
-/// back end only owns whatever its probe initialised (an NGX session, a loaded library).
+/// What an upscaler back end needs to create its temporal upscaler (ADR-0021 §4a): the
+/// device, the output size, the dynamic-resolution ceiling and the mode. Contexts are created
+/// with the renderer, never mid-match.
+#[cfg_attr(
+    not(any(
+        all(feature = "dlss", not(target_vendor = "apple")),
+        feature = "fsr4",
+        feature = "xess"
+    )),
+    allow(dead_code, reason = "only the vendor upscalers read it")
+)]
+pub(crate) struct UpscalerRequest<'a> {
+    pub(crate) device: &'a crate::device::DeviceContext,
+    pub(crate) output: crate::upscale::Extent,
+    #[cfg_attr(
+        not(feature = "fsr4"),
+        allow(
+            dead_code,
+            reason = "DLSS and XeSS take their own range; FSR 4 sizes by it"
+        )
+    )]
+    pub(crate) max_render: crate::upscale::Extent,
+    #[cfg_attr(
+        not(any(all(feature = "dlss", not(target_vendor = "apple")), feature = "xess")),
+        allow(dead_code, reason = "FSR 4 creates one context for every mode")
+    )]
+    pub(crate) mode: crate::upscale::UpscaleMode,
+}
+
+/// A temporal upscaler a vendor back end created, or why it could not.
+pub(crate) type UpscalerResult = Result<Box<dyn crate::upscale::TemporalUpscaler>, Unavailable>;
+
+/// A selected vendor back end. Each phase adds its per-frame entry points; a back end owns
+/// whatever its probe initialised (an NGX session, a loaded library), which the objects it
+/// creates share.
 pub(crate) trait Backend: Send {
     /// The candidate's name (`dlss`, `nrd`, …), as in the cargo feature.
     fn name(&self) -> &'static str;
     /// One-line detail for the selection summary (SDK version and the like).
     fn detail(&self) -> String;
+    /// An upscaler back end's temporal upscaler (ADR-0021 §4b, N1c); `None` for the other
+    /// slots.
+    fn upscaler(&self, _request: &UpscalerRequest<'_>) -> Option<UpscalerResult> {
+        None
+    }
 }
 
 /// Why a probe rejected its back end: one human-readable sentence, without a trailing period.
@@ -133,6 +173,12 @@ pub(crate) struct ProbeContext<'a> {
     pub(crate) instance_extensions: &'a [String],
     /// The device extensions enabled at `vkCreateDevice`.
     pub(crate) device_extensions: &'a [String],
+    /// The core feature bits enabled at `vkCreateDevice`.
+    #[cfg_attr(
+        not(feature = "xess"),
+        allow(dead_code, reason = "only XeSS asks for device features")
+    )]
+    pub(crate) enabled_features: &'a features::FeatureBits,
 }
 
 /// What [`device_extensions`] sees: a physical device about to be created, and its admission.
@@ -161,8 +207,12 @@ pub(crate) fn instance_extensions() -> Vec<CString> {
     if let Ok(requested) = ngx::instance_extensions() {
         names.extend(requested);
     }
-    // XeSS asks for nothing in N0: its probe never selects it (its device features are merged
-    // in N1), so its extensions would only widen the instance (vendor::xess).
+    // XeSS (N1c, ADR-0021 amendment 5): its extensions, with its device features
+    // (`device_features`).
+    #[cfg(feature = "xess")]
+    if let Ok(requested) = xess::instance_extensions() {
+        names.extend(requested);
+    }
     to_c_strings(names)
 }
 
@@ -182,8 +232,26 @@ pub(crate) fn device_extensions(query: &DeviceQuery<'_>) -> Vec<CString> {
     {
         names.extend(requested);
     }
-    // XeSS asks for nothing in N0, as for the instance.
+    // XeSS on any vendor's GPU (it picks XMX or DP4a itself; `MOBA_UPSCALER=xess` must work
+    // everywhere, `auto` takes it on Intel only).
+    #[cfg(feature = "xess")]
+    if let Ok(requested) = xess::device_extensions(query.instance, query.physical) {
+        names.extend(requested);
+    }
     to_c_strings(names)
+}
+
+/// The device features the compiled-in back ends ask for on `query`'s device, called before
+/// `vkCreateDevice` on the tiered path (ADR-0021 amendment 5): XeSS's, folded into core bits
+/// ([`features::FeatureBits`]). The device enables each one it supports; XeSS's probe checks
+/// them against [`ProbeContext::enabled_features`]. Empty without `xess`.
+#[cfg_attr(not(feature = "xess"), allow(unused_variables))]
+pub(crate) fn device_features(query: &DeviceQuery<'_>) -> features::FeatureBits {
+    #[cfg(feature = "xess")]
+    if let Ok(required) = xess::device_features(query.instance, query.physical) {
+        return required;
+    }
+    features::FeatureBits::default()
 }
 
 /// Sorted, de-duplicated C strings (names with a NUL are dropped: no extension has one).
@@ -201,8 +269,8 @@ fn to_c_strings(mut names: Vec<String>) -> Vec<CString> {
 /// (`VUID-VkDeviceCreateInfo-pNext-04748`); the tiered path enables that feature, which
 /// stands in for it.
 #[cfg_attr(
-    not(all(feature = "dlss", not(target_vendor = "apple"))),
-    allow(dead_code, reason = "only NGX checks its requests in N0")
+    not(any(all(feature = "dlss", not(target_vendor = "apple")), feature = "xess")),
+    allow(dead_code, reason = "only NGX and XeSS check their requests")
 )]
 fn satisfied(name: &str, enabled: &[String], path: RenderPath) -> bool {
     enabled.iter().any(|enabled| enabled == name)
@@ -212,8 +280,8 @@ fn satisfied(name: &str, enabled: &[String], path: RenderPath) -> bool {
 /// `Ok` when every `requested` extension is satisfied by `enabled`, else one sentence naming
 /// the missing ones (`what` is `instance` or `device`).
 #[cfg_attr(
-    not(all(feature = "dlss", not(target_vendor = "apple"))),
-    allow(dead_code, reason = "only NGX checks its requests in N0")
+    not(any(all(feature = "dlss", not(target_vendor = "apple")), feature = "xess")),
+    allow(dead_code, reason = "only NGX and XeSS check their requests")
 )]
 pub(crate) fn require_enabled(
     sdk: &str,
@@ -311,10 +379,20 @@ pub(crate) struct Candidate<P> {
 /// The back ends chosen for this device, plus what was compiled in.
 pub(crate) struct Selection {
     chosen: Vec<(Slot, Box<dyn Backend>)>,
+    /// Candidates probed and found unavailable, with why (an explicit `MOBA_UPSCALER` asks
+    /// for the reason again rather than probing twice).
+    rejected: Vec<(Slot, &'static str, Unavailable)>,
+    /// Upscaler candidates probed after selection because one was asked for by name while an
+    /// earlier one held the slot (ADR-0021 §4b: every back end stays selectable). Kept alive
+    /// with the selection, so whatever they loaded outlives the upscaler made from them.
+    on_demand: Vec<Box<dyn Backend>>,
     compiled: Vec<&'static str>,
     latency: LatencyMode,
     /// One line per candidate that was compiled in but unavailable, then the summary.
     lines: Vec<String>,
+    /// The upscaler that actually runs, once the renderer has created it (`builtin` when TAAU
+    /// runs in place of the slot's back end, ADR-0021 amendment 5); the slot's choice before.
+    upscaler_in_use: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Selection {
@@ -354,10 +432,46 @@ impl Selection {
             .map_or_else(|| slot.builtin(), |(_, backend)| backend.name())
     }
 
-    /// Plain-data view for the public API.
+    /// Records the upscaler that runs (a vendor back end's name, or `builtin`), for
+    /// [`Self::backends`] and the summary line.
+    pub(crate) fn set_upscaler_in_use(&mut self, name: &'static str) {
+        self.upscaler_in_use = Some(name);
+    }
+
+    /// The summary line (`[vendor] selected: …`), naming the upscaler that runs; `None` in
+    /// the open build.
+    pub(crate) fn summary(&self) -> Option<String> {
+        if self.compiled.is_empty() {
+            return None;
+        }
+        let backends = self.backends();
+        let mut summary = String::from("[vendor] selected:");
+        for slot in Slot::ALL {
+            let name = if slot == Slot::Upscaler {
+                backends.upscaler
+            } else {
+                self.backend(slot)
+            };
+            let _ = write!(summary, " {}={}", slot.name(), name);
+        }
+        let _ = write!(
+            summary,
+            " latency={} compiled={}",
+            self.latency.name(),
+            self.compiled.join(",")
+        );
+        for (_, backend) in &self.chosen {
+            let _ = write!(summary, " {}=[{}]", backend.name(), backend.detail());
+        }
+        Some(summary)
+    }
+
+    /// Plain-data view for the public API: the upscaler is the one that runs.
     pub(crate) fn backends(&self) -> VendorBackends {
         VendorBackends {
-            upscaler: self.backend(Slot::Upscaler),
+            upscaler: self
+                .upscaler_in_use
+                .unwrap_or_else(|| self.backend(Slot::Upscaler)),
             denoiser: self.backend(Slot::Denoiser),
             direct_lighting: self.backend(Slot::DirectLighting),
             radiance_cache: self.backend(Slot::RadianceCache),
@@ -370,6 +484,70 @@ impl Selection {
     /// Lines to log at start-up: empty in the open build.
     pub(crate) fn lines(&self) -> &[String] {
         &self.lines
+    }
+
+    /// Creates the temporal upscaler of the upscaler back end `name` (`dlss`, `fsr4`,
+    /// `xess`) for `request`, or says why it cannot run here: not compiled in, rejected by its
+    /// probe at start-up, or its context could not be created. A back end that was compiled
+    /// in but not probed (an earlier one filled the slot) is probed now against `context`,
+    /// once, and kept with the selection.
+    pub(crate) fn create_upscaler(
+        &mut self,
+        name: &'static str,
+        context: &ProbeContext<'_>,
+        request: &UpscalerRequest<'_>,
+    ) -> UpscalerResult {
+        self.create_upscaler_with(&candidates(), name, context, request)
+    }
+
+    /// [`Self::create_upscaler`] over `candidates` (the tests' fakes).
+    fn create_upscaler_with<C: ?Sized, P: Fn(&C) -> Result<Box<dyn Backend>, Unavailable>>(
+        &mut self,
+        candidates: &[Candidate<P>],
+        name: &'static str,
+        context: &C,
+        request: &UpscalerRequest<'_>,
+    ) -> UpscalerResult {
+        let made = |backend: &dyn Backend| {
+            backend
+                .upscaler(request)
+                .unwrap_or_else(|| Err(format!("{name} is not an upscaler back end")))
+        };
+        if let Some((_, backend)) = self
+            .chosen
+            .iter()
+            .find(|(slot, backend)| *slot == Slot::Upscaler && backend.name() == name)
+        {
+            return made(backend.as_ref());
+        }
+        if let Some(backend) = self.on_demand.iter().find(|backend| backend.name() == name) {
+            return made(backend.as_ref());
+        }
+        if let Some((_, _, reason)) = self
+            .rejected
+            .iter()
+            .find(|(slot, rejected, _)| *slot == Slot::Upscaler && *rejected == name)
+        {
+            return Err(reason.clone());
+        }
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.slot == Slot::Upscaler && candidate.name == name)
+        else {
+            return Err(format!("the `{name}` feature is not compiled in"));
+        };
+        match (candidate.probe)(context) {
+            Ok(backend) => {
+                let upscaler = made(backend.as_ref());
+                self.on_demand.push(backend);
+                upscaler
+            }
+            Err(reason) => {
+                self.rejected
+                    .push((Slot::Upscaler, candidate.name, reason.clone()));
+                Err(reason)
+            }
+        }
     }
 }
 
@@ -395,31 +573,22 @@ pub(crate) fn resolve<C: ?Sized, P: Fn(&C) -> Result<Box<dyn Backend>, Unavailab
     }
     let mut selection = Selection {
         chosen,
+        rejected: Vec::new(),
+        on_demand: Vec::new(),
         compiled: candidates.iter().map(|candidate| candidate.name).collect(),
         latency,
         lines: Vec::new(),
+        upscaler_in_use: None,
     };
-    for (slot, name, reason) in rejected {
-        let fallback = selection.backend(slot);
+    for (slot, name, reason) in &rejected {
+        let fallback = selection.backend(*slot);
         selection.lines.push(format!(
             "[vendor] {name} unavailable: {reason}; {} falls back to {fallback}",
             slot.name()
         ));
     }
-    if !selection.compiled.is_empty() {
-        let mut summary = String::from("[vendor] selected:");
-        for slot in Slot::ALL {
-            let _ = write!(summary, " {}={}", slot.name(), selection.backend(slot));
-        }
-        let _ = write!(
-            summary,
-            " latency={} compiled={}",
-            latency.name(),
-            selection.compiled.join(",")
-        );
-        for (_, backend) in &selection.chosen {
-            let _ = write!(summary, " {}=[{}]", backend.name(), backend.detail());
-        }
+    selection.rejected = rejected;
+    if let Some(summary) = selection.summary() {
         selection.lines.push(summary);
     }
     selection
@@ -482,12 +651,15 @@ fn candidates() -> Vec<Candidate<Probe>> {
     list
 }
 
-/// Selects the vendor back ends for a created device and logs the result (one line per
-/// fallback, then a summary; nothing in the open build). `latency` is the latency back end
-/// that runs (`latency::create`), so the summary and [`Selection::backends`] agree with it.
+/// Selects the vendor back ends for a created device and logs one line per fallback
+/// (nothing in the open build). `latency` is the latency back end that runs
+/// (`latency::create`), so the summary and [`Selection::backends`] agree with it. The
+/// summary line is logged by the renderer once the upscaler that runs is known
+/// ([`Selection::set_upscaler_in_use`], [`Selection::summary`]).
 pub(crate) fn select(context: &ProbeContext<'_>, latency: LatencyMode) -> Selection {
     let selection = resolve(&candidates(), context, latency);
-    for line in selection.lines() {
+    let fallbacks = selection.lines().len() - usize::from(!selection.compiled.is_empty());
+    for line in &selection.lines()[..fallbacks] {
         eprintln!("{line}");
     }
     selection
@@ -585,6 +757,7 @@ pub(crate) type Loaded<T> = std::sync::OnceLock<Result<T, Unavailable>>;
 pub(crate) mod pci {
     pub(crate) const NVIDIA: u32 = 0x10de;
     pub(crate) const AMD: u32 = 0x1002;
+    pub(crate) const INTEL: u32 = 0x8086;
 }
 
 /// Whether the device can run the ray-traced lighting libraries (RTXDI, SHaRC, NRD's

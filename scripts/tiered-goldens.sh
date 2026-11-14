@@ -15,8 +15,13 @@
 #     renders other bytes for every back end. On another device the check is skipped with a
 #     log line, except on CI (GITHUB_ACTIONS) for FSR 3.1, whose only regression check it
 #     is: there a mismatch fails the run (TAAU, in the required renderer-gate, warns and keeps
-#     its fingerprints). WRITE_HASHES=1 rewrites the file for the current device (from CI's
-#     artifact for CI's lavapipe); TIERED_HASHES names another file;
+#     its fingerprints). WRITE_HASHES=1 rewrites the file for the device it runs on, so it
+#     never regenerates CI's hashes on another machine. For CI's lavapipe, rewrite the file
+#     from CI's own captures instead: download the run's artifact and run
+#       HASHES_FROM=<artifact dir> HASH_DEVICE='<the device CI logged>' scripts/tiered-goldens.sh
+#     which hashes <dir>/[<upscaler>-]<scene>-1.ppm for UPSCALERS under that `device` line
+#     (CI logs it as "exact hashes: on ..." or "this device is '...'") and captures nothing.
+#     TIERED_HASHES names another file;
 #   - the 64x36 fingerprint (tests/golden/render-tiered-[fsr3-]<name>-fingerprint.rgb, WRITE=1
 #     rewrites them). It catches a broken frame, not an upscaler regression: it cannot tell
 #     FSR 3.1 from TAAU (perf/0033), which is why the exact check exists.
@@ -53,6 +58,31 @@ cases=(
 )
 upscalers=${UPSCALERS:-taau fsr3}
 hashes=${TIERED_HASHES:-tests/golden/render-tiered-hashes.txt}
+if [ -n "${HASHES_FROM:-}" ]; then
+  test -n "${HASH_DEVICE:-}" || { echo "FAIL: HASHES_FROM needs HASH_DEVICE (CI's device line)"; exit 1; }
+  new="$hashes.new"
+  printf '%s\n%s\n' "# SHA-256 of the tiered captures (scripts/tiered-goldens.sh) on this device only." \
+    "device $HASH_DEVICE" > "$new"
+  for upscaler in $upscalers; do
+    prefix=; [ "$upscaler" = taau ] || prefix="$upscaler-"
+    for entry in "${cases[@]}"; do
+      read -r name _ <<< "$entry"
+      file="$HASHES_FROM/$prefix$name-1.ppm"
+      test -s "$file" || { echo "FAIL: $file is missing"; rm "$new"; exit 1; }
+      echo "$prefix$name $(sha256sum < "$file" | cut -d' ' -f1)" >> "$new"
+    done
+  done
+  # Keep the other back ends' lines when only some were hashed.
+  if [ -f "$hashes" ] && [ "$(sed -n 's/^device //p' "$hashes")" = "$HASH_DEVICE" ]; then
+    grep -v -e '^#' -e '^device ' "$hashes" | while read -r name hash; do
+      grep -q "^$name " "$new" || echo "$name $hash" >> "$new"
+    done
+  fi
+  { head -2 "$new"; tail -n +3 "$new" | sort; } > "$hashes"
+  rm "$new"
+  echo "wrote $hashes for $HASH_DEVICE from $HASHES_FROM"
+  exit 0
+fi
 probe="$(dirname "$client")/vulkan-probe"
 # shellcheck disable=SC2086 # RUN is a command prefix.
 device=$(${RUN:-} "$probe" --json 2>/dev/null | python3 -c '
@@ -77,8 +107,9 @@ if [ "${WRITE_HASHES:-0}" != 1 ] && [ "$exact" = 0 ]; then
   # regression check, so its job fails (after the captures, which the artifact keeps);
   # TAAU's, in the required renderer-gate, warns.
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    regenerate="regenerate $hashes with WRITE_HASHES=1 from this run's artifact (the captures" \
-    regenerate="$regenerate are in it) or on this lavapipe"
+    regenerate="regenerate $hashes from this run's artifact: HASHES_FROM=<artifact dir>" \
+    regenerate="$regenerate HASH_DEVICE='${device:-unknown}' scripts/tiered-goldens.sh" \
+    regenerate="$regenerate (WRITE_HASHES=1 would key it to the machine it runs on)"
     if [[ " $upscalers " == *" fsr3 "* ]]; then
       echo "::error::tiered-goldens: no exact hashes for FSR 3.1 on '${device:-unknown}'; $regenerate"
       echo "FAIL: exact hashes do not cover this device; $regenerate"

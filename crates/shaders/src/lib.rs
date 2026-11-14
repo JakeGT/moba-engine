@@ -259,6 +259,8 @@ pub const EXPOSURE_LINEAR_SLANG: &[u8] =
 /// The in-house temporal AA and upscaler (ADR-0021 §3) with fused RCAS.
 pub const TEMPORAL_TAAU_SLANG: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/temporal_taau.slang.spv"));
+/// The `sharpen` pass (ADR-0021 §3): RCAS after a back end without its own sharpening.
+pub const SHARPEN_SLANG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sharpen.slang.spv"));
 
 include!(concat!(env!("OUT_DIR"), "/slang_reflection.rs"));
 
@@ -614,6 +616,10 @@ pub const MODULES: &[ShaderModule] = &[
         name: "temporal_taau.slang",
         spirv: TEMPORAL_TAAU_SLANG,
     },
+    ShaderModule {
+        name: "sharpen.slang",
+        spirv: SHARPEN_SLANG,
+    },
 ];
 
 /// The module called `name` (for example `"unit_textured.frag"`), if it exists.
@@ -852,6 +858,36 @@ mod tests {
                         set: 0,
                         binding: 11,
                         ty: Cow::Borrowed("samplerState"),
+                    },
+                ),
+                ("push", Slot::PushConstants),
+            ],
+        ),
+        (
+            "sharpen.slang",
+            &[
+                (
+                    "source",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 0,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "exposure",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 1,
+                        ty: Cow::Borrowed("texture2D:read"),
+                    },
+                ),
+                (
+                    "output",
+                    Slot::Descriptor {
+                        set: 0,
+                        binding: 2,
+                        ty: Cow::Borrowed("texture2D:readWrite"),
                     },
                 ),
                 ("push", Slot::PushConstants),

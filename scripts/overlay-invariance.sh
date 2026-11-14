@@ -10,7 +10,8 @@
 #   scripts/overlay-invariance.sh [client binary] [output dir]
 #
 # Captures are pinned (fixed tick per frame). CI runs it under lavapipe with validation
-# (render-golden.yml); set RUN="xvfb-run -a" when there is no display.
+# (render-golden.yml); set RUN="xvfb-run -a" when there is no display. Each capture with an
+# upscaler must also log that the back end ran.
 set -euo pipefail
 client=${1:-./target/release/moba-client}
 out=${2:-overlay-invariance}
@@ -29,9 +30,11 @@ capture() {
     exit 1
   fi
 }
-# UPSCALERS picks the temporal back ends (default "taau fsr3"). The reference is always TAAU
-# Quality; the FXAA and no-AA cases run with TAAU's set. CI runs "taau" in the required
-# renderer-gate and "fsr3" in tiered-temporal.
+# UPSCALERS picks the temporal back ends (default "taau fsr3"), each at Quality, native and
+# Performance; a vendor one (dlss, fsr4, xess) needs a client built with its feature on a GPU
+# that runs it (ADR-0021 amendment 5). The reference is always TAAU Quality; the FXAA and
+# no-AA cases run with TAAU's set. CI runs "taau" in the required renderer-gate and "fsr3" in
+# tiered-temporal.
 upscalers=" ${UPSCALERS:-taau fsr3} "
 cases=("taau-quality MOBA_AA=temporal MOBA_UPSCALER=taau MOBA_UPSCALE_MODE=quality")
 if [[ $upscalers == *" taau "* ]]; then
@@ -43,13 +46,12 @@ if [[ $upscalers == *" taau "* ]]; then
     "off MOBA_AA=off"
   )
 fi
-if [[ $upscalers == *" fsr3 "* ]]; then
-  cases+=(
-    "fsr3-quality MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=quality"
-    "fsr3-native MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=native"
-    "fsr3-performance MOBA_AA=temporal MOBA_UPSCALER=fsr3 MOBA_UPSCALE_MODE=performance"
-  )
-fi
+for upscaler in $upscalers; do
+  [ "$upscaler" = taau ] && continue
+  for mode in quality native performance; do
+    cases+=("$upscaler-$mode MOBA_AA=temporal MOBA_UPSCALER=$upscaler MOBA_UPSCALE_MODE=$mode")
+  done
+done
 status=0
 reference=
 for entry in "${cases[@]}"; do
@@ -57,10 +59,12 @@ for entry in "${cases[@]}"; do
   # shellcheck disable=SC2086 # settings are separate assignments.
   capture "$name" $settings
   # A back end that fell back would compare TAAU with itself.
-  case $name in
-    fsr3-*)
-      if ! grep -q "upscaler fsr3 " "$out/$name.log"; then
-        echo "FAIL: $name did not run fsr3"
+  case "$settings" in
+    *MOBA_UPSCALER=*)
+      upscaler=${settings##*MOBA_UPSCALER=}
+      upscaler=${upscaler%% *}
+      if ! grep -q "upscaler $upscaler " "$out/$name.log"; then
+        echo "FAIL: $name did not run $upscaler"
         grep "upscaler" "$out/$name.log" || true
         status=1
         continue

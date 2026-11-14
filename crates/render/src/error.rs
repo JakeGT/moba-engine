@@ -110,6 +110,9 @@ pub enum RenderError {
     /// waiting for its frame to retire (ADR-0020 §3a). The capacity is a constant, raised in
     /// one place (`caps::BINDLESS_*`).
     BindlessFull(&'static str),
+    /// A vendor temporal upscaler (DLSS, FSR 4, XeSS) failed to create or resize; the text
+    /// says why (ADR-0021 amendment 5). The renderer falls back to TAAU rather than return it.
+    Upscaler(String),
 }
 
 impl fmt::Display for RenderError {
@@ -118,6 +121,7 @@ impl fmt::Display for RenderError {
             Self::Loader(error) => write!(f, "cannot load the Vulkan loader: {error}"),
             Self::Vulkan(result) => write!(f, "Vulkan error: {result:?}"),
             Self::NoSuitableDevice(reason) => write!(f, "no suitable GPU found: {reason}"),
+            Self::Upscaler(reason) => write!(f, "the temporal upscaler failed: {reason}"),
             Self::UnsupportedApiVersion(version) => {
                 write!(f, "Vulkan 1.3 is required, loader provides {version:#x}")
             }
