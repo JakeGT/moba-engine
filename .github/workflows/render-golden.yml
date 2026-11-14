@@ -2,6 +2,13 @@ name: render golden
 
 on:
   workflow_dispatch:
+    inputs:
+      cpu_sample:
+        description: >-
+          Collect the tiered exact hashes on several runners instead of the full gate
+          (ADR-0021 amendment 6 item 5): one section per CPU class, from this ref's code.
+        type: boolean
+        default: false
   pull_request:
 
 permissions:
@@ -19,6 +26,8 @@ env:
 jobs:
   renderer-gate:
     name: renderer-gate
+    # A `cpu_sample` dispatch runs only `tiered-hash-sample` below.
+    if: github.event_name != 'workflow_dispatch' || !inputs.cpu_sample
     # Pinned (ubuntu-latest was 26.04 when pinned): the image's Mesa and LLVM key the exact
     # tiered hashes (tests/golden/render-tiered-hashes.txt), so an image change is a PR that
     # regenerates them, not a surprise. They are also keyed on the runner's CPU vendor, which
@@ -448,7 +457,8 @@ jobs:
       # lavapipe with validation + sync validation (MOBA_RENDER_PATH=tiered admits the CPU
       # device). Gate 2: motion vectors against a CPU twin within 1/64 px. Gate 3: ghost
       # energy, overlay invariance and the outline probe on Tiered. Gate 4: the tiered goldens,
-      # two runs byte-identical, exact hashes on this lavapipe. FSR 3.1's cases run in
+      # two runs byte-identical, exact hashes on this lavapipe and this runner's CPU class
+      # (amendment 6; a class without a section fails). FSR 3.1's cases run in
       # `tiered-temporal`. The ghost probe here is a tripwire: it is also run on a real GPU
       # (ADR-0021 amendment 4 item 14).
       - name: Tiered motion-vector probe (ADR-0021 gate 2)
@@ -558,6 +568,7 @@ jobs:
   # (everything in one job ran about 64 minutes once FSR 3.1 joined it).
   tiered-temporal:
     name: tiered-temporal
+    if: github.event_name != 'workflow_dispatch' || !inputs.cpu_sample
     # Pinned with renderer-gate (the exact tiered hashes are keyed on the image's lavapipe and
     # the runner's CPU vendor).
     runs-on: ubuntu-26.04
@@ -660,3 +671,111 @@ jobs:
             ghost-probe
             overlay-invariance
             tiered-goldens
+
+  # ADR-0021 amendment 6 item 5: `gh workflow run render-golden.yml --ref <branch>
+  # -f cpu_sample=true` runs the tiered goldens (TAAU and FSR 3.1) on eight runners at once,
+  # so one dispatch usually lands on both CPU classes (Intel was about one runner in five in
+  # #374's samples; dispatch again if a class is missing). Never on a pull request.
+  tiered-hash-sample:
+    name: tiered-hash-sample (${{ matrix.leg }})
+    if: github.event_name == 'workflow_dispatch' && inputs.cpu_sample
+    runs-on: ubuntu-26.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ matrix.leg == 1 }}
+      - uses: ./.github/actions/setup-slang
+      - name: Install software Vulkan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-validationlayers libvulkan1 \
+            glslang-tools spirv-tools libasound2-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev xvfb
+          ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
+          test -n "$ICD" || { echo "lavapipe ICD not found"; exit 1; }
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+      - name: Build client and tools
+        run: cargo build --release --locked -p moba-client -p moba-tools
+      # A mismatch is expected when the code changed pixels: the section is what is collected.
+      - name: Tiered goldens, TAAU and FSR 3.1
+        continue-on-error: true
+        run: |
+          scripts/tiered-goldens.sh ./target/release/moba-client ./target/release/image-check \
+            tiered-goldens
+        env:
+          RUN: xvfb-run -a
+          UPSCALERS: taau fsr3
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tiered-hash-sample-${{ matrix.leg }}
+          path: tiered-goldens/hashes-taau-fsr3.txt
+          if-no-files-found: ignore
+
+  # Merges the legs' sections: one per CPU class, ready to paste into
+  # tests/golden/render-tiered-hashes.txt. Legs of one class that disagree fail it (the class
+  # key would be too coarse), and so does a class whose legs all failed.
+  tiered-hash-sections:
+    name: tiered-hash-sections
+    needs: tiered-hash-sample
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.cpu_sample
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download the legs' sections
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'tiered-hash-sample-*' -D legs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Merge them per CPU class
+        run: |
+          python3 - legs <<'PY' | tee render-tiered-hashes.sections.txt
+          import pathlib, sys
+          classes, cpus, status = {}, {}, 0
+          for f in sorted(pathlib.Path(sys.argv[1]).glob("*/hashes-taau-fsr3.txt")):
+              lines = f.read_text().splitlines()
+              key = next(l[len("device "):] for l in lines if l.startswith("device "))
+              cpu = next((l[len("# cpu "):] for l in lines if l.startswith("# cpu ")), "?")
+              cpus.setdefault(key, set()).add(cpu.split(" flags:")[0])
+              for l in lines:
+                  if l.startswith("#") or l.startswith("device ") or not l.strip():
+                      continue
+                  name, digest = l.split()
+                  seen = classes.setdefault(key, {}).setdefault(name, set())
+                  seen.add(digest)
+              classes.setdefault(key, {})
+          for key in sorted(classes):
+              if not classes[key]:
+                  print(f"::error::every capture failed on '{key}'", file=sys.stderr)
+                  status = 1
+                  continue
+              print(f"device {key}")
+              for name in sorted(classes[key]):
+                  digests = classes[key][name]
+                  if len(digests) != 1:
+                      print(f"::error::{name} differs between legs of '{key}': {sorted(digests)}",
+                            file=sys.stderr)
+                      status = 1
+                  print(f"{name} {sorted(digests)[0]}")
+              for cpu in sorted(cpus[key]):
+                  print(f"# from {cpu}", file=sys.stderr)
+          if not classes:
+              print("::error::no leg produced a section", file=sys.stderr)
+              status = 1
+          sys.exit(status)
+          PY
+          cat render-tiered-hashes.sections.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tiered-hash-sections
+          path: render-tiered-hashes.sections.txt

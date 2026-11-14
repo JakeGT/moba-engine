@@ -14,19 +14,23 @@
 #     Vulkan version and driver info (Mesa and LLVM versions) from `vulkan-probe --json`):
 #     llvmpipe's code generation differs between Mesa and LLVM versions, so another lavapipe
 #     renders other bytes for every back end. The class is the CPU vendor (`amd`, `intel`,
-#     from /proc/cpuinfo): the same lavapipe renders other bytes on Intel than on AMD runners
-#     (AVX-512 or not makes no difference; most likely llvmpipe's RSQRTPS, an approximation
-#     whose bits are the vendor's own). On a device the file names, a CPU class it has no
-#     section for (or a file from before the classes) fails the run for every back end, with
-#     the section to add. A mismatch on a recorded class means the code changed, or that the
-#     class key is too coarse (one Intel model was seen when it was set): check the CPU line. On another device the check
-#     is skipped with a log line, except on CI (GITHUB_ACTIONS) for FSR 3.1, whose only
-#     regression check it is: there it fails the run (TAAU, in the required renderer-gate,
-#     warns and keeps its fingerprints). Every run writes its section to
-#     <output dir>/hashes-<back ends>.txt (with the CPU it ran on), which CI's artifact keeps:
-#     fill the file from CI runs only, one per class. WRITE_HASHES=1 rewrites the current
-#     device and class's section in place (on CI's lavapipe only); TIERED_HASHES names
-#     another file;
+#     from /proc/cpuinfo): the same lavapipe renders other bytes on Intel than on AMD
+#     runners, most likely through llvmpipe's RSQRTPS, an approximation whose bits are the
+#     vendor's own. AVX-512 does not explain the split (Zen 3 without it matches Zen 4 and 5
+#     with it); only one Intel model has been seen. On CI (GITHUB_ACTIONS) every back end
+#     fails when vulkan-probe names no device, when the file has no section, when the device
+#     is in the file but this CPU class is not, or when the file predates the classes (a
+#     `device` line without cpu=). When the image's lavapipe itself changed (a device the
+#     file does not name), every class needs regenerating: FSR 3.1, whose only regression
+#     check this is, fails; TAAU, in the required renderer-gate, warns and keeps its
+#     fingerprints (amendment 4 item 7). Off CI another device is skipped with a log line. A
+#     mismatch on a recorded class is a code change, or a sign that the class key is too
+#     coarse: the log's CPU line says which.
+#     Every run writes its section to <output dir>/hashes-<back ends>.txt (with the CPU it
+#     ran on, and failed captures as `# FAILED`), which CI's artifact keeps: fill the file
+#     from CI runs only, one per class. WRITE_HASHES=1 rewrites the current device and
+#     class's section in place, on CI only (ALLOW_LOCAL_HASHES=1 for a scratch TIERED_HASHES
+#     file); TIERED_HASHES names another file;
 #   - the 64x36 fingerprint (tests/golden/render-tiered-[fsr3-]<name>-fingerprint.rgb, WRITE=1
 #     rewrites them). It catches a broken frame, not an upscaler regression: it cannot tell
 #     FSR 3.1 from TAAU (perf/0033), which is why the exact check exists.
@@ -45,8 +49,9 @@ capture() {
   shift
   # shellcheck disable=SC2086 # RUN is a command prefix.
   env MOBA_RENDER_PATH=tiered MOBA_WINDOW_SIZE=640x360 MOBA_UI_SCALE=0.5 \
-    MOBA_CAPTURE="$file" "$@" timeout 300 ${RUN:-} "$client" > "$file.log" 2>&1 || { cat "$file.log"; exit 1; }
-  test -s "$file"
+    MOBA_CAPTURE="$file" "$@" timeout 300 ${RUN:-} "$client" > "$file.log" 2>&1 ||
+    { cat "$file.log"; echo "FAIL: capture failed ($file)"; exit 1; }
+  test -s "$file" || { tail -20 "$file.log"; echo "FAIL: empty capture ($file)"; exit 1; }
   if grep -E '^\[vulkan' "$file.log"; then
     echo "FAIL: validation messages ($file)"
     exit 1
@@ -87,48 +92,79 @@ case "$(cpuinfo vendor_id)" in
 esac
 echo "cpu: $cpu_line (class $cpu_class)"
 key="${device:-unknown} cpu=$cpu_class"
+on_ci=${GITHUB_ACTIONS:-}
 # The hash file has one section per key: a `device <device> cpu=<class>` line, then
-# `<capture> <sha256>` lines.
-section() { awk -v want="device $1" '/^device /{on = ($0 == want); next} on && NF == 2 && !/^#/' "$hashes"; }
+# `<capture> <sha256>` lines. Strings go to awk through ENVIRON (awk -v expands escapes).
+section() {
+  WANT="device $1" awk '/^device /{on = ($0 == ENVIRON["WANT"]); next} on && NF == 2 && !/^#/' \
+    "$hashes"
+}
 keys=$(sed -n 's/^device //p' "$hashes" 2>/dev/null || true)
-classes=$(awk -v d="device $device cpu=" 'index($0, d) == 1 { print substr($0, length(d) + 1) }' \
+classes=$(PREFIX="device $device cpu=" awk \
+  'index($0, ENVIRON["PREFIX"]) == 1 { print substr($0, length(ENVIRON["PREFIX"]) + 1) }' \
   "$hashes" 2>/dev/null | tr '\n' ' ' || true)
-# This run's hashes as a section of the file, kept in the artifact (CI fills the file from it).
+# A `device` line without ` cpu=`: the format before ADR-0021 amendment 6.
+old_format=0
+if grep -E '^device ' "$hashes" 2>/dev/null | grep -qv ' cpu=[^ ]*$'; then old_format=1; fi
+# This run's section, kept in the artifact (CI fills the file from it). A capture that failed
+# the fallback or two-run check is listed as `# FAILED`, so it cannot be copied by mistake.
 manifest="$out/hashes-${upscalers// /-}.txt"
 printf '%s\n%s\n' "# cpu $cpu_line" "device $key" > "$manifest"
 exact=0
 status=0
-regenerate="add a 'device $key' section to $hashes from a CI run on this class (its artifact"
-regenerate="$regenerate has it in $manifest); never from a local run"
+regenerate="add a 'device $key' section to $hashes from a CI run on this class (its"
+regenerate="$regenerate artifact has it in $manifest); never from a local run"
+fail_all() {
+  echo "::error::tiered-goldens: $1"
+  echo "FAIL: exact hashes: $1"
+  status=1
+}
 if [ "${WRITE_HASHES:-0}" = 1 ]; then
+  # Only CI's captures are the reference: a local lavapipe is never CI's (amendment 6).
+  if [ -z "$on_ci" ] && [ "${ALLOW_LOCAL_HASHES:-0}" != 1 ]; then
+    echo "FAIL: WRITE_HASHES=1 runs on CI only (ALLOW_LOCAL_HASHES=1 for a scratch file);"
+    echo "  fill $hashes from a CI run's artifact (ADR-0021 amendment 6 item 5)"
+    exit 1
+  fi
   test -n "$device" || { echo "FAIL: vulkan-probe named no device"; exit 1; }
+  if [ "$old_format" = 1 ]; then
+    echo "FAIL: $hashes has a section without cpu= (the format before ADR-0021 amendment 6);"
+    echo "  convert it to 'device <device> cpu=<class>' sections first"
+    exit 1
+  fi
   : > "$hashes.new"
-elif [ -n "$device" ] && printf '%s\n' "$keys" | grep -qxF "$key"; then
+elif [ -z "$device" ]; then
+  if [ -n "$on_ci" ]; then
+    fail_all "vulkan-probe named no device, so no exact hash can be checked"
+  else
+    echo "exact hashes: skipped, vulkan-probe named no device; the fingerprints alone are checked"
+  fi
+elif [ -n "$on_ci" ] && [ -z "$keys" ]; then
+  fail_all "$hashes is missing or has no 'device' section"
+elif grep -qxF "$key" <<< "$keys"; then
   exact=1
   echo "exact hashes: on $key"
-elif [ -n "$device" ] && { [ -n "$classes" ] || grep -qxF "device $device" "$hashes" 2>/dev/null; }; then
+elif [ -n "$classes" ] || grep -qxF "device $device" "$hashes" 2>/dev/null; then
   # The device is known and this CPU class is not (or the file predates CPU classes, a bare
   # `device <device>` line): fail loudly, for every back end.
   classes=${classes:-"none (a section without cpu=, from before ADR-0021 amendment 6) "}
-  echo "::error::tiered-goldens: no exact hashes for CPU class '$cpu_class' on '$device'" \
-    "(recorded: ${classes% }); $regenerate"
-  echo "FAIL: exact hashes: no section for '$key' (recorded classes: ${classes% }); $regenerate"
-  status=1
-else
-  echo "exact hashes: skipped, this device is '${device:-unknown}' and $hashes has" \
-    "'$(printf '%s' "$keys" | tr '\n' ';')'; the fingerprints alone are checked"
-  # On CI the runner's lavapipe changed (or vulkan-probe failed). FSR 3.1 has no other
-  # regression check, so its job fails (after the captures, which the artifact keeps);
-  # TAAU's, in the required renderer-gate, warns.
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    if [[ " $upscalers " == *" fsr3 "* ]]; then
-      echo "::error::tiered-goldens: no exact hashes for FSR 3.1 on '${device:-unknown}'; $regenerate"
-      echo "FAIL: exact hashes do not cover this device; $regenerate"
-      status=1
-    else
-      echo "::warning::tiered-goldens: exact hashes skipped on '${device:-unknown}'; $regenerate"
-    fi
+  missing="no section for CPU class '$cpu_class' on '$device' (recorded: ${classes% })"
+  fail_all "$missing; $regenerate"
+elif [ -n "$on_ci" ]; then
+  # The image's lavapipe changed (another Mesa or LLVM): every class needs regenerating.
+  # FSR 3.1 has no other regression check, so its job fails (after the captures, which the
+  # artifact keeps); TAAU's, in the required renderer-gate, warns (amendment 4 item 7).
+  changed="the image's lavapipe changed: this device is '$device' and $hashes has"
+  changed="$changed '$(tr '\n' ';' <<< "$keys")'; regenerate every class's section"
+  if [[ " $upscalers " == *" fsr3 "* ]]; then
+    fail_all "$changed (FSR 3.1 has no other regression check)"
+  else
+    echo "::warning::tiered-goldens: exact hashes skipped: $changed"
+    echo "exact hashes: skipped: $changed; the fingerprints alone are checked"
   fi
+else
+  echo "exact hashes: skipped, this lavapipe is '$device', not one $hashes covers (CI's);"
+  echo "  the fingerprints alone are checked"
 fi
 for upscaler in $upscalers; do
   prefix=; [ "$upscaler" = taau ] || prefix="$upscaler-"
@@ -141,18 +177,21 @@ for upscaler in $upscalers; do
     capture "$out/$capture_name-2.ppm" MOBA_UPSCALER="$upscaler" $settings
     grep -E "anti-aliasing" "$out/$capture_name-1.ppm.log" || true
     hash=$(sha256sum < "$out/$capture_name-1.ppm" | cut -d' ' -f1)
-    echo "$capture_name $hash" >> "$manifest"
     echo "sha256: $capture_name $hash"
     # A back end that fell back would check TAAU's output under another name.
     if ! grep -q "upscaler $upscaler " "$out/$capture_name-1.ppm.log"; then
       echo "FAIL: tiered $capture_name: did not run $upscaler"
+      echo "# FAILED (did not run $upscaler): $capture_name $hash" >> "$manifest"
       status=1
       continue
     elif cmp -s "$out/$capture_name-1.ppm" "$out/$capture_name-2.ppm"; then
       echo "ok: tiered $capture_name: two runs byte-identical (${hash:0:16})"
+      echo "$capture_name $hash" >> "$manifest"
     else
       echo "FAIL: tiered $capture_name: the two runs differ"
+      echo "# FAILED (the two runs differ): $capture_name $hash" >> "$manifest"
       status=1
+      continue
     fi
     if [ "${WRITE_HASHES:-0}" = 1 ]; then
       echo "$capture_name $hash" >> "$hashes.new"
@@ -189,12 +228,18 @@ if [ "${WRITE_HASHES:-0}" = 1 ]; then
     if [ -f "$hashes" ] && grep -q '^#' "$hashes"; then
       sed -n '/^#/p;/^device /q' "$hashes"
     else
-      echo "# SHA-256 of the tiered captures (scripts/tiered-goldens.sh), per device and CPU class."
+      echo "# SHA-256 of the tiered captures (scripts/tiered-goldens.sh), per device and CPU"
+      echo "# class (ADR-0021 amendment 6)."
     fi
-    { printf '%s\n' "$keys"; echo "$key"; } | grep -v '^$' | sort -u | while IFS= read -r k; do
-      echo "device $k"
-      if [ "$k" = "$key" ]; then sort "$hashes.new"; else section "$k" | sort; fi
-    done
+    { printf '%s\n' "$keys"; echo "$key"; } | grep -v '^$' | LC_ALL=C sort -u |
+      while IFS= read -r k; do
+        echo "device $k"
+        if [ "$k" = "$key" ]; then
+          LC_ALL=C sort "$hashes.new"
+        else
+          section "$k" | LC_ALL=C sort
+        fi
+      done
   } > "$hashes.tmp"
   mv "$hashes.tmp" "$hashes"
   rm "$hashes.new"
