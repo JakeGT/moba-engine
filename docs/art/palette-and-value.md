@@ -114,8 +114,8 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 
 | Swatch | sRGB | L | C | H | Use |
 |---|---|---|---|---|---|
-| Void composite | `#2F2C34` | 0.30 | 0.015 | 303 | Bodies, monoliths (luma 45) |
-| Obsidian metamaterial | `#2D2C35` | 0.30 | 0.016 | 291 | Polished faces (reads by **specular**, not albedo); luma 45 |
+| Void composite | `#312D37` | 0.31 | 0.019 | 304 | Bodies, monoliths (luma 47; the material target) |
+| Obsidian metamaterial | `#2E2D36` | 0.30 | 0.016 | 291 | Polished faces (reads by **specular**, not albedo); luma 46 |
 | Gravity-ring alloy | `#8A8A90` | 0.64 | 0.009 | 286 | Hovering rings, fittings (pewter-like) |
 | Tarnished silver | `#B8B8BC` | 0.78 | 0.006 | 286 | Bright metal edges |
 | Bone inlay | `#D6CFC2` | 0.86 | 0.019 | 83 | Star-chart lines, masks: keeps Void units off "black blob" |
@@ -125,12 +125,13 @@ The review app has protanopia/deuteranopia/tritanopia toggles to eyeball the sam
 
 **Decided (2026-11-14): dark bodies plus mandatory pale elements.** Void bodies stay at about
 L 0.30–0.36 (albedo luma 45 and up), darker than every Ember Crossing ground layer, which keeps
-them distinct from the Forge. (The draft's L 0.25–0.30 swatches were lifted to the decided
-luma floor of 45, at the same hue and chroma: derived by the agent.) Against
+them distinct from the Forge. (The draft's L 0.25–0.30 swatches were lifted just above the
+decided luma floor of 45, at the same hue and chroma: derived by the agent.) Against
 the risk of a dark blob on dark basalt, **every Void unit carries a bone or silver element of
 ≥ 10 % of its projected area** (VOID-1 in [checks.md](checks.md)). Void heroes also meet the
 material rule in [material-vocabulary.md §3.2](material-vocabulary.md#32-the-void) (luma
-floor 45 on body materials, ≥ 15 % of each hero's projected area in a light material). *Considered:* lifting the Void to mid-grey ceramics (safer,
+floor 45 on body materials, ≥ 15 % of each hero's area in a light material, read as
+projected area: derived). *Considered:* lifting the Void to mid-grey ceramics (safer,
 less identity), or leaving it to CON-1 alone.
 
 ## 6. Ember Crossing palette (map 1)
@@ -140,7 +141,7 @@ less identity), or leaving it to CON-1 alone.
 | Basalt | `#4A4744` | 0.40 | 0.006 | 68 | Cliffs, terraces, rampart bases |
 | Ash ground | `#6B6560` | 0.51 | 0.011 | 62 | Base terrain layer (scorched ash) |
 | Lane grit | `#906B58` | 0.56 | 0.055 | 48 | Trodden lanes: the centre of LANE-1's luma 112–119, a value step above the ash ground (derived) |
-| Desert sand | `#938564` | 0.62 | 0.050 | 88 | Drifts, off-lane, high ground in playable space (VAL-1; derived). The lighter draft sand (`#B39A7C`, L 0.70) only off-board (VAL-5) |
+| Desert sand | `#8B7D5C` | 0.59 | 0.050 | 88 | Drifts, off-lane, high ground in playable space, below VAL-1's 0.62 ceiling with headroom (derived). The lighter draft sand (`#B39A7C`, L 0.70) only off-board (VAL-5) |
 | Ember crystal, today | `#FF6B1A` | 0.70 | **0.198** | 43 | Breaks PAL-4: sits between the enemy red and the colour-blind enemy orange |
 | Ember crystal core (emissive) | `#FFE6BE` | 0.94 | 0.059 | 80 | White-gold core, within PAL-4; the same emissive as the material vocabulary's ember crystal |
 
@@ -162,4 +163,5 @@ moods and their exposure lock are in [lighting-mood.md](lighting-mood.md).
 ## Swatch boards
 
 The review app renders every palette above as swatch boards with value-only and colour-blind
-views. [boards/](boards/) holds the curated palette board.
+views. [boards/](boards/) holds the curated palette board; it shows the draft values, so
+where it differs from this page this page wins (see [boards/PROVENANCE.md](boards/PROVENANCE.md)).

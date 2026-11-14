@@ -191,7 +191,7 @@ the CB orange and yellow stay unique.
 | Forge dark alloy, scaled | Blackened alloy with heat scale; the Forge's dark metal | `OXIDE` | `#3A3836` (luma 56), C ≤ 0.01 | 0.60–0.85 | 0 (1 where scale is chipped) | none | all tiers alike |
 | Heat-shield ceramic, unglazed (stand-in: terracotta) | Buff-ochre heat-shield tiles on stepped walls and armour | `CERAM` | engine target `#B49272` (luma 152, C 0.061); desaturated from measured Terracotta | 0.75–0.95 | 0 | none | all tiers alike |
 | Heat-shield ceramic, glazed | Cream and honey glaze on terraces, domes and breastplates, crazed and chipped | `CERAM` | base `#D8C9A6` (luma 202, C 0.050) | base 0.6–0.8; clear coat 0.08–0.20 | 0 | clear coat | Compat: base only, roughness 0.3 |
-| Sun-glass (fusion lens) | Thick honey-tinted lenses on tower crowns and hammers; bright white-gold core when charged | `GLASS` | tint `#D9B98A` (C 0.072); emissive core `#FFE6BE` (C 0.059) | 0.05–0.20 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque base + emissive |
+| Sun-glass (fusion lens) | Thick honey-tinted lenses on tower crowns and hammers; bright white-gold core when charged | `GLASS` | tint `#D8B98C` (C 0.069; draft `#D9B98A`, C 0.072, derived); emissive core `#FFE6BE` (C 0.059) | 0.05–0.20 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque base + emissive |
 | Fused scorch (stand-in: slag) | Glassy black-brown crust where fusion energy has struck stone | `CHAR` / `GLASS` | `#3A3634` (luma 55), C ≤ 0.02 | crust 0.7–0.9; fracture faces 0.15–0.35 | 0 | optional molten seam (below) | all tiers alike |
 | Molten seam | Thin cracks of white-hot metal in fused scorch, cores and impact points | emissive only | emissive `#FFE6BE`, never orange | n/a | n/a | emissive | counts towards the emissive budget |
 | Forge sandstone | Dressed ashlar of temples and walls; pale buff, sand-scoured | `STONE-1` | engine target `#B8A07C` (luma 163, C 0.057); Sand entry as parent mineral | 0.75–0.95 | 0 | none | all tiers alike |
@@ -218,7 +218,8 @@ play** (PBR-FORGE-1); real gold (measured C 0.101, above the cap) only outside p
 on showcase variants and menus. *Considered:* no gilt.
 
 **Decided (2026-11-14): sun-glass has a pale honey tint, C ≤ 0.07, with a low-chroma
-white-gold emissive core** (PBR-FORGE-1). Measured Amber is a transmissive `#EB9235` at
+white-gold emissive core** (PBR-FORGE-1). The draft tint `#D9B98A` (C 0.072) is pulled to
+`#D8B98C` (C 0.069) to meet it (derived). Measured Amber is a transmissive `#EB9235` at
 C 0.148, close to the CB orange. *Considered:* real amber on small areas, or clear glass with
 only the core coloured.
 
@@ -241,16 +242,16 @@ the free bands (violet 284–345°, teal 167–211°) and only in small accents.
 
 | Material | Look | Class | Albedo target | Roughness | Metal | Layers | Tier note |
 |---|---|---|---|---|---|---|---|
-| Void composite, matte (stand-in: black ceramic) | The Void's main body material: black with a violet cast, fine and dense | `CERAM` | engine target `#302C36` (luma 46, C 0.019, h 304) | 0.55–0.80 | 0 | none | all tiers alike |
+| Void composite, matte (stand-in: black ceramic) | The Void's main body material: black with a violet cast, fine and dense | `CERAM` | engine target `#312D37` (luma 47, C 0.019, h 304; draft `#302C36`, 46, derived) | 0.55–0.80 | 0 | none | all tiers alike |
 | Void composite, glazed | Gloss black panels and masks; mirror-dark highlights | `CERAM` | base `#35303D` (luma 50) | base 0.5–0.7; clear coat 0.05–0.15 | 0 | clear coat | RT reflections High+; Compat: base 0.25 |
-| Obsidian metamaterial, polished (stand-in: obsidian) | Blades, inlaid panels, monoliths; reflects the sky darkly | `STONE-2` | engine target `#2E2C32` (luma 45; draft `#2B292F`, 42); IOR as Glass (1.52, F0 0.043) | 0.05–0.20 | 0 | none (opaque) | relies on reflections: RT High+, probes below |
-| Obsidian, knapped | Raw conchoidal fractures; sharp, glassy facets with rough cortex | `STONE-1` / `STONE-2` | `#2E2C32` facets (luma 45; draft 42); cortex luma 60–80 | facets 0.08–0.25; cortex 0.7–0.9 | 0 | none | all tiers alike |
+| Obsidian metamaterial, polished (stand-in: obsidian) | Blades, inlaid panels, monoliths; reflects the sky darkly | `STONE-2` | engine target `#2F2D33` (luma 46; draft `#2B292F`, 42; derived); IOR as Glass (1.52, F0 0.043) | 0.05–0.20 | 0 | none (opaque) | relies on reflections: RT High+, probes below |
+| Obsidian, knapped | Raw conchoidal fractures; sharp, glassy facets with rough cortex | `STONE-1` / `STONE-2` | `#2F2D33` facets (luma 46; draft 42; derived); cortex luma 60–80 | facets 0.08–0.25; cortex 0.7–0.9 | 0 | none | all tiers alike |
 | Polished black stone | Dressed architectural stone, less glassy than obsidian | `STONE-2` | engine target `#34323A` (luma 51) | 0.15–0.40 | 0 | none | all tiers alike |
 | Levitating basalt | Raw basalt masses held in the air; cut undersides with void-glass seams | `STONE-1` | as Ember basalt `#4A4744`; cut faces 0.4–0.55 roughness | 0.55–0.85 | 0 | void-glass seam (below) | all tiers alike |
 | Gravity-ring alloy (stand-in: pewter) | Hovering rings, fittings, filigree; dull and soft-edged | `METAL` | engine target `#C4C6C8` (luma 198), near measured Lead | 0.35–0.60 | 1 | none | all tiers alike |
 | Tarnished silver | Bright silver on raised edges, brown-grey tarnish in recesses | `METAL` + `OXIDE` | measured Silver `#FEFDFC` (luma 253) on wear; tarnish `#5A5048` (luma 82) | 0.15–0.35 metal; 0.6–0.85 tarnish | 1 / 0 | none | RT reflections High+ |
 | Void-glass | Cold, nearly clear glass with a teal or violet emissive edge | `GLASS` | tint near neutral (C ≤ 0.04); emissive edge teal `#7CCFC4` (h 185, C 0.083) or violet `#A08CD0` (h 297, C 0.100) | 0.045–0.15 | 0 | transmission; emissive edge | transmission from Medium; Low and Compat: dark opaque base + emissive edge |
-| Void lacquer | Deep violet-black lacquer on wood and metal armour | `PAINT` | `#322A36` (luma 45, C 0.024; draft `#2C2430`, 39) | base 0.4–0.6; clear coat 0.05–0.15 | 0 | clear coat | Compat: base only, roughness 0.25 |
+| Void lacquer | Deep violet-black lacquer on wood and metal armour | `PAINT` | `#352D39` (luma 48, C 0.024; draft `#2C2430`, 39; derived) | base 0.4–0.6; clear coat 0.05–0.15 | 0 | clear coat | Compat: base only, roughness 0.25 |
 | Void silk | Robes and banners in plum and violet-black | `CLOTH` | `#4A3346` (luma 58, C 0.045, h 333) | 0.55–0.80 | 0 | sheen, anisotropy | Compat: base only |
 | Void felt | Matte padding and hoods, charcoal-violet | `CLOTH` | `#3A3440` (luma 54, C 0.022) | 0.85–1.0 | 0 | sheen (low) | all tiers alike |
 | Bone-white inlay | Polished bone or nacre lines set into black ceramic and stone | `BONE` | `#DCD6C6` (luma 214), near measured Bone | 0.40–0.65 | 0 | none (Pearl-like iridescence: showcase only) | all tiers alike |
@@ -262,15 +263,18 @@ from the CB sky. *Considered:* teal main, or one hue only.
 
 **Decided (2026-11-14): how dark the Void may go: both the rims and the material floor.**
 The Void keeps its dark bodies and relies on rims and outlines, **and** every Void body
-material has an albedo floor of **luma 45**, with **at least 15 % of each Void hero's
-projected area in a light material** (pewter, silver, bone inlay) (PBR-VOID-1). Every Void
+material has an albedo floor of **luma 45**, with **at least 15 % of each Void hero's area
+in a light material** (pewter, silver, bone inlay) (PBR-VOID-1). The floor applies to a
+material's median luma, with p1 allowed down to about 40 for weathering (§4 rule 2), and the
+15 % is read as projected area (both derived by the agent; for the maintainer to confirm). Every Void
 unit also carries the palette's pale element (≥ 10 % of projected area: VOID-1,
-[palette §5](palette-and-value.md#5-faction-palettes)). Body materials now sit at luma 45–58
+[palette §5](palette-and-value.md#5-faction-palettes)). Body materials now sit at luma 46–58
 (39–58 in the draft), near the G1 floor; in the shade of an Ember Crossing cliff a Void hero
 could otherwise merge with basalt (`71`). Shape and material should separate the factions
-without leaning entirely on team rims. To meet the floor, three targets were lifted to luma 45
-at the same hue and chroma: obsidian metamaterial, polished, obsidian, knapped (facets) and
-Void lacquer (derived by the agent; for the maintainer to confirm).
+without leaning entirely on team rims. To sit above the floor, four targets were lifted at the
+same hue and chroma: obsidian metamaterial, polished, and obsidian, knapped (facets) to luma
+46, Void composite, matte to 47, and Void lacquer to 48 (derived by the agent; for the
+maintainer to confirm).
 
 ### 3.3 Environment: Ember Crossing
 
@@ -285,7 +289,7 @@ lane and ember crystals, under a low warm sun. The ground stays matte (C ≤ 0.0
 | Scorched ash ground | The basin floor: grey-brown ash, burnt patches, footprints | `CHAR` | engine target `#6B6560` (luma 102); burnt patches `#4E4945` (74) | 0.90–1.0 | 0 | none | all tiers alike |
 | Packed desert soil | Brown ground between ash fields; cracked crust | `SOIL` | engine target `#8C7A66` (luma 125, C 0.037) | 0.85–1.0 | 0 | none | all tiers alike |
 | Rust-red lane grit | The trodden lane: iron-oxide grit, compacted, rutted | `SOIL` | engine target `#8D6855`–`#956F5D` (luma 112–119, C 0.056, h 46–48), lifted at least 10 luma above the ash (derived); hue from measured Rust | 0.85–0.98 | 0 | none | all tiers alike |
-| Desert sand | Wind-blown drifts against cliffs and ruins | `SOIL` | engine target `#938564` (luma 134, L 0.62, C 0.050) in playable space, to meet VAL-1 (derived); the draft's `#BDAE8C` (luma 175) only off-board; measured Sand `#B1A784` is the anchor | 0.90–1.0 | 0 | none | all tiers alike |
+| Desert sand | Wind-blown drifts against cliffs and ruins | `SOIL` | engine target `#8B7D5C` (luma 126, L 0.59, C 0.050) in playable space, below VAL-1's 0.62 ceiling with headroom for lighter texels and abrasion (derived); the draft's `#BDAE8C` (luma 175) only off-board; measured Sand `#B1A784` is the anchor | 0.90–1.0 | 0 | none | all tiers alike |
 | Ember crystal | Clusters of dark smoky crystal with a white-gold glow deep inside | `GLASS` | body `#4A3430` (luma 57, C 0.033); emissive core `#FFE6BE` | 0.08–0.25 | 0 | transmission; emissive core | transmission from Medium; Low and Compat: opaque body + core |
 | Builder alloy | The fallen sky-engine's ribs and the Builder machines: seamless pale grey, fine precise seams, dead emitter rings | `METAL` | engine target `#B4B6B8` (luma 182, C ≤ 0.01; draft `#AEB0B2`, luma 175, was below G2); stand-in: aluminium or stainless steel (derived) | 0.30–0.55; dust 0.85+ | 1 | dust layer on up-facing surfaces | all tiers alike |
 | Hard light | The Ashen bowstring and arrows: a thin line of pale light, no body | emissive only | emissive `#F2F0EA` (C ≤ 0.02) | n/a | n/a | emissive | counts towards the emissive budget |
@@ -342,7 +346,7 @@ a 40 px hero one pixel is about 4.5 cm.
 | Layer | Physical change | Albedo | Roughness | Metalness | Where it goes |
 |---|---|---|---|---|---|
 | Edge wear | Paint, oxide or glaze rubbed off convex edges | base material shows through: lighter metal, lighter stone | metal edges smoother (−0.1 to −0.2); stone edges rounder (normal) | 1 where paint or oxide is worn off metal | Convex edges, handles, treads, shield rims |
-| Dust | Fine sand and ash settle on surfaces | towards the map's ground: ash `#6B6560`, sand `#938564` | up to 0.85–0.95 | 0 where coverage > 50 % (dust is a dielectric) | Up-facing surfaces (world-space normal·up), ledges, crevices on top |
+| Dust | Fine sand and ash settle on surfaces | towards the map's ground: ash `#6B6560`, sand `#8B7D5C` | up to 0.85–0.95 | 0 where coverage > 50 % (dust is a dielectric) | Up-facing surfaces (world-space normal·up), ledges, crevices on top |
 | Soot | Carbon from fires and forges | towards luma 40–60, C ≤ 0.01 | 0.85–1.0 | 0 | Above heat sources, vertical streaks on walls, chimney mouths |
 | Heat tint | Thin oxide film on hot steel | temper colours straw–bronze–purple (see the heat-tint decision) | unchanged | stays 1 (thin film) | Near forge zones, blade spines, grilles |
 | Patina | Corrosion of copper alloys and silver | statuary brown-black `#4A3E36`; silver tarnish `#5A5048` | 0.65–0.90 | 0 (it is an oxide) | Recesses and sheltered sides; worn off on high points |
@@ -419,9 +423,9 @@ encoding) unless it says "capture". Every threshold was approved on 2026-11-14; 
 | `PBR-EMIT-3` | Static emissive screen share (capture, 46 m, before VFX) | ≤ 2 % of playable-space pixels | approved |
 | `PBR-WEAR-1` | Dust coverage on units (capture or dust mask) | ≤ 20 % of surface | approved |
 | `PBR-VOCAB-1` | Every material names a vocabulary entry from §3 | listed entry | approved |
-| `PBR-FORGE-1` | Chroma of sun-alloy, gilt (in play) and sun-glass tint | C ≤ 0.075 (p99): measured brass is 0.072 | approved (cap derived) |
+| `PBR-FORGE-1` | Chroma of sun-alloy; gilt (in play); sun-glass tint | sun-alloy C ≤ 0.075 (p99; measured brass is 0.072); gilt and sun-glass C ≤ 0.07 (p99) | approved (the 0.075 check derived) |
 | `PBR-HEAT-1` | Temper and patina colours in playable space | straw to purple only (no blue temper); statuary brown-black patina (no verdigris) | approved |
-| `PBR-VOID-1` | Void body materials; light-material share per Void hero | albedo luma ≥ 45; ≥ 15 % of projected area in pewter, silver or bone | approved |
+| `PBR-VOID-1` | Void body materials; light-material share per Void hero | median albedo luma ≥ 45, p1 ≥ about 40; ≥ 15 % of projected area in pewter, silver or bone | approved (median/p1 reading and projected area derived) |
 | `PBR-VOID-2` | Void emissive hue | violet 284–345° main; teal 167–211° minor | approved |
 | `LANE-1` | Lane grit albedo | C ≤ 0.06 (p99), h 44–55°, luma 112–119 | approved (luma band derived) |
 | `EMB-1` | Ember crystal | white-gold core (PAL-4), ≤ +1 EV; orange only as a facet rim ≤ 3 % of area (PAL-3), non-emissive (derived); off the lanes | approved |
@@ -516,13 +520,13 @@ documents cite it.
 | 5 | How a material declares its classes | §2 | Source-side class-ID map |
 | 6 | Forge brass saturation | §3.1 | Measured brass chroma (≈ 0.07) as ceiling; checked at C ≤ 0.075 (derived) |
 | 7 | Gilt leaf | §3.1 | Worn gilt C ≤ 0.07 in play; real gold in showcase |
-| 8 | Sun-glass tint | §3.1 | Pale honey C ≤ 0.07, white-gold core (the target's 0.072 passes PBR-FORGE-1) |
+| 8 | Sun-glass tint | §3.1 | Pale honey C ≤ 0.07, white-gold core (target pulled to C 0.069, derived) |
 | 9 | Forge emissive colour | §3.1 | White-gold, C ≤ 0.06 |
 | 10 | Heat tint and the blue band | §3.1 | Straw to purple only in play |
 | 11 | Void emissive hue | §3.2 | Violet main, teal secondary |
-| 12 | How dark the Void may go | §3.2 | Both: rims and outlines, plus a luma floor of 45 on Void body materials and ≥ 15 % light material per hero (projected area) |
+| 12 | How dark the Void may go | §3.2 | Both: rims and outlines, plus a luma floor of 45 on Void body materials and ≥ 15 % light material per hero (median-luma floor and projected area: derived) |
 | 13 | Lane redness | §3.3 | C ≤ 0.06, h 44–55°; lane lifted to luma 112–119 for the value step (derived) |
 | 14 | Ember crystals | §3.3 | Dark body, white-gold core ≤ +1 EV (a gameplay state may reach +2 EV) |
 | 15 | Bronze patina colour | §4 | Statuary brown-black in play |
 | 16 | Dust on units | §4 | ≤ 20 %, lower body |
-| 17 | Emissive caps (+1/+2 EV, area shares) | §1.1 | As proposed, then tuned on the first Ember Crossing captures |
+| 17 | Emissive caps (+1/+2 EV, area shares) | §1.1 | As proposed, then tuned on the first Ember Crossing captures (the only thresholds tuned this way) |

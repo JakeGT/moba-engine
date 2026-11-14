@@ -56,7 +56,7 @@ executive). Agents draft, research and turn decisions into checks; **people deci
 | 2026-11-14 | Void: **dark bodies with mandatory pale elements** (bone or silver ≥ 10 % of every Void unit's projected area), plus the material rule: Void body materials at albedo luma ≥ 45 and ≥ 15 % of each Void hero's projected area in a light material | Maintainer (approval above) |
 | 2026-11-14 | Three Void materials and two display swatches lifted to luma 45 at the same hue and chroma | (derived by the agent; for the maintainer to confirm) |
 | 2026-11-14 | Chroma caps **0.06 ground (PAL-1 kept) / 0.08 elsewhere**, p99; albedo ranges per texel at p1/p99 | Maintainer (approval above) |
-| 2026-11-14 | **`team_tint` 0 on photoreal content**, mask kept for Compat: on Tiered the renderer ignores the tint (ADR-0023 §8c `team_tint_policy = zero`); Compat keeps it | Maintainer (approval above) |
+| 2026-11-14 | **`team_tint` 0 on photoreal content**, mask kept for Compat: on Tiered the renderer ignores the tint (ADR-0023 §8c `team_tint_policy = zero`) once the rims pass CON-2; Compat keeps it | Maintainer (approval above) |
 | 2026-11-14 | **Ability types coded by shape and motion**, never colour | Maintainer (approval above) |
 | 2026-11-14 | **Rim on everyone; outline only on enemies and the hovered unit** | Maintainer (approval above) |
 | 2026-11-14 | **Role-scaled S/M/L heroes** | Maintainer (approval above) |
@@ -142,13 +142,18 @@ force for v0 but are not the maintainer's words:
   the Ember Crossing display swatches now match the material targets.
 - **VFX-1:** the outside-zone cap is 0.12 (was 0.13), to match PAL-5.
 - **Violet edge:** `#A08CD0` everywhere (the VFX `#9F86D9` broke VFX-1).
-- **PBR-FORGE-1:** C ≤ 0.075, the measured brass chroma (0.072) the recommendation named, so
-  the bible's own brass and sun-glass targets pass; gilt and worn sun-alloy display swatches
-  retargeted to ≤ 0.07.
-- **Void:** obsidian (polished and knapped) and Void lacquer lifted to luma 45, and the
-  palette's Void swatches to luma ≥ 45, at the same hue and chroma.
-- **Desert sand:** in playable space lowered to L ≤ 0.62 (VAL-1); the lighter draft sand is
-  for off-board drifts only.
+- **PBR-FORGE-1:** sun-alloy is checked at C ≤ 0.075, the measured brass chroma (0.072) the
+  recommendation named, so the bible's own brass passes. Gilt and sun-glass keep their decided
+  C ≤ 0.07: the sun-glass tint moved from `#D9B98A` (C 0.072) to `#D8B98C` (C 0.069), and the
+  gilt and worn sun-alloy display swatches were retargeted to ≤ 0.07.
+- **Void:** obsidian (polished and knapped) moved to `#2F2D33` (luma 46), Void lacquer to
+  `#352D39` (luma 48), Void composite to `#312D37` (luma 47), and the palette's Void swatches
+  to luma 46–47, all at the same hue and chroma, so the targets sit above the floor rather than
+  on it. PBR-VOID-1's floor applies to a material's median luma, with p1 allowed down to about
+  40 for weathering (§4 rule 2). The 15 % light-material share is read as projected area.
+- **Desert sand:** in playable space lowered to `#8B7D5C` (L 0.59, below VAL-1's 0.62 ceiling,
+  leaving headroom for lighter texels and abrasion); the lighter draft sand is for off-board
+  drifts only.
 - **SIL-2:** minions ≤ 0.8× a Hero M (1.6 m), with siege judged by footprint and shape (the
   draft's "smallest hero" gave 1.28 m, which its own minion sizes break).
 - **Builder alloy:** `#B4B6B8` (luma 182) with an aluminium or steel stand-in, so it passes
@@ -156,6 +161,9 @@ force for v0 but are not the maintainer's words:
 - **The Still Oracle's crown:** one description, three hovering Void-composite segments.
 - **Modelling:** the heroes' next steps say "model it by hand in Blender" instead of
   "image → TRELLIS.2".
+- **Corrections (not decisions):** Dust Veil's sun elevation is ~30° (computed from its
+  `sun_dir`; the draft said ~35°), and the VFX history's orange-fire note cites PAL-4 (the
+  draft said PAL-5).
 - **Thresholds:** every non-decision threshold (VAL, CON, CB, SIL, RIM, TEL, VFX, EXP, SHD,
   PBR) marked approved; UI-1 to UI-4 stay proposed with the designer's brief.
 - **Briefs:** their "Decision needed" markers renamed "Open".
@@ -165,7 +173,7 @@ force for v0 but are not the maintainer's words:
 ### Follow-ups outside this folder
 
 - [ADR-0023](../adr/0023-frame-architecture-materials.md) still calls decisions 9 and 11
-  open, and its §2 quotes the draft's Void body range (luma 39–58; now 45–58). Its switches
+  open, and its §1a quotes the draft's Void body range (luma 39–58; now 46–58). Its switches
   flip after CON-2 as written, so only the wording is stale.
 - [boards/palettes.jpg](boards/palettes.jpg) shows the draft palette values; see
   [boards/PROVENANCE.md](boards/PROVENANCE.md).
@@ -175,8 +183,10 @@ force for v0 but are not the maintainer's words:
 1. Open a PR that edits the relevant part. Say which decision it changes, and why.
 2. If it changes a numeric rule, update [checks.md](checks.md) in the same PR.
 3. The part's lead approves (table above) and the approval is recorded in the decision log.
-   Agents draft and open PRs and never merge changes to this folder, except a PR that only
-   records a decision already logged by the maintainer, as PR #347 does for v0.
+   Agents draft and open PRs and never merge changes to this folder, except a PR that
+   records a decision the maintainer stated, quoted verbatim in the log. Values an agent
+   derives while applying it stay marked "for the maintainer to confirm" until the maintainer
+   confirms them.
 4. Record approved decisions in the decision log, with the date.
 
 ## Licences for what lives here
